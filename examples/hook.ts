@@ -5,7 +5,7 @@
 // to the WezTerm tab bar.
 //
 // Protocol:
-//   Write {"type":"<state>"} to ~/.claude/wezterm-attention/<WEZTERM_PANE>
+//   Write {"type":"<state>"} to ~/.local/state/wezterm-attention/<WEZTERM_PANE>
 //   Valid types: "thinking", "stop", "notify", "review"
 //   Optional: {"type":"thinking","frame":0} for animated spinner (0-3)
 //
@@ -21,7 +21,7 @@ async function writeMarker(type: AttentionType, frame?: number): Promise<void> {
   const home = process.env.HOME;
   if (!paneId || !home) return;
 
-  const dir = join(home, ".claude", "wezterm-attention");
+  const dir = join(home, ".local", "state", "wezterm-attention");
   await mkdir(dir, { recursive: true });
 
   const data: Record<string, unknown> = { type };

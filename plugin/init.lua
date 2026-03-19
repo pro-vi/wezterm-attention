@@ -8,7 +8,7 @@ local home = wezterm.home_dir or os.getenv("HOME") or os.getenv("USERPROFILE") o
 
 local defaults = {
   -- Where marker files are written (one file per pane ID)
-  dir = home .. "/.claude/wezterm-attention",
+  dir = home .. "/.local/state/wezterm-attention",
 
   -- Tab background tint per attention type (subtle, dark)
   colors = {

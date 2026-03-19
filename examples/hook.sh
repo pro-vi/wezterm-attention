@@ -3,7 +3,7 @@
 # Shell one-liner to write an attention marker.
 # Drop this into any hook or script that runs inside WezTerm.
 
-MARKER_DIR="${HOME}/.claude/wezterm-attention"
+MARKER_DIR="${HOME}/.local/state/wezterm-attention"
 mkdir -p "$MARKER_DIR"
 
 # Write a "stop" marker (tab shows ✓ in mint)
