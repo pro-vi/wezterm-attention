@@ -160,14 +160,6 @@ Claude Code has [hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) th
 
 **Minimum viable setup:** Just the `Stop` hook gives you the "agent finished" indicator. Add the rest as desired.
 
-Claude hooks write to `~/.claude/wezterm-attention/` by convention. Point the plugin at that path:
-
-```lua
-attention.apply_to_config(config, {
-  dir = os.getenv("HOME") .. "/.claude/wezterm-attention",
-})
-```
-
 The snippets below are **fragments to paste into your hook files** — not standalone scripts. Each one guards on `WEZTERM_PANE` so it's safe to use outside WezTerm. If you don't have existing hooks, wrap the snippet in a Claude Code hook handler (see [hook docs](https://docs.anthropic.com/en/docs/claude-code/hooks)).
 
 Register hooks in `~/.claude/settings.json`:
@@ -185,7 +177,7 @@ Register hooks in `~/.claude/settings.json`:
 ```typescript
 if (process.env.WEZTERM_PANE) {
   const { mkdirSync, writeFileSync, readFileSync, renameSync } = require('fs');
-  const markerDir = `${process.env.HOME}/.claude/wezterm-attention`;
+  const markerDir = `${process.env.HOME}/.local/state/wezterm-attention`;
   const markerFile = `${markerDir}/${process.env.WEZTERM_PANE}`;
 
   let frame = 0;
@@ -204,7 +196,7 @@ if (process.env.WEZTERM_PANE) {
 ```typescript
 if (process.env.WEZTERM_PANE) {
   const { mkdirSync, writeFileSync, renameSync } = require('fs');
-  const markerDir = `${process.env.HOME}/.claude/wezterm-attention`;
+  const markerDir = `${process.env.HOME}/.local/state/wezterm-attention`;
   const markerFile = `${markerDir}/${process.env.WEZTERM_PANE}`;
   mkdirSync(markerDir, { recursive: true });
   writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'stop' }));
@@ -216,7 +208,7 @@ if (process.env.WEZTERM_PANE) {
 ```typescript
 if (process.env.WEZTERM_PANE) {
   const { mkdirSync, writeFileSync, renameSync } = require('fs');
-  const markerDir = `${process.env.HOME}/.claude/wezterm-attention`;
+  const markerDir = `${process.env.HOME}/.local/state/wezterm-attention`;
   const markerFile = `${markerDir}/${process.env.WEZTERM_PANE}`;
   mkdirSync(markerDir, { recursive: true });
   writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'notify' }));
@@ -229,7 +221,7 @@ if (process.env.WEZTERM_PANE) {
 if (process.env.WEZTERM_PANE) {
   const { unlinkSync } = require('fs');
   try {
-    unlinkSync(`${process.env.HOME}/.claude/wezterm-attention/${process.env.WEZTERM_PANE}`);
+    unlinkSync(`${process.env.HOME}/.local/state/wezterm-attention/${process.env.WEZTERM_PANE}`);
   } catch {}
 }
 ```
@@ -238,7 +230,7 @@ if (process.env.WEZTERM_PANE) {
 
 ## Codex hooks
 
-Codex uses a single `notify` hook that fires when the agent finishes or needs attention. Like Claude, Codex hooks write to `~/.claude/wezterm-attention/` — use the same `dir` config shown above. Add this to your Codex notify handler:
+Codex uses a single `notify` hook that fires when the agent finishes or needs attention. Add this to your Codex notify handler:
 
 ```typescript
 async function writeWezTermMarker(type: "stop" | "notify"): Promise<void> {
@@ -249,7 +241,7 @@ async function writeWezTermMarker(type: "stop" | "notify"): Promise<void> {
   const { mkdir, writeFile } = require("node:fs/promises");
   const { join } = require("node:path");
 
-  const markerDir = join(home, ".claude", "wezterm-attention");
+  const markerDir = join(home, ".local", "state", "wezterm-attention");
   await mkdir(markerDir, { recursive: true });
   await writeFile(join(markerDir, paneId), JSON.stringify({ type }));
 }
