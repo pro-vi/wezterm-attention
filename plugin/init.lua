@@ -233,26 +233,12 @@ function M.apply_to_config(config, opts)
 
   -- ── Renderer: format-tab-title ──────────────────────────────────────────
   --
-  -- Set format_tab_title = false to disable. When disabled, use
-  -- attention.get_tab_attention(tab) and attention.auto_clear_tab(tab)
-  -- in your own format-tab-title handler instead.
+  -- Default: plugin owns tab title formatting (dir / title + indicators).
+  -- Set format_tab_title = false to disable and use get_tab_attention()
+  -- and auto_clear_tab() in your own handler instead.
 
   if format_tab then
-    wezterm.on("format-tab-title", function(tab, tabs, panes, conf, hover, max_width)
-      -- Active tab: auto-clear applicable markers
-      if tab.is_active then
-        M.auto_clear_tab(tab)
-        return nil
-      end
-
-      -- Inactive tab: resolve attention indicator
-      local indicator, attention_type, color = M.get_tab_attention(tab)
-
-      if not attention_type then
-        return nil
-      end
-
-      -- Build title: prepend indicator to the default tab title
+    wezterm.on("format-tab-title", function(tab)
       local pane = tab.active_pane
       local title = pane.title or ""
       local index = tab.tab_index + 1
@@ -265,6 +251,15 @@ function M.apply_to_config(config, opts)
       end
 
       local base = dir_name ~= "" and (dir_name .. " / " .. title) or title
+
+      -- Active tab: auto-clear stop/notify markers
+      if tab.is_active then
+        M.auto_clear_tab(tab)
+        return " " .. index .. ": " .. base .. " "
+      end
+
+      -- Inactive tab: attention indicator + background tint
+      local indicator, attention_type, color = M.get_tab_attention(tab)
       local text = " " .. indicator .. index .. ": " .. base .. " "
 
       if color then
