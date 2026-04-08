@@ -24,7 +24,9 @@ local attention = wezterm.plugin.require("https://github.com/pro-vi/wezterm-atte
 attention.apply_to_config(config)
 ```
 
-This registers the tab title formatter, pane cleanup handler, and an `Alt+B` keybind to toggle review mode.
+The plugin decorates your existing tab titles — it doesn't replace them. When a pane has attention, the plugin prepends an indicator and tints the tab background. When there's no attention, your normal tab title shows through unchanged.
+
+It also registers pane cleanup, a marker poller, and an `Alt+B` keybind to toggle review mode.
 
 ## Configure
 
@@ -138,6 +140,10 @@ local attention = wezterm.plugin.require("https://github.com/pro-vi/wezterm-atte
 
 -- Read cached attention state: returns (type, frame) or nil
 local state, frame = attention.get_attention(pane:pane_id())
+
+-- Get resolved indicator for a tab (considers all panes, applies priority)
+-- Returns (indicator_string, attention_type, color) or ("", nil, nil)
+local indicator, atype, color = attention.get_tab_attention(tab)
 
 -- Clear a marker programmatically
 attention.remove_marker(pane:pane_id())
@@ -285,7 +291,7 @@ No background threads, no FFI, no external dependencies — just filesystem read
 - `status_update_interval` defaults to 1000ms; markers update on this interval
 
 **Tab titles look wrong?**
-- The plugin registers `format-tab-title` — if you have your own handler, only the first one registered wins. Remove yours or integrate the plugin's logic.
+- The plugin's `format-tab-title` returns `nil` for tabs without attention, letting your own handler or WezTerm's default take over. If you register your own handler BEFORE `apply_to_config`, both run — WezTerm uses the last non-nil return. Register the plugin last (call `apply_to_config` at the end of your config) so its indicators take priority when attention is active.
 
 **Alt+B not working?**
 - Check for keybind conflicts. Set `review_key = false` and bind manually if needed.

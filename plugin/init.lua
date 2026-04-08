@@ -67,7 +67,7 @@ end
 
 -- ── In-memory cache ─────────────────────────────────────────────────────────
 -- format-tab-title must not do I/O (blocks GUI thread).
--- update-status reads files on the 5s interval; format-tab-title reads cache.
+-- update-status reads files on the interval; format-tab-title reads cache.
 
 local attention_cache = {} -- { [pane_id_string] = { type = "stop", frame = 0 } }
 
@@ -120,6 +120,42 @@ function M.poll(window, opts)
   end
 end
 
+--- Get the resolved attention indicator and type for a tab.
+--- Considers all panes and applies priority. Returns (indicator, type, color) or ("", nil, nil).
+function M.get_tab_attention(tab, opts)
+  local cfg_indicators = (opts and opts.indicators) or M._active_indicators or defaults.indicators
+  local cfg_colors = (opts and opts.colors) or M._active_colors or defaults.colors
+  local cfg_priority = M._active_priority_map or {}
+
+  local best_type     = nil
+  local best_priority = -1
+  local best_frame    = nil
+
+  for _, p in ipairs(tab.panes) do
+    local cached = attention_cache[tostring(p.pane_id)]
+    if cached then
+      local pri = cfg_priority[cached.type] or 0
+      if pri > best_priority then
+        best_type     = cached.type
+        best_priority = pri
+        best_frame    = cached.frame
+      end
+    end
+  end
+
+  if not best_type then return "", nil, nil end
+
+  local indicator = ""
+  if best_type == "thinking" then
+    local frames = cfg_indicators.thinking_frames
+    indicator = frames[((best_frame or 0) % #frames) + 1]
+  elseif cfg_indicators[best_type] then
+    indicator = cfg_indicators[best_type]
+  end
+
+  return indicator, best_type, cfg_colors[best_type]
+end
+
 -- ── apply_to_config ─────────────────────────────────────────────────────────
 
 local applied = false
@@ -141,12 +177,14 @@ function M.apply_to_config(config, opts)
   if opts.colors then
     for k, v in pairs(opts.colors) do colors[k] = v end
   end
+  M._active_colors = colors
 
   local indicators = {}
   for k, v in pairs(defaults.indicators) do indicators[k] = v end
   if opts.indicators then
     for k, v in pairs(opts.indicators) do indicators[k] = v end
   end
+  M._active_indicators = indicators
 
   local auto_clear = opts.auto_clear or defaults.auto_clear
   local priority   = opts.priority   or defaults.priority
@@ -157,10 +195,9 @@ function M.apply_to_config(config, opts)
 
   local priority_map = {}
   for i, t in ipairs(priority) do priority_map[t] = i end
+  M._active_priority_map = priority_map
 
   -- ── Poller: update-status (runs on status_update_interval) ────────────
-  -- Set auto_poll = false if you already have an update-status handler
-  -- and call attention.poll(window) from it instead.
 
   if auto_poll then
     wezterm.on("update-status", function(window, _pane)
@@ -176,24 +213,21 @@ function M.apply_to_config(config, opts)
     attention_cache[id] = nil
   end)
 
-  -- ── Renderer: format-tab-title (must be instant, no I/O) ─────────────
+  -- ── Renderer: format-tab-title (wraps user title with indicators) ─────
+  --
+  -- The plugin does NOT own tab title formatting. It wraps whatever title
+  -- the user's config produces. If the user has their own format-tab-title
+  -- handler registered BEFORE apply_to_config, it runs first and the plugin
+  -- decorates its output. If no user handler exists, WezTerm's default
+  -- title is used.
+  --
+  -- The plugin:
+  --   1. Auto-clears applicable markers on active tabs
+  --   2. Prepends an indicator (✓, !, ◆, spinner) to inactive tab titles
+  --   3. Applies a background tint color for attention types
 
-  wezterm.on("format-tab-title", function(tab)
-    local pane = tab.active_pane
-    local title = pane.title or ""
-    local index = tab.tab_index + 1
-
-    -- Directory basename from cwd
-    local cwd = pane.current_working_dir
-    local dir_name = ""
-    if cwd then
-      local path = cwd.file_path or cwd.path or tostring(cwd)
-      dir_name = string.match(path, "([^/]+)/?$") or ""
-    end
-
-    local base = dir_name ~= "" and (dir_name .. " / " .. title) or title
-
-    -- Active tab: auto-clear applicable markers (from cache, remove files)
+  wezterm.on("format-tab-title", function(tab, tabs, panes, conf, hover, max_width)
+    -- Active tab: auto-clear applicable markers
     if tab.is_active then
       for _, p in ipairs(tab.panes) do
         local id = tostring(p.pane_id)
@@ -203,43 +237,36 @@ function M.apply_to_config(config, opts)
           attention_cache[id] = nil
         end
       end
-      return " " .. index .. ": " .. base .. " "
+      -- Return nil to let WezTerm use default title (or a prior handler's title)
+      return nil
     end
 
-    -- Inactive tab: find highest-priority attention across panes (from cache)
-    local best_type     = nil
-    local best_priority = -1
-    local best_frame    = nil
+    -- Inactive tab: resolve attention indicator
+    local indicator, attention_type, color = M.get_tab_attention(tab)
 
-    for _, p in ipairs(tab.panes) do
-      local cached = attention_cache[tostring(p.pane_id)]
-      if cached then
-        local pri = priority_map[cached.type] or 0
-        if pri > best_priority then
-          best_type     = cached.type
-          best_priority = pri
-          best_frame    = cached.frame
-        end
-      end
+    if not attention_type then
+      -- No attention — let WezTerm use default title
+      return nil
     end
 
-    -- Resolve indicator text
-    local indicator = ""
-    if best_type then
-      if best_type == "thinking" then
-        local frames = indicators.thinking_frames
-        indicator = frames[((best_frame or 0) % #frames) + 1]
-      elseif indicators[best_type] then
-        indicator = indicators[best_type]
-      end
+    -- Build title: prepend indicator to the default tab title
+    local pane = tab.active_pane
+    local title = pane.title or ""
+    local index = tab.tab_index + 1
+
+    local cwd = pane.current_working_dir
+    local dir_name = ""
+    if cwd then
+      local path = cwd.file_path or cwd.path or tostring(cwd)
+      dir_name = string.match(path, "([^/]+)/?$") or ""
     end
 
+    local base = dir_name ~= "" and (dir_name .. " / " .. title) or title
     local text = " " .. indicator .. index .. ": " .. base .. " "
 
-    -- Tint tab background for attention types
-    if best_type and colors[best_type] then
+    if color then
       return {
-        { Background = { Color = colors[best_type] } },
+        { Background = { Color = color } },
         { Text = text },
       }
     end
