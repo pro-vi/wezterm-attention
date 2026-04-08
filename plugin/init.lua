@@ -76,10 +76,10 @@ end
 
 local attention_cache = {} -- { [pane_id_string] = { type = "stop", frame = 0 } }
 
--- ── Public API ──────────────────────────────────────────────────────────────
+-- ── Internal helpers ────────────────────────────────────────────────────────
 
 --- Build the default tab title: "dir / pane_title"
-function M.default_title(tab)
+local function default_title(tab)
   local pane = tab.active_pane
   local title = pane.title or ""
 
@@ -92,6 +92,58 @@ function M.default_title(tab)
 
   return dir_name ~= "" and (dir_name .. " / " .. title) or title
 end
+
+--- Get the resolved attention indicator and type for a tab.
+--- Considers all panes and applies priority. Returns (indicator, type, color) or ("", nil, nil).
+local function get_tab_attention(tab, opts)
+  local cfg_indicators = (opts and opts.indicators) or M._active_indicators or defaults.indicators
+  local cfg_colors = (opts and opts.colors) or M._active_colors or defaults.colors
+  local cfg_priority = M._active_priority_map or {}
+
+  local best_type     = nil
+  local best_priority = -1
+  local best_frame    = nil
+
+  for _, p in ipairs(tab.panes) do
+    local cached = attention_cache[tostring(p.pane_id)]
+    if cached then
+      local pri = cfg_priority[cached.type] or 0
+      if pri > best_priority then
+        best_type     = cached.type
+        best_priority = pri
+        best_frame    = cached.frame
+      end
+    end
+  end
+
+  if not best_type then return "", nil, nil end
+
+  local indicator = ""
+  if best_type == "thinking" then
+    local frames = cfg_indicators.thinking_frames
+    indicator = frames[((best_frame or 0) % #frames) + 1]
+  elseif cfg_indicators[best_type] then
+    indicator = cfg_indicators[best_type]
+  end
+
+  return indicator, best_type, cfg_colors[best_type]
+end
+
+--- Auto-clear applicable markers on an active tab (stop, notify by default).
+local function auto_clear_tab(tab)
+  local dir = M._active_dir or defaults.dir
+  local clear_set = M._active_clear_set or { stop = true, notify = true }
+  for _, p in ipairs(tab.panes) do
+    local id = tostring(p.pane_id)
+    local cached = attention_cache[id]
+    if cached and clear_set[cached.type] then
+      remove_marker(dir, id)
+      attention_cache[id] = nil
+    end
+  end
+end
+
+-- ── Public API ──────────────────────────────────────────────────────────────
 
 --- Read the cached attention state for a pane.
 --- Returns (type, frame) or nil.
@@ -139,57 +191,6 @@ function M.poll(window, opts)
   end
 end
 
---- Get the resolved attention indicator and type for a tab.
---- Considers all panes and applies priority. Returns (indicator, type, color) or ("", nil, nil).
-function M.get_tab_attention(tab, opts)
-  local cfg_indicators = (opts and opts.indicators) or M._active_indicators or defaults.indicators
-  local cfg_colors = (opts and opts.colors) or M._active_colors or defaults.colors
-  local cfg_priority = M._active_priority_map or {}
-
-  local best_type     = nil
-  local best_priority = -1
-  local best_frame    = nil
-
-  for _, p in ipairs(tab.panes) do
-    local cached = attention_cache[tostring(p.pane_id)]
-    if cached then
-      local pri = cfg_priority[cached.type] or 0
-      if pri > best_priority then
-        best_type     = cached.type
-        best_priority = pri
-        best_frame    = cached.frame
-      end
-    end
-  end
-
-  if not best_type then return "", nil, nil end
-
-  local indicator = ""
-  if best_type == "thinking" then
-    local frames = cfg_indicators.thinking_frames
-    indicator = frames[((best_frame or 0) % #frames) + 1]
-  elseif cfg_indicators[best_type] then
-    indicator = cfg_indicators[best_type]
-  end
-
-  return indicator, best_type, cfg_colors[best_type]
-end
-
---- Auto-clear applicable markers on an active tab (stop, notify by default).
---- Call from your format-tab-title handler when tab.is_active.
-function M.auto_clear_tab(tab)
-  local dir = M._active_dir or defaults.dir
-  local clear_set = M._active_clear_set or { stop = true, notify = true }
-  for _, p in ipairs(tab.panes) do
-    local id = tostring(p.pane_id)
-    local cached = attention_cache[id]
-    if cached and clear_set[cached.type] then
-      remove_marker(dir, id)
-      attention_cache[id] = nil
-    end
-  end
-end
-
 --- Wrap a user's title function with attention decoration.
 --- For renderer = "manual" mode. Returns a function suitable for wezterm.on("format-tab-title", ...).
 ---
@@ -205,13 +206,13 @@ function M.wrap_title_formatter(base_fn)
       config       = config,
       hover        = hover,
       max_width    = max_width,
-      default_title = M.default_title(tab),
-      attention    = { M.get_tab_attention(tab) },
+      default_title = default_title(tab),
+      attention    = { get_tab_attention(tab) },
     }
 
     -- Auto-clear on active tab
     if tab.is_active then
-      M.auto_clear_tab(tab)
+      auto_clear_tab(tab)
     end
 
     local base = base_fn(tab, ctx)
@@ -221,7 +222,7 @@ function M.wrap_title_formatter(base_fn)
       return " " .. index .. ": " .. base .. " "
     end
 
-    local indicator, atype, color = M.get_tab_attention(tab)
+    local indicator, atype, color = get_tab_attention(tab)
     local text = " " .. indicator .. index .. ": " .. base .. " "
 
     if color then
@@ -308,22 +309,22 @@ function M.apply_to_config(config, opts)
       local base
       if title_formatter then
         local ctx = {
-          default_title = M.default_title(tab),
-          attention     = { M.get_tab_attention(tab) },
+          default_title = default_title(tab),
+          attention     = { get_tab_attention(tab) },
         }
         base = title_formatter(tab, ctx)
       else
-        base = M.default_title(tab)
+        base = default_title(tab)
       end
 
       -- Active tab: auto-clear, plain title
       if tab.is_active then
-        M.auto_clear_tab(tab)
+        auto_clear_tab(tab)
         return " " .. index .. ": " .. base .. " "
       end
 
       -- Inactive tab: attention indicator + background tint
-      local indicator, attention_type, color = M.get_tab_attention(tab)
+      local indicator, attention_type, color = get_tab_attention(tab)
       local text = " " .. indicator .. index .. ": " .. base .. " "
 
       if color then
@@ -337,7 +338,6 @@ function M.apply_to_config(config, opts)
     end)
   end
   -- renderer == "manual": no format-tab-title registered
-  -- renderer == "status": no format-tab-title registered (status bar only)
 
   -- ── Review toggle keybind ─────────────────────────────────────────────
 
