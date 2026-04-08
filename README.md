@@ -36,7 +36,6 @@ The plugin supports three render modes:
 |------|---------------------------|----------------|----------|
 | `tab` (default) | Plugin | Yes | You want it to just work |
 | `manual` | You | Yes | You have a custom tab formatter |
-| `status` | Neither | No (status bar only) | You use tabline.wez or similar |
 
 ```lua
 -- Default: plugin owns everything
@@ -47,9 +46,6 @@ attention.apply_to_config(config, { renderer = "manual" })
 wezterm.on("format-tab-title", attention.wrap_title_formatter(function(tab, ctx)
   return ctx.default_title  -- your custom logic here
 end))
-
--- Status: compact summary in right status area (no per-tab colors)
-attention.apply_to_config(config, { renderer = "status" })
 ```
 
 ## Custom tab titles
@@ -73,7 +69,7 @@ All options are optional — defaults work out of the box:
 
 ```lua
 attention.apply_to_config(config, {
-  -- Render mode: "tab" | "manual" | "status"
+  -- Render mode: "tab" | "manual"
   renderer = "tab",
 
   -- Where marker files live (one file per pane ID)
@@ -107,8 +103,6 @@ attention.apply_to_config(config, {
   -- Review toggle keybind (false to disable)
   review_key = { key = "b", mods = "ALT" },
 
-  -- Status mode: which side to render on
-  status_side = "right",
 })
 ```
 

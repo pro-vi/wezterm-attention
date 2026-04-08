@@ -10,10 +10,9 @@ local defaults = {
   -- Where marker files are written (one file per pane ID)
   dir = home .. "/.local/state/wezterm-attention",
 
-  -- Render mode: "tab" | "manual" | "status"
+  -- Render mode: "tab" | "manual"
   --   tab:    plugin owns format-tab-title (default)
   --   manual: plugin registers no tab handler; use wrap_title_formatter() or API
-  --   status: plugin renders a summary in left/right status area (no per-tab colors)
   renderer = "tab",
 
   -- Tab background tint per attention type (subtle, dark)
@@ -40,9 +39,6 @@ local defaults = {
 
   -- Keybind to toggle "review" marker on active pane (false to disable)
   review_key = { key = "b", mods = "ALT" },
-
-  -- Status mode: which side to render on
-  status_side = "right",
 }
 
 -- Known attention types (reject unknown values from marker files)
@@ -259,7 +255,6 @@ function M.apply_to_config(config, opts)
   if opts.format_tab_title == false then renderer = "manual" end
 
   local title_formatter = opts.title_formatter -- optional user callback
-  local status_side = opts.status_side or defaults.status_side
 
   local colors = {}
   for k, v in pairs(defaults.colors) do colors[k] = v end
@@ -289,40 +284,9 @@ function M.apply_to_config(config, opts)
 
   -- ── Poller: update-status ─────────────────────────────────────────────
 
-  if auto_poll or renderer == "status" then
+  if auto_poll then
     wezterm.on("update-status", function(window, _pane)
       M.poll(window)
-
-      -- Status mode: render a summary in left/right status area
-      if renderer == "status" then
-        local counts = {}
-        local mux_win = window:mux_window()
-        if mux_win then
-          for _, tab in ipairs(mux_win:tabs()) do
-            local _, atype = M.get_tab_attention(tab)
-            if atype then
-              counts[atype] = (counts[atype] or 0) + 1
-            end
-          end
-        end
-
-        local parts = {}
-        for _, t in ipairs({ "notify", "stop", "review", "thinking" }) do
-          if counts[t] then
-            local icon = t == "thinking" and "◑" or
-                         t == "stop" and "✓" or
-                         t == "notify" and "!" or "◆"
-            table.insert(parts, icon .. counts[t])
-          end
-        end
-
-        local summary = #parts > 0 and (" " .. table.concat(parts, " ") .. " ") or ""
-        if status_side == "left" then
-          window:set_left_status(summary)
-        else
-          window:set_right_status(summary)
-        end
-      end
     end)
   end
 
