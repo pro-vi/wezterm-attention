@@ -24,9 +24,46 @@ local attention = wezterm.plugin.require("https://github.com/pro-vi/wezterm-atte
 attention.apply_to_config(config)
 ```
 
-The plugin decorates your existing tab titles — it doesn't replace them. When a pane has attention, the plugin prepends an indicator and tints the tab background. When there's no attention, your normal tab title shows through unchanged.
+By default, the plugin owns tab title formatting (`dir / title` + attention indicators). It also registers pane cleanup, a marker poller, and an `Alt+B` keybind to toggle review mode.
 
-It also registers pane cleanup, a marker poller, and an `Alt+B` keybind to toggle review mode.
+## Render modes
+
+The plugin supports three render modes:
+
+| Mode | Who owns `format-tab-title` | Per-tab colors | Use when |
+|------|---------------------------|----------------|----------|
+| `tab` (default) | Plugin | Yes | You want it to just work |
+| `manual` | You | Yes | You have a custom tab formatter |
+| `status` | Neither | No (status bar only) | You use tabline.wez or similar |
+
+```lua
+-- Default: plugin owns everything
+attention.apply_to_config(config)
+
+-- Manual: you own format-tab-title, plugin provides helpers
+attention.apply_to_config(config, { renderer = "manual" })
+wezterm.on("format-tab-title", attention.wrap_title_formatter(function(tab, ctx)
+  return ctx.default_title  -- your custom logic here
+end))
+
+-- Status: compact summary in right status area (no per-tab colors)
+attention.apply_to_config(config, { renderer = "status" })
+```
+
+## Custom tab titles
+
+In `tab` mode, pass a `title_formatter` to control the base title without losing indicators:
+
+```lua
+attention.apply_to_config(config, {
+  title_formatter = function(tab, ctx)
+    -- ctx.default_title = "dir / pane_title"
+    -- ctx.attention = { indicator, type, color }
+    local pane = tab.active_pane
+    return pane.title  -- just the pane title, no directory
+  end,
+})
+```
 
 ## Configure
 
@@ -34,14 +71,16 @@ All options are optional — defaults work out of the box:
 
 ```lua
 attention.apply_to_config(config, {
+  -- Render mode: "tab" | "manual" | "status"
+  renderer = "tab",
+
   -- Where marker files live (one file per pane ID)
-  -- Default: ~/.local/state/wezterm-attention
   dir = os.getenv("HOME") .. "/.local/state/wezterm-attention",
 
-  -- Tab background tints per attention type.
-  -- These are blended behind tab text, so keep them dark (lightness ~10-15%).
-  -- A good starting point: take your accent color and mix it ~70% toward
-  -- your tab bar background. The defaults assume a near-black tab bar.
+  -- Custom base title (tab mode only; plugin adds indicators + colors around it)
+  title_formatter = nil,  -- function(tab, ctx) -> string
+
+  -- Tab background tints per attention type
   colors = {
     thinking = "#1c1730",  -- violet tint
     stop     = "#12271c",  -- mint tint
@@ -65,6 +104,9 @@ attention.apply_to_config(config, {
 
   -- Review toggle keybind (false to disable)
   review_key = { key = "b", mods = "ALT" },
+
+  -- Status mode: which side to render on
+  status_side = "right",
 })
 ```
 
@@ -144,6 +186,17 @@ local state, frame = attention.get_attention(pane:pane_id())
 -- Get resolved indicator for a tab (considers all panes, applies priority)
 -- Returns (indicator_string, attention_type, color) or ("", nil, nil)
 local indicator, atype, color = attention.get_tab_attention(tab)
+
+-- Build default "dir / title" string for a tab
+local title = attention.default_title(tab)
+
+-- Auto-clear stop/notify markers on an active tab
+attention.auto_clear_tab(tab)
+
+-- Wrap a title function with attention decoration (for renderer = "manual")
+wezterm.on("format-tab-title", attention.wrap_title_formatter(function(tab, ctx)
+  return ctx.default_title
+end))
 
 -- Clear a marker programmatically
 attention.remove_marker(pane:pane_id())
@@ -291,7 +344,8 @@ No background threads, no FFI, no external dependencies — just filesystem read
 - `status_update_interval` defaults to 1000ms; markers update on this interval
 
 **Tab titles look wrong?**
-- The plugin's `format-tab-title` returns `nil` for tabs without attention, letting your own handler or WezTerm's default take over. If you register your own handler BEFORE `apply_to_config`, both run — WezTerm uses the last non-nil return. Register the plugin last (call `apply_to_config` at the end of your config) so its indicators take priority when attention is active.
+- WezTerm only runs the **first** registered `format-tab-title` handler. If you have your own handler, set `renderer = "manual"` and use `wrap_title_formatter()` or the plugin API. Two handlers cannot coexist.
+- Use `title_formatter` to customize the base title while keeping the plugin's indicators.
 
 **Alt+B not working?**
 - Check for keybind conflicts. Set `review_key = false` and bind manually if needed.

@@ -10,6 +10,12 @@ local defaults = {
   -- Where marker files are written (one file per pane ID)
   dir = home .. "/.local/state/wezterm-attention",
 
+  -- Render mode: "tab" | "manual" | "status"
+  --   tab:    plugin owns format-tab-title (default)
+  --   manual: plugin registers no tab handler; use wrap_title_formatter() or API
+  --   status: plugin renders a summary in left/right status area (no per-tab colors)
+  renderer = "tab",
+
   -- Tab background tint per attention type (subtle, dark)
   colors = {
     thinking = "#1c1730",
@@ -34,6 +40,9 @@ local defaults = {
 
   -- Keybind to toggle "review" marker on active pane (false to disable)
   review_key = { key = "b", mods = "ALT" },
+
+  -- Status mode: which side to render on
+  status_side = "right",
 }
 
 -- Known attention types (reject unknown values from marker files)
@@ -73,12 +82,26 @@ local attention_cache = {} -- { [pane_id_string] = { type = "stop", frame = 0 } 
 
 -- ── Public API ──────────────────────────────────────────────────────────────
 
+--- Build the default tab title: "dir / pane_title"
+function M.default_title(tab)
+  local pane = tab.active_pane
+  local title = pane.title or ""
+
+  local cwd = pane.current_working_dir
+  local dir_name = ""
+  if cwd then
+    local path = cwd.file_path or cwd.path or tostring(cwd)
+    dir_name = string.match(path, "([^/]+)/?$") or ""
+  end
+
+  return dir_name ~= "" and (dir_name .. " / " .. title) or title
+end
+
 --- Read the cached attention state for a pane.
 --- Returns (type, frame) or nil.
 function M.get_attention(pane_id, opts)
   local id = tostring(pane_id)
   if opts and opts.dir then
-    -- Direct read (bypasses cache) when custom dir is specified
     return read_marker(opts.dir, id)
   end
   local cached = attention_cache[id]
@@ -95,7 +118,7 @@ function M.remove_marker(pane_id, opts)
 end
 
 --- Poll marker files and update cache. Call from your own update-status
---- handler if you set auto_poll = false, or if WezTerm only fires one handler.
+--- handler if you set auto_poll = false.
 function M.poll(window, opts)
   local dir = (opts and opts.dir) or M._active_dir or defaults.dir
   local mux_win = window:mux_window()
@@ -158,7 +181,7 @@ end
 
 --- Auto-clear applicable markers on an active tab (stop, notify by default).
 --- Call from your format-tab-title handler when tab.is_active.
-function M.auto_clear_tab(tab, opts)
+function M.auto_clear_tab(tab)
   local dir = M._active_dir or defaults.dir
   local clear_set = M._active_clear_set or { stop = true, notify = true }
   for _, p in ipairs(tab.panes) do
@@ -171,12 +194,56 @@ function M.auto_clear_tab(tab, opts)
   end
 end
 
+--- Wrap a user's title function with attention decoration.
+--- For renderer = "manual" mode. Returns a function suitable for wezterm.on("format-tab-title", ...).
+---
+--- Usage:
+---   wezterm.on("format-tab-title", attention.wrap_title_formatter(function(tab, ctx)
+---     return string.format("%d %s", tab.tab_index + 1, ctx.default_title)
+---   end))
+function M.wrap_title_formatter(base_fn)
+  return function(tab, tabs, panes, config, hover, max_width)
+    local ctx = {
+      tabs         = tabs,
+      panes        = panes,
+      config       = config,
+      hover        = hover,
+      max_width    = max_width,
+      default_title = M.default_title(tab),
+      attention    = { M.get_tab_attention(tab) },
+    }
+
+    -- Auto-clear on active tab
+    if tab.is_active then
+      M.auto_clear_tab(tab)
+    end
+
+    local base = base_fn(tab, ctx)
+    local index = tab.tab_index + 1
+
+    if tab.is_active then
+      return " " .. index .. ": " .. base .. " "
+    end
+
+    local indicator, atype, color = M.get_tab_attention(tab)
+    local text = " " .. indicator .. index .. ": " .. base .. " "
+
+    if color then
+      return {
+        { Background = { Color = color } },
+        { Text = text },
+      }
+    end
+
+    return text
+  end
+end
+
 -- ── apply_to_config ─────────────────────────────────────────────────────────
 
 local applied = false
 
 function M.apply_to_config(config, opts)
-  -- Idempotency: only register events once
   if applied then return end
   applied = true
 
@@ -184,8 +251,15 @@ function M.apply_to_config(config, opts)
 
   -- Merge options with defaults
   local dir = opts.dir or defaults.dir
-  local auto_poll = opts.auto_poll ~= false -- default true
-  M._active_dir = dir -- expose for M.poll()
+  local auto_poll = opts.auto_poll ~= false
+  M._active_dir = dir
+
+  -- Resolve renderer: support both new "renderer" and legacy "format_tab_title"
+  local renderer = opts.renderer or defaults.renderer
+  if opts.format_tab_title == false then renderer = "manual" end
+
+  local title_formatter = opts.title_formatter -- optional user callback
+  local status_side = opts.status_side or defaults.status_side
 
   local colors = {}
   for k, v in pairs(defaults.colors) do colors[k] = v end
@@ -204,8 +278,6 @@ function M.apply_to_config(config, opts)
   local auto_clear = opts.auto_clear or defaults.auto_clear
   local priority   = opts.priority   or defaults.priority
 
-  local format_tab = opts.format_tab_title ~= false -- default true
-
   -- Build lookup tables
   local clear_set = {}
   for _, t in ipairs(auto_clear) do clear_set[t] = true end
@@ -215,11 +287,42 @@ function M.apply_to_config(config, opts)
   for i, t in ipairs(priority) do priority_map[t] = i end
   M._active_priority_map = priority_map
 
-  -- ── Poller: update-status (runs on status_update_interval) ────────────
+  -- ── Poller: update-status ─────────────────────────────────────────────
 
-  if auto_poll then
+  if auto_poll or renderer == "status" then
     wezterm.on("update-status", function(window, _pane)
       M.poll(window)
+
+      -- Status mode: render a summary in left/right status area
+      if renderer == "status" then
+        local counts = {}
+        local mux_win = window:mux_window()
+        if mux_win then
+          for _, tab in ipairs(mux_win:tabs()) do
+            local _, atype = M.get_tab_attention(tab)
+            if atype then
+              counts[atype] = (counts[atype] or 0) + 1
+            end
+          end
+        end
+
+        local parts = {}
+        for _, t in ipairs({ "notify", "stop", "review", "thinking" }) do
+          if counts[t] then
+            local icon = t == "thinking" and "◑" or
+                         t == "stop" and "✓" or
+                         t == "notify" and "!" or "◆"
+            table.insert(parts, icon .. counts[t])
+          end
+        end
+
+        local summary = #parts > 0 and (" " .. table.concat(parts, " ") .. " ") or ""
+        if status_side == "left" then
+          window:set_left_status(summary)
+        else
+          window:set_right_status(summary)
+        end
+      end
     end)
   end
 
@@ -231,28 +334,25 @@ function M.apply_to_config(config, opts)
     attention_cache[id] = nil
   end)
 
-  -- ── Renderer: format-tab-title ──────────────────────────────────────────
-  --
-  -- Default: plugin owns tab title formatting (dir / title + indicators).
-  -- Set format_tab_title = false to disable and use get_tab_attention()
-  -- and auto_clear_tab() in your own handler instead.
+  -- ── Renderer: format-tab-title ────────────────────────────────────────
 
-  if format_tab then
+  if renderer == "tab" then
     wezterm.on("format-tab-title", function(tab)
-      local pane = tab.active_pane
-      local title = pane.title or ""
       local index = tab.tab_index + 1
 
-      local cwd = pane.current_working_dir
-      local dir_name = ""
-      if cwd then
-        local path = cwd.file_path or cwd.path or tostring(cwd)
-        dir_name = string.match(path, "([^/]+)/?$") or ""
+      -- Build base title (user callback or default)
+      local base
+      if title_formatter then
+        local ctx = {
+          default_title = M.default_title(tab),
+          attention     = { M.get_tab_attention(tab) },
+        }
+        base = title_formatter(tab, ctx)
+      else
+        base = M.default_title(tab)
       end
 
-      local base = dir_name ~= "" and (dir_name .. " / " .. title) or title
-
-      -- Active tab: auto-clear stop/notify markers
+      -- Active tab: auto-clear, plain title
       if tab.is_active then
         M.auto_clear_tab(tab)
         return " " .. index .. ": " .. base .. " "
@@ -272,6 +372,8 @@ function M.apply_to_config(config, opts)
       return text
     end)
   end
+  -- renderer == "manual": no format-tab-title registered
+  -- renderer == "status": no format-tab-title registered (status bar only)
 
   -- ── Review toggle keybind ─────────────────────────────────────────────
 
@@ -287,7 +389,6 @@ function M.apply_to_config(config, opts)
         local id = tostring(pane:pane_id())
         local path = dir .. "/" .. id
 
-        -- Toggle off if already in review
         local cached = attention_cache[id]
         if cached and cached.type == "review" then
           os.remove(path)
@@ -295,7 +396,6 @@ function M.apply_to_config(config, opts)
           return
         end
 
-        -- Toggle on (ensure directory exists)
         os.execute("mkdir -p " .. dir)
         local w = io.open(path, "w")
         if w then
