@@ -26,6 +26,8 @@ attention.apply_to_config(config)
 
 By default, the plugin owns tab title formatting (`dir / title` + attention indicators). It also registers pane cleanup, a marker poller, and an `Alt+B` keybind to toggle review mode.
 
+> **Important:** WezTerm only runs the **first** registered `format-tab-title` handler. If another plugin (e.g. tabline.wez) registers one before this plugin, all attention features — indicators, colors, and auto-clear — are disabled. Make sure `apply_to_config` runs before any other plugin that touches tab titles, or use `renderer = "manual"` to integrate via the API instead.
+
 ## Render modes
 
 The plugin supports three render modes:
