@@ -156,6 +156,21 @@ function M.get_tab_attention(tab, opts)
   return indicator, best_type, cfg_colors[best_type]
 end
 
+--- Auto-clear applicable markers on an active tab (stop, notify by default).
+--- Call from your format-tab-title handler when tab.is_active.
+function M.auto_clear_tab(tab, opts)
+  local dir = M._active_dir or defaults.dir
+  local clear_set = M._active_clear_set or { stop = true, notify = true }
+  for _, p in ipairs(tab.panes) do
+    local id = tostring(p.pane_id)
+    local cached = attention_cache[id]
+    if cached and clear_set[cached.type] then
+      remove_marker(dir, id)
+      attention_cache[id] = nil
+    end
+  end
+end
+
 -- ── apply_to_config ─────────────────────────────────────────────────────────
 
 local applied = false
@@ -189,9 +204,12 @@ function M.apply_to_config(config, opts)
   local auto_clear = opts.auto_clear or defaults.auto_clear
   local priority   = opts.priority   or defaults.priority
 
+  local format_tab = opts.format_tab_title ~= false -- default true
+
   -- Build lookup tables
   local clear_set = {}
   for _, t in ipairs(auto_clear) do clear_set[t] = true end
+  M._active_clear_set = clear_set
 
   local priority_map = {}
   for i, t in ipairs(priority) do priority_map[t] = i end
@@ -213,66 +231,52 @@ function M.apply_to_config(config, opts)
     attention_cache[id] = nil
   end)
 
-  -- ── Renderer: format-tab-title (wraps user title with indicators) ─────
+  -- ── Renderer: format-tab-title ──────────────────────────────────────────
   --
-  -- The plugin does NOT own tab title formatting. It wraps whatever title
-  -- the user's config produces. If the user has their own format-tab-title
-  -- handler registered BEFORE apply_to_config, it runs first and the plugin
-  -- decorates its output. If no user handler exists, WezTerm's default
-  -- title is used.
-  --
-  -- The plugin:
-  --   1. Auto-clears applicable markers on active tabs
-  --   2. Prepends an indicator (✓, !, ◆, spinner) to inactive tab titles
-  --   3. Applies a background tint color for attention types
+  -- Set format_tab_title = false to disable. When disabled, use
+  -- attention.get_tab_attention(tab) and attention.auto_clear_tab(tab)
+  -- in your own format-tab-title handler instead.
 
-  wezterm.on("format-tab-title", function(tab, tabs, panes, conf, hover, max_width)
-    -- Active tab: auto-clear applicable markers
-    if tab.is_active then
-      for _, p in ipairs(tab.panes) do
-        local id = tostring(p.pane_id)
-        local cached = attention_cache[id]
-        if cached and clear_set[cached.type] then
-          remove_marker(dir, id)
-          attention_cache[id] = nil
-        end
+  if format_tab then
+    wezterm.on("format-tab-title", function(tab, tabs, panes, conf, hover, max_width)
+      -- Active tab: auto-clear applicable markers
+      if tab.is_active then
+        M.auto_clear_tab(tab)
+        return nil
       end
-      -- Return nil to let WezTerm use default title (or a prior handler's title)
-      return nil
-    end
 
-    -- Inactive tab: resolve attention indicator
-    local indicator, attention_type, color = M.get_tab_attention(tab)
+      -- Inactive tab: resolve attention indicator
+      local indicator, attention_type, color = M.get_tab_attention(tab)
 
-    if not attention_type then
-      -- No attention — let WezTerm use default title
-      return nil
-    end
+      if not attention_type then
+        return nil
+      end
 
-    -- Build title: prepend indicator to the default tab title
-    local pane = tab.active_pane
-    local title = pane.title or ""
-    local index = tab.tab_index + 1
+      -- Build title: prepend indicator to the default tab title
+      local pane = tab.active_pane
+      local title = pane.title or ""
+      local index = tab.tab_index + 1
 
-    local cwd = pane.current_working_dir
-    local dir_name = ""
-    if cwd then
-      local path = cwd.file_path or cwd.path or tostring(cwd)
-      dir_name = string.match(path, "([^/]+)/?$") or ""
-    end
+      local cwd = pane.current_working_dir
+      local dir_name = ""
+      if cwd then
+        local path = cwd.file_path or cwd.path or tostring(cwd)
+        dir_name = string.match(path, "([^/]+)/?$") or ""
+      end
 
-    local base = dir_name ~= "" and (dir_name .. " / " .. title) or title
-    local text = " " .. indicator .. index .. ": " .. base .. " "
+      local base = dir_name ~= "" and (dir_name .. " / " .. title) or title
+      local text = " " .. indicator .. index .. ": " .. base .. " "
 
-    if color then
-      return {
-        { Background = { Color = color } },
-        { Text = text },
-      }
-    end
+      if color then
+        return {
+          { Background = { Color = color } },
+          { Text = text },
+        }
+      end
 
-    return text
-  end)
+      return text
+    end)
+  end
 
   -- ── Review toggle keybind ─────────────────────────────────────────────
 
