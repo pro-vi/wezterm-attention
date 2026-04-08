@@ -179,26 +179,18 @@ local attention = wezterm.plugin.require("https://github.com/pro-vi/wezterm-atte
 -- Read cached attention state: returns (type, frame) or nil
 local state, frame = attention.get_attention(pane:pane_id())
 
--- Get resolved indicator for a tab (considers all panes, applies priority)
--- Returns (indicator_string, attention_type, color) or ("", nil, nil)
-local indicator, atype, color = attention.get_tab_attention(tab)
-
--- Build default "dir / title" string for a tab
-local title = attention.default_title(tab)
-
--- Auto-clear stop/notify markers on an active tab
-attention.auto_clear_tab(tab)
-
--- Wrap a title function with attention decoration (for renderer = "manual")
-wezterm.on("format-tab-title", attention.wrap_title_formatter(function(tab, ctx)
-  return ctx.default_title
-end))
-
 -- Clear a marker programmatically
 attention.remove_marker(pane:pane_id())
 
 -- Poll markers manually (for auto_poll = false)
 attention.poll(window)
+
+-- Wrap a title function with attention decoration (for renderer = "manual")
+wezterm.on("format-tab-title", attention.wrap_title_formatter(function(tab, ctx)
+  -- ctx.default_title is "dir / title"
+  -- ctx.attention is { indicator, type, color }
+  return ctx.default_title
+end))
 ```
 
 ## Claude Code hooks
@@ -345,6 +337,10 @@ No background threads, no FFI, no external dependencies — just filesystem read
 
 **Alt+B not working?**
 - Check for keybind conflicts. Set `review_key = false` and bind manually if needed.
+
+## Type annotations
+
+LuaCATS type annotations are available via [wezterm-types](https://github.com/DrKJeff16/wezterm-types) for IDE autocomplete and type checking. See [DrKJeff16/wezterm-types#145](https://github.com/DrKJeff16/wezterm-types/pull/145).
 
 ## License
 
