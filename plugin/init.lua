@@ -167,16 +167,20 @@ end
 
 --- Poll marker files and update cache. Call from your own update-status
 --- handler if you set auto_poll = false.
+---
+--- Only refreshes entries for panes in the current window. Cross-window cache
+--- entries are left alone — pruning them here would cause cache thrash when
+--- multiple windows fire update-status (each window would wipe the other's
+--- entries every tick, producing visible tab-indicator blinking). Stale
+--- entries are cleaned up by the pane-destroyed handler.
 function M.poll(window, opts)
   local dir = (opts and opts.dir) or M._active_dir or defaults.dir
   local mux_win = window:mux_window()
   if not mux_win then return end
 
-  local seen = {}
   for _, tab in ipairs(mux_win:tabs()) do
     for _, p in ipairs(tab:panes()) do
       local id = tostring(p:pane_id())
-      seen[id] = true
       local atype, frame = read_marker(dir, id)
       if atype then
         attention_cache[id] = { type = atype, frame = frame }
@@ -184,10 +188,6 @@ function M.poll(window, opts)
         attention_cache[id] = nil
       end
     end
-  end
-
-  for id in pairs(attention_cache) do
-    if not seen[id] then attention_cache[id] = nil end
   end
 end
 
