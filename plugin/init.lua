@@ -37,12 +37,45 @@ local defaults = {
   -- These types auto-clear when their tab becomes active
   auto_clear = { "stop", "notify" },
 
+  -- Stale marker cleanup by type, in milliseconds. Prevents zombie busy tabs
+  -- after a process exits without clearing its marker. Set to false to disable.
+  stale_after_ms = { thinking = 30 * 60 * 1000 },
+
   -- Keybind to toggle "review" marker on active pane (false to disable)
   review_key = { key = "b", mods = "ALT" },
 }
 
 -- Known attention types (reject unknown values from marker files)
 local valid_types = { thinking = true, stop = true, notify = true, review = true }
+
+local function now_ms()
+  return os.time() * 1000
+end
+
+local function normalize_epoch_ms(value)
+  local n = tonumber(value)
+  if not n then return nil end
+  -- Accept either seconds or milliseconds. Current Unix seconds are 10 digits;
+  -- current Unix milliseconds are 13 digits.
+  if n < 100000000000 then return n * 1000 end
+  return n
+end
+
+local function stale_ttl_ms(atype, marker_ttl_ms)
+  local explicit = tonumber(marker_ttl_ms)
+  if explicit and explicit > 0 then return explicit end
+
+  local cfg = M._active_stale_after_ms
+  if cfg == false then return nil end
+  cfg = cfg or defaults.stale_after_ms
+  if type(cfg) ~= "table" then return nil end
+
+  local ttl = cfg[atype]
+  if ttl == false then return nil end
+  ttl = tonumber(ttl)
+  if ttl and ttl > 0 then return ttl end
+  return nil
+end
 
 -- ── Marker I/O ──────────────────────────────────────────────────────────────
 
@@ -57,12 +90,12 @@ local function read_marker(dir, pane_id)
     return wezterm.json_parse(content)
   end)
   if ok and data and valid_types[data.type] then
-    return data.type, data.frame
+    return data.type, data.frame, normalize_epoch_ms(data.updated_at or data.updated_at_ms), data.ttl_ms, content
   end
 
   -- Fallback: plain text (backward compat)
   local text = content:gsub("%s+", "")
-  if valid_types[text] then return text, nil end
+  if valid_types[text] then return text, nil, nil, nil, content end
   return nil
 end
 
@@ -188,18 +221,46 @@ end
 --- entries are left alone — pruning them here would cause cache thrash when
 --- multiple windows fire update-status (each window would wipe the other's
 --- entries every tick, producing visible tab-indicator blinking). Stale
---- entries are cleaned up by the pane-destroyed handler.
+--- thinking markers are removed here by TTL; closed panes are cleaned up by
+--- the pane-destroyed handler.
 function M.poll(window, opts)
   local dir = (opts and opts.dir) or M._active_dir or defaults.dir
   local mux_win = window:mux_window()
   if not mux_win then return end
 
+  local now = now_ms()
+  local animation_frame = M._poll_animation_frame or 0
+  M._poll_animation_frame = (animation_frame + 1) % 4
+
   for _, tab in ipairs(mux_win:tabs()) do
     for _, p in ipairs(tab:panes()) do
       local id = tostring(p:pane_id())
-      local atype, frame = read_marker(dir, id)
+      local atype, frame, updated_at, marker_ttl_ms, raw = read_marker(dir, id)
       if atype then
-        attention_cache[id] = { type = atype, frame = frame }
+        local cached = attention_cache[id]
+        local observed_at = now
+        if cached and cached.raw == raw and cached.observed_at then
+          observed_at = cached.observed_at
+        end
+
+        local effective_updated_at = updated_at or observed_at
+        local ttl = stale_ttl_ms(atype, marker_ttl_ms)
+        if ttl and now - effective_updated_at > ttl then
+          remove_marker(dir, id)
+          attention_cache[id] = nil
+        else
+          if atype == "thinking" and frame == nil then
+            frame = animation_frame
+          end
+          attention_cache[id] = {
+            type        = atype,
+            frame       = frame,
+            updated_at  = effective_updated_at,
+            observed_at = observed_at,
+            ttl_ms      = ttl,
+            raw         = raw,
+          }
+        end
       else
         attention_cache[id] = nil
       end
@@ -289,6 +350,9 @@ function M.apply_to_config(config, opts)
 
   local auto_clear = opts.auto_clear or defaults.auto_clear
   local priority   = opts.priority   or defaults.priority
+  local stale_after_ms = opts.stale_after_ms
+  if stale_after_ms == nil then stale_after_ms = defaults.stale_after_ms end
+  M._active_stale_after_ms = stale_after_ms
 
   -- Build lookup tables
   local clear_set = {}

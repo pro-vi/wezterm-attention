@@ -8,7 +8,7 @@ mkdir -p "$MARKER_DIR"
 
 # Write a "stop" marker (tab shows ✓ in mint)
 # Atomic: write to .tmp then rename to avoid partial reads
-echo '{"type":"stop"}' > "${MARKER_DIR}/${WEZTERM_PANE}.tmp"
+printf '{"type":"stop","updated_at":%s}\n' "$(date +%s)" > "${MARKER_DIR}/${WEZTERM_PANE}.tmp"
 mv "${MARKER_DIR}/${WEZTERM_PANE}.tmp" "${MARKER_DIR}/${WEZTERM_PANE}"
 
 # Other types:

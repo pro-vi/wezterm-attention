@@ -24,7 +24,7 @@ async function writeMarker(type: AttentionType, frame?: number): Promise<void> {
   const dir = join(home, ".local", "state", "wezterm-attention");
   await mkdir(dir, { recursive: true });
 
-  const data: Record<string, unknown> = { type };
+  const data: Record<string, unknown> = { type, updated_at: Date.now() };
   if (frame !== undefined) data.frame = frame;
 
   // Atomic write: tmp file + rename avoids partial reads

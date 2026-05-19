@@ -100,6 +100,11 @@ attention.apply_to_config(config, {
   -- Auto-clear these types when switching to the tab
   auto_clear = { "stop", "notify" },
 
+  -- Stale marker cleanup by type, in milliseconds.
+  -- Prevents zombie busy tabs if a process exits without clearing.
+  -- Set to false to disable all stale cleanup.
+  stale_after_ms = { thinking = 30 * 60 * 1000 },
+
   -- Review toggle keybind (false to disable)
   review_key = { key = "b", mods = "ALT" },
 
@@ -112,8 +117,10 @@ Any process running inside WezTerm can write a marker. The contract is:
 
 1. **Write** a JSON file to `~/.local/state/wezterm-attention/<WEZTERM_PANE>`
 2. **Contents:** `{"type":"<state>"}` where state is `thinking`, `stop`, `notify`, or `review`
-3. **Optional:** `{"type":"thinking","frame":0}` — `frame` (0-3) controls the spinner position
-4. **Cleanup** is automatic — markers are removed when panes close or tabs become active
+3. **Optional:** `{"type":"thinking","frame":0}` — `frame` (0-3) controls the spinner position. If omitted for `thinking`, the plugin animates it during polling.
+4. **Optional:** `updated_at` or `updated_at_ms` records when the marker was refreshed. Seconds and milliseconds are both accepted.
+5. **Optional:** `ttl_ms` overrides stale cleanup for that marker. By default, stale `thinking` markers clear after 30 minutes.
+6. **Cleanup** is automatic — markers are removed when panes close, tabs become active, or stale TTL expires
 
 The `WEZTERM_PANE` environment variable is injected by WezTerm into every shell it spawns. That's the pane's unique ID.
 
@@ -124,7 +131,7 @@ The `WEZTERM_PANE` environment variable is injected by WezTerm into every shell 
 ```bash
 MARKER_DIR="$HOME/.local/state/wezterm-attention"
 mkdir -p "$MARKER_DIR"
-echo '{"type":"stop"}' > "$MARKER_DIR/$WEZTERM_PANE.tmp" && mv "$MARKER_DIR/$WEZTERM_PANE.tmp" "$MARKER_DIR/$WEZTERM_PANE"
+printf '{"type":"stop","updated_at":%s}\n' "$(date +%s)" > "$MARKER_DIR/$WEZTERM_PANE.tmp" && mv "$MARKER_DIR/$WEZTERM_PANE.tmp" "$MARKER_DIR/$WEZTERM_PANE"
 ```
 
 ### TypeScript / Bun
@@ -137,7 +144,7 @@ const dir = join(process.env.HOME!, ".local", "state", "wezterm-attention");
 await mkdir(dir, { recursive: true });
 
 const file = join(dir, process.env.WEZTERM_PANE!);
-await writeFile(file + ".tmp", JSON.stringify({ type: "stop" }));
+await writeFile(file + ".tmp", JSON.stringify({ type: "stop", updated_at: Date.now() }));
 await rename(file + ".tmp", file);
 ```
 
@@ -151,7 +158,7 @@ const dir = path.join(process.env.HOME, ".local", "state", "wezterm-attention");
 fs.mkdirSync(dir, { recursive: true });
 
 const file = path.join(dir, process.env.WEZTERM_PANE);
-fs.writeFileSync(file + ".tmp", JSON.stringify({ type: "stop" }));
+fs.writeFileSync(file + ".tmp", JSON.stringify({ type: "stop", updated_at: Date.now() }));
 fs.renameSync(file + ".tmp", file);
 ```
 
@@ -234,7 +241,7 @@ if (process.env.WEZTERM_PANE) {
   } catch {}
 
   mkdirSync(markerDir, { recursive: true });
-  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'thinking', frame }));
+  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'thinking', frame, updated_at: Date.now() }));
   renameSync(markerFile + '.tmp', markerFile);
 }
 ```
@@ -246,7 +253,7 @@ if (process.env.WEZTERM_PANE) {
   const markerDir = `${process.env.HOME}/.local/state/wezterm-attention`;
   const markerFile = `${markerDir}/${process.env.WEZTERM_PANE}`;
   mkdirSync(markerDir, { recursive: true });
-  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'stop' }));
+  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'stop', updated_at: Date.now() }));
   renameSync(markerFile + '.tmp', markerFile);
 }
 ```
@@ -258,7 +265,7 @@ if (process.env.WEZTERM_PANE) {
   const markerDir = `${process.env.HOME}/.local/state/wezterm-attention`;
   const markerFile = `${markerDir}/${process.env.WEZTERM_PANE}`;
   mkdirSync(markerDir, { recursive: true });
-  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'notify' }));
+  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'notify', updated_at: Date.now() }));
   renameSync(markerFile + '.tmp', markerFile);
 }
 ```
@@ -290,7 +297,7 @@ async function writeWezTermMarker(type: "stop" | "notify"): Promise<void> {
 
   const markerDir = join(home, ".local", "state", "wezterm-attention");
   await mkdir(markerDir, { recursive: true });
-  await writeFile(join(markerDir, paneId), JSON.stringify({ type }));
+  await writeFile(join(markerDir, paneId), JSON.stringify({ type, updated_at: Date.now() }));
 }
 
 // In your notify handler:
