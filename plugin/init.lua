@@ -129,6 +129,22 @@ local function get_tab_attention(tab, opts)
   return indicator, best_type, cfg_colors[best_type]
 end
 
+--- Return the panes of the tab that contains pane_id, or nil if none does.
+--- Uses only mux_win:tabs()/tab:panes() — the same WezTerm API surface poll()
+--- already calls every tick — so it stays within the plugin's compatibility
+--- floor (active_tab()/active_pane() don't exist on the oldest plugin builds).
+local function tab_panes_containing(mux_win, pane_id)
+  for _, tab in ipairs(mux_win:tabs()) do
+    local panes = tab:panes()
+    for _, p in ipairs(panes) do
+      if tostring(p:pane_id()) == pane_id then
+        return panes
+      end
+    end
+  end
+  return nil
+end
+
 --- Auto-clear applicable markers on an active tab (stop, notify by default).
 local function auto_clear_tab(tab)
   local dir = M._active_dir or defaults.dir
@@ -354,30 +370,10 @@ function M.apply_to_config(config, opts)
         -- if ANY of its panes is flagged. So toggle across every pane in the
         -- focused pane's tab — toggling only the focused pane leaves a split
         -- tab stuck showing ◆ (the other pane is still flagged) and unclearable.
-        --
-        -- Resolve the tab via mux_win:tabs()/tab:panes() — the exact APIs poll()
-        -- already calls every tick — rather than active_tab()/active_pane(),
-        -- which don't exist on the oldest plugin-capable WezTerm builds. This
-        -- keeps the keybind within the plugin's existing compatibility floor.
+        -- Panes not in any tab (GUI overlays) fall back to per-pane behavior.
         local mux_win = win:mux_window()
         local target_id = tostring(pane:pane_id())
-        local panes = { pane }
-        if mux_win then
-          for _, t in ipairs(mux_win:tabs()) do
-            local tp = t:panes()
-            local found = false
-            for _, p in ipairs(tp) do
-              if tostring(p:pane_id()) == target_id then
-                found = true
-                break
-              end
-            end
-            if found then
-              panes = tp
-              break
-            end
-          end
-        end
+        local panes = (mux_win and tab_panes_containing(mux_win, target_id)) or { pane }
 
         -- Decide and act on disk truth, never the cache. poll() rebuilds the
         -- cache from files every tick, so the cache can lag a marker an external
