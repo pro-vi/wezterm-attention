@@ -379,13 +379,15 @@ function M.apply_to_config(config, opts)
           end
         end
 
-        -- Decide off disk truth, not just the cache. poll() rebuilds the cache
-        -- from files every tick, so a review marker that exists on disk but is
-        -- not yet cached must still count — otherwise the clear below skips it
-        -- and the next poll re-lights the tab a tick later.
+        -- Decide and act on disk truth, never the cache. poll() rebuilds the
+        -- cache from files every tick, so the cache can lag a marker an external
+        -- process just rewrote. Trusting it here is unsafe two ways: a review on
+        -- disk but not yet cached would be missed (the clear skips it and the
+        -- next poll re-lights the tab), and — worse — a pane cached as review
+        -- whose file was just overwritten with stop/notify would be deleted by
+        -- the clear path, dropping a completion/failure notification. Read the
+        -- file so this destructive toggle only ever removes a real review marker.
         local function is_review(id)
-          local c = attention_cache[id]
-          if c then return c.type == "review" end
           return read_marker(dir, id) == "review"
         end
 
