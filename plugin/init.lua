@@ -412,17 +412,36 @@ function M.apply_to_config(config, opts)
           return
         end
 
-        -- Tab not flagged → flag the focused pane. It is the active pane of its
-        -- tab and always a member of `panes`, so flag and clear stay symmetric.
+        -- Tab not flagged → flag the focused pane (the active pane of its tab,
+        -- always a member of `panes`, so flag and clear stay symmetric).
+        --
+        -- Never clobber a process-owned marker that may have landed since the
+        -- last poll: review is a manual overlay, and stop/notify are terminal,
+        -- so overwriting one would silently drop a completion/failure signal.
+        local existing = read_marker(dir, target_id)
+        if existing ~= nil and existing ~= "review" then
+          return
+        end
+
+        -- Write atomically (tmp + rename) so a concurrent poll() — including
+        -- one in another window — never reads a half-written marker, matching
+        -- the atomic-write protocol the README recommends.
         local quoted_dir = dir:gsub("'", [['\'']])
         os.execute("mkdir -p '" .. quoted_dir .. "'")
-        local w = io.open(dir .. "/" .. target_id, "w")
-        if w then
-          w:write('{"type":"review"}')
-          w:close()
+        local path = dir .. "/" .. target_id
+        local tmp = path .. ".tmp"
+        local w = io.open(tmp, "w")
+        if not w then
+          wezterm.log_error("wezterm-attention: failed to write review marker " .. path)
+          return
+        end
+        w:write('{"type":"review"}')
+        w:close()
+        if os.rename(tmp, path) then
           attention_cache[target_id] = { type = "review" }
         else
-          wezterm.log_error("wezterm-attention: failed to write review marker " .. dir .. "/" .. target_id)
+          os.remove(tmp)
+          wezterm.log_error("wezterm-attention: failed to place review marker " .. path)
         end
       end),
     })
