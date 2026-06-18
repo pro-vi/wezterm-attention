@@ -349,19 +349,41 @@ function M.apply_to_config(config, opts)
     table.insert(config.keys, {
       key  = review_key.key,
       mods = review_key.mods,
-      action = wezterm.action_callback(function(_win, pane)
-        local id = tostring(pane:pane_id())
-        local path = dir .. "/" .. id
+      action = wezterm.action_callback(function(win, pane)
+        -- The review indicator is tab-level: get_tab_attention lights the tab
+        -- if ANY of its panes is flagged. So toggle across every pane in the
+        -- active tab — toggling only the active pane leaves a split tab stuck
+        -- showing ◆ (the other pane is still flagged) and unclearable.
+        local mux_win = win:mux_window()
+        local tab = mux_win and mux_win:active_tab()
+        local panes = (tab and tab:panes()) or { pane }
 
-        local cached = attention_cache[id]
-        if cached and cached.type == "review" then
-          os.remove(path)
-          attention_cache[id] = nil
+        local has_review = false
+        for _, p in ipairs(panes) do
+          local c = attention_cache[tostring(p:pane_id())]
+          if c and c.type == "review" then
+            has_review = true
+            break
+          end
+        end
+
+        -- Tab already flagged → clear review from all its panes.
+        if has_review then
+          for _, p in ipairs(panes) do
+            local id = tostring(p:pane_id())
+            local c = attention_cache[id]
+            if c and c.type == "review" then
+              remove_marker(dir, id)
+              attention_cache[id] = nil
+            end
+          end
           return
         end
 
+        -- Tab not flagged → flag the active pane.
+        local id = tostring(pane:pane_id())
         os.execute("mkdir -p " .. dir)
-        local w = io.open(path, "w")
+        local w = io.open(dir .. "/" .. id, "w")
         if w then
           w:write('{"type":"review"}')
           w:close()
