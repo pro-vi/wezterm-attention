@@ -358,21 +358,30 @@ function M.apply_to_config(config, opts)
         local tab = mux_win and mux_win:active_tab()
         local panes = (tab and tab:panes()) or { pane }
 
+        -- Decide off disk truth, not just the cache. poll() rebuilds the cache
+        -- from files every tick, so a review marker that exists on disk but is
+        -- not yet cached must still count — otherwise the clear below skips it
+        -- and the next poll re-lights the tab a tick later.
+        local function is_review(id)
+          local c = attention_cache[id]
+          if c then return c.type == "review" end
+          return read_marker(dir, id) == "review"
+        end
+
         local has_review = false
         for _, p in ipairs(panes) do
-          local c = attention_cache[tostring(p:pane_id())]
-          if c and c.type == "review" then
+          if is_review(tostring(p:pane_id())) then
             has_review = true
             break
           end
         end
 
-        -- Tab already flagged → clear review from all its panes.
+        -- Tab already flagged → clear review from all its panes (sibling
+        -- stop/notify/thinking markers are spared by the is_review guard).
         if has_review then
           for _, p in ipairs(panes) do
             local id = tostring(p:pane_id())
-            local c = attention_cache[id]
-            if c and c.type == "review" then
+            if is_review(id) then
               remove_marker(dir, id)
               attention_cache[id] = nil
             end
@@ -380,14 +389,20 @@ function M.apply_to_config(config, opts)
           return
         end
 
-        -- Tab not flagged → flag the active pane.
-        local id = tostring(pane:pane_id())
-        os.execute("mkdir -p " .. dir)
+        -- Tab not flagged → flag the tab's active pane. Use tab:active_pane()
+        -- (the same pane universe we detect/clear over) so flag and clear stay
+        -- symmetric; the focused `pane` may be a GUI overlay not in the tab.
+        local target = (tab and tab:active_pane()) or pane
+        local id = tostring(target:pane_id())
+        local quoted_dir = dir:gsub("'", [['\'']])
+        os.execute("mkdir -p '" .. quoted_dir .. "'")
         local w = io.open(dir .. "/" .. id, "w")
         if w then
           w:write('{"type":"review"}')
           w:close()
           attention_cache[id] = { type = "review" }
+        else
+          wezterm.log_error("wezterm-attention: failed to write review marker " .. dir .. "/" .. id)
         end
       end),
     })
