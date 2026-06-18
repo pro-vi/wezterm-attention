@@ -352,11 +352,32 @@ function M.apply_to_config(config, opts)
       action = wezterm.action_callback(function(win, pane)
         -- The review indicator is tab-level: get_tab_attention lights the tab
         -- if ANY of its panes is flagged. So toggle across every pane in the
-        -- active tab — toggling only the active pane leaves a split tab stuck
-        -- showing ◆ (the other pane is still flagged) and unclearable.
+        -- focused pane's tab — toggling only the focused pane leaves a split
+        -- tab stuck showing ◆ (the other pane is still flagged) and unclearable.
+        --
+        -- Resolve the tab via mux_win:tabs()/tab:panes() — the exact APIs poll()
+        -- already calls every tick — rather than active_tab()/active_pane(),
+        -- which don't exist on the oldest plugin-capable WezTerm builds. This
+        -- keeps the keybind within the plugin's existing compatibility floor.
         local mux_win = win:mux_window()
-        local tab = mux_win and mux_win:active_tab()
-        local panes = (tab and tab:panes()) or { pane }
+        local target_id = tostring(pane:pane_id())
+        local panes = { pane }
+        if mux_win then
+          for _, t in ipairs(mux_win:tabs()) do
+            local tp = t:panes()
+            local found = false
+            for _, p in ipairs(tp) do
+              if tostring(p:pane_id()) == target_id then
+                found = true
+                break
+              end
+            end
+            if found then
+              panes = tp
+              break
+            end
+          end
+        end
 
         -- Decide off disk truth, not just the cache. poll() rebuilds the cache
         -- from files every tick, so a review marker that exists on disk but is
@@ -389,20 +410,17 @@ function M.apply_to_config(config, opts)
           return
         end
 
-        -- Tab not flagged → flag the tab's active pane. Use tab:active_pane()
-        -- (the same pane universe we detect/clear over) so flag and clear stay
-        -- symmetric; the focused `pane` may be a GUI overlay not in the tab.
-        local target = (tab and tab:active_pane()) or pane
-        local id = tostring(target:pane_id())
+        -- Tab not flagged → flag the focused pane. It is the active pane of its
+        -- tab and always a member of `panes`, so flag and clear stay symmetric.
         local quoted_dir = dir:gsub("'", [['\'']])
         os.execute("mkdir -p '" .. quoted_dir .. "'")
-        local w = io.open(dir .. "/" .. id, "w")
+        local w = io.open(dir .. "/" .. target_id, "w")
         if w then
           w:write('{"type":"review"}')
           w:close()
-          attention_cache[id] = { type = "review" }
+          attention_cache[target_id] = { type = "review" }
         else
-          wezterm.log_error("wezterm-attention: failed to write review marker " .. dir .. "/" .. id)
+          wezterm.log_error("wezterm-attention: failed to write review marker " .. dir .. "/" .. target_id)
         end
       end),
     })
