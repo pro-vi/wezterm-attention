@@ -129,6 +129,22 @@ local function get_tab_attention(tab, opts)
   return indicator, best_type, cfg_colors[best_type]
 end
 
+--- Return the panes of the tab that contains pane_id, or nil if none does.
+--- Uses only mux_win:tabs()/tab:panes() — the same WezTerm API surface poll()
+--- already calls every tick — so it stays within the plugin's compatibility
+--- floor (active_tab()/active_pane() don't exist on the oldest plugin builds).
+local function tab_panes_containing(mux_win, pane_id)
+  for _, tab in ipairs(mux_win:tabs()) do
+    local panes = tab:panes()
+    for _, p in ipairs(panes) do
+      if tostring(p:pane_id()) == pane_id then
+        return panes
+      end
+    end
+  end
+  return nil
+end
+
 --- Auto-clear applicable markers on an active tab (stop, notify by default).
 local function auto_clear_tab(tab)
   local dir = M._active_dir or defaults.dir
@@ -349,23 +365,79 @@ function M.apply_to_config(config, opts)
     table.insert(config.keys, {
       key  = review_key.key,
       mods = review_key.mods,
-      action = wezterm.action_callback(function(_win, pane)
-        local id = tostring(pane:pane_id())
-        local path = dir .. "/" .. id
+      action = wezterm.action_callback(function(win, pane)
+        -- The review indicator is tab-level: get_tab_attention lights the tab
+        -- if ANY of its panes is flagged. So toggle across every pane in the
+        -- focused pane's tab — toggling only the focused pane leaves a split
+        -- tab stuck showing ◆ (the other pane is still flagged) and unclearable.
+        -- Panes not in any tab (GUI overlays) fall back to per-pane behavior.
+        local mux_win = win:mux_window()
+        local target_id = tostring(pane:pane_id())
+        local panes = (mux_win and tab_panes_containing(mux_win, target_id)) or { pane }
 
-        local cached = attention_cache[id]
-        if cached and cached.type == "review" then
-          os.remove(path)
-          attention_cache[id] = nil
+        -- Decide and act on disk truth, never the cache. poll() rebuilds the
+        -- cache from files every tick, so the cache can lag a marker an external
+        -- process just rewrote. Trusting it here is unsafe two ways: a review on
+        -- disk but not yet cached would be missed (the clear skips it and the
+        -- next poll re-lights the tab), and — worse — a pane cached as review
+        -- whose file was just overwritten with stop/notify would be deleted by
+        -- the clear path, dropping a completion/failure notification. Read the
+        -- file so this destructive toggle only ever removes a real review marker.
+        local function is_review(id)
+          return read_marker(dir, id) == "review"
+        end
+
+        local has_review = false
+        for _, p in ipairs(panes) do
+          if is_review(tostring(p:pane_id())) then
+            has_review = true
+            break
+          end
+        end
+
+        -- Tab already flagged → clear review from all its panes (sibling
+        -- stop/notify/thinking markers are spared by the is_review guard).
+        if has_review then
+          for _, p in ipairs(panes) do
+            local id = tostring(p:pane_id())
+            if is_review(id) then
+              remove_marker(dir, id)
+              attention_cache[id] = nil
+            end
+          end
           return
         end
 
-        os.execute("mkdir -p " .. dir)
-        local w = io.open(path, "w")
-        if w then
-          w:write('{"type":"review"}')
-          w:close()
-          attention_cache[id] = { type = "review" }
+        -- Tab not flagged → flag the focused pane (the active pane of its tab,
+        -- always a member of `panes`, so flag and clear stay symmetric).
+        --
+        -- Never clobber a process-owned marker that may have landed since the
+        -- last poll: review is a manual overlay, and stop/notify are terminal,
+        -- so overwriting one would silently drop a completion/failure signal.
+        local existing = read_marker(dir, target_id)
+        if existing ~= nil and existing ~= "review" then
+          return
+        end
+
+        -- Write atomically (tmp + rename) so a concurrent poll() — including
+        -- one in another window — never reads a half-written marker, matching
+        -- the atomic-write protocol the README recommends.
+        local quoted_dir = dir:gsub("'", [['\'']])
+        os.execute("mkdir -p '" .. quoted_dir .. "'")
+        local path = dir .. "/" .. target_id
+        local tmp = path .. ".tmp"
+        local w = io.open(tmp, "w")
+        if not w then
+          wezterm.log_error("wezterm-attention: failed to write review marker " .. path)
+          return
+        end
+        w:write('{"type":"review"}')
+        w:close()
+        if os.rename(tmp, path) then
+          attention_cache[target_id] = { type = "review" }
+        else
+          os.remove(tmp)
+          wezterm.log_error("wezterm-attention: failed to place review marker " .. path)
         end
       end),
     })
