@@ -34,7 +34,7 @@ local defaults = {
   -- Higher index = higher priority when multiple panes have attention
   priority = { "thinking", "review", "stop", "notify" },
 
-  -- These types auto-clear when their tab becomes active
+  -- These types auto-clear when their pane becomes active
   auto_clear = { "stop", "notify" },
 
   -- Stale marker cleanup by type, in milliseconds. Prevents zombie busy tabs
@@ -104,8 +104,9 @@ local function remove_marker(dir, pane_id)
 end
 
 -- ── In-memory cache ─────────────────────────────────────────────────────────
--- format-tab-title must not do I/O (blocks GUI thread).
--- update-status reads files on the interval; format-tab-title reads cache.
+-- format-tab-title must not poll every pane from disk (it blocks the GUI
+-- thread). update-status fills this cache; auto-clear performs one confirmation
+-- read only when acknowledging a cached terminal marker.
 
 local attention_cache = {} -- { [pane_id_string] = { type = "stop", frame = 0 } }
 
@@ -178,15 +179,33 @@ local function tab_panes_containing(mux_win, pane_id)
   return nil
 end
 
---- Auto-clear applicable markers on an active tab (stop, notify by default).
-local function auto_clear_tab(tab)
+--- Auto-clear an applicable marker on the active pane (stop, notify by default).
+local function auto_clear_active_pane(tab)
   local dir = M._active_dir or defaults.dir
   local clear_set = M._active_clear_set or { stop = true, notify = true }
-  for _, p in ipairs(tab.panes) do
-    local id = tostring(p.pane_id)
-    local cached = attention_cache[id]
-    if cached and clear_set[cached.type] then
+  local pane = tab.active_pane
+  if not pane then return end
+
+  local id = tostring(pane.pane_id)
+  local cached = attention_cache[id]
+  if cached and clear_set[cached.type] then
+    -- Confirm disk truth before a destructive clear. A new turn can replace a
+    -- cached stop with thinking between poll() and this title callback; deleting
+    -- from the stale cache would erase the new lifecycle state.
+    local current_type, current_frame, updated_at, marker_ttl_ms, raw = read_marker(dir, id)
+    if current_type and clear_set[current_type] then
       remove_marker(dir, id)
+      attention_cache[id] = nil
+    elseif current_type then
+      attention_cache[id] = {
+        type        = current_type,
+        frame       = current_frame,
+        updated_at  = updated_at,
+        observed_at = now_ms(),
+        ttl_ms      = marker_ttl_ms,
+        raw         = raw,
+      }
+    else
       attention_cache[id] = nil
     end
   end
@@ -277,6 +296,12 @@ end
 ---   end))
 function M.wrap_title_formatter(base_fn)
   return function(tab, tabs, panes, config, hover, max_width)
+    -- Clear before deriving formatter context so ctx.attention describes only
+    -- attention the user has not seen yet.
+    if tab.is_active then
+      auto_clear_active_pane(tab)
+    end
+
     local ctx = {
       tabs         = tabs,
       panes        = panes,
@@ -287,17 +312,8 @@ function M.wrap_title_formatter(base_fn)
       attention    = { get_tab_attention(tab) },
     }
 
-    -- Auto-clear on active tab
-    if tab.is_active then
-      auto_clear_tab(tab)
-    end
-
     local base = base_fn(tab, ctx)
     local index = tab.tab_index + 1
-
-    if tab.is_active then
-      return " " .. index .. ": " .. base .. " "
-    end
 
     local indicator, atype, color = get_tab_attention(tab)
     local text = " " .. indicator .. index .. ": " .. base .. " "
@@ -385,6 +401,12 @@ function M.apply_to_config(config, opts)
     wezterm.on("format-tab-title", function(tab)
       local index = tab.tab_index + 1
 
+      -- Clear only the pane the user is viewing. Sibling panes may have
+      -- completed in the background and must remain visible on the active tab.
+      if tab.is_active then
+        auto_clear_active_pane(tab)
+      end
+
       -- Build base title (user callback or default)
       local base
       if title_formatter then
@@ -397,13 +419,8 @@ function M.apply_to_config(config, opts)
         base = default_title(tab)
       end
 
-      -- Active tab: auto-clear, plain title
-      if tab.is_active then
-        auto_clear_tab(tab)
-        return " " .. index .. ": " .. base .. " "
-      end
-
-      -- Inactive tab: attention indicator + background tint
+      -- Render any remaining attention, including an unfocused sibling marker
+      -- on the active tab.
       local indicator, attention_type, color = get_tab_attention(tab)
       local text = " " .. indicator .. index .. ": " .. base .. " "
 
