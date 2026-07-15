@@ -11,7 +11,7 @@ A WezTerm plugin that turns your tab bar into a notification system. Any CLI too
 | `notify` | ! | Rose | Something needs your attention |
 | `review` | ◆ | Gold | Manually flagged for review |
 
-Inactive tabs light up when a background process writes a marker. Active tabs auto-clear `stop` and `notify` (you've seen it). `thinking` and `review` persist until explicitly removed.
+Tabs light up when a background process writes a marker—even when another pane in that tab is currently focused. Focusing a pane auto-clears only that pane's `stop` and `notify`; markers from unfocused sibling panes remain visible until you visit them. `thinking` and `review` persist until explicitly removed.
 
 When multiple panes in a tab have different states, the highest-priority one wins: **notify > stop > review > thinking**.
 
@@ -97,7 +97,7 @@ attention.apply_to_config(config, {
   -- Priority order (last = highest)
   priority = { "thinking", "review", "stop", "notify" },
 
-  -- Auto-clear these types when switching to the tab
+  -- Auto-clear these types when focusing their pane
   auto_clear = { "stop", "notify" },
 
   -- Stale marker cleanup by type, in milliseconds.
@@ -120,7 +120,7 @@ Any process running inside WezTerm can write a marker. The contract is:
 3. **Optional:** `{"type":"thinking","frame":0}` — `frame` (0-3) controls the spinner position. If omitted for `thinking`, the plugin animates it during polling.
 4. **Optional:** `updated_at` or `updated_at_ms` records when the marker was refreshed. Seconds and milliseconds are both accepted.
 5. **Optional:** `ttl_ms` overrides stale cleanup for that marker. By default, stale `thinking` markers clear after 30 minutes.
-6. **Cleanup** is automatic — markers are removed when panes close, tabs become active, or stale TTL expires
+6. **Cleanup** is automatic — markers are removed when panes close, their panes become focused, or stale TTL expires
 
 The `WEZTERM_PANE` environment variable is injected by WezTerm into every shell it spawns. That's the pane's unique ID.
 
