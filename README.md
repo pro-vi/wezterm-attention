@@ -334,21 +334,25 @@ if (process.env.WEZTERM_PANE) {
 
 ## Codex hooks
 
-Wire Codex through its **lifecycle hooks** (`~/.codex/hooks.json`). Avoid the older
-`~/.codex/config.toml` `[hooks] notify` field: it is finish-only, and the desktop Codex "Computer
-Use" app silently rewrites it on launch (repointing it at a temp path that later disappears), so
-markers quietly stop firing. Lifecycle hooks aren't touched by that. They require a one-time trust
-step — run `/hooks` in Codex and approve them once per machine before they fire.
+Wire Codex through its **lifecycle hooks** (`~/.codex/hooks.json`). Avoid the older top-level
+`notify` field in `~/.codex/config.toml`: it is finish-only, and the desktop Codex "Computer Use"
+app silently rewrites it on launch (repointing it at a temp path that later disappears), so markers
+quietly stop firing. Lifecycle hooks aren't touched by that. They require a one-time trust approval —
+run `/hooks` in Codex and approve — and because trust is keyed to a hash of the hook definition,
+editing a hook re-prompts. See the [Codex hooks documentation](https://learn.chatgpt.com/docs/hooks)
+for the `hooks.json` schema that binds each event to a command.
 
-The marker writer is transport-agnostic — it writes the same JSON the plugin reads, tagged
-`source:"codex"`. Map each lifecycle event to the matching state:
+Map each lifecycle event to a marker state (all tagged `source:"codex"`):
 
-| Codex lifecycle event | Marker |
+| Codex lifecycle event | Marker state |
 |---|---|
-| `PreToolUse` | `{"type":"thinking","source":"codex","frame":0-3,"updated_at_ms":…}` (frame cycles 0→3) |
-| `PermissionRequest` | `{"type":"notify","source":"codex","updated_at_ms":…}` |
-| `Stop` | `{"type":"stop","source":"codex","updated_at_ms":…}` |
-| `SessionStart` | clears the marker (skip `compact`, so a mid-turn compaction keeps its spinner) |
+| `PreToolUse` | `thinking` (optionally cycle `frame` 0→3 for the spinner) |
+| `PermissionRequest` | `notify` |
+| `Stop` | `stop` |
+| `SessionStart` | **remove** the marker file |
+
+The three *write* states share one helper — a **writer-only fragment**, not a complete hook. Call it
+from the `PreToolUse` / `PermissionRequest` / `Stop` hooks with the matching state:
 
 ```typescript
 async function writeWezTermMarker(marker: Record<string, unknown>): Promise<void> {
@@ -365,11 +369,17 @@ async function writeWezTermMarker(marker: Record<string, unknown>): Promise<void
   await writeFile(file + ".tmp", JSON.stringify({ source: "codex", updated_at_ms: Date.now(), ...marker }));
   await rename(file + ".tmp", file); // atomic
 }
+// PreToolUse:        writeWezTermMarker({ type: "thinking" })
+// PermissionRequest: writeWezTermMarker({ type: "notify" })
+// Stop:              writeWezTermMarker({ type: "stop" })
 ```
 
-See Codex's hooks documentation for the `hooks.json` structure that binds each lifecycle event to a
-command; call `writeWezTermMarker` from each with the state above. (`updated_at_ms` is accepted by
-the plugin alongside `updated_at`.)
+Two behaviours the fragment deliberately does **not** implement — wire them in your hooks if you want them:
+
+- **`SessionStart` cleanup** *removes* the marker rather than writing one: `rm(join(dir, paneId), { force: true })`, not `writeWezTermMarker`. (Skip it on the `compact` startup reason so a mid-turn compaction keeps its spinner.)
+- **Spinner frame cycling** (`frame` 0→3 across repeated `PreToolUse`) needs reading the current marker and incrementing; omit it entirely and the plugin animates the spinner on its own poll. Optional.
+
+(`updated_at_ms` is accepted by the plugin alongside `updated_at`.)
 
 **Coverage caveat.** `PermissionRequest` fires only for command / patch / network approvals — *not*
 for Codex's other human-input waits (`request_user_input`, `request_permissions`, and MCP
