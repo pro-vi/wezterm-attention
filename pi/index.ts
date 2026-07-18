@@ -9,6 +9,11 @@ const ATTENTION_EVENT = "wezterm-attention:mark";
 type AttentionState = "thinking" | "stop" | "notify" | "review";
 type AttentionCommand = "busy" | "thinking" | "ready" | "stop" | "blocked" | "pending" | "notify" | "review" | "clear" | "status";
 
+// Outcome of a marker mutation. Distinguishes "no pane" from "bad pane" from an
+// actual filesystem failure so callers can report the true reason rather than
+// collapsing every failure into "WEZTERM_PANE is not set".
+type MarkOutcome = "ok" | "missing-pane" | "invalid-pane" | "io-error";
+
 type Marker = {
 	type: AttentionState;
 	source: "pi";
@@ -31,10 +36,15 @@ function markerDirectory(): string {
 	return process.env.WEZTERM_ATTENTION_DIR ?? join(process.env.HOME ?? homedir(), ".local", "state", "wezterm-attention");
 }
 
-function markerPath(): string | undefined {
-	const paneId = process.env.WEZTERM_PANE;
-	if (!paneId) return undefined;
-	return join(markerDirectory(), paneId);
+// WezTerm injects WEZTERM_PANE as a non-negative integer pane id. Validate the
+// contract before building a path: an unvalidated value like "../../foo" would
+// escape the marker directory, and clearMarker's rm would then delete an
+// arbitrary file. Reject anything that is not purely digits.
+function readPaneId(): { ok: true; id: string } | { ok: false; reason: "missing-pane" | "invalid-pane" } {
+	const id = process.env.WEZTERM_PANE;
+	if (!id) return { ok: false, reason: "missing-pane" };
+	if (!/^\d+$/.test(id)) return { ok: false, reason: "invalid-pane" };
+	return { ok: true, id };
 }
 
 function ttlMs(): number {
@@ -68,10 +78,32 @@ function normalizeCommand(command: string): AttentionState | "clear" | "status" 
 	}
 }
 
-async function writeMarker(state: AttentionState, label?: string): Promise<boolean> {
-	const path = markerPath();
-	if (!path) return false;
+// All marker mutations (and status reads) run through this single serial chain,
+// so emit order equals apply order even for the fire-and-forget event-bus path.
+// Without it, a `notify` immediately followed by `clear` races: rm finishes
+// before the write's rename, leaving the marker present. The chain swallows
+// results so one failure never poisons later operations.
+let mutationChain: Promise<unknown> = Promise.resolve();
+function enqueue<T>(op: () => Promise<T>): Promise<T> {
+	const run = mutationChain.then(op, op);
+	mutationChain = run.then(
+		() => undefined,
+		() => undefined,
+	);
+	return run;
+}
 
+// Monotonic counter makes temp filenames unique within the process even for
+// same-millisecond writes; serialization already prevents overlap, this is
+// defense in depth.
+let tmpSeq = 0;
+
+async function writeMarkerNow(state: AttentionState, label?: string): Promise<MarkOutcome> {
+	const pane = readPaneId();
+	if (!pane.ok) return pane.reason;
+
+	const dir = markerDirectory();
+	const path = join(dir, pane.id);
 	const marker: Marker = {
 		type: state,
 		source: "pi",
@@ -81,39 +113,77 @@ async function writeMarker(state: AttentionState, label?: string): Promise<boole
 	if (state === "thinking") marker.ttl_ms = ttlMs();
 
 	try {
-		await mkdir(markerDirectory(), { recursive: true });
-		const tmp = `${path}.tmp.${process.pid}.${Date.now()}`;
+		await mkdir(dir, { recursive: true });
+		const tmp = `${path}.tmp.${process.pid}.${Date.now()}.${tmpSeq++}`;
 		await writeFile(tmp, JSON.stringify(marker) + "\n");
 		await rename(tmp, path);
-		return true;
+		return "ok";
 	} catch {
-		return false;
+		return "io-error";
 	}
 }
 
-async function clearMarker(): Promise<boolean> {
-	const path = markerPath();
-	if (!path) return false;
+async function clearMarkerNow(): Promise<MarkOutcome> {
+	const pane = readPaneId();
+	if (!pane.ok) return pane.reason;
 	try {
-		await rm(path, { force: true });
-		return true;
+		await rm(join(markerDirectory(), pane.id), { force: true });
+		return "ok";
 	} catch {
-		return false;
+		return "io-error";
 	}
 }
 
+function writeMarker(state: AttentionState, label?: string): Promise<MarkOutcome> {
+	return enqueue(() => writeMarkerNow(state, label));
+}
+
+function clearMarker(): Promise<MarkOutcome> {
+	return enqueue(() => clearMarkerNow());
+}
+
+// Read behind the mutation chain so `status` reflects the latest queued write or
+// clear rather than a stale on-disk state.
 async function readMarkerText(): Promise<string | undefined> {
-	const path = markerPath();
-	if (!path) return undefined;
-	try {
-		return await readFile(path, "utf8");
-	} catch {
-		return undefined;
+	const pane = readPaneId();
+	if (!pane.ok) return undefined;
+	return enqueue(async () => {
+		try {
+			return await readFile(join(markerDirectory(), pane.id), "utf8");
+		} catch {
+			return undefined;
+		}
+	});
+}
+
+async function mark(state: AttentionState, label?: string): Promise<MarkOutcome> {
+	return writeMarker(state, label);
+}
+
+function writeMessage(outcome: MarkOutcome, command: string): { text: string; level: "info" | "warning" } {
+	switch (outcome) {
+		case "ok":
+			return { text: `Marked WezTerm pane as ${command}`, level: "info" };
+		case "missing-pane":
+			return { text: "WEZTERM_PANE is not set; nothing written", level: "info" };
+		case "invalid-pane":
+			return { text: "WEZTERM_PANE is not a valid pane id; nothing written", level: "warning" };
+		case "io-error":
+			return { text: "Failed to write WezTerm marker (I/O error)", level: "warning" };
 	}
 }
 
-async function mark(state: AttentionState, label?: string): Promise<boolean> {
-	return writeMarker(state, label);
+function clearMessage(outcome: MarkOutcome): { text: string; level: "info" | "warning" } {
+	switch (outcome) {
+		case "ok":
+			return { text: "Cleared WezTerm attention marker", level: "info" };
+		case "missing-pane":
+			return { text: "WEZTERM_PANE is not set; nothing to clear", level: "info" };
+		case "invalid-pane":
+			return { text: "WEZTERM_PANE is not a valid pane id; nothing to clear", level: "warning" };
+		case "io-error":
+			return { text: "Failed to clear WezTerm marker (I/O error)", level: "warning" };
+	}
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -185,23 +255,29 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 			}
 
 			if (command === "status") {
-				const marker = await readMarkerText();
-				if (!marker) {
-					ctx.ui.notify(process.env.WEZTERM_PANE ? "No WezTerm attention marker for this pane" : "WEZTERM_PANE is not set; attention markers are disabled", "info");
+				const pane = readPaneId();
+				if (!pane.ok) {
+					ctx.ui.notify(
+						pane.reason === "missing-pane"
+							? "WEZTERM_PANE is not set; attention markers are disabled"
+							: "WEZTERM_PANE is not a valid pane id; attention markers are disabled",
+						"info",
+					);
 					return;
 				}
-				ctx.ui.notify(`WezTerm attention marker: ${marker}`, "info");
+				const marker = await readMarkerText();
+				ctx.ui.notify(marker ? `WezTerm attention marker: ${marker}` : "No WezTerm attention marker for this pane", "info");
 				return;
 			}
 
 			if (command === "clear") {
-				const cleared = await clearMarker();
-				ctx.ui.notify(cleared ? "Cleared WezTerm attention marker" : "WEZTERM_PANE is not set; nothing to clear", "info");
+				const { text, level } = clearMessage(await clearMarker());
+				ctx.ui.notify(text, level);
 				return;
 			}
 
-			const marked = await mark(command, label);
-			ctx.ui.notify(marked ? `Marked WezTerm pane as ${command}` : "WEZTERM_PANE is not set; nothing written", "info");
+			const { text, level } = writeMessage(await mark(command, label), command);
+			ctx.ui.notify(text, level);
 		},
 	});
 }
