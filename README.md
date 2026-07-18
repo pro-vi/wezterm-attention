@@ -334,34 +334,47 @@ if (process.env.WEZTERM_PANE) {
 
 ## Codex hooks
 
-Codex uses a single `notify` hook that fires when the agent finishes or needs attention. Add this to your Codex notify handler:
+Wire Codex through its **lifecycle hooks** (`~/.codex/hooks.json`). Avoid the older
+`~/.codex/config.toml` `[hooks] notify` field: it is finish-only, and the desktop Codex "Computer
+Use" app silently rewrites it on launch (repointing it at a temp path that later disappears), so
+markers quietly stop firing. Lifecycle hooks aren't touched by that. They require a one-time trust
+step — run `/hooks` in Codex and approve them once per machine before they fire.
+
+The marker writer is transport-agnostic — it writes the same JSON the plugin reads, tagged
+`source:"codex"`. Map each lifecycle event to the matching state:
+
+| Codex lifecycle event | Marker |
+|---|---|
+| `PreToolUse` | `{"type":"thinking","source":"codex","frame":0-3,"updated_at_ms":…}` (frame cycles 0→3) |
+| `PermissionRequest` | `{"type":"notify","source":"codex","updated_at_ms":…}` |
+| `Stop` | `{"type":"stop","source":"codex","updated_at_ms":…}` |
+| `SessionStart` | clears the marker (skip `compact`, so a mid-turn compaction keeps its spinner) |
 
 ```typescript
-async function writeWezTermMarker(type: "stop" | "notify"): Promise<void> {
+async function writeWezTermMarker(marker: Record<string, unknown>): Promise<void> {
   const paneId = process.env.WEZTERM_PANE;
   const home = process.env.HOME;
   if (!paneId || !home) return;
 
-  const { mkdir, writeFile } = require("node:fs/promises");
+  const { mkdir, writeFile, rename } = require("node:fs/promises");
   const { join } = require("node:path");
 
-  const markerDir = join(home, ".local", "state", "wezterm-attention");
-  await mkdir(markerDir, { recursive: true });
-  await writeFile(join(markerDir, paneId), JSON.stringify({ type, updated_at: Date.now() }));
+  const dir = join(home, ".local", "state", "wezterm-attention");
+  await mkdir(dir, { recursive: true });
+  const file = join(dir, paneId);
+  await writeFile(file + ".tmp", JSON.stringify({ source: "codex", updated_at_ms: Date.now(), ...marker }));
+  await rename(file + ".tmp", file); // atomic
 }
-
-// In your notify handler:
-// - "stop" if the agent completed work (has last-assistant-message)
-// - "notify" for other notifications
-const attentionType = payload["last-assistant-message"] ? "stop" : "notify";
-await writeWezTermMarker(attentionType);
 ```
 
-Wire it in `~/.codex/config.toml`:
-```toml
-[hooks]
-notify = ["bun", "/path/to/your/notify.ts"]
-```
+See Codex's hooks documentation for the `hooks.json` structure that binds each lifecycle event to a
+command; call `writeWezTermMarker` from each with the state above. (`updated_at_ms` is accepted by
+the plugin alongside `updated_at`.)
+
+**Coverage caveat.** `PermissionRequest` fires only for command / patch / network approvals — *not*
+for Codex's other human-input waits (`request_user_input`, `request_permissions`, and MCP
+elicitation). A turn blocked on one of those shows the `thinking` spinner, not `!`. Routing those to
+`notify` means detecting the tool in `PreToolUse`; it isn't wired here yet.
 
 ## Other use cases
 
