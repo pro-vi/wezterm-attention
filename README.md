@@ -200,6 +200,56 @@ wezterm.on("format-tab-title", attention.wrap_title_formatter(function(tab, ctx)
 end))
 ```
 
+## Pi extension
+
+[Pi](https://github.com/badlogic/pi-mono) is an extensible coding agent. This repo ships a Pi extension that writes attention markers for the current WezTerm pane — install it with one command:
+
+```bash
+pi install git:github.com/pro-vi/wezterm-attention
+```
+
+Once installed, it writes markers automatically as Pi works. Outside WezTerm (`WEZTERM_PANE` unset) it's a silent no-op:
+
+| Pi event | Marker | What happens |
+|----------|--------|--------------|
+| `agent_start` | `thinking` | Tab spins violet while Pi runs |
+| `tool_execution_start` | `thinking` | Spinner continues while Pi uses a tool |
+| `agent_end` | `stop` | Tab turns mint with ✓ when Pi finishes |
+
+`thinking` markers carry `ttl_ms`, so a Pi process that exits unexpectedly won't leave a stuck spinner.
+
+### Commands
+
+Control the marker for the current pane manually:
+
+```text
+/attention status              show the current marker
+/attention busy    [label]     mark thinking
+/attention ready   [label]     mark stop
+/attention pending [label]     mark notify (waiting on you)
+/attention blocked [label]     mark notify
+/attention review  [label]     flag for review
+/attention clear               remove the marker
+```
+
+Aliases: `busy → thinking`, `ready → stop`, `pending`/`blocked → notify`. With `WEZTERM_PANE` unset, every command reports that markers are disabled rather than silently doing nothing.
+
+### For other Pi extensions
+
+Any Pi extension can request a marker for the current pane by emitting the shared `wezterm-attention:mark` event — e.g. an ask-user extension flagging `notify` while it waits for you:
+
+```ts
+pi.events.emit("wezterm-attention:mark", { type: "notify" });
+// { type: "clear" } removes it; a bare string like "busy" also works
+```
+
+### Environment
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `WEZTERM_ATTENTION_DIR` | `~/.local/state/wezterm-attention` | Override the marker directory (match the plugin's `dir`) |
+| `PI_WEZTERM_ATTENTION_TTL_MS` | `1800000` (30 min) | Override the `thinking` marker TTL |
+
 ## Claude Code hooks
 
 Claude Code has [hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) that fire on lifecycle events. Add attention markers to each one:
