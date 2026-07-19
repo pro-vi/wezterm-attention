@@ -208,7 +208,7 @@ end))
 pi install git:github.com/pro-vi/wezterm-attention
 ```
 
-Once installed, it writes markers automatically as Pi works. Outside WezTerm (`WEZTERM_PANE` unset) it's a silent no-op:
+Once installed, it writes markers automatically from Pi's lifecycle. Outside WezTerm (`WEZTERM_PANE` unset) it's a silent no-op:
 
 | Pi event | Marker | What happens |
 |----------|--------|--------------|
@@ -216,32 +216,18 @@ Once installed, it writes markers automatically as Pi works. Outside WezTerm (`W
 | `tool_execution_start` | `thinking` | Spinner continues while Pi uses a tool |
 | `agent_end` | `stop` | Tab turns mint with ✓ when Pi finishes |
 
-`thinking` markers carry `ttl_ms`, so a Pi process that exits unexpectedly won't leave a stuck spinner.
+`thinking` markers carry `ttl_ms`, so a Pi process that exits unexpectedly won't leave a stuck spinner. That's the whole extension — no commands, no configuration; the tab tracks Pi automatically.
 
-### Commands
+### The `notify` state, for other extensions
 
-Control the marker for the current pane manually:
-
-```text
-/attention status              show the current marker
-/attention busy    [label]     mark thinking
-/attention ready   [label]     mark stop
-/attention pending [label]     mark notify (waiting on you)
-/attention blocked [label]     mark notify
-/attention review  [label]     flag for review
-/attention clear               remove the marker
-```
-
-Aliases: `busy → thinking`, `ready → stop`, `pending`/`blocked → notify`. With `WEZTERM_PANE` unset, every command reports that markers are disabled rather than silently doing nothing.
-
-### For other Pi extensions
-
-Any Pi extension can request a marker for the current pane by emitting the shared `wezterm-attention:mark` event — e.g. an ask-user extension flagging `notify` while it waits for you:
+Pi's lifecycle only produces `thinking` and `stop` — there's no lifecycle event for "blocked, waiting for a human", so the extension never raises the rose `!` on its own. Instead it listens on a shared event bus so **any other Pi extension can request a state** without knowing anything about marker files or `WEZTERM_PANE`. The typical caller is an ask-user extension flagging `notify` while it waits for you, then clearing it:
 
 ```ts
-pi.events.emit("wezterm-attention:mark", { type: "notify" });
-// { type: "clear" } removes it; a bare string like "busy" also works
+pi.events.emit("wezterm-attention:mark", { type: "notify" }); // waiting on you → rose !
+pi.events.emit("wezterm-attention:mark", { type: "clear" });  // answered → remove it
 ```
+
+The payload is a bare string (`"notify"`) or an object (`{ type: "notify", label }`); accepted states are `thinking` / `stop` / `notify` / `review` / `clear` (with `busy`, `ready`, `pending`, `blocked` as aliases). Extensions that would rather not depend on this event can always [write the marker file directly](#the-protocol).
 
 ### Environment
 

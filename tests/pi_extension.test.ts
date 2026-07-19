@@ -1,27 +1,24 @@
-// Regression tests for pi/index.ts, driving the REAL registered command/event
-// handlers through a mock ExtensionAPI. Named after the properties they lock —
-// several are the negation of a bug fixed during review triage. Run: `bun test`.
+// Regression tests for pi/index.ts, driving the REAL registered lifecycle and
+// event handlers through a mock ExtensionAPI. Named after the properties they
+// lock — several are the negation of a bug fixed during review triage.
+// Run: `bun test`.
 import { test, expect } from "bun:test";
-import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ext from "../pi/index.ts";
 
-type Note = { msg: string; level: string };
-
 function loadExt() {
-	let cmdHandler!: (args: string, ctx: { ui: { notify: (m: string, l: string) => void } }) => Promise<void>;
-	let eventHandler!: (data: unknown) => void;
-	const notes: Note[] = [];
+	const lifecycle: Record<string, () => Promise<void> | void> = {};
+	let eventHandler: (data: unknown) => void = () => {};
 	const pi = {
 		events: { on: (_e: string, h: (d: unknown) => void) => { eventHandler = h; } },
-		on: () => {},
-		registerCommand: (_n: string, o: { handler: typeof cmdHandler }) => { cmdHandler = o.handler; },
+		on: (event: string, h: () => Promise<void> | void) => { lifecycle[event] = h; },
+		registerCommand: () => {},
 	};
 	// deno-lint-ignore no-explicit-any
 	ext(pi as any);
-	const ctx = { ui: { notify: (msg: string, level: string) => notes.push({ msg, level }) } };
-	return { cmdHandler, eventHandler, notes, ctx };
+	return { lifecycle, eventHandler };
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -31,18 +28,48 @@ function freshDir(prefix: string): string {
 	return d;
 }
 
-test("happy path: /attention busy writes a thinking marker with ttl_ms and source pi", async () => {
-	const dir = freshDir("wez-happy-");
+test("lifecycle: agent_start writes a thinking marker with ttl_ms and source pi", async () => {
+	const dir = freshDir("wez-life1-");
 	process.env.WEZTERM_PANE = "42";
-	const { cmdHandler, notes } = loadExt();
-	await cmdHandler("busy label here", { ui: { notify: (m, l) => notes.push({ msg: m, level: l }) } });
+	const { lifecycle } = loadExt();
+	await lifecycle["agent_start"]!();
 	const m = JSON.parse(readFileSync(join(dir, "42"), "utf8"));
 	expect(m.type).toBe("thinking");
 	expect(m.source).toBe("pi");
 	expect(typeof m.ttl_ms).toBe("number");
-	expect(m.label).toBe("label here");
-	// The message reports the resolved state (busy -> thinking), pre-existing behavior.
-	expect(notes.at(-1)?.msg).toBe("Marked WezTerm pane as thinking");
+	rmSync(dir, { recursive: true, force: true });
+});
+
+test("lifecycle: agent_end writes a stop marker (no ttl_ms)", async () => {
+	const dir = freshDir("wez-life2-");
+	process.env.WEZTERM_PANE = "42";
+	const { lifecycle } = loadExt();
+	await lifecycle["agent_end"]!();
+	const m = JSON.parse(readFileSync(join(dir, "42"), "utf8"));
+	expect(m.type).toBe("stop");
+	expect(m.ttl_ms).toBeUndefined();
+	rmSync(dir, { recursive: true, force: true });
+});
+
+test("event: emitting a notify object writes a labeled notify marker", async () => {
+	const dir = freshDir("wez-evt-");
+	process.env.WEZTERM_PANE = "42";
+	const { eventHandler } = loadExt();
+	eventHandler({ type: "notify", label: "answer me" });
+	await sleep(20);
+	const m = JSON.parse(readFileSync(join(dir, "42"), "utf8"));
+	expect(m.type).toBe("notify");
+	expect(m.label).toBe("answer me");
+	rmSync(dir, { recursive: true, force: true });
+});
+
+test("event: a bare string state is accepted", async () => {
+	const dir = freshDir("wez-evtstr-");
+	process.env.WEZTERM_PANE = "42";
+	const { eventHandler } = loadExt();
+	eventHandler("review");
+	await sleep(20);
+	expect(JSON.parse(readFileSync(join(dir, "42"), "utf8")).type).toBe("review");
 	rmSync(dir, { recursive: true, force: true });
 });
 
@@ -74,31 +101,7 @@ test("F1: ordering preserved — clear then notify leaves a notify marker", asyn
 	rmSync(dir, { recursive: true, force: true });
 });
 
-test("F3: filesystem failure reports io-error, NOT 'not set', when the pane IS set", async () => {
-	const parent = mkdtempSync(join(tmpdir(), "wez-io-"));
-	const dir = join(parent, "markers");
-	mkdirSync(dir);
-	chmodSync(dir, 0o500); // no write
-	process.env.WEZTERM_ATTENTION_DIR = dir;
-	process.env.WEZTERM_PANE = "42";
-	const { cmdHandler, notes } = loadExt();
-	await cmdHandler("notify", { ui: { notify: (m, l) => notes.push({ msg: m, level: l }) } });
-	const msg = notes.at(-1)?.msg ?? "";
-	expect(msg).toContain("I/O error");
-	expect(msg).not.toContain("not set");
-	chmodSync(dir, 0o700);
-	rmSync(parent, { recursive: true, force: true });
-});
-
-test("F3: missing pane still reports 'not set' (unchanged truthful behavior)", async () => {
-	freshDir("wez-missing-");
-	delete process.env.WEZTERM_PANE;
-	const { cmdHandler, notes } = loadExt();
-	await cmdHandler("notify", { ui: { notify: (m, l) => notes.push({ msg: m, level: l }) } });
-	expect(notes.at(-1)?.msg).toBe("WEZTERM_PANE is not set; nothing written");
-});
-
-test("F4: traversal pane id writes NOTHING outside the marker dir and is rejected", async () => {
+test("F4: a traversal pane id writes NOTHING outside the marker dir", async () => {
 	const parent = mkdtempSync(join(tmpdir(), "wez-trav1-"));
 	const dir = join(parent, "markerdir");
 	mkdirSync(dir);
@@ -106,14 +109,14 @@ test("F4: traversal pane id writes NOTHING outside the marker dir and is rejecte
 	writeFileSync(victim, "IMPORTANT");
 	process.env.WEZTERM_ATTENTION_DIR = dir;
 	process.env.WEZTERM_PANE = "../victim.txt";
-	const { cmdHandler, notes } = loadExt();
-	await cmdHandler("busy", { ui: { notify: (m, l) => notes.push({ msg: m, level: l }) } });
+	const { eventHandler } = loadExt();
+	eventHandler("notify");
+	await sleep(20);
 	expect(readFileSync(victim, "utf8")).toBe("IMPORTANT"); // untouched
-	expect(notes.at(-1)?.msg).toContain("not a valid pane id");
 	rmSync(parent, { recursive: true, force: true });
 });
 
-test("F4: /attention clear with a traversal pane id does NOT delete an outside file", async () => {
+test("F4: a traversal pane id does NOT delete an outside file on clear", async () => {
 	const parent = mkdtempSync(join(tmpdir(), "wez-trav2-"));
 	const dir = join(parent, "markerdir");
 	mkdirSync(dir);
@@ -121,8 +124,18 @@ test("F4: /attention clear with a traversal pane id does NOT delete an outside f
 	writeFileSync(victim, "IMPORTANT");
 	process.env.WEZTERM_ATTENTION_DIR = dir;
 	process.env.WEZTERM_PANE = "../victim.txt";
-	const { cmdHandler } = loadExt();
-	await cmdHandler("clear", { ui: { notify: () => {} } });
+	const { eventHandler } = loadExt();
+	eventHandler("clear");
+	await sleep(20);
 	expect(existsSync(victim)).toBe(true); // not deleted
 	rmSync(parent, { recursive: true, force: true });
+});
+
+test("missing pane: lifecycle write is a silent no-op, no throw", async () => {
+	const dir = freshDir("wez-nopane-");
+	delete process.env.WEZTERM_PANE;
+	const { lifecycle } = loadExt();
+	await lifecycle["agent_start"]!();
+	expect(existsSync(join(dir, "undefined"))).toBe(false);
+	rmSync(dir, { recursive: true, force: true });
 });
