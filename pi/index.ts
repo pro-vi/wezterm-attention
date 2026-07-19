@@ -93,13 +93,17 @@ async function writeMarkerNow(state: AttentionState, label?: string): Promise<vo
 	if (label) marker.label = label;
 	if (state === "thinking") marker.ttl_ms = ttlMs();
 
+	const tmp = `${path}.tmp.${process.pid}.${Date.now()}.${tmpSeq++}`;
 	try {
 		await mkdir(dir, { recursive: true });
-		const tmp = `${path}.tmp.${process.pid}.${Date.now()}.${tmpSeq++}`;
 		await writeFile(tmp, JSON.stringify(marker) + "\n");
 		await rename(tmp, path);
 	} catch {
 		// Best-effort: a marker that fails to write just means the tab doesn't change.
+		// A failed rename (e.g. the destination is a directory) leaves tmp behind —
+		// remove it so failures don't accumulate filesystem residue. Cleanup only on
+		// failure; on success tmp was already renamed away.
+		await rm(tmp, { force: true }).catch(() => {});
 	}
 }
 
@@ -165,13 +169,11 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 	// this event to request a state — notably `notify` (the "waiting for you" `!`),
 	// which the lifecycle events never produce. Emit a bare string ("notify") or
 	// an object ({ type: "notify", label }); "clear" removes the marker.
+	// The bus ignores the handler's return value; we return the mutation promise
+	// so callers/tests can await completion deterministically.
 	pi.events.on(ATTENTION_EVENT, (data) => {
 		const request = normalizeEventData(data);
 		if (!request) return;
-		if (request.state === "clear") {
-			void clearMarker();
-			return;
-		}
-		void mark(request.state, request.label);
+		return request.state === "clear" ? clearMarker() : mark(request.state, request.label);
 	});
 }

@@ -1,18 +1,19 @@
 // Regression tests for pi/index.ts, driving the REAL registered lifecycle and
 // event handlers through a mock ExtensionAPI. Named after the properties they
 // lock — several are the negation of a bug fixed during review triage.
-// Run: `bun test`.
+// Mutations are awaited deterministically (the event handler returns its queue
+// promise), never slept on. Run: `bun test`.
 import { test, expect } from "bun:test";
-import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, existsSync, readFileSync, readdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ext from "../pi/index.ts";
 
 function loadExt() {
 	const lifecycle: Record<string, () => Promise<void> | void> = {};
-	let eventHandler: (data: unknown) => void = () => {};
+	let eventHandler: (data: unknown) => void | Promise<void> = () => {};
 	const pi = {
-		events: { on: (_e: string, h: (d: unknown) => void) => { eventHandler = h; } },
+		events: { on: (_e: string, h: (d: unknown) => void | Promise<void>) => { eventHandler = h; } },
 		on: (event: string, h: () => Promise<void> | void) => { lifecycle[event] = h; },
 		registerCommand: () => {},
 	};
@@ -20,7 +21,6 @@ function loadExt() {
 	ext(pi as any);
 	return { lifecycle, eventHandler };
 }
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function freshDir(prefix: string): string {
 	const d = mkdtempSync(join(tmpdir(), prefix));
@@ -55,8 +55,7 @@ test("event: emitting a notify object writes a labeled notify marker", async () 
 	const dir = freshDir("wez-evt-");
 	process.env.WEZTERM_PANE = "42";
 	const { eventHandler } = loadExt();
-	eventHandler({ type: "notify", label: "answer me" });
-	await sleep(20);
+	await eventHandler({ type: "notify", label: "answer me" });
 	const m = JSON.parse(readFileSync(join(dir, "42"), "utf8"));
 	expect(m.type).toBe("notify");
 	expect(m.label).toBe("answer me");
@@ -67,41 +66,42 @@ test("event: a bare string state is accepted", async () => {
 	const dir = freshDir("wez-evtstr-");
 	process.env.WEZTERM_PANE = "42";
 	const { eventHandler } = loadExt();
-	eventHandler("review");
-	await sleep(20);
+	await eventHandler("review");
 	expect(JSON.parse(readFileSync(join(dir, "42"), "utf8")).type).toBe("review");
 	rmSync(dir, { recursive: true, force: true });
 });
 
-test("F1: last requested mutation wins — notify then clear leaves NO marker", async () => {
+test("ordering: notify then clear leaves NO marker (last requested wins)", async () => {
 	const dir = freshDir("wez-order1-");
 	process.env.WEZTERM_PANE = "42";
 	const { eventHandler } = loadExt();
 	let present = 0;
 	for (let i = 0; i < 30; i++) {
-		eventHandler("notify");
-		eventHandler("clear");
-		await sleep(10);
+		// Emit both before either settles (exercise the interleaving), then await
+		// both deterministically — no sleep, so the assertion can't run early.
+		const a = eventHandler("notify");
+		const b = eventHandler("clear");
+		await Promise.all([a, b]);
 		if (existsSync(join(dir, "42"))) present++;
 	}
 	expect(present).toBe(0);
 	rmSync(dir, { recursive: true, force: true });
 });
 
-test("F1: ordering preserved — clear then notify leaves a notify marker", async () => {
+test("ordering: clear then notify leaves a notify marker", async () => {
 	const dir = freshDir("wez-order2-");
 	process.env.WEZTERM_PANE = "42";
 	const { eventHandler } = loadExt();
 	writeFileSync(join(dir, "42"), "{}");
-	eventHandler("clear");
-	eventHandler("notify");
-	await sleep(20);
+	const a = eventHandler("clear");
+	const b = eventHandler("notify");
+	await Promise.all([a, b]);
 	expect(existsSync(join(dir, "42"))).toBe(true);
 	expect(JSON.parse(readFileSync(join(dir, "42"), "utf8")).type).toBe("notify");
 	rmSync(dir, { recursive: true, force: true });
 });
 
-test("F4: a traversal pane id writes NOTHING outside the marker dir", async () => {
+test("traversal: a bad pane id writes NOTHING outside the marker dir", async () => {
 	const parent = mkdtempSync(join(tmpdir(), "wez-trav1-"));
 	const dir = join(parent, "markerdir");
 	mkdirSync(dir);
@@ -110,13 +110,12 @@ test("F4: a traversal pane id writes NOTHING outside the marker dir", async () =
 	process.env.WEZTERM_ATTENTION_DIR = dir;
 	process.env.WEZTERM_PANE = "../victim.txt";
 	const { eventHandler } = loadExt();
-	eventHandler("notify");
-	await sleep(20);
+	await eventHandler("notify");
 	expect(readFileSync(victim, "utf8")).toBe("IMPORTANT"); // untouched
 	rmSync(parent, { recursive: true, force: true });
 });
 
-test("F4: a traversal pane id does NOT delete an outside file on clear", async () => {
+test("traversal: a bad pane id does NOT delete an outside file on clear", async () => {
 	const parent = mkdtempSync(join(tmpdir(), "wez-trav2-"));
 	const dir = join(parent, "markerdir");
 	mkdirSync(dir);
@@ -125,10 +124,20 @@ test("F4: a traversal pane id does NOT delete an outside file on clear", async (
 	process.env.WEZTERM_ATTENTION_DIR = dir;
 	process.env.WEZTERM_PANE = "../victim.txt";
 	const { eventHandler } = loadExt();
-	eventHandler("clear");
-	await sleep(20);
+	await eventHandler("clear");
 	expect(existsSync(victim)).toBe(true); // not deleted
 	rmSync(parent, { recursive: true, force: true });
+});
+
+test("cleanup: a failed rename does not leak temp files", async () => {
+	const dir = freshDir("wez-leak-");
+	process.env.WEZTERM_PANE = "42";
+	mkdirSync(join(dir, "42")); // marker path is a directory → rename fails
+	const { eventHandler } = loadExt();
+	for (let i = 0; i < 10; i++) await eventHandler("notify");
+	const leaked = readdirSync(dir).filter((f) => f.includes(".tmp."));
+	expect(leaked.length).toBe(0);
+	rmSync(dir, { recursive: true, force: true });
 });
 
 test("missing pane: lifecycle write is a silent no-op, no throw", async () => {
