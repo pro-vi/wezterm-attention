@@ -1,10 +1,13 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 const DEFAULT_TTL_MS = 30 * 60 * 1000;
 const ATTENTION_EVENT = "wezterm-attention:mark";
+// Cap the session_shutdown drain so a hung marker FS can never wedge Pi's reload
+// or quit. Normal writes settle in single-digit ms; this is only a safety valve.
+const DRAIN_TIMEOUT_MS = 2000;
 
 type AttentionState = "thinking" | "stop" | "notify" | "review";
 
@@ -16,8 +19,16 @@ type Marker = {
 	ttl_ms?: number;
 };
 
-function markerDirectory(): string {
-	return process.env.WEZTERM_ATTENTION_DIR ?? join(process.env.HOME ?? homedir(), ".local", "state", "wezterm-attention");
+// Resolve the marker directory, then require it to be absolute. This closes two
+// degenerate-env holes: WEZTERM_ATTENTION_DIR="" would otherwise leave the clear
+// path calling rm() on a cwd-relative name (deleting a file where Pi was
+// launched), and HOME="" resolves to a relative ".local/..." that scatters
+// markers into the launch directory where the plugin never looks. `||` (not
+// `??`) folds an empty override or empty HOME into the fallback; the isAbsolute
+// gate rejects any still-relative result so the caller no-ops.
+function markerDirectory(): string | undefined {
+	const dir = process.env.WEZTERM_ATTENTION_DIR || join(process.env.HOME || homedir(), ".local", "state", "wezterm-attention");
+	return isAbsolute(dir) ? dir : undefined;
 }
 
 // WezTerm injects WEZTERM_PANE as a non-negative integer pane id. Validate the
@@ -32,7 +43,11 @@ function paneId(): string | undefined {
 function ttlMs(): number {
 	const raw = process.env.PI_WEZTERM_ATTENTION_TTL_MS;
 	if (!raw) return DEFAULT_TTL_MS;
-	const parsed = Number.parseInt(raw, 10);
+	// Strict digits only: parseInt("30m") is 30, silently turning a "30 minutes"
+	// typo into a 30ms TTL that expires the spinner almost instantly. Reject
+	// anything that isn't a plain integer and fall back to the default.
+	if (!/^\d+$/.test(raw.trim())) return DEFAULT_TTL_MS;
+	const parsed = Number.parseInt(raw.trim(), 10);
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TTL_MS;
 }
 
@@ -62,8 +77,10 @@ function normalizeState(value: string): AttentionState | "clear" | undefined {
 // All mutations run through one serial chain so emit order == apply order even
 // for the fire-and-forget event path: a `notify` immediately followed by a
 // `clear` must not race (rm finishing before the write's rename would leave the
-// marker present). The chain swallows results so one failure never poisons later
-// operations.
+// marker present). The chain is module-local; cross-generation ordering across a
+// reload is handled by draining it in session_shutdown (which Pi awaits before
+// re-evaluating the module), not by any per-generation disposal here. The chain
+// swallows results so one failure never poisons later operations.
 let mutationChain: Promise<unknown> = Promise.resolve();
 function enqueue(op: () => Promise<void>): Promise<void> {
 	const run = mutationChain.then(op, op);
@@ -84,6 +101,7 @@ async function writeMarkerNow(state: AttentionState, label?: string): Promise<vo
 	if (!id) return;
 
 	const dir = markerDirectory();
+	if (!dir) return;
 	const path = join(dir, id);
 	const marker: Marker = {
 		type: state,
@@ -110,8 +128,10 @@ async function writeMarkerNow(state: AttentionState, label?: string): Promise<vo
 async function clearMarkerNow(): Promise<void> {
 	const id = paneId();
 	if (!id) return;
+	const dir = markerDirectory();
+	if (!dir) return;
 	try {
-		await rm(join(markerDirectory(), id), { force: true });
+		await rm(join(dir, id), { force: true });
 	} catch {
 		// Best-effort.
 	}
@@ -151,8 +171,38 @@ function normalizeEventData(data: unknown): { state: AttentionState | "clear"; l
 	return { state, ...(label ? { label } : {}) };
 }
 
+// Retire the previous generation's bus listener when a NEW generation registers,
+// rather than in session_shutdown. The shared event bus is not cleared on reload,
+// so a leaked listener would accumulate — but disposal cannot happen on shutdown:
+// reload() emits session_shutdown BEFORE its fallible work, and handleReloadCommand
+// catches a reload failure and keeps the session running, so disposing on shutdown
+// would kill the notify path with no replacement. Disposing only once a successor
+// provably exists (at the next registration) avoids that. The registry is a
+// WeakMap keyed by the bus object, so a multi-loader process never disposes
+// another bus's listener.
+//
+// This keying relies on `pi.events` being referentially stable across /reload.
+// The bus is created once per resource-loader (not strictly per process) and the
+// same object is passed to every reloaded generation, which holds. A /new, /fork,
+// /resume, or fresh import gets a DIFFERENT bus — that is safe, not a leak:
+// nothing emits on or retains the old bus, and the WeakMap value closes over the
+// emitter rather than the key, so the stale entry is collectible. Only a
+// hypothetical Pi that swapped the bus on /reload itself would defeat the keying.
+const REGISTRY_KEY = "__weztermAttentionPiBusRegistry__";
+function busRegistry(): WeakMap<object, () => void> {
+	const g = globalThis as Record<string, unknown>;
+	let reg = g[REGISTRY_KEY] as WeakMap<object, () => void> | undefined;
+	if (!reg) {
+		reg = new WeakMap();
+		g[REGISTRY_KEY] = reg;
+	}
+	return reg;
+}
+
 export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
-	// Automatic: Pi lifecycle → WezTerm tab state. These produce thinking/stop only.
+	// Automatic: Pi lifecycle → WezTerm tab state. Lifecycle handlers are stored
+	// per-extension-instance by Pi's runner and replaced wholesale on reload, so
+	// they don't accumulate — safe to register on every load.
 	pi.on("agent_start", async () => {
 		await mark("thinking");
 	});
@@ -161,7 +211,12 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 		await mark("thinking");
 	});
 
-	pi.on("agent_end", async () => {
+	// `agent_settled`, NOT `agent_end`: agent_end fires at the end of every
+	// low-level run, but Pi may still auto-retry, auto-compact and retry, or
+	// continue with queued follow-up messages — writing `stop` there flashes a
+	// false ✓ mid-task. agent_settled fires only once Pi will not continue
+	// running automatically. Requires Pi >= 0.80.5.
+	pi.on("agent_settled", async () => {
 		await mark("stop");
 	});
 
@@ -171,9 +226,46 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 	// an object ({ type: "notify", label }); "clear" removes the marker.
 	// The bus ignores the handler's return value; we return the mutation promise
 	// so callers/tests can await completion deterministically.
-	pi.events.on(ATTENTION_EVENT, (data) => {
+	//
+	// Register ours FIRST, record it, THEN retire the prior generation's listener
+	// on THIS bus (see busRegistry) so reloads never accumulate listeners. This is
+	// synchronous — no await between the steps — so no emit can observe both live.
+	// Ordering it register-then-retire means a throw in `pi.events.on` can never
+	// leave zero listeners (the old one survives); the worst case is a leak, never
+	// silence.
+	const registry = busRegistry();
+	const bus = pi.events as unknown as object;
+	const prev = registry.get(bus);
+	const disposeEvent = pi.events.on(ATTENTION_EVENT, (data) => {
 		const request = normalizeEventData(data);
 		if (!request) return;
 		return request.state === "clear" ? clearMarker() : mark(request.state, request.label);
+	});
+	registry.set(bus, disposeEvent);
+	prev?.();
+
+	// Drain in-flight writes on teardown. Pi awaits session_shutdown before it
+	// re-loads extensions, so every write ENQUEUED BEFORE shutdown settles before
+	// the next generation's (fresh) chain starts — the common-path cross-reload
+	// ordering case. (One narrow, self-correcting residual: our listener is kept
+	// live through the reload for failed-reload safety, so a late emit delivered
+	// during Pi's post-shutdown steps enqueues on the old chain and could still be
+	// writing as the new generation writes; the next event corrects the marker.)
+	// We deliberately do NOT dispose here (that happens at the next registration);
+	// disposing on a shutdown that precedes a *failed* reload would silence us
+	// with no successor.
+	//
+	// The drain is bounded: Pi awaits this handler with no timeout of its own, so
+	// a hung marker FS must never wedge /reload or quit. Markers are best-effort;
+	// capping the wait matches that contract.
+	pi.on("session_shutdown", async () => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		await Promise.race([
+			mutationChain,
+			new Promise<void>((resolve) => {
+				timer = setTimeout(resolve, DRAIN_TIMEOUT_MS);
+			}),
+		]);
+		if (timer) clearTimeout(timer);
 	});
 }
