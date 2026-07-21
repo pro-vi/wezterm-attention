@@ -19,7 +19,9 @@ type AttentionType = "thinking" | "stop" | "notify" | "review";
 async function writeMarker(type: AttentionType, frame?: number): Promise<void> {
   const paneId = process.env.WEZTERM_PANE;
   const home = process.env.HOME;
-  if (!paneId || !home) return;
+  // WezTerm sets WEZTERM_PANE to a non-negative integer; validate it so a stray
+  // value can't build a path outside the marker directory.
+  if (!paneId || !home || !/^\d+$/.test(paneId)) return;
 
   const dir = join(home, ".local", "state", "wezterm-attention");
   await mkdir(dir, { recursive: true });

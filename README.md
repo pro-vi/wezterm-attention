@@ -102,7 +102,9 @@ attention.apply_to_config(config, {
 
   -- Stale marker cleanup by type, in milliseconds.
   -- Prevents zombie busy tabs if a process exits without clearing.
-  -- Set to false to disable all stale cleanup.
+  -- Set to false to disable the config-driven sweep. Note: markers that carry
+  -- their own ttl_ms (e.g. the Pi extension's `thinking` markers) still expire
+  -- on that embedded TTL — false only turns off this type-based cleanup.
   stale_after_ms = { thinking = 30 * 60 * 1000 },
 
   -- Review toggle keybind (false to disable)
@@ -122,13 +124,14 @@ Any process running inside WezTerm can write a marker. The contract is:
 5. **Optional:** `ttl_ms` overrides stale cleanup for that marker. By default, stale `thinking` markers clear after 30 minutes.
 6. **Cleanup** is automatic — markers are removed when panes close, their panes become focused, or stale TTL expires
 
-The `WEZTERM_PANE` environment variable is injected by WezTerm into every shell it spawns. That's the pane's unique ID.
+The `WEZTERM_PANE` environment variable is injected by WezTerm into every shell it spawns. That's the pane's unique ID — always a non-negative integer. Validate it (`/^\d+$/`) before building a path from it: a stray `../…` value would otherwise write to, or delete, a file outside the marker directory. Every example and fragment below enforces this.
 
 **Atomic writes recommended:** To avoid partial reads, write to a `.tmp` file then rename:
 
 ### Shell (one-liner)
 
 ```bash
+case "$WEZTERM_PANE" in '' | *[!0-9]*) exit 0 ;; esac  # numeric pane id only
 MARKER_DIR="$HOME/.local/state/wezterm-attention"
 mkdir -p "$MARKER_DIR"
 printf '{"type":"stop","updated_at":%s}\n' "$(date +%s)" > "$MARKER_DIR/$WEZTERM_PANE.tmp" && mv "$MARKER_DIR/$WEZTERM_PANE.tmp" "$MARKER_DIR/$WEZTERM_PANE"
@@ -140,10 +143,13 @@ printf '{"type":"stop","updated_at":%s}\n' "$(date +%s)" > "$MARKER_DIR/$WEZTERM
 import { mkdir, writeFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 
+const pane = process.env.WEZTERM_PANE;
+if (!pane || !/^\d+$/.test(pane)) process.exit(0); // numeric pane id only
+
 const dir = join(process.env.HOME!, ".local", "state", "wezterm-attention");
 await mkdir(dir, { recursive: true });
 
-const file = join(dir, process.env.WEZTERM_PANE!);
+const file = join(dir, pane);
 await writeFile(file + ".tmp", JSON.stringify({ type: "stop", updated_at: Date.now() }));
 await rename(file + ".tmp", file);
 ```
@@ -154,10 +160,13 @@ await rename(file + ".tmp", file);
 const fs = require("fs");
 const path = require("path");
 
+const pane = process.env.WEZTERM_PANE;
+if (!pane || !/^\d+$/.test(pane)) process.exit(0); // numeric pane id only
+
 const dir = path.join(process.env.HOME, ".local", "state", "wezterm-attention");
 fs.mkdirSync(dir, { recursive: true });
 
-const file = path.join(dir, process.env.WEZTERM_PANE);
+const file = path.join(dir, pane);
 fs.writeFileSync(file + ".tmp", JSON.stringify({ type: "stop", updated_at: Date.now() }));
 fs.renameSync(file + ".tmp", file);
 ```
@@ -214,7 +223,9 @@ Once installed, it writes markers automatically from Pi's lifecycle. Outside Wez
 |----------|--------|--------------|
 | `agent_start` | `thinking` | Tab spins violet while Pi runs |
 | `tool_execution_start` | `thinking` | Spinner continues while Pi uses a tool |
-| `agent_end` | `stop` | Tab turns mint with ✓ when Pi finishes |
+| `agent_settled` | `stop` | Tab turns mint with ✓ once Pi is fully done |
+
+`stop` hangs off `agent_settled`, not `agent_end`: `agent_end` fires at the end of every low-level run — including ones Pi will auto-retry or auto-continue after compaction — so using it would flash a false ✓ mid-task. `agent_settled` fires only once Pi will not continue running automatically, so the ✓ appears exactly once, at the real end. (This needs **Pi 0.80.5+** — `agent_settled` landed in the 0.80.4 changelog but 0.80.4 was never published to npm. On an older Pi the extension loads but the ✓ never fires; the spinner clears on its TTL instead.)
 
 `thinking` markers carry `ttl_ms`, so a Pi process that exits unexpectedly won't leave a stuck spinner. That's the whole extension — no commands, no configuration; the tab tracks Pi automatically.
 
@@ -252,6 +263,8 @@ Claude Code has [hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) th
 
 The snippets below are **fragments to paste into your hook files** — not standalone scripts. Each one guards on `WEZTERM_PANE` so it's safe to use outside WezTerm. If you don't have existing hooks, wrap the snippet in a Claude Code hook handler (see [hook docs](https://docs.anthropic.com/en/docs/claude-code/hooks)).
 
+> **Pane-ID contract.** WezTerm sets `WEZTERM_PANE` to a non-negative integer. Every fragment below gates on `/^\d+$/` before touching the filesystem — an unvalidated `../…` value would let a write clobber, or a delete remove, a file *outside* the marker dir.
+
 Register hooks in `~/.claude/settings.json`:
 ```json
 {
@@ -265,7 +278,7 @@ Register hooks in `~/.claude/settings.json`:
 
 **PreToolUse** — animated thinking spinner:
 ```typescript
-if (process.env.WEZTERM_PANE) {
+if (process.env.WEZTERM_PANE && /^\d+$/.test(process.env.WEZTERM_PANE)) {
   const { mkdirSync, writeFileSync, readFileSync, renameSync } = require('fs');
   const markerDir = `${process.env.HOME}/.local/state/wezterm-attention`;
   const markerFile = `${markerDir}/${process.env.WEZTERM_PANE}`;
@@ -284,7 +297,7 @@ if (process.env.WEZTERM_PANE) {
 
 **Stop** — agent finished:
 ```typescript
-if (process.env.WEZTERM_PANE) {
+if (process.env.WEZTERM_PANE && /^\d+$/.test(process.env.WEZTERM_PANE)) {
   const { mkdirSync, writeFileSync, renameSync } = require('fs');
   const markerDir = `${process.env.HOME}/.local/state/wezterm-attention`;
   const markerFile = `${markerDir}/${process.env.WEZTERM_PANE}`;
@@ -296,7 +309,7 @@ if (process.env.WEZTERM_PANE) {
 
 **Notification / PermissionRequest** — needs attention:
 ```typescript
-if (process.env.WEZTERM_PANE) {
+if (process.env.WEZTERM_PANE && /^\d+$/.test(process.env.WEZTERM_PANE)) {
   const { mkdirSync, writeFileSync, renameSync } = require('fs');
   const markerDir = `${process.env.HOME}/.local/state/wezterm-attention`;
   const markerFile = `${markerDir}/${process.env.WEZTERM_PANE}`;
@@ -308,7 +321,7 @@ if (process.env.WEZTERM_PANE) {
 
 **SessionEnd** — cleanup:
 ```typescript
-if (process.env.WEZTERM_PANE) {
+if (process.env.WEZTERM_PANE && /^\d+$/.test(process.env.WEZTERM_PANE)) {
   const { unlinkSync } = require('fs');
   try {
     unlinkSync(`${process.env.HOME}/.local/state/wezterm-attention/${process.env.WEZTERM_PANE}`);
@@ -344,10 +357,16 @@ from the `PreToolUse` / `PermissionRequest` / `Stop` hooks with the matching sta
 async function writeWezTermMarker(marker: Record<string, unknown>): Promise<void> {
   const paneId = process.env.WEZTERM_PANE;
   const home = process.env.HOME;
-  if (!paneId || !home) return;
+  // WezTerm injects WEZTERM_PANE as a non-negative integer. Validate it: a stray
+  // value like "../foo" would escape the marker dir — and on the SessionStart
+  // cleanup path below, the rm would then delete a file outside it.
+  if (!paneId || !home || !/^\d+$/.test(paneId)) return;
 
-  const { mkdir, writeFile, rename } = require("node:fs/promises");
-  const { join } = require("node:path");
+  // `await import`, not `require`: this fragment is ESM-shaped, and bare
+  // `require` is undefined under Node in module mode (throws). `await import`
+  // works under both Node ESM and bun.
+  const { mkdir, writeFile, rename } = await import("node:fs/promises");
+  const { join } = await import("node:path");
 
   const dir = join(home, ".local", "state", "wezterm-attention");
   await mkdir(dir, { recursive: true });
@@ -362,15 +381,16 @@ async function writeWezTermMarker(marker: Record<string, unknown>): Promise<void
 
 Two behaviours the fragment deliberately does **not** implement — wire them in your hooks if you want them:
 
-- **`SessionStart` cleanup** *removes* the marker rather than writing one: `rm(join(dir, paneId), { force: true })`, not `writeWezTermMarker`. (Skip it on the `compact` startup reason so a mid-turn compaction keeps its spinner.)
+- **`SessionStart` cleanup** *removes* the marker rather than writing one: `rm(join(dir, paneId), { force: true })`, not `writeWezTermMarker`. Apply the same `paneId`/`home` guard first (`if (!paneId || !home || !/^\d+$/.test(paneId)) return;`) — the `rm` is the one path where an unvalidated pane id could delete a file *outside* the marker dir. (Skip cleanup on the `compact` startup reason so a mid-turn compaction keeps its spinner.)
 - **Spinner frame cycling** (`frame` 0→3 across repeated `PreToolUse`) needs reading the current marker and incrementing; omit it entirely and the plugin animates the spinner on its own poll. Optional.
 
 (`updated_at_ms` is accepted by the plugin alongside `updated_at`.)
 
-**Coverage caveat.** `PermissionRequest` fires only for command / patch / network approvals — *not*
-for Codex's other human-input waits (`request_user_input`, `request_permissions`, and MCP
-elicitation). A turn blocked on one of those shows the `thinking` spinner, not `!`. Routing those to
-`notify` means detecting the tool in `PreToolUse`; it isn't wired here yet.
+**Coverage caveat.** `PermissionRequest` fires for command / patch / network approvals *and* MCP
+tool-call approvals — but *not* for Codex's other human-input waits (`request_user_input`,
+`request_permissions`, and MCP *elicitation*). A turn blocked on one of those uncovered waits shows
+the `thinking` spinner, not `!`. Routing those to `notify` means detecting the tool in `PreToolUse`;
+it isn't wired here yet.
 
 ## Other use cases
 

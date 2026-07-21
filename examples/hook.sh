@@ -3,6 +3,12 @@
 # Shell one-liner to write an attention marker.
 # Drop this into any hook or script that runs inside WezTerm.
 
+# WEZTERM_PANE is a non-negative integer set by WezTerm; bail if it's unset or
+# malformed so a stray value can't build a path outside the marker directory.
+case "$WEZTERM_PANE" in
+  '' | *[!0-9]*) exit 0 ;;
+esac
+
 MARKER_DIR="${HOME}/.local/state/wezterm-attention"
 mkdir -p "$MARKER_DIR"
 
