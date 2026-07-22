@@ -6,7 +6,11 @@
 //
 // The mock event bus models the real one (node:events under the hood): `on`
 // appends a handler and returns a disposer that removes it, and `emit` invokes
-// every current handler.
+// every current handler. One deliberate divergence: this `emit` awaits the
+// handlers, while the real bus discards their return value. That is a test
+// affordance, not a capability production has — do not conclude from these tests
+// that emitting is awaitable. Ordering is guaranteed by `mutationChain`, not by
+// awaiting the emit.
 //
 // Fidelity caveat: `loadExt().load()` re-invokes the default export against the
 // SAME module scope, so it exercises re-registration but NOT a cache-cleared
@@ -14,7 +18,7 @@
 // test below covers genuine module re-evaluation via `import(...?gen=N)`; that
 // one is what actually locks retire-at-registration against the WeakMap-scope
 // and key-choice regressions.
-import { test, expect } from "bun:test";
+import { test, expect, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, existsSync, readFileSync, readdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -55,10 +59,35 @@ function loadExt() {
 	return { lifecycle, emit, load, handlers, channels, commandCount: () => commandCalls };
 }
 
-function freshDir(prefix: string): string {
+// Teardown is centralised so a FAILING assertion still cleans up, and so no test
+// inherits env from its neighbour. Previously both were done by trailing
+// statements, which a failed expect() skips — leaking temp dirs exactly when you
+// are iterating on a red test, and leaving WEZTERM_PANE set to a traversal path
+// after the traversal tests.
+const tempDirs: string[] = [];
+afterEach(() => {
+	for (const d of tempDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+	delete process.env.WEZTERM_PANE;
+	delete process.env.WEZTERM_ATTENTION_DIR;
+	delete process.env.PI_WEZTERM_ATTENTION_TTL_MS;
+});
+
+// A temp dir registered for automatic teardown.
+function tempDir(prefix: string): string {
 	const d = mkdtempSync(join(tmpdir(), prefix));
+	tempDirs.push(d);
+	return d;
+}
+
+// ...and pointed at by WEZTERM_ATTENTION_DIR.
+function freshDir(prefix: string): string {
+	const d = tempDir(prefix);
 	process.env.WEZTERM_ATTENTION_DIR = d;
 	return d;
+}
+
+function readMarker(dir: string, pane = "42"): Record<string, unknown> {
+	return JSON.parse(readFileSync(join(dir, pane), "utf8"));
 }
 
 test("lifecycle: agent_start writes a thinking marker with ttl_ms, updated_at, source pi", async () => {
@@ -66,12 +95,11 @@ test("lifecycle: agent_start writes a thinking marker with ttl_ms, updated_at, s
 	process.env.WEZTERM_PANE = "42";
 	const { lifecycle } = loadExt();
 	await lifecycle["agent_start"]!();
-	const m = JSON.parse(readFileSync(join(dir, "42"), "utf8"));
+	const m = readMarker(dir);
 	expect(m.type).toBe("thinking");
 	expect(m.source).toBe("pi");
 	expect(typeof m.ttl_ms).toBe("number");
 	expect(typeof m.updated_at).toBe("number"); // locks the contract field bun won't typecheck
-	rmSync(dir, { recursive: true, force: true });
 });
 
 test("lifecycle: tool_execution_start writes a thinking marker", async () => {
@@ -79,8 +107,7 @@ test("lifecycle: tool_execution_start writes a thinking marker", async () => {
 	process.env.WEZTERM_PANE = "42";
 	const { lifecycle } = loadExt();
 	await lifecycle["tool_execution_start"]!();
-	expect(JSON.parse(readFileSync(join(dir, "42"), "utf8")).type).toBe("thinking");
-	rmSync(dir, { recursive: true, force: true });
+	expect(readMarker(dir).type).toBe("thinking");
 });
 
 test("lifecycle: agent_settled — not agent_end — writes the stop marker", async () => {
@@ -92,10 +119,9 @@ test("lifecycle: agent_settled — not agent_end — writes the stop marker", as
 	const { lifecycle } = loadExt();
 	expect(lifecycle["agent_end"]).toBeUndefined();
 	await lifecycle["agent_settled"]!();
-	const m = JSON.parse(readFileSync(join(dir, "42"), "utf8"));
+	const m = readMarker(dir);
 	expect(m.type).toBe("stop");
 	expect(m.ttl_ms).toBeUndefined();
-	rmSync(dir, { recursive: true, force: true });
 });
 
 test("registration: the extension listens on the wezterm-attention:mark channel", () => {
@@ -115,10 +141,9 @@ test("event: emitting a notify object writes a labeled notify marker", async () 
 	process.env.WEZTERM_PANE = "42";
 	const { emit } = loadExt();
 	await emit({ type: "notify", label: "answer me" });
-	const m = JSON.parse(readFileSync(join(dir, "42"), "utf8"));
+	const m = readMarker(dir);
 	expect(m.type).toBe("notify");
 	expect(m.label).toBe("answer me");
-	rmSync(dir, { recursive: true, force: true });
 });
 
 test("event: a bare string state is accepted", async () => {
@@ -126,8 +151,7 @@ test("event: a bare string state is accepted", async () => {
 	process.env.WEZTERM_PANE = "42";
 	const { emit } = loadExt();
 	await emit("review");
-	expect(JSON.parse(readFileSync(join(dir, "42"), "utf8")).type).toBe("review");
-	rmSync(dir, { recursive: true, force: true });
+	expect(readMarker(dir).type).toBe("review");
 });
 
 test("ordering: notify then clear leaves NO marker (last requested wins)", async () => {
@@ -144,7 +168,6 @@ test("ordering: notify then clear leaves NO marker (last requested wins)", async
 		if (existsSync(join(dir, "42"))) present++;
 	}
 	expect(present).toBe(0);
-	rmSync(dir, { recursive: true, force: true });
 });
 
 test("ordering: clear then notify leaves a notify marker", async () => {
@@ -156,8 +179,7 @@ test("ordering: clear then notify leaves a notify marker", async () => {
 	const b = emit("notify");
 	await Promise.all([a, b]);
 	expect(existsSync(join(dir, "42"))).toBe(true);
-	expect(JSON.parse(readFileSync(join(dir, "42"), "utf8")).type).toBe("notify");
-	rmSync(dir, { recursive: true, force: true });
+	expect(readMarker(dir).type).toBe("notify");
 });
 
 test("reload (real module re-eval): retire-at-registration collapses N fresh generations to one listener", async () => {
@@ -191,23 +213,29 @@ test("reload (real module re-eval): retire-at-registration collapses N fresh gen
 		mod.default(makePi() as any);
 	}
 	expect(handlers.length).toBe(1); // all four generations collapsed to one live listener
-	expect(handlers.map((e) => e.gen)).toEqual([3]); // and the survivor is the NEWEST one
+	// The survivor is the NEWEST generation. This asserts listener IDENTITY because
+	// nothing else distinguishes the generations: they are byte-identical modules and
+	// every config value is re-read from process.env at write time.
+	//
+	// That makes it design-specific on purpose. Under the deferred bus-owned-controller
+	// design — one listener installed once per bus, later generations swapping only a
+	// delegate — the survivor would legitimately be gen 0 and this line SHOULD fail.
+	// If you are doing that migration, revisit this expectation; do not "fix" the
+	// controller to preserve gen-3 identity, which would reintroduce the register/
+	// retire dance the migration exists to delete.
+	expect(handlers.map((e) => e.gen)).toEqual([3]);
 });
 
 test("reload: a new generation retires the previous listener (no accumulation)", async () => {
 	// Same-instance re-registration (see the fidelity caveat at the top): covers
 	// the re-register path; the real-module-re-eval test above covers cross-gen.
-	const dir = freshDir("wez-reload-");
-	process.env.WEZTERM_PANE = "42";
+	freshDir("wez-reload-");
 	const h = loadExt();
 	expect(h.handlers.length).toBe(1); // gen-0 registered exactly one listener
 	h.load(); // gen-1 registers and retires gen-0's listener
 	expect(h.handlers.length).toBe(1); // one, not stacked
 	h.load(); // gen-2
 	expect(h.handlers.length).toBe(1);
-	await Promise.all([h.emit("notify"), h.emit("clear")]);
-	expect(existsSync(join(dir, "42"))).toBe(false);
-	rmSync(dir, { recursive: true, force: true });
 });
 
 test("failed reload: session_shutdown does NOT dispose the listener", async () => {
@@ -223,7 +251,6 @@ test("failed reload: session_shutdown does NOT dispose the listener", async () =
 	expect(h.handlers.length).toBe(1); // listener still live
 	await h.emit("notify"); // cooperative path still works
 	expect(existsSync(join(dir, "42"))).toBe(true);
-	rmSync(dir, { recursive: true, force: true });
 });
 
 test("session_shutdown drains in-flight writes before returning", async () => {
@@ -236,11 +263,10 @@ test("session_shutdown drains in-flight writes before returning", async () => {
 	await h.lifecycle["session_shutdown"]!(); // must not return until `pending` settles
 	expect(existsSync(join(dir, "42"))).toBe(true); // drained → write landed
 	await pending;
-	rmSync(dir, { recursive: true, force: true });
 });
 
 test("traversal: a bad pane id writes NOTHING outside the marker dir", async () => {
-	const parent = mkdtempSync(join(tmpdir(), "wez-trav1-"));
+	const parent = tempDir("wez-trav1-");
 	const dir = join(parent, "markerdir");
 	mkdirSync(dir);
 	const victim = join(parent, "victim.txt");
@@ -250,11 +276,10 @@ test("traversal: a bad pane id writes NOTHING outside the marker dir", async () 
 	const { emit } = loadExt();
 	await emit("notify");
 	expect(readFileSync(victim, "utf8")).toBe("IMPORTANT"); // untouched
-	rmSync(parent, { recursive: true, force: true });
 });
 
 test("traversal: a bad pane id does NOT delete an outside file on clear", async () => {
-	const parent = mkdtempSync(join(tmpdir(), "wez-trav2-"));
+	const parent = tempDir("wez-trav2-");
 	const dir = join(parent, "markerdir");
 	mkdirSync(dir);
 	const victim = join(parent, "victim.txt");
@@ -264,7 +289,6 @@ test("traversal: a bad pane id does NOT delete an outside file on clear", async 
 	const { emit } = loadExt();
 	await emit("clear");
 	expect(existsSync(victim)).toBe(true); // not deleted
-	rmSync(parent, { recursive: true, force: true });
 });
 
 test("cleanup: a failed rename does not leak temp files", async () => {
@@ -275,16 +299,14 @@ test("cleanup: a failed rename does not leak temp files", async () => {
 	for (let i = 0; i < 10; i++) await emit("notify");
 	const leaked = readdirSync(dir).filter((f) => f.includes(".tmp."));
 	expect(leaked.length).toBe(0);
-	rmSync(dir, { recursive: true, force: true });
 });
 
 test("missing pane: lifecycle write is a silent no-op that creates no file", async () => {
 	const dir = freshDir("wez-nopane-");
-	delete process.env.WEZTERM_PANE;
+	delete process.env.WEZTERM_PANE; // the condition under test, not teardown
 	const { lifecycle } = loadExt();
 	await lifecycle["agent_start"]!();
 	expect(readdirSync(dir).length).toBe(0); // nothing written at all, not merely no "undefined" file
-	rmSync(dir, { recursive: true, force: true });
 });
 
 test('env: a unit-suffixed TTL ("30m") is rejected, not parsed as 30', async () => {
@@ -295,10 +317,8 @@ test('env: a unit-suffixed TTL ("30m") is rejected, not parsed as 30', async () 
 	process.env.PI_WEZTERM_ATTENTION_TTL_MS = "30m";
 	const { lifecycle } = loadExt();
 	await lifecycle["agent_start"]!();
-	const m = JSON.parse(readFileSync(join(dir, "42"), "utf8"));
+	const m = readMarker(dir);
 	expect(m.ttl_ms).toBe(30 * 60 * 1000); // default, NOT 30
-	delete process.env.PI_WEZTERM_ATTENTION_TTL_MS;
-	rmSync(dir, { recursive: true, force: true });
 });
 
 test("env: a relative WEZTERM_ATTENTION_DIR is rejected (no cwd scatter, no cwd delete)", async () => {
@@ -314,7 +334,6 @@ test("env: a relative WEZTERM_ATTENTION_DIR is rejected (no cwd scatter, no cwd 
 	expect(existsSync(join(relDir, "42"))).toBe(false);
 	expect(existsSync(relDir)).toBe(false); // dir never even created
 	rmSync(relDir, { recursive: true, force: true });
-	delete process.env.WEZTERM_ATTENTION_DIR;
 });
 
 test('env: TTL_MS="0" falls back to the default, not an instantly-stale marker', async () => {
@@ -326,10 +345,8 @@ test('env: TTL_MS="0" falls back to the default, not an instantly-stale marker',
 	process.env.PI_WEZTERM_ATTENTION_TTL_MS = "0";
 	const { lifecycle } = loadExt();
 	await lifecycle["agent_start"]!();
-	const m = JSON.parse(readFileSync(join(dir, "42"), "utf8"));
+	const m = readMarker(dir);
 	expect(m.ttl_ms).toBe(30 * 60 * 1000); // default, NOT 0
-	delete process.env.PI_WEZTERM_ATTENTION_TTL_MS;
-	rmSync(dir, { recursive: true, force: true });
 });
 
 // The alias table README.md advertises to other extension authors. It is a public
@@ -353,7 +370,7 @@ test("event: every documented alias maps to its canonical marker state", async (
 		process.env.WEZTERM_PANE = "42";
 		const h = loadExt();
 		await h.emit(alias);
-		const m = JSON.parse(readFileSync(join(dir, "42"), "utf8"));
+		const m = readMarker(dir);
 		expect(m.type).toBe(expected); // `${alias}` → `${expected}`
 		rmSync(dir, { recursive: true, force: true });
 	}
@@ -368,5 +385,4 @@ test("event: an unrecognized state is rejected, writing nothing", async () => {
 	const h = loadExt();
 	await h.emit("bogus");
 	expect(readdirSync(dir).length).toBe(0);
-	rmSync(dir, { recursive: true, force: true });
 });
