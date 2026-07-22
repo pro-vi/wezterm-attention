@@ -276,9 +276,26 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 	//
 	// The cap does not cancel an abandoned write; it can land after the next
 	// generation's write and leave stale state until the next event or the marker's
-	// ttl_ms. Accepted trade for a best-effort indicator. Do not "fix" it with a
-	// sticky abandoned flag — one failed reload turns that into permanent silence;
-	// use a per-operation generation counter if it ever matters.
+	// ttl_ms. Accepted trade for a best-effort indicator.
+	//
+	// Three fixes look obvious here and all three are worse than the defect:
+	//
+	// - A sticky abandoned flag: a generation survives a *failed* reload by design,
+	//   so one timeout plus one failed reload is permanent silence.
+	// - Sharing the chain across generations (proposed independently twice, so expect
+	//   it again): the host awaits lifecycle handlers all the way from the agent loop,
+	//   so a successor inheriting a stuck predecessor's backlog stalls the agent's own
+	//   run — measured as a block equal to the whole abandoned backlog, and on a
+	//   stalled mount a permanent wedge with no marker ever written again. The cap is
+	//   not an oversight to delete; it is what keeps a stuck fs op away from the host.
+	// - A per-operation generation counter: closes the queued-backlog case but NOT a
+	//   single write that stalls inside `rename` past the cap, because the gate
+	//   necessarily precedes the publish. Verified: the successor registers while the
+	//   rename is still in flight, then the rename lands and clobbers.
+	//
+	// Closing the remaining case needs the bus-owned controller — one controller per
+	// bus owning the listener and the mutation state, re-asserting the last requested
+	// state after an abandoned write lands. Deferred; its trigger has not arrived.
 	pi.on("session_shutdown", async () => {
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		await Promise.race([
