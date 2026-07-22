@@ -95,6 +95,7 @@ test("lifecycle: agent_start writes a thinking marker with ttl_ms, updated_at, s
 	process.env.WEZTERM_PANE = "42";
 	const { lifecycle } = loadExt();
 	await lifecycle["agent_start"]!();
+	await lifecycle["session_shutdown"]!(); // lifecycle no longer awaits I/O; drain it
 	const m = readMarker(dir);
 	expect(m.type).toBe("thinking");
 	expect(m.source).toBe("pi");
@@ -107,6 +108,7 @@ test("lifecycle: tool_execution_start writes a thinking marker", async () => {
 	process.env.WEZTERM_PANE = "42";
 	const { lifecycle } = loadExt();
 	await lifecycle["tool_execution_start"]!();
+	await lifecycle["session_shutdown"]!(); // lifecycle no longer awaits I/O; drain it
 	expect(readMarker(dir).type).toBe("thinking");
 });
 
@@ -119,9 +121,34 @@ test("lifecycle: agent_settled — not agent_end — writes the stop marker", as
 	const { lifecycle } = loadExt();
 	expect(lifecycle["agent_end"]).toBeUndefined();
 	await lifecycle["agent_settled"]!();
+	await lifecycle["session_shutdown"]!(); // lifecycle no longer awaits I/O; drain it
 	const m = readMarker(dir);
 	expect(m.type).toBe("stop");
 	expect(m.ttl_ms).toBeUndefined();
+});
+
+test("lifecycle: handlers return before marker I/O lands (no agent-critical-path await)", async () => {
+	// Pi awaits lifecycle handlers on the agent's OWN critical path:
+	//   agent-loop.ts  await emit("tool_execution_start")  → then prepares the tool call
+	//   agent.ts       for (listener of listeners) await listener(event, signal)   (serial, no timeout)
+	//   agent-session.ts  await this._emitExtensionEvent(event)  → before the TUI notify
+	//   runner.ts      await handler(event, ctx)
+	// So awaiting a marker write here puts the filesystem in the agent's latency
+	// budget, and on a mount whose syscalls block forever it wedges the host: one
+	// stuck op parks every later lifecycle event (shared serial chain), the TUI never
+	// sees the event, and abort cannot release a parked await. Headless is worse —
+	// `_resolveIdleWaitIfIdle()` lives in a `finally` whose `try` awaits this emit, so
+	// `pi -p` never terminates.
+	//
+	// Both assertions carry weight: the first locks OUT restoring the await, the
+	// second locks IN that the write is deferred rather than dropped.
+	const dir = freshDir("wez-nocritpath-");
+	process.env.WEZTERM_PANE = "42";
+	const { lifecycle } = loadExt();
+	await lifecycle["agent_start"]!();
+	expect(existsSync(join(dir, "42"))).toBe(false); // returned without waiting on I/O
+	await lifecycle["session_shutdown"]!();
+	expect(existsSync(join(dir, "42"))).toBe(true); // ...and the write still lands
 });
 
 test("registration: the extension listens on the wezterm-attention:mark channel", () => {
@@ -306,6 +333,7 @@ test("missing pane: lifecycle write is a silent no-op that creates no file", asy
 	delete process.env.WEZTERM_PANE; // the condition under test, not teardown
 	const { lifecycle } = loadExt();
 	await lifecycle["agent_start"]!();
+	await lifecycle["session_shutdown"]!(); // lifecycle no longer awaits I/O; drain it
 	expect(readdirSync(dir).length).toBe(0); // nothing written at all, not merely no "undefined" file
 });
 
@@ -317,6 +345,7 @@ test('env: a unit-suffixed TTL ("30m") is rejected, not parsed as 30', async () 
 	process.env.PI_WEZTERM_ATTENTION_TTL_MS = "30m";
 	const { lifecycle } = loadExt();
 	await lifecycle["agent_start"]!();
+	await lifecycle["session_shutdown"]!(); // lifecycle no longer awaits I/O; drain it
 	const m = readMarker(dir);
 	expect(m.ttl_ms).toBe(30 * 60 * 1000); // default, NOT 30
 });
@@ -330,6 +359,7 @@ test("env: a relative WEZTERM_ATTENTION_DIR is rejected (no cwd scatter, no cwd 
 	process.env.WEZTERM_PANE = "42";
 	const { lifecycle, emit } = loadExt();
 	await lifecycle["agent_start"]!(); // write path: guarded → no file created
+	await lifecycle["session_shutdown"]!(); // lifecycle no longer awaits I/O; drain it
 	await emit("clear"); // clear path shares the same guard → no rm of a cwd file
 	expect(existsSync(join(relDir, "42"))).toBe(false);
 	expect(existsSync(relDir)).toBe(false); // dir never even created
@@ -345,6 +375,7 @@ test('env: TTL_MS="0" falls back to the default, not an instantly-stale marker',
 	process.env.PI_WEZTERM_ATTENTION_TTL_MS = "0";
 	const { lifecycle } = loadExt();
 	await lifecycle["agent_start"]!();
+	await lifecycle["session_shutdown"]!(); // lifecycle no longer awaits I/O; drain it
 	const m = readMarker(dir);
 	expect(m.ttl_ms).toBe(30 * 60 * 1000); // default, NOT 0
 });

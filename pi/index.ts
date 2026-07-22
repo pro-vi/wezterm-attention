@@ -221,12 +221,30 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 	// Automatic: Pi lifecycle → WezTerm tab state. Lifecycle handlers are stored
 	// per-extension-instance by Pi's runner and replaced wholesale on reload, so
 	// they don't accumulate — safe to register on every load.
-	pi.on("agent_start", async () => {
-		await mark("thinking");
+	// These do NOT await the write. Pi awaits lifecycle handlers on the agent's own
+	// critical path — agent-loop.ts emits `tool_execution_start` and awaits it before
+	// preparing the tool call, through agent.ts's serial `await listener(...)` and
+	// agent-session.ts's `await this._emitExtensionEvent(event)`, down to runner.ts's
+	// `await handler(event, ctx)`. None of those has a timeout. So awaiting a marker
+	// write here puts the filesystem inside the agent's latency budget, and on a mount
+	// whose syscalls block indefinitely (hard NFS/SMB, dead FUSE daemon) it wedges the
+	// host outright: every write shares one serial chain, so a single stuck op parks
+	// every later lifecycle event too, the TUI never sees the event (the notify at
+	// agent-session.ts:601 is downstream of the await), and aborting does not release
+	// an already-parked await. Headless is worse — `_resolveIdleWaitIfIdle()` sits in a
+	// `finally` whose `try` awaits this emit, so `pi -p` never terminates.
+	//
+	// A tab tint is best-effort; the host's liveness is not ours to spend. Ordering is
+	// unaffected: `enqueue` chains synchronously at call time, so emit order == apply
+	// order is a property of CALL order, not await order. The session_shutdown drain is
+	// what guarantees these land before a reload — which makes that drain load-bearing
+	// in a way it was not before. Do not weaken it.
+	pi.on("agent_start", () => {
+		void mark("thinking").catch(() => {});
 	});
 
-	pi.on("tool_execution_start", async () => {
-		await mark("thinking");
+	pi.on("tool_execution_start", () => {
+		void mark("thinking").catch(() => {});
 	});
 
 	// `agent_settled`, NOT `agent_end`: agent_end fires at the end of every
@@ -234,8 +252,8 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 	// continue with queued follow-up messages — writing `stop` there flashes a
 	// false ✓ mid-task. agent_settled fires only once Pi will not continue
 	// running automatically. Requires Pi >= 0.80.5.
-	pi.on("agent_settled", async () => {
-		await mark("stop");
+	pi.on("agent_settled", () => {
+		void mark("stop").catch(() => {});
 	});
 
 	// Cooperative: any other Pi extension (e.g. an ask-user extension) can emit
