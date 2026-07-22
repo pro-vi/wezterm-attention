@@ -6,7 +6,10 @@ import { isAbsolute, join } from "node:path";
 const DEFAULT_TTL_MS = 30 * 60 * 1000;
 const ATTENTION_EVENT = "wezterm-attention:mark";
 // Cap the session_shutdown drain so a hung marker FS can never wedge Pi's reload
-// or quit. Normal writes settle in single-digit ms; this is only a safety valve.
+// or quit. Measured p99 for one write is well under a millisecond, so this is
+// only a safety valve — but note it bounds the WHOLE queued backlog, not a single
+// write: the drain awaits the tail of the serial chain, so N queued writes trip
+// it once their SUM exceeds the cap, even though no individual write is slow.
 const DRAIN_TIMEOUT_MS = 2000;
 
 type AttentionState = "thinking" | "stop" | "notify" | "review";
@@ -23,9 +26,14 @@ type Marker = {
 // degenerate-env holes: WEZTERM_ATTENTION_DIR="" would otherwise leave the clear
 // path calling rm() on a cwd-relative name (deleting a file where Pi was
 // launched), and HOME="" resolves to a relative ".local/..." that scatters
-// markers into the launch directory where the plugin never looks. `||` (not
-// `??`) folds an empty override or empty HOME into the fallback; the isAbsolute
-// gate rejects any still-relative result so the caller no-ops.
+// markers into the launch directory where the plugin never looks.
+//
+// The two operators do NOT split that work evenly. `||` (not `??`) matters only
+// for the override: with `||` an empty WEZTERM_ATTENTION_DIR falls through to the
+// HOME-based default and markers are still written, where `??` would keep "" and
+// no-op everything. For HOME it changes nothing — os.homedir() also returns ""
+// when HOME="" — so the isAbsolute gate below is what actually closes that hole.
+// Do not remove it on the assumption that `||` covers HOME; it does not.
 function markerDirectory(): string | undefined {
 	const dir = process.env.WEZTERM_ATTENTION_DIR || join(process.env.HOME || homedir(), ".local", "state", "wezterm-attention");
 	return isAbsolute(dir) ? dir : undefined;
@@ -256,8 +264,22 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 	// with no successor.
 	//
 	// The drain is bounded: Pi awaits this handler with no timeout of its own, so
-	// a hung marker FS must never wedge /reload or quit. Markers are best-effort;
-	// capping the wait matches that contract.
+	// a hung marker FS must never wedge /reload or quit.
+	//
+	// Be precise about what the cap trades away. Timing out does NOT cancel the
+	// abandoned write — it is still in flight, and it can land AFTER the next
+	// generation has written, leaving the older state on disk (e.g. a stale
+	// `thinking` overwriting a fresh `stop`, which the plugin then renders until
+	// the next event or the marker's own ttl_ms expires). So the cap converts
+	// "reload hangs" into "marker may be briefly wrong", which is the right trade
+	// for a best-effort indicator, but it is a different failure, not no failure.
+	// Reachable only on /reload and the /new,/fork,/resume teardowns (quit exits
+	// the process immediately), and only when the queued backlog exceeds the cap.
+	//
+	// Do NOT "fix" this with a sticky abandoned flag that suppresses later writes:
+	// a generation survives a *failed* reload by design (see above and the
+	// failed-reload test), so one timeout plus one failed reload would silence the
+	// extension permanently. Gate on a per-operation generation counter instead.
 	pi.on("session_shutdown", async () => {
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		await Promise.race([

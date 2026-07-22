@@ -166,22 +166,32 @@ test("reload (real module re-eval): retire-at-registration collapses N fresh gen
 	// globalThis WeakMap — which the same-instance harness can't reproduce. This
 	// is the test that goes red if the registry is module-level instead of
 	// globalThis, or keyed on `pi` instead of `pi.events`.
-	const handlers: Array<(d: unknown) => unknown> = [];
+	// Handlers are tagged with the generation that registered them, because
+	// cardinality alone does not lock the property this test exists for: a mutant
+	// that disposes ITSELF instead of its predecessor (`if (prev) disposeEvent()`
+	// rather than `prev?.()` — two same-typed locals on adjacent lines) also leaves
+	// exactly one listener, but it is generation 0's, live forever, while every
+	// later reload silently registers and immediately retires itself.
+	const handlers: Array<{ gen: number; h: (d: unknown) => unknown }> = [];
+	let currentGen = -1;
 	const bus = {
 		on: (_ch: string, h: (d: unknown) => unknown) => {
-			handlers.push(h);
+			const entry = { gen: currentGen, h };
+			handlers.push(entry);
 			return () => {
-				const i = handlers.indexOf(h);
+				const i = handlers.indexOf(entry);
 				if (i >= 0) handlers.splice(i, 1);
 			};
 		},
 	};
 	const makePi = () => ({ events: bus, on: () => {}, registerCommand: () => {} });
 	for (let gen = 0; gen < 4; gen++) {
+		currentGen = gen;
 		const mod = await import(`../pi/index.ts?realreload=${gen}`);
 		mod.default(makePi() as any);
 	}
 	expect(handlers.length).toBe(1); // all four generations collapsed to one live listener
+	expect(handlers.map((e) => e.gen)).toEqual([3]); // and the survivor is the NEWEST one
 });
 
 test("reload: a new generation retires the previous listener (no accumulation)", async () => {
@@ -305,4 +315,58 @@ test("env: a relative WEZTERM_ATTENTION_DIR is rejected (no cwd scatter, no cwd 
 	expect(existsSync(relDir)).toBe(false); // dir never even created
 	rmSync(relDir, { recursive: true, force: true });
 	delete process.env.WEZTERM_ATTENTION_DIR;
+});
+
+test('env: TTL_MS="0" falls back to the default, not an instantly-stale marker', async () => {
+	// "0" is a plausible "disable the TTL" reading, and it passes the digits-only
+	// gate — only the `parsed > 0` range check rejects it. Without that check the
+	// marker ships ttl_ms: 0 and plugin/init.lua expires the spinner immediately.
+	const dir = freshDir("wez-ttl0-");
+	process.env.WEZTERM_PANE = "42";
+	process.env.PI_WEZTERM_ATTENTION_TTL_MS = "0";
+	const { lifecycle } = loadExt();
+	await lifecycle["agent_start"]!();
+	const m = JSON.parse(readFileSync(join(dir, "42"), "utf8"));
+	expect(m.ttl_ms).toBe(30 * 60 * 1000); // default, NOT 0
+	delete process.env.PI_WEZTERM_ATTENTION_TTL_MS;
+	rmSync(dir, { recursive: true, force: true });
+});
+
+// The alias table README.md advertises to other extension authors. It is a public
+// cross-extension contract, so every row is locked here rather than left to the
+// lifecycle path (which only ever calls mark("thinking"|"stop") directly and so
+// exercises none of the mapping).
+const ALIAS_CASES: Array<[string, string]> = [
+	["busy", "thinking"],
+	["thinking", "thinking"],
+	["ready", "stop"],
+	["stop", "stop"],
+	["blocked", "notify"],
+	["pending", "notify"],
+	["notify", "notify"],
+	["review", "review"],
+];
+
+test("event: every documented alias maps to its canonical marker state", async () => {
+	for (const [alias, expected] of ALIAS_CASES) {
+		const dir = freshDir("wez-alias-");
+		process.env.WEZTERM_PANE = "42";
+		const h = loadExt();
+		await h.emit(alias);
+		const m = JSON.parse(readFileSync(join(dir, "42"), "utf8"));
+		expect(m.type).toBe(expected); // `${alias}` → `${expected}`
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("event: an unrecognized state is rejected, writing nothing", async () => {
+	// normalizeState's `default: undefined` is the gate. Without it an arbitrary
+	// string reaches disk as {"type":"bogus"} — litter the plugin's valid_types
+	// table ignores, but litter this writer should never produce.
+	const dir = freshDir("wez-bogus-");
+	process.env.WEZTERM_PANE = "42";
+	const h = loadExt();
+	await h.emit("bogus");
+	expect(readdirSync(dir).length).toBe(0);
+	rmSync(dir, { recursive: true, force: true });
 });
