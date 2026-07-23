@@ -275,8 +275,24 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 	// leave us silenced with no successor.
 	//
 	// The cap does not cancel an abandoned write; it can land after the next
-	// generation's write and leave stale state until the next event or the marker's
-	// ttl_ms. Accepted trade for a best-effort indicator.
+	// generation's write and leave stale state. A stale *write* self-limits — the
+	// next event overwrites it, or its ttl_ms expires it. Same residual, same fix,
+	// for an op enqueued AFTER this race snapshots the chain — e.g. a later extension
+	// emitting `clear` on the bus during its own session_shutdown, which our still-live
+	// listener enqueues past the snapshot, so the cap never sees it. Note a late
+	// `clear` REMOVES the successor's marker, and ttl_ms cannot self-heal an absent
+	// file — only a later lifecycle/event write restores it. Accepted trade for a
+	// best-effort indicator.
+	//
+	// Second accepted cost under a *permanently* blocked write (dead NFS/SMB/FUSE
+	// mount, not a merely slow one): the serial chain retains every op queued behind
+	// the stuck head, because a real in-flight fs op is rooted by libuv and holds its
+	// forward reaction chain (each op captures its marker + label). Measured ~0.6 KB
+	// per queued op — unbounded until the mount recovers or the process restarts, on
+	// the same rare precondition as the clobber above. NOT worth a coalescing mailbox:
+	// that bounds memory but breaks the FIFO ordering the tests lock, dropping
+	// intermediate states — the bus-owned controller below is the right home if it
+	// ever earns its trigger.
 	//
 	// Three fixes look obvious here and all three are worse than the defect:
 	//
