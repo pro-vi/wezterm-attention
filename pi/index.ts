@@ -21,18 +21,11 @@ type Marker = {
 	ttl_ms?: number;
 };
 
-// Resolve the marker directory, then require it to be absolute. This closes two
-// degenerate-env holes: WEZTERM_ATTENTION_DIR="" would otherwise leave the clear
-// path calling rm() on a cwd-relative name (deleting a file where Pi was
-// launched), and HOME="" resolves to a relative ".local/..." that scatters
-// markers into the launch directory where the plugin never looks.
-//
-// The two operators do NOT split that work evenly. `||` (not `??`) matters only
-// for the override: with `||` an empty WEZTERM_ATTENTION_DIR falls through to the
-// HOME-based default and markers are still written, where `??` would keep "" and
-// no-op everything. For HOME it changes nothing — os.homedir() also returns ""
-// when HOME="" — so the isAbsolute gate below is what actually closes that hole.
-// Do not remove it on the assumption that `||` covers HOME; it does not.
+// Resolve the marker dir and require it absolute — closes two degenerate-env holes:
+// WEZTERM_ATTENTION_DIR="" would make clear's rm() delete a cwd-relative file, and
+// HOME="" resolves to a relative ".local/..." that scatters markers. `||` (not `??`)
+// so an empty override falls through to the HOME default; the isAbsolute gate is what
+// closes the HOME hole (homedir() also returns "" for HOME=""), so don't drop it.
 function markerDirectory(): string | undefined {
 	const dir = process.env.WEZTERM_ATTENTION_DIR || join(process.env.HOME || homedir(), ".local", "state", "wezterm-attention");
 	return isAbsolute(dir) ? dir : undefined;
@@ -172,20 +165,13 @@ function normalizeEventData(data: unknown): { state: AttentionState | "clear"; l
 	return { state, ...(label ? { label } : {}) };
 }
 
-// Retire the previous generation's bus listener when a NEW generation registers,
-// rather than in session_shutdown. The shared event bus is not cleared on reload,
-// so a leaked listener would accumulate — but disposal cannot happen on shutdown:
-// reload() emits session_shutdown BEFORE its fallible work, and handleReloadCommand
-// catches a reload failure and keeps the session running, so disposing on shutdown
-// would kill the notify path with no replacement. Disposing only once a successor
-// provably exists (at the next registration) avoids that. The registry is a
-// WeakMap keyed by the bus object, so a multi-loader process never disposes
-// another bus's listener.
-//
-// Keyed on `pi.events`, which is referentially stable across /reload (one bus per
-// resource-loader, handed to every reloaded generation). A /new, /fork, /resume or
-// fresh import gets a different bus; that is correct, not a leak — nothing retains
-// the old one, so its WeakMap entry is collectible.
+// Retire the previous generation's bus listener at the NEXT registration, not in
+// session_shutdown. The shared bus is never cleared, so listeners would accumulate —
+// but disposing on shutdown is unsafe: reload() emits it before its fallible work, and
+// a caught reload failure keeps the old generation running, so we'd kill the notify
+// path with no replacement. Disposing only once a successor exists avoids that. Keyed
+// on `pi.events`, stable across /reload (one bus per resource-loader); a /new, /fork,
+// /resume or fresh import gets a different bus — safe, its stale entry is collectible.
 const REGISTRY_KEY = "__weztermAttentionPiBusRegistry__";
 function busRegistry(): WeakMap<object, () => void> {
 	const g = globalThis as Record<string, unknown>;
@@ -197,12 +183,9 @@ function busRegistry(): WeakMap<object, () => void> {
 	return reg;
 }
 
-// Register this generation's listener, then retire the predecessor's. Order is
-// load-bearing: register-before-retire means a throw in `pi.events.on` leaks a
-// listener rather than leaving zero, and the steps are synchronous so no emit can
-// observe both live. Retiring is best-effort — a throwing disposer must never fail
-// the host's reload.
-//
+// Register FIRST, then retire the predecessor: a throw in `pi.events.on` then leaks a
+// listener rather than leaving zero, and the steps are synchronous so no emit sees
+// both. Retiring is best-effort — a throwing disposer must not fail the host reload.
 // This function is the seam the bus-owned-controller design would replace.
 function installBusListener(pi: ExtensionAPI, handler: (data: unknown) => unknown): void {
 	const registry = busRegistry();
@@ -218,27 +201,19 @@ function installBusListener(pi: ExtensionAPI, handler: (data: unknown) => unknow
 }
 
 export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
-	// Automatic: Pi lifecycle → WezTerm tab state. Lifecycle handlers are stored
-	// per-extension-instance by Pi's runner and replaced wholesale on reload, so
-	// they don't accumulate — safe to register on every load.
-	// These do NOT await the write. Pi awaits lifecycle handlers on the agent's own
-	// critical path — agent-loop.ts emits `tool_execution_start` and awaits it before
-	// preparing the tool call, through agent.ts's serial `await listener(...)` and
-	// agent-session.ts's `await this._emitExtensionEvent(event)`, down to runner.ts's
-	// `await handler(event, ctx)`. None of those has a timeout. So awaiting a marker
-	// write here puts the filesystem inside the agent's latency budget, and on a mount
-	// whose syscalls block indefinitely (hard NFS/SMB, dead FUSE daemon) it wedges the
-	// host outright: every write shares one serial chain, so a single stuck op parks
-	// every later lifecycle event too, the TUI never sees the event (the notify at
-	// agent-session.ts:601 is downstream of the await), and aborting does not release
-	// an already-parked await. Headless is worse — `_resolveIdleWaitIfIdle()` sits in a
-	// `finally` whose `try` awaits this emit, so `pi -p` never terminates.
+	// Automatic: Pi lifecycle → WezTerm tab state. Lifecycle handlers are per-instance,
+	// replaced wholesale on reload, so they don't accumulate (unlike the shared bus
+	// listener below — no dedup needed here).
 	//
-	// A tab tint is best-effort; the host's liveness is not ours to spend. Ordering is
-	// unaffected: `enqueue` chains synchronously at call time, so emit order == apply
-	// order is a property of CALL order, not await order. The session_shutdown drain is
-	// what guarantees these land before a reload — which makes that drain load-bearing
-	// in a way it was not before. Do not weaken it.
+	// These do NOT await the write. Pi awaits lifecycle handlers on the agent's own
+	// critical path with no timeout, so awaiting marker I/O here would put the
+	// filesystem in the agent's latency budget — and on a mount whose syscalls block
+	// forever (hard NFS/SMB, dead FUSE) it would wedge the host (one stuck op parks
+	// every later event via the shared chain; headless `pi -p` never terminates). A tab
+	// tint is best-effort; host liveness is not. Ordering is unaffected — `enqueue`
+	// chains synchronously at call time, so emit order == apply order regardless of the
+	// await. The session_shutdown drain now guarantees these land before a reload; don't
+	// weaken it.
 	pi.on("agent_start", () => {
 		void mark("thinking").catch(() => {});
 	});
@@ -268,52 +243,31 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 		return request.state === "clear" ? clearMarker() : mark(request.state, request.label);
 	});
 
-	// Drain in-flight writes on teardown: Pi awaits session_shutdown before it
-	// re-loads, so everything enqueued before shutdown lands before the next
-	// generation's fresh chain starts. Drain only — do NOT dispose the listener
-	// here (see installBusListener): a shutdown preceding a *failed* reload would
-	// leave us silenced with no successor.
+	// Drain in-flight writes on teardown: Pi awaits session_shutdown before re-loading,
+	// so everything enqueued before shutdown lands before the next generation's fresh
+	// chain. Drain only — do NOT dispose the listener here (see installBusListener): a
+	// shutdown before a *failed* reload would leave us with no successor.
 	//
-	// The cap does not cancel an abandoned write; it can land after the next
-	// generation's write and leave stale state. A stale *write* self-limits — the
-	// next event overwrites it, or its ttl_ms expires it. Same residual, same fix,
-	// for an op enqueued AFTER this race snapshots the chain — e.g. a later extension
-	// emitting `clear` on the bus during its own session_shutdown, which our still-live
-	// listener enqueues past the snapshot, so the cap never sees it. Note a late
-	// `clear` REMOVES the successor's marker, and ttl_ms cannot self-heal an absent
-	// file — only a later lifecycle/event write restores it. Accepted trade for a
-	// best-effort indicator.
+	// Two residuals are accepted best-effort costs, with different triggers:
+	//   1. Ordering — on a merely slow or racing write, no dead mount needed: the cap
+	//      doesn't cancel a write that overruns it, nor an op enqueued after this race
+	//      snapshots the chain (e.g. a later extension emitting `clear` on the bus during
+	//      its own shutdown, which our still-live listener enqueues past the snapshot — a
+	//      pure race, fine on a healthy system). A stale write self-limits (next event or
+	//      ttl_ms); a stale `clear` removes the marker, and ttl_ms can't restore an absent
+	//      file — only a later write does.
+	//   2. Memory — only under a *permanently* blocked write (a dead NFS/SMB/FUSE mount,
+	//      not a merely slow one): the chain retains every op queued behind the stuck head
+	//      (a real in-flight fs op is libuv-rooted), growing until the mount recovers or
+	//      the process restarts.
 	//
-	// Second accepted cost under a *permanently* blocked write (dead NFS/SMB/FUSE
-	// mount, not a merely slow one): the serial chain retains every op queued behind
-	// the stuck head, because a real in-flight fs op is rooted by libuv and holds its
-	// forward reaction chain (each op captures its marker + label). Measured ~0.6 KB
-	// per queued op — unbounded until the mount recovers or the process restarts, on
-	// the same rare precondition as the clobber above. NOT worth a coalescing mailbox:
-	// that bounds memory but breaks the FIFO ordering the tests lock, dropping
-	// intermediate states — the bus-owned controller below is the right home if it
-	// ever earns its trigger.
-	//
-	// Three fixes look obvious here and all three are worse than the defect:
-	//
-	// - A sticky abandoned flag: a generation survives a *failed* reload by design,
-	//   so one timeout plus one failed reload is permanent silence.
-	// - Sharing the chain across generations (proposed independently twice, so expect
-	//   it again): lifecycle handlers no longer await the write, so this no longer
-	//   risks host liveness — but one shared FIFO lets a predecessor's slow or hung
-	//   write own the head and stall every successor's marker. Measured ~1.3s behind a
-	//   1.5s write; on a hung mount the successor's marker never lands while the backlog
-	//   grows unbounded (fire-and-forget removed the back-pressure that pinned depth at
-	//   1). The module-local chain isolates generations, so a fresh successor always
-	//   publishes at once past a dead predecessor's abandoned chain.
-	// - A per-operation generation counter: closes the queued-backlog case but NOT a
-	//   single write that stalls inside `rename` past the cap, because the gate
-	//   necessarily precedes the publish. Verified: the successor registers while the
-	//   rename is still in flight, then the rename lands and clobbers.
-	//
-	// Closing the remaining case needs the bus-owned controller — one controller per
-	// bus owning the listener and the mutation state, re-asserting the last requested
-	// state after an abandoned write lands. Deferred; its trigger has not arrived.
+	// The obvious fixes are all worse: a sticky abandoned flag → permanent silence after
+	// a failed reload; sharing the chain across generations → a stuck predecessor stalls
+	// or wedges the successor; a per-op generation counter → the gate precedes the
+	// publish, so it can't catch a write already stalling inside rename; a coalescing
+	// mailbox → bounds memory but breaks the FIFO ordering the tests lock. The real fix
+	// is the deferred bus-owned controller (one per bus, owning the listener + mutation
+	// state, re-asserting the last requested state after an abandoned write lands).
 	pi.on("session_shutdown", async () => {
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		await Promise.race([
