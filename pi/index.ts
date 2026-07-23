@@ -283,11 +283,13 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 	// - A sticky abandoned flag: a generation survives a *failed* reload by design,
 	//   so one timeout plus one failed reload is permanent silence.
 	// - Sharing the chain across generations (proposed independently twice, so expect
-	//   it again): the host awaits lifecycle handlers all the way from the agent loop,
-	//   so a successor inheriting a stuck predecessor's backlog stalls the agent's own
-	//   run — measured as a block equal to the whole abandoned backlog, and on a
-	//   stalled mount a permanent wedge with no marker ever written again. The cap is
-	//   not an oversight to delete; it is what keeps a stuck fs op away from the host.
+	//   it again): lifecycle handlers no longer await the write, so this no longer
+	//   risks host liveness — but one shared FIFO lets a predecessor's slow or hung
+	//   write own the head and stall every successor's marker. Measured ~1.3s behind a
+	//   1.5s write; on a hung mount the successor's marker never lands while the backlog
+	//   grows unbounded (fire-and-forget removed the back-pressure that pinned depth at
+	//   1). The module-local chain isolates generations, so a fresh successor always
+	//   publishes at once past a dead predecessor's abandoned chain.
 	// - A per-operation generation counter: closes the queued-backlog case but NOT a
 	//   single write that stalls inside `rename` past the cap, because the gate
 	//   necessarily precedes the publish. Verified: the successor registers while the
