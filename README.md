@@ -100,6 +100,9 @@ attention.apply_to_config(config, {
   -- Auto-clear these types when focusing their pane
   auto_clear = { "stop", "notify" },
 
+  -- Refresh custom tab titles when visible attention state changes
+  refresh_tab_bar = true,
+
   -- Stale marker cleanup by type, in milliseconds.
   -- Prevents zombie busy tabs if a process exits without clearing.
   -- Set to false to disable the config-driven sweep. Note: markers that carry
@@ -180,10 +183,14 @@ attention.apply_to_config(config, { auto_poll = false })
 
 -- Then in your existing update-status handler:
 wezterm.on('update-status', function(window, pane)
-  attention.poll(window)  -- reads markers, updates cache
-  -- ... your git status bar, battery, etc.
+  attention.poll(window)  -- reads markers, updates cache, refreshes changed tabs
+  -- Set your left/right status after poll() so your text remains authoritative.
 end)
 ```
+
+The refresh uses alternating zero-width left-status values because stable WezTerm
+has no direct tab-bar invalidation method. Set `refresh_tab_bar = false` if your
+status handler must run before `attention.poll()`.
 
 ## Public API
 
@@ -329,8 +336,6 @@ if (process.env.WEZTERM_PANE && /^\d+$/.test(process.env.WEZTERM_PANE)) {
 }
 ```
 
-> **Tip:** Add `` execSync(`wezterm cli set-window-title --pane-id ${process.env.WEZTERM_PANE} " "`) `` after writing a marker to force an immediate tab redraw instead of waiting for the next poll cycle.
-
 ## Codex hooks
 
 Wire Codex through its **lifecycle hooks** (`~/.codex/hooks.json`). Avoid the older top-level
@@ -403,7 +408,7 @@ it isn't wired here yet.
 
 The plugin uses a **poller/renderer split** to avoid blocking WezTerm's GUI thread:
 
-1. **Poller** (`update-status` event) — runs on WezTerm's `config.status_update_interval` (default 1000ms). Reads marker files from disk and updates an in-memory cache.
+1. **Poller** (`update-status` event) — runs on WezTerm's `config.status_update_interval` (default 1000ms). Reads marker files, updates an in-memory cache, and refreshes the tab bar when visible attention state changes.
 2. **Renderer** (`format-tab-title` event) — fires on every tab repaint (mouse hover, key press, redraws). Reads only from the cache — zero I/O, instant returns.
 
 No background threads, no FFI, no external dependencies — just filesystem reads in Lua on a configurable interval.

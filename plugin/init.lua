@@ -37,6 +37,9 @@ local defaults = {
   -- These types auto-clear when their pane becomes active
   auto_clear = { "stop", "notify" },
 
+  -- Refresh custom tab titles when visible attention state changes
+  refresh_tab_bar = true,
+
   -- Stale marker cleanup by type, in milliseconds. Prevents zombie busy tabs
   -- after a process exits without clearing its marker. Set to false to disable.
   stale_after_ms = { thinking = 30 * 60 * 1000 },
@@ -109,6 +112,7 @@ end
 -- read only when acknowledging a cached terminal marker.
 
 local attention_cache = {} -- { [pane_id_string] = { type = "stop", frame = 0 } }
+local redraw_nonce = {}
 
 -- ── Internal helpers ────────────────────────────────────────────────────────
 
@@ -250,16 +254,17 @@ function M.poll(window, opts)
   local now = now_ms()
   local animation_frame = M._poll_animation_frame or 0
   M._poll_animation_frame = (animation_frame + 1) % 4
+  local redraw_needed = false
 
   for _, tab in ipairs(mux_win:tabs()) do
     for _, p in ipairs(tab:panes()) do
       local id = tostring(p:pane_id())
+      local previous = attention_cache[id]
       local atype, frame, updated_at, marker_ttl_ms, raw = read_marker(dir, id)
       if atype then
-        local cached = attention_cache[id]
         local observed_at = now
-        if cached and cached.raw == raw and cached.observed_at then
-          observed_at = cached.observed_at
+        if previous and previous.raw == raw and previous.observed_at then
+          observed_at = previous.observed_at
         end
 
         local effective_updated_at = updated_at or observed_at
@@ -283,7 +288,25 @@ function M.poll(window, opts)
       else
         attention_cache[id] = nil
       end
+
+      local current = attention_cache[id]
+      if (previous and previous.type) ~= (current and current.type)
+          or (previous and previous.frame) ~= (current and current.frame) then
+        redraw_needed = true
+      end
     end
+  end
+
+  local refresh_tab_bar = M._active_refresh_tab_bar
+  if opts and opts.refresh_tab_bar ~= nil then
+    refresh_tab_bar = opts.refresh_tab_bar
+  end
+  if redraw_needed and refresh_tab_bar ~= false then
+    local window_id = tostring(window:window_id())
+    redraw_nonce[window_id] = not redraw_nonce[window_id]
+    -- Alternating zero-width status text is the stable WezTerm API that
+    -- schedules custom tab-title recomputation without visible output.
+    window:set_left_status(utf8.char(redraw_nonce[window_id] and 0x200b or 0x200c))
   end
 end
 
@@ -369,6 +392,7 @@ function M.apply_to_config(config, opts)
   local stale_after_ms = opts.stale_after_ms
   if stale_after_ms == nil then stale_after_ms = defaults.stale_after_ms end
   M._active_stale_after_ms = stale_after_ms
+  M._active_refresh_tab_bar = opts.refresh_tab_bar ~= false
 
   -- Build lookup tables
   local clear_set = {}

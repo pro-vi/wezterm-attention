@@ -10,6 +10,7 @@ os.remove(test_dir)
 assert(os.execute("mkdir -p " .. shell_quote(test_dir)) == 0)
 
 local handlers = {}
+local status_updates = {}
 local wezterm = {
   home_dir = test_dir,
   action_callback = function(callback) return callback end,
@@ -70,7 +71,7 @@ local function gui_pane(pane_id)
   }
 end
 
-local function poll(pane_ids)
+local function poll(pane_ids, opts)
   local panes = {}
   for _, pane_id in ipairs(pane_ids) do
     table.insert(panes, mux_pane(pane_id))
@@ -84,9 +85,13 @@ local function poll(pane_ids)
   }
   local window = {
     mux_window = function() return mux_window end,
+    window_id = function() return 1 end,
+    set_left_status = function(_, status)
+      table.insert(status_updates, status)
+    end,
   }
 
-  attention.poll(window)
+  attention.poll(window, opts)
 end
 
 local function tab(active_pane_id, sibling_pane_id, is_active)
@@ -181,6 +186,42 @@ test("auto-clear never deletes a newer non-clearable marker", function()
 
   assert(marker_exists(501), "newer thinking marker should remain on disk")
   assert(attention.get_attention(501) == "thinking", "cache should adopt the newer marker")
+end)
+
+test("poll refreshes the tab bar only when visible attention changes", function()
+  status_updates = {}
+  write_marker(601, "notify")
+
+  poll({ 601 })
+  assert(#status_updates == 1, "new marker should request one refresh")
+
+  poll({ 601 })
+  assert(#status_updates == 1, "unchanged marker should not request another refresh")
+
+  os.remove(test_dir .. "/601")
+  poll({ 601 })
+  assert(#status_updates == 2, "removed marker should request another refresh")
+  assert(status_updates[1] ~= status_updates[2], "refresh nonce should alternate")
+end)
+
+test("poll refreshes each generated thinking frame", function()
+  status_updates = {}
+  write_marker(701, "thinking")
+
+  poll({ 701 })
+  poll({ 701 })
+
+  assert(#status_updates == 2, "thinking animation should refresh each frame")
+  assert(status_updates[1] ~= status_updates[2], "refresh nonce should alternate")
+end)
+
+test("poll can leave status ownership untouched", function()
+  status_updates = {}
+  write_marker(801, "notify")
+
+  poll({ 801 }, { refresh_tab_bar = false })
+
+  assert(#status_updates == 0, "disabled refresh should not touch left status")
 end)
 
 os.execute("rm -rf " .. shell_quote(test_dir))
