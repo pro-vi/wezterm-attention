@@ -869,6 +869,22 @@ test("the per-window redraw budget caps feedback and logs once", function()
     "budget refusal should log once, got " .. tostring(errors[1]))
 end)
 
+test("a budget-rejected final projection is retried after reset", function()
+  local w = window_double({ tabs = { { 870, 874 } }, focused = true, active_pane_id = 870 })
+  for i = 1, 5 do
+    if i % 2 == 1 then
+      write_marker(874, "notify")
+    else
+      os.remove(test_dir .. "/874")
+    end
+    attention.poll(w, { now_ms = 1000 })
+  end
+  assert(#w.actions == 4, "precondition: fifth change is budget-rejected")
+
+  attention.poll(w, { now_ms = 2000 })
+  assert(#w.actions == 5, "the final projection should redraw after the budget resets")
+end)
+
 test("a failed redraw action leaves marker and cache truth intact", function()
   write_marker(881, "notify")
 

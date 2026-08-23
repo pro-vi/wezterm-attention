@@ -505,6 +505,7 @@ local reported_missing = {}
 local redraw_budget = {}
 local redraw_budget_reported = false
 local redraw_disabled = {}
+local redraw_pending = {}
 
 local function report_missing_once(method_name)
   if reported_missing[method_name] then return end
@@ -749,8 +750,20 @@ function M.poll(window, opts)
     end
   end
 
-  if changed and redraw_allowed(window, now) then
-    request_tab_bar_redraw(window, action_pane)
+  local window_key = redraw_window_key(window)
+  local needs_redraw = changed or redraw_pending[window_key]
+  if needs_redraw then
+    if redraw_disabled[window_key] then
+      redraw_pending[window_key] = nil
+    elseif redraw_allowed(window, now) then
+      if request_tab_bar_redraw(window, action_pane) or redraw_disabled[window_key] then
+        redraw_pending[window_key] = nil
+      else
+        redraw_pending[window_key] = true
+      end
+    else
+      redraw_pending[window_key] = true
+    end
   end
 end
 
