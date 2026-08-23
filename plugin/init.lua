@@ -507,12 +507,12 @@ local redraw_budget_reported = false
 local redraw_disabled = {}
 local redraw_pending = {}
 
-local function report_missing_once(method_name)
+local function report_missing_once(method_name, impact)
   if reported_missing[method_name] then return end
   reported_missing[method_name] = true
   wezterm.log_error(
     "wezterm-attention: this WezTerm build does not expose window:" .. method_name ..
-    "(); inactive tabs will update only on ordinary WezTerm redraws")
+    "(); " .. impact)
 end
 
 local function redraw_window_key(window)
@@ -555,7 +555,9 @@ end
 local function window_is_focused(window)
   local is_focused = window.is_focused
   if type(is_focused) ~= "function" then
-    report_missing_once("is_focused")
+    report_missing_once(
+      "is_focused",
+      "attention acknowledgement and compatibility redraw are disabled")
     return false
   end
   local ok, focused = pcall(is_focused, window)
@@ -568,7 +570,9 @@ end
 local function window_current_active_pane(window)
   local active_pane = window.active_pane
   if type(active_pane) ~= "function" then
-    report_missing_once("active_pane")
+    report_missing_once(
+      "active_pane",
+      "attention acknowledgement is disabled; redraw can still use the update-status event pane")
     return nil
   end
   local ok, resolved = pcall(active_pane, window)
@@ -608,7 +612,9 @@ local function request_tab_bar_redraw(window, pane)
 
   local perform_action = window.perform_action
   if type(perform_action) ~= "function" then
-    report_missing_once("perform_action")
+    report_missing_once(
+      "perform_action",
+      "compatibility redraw is disabled; inactive tabs update only on ordinary WezTerm redraws")
     redraw_disabled[window_key] = true
     return false
   end

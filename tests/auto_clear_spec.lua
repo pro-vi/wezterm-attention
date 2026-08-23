@@ -775,6 +775,41 @@ test("a focused window with no active pane acknowledges nothing", function()
   assert(#w.actions == 0, "there is no pane to perform an action through")
 end)
 
+test("a missing focus method reports acknowledgement and redraw degradation", function()
+  write_marker(822, "notify", "publication-a")
+  local w = window_double({
+    tabs = { { 822 } },
+    focused = true,
+    active_pane_id = 822,
+    omit = { is_focused = true },
+  })
+  attention.poll(w, { active_pane = mux_pane(822) })
+
+  assert(not acknowledgement_exists(822), "missing focus method must disable acknowledgement")
+  assert(w.action_calls == 0, "missing focus method must disable redraw")
+  local errors = drain_errors()
+  assert(#errors == 1 and errors[1]:find("acknowledgement and compatibility redraw are disabled", 1, true),
+    "warning should name both disabled behaviors")
+end)
+
+test("a missing active pane method retains event-pane redraw", function()
+  write_marker(823, "notify", "publication-a")
+  local w = window_double({
+    tabs = { { 823 } },
+    focused = true,
+    active_pane_id = 823,
+    omit = { active_pane = true },
+  })
+  attention.poll(w, { active_pane = mux_pane(823) })
+
+  assert(not acknowledgement_exists(823), "missing active pane method must disable acknowledgement")
+  assert(w.action_calls == 1, "event pane should still transport the redraw")
+  local errors = drain_errors()
+  assert(#errors == 1 and errors[1]:find("acknowledgement is disabled", 1, true)
+      and errors[1]:find("event pane", 1, true),
+    "warning should preserve the event-pane redraw path")
+end)
+
 -- ── U2: focus-safe redraw ───────────────────────────────────────────────────
 
 test("a focused visible change requests exactly one redraw through the active pane", function()
