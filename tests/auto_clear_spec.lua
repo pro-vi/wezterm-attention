@@ -662,6 +662,29 @@ test("public removal clears canonical marker and acknowledgement sidecar", funct
   assert(attention.get_attention(944) == nil, "public removal should clear cache")
 end)
 
+test("public removal without opts uses the configured marker directory", function()
+  local configured_dir = test_dir .. "/configured"
+  assert(os.execute("mkdir -p " .. shell_quote(configured_dir)) == 0)
+  local marker = assert(io.open(configured_dir .. "/949", "w"))
+  marker:write('{"type":"notify","publication_id":"publication-a"}')
+  marker:close()
+  local ack = assert(io.open(configured_dir .. "/949.ack", "w"))
+  ack:write("publication\npublication-a")
+  ack:close()
+
+  local configured = dofile(repo_root .. "/plugin/init.lua")
+  configured.apply_to_config({}, {
+    auto_poll = false,
+    dir = configured_dir,
+    review_key = false,
+  })
+  configured.remove_marker(949)
+
+  assert(not path_exists(configured_dir .. "/949"), "configured marker should be removed")
+  assert(not path_exists(configured_dir .. "/949.ack"),
+    "configured acknowledgement should be removed")
+end)
+
 test("pane destruction clears canonical marker and acknowledgement sidecar", function()
   write_marker(945, "notify", "publication-a")
   poll_focused({ tabs = { { 940, 945 } }, active_pane_id = 945 })
@@ -725,6 +748,23 @@ test("acknowledgement never deletes a newer non-clearable marker", function()
   assert(not acknowledgement_exists(501), "a non-clearable replacement must not be acknowledged")
 end)
 
+test("a same-type replacement during acknowledgement remains visible", function()
+  write_marker(981, "notify", "publication-a")
+  local replaced = false
+  poll_focused({
+    tabs = { { 980, 981 } },
+    active_pane_id = 981,
+    on_focus_check = function()
+      if replaced then return end
+      replaced = true
+      write_marker(981, "notify", "publication-b")
+    end,
+  })
+
+  assert(attention.get_attention(981) == "notify", "replacement B must remain visible")
+  assert(not acknowledgement_exists(981), "replacement B must not be acknowledged unseen")
+end)
+
 test("a focused window with no active pane acknowledges nothing", function()
   write_marker(821, "notify")
 
@@ -733,6 +773,41 @@ test("a focused window with no active pane acknowledges nothing", function()
   assert(marker_exists(821), "with no active pane there is nothing to acknowledge")
   assert(attention.get_attention(821) == "notify", "the cache should still be filled")
   assert(#w.actions == 0, "there is no pane to perform an action through")
+end)
+
+test("a missing focus method reports acknowledgement and redraw degradation", function()
+  write_marker(822, "notify", "publication-a")
+  local w = window_double({
+    tabs = { { 822 } },
+    focused = true,
+    active_pane_id = 822,
+    omit = { is_focused = true },
+  })
+  attention.poll(w, { active_pane = mux_pane(822) })
+
+  assert(not acknowledgement_exists(822), "missing focus method must disable acknowledgement")
+  assert(w.action_calls == 0, "missing focus method must disable redraw")
+  local errors = drain_errors()
+  assert(#errors == 1 and errors[1]:find("acknowledgement and compatibility redraw are disabled", 1, true),
+    "warning should name both disabled behaviors")
+end)
+
+test("a missing active pane method retains event-pane redraw", function()
+  write_marker(823, "notify", "publication-a")
+  local w = window_double({
+    tabs = { { 823 } },
+    focused = true,
+    active_pane_id = 823,
+    omit = { active_pane = true },
+  })
+  attention.poll(w, { active_pane = mux_pane(823) })
+
+  assert(not acknowledgement_exists(823), "missing active pane method must disable acknowledgement")
+  assert(w.action_calls == 1, "event pane should still transport the redraw")
+  local errors = drain_errors()
+  assert(#errors == 1 and errors[1]:find("acknowledgement is disabled", 1, true)
+      and errors[1]:find("event pane", 1, true),
+    "warning should preserve the event-pane redraw path")
 end)
 
 -- ── U2: focus-safe redraw ───────────────────────────────────────────────────
@@ -850,6 +925,48 @@ test("the per-window redraw budget caps feedback and logs once", function()
   local errors = drain_errors()
   assert(#errors == 1 and errors[1]:find("budget exhausted", 1, true),
     "budget refusal should log once, got " .. tostring(errors[1]))
+end)
+
+test("a budget-rejected final projection is retried after reset", function()
+  local w = window_double({ tabs = { { 870, 874 } }, focused = true, active_pane_id = 870 })
+  for i = 1, 5 do
+    if i % 2 == 1 then
+      write_marker(874, "notify")
+    else
+      os.remove(test_dir .. "/874")
+    end
+    attention.poll(w, { now_ms = 1000 })
+  end
+  assert(#w.actions == 4, "precondition: fifth change is budget-rejected")
+
+  attention.poll(w, { now_ms = 2000 })
+  assert(#w.actions == 5, "the final projection should redraw after the budget resets")
+end)
+
+test("a pending redraw retry does not re-enter before the action returns", function()
+  local current_now = 1000
+  local w = window_double({
+    tabs = { { 870, 875 } },
+    focused = true,
+    active_pane_id = 870,
+    on_action = function(window)
+      attention.poll(window, { now_ms = current_now })
+    end,
+  })
+  for i = 1, 5 do
+    if i % 2 == 1 then
+      write_marker(875, "notify")
+    else
+      os.remove(test_dir .. "/875")
+    end
+    attention.poll(w, { now_ms = current_now })
+  end
+  assert(#w.actions == 4, "precondition: fifth change is pending")
+
+  current_now = 2000
+  attention.poll(w, { now_ms = current_now })
+  assert(#w.actions == 5,
+    "the pending retry must request exactly one action, got " .. #w.actions)
 end)
 
 test("a failed redraw action leaves marker and cache truth intact", function()

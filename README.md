@@ -438,7 +438,9 @@ No background threads, no FFI, no external dependencies — just filesystem read
 - `status_update_interval` defaults to 1000ms; markers update on this interval. Lower it if indicators feel slow — the redraw request rides on the same tick.
 
 **Indicators appear only when you switch tabs?**
-- The redraw needs `window:is_focused()`, `window:active_pane()`, and `window:perform_action()`. On a build missing any of them the plugin logs once to the WezTerm error log and falls back to WezTerm's own redraw timing.
+- Without `window:is_focused()`, the plugin cannot safely acknowledge attention or request a compatibility redraw.
+- Without `window:active_pane()`, acknowledgement is disabled, but redraw can still use the pane supplied by `update-status`.
+- Without `window:perform_action()`, acknowledgement and polling continue, but inactive tabs update only on ordinary WezTerm redraws.
 - In `renderer = "manual"` mode, pass the event pane: `attention.poll(window, { active_pane = pane })`. The plugin resolves `window:active_pane()` at use time; the event pane is used only when the current pane is unavailable.
 
 **Tab titles look wrong?**
