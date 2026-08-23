@@ -432,7 +432,7 @@ end
 --- acknowledged while its window is in the background is a notification the user
 --- never saw.
 ---
-local function cache_marker_values(id, atype, frame, raw, observed_now)
+local function cache_marker_values(id, atype, frame, raw, publication_id, observed_now)
   if not atype then
     attention_cache[id] = nil
     return
@@ -449,6 +449,7 @@ local function cache_marker_values(id, atype, frame, raw, observed_now)
     frame       = frame,
     observed_at = observed_now,
     raw         = raw,
+    identity    = marker_identity(publication_id, raw),
   }
 end
 
@@ -468,23 +469,31 @@ local function acknowledge_focused_pane(pane_id, opts)
     return "absent"
   end
 
+  local current_identity = marker_identity(publication_id, raw)
+  if cached.identity ~= current_identity then
+    cache_marker_values(id, current_type, current_frame, raw, publication_id, observed_now)
+    return "kept"
+  end
+
   if not acknowledge_set[current_type] then
     clear_acknowledgement(dir, id)
-    cache_marker_values(id, current_type, current_frame, raw, observed_now)
+    cache_marker_values(id, current_type, current_frame, raw, publication_id, observed_now)
     return "kept"
   end
 
   local write_ack = (opts and opts.write_acknowledgement) or write_acknowledgement
-  if not write_ack(dir, id, marker_identity(publication_id, raw)) then
-    cache_marker_values(id, current_type, current_frame, raw, observed_now)
+  if not write_ack(dir, id, current_identity) then
+    cache_marker_values(id, current_type, current_frame, raw, publication_id, observed_now)
     return "failed"
   end
 
   -- A writer may replace or clear the marker while the sidecar is being
   -- written. Re-read effective truth before updating the cache: only the exact
   -- identity that was viewed is suppressed.
-  local effective_type, effective_frame, _, _, effective_raw = read_effective_marker(dir, id)
-  cache_marker_values(id, effective_type, effective_frame, effective_raw, observed_now)
+  local effective_type, effective_frame, _, _, effective_raw, effective_publication_id =
+    read_effective_marker(dir, id)
+  cache_marker_values(
+    id, effective_type, effective_frame, effective_raw, effective_publication_id, observed_now)
   return effective_type and "kept" or "acknowledged"
 end
 
@@ -704,6 +713,7 @@ function M.poll(window, opts)
             frame       = frame,
             observed_at = observed_at,
             raw         = raw,
+            identity    = marker_identity(publication_id, raw),
           }
         end
       else
@@ -984,6 +994,7 @@ function M.apply_to_config(config, opts)
           attention_cache[target_id] = {
             type = "review",
             raw = raw,
+            identity = marker_identity(publication_id, raw),
           }
           redraw_if_visible_changed()
         else

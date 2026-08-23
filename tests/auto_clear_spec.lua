@@ -725,6 +725,23 @@ test("acknowledgement never deletes a newer non-clearable marker", function()
   assert(not acknowledgement_exists(501), "a non-clearable replacement must not be acknowledged")
 end)
 
+test("a same-type replacement during acknowledgement remains visible", function()
+  write_marker(981, "notify", "publication-a")
+  local replaced = false
+  poll_focused({
+    tabs = { { 980, 981 } },
+    active_pane_id = 981,
+    on_focus_check = function()
+      if replaced then return end
+      replaced = true
+      write_marker(981, "notify", "publication-b")
+    end,
+  })
+
+  assert(attention.get_attention(981) == "notify", "replacement B must remain visible")
+  assert(not acknowledgement_exists(981), "replacement B must not be acknowledged unseen")
+end)
+
 test("a focused window with no active pane acknowledges nothing", function()
   write_marker(821, "notify")
 
