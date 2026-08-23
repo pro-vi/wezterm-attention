@@ -662,6 +662,29 @@ test("public removal clears canonical marker and acknowledgement sidecar", funct
   assert(attention.get_attention(944) == nil, "public removal should clear cache")
 end)
 
+test("public removal without opts uses the configured marker directory", function()
+  local configured_dir = test_dir .. "/configured"
+  assert(os.execute("mkdir -p " .. shell_quote(configured_dir)) == 0)
+  local marker = assert(io.open(configured_dir .. "/949", "w"))
+  marker:write('{"type":"notify","publication_id":"publication-a"}')
+  marker:close()
+  local ack = assert(io.open(configured_dir .. "/949.ack", "w"))
+  ack:write("publication\npublication-a")
+  ack:close()
+
+  local configured = dofile(repo_root .. "/plugin/init.lua")
+  configured.apply_to_config({}, {
+    auto_poll = false,
+    dir = configured_dir,
+    review_key = false,
+  })
+  configured.remove_marker(949)
+
+  assert(not path_exists(configured_dir .. "/949"), "configured marker should be removed")
+  assert(not path_exists(configured_dir .. "/949.ack"),
+    "configured acknowledgement should be removed")
+end)
+
 test("pane destruction clears canonical marker and acknowledgement sidecar", function()
   write_marker(945, "notify", "publication-a")
   poll_focused({ tabs = { { 940, 945 } }, active_pane_id = 945 })

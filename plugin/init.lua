@@ -638,7 +638,7 @@ end
 
 --- Remove the attention marker for a pane.
 function M.remove_marker(pane_id, opts)
-  local dir = (opts and opts.dir) or defaults.dir
+  local dir = (opts and opts.dir) or M._active_dir or defaults.dir
   local id = tostring(pane_id)
   remove_marker(dir, id)
   attention_cache[id] = nil
