@@ -129,7 +129,7 @@ Any process running inside WezTerm can write a marker. The contract is:
 1. **Write** a JSON file to `~/.local/state/wezterm-attention/<WEZTERM_PANE>`
 2. **Contents:** `{"type":"<state>"}` where state is `thinking`, `stop`, `notify`, or `review`
 3. **Optional:** `{"type":"thinking","frame":0}` — `frame` (0-3) controls the spinner position. If omitted for `thinking`, the plugin animates it during polling.
-4. **Recommended:** `revision` is a new non-empty string for every publication. It lets an identical `stop` or `notify` payload become visible again after the previous publication was acknowledged. Without it, the plugin uses the exact JSON bytes as the legacy identity.
+4. **Recommended:** `publication_id` is a new non-empty string for every publication. It lets an identical `stop` or `notify` payload become visible again after the previous publication was acknowledged. Without it, the plugin uses the exact JSON bytes as the legacy identity.
 5. **Optional:** `updated_at` or `updated_at_ms` records when the marker was refreshed. Seconds and milliseconds are both accepted.
 6. **Optional:** `ttl_ms` overrides stale cleanup for that marker. By default, stale `thinking` markers clear after 30 minutes.
 7. **Cleanup** is automatic — canonical markers are removed when panes close or stale TTL expires. Focusing a pane writes an acknowledgement sidecar instead of removing writer-owned state.
@@ -144,8 +144,8 @@ The `WEZTERM_PANE` environment variable is injected by WezTerm into every shell 
 case "$WEZTERM_PANE" in '' | *[!0-9]*) exit 0 ;; esac  # numeric pane id only
 MARKER_DIR="$HOME/.local/state/wezterm-attention"
 mkdir -p "$MARKER_DIR"
-if command -v uuidgen >/dev/null 2>&1; then REVISION="$(uuidgen)"; else REVISION="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"; fi
-printf '{"type":"stop","revision":"%s","updated_at":%s}\n' "$REVISION" "$(date +%s)" > "$MARKER_DIR/$WEZTERM_PANE.tmp" && mv "$MARKER_DIR/$WEZTERM_PANE.tmp" "$MARKER_DIR/$WEZTERM_PANE"
+if command -v uuidgen >/dev/null 2>&1; then PUBLICATION_ID="$(uuidgen)"; else PUBLICATION_ID="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"; fi
+printf '{"type":"stop","publication_id":"%s","updated_at":%s}\n' "$PUBLICATION_ID" "$(date +%s)" > "$MARKER_DIR/$WEZTERM_PANE.tmp" && mv "$MARKER_DIR/$WEZTERM_PANE.tmp" "$MARKER_DIR/$WEZTERM_PANE"
 ```
 
 ### TypeScript / Bun
@@ -162,7 +162,7 @@ const dir = join(process.env.HOME!, ".local", "state", "wezterm-attention");
 await mkdir(dir, { recursive: true });
 
 const file = join(dir, pane);
-await writeFile(file + ".tmp", JSON.stringify({ type: "stop", revision: randomUUID(), updated_at: Date.now() }));
+await writeFile(file + ".tmp", JSON.stringify({ type: "stop", publication_id: randomUUID(), updated_at: Date.now() }));
 await rename(file + ".tmp", file);
 ```
 
@@ -180,7 +180,7 @@ const dir = path.join(process.env.HOME, ".local", "state", "wezterm-attention");
 fs.mkdirSync(dir, { recursive: true });
 
 const file = path.join(dir, pane);
-fs.writeFileSync(file + ".tmp", JSON.stringify({ type: "stop", revision: randomUUID(), updated_at: Date.now() }));
+fs.writeFileSync(file + ".tmp", JSON.stringify({ type: "stop", publication_id: randomUUID(), updated_at: Date.now() }));
 fs.renameSync(file + ".tmp", file);
 ```
 
@@ -304,7 +304,7 @@ if (process.env.WEZTERM_PANE && /^\d+$/.test(process.env.WEZTERM_PANE)) {
   } catch {}
 
   mkdirSync(markerDir, { recursive: true });
-  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'thinking', revision: randomUUID(), frame, updated_at: Date.now() }));
+  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'thinking', publication_id: randomUUID(), frame, updated_at: Date.now() }));
   renameSync(markerFile + '.tmp', markerFile);
 }
 ```
@@ -317,7 +317,7 @@ if (process.env.WEZTERM_PANE && /^\d+$/.test(process.env.WEZTERM_PANE)) {
   const markerDir = `${process.env.HOME}/.local/state/wezterm-attention`;
   const markerFile = `${markerDir}/${process.env.WEZTERM_PANE}`;
   mkdirSync(markerDir, { recursive: true });
-  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'stop', revision: randomUUID(), updated_at: Date.now() }));
+  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'stop', publication_id: randomUUID(), updated_at: Date.now() }));
   renameSync(markerFile + '.tmp', markerFile);
 }
 ```
@@ -330,7 +330,7 @@ if (process.env.WEZTERM_PANE && /^\d+$/.test(process.env.WEZTERM_PANE)) {
   const markerDir = `${process.env.HOME}/.local/state/wezterm-attention`;
   const markerFile = `${markerDir}/${process.env.WEZTERM_PANE}`;
   mkdirSync(markerDir, { recursive: true });
-  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'notify', revision: randomUUID(), updated_at: Date.now() }));
+  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'notify', publication_id: randomUUID(), updated_at: Date.now() }));
   renameSync(markerFile + '.tmp', markerFile);
 }
 ```
@@ -386,7 +386,7 @@ async function writeWezTermMarker(marker: Record<string, unknown>): Promise<void
   const dir = join(home, ".local", "state", "wezterm-attention");
   await mkdir(dir, { recursive: true });
   const file = join(dir, paneId);
-  await writeFile(file + ".tmp", JSON.stringify({ source: "codex", updated_at_ms: Date.now(), ...marker, revision: randomUUID() }));
+  await writeFile(file + ".tmp", JSON.stringify({ source: "codex", updated_at_ms: Date.now(), ...marker, publication_id: randomUUID() }));
   await rename(file + ".tmp", file); // atomic
 }
 // PreToolUse:        writeWezTermMarker({ type: "thinking" })

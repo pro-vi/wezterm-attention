@@ -15,14 +15,14 @@ mkdir -p "$MARKER_DIR"
 # Write a "stop" marker (tab shows ✓ in mint)
 # Atomic: write to .tmp then rename to avoid partial reads
 if command -v uuidgen >/dev/null 2>&1; then
-  REVISION="$(uuidgen)"
+  PUBLICATION_ID="$(uuidgen)"
 else
-  REVISION="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+  PUBLICATION_ID="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 fi
-printf '{"type":"stop","revision":"%s","updated_at":%s}\n' "$REVISION" "$(date +%s)" > "${MARKER_DIR}/${WEZTERM_PANE}.tmp"
+printf '{"type":"stop","publication_id":"%s","updated_at":%s}\n' "$PUBLICATION_ID" "$(date +%s)" > "${MARKER_DIR}/${WEZTERM_PANE}.tmp"
 mv "${MARKER_DIR}/${WEZTERM_PANE}.tmp" "${MARKER_DIR}/${WEZTERM_PANE}"
 
-# Other payloads (include a fresh revision when writing them):
+# Other payloads (include a fresh publication ID when writing them):
 #   {"type":"notify"}                # tab shows ! in rose
 #   {"type":"thinking","frame":0}  # animated spinner
 #   {"type":"review"}                # tab shows ◆ in gold

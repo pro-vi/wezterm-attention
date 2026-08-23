@@ -38,7 +38,7 @@ local wezterm = {
       updated_at = tonumber(content:match('"updated_at"%s*:%s*(%d+)')),
       updated_at_ms = tonumber(content:match('"updated_at_ms"%s*:%s*(%d+)')),
       ttl_ms = tonumber(content:match('"ttl_ms"%s*:%s*(%d+)')),
-      revision = content:match('"revision"%s*:%s*"([^"]+)"'),
+      publication_id = content:match('"publication_id"%s*:%s*"([^"]+)"'),
     }
   end,
   log_error = function(message)
@@ -73,10 +73,11 @@ local internal = assert(attention._internal, "internal seams were not exposed")
 
 -- ── Fixtures ────────────────────────────────────────────────────────────────
 
-local function write_marker(pane_id, marker_type, revision)
+local function write_marker(pane_id, marker_type, publication_id)
   local file = assert(io.open(test_dir .. "/" .. pane_id, "w"))
-  if revision then
-    file:write(string.format('{"type":"%s","revision":"%s"}', marker_type, revision))
+  if publication_id then
+    file:write(string.format(
+      '{"type":"%s","publication_id":"%s"}', marker_type, publication_id))
   else
     file:write(string.format('{"type":"%s"}', marker_type))
   end
@@ -373,9 +374,9 @@ test("time-derived frames preserve the public get_attention return shape", funct
   assert(frame == 3, "the second return remains the derived frame, got " .. tostring(frame))
 end)
 
-test("Lua accepts the revision-bearing marker shape published by Pi", function()
+test("Lua accepts the publication ID marker shape published by Pi", function()
   local file = assert(io.open(test_dir .. "/733", "w"))
-  file:write('{"type":"notify","source":"pi","revision":"pi-generation",'
+  file:write('{"type":"notify","source":"pi","publication_id":"pi-publication",'
     .. '"updated_at":1000,"label":"done","unknown":"ignored"}')
   file:close()
 
@@ -384,7 +385,7 @@ test("Lua accepts the revision-bearing marker shape published by Pi", function()
     { now_ms = 1000000 })
 
   assert(attention.get_attention(733) == "notify",
-    "Pi's revision and extra fields must not change the marker type")
+    "Pi's publication ID and extra fields must not change the marker type")
 end)
 
 test("a coarse clock clamps generated frames to one-second buckets", function()
@@ -530,16 +531,16 @@ test("visiting the sibling pane acknowledges its retained marker", function()
   assert(attention.get_attention(402) == nil, "the acknowledged sibling should disappear from effective cache")
 end)
 
-test("a new marker revision releases an older acknowledgement", function()
-  write_marker(931, "notify", "generation-g")
+test("a new publication ID releases an older acknowledgement", function()
+  write_marker(931, "notify", "publication-a")
   poll_focused({ tabs = { { 930, 931 } }, active_pane_id = 931 })
-  assert(attention.get_attention(931) == nil, "generation G should be acknowledged")
+  assert(attention.get_attention(931) == nil, "publication A should be acknowledged")
 
-  write_marker(931, "notify", "generation-h")
+  write_marker(931, "notify", "publication-b")
   poll({ 930, 931 })
 
-  assert(attention.get_attention(931) == "notify", "generation H must be visible")
-  assert(not acknowledgement_exists(931), "the stale generation-G acknowledgement should be removed")
+  assert(attention.get_attention(931) == "notify", "publication B must be visible")
+  assert(not acknowledgement_exists(931), "the stale publication-A acknowledgement should be removed")
 end)
 
 test("legacy raw identity remains compatible and changed bytes become visible", function()
@@ -555,8 +556,8 @@ test("legacy raw identity remains compatible and changed bytes become visible", 
 end)
 
 test("a stale acknowledgement never suppresses mismatched canonical truth when cleanup fails", function()
-  write_marker(933, "notify", "generation-h")
-  write_acknowledgement_file(933, "revision\ngeneration-g")
+  write_marker(933, "notify", "publication-b")
+  write_acknowledgement_file(933, "publication\npublication-a")
 
   local ack_path = test_dir .. "/933.ack"
   local real_remove = os.remove
@@ -575,7 +576,7 @@ test("a stale acknowledgement never suppresses mismatched canonical truth when c
 end)
 
 test("canonical absence clears acknowledgement without resurrecting state", function()
-  write_marker(941, "stop", "generation-g")
+  write_marker(941, "stop", "publication-a")
   poll_focused({ tabs = { { 940, 941 } }, active_pane_id = 941 })
   assert(acknowledgement_exists(941), "the sidecar should exist after acknowledgement")
 
@@ -587,7 +588,7 @@ test("canonical absence clears acknowledgement without resurrecting state", func
 end)
 
 test("direct disk reads respect acknowledgement identity", function()
-  write_marker(942, "notify", "generation-g")
+  write_marker(942, "notify", "publication-a")
   poll_focused({ tabs = { { 940, 942 } }, active_pane_id = 942 })
 
   assert(attention.get_attention(942, { dir = test_dir }) == nil,
@@ -595,7 +596,7 @@ test("direct disk reads respect acknowledgement identity", function()
 end)
 
 test("acknowledgement survives a plugin reload without moving canonical truth", function()
-  write_marker(947, "notify", "generation-g")
+  write_marker(947, "notify", "publication-a")
   poll_focused({ tabs = { { 940, 947 } }, active_pane_id = 947 })
   assert(acknowledgement_exists(947), "precondition: sidecar exists")
 
@@ -608,7 +609,7 @@ test("acknowledgement survives a plugin reload without moving canonical truth", 
 end)
 
 test("acknowledgement write failure leaves marker visible and cache truthful", function()
-  write_marker(943, "notify", "generation-g")
+  write_marker(943, "notify", "publication-a")
   poll({ 943 })
 
   local outcome = internal.acknowledge_focused_pane(943, {
@@ -624,7 +625,7 @@ test("acknowledgement write failure leaves marker visible and cache truthful", f
 end)
 
 test("acknowledgement rename failure removes its temp and leaves truth visible", function()
-  write_marker(948, "notify", "generation-g")
+  write_marker(948, "notify", "publication-a")
   poll({ 948 })
 
   local ack_path = test_dir .. "/948.ack"
@@ -650,7 +651,7 @@ test("acknowledgement rename failure removes its temp and leaves truth visible",
 end)
 
 test("public removal clears canonical marker and acknowledgement sidecar", function()
-  write_marker(944, "stop", "generation-g")
+  write_marker(944, "stop", "publication-a")
   poll_focused({ tabs = { { 940, 944 } }, active_pane_id = 944 })
   assert(acknowledgement_exists(944), "precondition: sidecar exists")
 
@@ -662,7 +663,7 @@ test("public removal clears canonical marker and acknowledgement sidecar", funct
 end)
 
 test("pane destruction clears canonical marker and acknowledgement sidecar", function()
-  write_marker(945, "notify", "generation-g")
+  write_marker(945, "notify", "publication-a")
   poll_focused({ tabs = { { 940, 945 } }, active_pane_id = 945 })
   assert(acknowledgement_exists(945), "precondition: sidecar exists")
 
@@ -675,7 +676,8 @@ end)
 
 test("TTL cleanup removes canonical marker and acknowledgement sidecar", function()
   local file = assert(io.open(test_dir .. "/946", "w"))
-  file:write('{"type":"notify","revision":"generation-g","updated_at_ms":1000000000000,"ttl_ms":1000}')
+  file:write('{"type":"notify","publication_id":"publication-a",'
+    .. '"updated_at_ms":1000000000000,"ttl_ms":1000}')
   file:close()
   local w = window_double({ tabs = { { 940, 946 } }, focused = true, active_pane_id = 946 })
   attention.poll(w, { now_ms = 1000000000000 })
@@ -691,7 +693,7 @@ test("TTL cleanup removes canonical marker and acknowledgement sidecar", functio
 end)
 
 test("a stale update-status pane is never destructive authority", function()
-  write_marker(951, "notify", "generation-g")
+  write_marker(951, "notify", "publication-a")
   local w = window_double({ tabs = { { 951, 952 } }, focused = true, active_pane_id = 952 })
 
   attention.poll(w, { active_pane = mux_pane(951) })
@@ -702,7 +704,7 @@ test("a stale update-status pane is never destructive authority", function()
 end)
 
 test("acknowledgement never deletes a newer non-clearable marker", function()
-  write_marker(501, "stop", "generation-g")
+  write_marker(501, "stop", "publication-a")
   write_marker(502, "notify")
 
   local rewrote = false
@@ -712,9 +714,9 @@ test("acknowledgement never deletes a newer non-clearable marker", function()
     on_focus_check = function()
       if rewrote then return end
       rewrote = true
-      -- The poll has already cached generation G. Replace it before current
+      -- The poll has already cached publication A. Replace it before current
       -- active-pane acknowledgement reads physical truth.
-      write_marker(501, "thinking", "generation-h")
+      write_marker(501, "thinking", "publication-b")
     end,
   })
 
@@ -907,7 +909,7 @@ test("polling one window never removes another window's cache entries", function
 end)
 
 test("poll resolves current pane even when the event pane is supplied", function()
-  write_marker(911, "notify", "generation-g")
+  write_marker(911, "notify", "publication-a")
 
   local w = window_double({ tabs = { { 911 } }, focused = true, active_pane_id = 911 })
   attention.poll(w, { active_pane = mux_pane(911) })
@@ -924,7 +926,7 @@ test("the registered update-status handler resolves current pane before acknowle
   second.apply_to_config({}, { dir = test_dir, review_key = false })
 
   local update_status = handlers["update-status"][#handlers["update-status"]]
-  write_marker(921, "notify", "generation-g")
+  write_marker(921, "notify", "publication-a")
 
   local w = window_double({ tabs = { { 921 } }, focused = true, active_pane_id = 921 })
   update_status(w, mux_pane(921))

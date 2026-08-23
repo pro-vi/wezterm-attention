@@ -99,7 +99,7 @@ test("lifecycle: agent_start writes a thinking marker with ttl_ms, updated_at, s
 	const m = readMarker(dir);
 	expect(m.type).toBe("thinking");
 	expect(m.source).toBe("pi");
-	expect(typeof m.revision).toBe("string");
+	expect(typeof m.publication_id).toBe("string");
 	expect(typeof m.ttl_ms).toBe("number");
 	expect(typeof m.updated_at).toBe("number"); // locks the contract field bun won't typecheck
 });
@@ -182,15 +182,15 @@ test("event: a bare string state is accepted", async () => {
 	expect(readMarker(dir).type).toBe("review");
 });
 
-test("publication: identical states receive distinct revisions", async () => {
-	const dir = freshDir("wez-revision-");
+test("publication: identical states receive distinct publication IDs", async () => {
+	const dir = freshDir("wez-publication-");
 	process.env.WEZTERM_PANE = "42";
 	const { emit } = loadExt();
 
 	await emit("notify");
-	const first = readMarker(dir).revision;
+	const first = readMarker(dir).publication_id;
 	await emit("notify");
-	const second = readMarker(dir).revision;
+	const second = readMarker(dir).publication_id;
 
 	expect(typeof first).toBe("string");
 	expect(typeof second).toBe("string");

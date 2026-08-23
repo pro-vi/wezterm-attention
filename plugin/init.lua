@@ -157,8 +157,10 @@ local function read_marker(dir, pane_id)
     return wezterm.json_parse(content)
   end)
   if ok and data and valid_types[data.type] then
-    local revision = type(data.revision) == "string" and data.revision ~= "" and data.revision or nil
-    return data.type, data.frame, normalize_epoch_ms(data.updated_at or data.updated_at_ms), data.ttl_ms, content, revision
+    local publication_id = type(data.publication_id) == "string"
+      and data.publication_id ~= "" and data.publication_id or nil
+    return data.type, data.frame, normalize_epoch_ms(data.updated_at or data.updated_at_ms),
+      data.ttl_ms, content, publication_id
   end
 
   -- Fallback: plain text (backward compat)
@@ -168,20 +170,22 @@ local function read_marker(dir, pane_id)
 end
 
 local acknowledgement_errors = {}
-local revision_counter = 0
-local revision_session = tostring({}):gsub("[^%w]", "")
+local publication_counter = 0
+local publication_session = tostring({}):gsub("[^%w]", "")
 
-local function next_marker_revision()
-  revision_counter = revision_counter + 1
-  return table.concat({ tostring(math.floor(now_ms())), revision_session, revision_counter }, "-")
+local function next_publication_id()
+  publication_counter = publication_counter + 1
+  return table.concat({
+    tostring(math.floor(now_ms())), publication_session, publication_counter,
+  }, "-")
 end
 
 local function acknowledgement_path(dir, pane_id)
   return dir .. "/" .. pane_id .. ".ack"
 end
 
-local function marker_identity(revision, raw)
-  if revision then return "revision\n" .. revision end
+local function marker_identity(publication_id, raw)
+  if publication_id then return "publication\n" .. publication_id end
   return "raw\n" .. (raw or "")
 end
 
@@ -251,14 +255,14 @@ local function write_acknowledgement(dir, pane_id, identity)
   return true
 end
 
-local function acknowledgement_matches(dir, pane_id, raw, revision)
+local function acknowledgement_matches(dir, pane_id, raw, publication_id)
   local acknowledged = read_acknowledgement(dir, pane_id)
   if not raw then
     if acknowledged then clear_acknowledgement(dir, pane_id) end
     return false
   end
 
-  local identity = marker_identity(revision, raw)
+  local identity = marker_identity(publication_id, raw)
   if acknowledged == identity then return true end
 
   -- Cleanup is best-effort. A stale sidecar never suppresses absent or
@@ -270,9 +274,9 @@ end
 local function read_effective_marker(dir, pane_id)
   -- A crash can strand only the temporary sidecar. It was never authoritative.
   os.remove(acknowledgement_path(dir, pane_id) .. ".tmp")
-  local atype, frame, updated_at, marker_ttl_ms, raw, revision = read_marker(dir, pane_id)
-  if acknowledgement_matches(dir, pane_id, raw, revision) then return nil end
-  return atype, frame, updated_at, marker_ttl_ms, raw, revision
+  local atype, frame, updated_at, marker_ttl_ms, raw, publication_id = read_marker(dir, pane_id)
+  if acknowledgement_matches(dir, pane_id, raw, publication_id) then return nil end
+  return atype, frame, updated_at, marker_ttl_ms, raw, publication_id
 end
 
 local function remove_marker(dir, pane_id)
@@ -457,7 +461,7 @@ local function acknowledge_focused_pane(pane_id, opts)
   local cached = attention_cache[id]
   if not (cached and acknowledge_set[cached.type]) then return "absent" end
 
-  local current_type, current_frame, _, _, raw, revision = read_marker(dir, id)
+  local current_type, current_frame, _, _, raw, publication_id = read_marker(dir, id)
   if not current_type then
     clear_acknowledgement(dir, id)
     attention_cache[id] = nil
@@ -471,7 +475,7 @@ local function acknowledge_focused_pane(pane_id, opts)
   end
 
   local write_ack = (opts and opts.write_acknowledgement) or write_acknowledgement
-  if not write_ack(dir, id, marker_identity(revision, raw)) then
+  if not write_ack(dir, id, marker_identity(publication_id, raw)) then
     cache_marker_values(id, current_type, current_frame, raw, observed_now)
     return "failed"
   end
@@ -671,8 +675,8 @@ function M.poll(window, opts)
   for _, tab in ipairs(mux_tabs) do
     for _, p in ipairs(tab:panes()) do
       local id = tostring(p:pane_id())
-      local atype, frame, updated_at, marker_ttl_ms, raw, revision = read_marker(dir, id)
-      local acknowledged = acknowledgement_matches(dir, id, raw, revision)
+      local atype, frame, updated_at, marker_ttl_ms, raw, publication_id = read_marker(dir, id)
+      local acknowledged = acknowledgement_matches(dir, id, raw, publication_id)
       if atype then
         local cached = attention_cache[id]
         local observed_at = now
@@ -972,8 +976,8 @@ function M.apply_to_config(config, opts)
           wezterm.log_error("wezterm-attention: failed to write review marker " .. path)
           return
         end
-        local revision = next_marker_revision()
-        local raw = '{"type":"review","revision":"' .. revision .. '"}'
+        local publication_id = next_publication_id()
+        local raw = '{"type":"review","publication_id":"' .. publication_id .. '"}'
         w:write(raw)
         w:close()
         if os.rename(tmp, path) then
