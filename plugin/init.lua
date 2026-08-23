@@ -506,6 +506,7 @@ local redraw_budget = {}
 local redraw_budget_reported = false
 local redraw_disabled = {}
 local redraw_pending = {}
+local redraw_in_flight = {}
 
 local function report_missing_once(method_name, impact)
   if reported_missing[method_name] then return end
@@ -757,14 +758,23 @@ function M.poll(window, opts)
   end
 
   local window_key = redraw_window_key(window)
+  if redraw_in_flight[window_key] then
+    if changed then redraw_pending[window_key] = true end
+    return
+  end
+
   local needs_redraw = changed or redraw_pending[window_key]
   if needs_redraw then
     if redraw_disabled[window_key] then
       redraw_pending[window_key] = nil
     elseif redraw_allowed(window, now) then
-      if request_tab_bar_redraw(window, action_pane) or redraw_disabled[window_key] then
+      redraw_pending[window_key] = nil
+      redraw_in_flight[window_key] = true
+      local succeeded = request_tab_bar_redraw(window, action_pane)
+      redraw_in_flight[window_key] = nil
+      if redraw_disabled[window_key] then
         redraw_pending[window_key] = nil
-      else
+      elseif not succeeded then
         redraw_pending[window_key] = true
       end
     else

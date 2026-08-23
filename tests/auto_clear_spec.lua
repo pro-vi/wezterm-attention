@@ -943,6 +943,32 @@ test("a budget-rejected final projection is retried after reset", function()
   assert(#w.actions == 5, "the final projection should redraw after the budget resets")
 end)
 
+test("a pending redraw retry does not re-enter before the action returns", function()
+  local current_now = 1000
+  local w = window_double({
+    tabs = { { 870, 875 } },
+    focused = true,
+    active_pane_id = 870,
+    on_action = function(window)
+      attention.poll(window, { now_ms = current_now })
+    end,
+  })
+  for i = 1, 5 do
+    if i % 2 == 1 then
+      write_marker(875, "notify")
+    else
+      os.remove(test_dir .. "/875")
+    end
+    attention.poll(w, { now_ms = current_now })
+  end
+  assert(#w.actions == 4, "precondition: fifth change is pending")
+
+  current_now = 2000
+  attention.poll(w, { now_ms = current_now })
+  assert(#w.actions == 5,
+    "the pending retry must request exactly one action, got " .. #w.actions)
+end)
+
 test("a failed redraw action leaves marker and cache truth intact", function()
   write_marker(881, "notify")
 
