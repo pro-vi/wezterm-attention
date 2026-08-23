@@ -11,7 +11,9 @@ A WezTerm plugin that turns your tab bar into a notification system. Any CLI too
 | `notify` | ! | Rose | Something needs your attention |
 | `review` | ◆ | Gold | Manually flagged for review |
 
-Tabs light up when a background process writes a marker—even when another pane in that tab is currently focused. Focusing a pane auto-clears only that pane's `stop` and `notify`; markers from unfocused sibling panes remain visible until you visit them. `thinking` and `review` persist until explicitly removed.
+Tabs light up when a background process writes a marker—even when another pane in that tab is currently focused, and even when the tab itself is not the one you are on. Focusing a pane acknowledges only that pane's `stop` and `notify`; markers from unfocused sibling panes remain visible until you visit them. `thinking` persists until its writer removes it or its TTL expires; `review` persists until explicitly removed.
+
+Only the active pane of the focused window is acknowledged. The writer-owned marker stays in place; the plugin records the exact displayed identity in a `.ack` sidecar, so unseen notifications remain visible.
 
 When multiple panes in a tab have different states, the highest-priority one wins: **notify > stop > review > thinking**.
 
@@ -26,7 +28,7 @@ attention.apply_to_config(config)
 
 By default, the plugin owns tab title formatting (`dir / title` + attention indicators). It also registers pane cleanup, a marker poller, and an `Alt+B` keybind to toggle review mode. `Alt+B` operates on the whole active tab: it flags the active pane, and clears the flag from every pane in the tab when any are already flagged (so split tabs can always be cleared with one press). It keys off whether `review` is set anywhere in the tab, independent of which indicator is currently rendered — a higher-priority `stop`/`notify` can mask the ◆.
 
-> **Important:** WezTerm only runs the **first** registered `format-tab-title` handler. If another plugin (e.g. tabline.wez) registers one before this plugin, all attention features — indicators, colors, and auto-clear — are disabled. Make sure `apply_to_config` runs before any other plugin that touches tab titles, or use `renderer = "manual"` to integrate via the API instead.
+> **Important:** WezTerm only runs the **first** registered `format-tab-title` handler. If another plugin (e.g. tabline.wez) registers one first, this plugin still polls and acknowledges markers, but its indicators and colors are not rendered. Make sure `apply_to_config` runs first, or use `renderer = "manual"` to integrate via the API instead.
 
 ## Render modes
 
@@ -97,7 +99,14 @@ attention.apply_to_config(config, {
   -- Priority order (last = highest)
   priority = { "thinking", "review", "stop", "notify" },
 
-  -- Auto-clear these types when focusing their pane
+  -- Wall-clock bucket used for generated thinking frames. A coarse WezTerm
+  -- clock clamps this to its actual resolution.
+  frame_interval_ms = 1000,
+
+  -- Per-window safety cap for poll-triggered compatibility redraws.
+  max_redraws_per_second = 4,
+
+  -- Visually acknowledge these types when focusing their pane
   auto_clear = { "stop", "notify" },
 
   -- Stale marker cleanup by type, in milliseconds.
@@ -120,9 +129,10 @@ Any process running inside WezTerm can write a marker. The contract is:
 1. **Write** a JSON file to `~/.local/state/wezterm-attention/<WEZTERM_PANE>`
 2. **Contents:** `{"type":"<state>"}` where state is `thinking`, `stop`, `notify`, or `review`
 3. **Optional:** `{"type":"thinking","frame":0}` — `frame` (0-3) controls the spinner position. If omitted for `thinking`, the plugin animates it during polling.
-4. **Optional:** `updated_at` or `updated_at_ms` records when the marker was refreshed. Seconds and milliseconds are both accepted.
-5. **Optional:** `ttl_ms` overrides stale cleanup for that marker. By default, stale `thinking` markers clear after 30 minutes.
-6. **Cleanup** is automatic — markers are removed when panes close, their panes become focused, or stale TTL expires
+4. **Recommended:** `publication_id` is a new non-empty string for every publication. It lets an identical `stop` or `notify` payload become visible again after the previous publication was acknowledged. Without it, the plugin uses the exact JSON bytes as the legacy identity.
+5. **Optional:** `updated_at` or `updated_at_ms` records when the marker was refreshed. Seconds and milliseconds are both accepted.
+6. **Optional:** `ttl_ms` overrides stale cleanup for that marker. By default, stale `thinking` markers clear after 30 minutes.
+7. **Cleanup** is automatic — canonical markers are removed when panes close or stale TTL expires. Focusing a pane writes an acknowledgement sidecar instead of removing writer-owned state.
 
 The `WEZTERM_PANE` environment variable is injected by WezTerm into every shell it spawns. That's the pane's unique ID — always a non-negative integer. Validate it (`/^\d+$/`) before building a path from it: a stray `../…` value would otherwise write to, or delete, a file outside the marker directory. Every example and fragment below enforces this.
 
@@ -134,13 +144,15 @@ The `WEZTERM_PANE` environment variable is injected by WezTerm into every shell 
 case "$WEZTERM_PANE" in '' | *[!0-9]*) exit 0 ;; esac  # numeric pane id only
 MARKER_DIR="$HOME/.local/state/wezterm-attention"
 mkdir -p "$MARKER_DIR"
-printf '{"type":"stop","updated_at":%s}\n' "$(date +%s)" > "$MARKER_DIR/$WEZTERM_PANE.tmp" && mv "$MARKER_DIR/$WEZTERM_PANE.tmp" "$MARKER_DIR/$WEZTERM_PANE"
+if command -v uuidgen >/dev/null 2>&1; then PUBLICATION_ID="$(uuidgen)"; else PUBLICATION_ID="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"; fi
+printf '{"type":"stop","publication_id":"%s","updated_at":%s}\n' "$PUBLICATION_ID" "$(date +%s)" > "$MARKER_DIR/$WEZTERM_PANE.tmp" && mv "$MARKER_DIR/$WEZTERM_PANE.tmp" "$MARKER_DIR/$WEZTERM_PANE"
 ```
 
 ### TypeScript / Bun
 
 ```typescript
 import { mkdir, writeFile, rename } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
 const pane = process.env.WEZTERM_PANE;
@@ -150,7 +162,7 @@ const dir = join(process.env.HOME!, ".local", "state", "wezterm-attention");
 await mkdir(dir, { recursive: true });
 
 const file = join(dir, pane);
-await writeFile(file + ".tmp", JSON.stringify({ type: "stop", updated_at: Date.now() }));
+await writeFile(file + ".tmp", JSON.stringify({ type: "stop", publication_id: randomUUID(), updated_at: Date.now() }));
 await rename(file + ".tmp", file);
 ```
 
@@ -159,6 +171,7 @@ await rename(file + ".tmp", file);
 ```javascript
 const fs = require("fs");
 const path = require("path");
+const { randomUUID } = require("crypto");
 
 const pane = process.env.WEZTERM_PANE;
 if (!pane || !/^\d+$/.test(pane)) process.exit(0); // numeric pane id only
@@ -167,7 +180,7 @@ const dir = path.join(process.env.HOME, ".local", "state", "wezterm-attention");
 fs.mkdirSync(dir, { recursive: true });
 
 const file = path.join(dir, pane);
-fs.writeFileSync(file + ".tmp", JSON.stringify({ type: "stop", updated_at: Date.now() }));
+fs.writeFileSync(file + ".tmp", JSON.stringify({ type: "stop", publication_id: randomUUID(), updated_at: Date.now() }));
 fs.renameSync(file + ".tmp", file);
 ```
 
@@ -180,7 +193,7 @@ attention.apply_to_config(config, { auto_poll = false })
 
 -- Then in your existing update-status handler:
 wezterm.on('update-status', function(window, pane)
-  attention.poll(window)  -- reads markers, updates cache
+  attention.poll(window, { active_pane = pane })  -- compatibility transport for older WezTerm builds
   -- ... your git status bar, battery, etc.
 end)
 ```
@@ -199,7 +212,7 @@ local state, frame = attention.get_attention(pane:pane_id())
 attention.remove_marker(pane:pane_id())
 
 -- Poll markers manually (for auto_poll = false)
-attention.poll(window)
+attention.poll(window, { active_pane = pane })
 
 -- Wrap a title function with attention decoration (for renderer = "manual")
 wezterm.on("format-tab-title", attention.wrap_title_formatter(function(tab, ctx)
@@ -280,6 +293,7 @@ Register hooks in `~/.claude/settings.json`:
 ```typescript
 if (process.env.WEZTERM_PANE && /^\d+$/.test(process.env.WEZTERM_PANE)) {
   const { mkdirSync, writeFileSync, readFileSync, renameSync } = require('fs');
+  const { randomUUID } = require('crypto');
   const markerDir = `${process.env.HOME}/.local/state/wezterm-attention`;
   const markerFile = `${markerDir}/${process.env.WEZTERM_PANE}`;
 
@@ -290,7 +304,7 @@ if (process.env.WEZTERM_PANE && /^\d+$/.test(process.env.WEZTERM_PANE)) {
   } catch {}
 
   mkdirSync(markerDir, { recursive: true });
-  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'thinking', frame, updated_at: Date.now() }));
+  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'thinking', publication_id: randomUUID(), frame, updated_at: Date.now() }));
   renameSync(markerFile + '.tmp', markerFile);
 }
 ```
@@ -299,10 +313,11 @@ if (process.env.WEZTERM_PANE && /^\d+$/.test(process.env.WEZTERM_PANE)) {
 ```typescript
 if (process.env.WEZTERM_PANE && /^\d+$/.test(process.env.WEZTERM_PANE)) {
   const { mkdirSync, writeFileSync, renameSync } = require('fs');
+  const { randomUUID } = require('crypto');
   const markerDir = `${process.env.HOME}/.local/state/wezterm-attention`;
   const markerFile = `${markerDir}/${process.env.WEZTERM_PANE}`;
   mkdirSync(markerDir, { recursive: true });
-  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'stop', updated_at: Date.now() }));
+  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'stop', publication_id: randomUUID(), updated_at: Date.now() }));
   renameSync(markerFile + '.tmp', markerFile);
 }
 ```
@@ -311,10 +326,11 @@ if (process.env.WEZTERM_PANE && /^\d+$/.test(process.env.WEZTERM_PANE)) {
 ```typescript
 if (process.env.WEZTERM_PANE && /^\d+$/.test(process.env.WEZTERM_PANE)) {
   const { mkdirSync, writeFileSync, renameSync } = require('fs');
+  const { randomUUID } = require('crypto');
   const markerDir = `${process.env.HOME}/.local/state/wezterm-attention`;
   const markerFile = `${markerDir}/${process.env.WEZTERM_PANE}`;
   mkdirSync(markerDir, { recursive: true });
-  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'notify', updated_at: Date.now() }));
+  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'notify', publication_id: randomUUID(), updated_at: Date.now() }));
   renameSync(markerFile + '.tmp', markerFile);
 }
 ```
@@ -328,8 +344,6 @@ if (process.env.WEZTERM_PANE && /^\d+$/.test(process.env.WEZTERM_PANE)) {
   } catch {}
 }
 ```
-
-> **Tip:** Add `` execSync(`wezterm cli set-window-title --pane-id ${process.env.WEZTERM_PANE} " "`) `` after writing a marker to force an immediate tab redraw instead of waiting for the next poll cycle.
 
 ## Codex hooks
 
@@ -366,12 +380,13 @@ async function writeWezTermMarker(marker: Record<string, unknown>): Promise<void
   // `require` is undefined under Node in module mode (throws). `await import`
   // works under both Node ESM and bun.
   const { mkdir, writeFile, rename } = await import("node:fs/promises");
+  const { randomUUID } = await import("node:crypto");
   const { join } = await import("node:path");
 
   const dir = join(home, ".local", "state", "wezterm-attention");
   await mkdir(dir, { recursive: true });
   const file = join(dir, paneId);
-  await writeFile(file + ".tmp", JSON.stringify({ source: "codex", updated_at_ms: Date.now(), ...marker }));
+  await writeFile(file + ".tmp", JSON.stringify({ source: "codex", updated_at_ms: Date.now(), ...marker, publication_id: randomUUID() }));
   await rename(file + ".tmp", file); // atomic
 }
 // PreToolUse:        writeWezTermMarker({ type: "thinking" })
@@ -403,8 +418,12 @@ it isn't wired here yet.
 
 The plugin uses a **poller/renderer split** to avoid blocking WezTerm's GUI thread:
 
-1. **Poller** (`update-status` event) — runs on WezTerm's `config.status_update_interval` (default 1000ms). Reads marker files from disk and updates an in-memory cache.
-2. **Renderer** (`format-tab-title` event) — fires on every tab repaint (mouse hover, key press, redraws). Reads only from the cache — zero I/O, instant returns.
+1. **Poller** (`update-status` event) — runs on WezTerm's `config.status_update_interval` (default 1000ms). Reads marker files and acknowledgement sidecars, then updates an in-memory cache. It acknowledges the focused window's current active pane and asks WezTerm to rebuild the tab bar only when what the tab bar would show has changed.
+2. **Renderer** (`format-tab-title` event) — fires on every tab repaint (mouse hover, key press, redraws). Reads only from the cache — zero I/O, instant returns, and no writes of any kind.
+
+WezTerm rebuilds tab titles when something it knows about changes, and a marker file appearing on disk is not one of those things. When the poller sees a visible attention change, it performs `ActivateTabRelative(0)` on the focused window. That re-activates the already-selected tab and makes WezTerm recompute every tab title. The plugin does not write either status string, the window title, or any user title.
+
+The compatibility action can pass through WezTerm's normal tab-activation path, including terminal focus reporting. It therefore runs only when the window has keyboard focus and a valid active pane. The plugin compares only what the tab bar shows—indicator, type, and color—so a marker changing behind a higher-priority sibling costs nothing. Generated spinner frames come from wall-clock buckets, so polls induced by the action see the same frame and terminate. A per-window redraw budget is the final backstop. If an action fails, that window logs once and stops requesting compatibility redraws.
 
 No background threads, no FFI, no external dependencies — just filesystem reads in Lua on a configurable interval.
 
@@ -414,8 +433,13 @@ No background threads, no FFI, no external dependencies — just filesystem read
 - Check the directory exists: `ls ~/.local/state/wezterm-attention/` (or your configured `dir`)
 - Verify `WEZTERM_PANE` is set: `echo $WEZTERM_PANE` (should print a number inside WezTerm)
 - Check file contents: `cat ~/.local/state/wezterm-attention/$WEZTERM_PANE` (should be valid JSON)
+- A matching `$WEZTERM_PANE.ack` means that publication was already displayed. Removing the sidecar makes it visible again; sidecars are plugin-owned and safe to remove before rolling back to an older plugin version.
 - Ensure your hooks write to the same path as the plugin's `dir` setting
-- `status_update_interval` defaults to 1000ms; markers update on this interval
+- `status_update_interval` defaults to 1000ms; markers update on this interval. Lower it if indicators feel slow — the redraw request rides on the same tick.
+
+**Indicators appear only when you switch tabs?**
+- The redraw needs `window:is_focused()`, `window:active_pane()`, and `window:perform_action()`. On a build missing any of them the plugin logs once to the WezTerm error log and falls back to WezTerm's own redraw timing.
+- In `renderer = "manual"` mode, pass the event pane: `attention.poll(window, { active_pane = pane })`. The plugin resolves `window:active_pane()` at use time; the event pane is used only when the current pane is unavailable.
 
 **Tab titles look wrong?**
 - WezTerm only runs the **first** registered `format-tab-title` handler. If you have your own handler, set `renderer = "manual"` and use `wrap_title_formatter()` or the plugin API. Two handlers cannot coexist.

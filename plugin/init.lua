@@ -31,10 +31,17 @@ local defaults = {
     review = "◆ ",
   },
 
+  -- Generated thinking frames are derived from wall-clock buckets. The
+  -- default matches WezTerm's default status update interval.
+  frame_interval_ms = 1000,
+
+  -- Backstop for unexpected event feedback from the redraw action.
+  max_redraws_per_second = 4,
+
   -- Higher index = higher priority when multiple panes have attention
   priority = { "thinking", "review", "stop", "notify" },
 
-  -- These types auto-clear when their pane becomes active
+  -- These types are acknowledged when their pane becomes active
   auto_clear = { "stop", "notify" },
 
   -- Stale marker cleanup by type, in milliseconds. Prevents zombie busy tabs
@@ -48,8 +55,68 @@ local defaults = {
 -- Known attention types (reject unknown values from marker files)
 local valid_types = { thinking = true, stop = true, notify = true, review = true }
 
-local function now_ms()
+local function coarse_now_ms()
   return os.time() * 1000
+end
+
+-- Bind one wall-clock source for this Lua generation. `%s%3f` is Chrono's
+-- seconds-plus-three-fractional-digits form, which produces integer epoch
+-- milliseconds. Builds without that API use the known one-second fallback.
+local clock_resolution = 1000
+local clock_now_ms = coarse_now_ms
+local clock_fallback_reported = false
+
+local function wezterm_clock_ms()
+  local value = tonumber(wezterm.time.now():format_utc("%s%3f"))
+  if not value or value < 1000000000000 then
+    error("unexpected wezterm.time millisecond value")
+  end
+  return value
+end
+
+if wezterm.time and type(wezterm.time.now) == "function" then
+  local ok = pcall(wezterm_clock_ms)
+  if ok then
+    clock_resolution = 1
+    clock_now_ms = function()
+      local current_ok, value = pcall(wezterm_clock_ms)
+      if current_ok then return value end
+
+      -- A later clock failure must fail coarse, never keep claiming a finer
+      -- resolution than the source can provide.
+      clock_resolution = 1000
+      clock_now_ms = coarse_now_ms
+      if not clock_fallback_reported then
+        clock_fallback_reported = true
+        wezterm.log_error("wezterm-attention: high-resolution clock failed; using one-second animation buckets")
+      end
+      return clock_now_ms()
+    end
+  end
+end
+
+local function now_ms()
+  return clock_now_ms()
+end
+
+local function clock_resolution_ms()
+  return clock_resolution
+end
+
+local function positive_number(value, fallback)
+  local number = tonumber(value)
+  if not number or number <= 0 or number ~= number then return fallback end
+  return number
+end
+
+local function effective_frame_interval_ms()
+  local configured = M._active_frame_interval_ms or defaults.frame_interval_ms
+  return math.max(configured, clock_resolution_ms())
+end
+
+local function frame_for_now(poll_now_ms, frame_count)
+  if frame_count <= 0 then return 0 end
+  return math.floor(poll_now_ms / effective_frame_interval_ms()) % frame_count
 end
 
 local function normalize_epoch_ms(value)
@@ -90,7 +157,10 @@ local function read_marker(dir, pane_id)
     return wezterm.json_parse(content)
   end)
   if ok and data and valid_types[data.type] then
-    return data.type, data.frame, normalize_epoch_ms(data.updated_at or data.updated_at_ms), data.ttl_ms, content
+    local publication_id = type(data.publication_id) == "string"
+      and data.publication_id ~= "" and data.publication_id or nil
+    return data.type, data.frame, normalize_epoch_ms(data.updated_at or data.updated_at_ms),
+      data.ttl_ms, content, publication_id
   end
 
   -- Fallback: plain text (backward compat)
@@ -99,13 +169,125 @@ local function read_marker(dir, pane_id)
   return nil
 end
 
+local acknowledgement_errors = {}
+local publication_counter = 0
+local publication_session = tostring({}):gsub("[^%w]", "")
+
+local function next_publication_id()
+  publication_counter = publication_counter + 1
+  return table.concat({
+    tostring(math.floor(now_ms())), publication_session, publication_counter,
+  }, "-")
+end
+
+local function acknowledgement_path(dir, pane_id)
+  return dir .. "/" .. pane_id .. ".ack"
+end
+
+local function marker_identity(publication_id, raw)
+  if publication_id then return "publication\n" .. publication_id end
+  return "raw\n" .. (raw or "")
+end
+
+local function read_acknowledgement(dir, pane_id)
+  local file = io.open(acknowledgement_path(dir, pane_id), "r")
+  if not file then return nil end
+  local identity = file:read("*a")
+  file:close()
+  return identity
+end
+
+local function report_acknowledgement_error_once(key, message)
+  if acknowledgement_errors[key] then return end
+  acknowledgement_errors[key] = true
+  wezterm.log_error("wezterm-attention: " .. message)
+end
+
+local function clear_acknowledgement(dir, pane_id)
+  local path = acknowledgement_path(dir, pane_id)
+  local existing = io.open(path, "r")
+  if not existing then return true end
+  existing:close()
+
+  local ok, err = os.remove(path)
+  if ok then return true end
+  report_acknowledgement_error_once(
+    "clear:" .. pane_id,
+    "failed to remove acknowledgement " .. path .. ": " .. tostring(err))
+  return false
+end
+
+local function write_acknowledgement(dir, pane_id, identity)
+  local path = acknowledgement_path(dir, pane_id)
+  local tmp = path .. ".tmp"
+  os.remove(tmp)
+  local file, open_err = io.open(tmp, "w")
+  if not file then
+    report_acknowledgement_error_once(
+      "write:" .. pane_id,
+      "failed to write acknowledgement " .. tmp .. ": " .. tostring(open_err))
+    return false
+  end
+
+  local wrote, write_err = file:write(identity)
+  local closed, close_err = file:close()
+  if not wrote or not closed then
+    os.remove(tmp)
+    report_acknowledgement_error_once(
+      "write:" .. pane_id,
+      "failed to finish acknowledgement " .. tmp .. ": " .. tostring(write_err or close_err))
+    return false
+  end
+
+  if not clear_acknowledgement(dir, pane_id) then
+    os.remove(tmp)
+    return false
+  end
+
+  local renamed, rename_err = os.rename(tmp, path)
+  if not renamed then
+    os.remove(tmp)
+    report_acknowledgement_error_once(
+      "write:" .. pane_id,
+      "failed to place acknowledgement " .. path .. ": " .. tostring(rename_err))
+    return false
+  end
+  return true
+end
+
+local function acknowledgement_matches(dir, pane_id, raw, publication_id)
+  local acknowledged = read_acknowledgement(dir, pane_id)
+  if not raw then
+    if acknowledged then clear_acknowledgement(dir, pane_id) end
+    return false
+  end
+
+  local identity = marker_identity(publication_id, raw)
+  if acknowledged == identity then return true end
+
+  -- Cleanup is best-effort. A stale sidecar never suppresses absent or
+  -- mismatched canonical truth even when it cannot be removed.
+  if acknowledged then clear_acknowledgement(dir, pane_id) end
+  return false
+end
+
+local function read_effective_marker(dir, pane_id)
+  -- A crash can strand only the temporary sidecar. It was never authoritative.
+  os.remove(acknowledgement_path(dir, pane_id) .. ".tmp")
+  local atype, frame, updated_at, marker_ttl_ms, raw, publication_id = read_marker(dir, pane_id)
+  if acknowledgement_matches(dir, pane_id, raw, publication_id) then return nil end
+  return atype, frame, updated_at, marker_ttl_ms, raw, publication_id
+end
+
 local function remove_marker(dir, pane_id)
   os.remove(dir .. "/" .. pane_id)
+  clear_acknowledgement(dir, pane_id)
+  os.remove(acknowledgement_path(dir, pane_id) .. ".tmp")
 end
 
 -- ── In-memory cache ─────────────────────────────────────────────────────────
 -- format-tab-title must not poll every pane from disk (it blocks the GUI
--- thread). update-status fills this cache; auto-clear performs one confirmation
+-- thread). update-status fills this cache; acknowledgement performs one confirmation
 -- read only when acknowledging a cached terminal marker.
 
 local attention_cache = {} -- { [pane_id_string] = { type = "stop", frame = 0 } }
@@ -127,9 +309,58 @@ local function default_title(tab)
   return dir_name ~= "" and (dir_name .. " / " .. title) or title
 end
 
---- Get the resolved attention indicator and type for a tab.
---- Considers all panes and applies priority. Returns (indicator, type, color) or ("", nil, nil).
-local function get_tab_attention(tab, opts)
+--- Pane IDs of one tab, as the GUI hands them to format-tab-title.
+local function gui_tab_pane_ids(tab)
+  local ids = {}
+  for _, p in ipairs(tab.panes) do
+    ids[#ids + 1] = tostring(p.pane_id)
+  end
+  return ids
+end
+
+--- Pane IDs of one tab, as the mux hands them to poll().
+local mux_projection_fallback_reported = false
+
+local function mux_tab_pane_ids(tab)
+  local panes_with_info = tab.panes_with_info
+  if type(panes_with_info) == "function" then
+    local ok, infos = pcall(panes_with_info, tab)
+    if ok and type(infos) == "table" then
+      local all = {}
+      local zoomed = {}
+      for _, info in ipairs(infos) do
+        local pane = info.pane
+        if pane then
+          local id = tostring(pane:pane_id())
+          all[#all + 1] = id
+          if info.is_zoomed then zoomed[#zoomed + 1] = id end
+        end
+      end
+      if #zoomed > 0 then return zoomed end
+      return all
+    end
+  end
+
+  if not mux_projection_fallback_reported then
+    mux_projection_fallback_reported = true
+    wezterm.log_error(
+      "wezterm-attention: this WezTerm build does not expose tab:panes_with_info(); " ..
+      "zoomed tabs may redraw on hidden-pane changes")
+  end
+
+  local ids = {}
+  for _, p in ipairs(tab:panes()) do
+    ids[#ids + 1] = tostring(p:pane_id())
+  end
+  return ids
+end
+
+--- Project one tab's panes into exactly what a title formatter can see:
+--- { indicator = string, type = string|nil, color = string|nil }.
+--- Pane IDs are the input, not a GUI or mux tab object, so the renderer and
+--- the poller resolve the same value from the same tab. Panes with no cache
+--- entry contribute nothing.
+local function resolve_visible_attention(pane_ids, opts)
   local cfg_indicators = (opts and opts.indicators) or M._active_indicators or defaults.indicators
   local cfg_colors = (opts and opts.colors) or M._active_colors or defaults.colors
   local cfg_priority = M._active_priority_map or {}
@@ -138,8 +369,8 @@ local function get_tab_attention(tab, opts)
   local best_priority = -1
   local best_frame    = nil
 
-  for _, p in ipairs(tab.panes) do
-    local cached = attention_cache[tostring(p.pane_id)]
+  for _, id in ipairs(pane_ids) do
+    local cached = attention_cache[id]
     if cached then
       local pri = cfg_priority[cached.type] or 0
       if pri > best_priority then
@@ -150,20 +381,32 @@ local function get_tab_attention(tab, opts)
     end
   end
 
-  if not best_type then return "", nil, nil end
+  if not best_type then
+    return { indicator = "", type = nil, color = nil }
+  end
 
   local indicator = ""
   if best_type == "thinking" then
     local frames = cfg_indicators.thinking_frames
-    indicator = frames[((best_frame or 0) % #frames) + 1]
+    if frames and #frames > 0 then
+      indicator = frames[((best_frame or 0) % #frames) + 1]
+    end
   elseif cfg_indicators[best_type] then
     indicator = cfg_indicators[best_type]
   end
 
-  return indicator, best_type, cfg_colors[best_type]
+  return { indicator = indicator, type = best_type, color = cfg_colors[best_type] }
 end
 
---- Return the panes of the tab that contains pane_id, or nil if none does.
+--- Two projections are the same iff a viewer could not tell them apart.
+--- Marker bytes, TTL metadata, pane ordering and cache identity are all
+--- deliberately excluded: a change none of these three fields reflects is a
+--- change no tab title would show.
+local function same_visible_attention(a, b)
+  return a.indicator == b.indicator and a.type == b.type and a.color == b.color
+end
+
+--- Return the panes and tab that contain pane_id, or nil if none does.
 --- Uses only mux_win:tabs()/tab:panes() — the same WezTerm API surface poll()
 --- already calls every tick — so it stays within the plugin's compatibility
 --- floor (active_tab()/active_pane() don't exist on the oldest plugin builds).
@@ -172,43 +415,201 @@ local function tab_panes_containing(mux_win, pane_id)
     local panes = tab:panes()
     for _, p in ipairs(panes) do
       if tostring(p:pane_id()) == pane_id then
-        return panes
+        return panes, tab
       end
     end
   end
   return nil
 end
 
---- Auto-clear an applicable marker on the active pane (stop, notify by default).
-local function auto_clear_active_pane(tab)
-  local dir = M._active_dir or defaults.dir
-  local clear_set = M._active_clear_set or { stop = true, notify = true }
-  local pane = tab.active_pane
-  if not pane then return end
+--- Acknowledge the one pane the user is actually looking at: suppress its
+--- effective attention if disk still says its type is one they configured to acknowledge on
+--- sight (stop, notify by default). Canonical writer truth is never moved or
+--- removed; the acknowledged marker identity is written to a sidecar instead.
+---
+--- The caller must already have established that the GUI window has keyboard
+--- focus and that this is its active pane. Both conditions matter: a marker
+--- acknowledged while its window is in the background is a notification the user
+--- never saw.
+---
+local function cache_marker_values(id, atype, frame, raw, observed_now)
+  if not atype then
+    attention_cache[id] = nil
+    return
+  end
 
-  local id = tostring(pane.pane_id)
+  if atype == "thinking" and frame == nil then
+    local cfg_indicators = M._active_indicators or defaults.indicators
+    local frames = cfg_indicators.thinking_frames or defaults.indicators.thinking_frames
+    frame = frame_for_now(observed_now, #frames)
+  end
+
+  attention_cache[id] = {
+    type        = atype,
+    frame       = frame,
+    observed_at = observed_now,
+    raw         = raw,
+  }
+end
+
+local function acknowledge_focused_pane(pane_id, opts)
+  local dir = (opts and opts.dir) or M._active_dir or defaults.dir
+  local acknowledge_set = M._active_acknowledge_set or { stop = true, notify = true }
+  local observed_now = (opts and opts.now_ms) or now_ms()
+
+  local id = tostring(pane_id)
   local cached = attention_cache[id]
-  if cached and clear_set[cached.type] then
-    -- Confirm disk truth before a destructive clear. A new turn can replace a
-    -- cached stop with thinking between poll() and this title callback; deleting
-    -- from the stale cache would erase the new lifecycle state.
-    local current_type, current_frame, updated_at, marker_ttl_ms, raw = read_marker(dir, id)
-    if current_type and clear_set[current_type] then
-      remove_marker(dir, id)
-      attention_cache[id] = nil
-    elseif current_type then
-      attention_cache[id] = {
-        type        = current_type,
-        frame       = current_frame,
-        updated_at  = updated_at,
-        observed_at = now_ms(),
-        ttl_ms      = marker_ttl_ms,
-        raw         = raw,
-      }
-    else
-      attention_cache[id] = nil
+  if not (cached and acknowledge_set[cached.type]) then return "absent" end
+
+  local current_type, current_frame, _, _, raw, publication_id = read_marker(dir, id)
+  if not current_type then
+    clear_acknowledgement(dir, id)
+    attention_cache[id] = nil
+    return "absent"
+  end
+
+  if not acknowledge_set[current_type] then
+    clear_acknowledgement(dir, id)
+    cache_marker_values(id, current_type, current_frame, raw, observed_now)
+    return "kept"
+  end
+
+  local write_ack = (opts and opts.write_acknowledgement) or write_acknowledgement
+  if not write_ack(dir, id, marker_identity(publication_id, raw)) then
+    cache_marker_values(id, current_type, current_frame, raw, observed_now)
+    return "failed"
+  end
+
+  -- A writer may replace or clear the marker while the sidecar is being
+  -- written. Re-read effective truth before updating the cache: only the exact
+  -- identity that was viewed is suppressed.
+  local effective_type, effective_frame, _, _, effective_raw = read_effective_marker(dir, id)
+  cache_marker_values(id, effective_type, effective_frame, effective_raw, observed_now)
+  return effective_type and "kept" or "acknowledged"
+end
+
+-- ── Focus and redraw ────────────────────────────────────────────────────────
+
+-- update-status fires several times a second, so a missing WezTerm method is
+-- reported once per process rather than once per tick.
+local reported_missing = {}
+local redraw_budget = {}
+local redraw_budget_reported = false
+local redraw_disabled = {}
+
+local function report_missing_once(method_name)
+  if reported_missing[method_name] then return end
+  reported_missing[method_name] = true
+  wezterm.log_error(
+    "wezterm-attention: this WezTerm build does not expose window:" .. method_name ..
+    "(); inactive tabs will update only on ordinary WezTerm redraws")
+end
+
+local function redraw_window_key(window)
+  local window_id = window.window_id
+  if type(window_id) == "function" then
+    local ok, id = pcall(window_id, window)
+    if ok and id ~= nil then return tostring(id) end
+  end
+  return tostring(window)
+end
+
+local function redraw_allowed(window, poll_now_ms)
+  local limit = math.floor(
+    M._active_max_redraws_per_second or defaults.max_redraws_per_second)
+  if limit <= 0 then return false end
+
+  local key = redraw_window_key(window)
+  local second = math.floor(poll_now_ms / 1000)
+  local budget = redraw_budget[key]
+  if not budget or budget.second ~= second then
+    budget = { second = second, count = 0 }
+    redraw_budget[key] = budget
+  end
+
+  if budget.count >= limit then
+    if not redraw_budget_reported then
+      redraw_budget_reported = true
+      wezterm.log_error("wezterm-attention: tab bar redraw budget exhausted; suppressing excess redraws")
+    end
+    return false
+  end
+
+  budget.count = budget.count + 1
+  return true
+end
+
+--- True only when this GUI window currently has keyboard focus. A build that
+--- cannot answer counts as unfocused, which costs a redraw and never acknowledges a
+--- marker the user has not seen.
+local function window_is_focused(window)
+  local is_focused = window.is_focused
+  if type(is_focused) ~= "function" then
+    report_missing_once("is_focused")
+    return false
+  end
+  local ok, focused = pcall(is_focused, window)
+  return ok and focused == true
+end
+
+--- Resolve current pane truth at use time. The pane captured when
+--- update-status was scheduled can be stale by the time its async callback
+--- runs, so it is never destructive authority.
+local function window_current_active_pane(window)
+  local active_pane = window.active_pane
+  if type(active_pane) ~= "function" then
+    report_missing_once("active_pane")
+    return nil
+  end
+  local ok, resolved = pcall(active_pane, window)
+  if not ok then return nil end
+  return resolved
+end
+
+local function pane_belongs_to_tabs(pane, mux_tabs)
+  if not pane then return false end
+  local target_id = tostring(pane:pane_id())
+  for _, tab in ipairs(mux_tabs) do
+    for _, candidate in ipairs(tab:panes()) do
+      if tostring(candidate:pane_id()) == target_id then return true end
     end
   end
+  return false
+end
+
+--- Ask WezTerm to rebuild every tab title without changing tab selection or
+--- user-owned title and status values.
+---
+--- ActivateTabRelative(0) re-activates the tab that is already active. WezTerm
+--- answers by recomputing the tab bar, which is the whole point; the active
+--- tab, active pane, status strings, mux window title, and user-owned title
+--- values remain intact while attention decoration updates. This is not a
+--- dedicated invalidation API, so it lives behind this one function: if
+--- WezTerm ever ships a real "redraw the tab bar" call, only this body changes.
+---
+--- The caller must have established that the window is focused. Performing a
+--- key action against a background window can emit terminal focus events, so
+--- that guard is correctness, not economy.
+local function request_tab_bar_redraw(window, pane)
+  if not pane then return false end
+
+  local window_key = redraw_window_key(window)
+  if redraw_disabled[window_key] then return false end
+
+  local perform_action = window.perform_action
+  if type(perform_action) ~= "function" then
+    report_missing_once("perform_action")
+    redraw_disabled[window_key] = true
+    return false
+  end
+
+  local ok, err = pcall(perform_action, window, wezterm.action.ActivateTabRelative(0), pane)
+  if not ok then
+    redraw_disabled[window_key] = true
+    wezterm.log_error("wezterm-attention: tab bar redraw failed: " .. tostring(err))
+    return false
+  end
+  return true
 end
 
 -- ── Public API ──────────────────────────────────────────────────────────────
@@ -218,7 +619,7 @@ end
 function M.get_attention(pane_id, opts)
   local id = tostring(pane_id)
   if opts and opts.dir then
-    return read_marker(opts.dir, id)
+    return read_effective_marker(opts.dir, id)
   end
   local cached = attention_cache[id]
   if cached then return cached.type, cached.frame end
@@ -233,8 +634,10 @@ function M.remove_marker(pane_id, opts)
   attention_cache[id] = nil
 end
 
---- Poll marker files and update cache. Call from your own update-status
---- handler if you set auto_poll = false.
+--- Poll marker files, update the cache, acknowledge what the user is looking
+--- at, and ask WezTerm to redraw the tab bar if what it shows has changed.
+--- Call this from your own update-status handler if you set auto_poll = false;
+--- pass the handler's pane as opts.active_pane.
 ---
 --- Only refreshes entries for panes in the current window. Cross-window cache
 --- entries are left alone — pruning them here would cause cache thrash when
@@ -242,19 +645,38 @@ end
 --- entries every tick, producing visible tab-indicator blinking). Stale
 --- thinking markers are removed here by TTL; closed panes are cleaned up by
 --- the pane-destroyed handler.
+---
+--- The redraw exists because caching alone is not enough: WezTerm calls
+--- format-tab-title when something it knows about changes, and a marker file
+--- appearing on disk is not one of those things. Without the request below, a
+--- background pane's new state sat in the cache, unrendered, until the user
+--- happened to switch tabs — which is exactly when they no longer needed to be
+--- told.
 function M.poll(window, opts)
   local dir = (opts and opts.dir) or M._active_dir or defaults.dir
   local mux_win = window:mux_window()
   if not mux_win then return end
 
-  local now = now_ms()
-  local animation_frame = M._poll_animation_frame or 0
-  M._poll_animation_frame = (animation_frame + 1) % 4
+  -- Hold one tab list for the whole poll so the before/after snapshots below
+  -- describe the same tabs in the same order.
+  local mux_tabs = mux_win:tabs()
+  local before = {}
+  for i, tab in ipairs(mux_tabs) do
+    before[i] = resolve_visible_attention(mux_tab_pane_ids(tab))
+  end
 
-  for _, tab in ipairs(mux_win:tabs()) do
+  local now = opts and opts.now_ms
+  if type(now) == "function" then now = now() end
+  if type(now) ~= "number" or now ~= now then now = now_ms() end
+  local cfg_indicators = M._active_indicators or defaults.indicators
+  local frames = cfg_indicators.thinking_frames or defaults.indicators.thinking_frames
+  local frame_count = #frames
+
+  for _, tab in ipairs(mux_tabs) do
     for _, p in ipairs(tab:panes()) do
       local id = tostring(p:pane_id())
-      local atype, frame, updated_at, marker_ttl_ms, raw = read_marker(dir, id)
+      local atype, frame, updated_at, marker_ttl_ms, raw, publication_id = read_marker(dir, id)
+      local acknowledged = acknowledgement_matches(dir, id, raw, publication_id)
       if atype then
         local cached = attention_cache[id]
         local observed_at = now
@@ -267,16 +689,20 @@ function M.poll(window, opts)
         if ttl and now - effective_updated_at > ttl then
           remove_marker(dir, id)
           attention_cache[id] = nil
+        elseif acknowledged then
+          attention_cache[id] = nil
         else
           if atype == "thinking" and frame == nil then
-            frame = animation_frame
+            -- A frame is a function of time, never of poll count. The redraw
+            -- action can induce immediate update-status events; every poll in
+            -- the same bucket therefore projects the same frame and the chain
+            -- terminates at the visible-change comparison below.
+            frame = frame_for_now(now, frame_count)
           end
           attention_cache[id] = {
             type        = atype,
             frame       = frame,
-            updated_at  = effective_updated_at,
             observed_at = observed_at,
-            ttl_ms      = ttl,
             raw         = raw,
           }
         end
@@ -285,6 +711,49 @@ function M.poll(window, opts)
       end
     end
   end
+
+  -- Everything below is about the focused window only. An unfocused window
+  -- must neither acknowledge a marker its user has not seen nor be sent a key
+  -- action, so an unfocused poll ends here with the cache correct.
+  if not window_is_focused(window) then return end
+
+  local current_active_pane = window_current_active_pane(window)
+  if pane_belongs_to_tabs(current_active_pane, mux_tabs) then
+    acknowledge_focused_pane(current_active_pane:pane_id(), { dir = dir, now_ms = now })
+  end
+
+  -- The current pane is preferred for both acknowledgement and action. The
+  -- event pane remains a compatibility transport only when this WezTerm build
+  -- cannot resolve current pane state; it never authorizes acknowledgement.
+  local action_pane = current_active_pane or (opts and opts.active_pane)
+
+  -- Compare what the tab bar would show, not what the cache holds. A marker
+  -- that changed behind a higher-priority sibling, or a frame number nothing
+  -- renders, must not cost a redraw.
+  local changed = false
+  for i, tab in ipairs(mux_tabs) do
+    local after = resolve_visible_attention(mux_tab_pane_ids(tab))
+    if not same_visible_attention(before[i], after) then
+      changed = true
+      break
+    end
+  end
+
+  if changed and redraw_allowed(window, now) then
+    request_tab_bar_redraw(window, action_pane)
+  end
+end
+
+--- Apply the shared attention indicator and color decoration to a base title.
+local function decorate_tab_title(tab, visible, base)
+  local text = " " .. visible.indicator .. (tab.tab_index + 1) .. ": " .. base .. " "
+  if visible.color then
+    return {
+      { Background = { Color = visible.color } },
+      { Text = text },
+    }
+  end
+  return text
 end
 
 --- Wrap a user's title function with attention decoration.
@@ -296,11 +765,10 @@ end
 ---   end))
 function M.wrap_title_formatter(base_fn)
   return function(tab, tabs, panes, config, hover, max_width)
-    -- Clear before deriving formatter context so ctx.attention describes only
-    -- attention the user has not seen yet.
-    if tab.is_active then
-      auto_clear_active_pane(tab)
-    end
+    -- Read-only. WezTerm may call this at any moment, including for a window
+    -- the user is not looking at, so acknowledgement belongs in poll() where
+    -- focus is known.
+    local visible = resolve_visible_attention(gui_tab_pane_ids(tab))
 
     local ctx = {
       tabs         = tabs,
@@ -309,23 +777,10 @@ function M.wrap_title_formatter(base_fn)
       hover        = hover,
       max_width    = max_width,
       default_title = default_title(tab),
-      attention    = { get_tab_attention(tab) },
+      attention    = { visible.indicator, visible.type, visible.color },
     }
 
-    local base = base_fn(tab, ctx)
-    local index = tab.tab_index + 1
-
-    local indicator, atype, color = get_tab_attention(tab)
-    local text = " " .. indicator .. index .. ": " .. base .. " "
-
-    if color then
-      return {
-        { Background = { Color = color } },
-        { Text = text },
-      }
-    end
-
-    return text
+    return decorate_tab_title(tab, visible, base_fn(tab, ctx))
   end
 end
 
@@ -364,16 +819,20 @@ function M.apply_to_config(config, opts)
   end
   M._active_indicators = indicators
 
-  local auto_clear = opts.auto_clear or defaults.auto_clear
+  local acknowledge_types = opts.auto_clear or defaults.auto_clear
   local priority   = opts.priority   or defaults.priority
+  M._active_frame_interval_ms = positive_number(opts.frame_interval_ms, defaults.frame_interval_ms)
+  M._active_max_redraws_per_second = positive_number(
+    opts.max_redraws_per_second,
+    defaults.max_redraws_per_second)
   local stale_after_ms = opts.stale_after_ms
   if stale_after_ms == nil then stale_after_ms = defaults.stale_after_ms end
   M._active_stale_after_ms = stale_after_ms
 
   -- Build lookup tables
-  local clear_set = {}
-  for _, t in ipairs(auto_clear) do clear_set[t] = true end
-  M._active_clear_set = clear_set
+  local acknowledge_set = {}
+  for _, t in ipairs(acknowledge_types) do acknowledge_set[t] = true end
+  M._active_acknowledge_set = acknowledge_set
 
   local priority_map = {}
   for i, t in ipairs(priority) do priority_map[t] = i end
@@ -382,8 +841,8 @@ function M.apply_to_config(config, opts)
   -- ── Poller: update-status ─────────────────────────────────────────────
 
   if auto_poll then
-    wezterm.on("update-status", function(window, _pane)
-      M.poll(window)
+    wezterm.on("update-status", function(window, pane)
+      M.poll(window, { active_pane = pane })
     end)
   end
 
@@ -399,39 +858,27 @@ function M.apply_to_config(config, opts)
 
   if renderer == "tab" then
     wezterm.on("format-tab-title", function(tab)
-      local index = tab.tab_index + 1
-
-      -- Clear only the pane the user is viewing. Sibling panes may have
-      -- completed in the background and must remain visible on the active tab.
-      if tab.is_active then
-        auto_clear_active_pane(tab)
-      end
+      -- Read-only. WezTerm may call this at any moment, including for a window
+      -- the user is not looking at, so acknowledgement belongs in poll() where
+      -- focus is known.
+      --
+      -- Resolve what this tab shows, including an unfocused sibling marker
+      -- on the active tab.
+      local visible = resolve_visible_attention(gui_tab_pane_ids(tab))
 
       -- Build base title (user callback or default)
       local base
       if title_formatter then
         local ctx = {
           default_title = default_title(tab),
-          attention     = { get_tab_attention(tab) },
+          attention     = { visible.indicator, visible.type, visible.color },
         }
         base = title_formatter(tab, ctx)
       else
         base = default_title(tab)
       end
 
-      -- Render any remaining attention, including an unfocused sibling marker
-      -- on the active tab.
-      local indicator, attention_type, color = get_tab_attention(tab)
-      local text = " " .. indicator .. index .. ": " .. base .. " "
-
-      if color then
-        return {
-          { Background = { Color = color } },
-          { Text = text },
-        }
-      end
-
-      return text
+      return decorate_tab_title(tab, visible, base)
     end)
   end
   -- renderer == "manual": no format-tab-title registered
@@ -447,14 +894,26 @@ function M.apply_to_config(config, opts)
       key  = review_key.key,
       mods = review_key.mods,
       action = wezterm.action_callback(function(win, pane)
-        -- The review indicator is tab-level: get_tab_attention lights the tab
+        -- The review indicator is tab-level: resolve_visible_attention lights the tab
         -- if ANY of its panes is flagged. So toggle across every pane in the
         -- focused pane's tab — toggling only the focused pane leaves a split
         -- tab stuck showing ◆ (the other pane is still flagged) and unclearable.
         -- Panes not in any tab (GUI overlays) fall back to per-pane behavior.
         local mux_win = win:mux_window()
         local target_id = tostring(pane:pane_id())
-        local panes = (mux_win and tab_panes_containing(mux_win, target_id)) or { pane }
+        local panes, mux_tab
+        if mux_win then panes, mux_tab = tab_panes_containing(mux_win, target_id) end
+        panes = panes or { pane }
+        local visible_pane_ids = mux_tab and mux_tab_pane_ids(mux_tab)
+        local before = visible_pane_ids and resolve_visible_attention(visible_pane_ids)
+
+        local function redraw_if_visible_changed()
+          if not visible_pane_ids then return end
+          local after = resolve_visible_attention(visible_pane_ids)
+          if not same_visible_attention(before, after) then
+            request_tab_bar_redraw(win, pane)
+          end
+        end
 
         -- Decide and act on disk truth, never the cache. poll() rebuilds the
         -- cache from files every tick, so the cache can lag a marker an external
@@ -465,7 +924,7 @@ function M.apply_to_config(config, opts)
         -- the clear path, dropping a completion/failure notification. Read the
         -- file so this destructive toggle only ever removes a real review marker.
         local function is_review(id)
-          return read_marker(dir, id) == "review"
+          return read_effective_marker(dir, id) == "review"
         end
 
         local has_review = false
@@ -486,6 +945,8 @@ function M.apply_to_config(config, opts)
               attention_cache[id] = nil
             end
           end
+          -- The user pressed this key in this window, so it is focused.
+          redraw_if_visible_changed()
           return
         end
 
@@ -495,6 +956,9 @@ function M.apply_to_config(config, opts)
         -- Never clobber a process-owned marker that may have landed since the
         -- last poll: review is a manual overlay, and stop/notify are terminal,
         -- so overwriting one would silently drop a completion/failure signal.
+        -- Use physical writer truth here. An acknowledged terminal marker is
+        -- intentionally absent from effective attention but is still owned by
+        -- its writer and must not be replaced by the review overlay.
         local existing = read_marker(dir, target_id)
         if existing ~= nil and existing ~= "review" then
           return
@@ -512,10 +976,16 @@ function M.apply_to_config(config, opts)
           wezterm.log_error("wezterm-attention: failed to write review marker " .. path)
           return
         end
-        w:write('{"type":"review"}')
+        local publication_id = next_publication_id()
+        local raw = '{"type":"review","publication_id":"' .. publication_id .. '"}'
+        w:write(raw)
         w:close()
         if os.rename(tmp, path) then
-          attention_cache[target_id] = { type = "review" }
+          attention_cache[target_id] = {
+            type = "review",
+            raw = raw,
+          }
+          redraw_if_visible_changed()
         else
           os.remove(tmp)
           wezterm.log_error("wezterm-attention: failed to place review marker " .. path)
@@ -524,5 +994,16 @@ function M.apply_to_config(config, opts)
     })
   end
 end
+
+-- Internal seams, exposed for the LuaJIT specs only. Not public API.
+M._internal = {
+  acknowledge_focused_pane = acknowledge_focused_pane,
+  clock_resolution_ms      = clock_resolution_ms,
+  effective_frame_interval_ms = effective_frame_interval_ms,
+  gui_tab_pane_ids         = gui_tab_pane_ids,
+  mux_tab_pane_ids         = mux_tab_pane_ids,
+  resolve_visible_attention = resolve_visible_attention,
+  same_visible_attention   = same_visible_attention,
+}
 
 return M

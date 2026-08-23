@@ -16,6 +16,7 @@ type AttentionState = "thinking" | "stop" | "notify" | "review";
 type Marker = {
 	type: AttentionState;
 	source: "pi";
+	publication_id: string;
 	updated_at: number;
 	label?: string;
 	ttl_ms?: number;
@@ -98,15 +99,17 @@ async function writeMarkerNow(state: AttentionState, label?: string): Promise<vo
 	const dir = markerDirectory();
 	if (!dir) return;
 	const path = join(dir, id);
+	const publicationId = randomUUID();
 	const marker: Marker = {
 		type: state,
 		source: "pi",
+		publication_id: publicationId,
 		updated_at: Date.now(),
 	};
 	if (label) marker.label = label;
 	if (state === "thinking") marker.ttl_ms = ttlMs();
 
-	const tmp = `${path}.tmp.${randomUUID()}`;
+	const tmp = `${path}.tmp.${publicationId}`;
 	try {
 		await mkdir(dir, { recursive: true });
 		await writeFile(tmp, JSON.stringify(marker) + "\n");

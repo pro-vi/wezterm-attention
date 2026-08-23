@@ -162,8 +162,10 @@ config.status_update_interval = 5000
 local git_cache = { cwd = "", diff = "", branch = "", untracked = 0, ahead = 0, is_repo = false, last = 0 }
 
 wezterm.on('update-status', function(window, pane)
-  -- Poll attention markers (manual mode — plugin doesn't own this event)
-  attention.poll(window)
+  -- Poll attention markers (manual mode — plugin doesn't own this event).
+  -- Passing the event pane gives older WezTerm builds a compatibility
+  -- transport for redraws. Current builds resolve the active pane at use time.
+  attention.poll(window, { active_pane = pane })
 
   local git_cells_prefix = {}
   local cwd_uri = pane:get_current_working_dir()

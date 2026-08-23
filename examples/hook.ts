@@ -12,6 +12,7 @@
 // The WEZTERM_PANE env var is set automatically by WezTerm for every shell.
 
 import { mkdir, writeFile, rename } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
 type AttentionType = "thinking" | "stop" | "notify" | "review";
@@ -26,7 +27,11 @@ async function writeMarker(type: AttentionType, frame?: number): Promise<void> {
   const dir = join(home, ".local", "state", "wezterm-attention");
   await mkdir(dir, { recursive: true });
 
-  const data: Record<string, unknown> = { type, updated_at: Date.now() };
+  const data: Record<string, unknown> = {
+    type,
+    publication_id: randomUUID(),
+    updated_at: Date.now(),
+  };
   if (frame !== undefined) data.frame = frame;
 
   // Atomic write: tmp file + rename avoids partial reads
