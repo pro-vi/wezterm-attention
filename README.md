@@ -26,6 +26,8 @@ local attention = wezterm.plugin.require("https://github.com/pro-vi/wezterm-atte
 attention.apply_to_config(config)
 ```
 
+Requires WezTerm `20221119-145034-49b9839f` or newer.
+
 By default, the plugin owns tab title formatting (`dir / title` + attention indicators). It also registers pane cleanup, a marker poller, and an `Alt+B` keybind to toggle review mode. `Alt+B` operates on the whole active tab: it flags the active pane, and clears the flag from every pane in the tab when any are already flagged (so split tabs can always be cleared with one press). It keys off whether `review` is set anywhere in the tab, independent of which indicator is currently rendered — a higher-priority `stop`/`notify` can mask the ◆.
 
 > **Important:** WezTerm only runs the **first** registered `format-tab-title` handler. If another plugin (e.g. tabline.wez) registers one first, this plugin still polls and acknowledges markers, but its indicators and colors are not rendered. Make sure `apply_to_config` runs first, or use `renderer = "manual"` to integrate via the API instead.
@@ -98,13 +100,6 @@ attention.apply_to_config(config, {
 
   -- Priority order (last = highest)
   priority = { "thinking", "review", "stop", "notify" },
-
-  -- Wall-clock bucket used for generated thinking frames. A coarse WezTerm
-  -- clock clamps this to its actual resolution.
-  frame_interval_ms = 1000,
-
-  -- Per-window safety cap for poll-triggered compatibility redraws.
-  max_redraws_per_second = 4,
 
   -- Visually acknowledge these types when focusing their pane
   auto_clear = { "stop", "notify" },
@@ -193,7 +188,7 @@ attention.apply_to_config(config, { auto_poll = false })
 
 -- Then in your existing update-status handler:
 wezterm.on('update-status', function(window, pane)
-  attention.poll(window, { active_pane = pane })  -- compatibility transport for older WezTerm builds
+  attention.poll(window, { active_pane = pane })  -- redraw transport when no current pane is available
   -- ... your git status bar, battery, etc.
 end)
 ```
@@ -418,12 +413,12 @@ it isn't wired here yet.
 
 The plugin uses a **poller/renderer split** to avoid blocking WezTerm's GUI thread:
 
-1. **Poller** (`update-status` event) — runs on WezTerm's `config.status_update_interval` (default 1000ms). Reads marker files and acknowledgement sidecars, then updates an in-memory cache. It acknowledges the focused window's current active pane and asks WezTerm to rebuild the tab bar only when what the tab bar would show has changed.
+1. **Poller** (`update-status` event) — runs on WezTerm's `config.status_update_interval` (default 1000ms). Reads marker files and acknowledgement sidecars, then updates an in-memory cache. It acknowledges the focused window's current active pane and asks WezTerm to rebuild the tab bar when a pane's effective attention changes.
 2. **Renderer** (`format-tab-title` event) — fires on every tab repaint (mouse hover, key press, redraws). Reads only from the cache — zero I/O, instant returns, and no writes of any kind.
 
-WezTerm rebuilds tab titles when something it knows about changes, and a marker file appearing on disk is not one of those things. When the poller sees a visible attention change, it performs `ActivateTabRelative(0)` on the focused window. That re-activates the already-selected tab and makes WezTerm recompute every tab title. The plugin does not write either status string, the window title, or any user title.
+WezTerm rebuilds tab titles when something it knows about changes, and a marker file appearing on disk is not one of those things. When the poller sees a pane's effective attention change, it performs `ActivateTabRelative(0)` on the focused window. That re-activates the already-selected tab and makes WezTerm recompute every tab title. The plugin does not write either status string, the window title, or any user title.
 
-The compatibility action can pass through WezTerm's normal tab-activation path, including terminal focus reporting. It therefore runs only when the window has keyboard focus and a valid active pane. The plugin compares only what the tab bar shows—indicator, type, and color—so a marker changing behind a higher-priority sibling costs nothing. Generated spinner frames come from wall-clock buckets, so polls induced by the action see the same frame and terminate. A per-window redraw budget is the final backstop. If an action fails, that window logs once and stops requesting compatibility redraws.
+The redraw action can pass through WezTerm's normal tab-activation path, including terminal focus reporting. It therefore runs only when the window has keyboard focus and a valid active pane. Generated spinner frames use one-second wall-clock buckets, so polls induced by the action see the same frame and terminate. If an action fails, that window logs once and stops requesting redraws.
 
 No background threads, no FFI, no external dependencies — just filesystem reads in Lua on a configurable interval.
 
@@ -438,10 +433,8 @@ No background threads, no FFI, no external dependencies — just filesystem read
 - `status_update_interval` defaults to 1000ms; markers update on this interval. Lower it if indicators feel slow — the redraw request rides on the same tick.
 
 **Indicators appear only when you switch tabs?**
-- Without `window:is_focused()`, the plugin cannot safely acknowledge attention or request a compatibility redraw.
-- Without `window:active_pane()`, acknowledgement is disabled, but redraw can still use the pane supplied by `update-status`.
-- Without `window:perform_action()`, acknowledgement and polling continue, but inactive tabs update only on ordinary WezTerm redraws.
 - In `renderer = "manual"` mode, pass the event pane: `attention.poll(window, { active_pane = pane })`. The plugin resolves `window:active_pane()` at use time; the event pane is used only when the current pane is unavailable.
+- Check the WezTerm error log. A failed redraw action is logged once for that window; polling and acknowledgement continue.
 
 **Tab titles look wrong?**
 - WezTerm only runs the **first** registered `format-tab-title` handler. If you have your own handler, set `renderer = "manual"` and use `wrap_title_formatter()` or the plugin API. Two handlers cannot coexist.

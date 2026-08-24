@@ -128,7 +128,6 @@ end
 ---   active_pane_id = pane_id | nil,
 ---   action_error   = string | nil,   -- make perform_action throw
 ---   on_action      = function | nil, -- observe or re-enter perform_action
----   omit           = { method_name = true },  -- pretend an older build
 --- }
 local next_window_id = 0
 
@@ -143,13 +142,6 @@ local function window_double(spec)
     end
     table.insert(mux_tabs, {
       panes = function() return panes end,
-      panes_with_info = function()
-        local infos = {}
-        for _, pane in ipairs(panes) do
-          infos[#infos + 1] = { pane = pane, is_zoomed = false }
-        end
-        return infos
-      end,
     })
   end
 
@@ -191,8 +183,6 @@ local function window_double(spec)
   function w.set_right_status(_, text) table.insert(w.status_writes, text) end
   function w.set_title(_, text) table.insert(w.title_writes, text) end
 
-  for name in pairs(spec.omit or {}) do w[name] = nil end
-
   return w
 end
 
@@ -211,7 +201,6 @@ local function poll_focused(spec)
     active_pane_id = spec.active_pane_id,
     action_error   = spec.action_error,
     on_action      = spec.on_action,
-    omit           = spec.omit,
     on_focus_check = spec.on_focus_check,
   })
   attention.poll(w, spec.opts)
@@ -249,59 +238,6 @@ end
 
 -- ── U1: visible-attention projection ────────────────────────────────────────
 
-test("GUI and mux adapters project the same pane IDs in the same order", function()
-  local gui_tab = tab(701, 702, false)
-  local mux_tab = {
-    panes = function() return { mux_pane(701), mux_pane(702) } end,
-    panes_with_info = function()
-      return {
-        { pane = mux_pane(701), is_zoomed = false },
-        { pane = mux_pane(702), is_zoomed = false },
-      }
-    end,
-  }
-
-  local gui_ids = internal.gui_tab_pane_ids(gui_tab)
-  local mux_ids = internal.mux_tab_pane_ids(mux_tab)
-
-  assert(#gui_ids == 2 and #mux_ids == 2, "both adapters should return two pane IDs")
-  assert(gui_ids[1] == mux_ids[1] and gui_ids[2] == mux_ids[2], "adapter outputs should agree")
-  assert(gui_ids[1] == "701", "pane IDs should be strings, got " .. tostring(gui_ids[1]))
-end)
-
-test("mux projection matches the GUI pane set while a split is zoomed", function()
-  local mux_tab = {
-    panes = function() return { mux_pane(703), mux_pane(704) } end,
-    panes_with_info = function()
-      return {
-        { pane = mux_pane(703), is_zoomed = false },
-        { pane = mux_pane(704), is_zoomed = true },
-      }
-    end,
-  }
-  local gui_tab = { panes = { gui_pane(704) } }
-
-  local gui_ids = internal.gui_tab_pane_ids(gui_tab)
-  local mux_ids = internal.mux_tab_pane_ids(mux_tab)
-
-  assert(#mux_ids == 1 and mux_ids[1] == "704",
-    "a zoomed mux tab should project only pane 704")
-  assert(#gui_ids == 1 and gui_ids[1] == mux_ids[1],
-    "GUI and mux projections should agree under zoom")
-end)
-
-test("mux projection falls back once when zoom metadata is unavailable", function()
-  local legacy_tab = { panes = function() return { mux_pane(705), mux_pane(706) } end }
-
-  local first = internal.mux_tab_pane_ids(legacy_tab)
-  local second = internal.mux_tab_pane_ids(legacy_tab)
-  assert(#first == 2 and #second == 2, "legacy fallback should retain every pane")
-
-  local errors = drain_errors()
-  assert(#errors == 1 and errors[1]:find("panes_with_info", 1, true),
-    "the compatibility fallback should log once, got " .. tostring(errors[1]))
-end)
-
 test("projection returns the highest-priority cached pane and ignores uncached ones", function()
   write_marker(711, "thinking")
   write_marker(712, "notify")
@@ -315,33 +251,6 @@ test("projection returns the highest-priority cached pane and ignores uncached o
   local empty = internal.resolve_visible_attention({ "799" })
   assert(empty.type == nil and empty.indicator == "" and empty.color == nil,
     "a pane with no cache entry should project no attention")
-end)
-
-test("visible equality hides changes no tab title would show", function()
-  write_marker(721, "notify")
-  write_marker(722, "notify")
-  poll({ 721, 722 })
-
-  local one  = internal.resolve_visible_attention({ "721" })
-  local both = internal.resolve_visible_attention({ "721", "722" })
-  assert(internal.same_visible_attention(one, both),
-    "a second pane of the same type changes nothing a viewer can see")
-
-  -- 722 drops from notify to stop while 721 still shows notify: the losing
-  -- pane changed, the tab did not.
-  write_marker(722, "stop")
-  poll({ 721, 722 })
-  local masked = internal.resolve_visible_attention({ "721", "722" })
-  assert(internal.same_visible_attention(both, masked),
-    "a change behind the winning pane should compare equal")
-
-  -- 721 drops from notify to review, so stop on 722 becomes the winner.
-  write_marker(721, "review")
-  poll({ 721, 722 })
-  local changed = internal.resolve_visible_attention({ "721", "722" })
-  assert(changed.type == "stop", "stop should outrank review, got " .. tostring(changed.type))
-  assert(not internal.same_visible_attention(masked, changed),
-    "a change to the winning type should compare unequal")
 end)
 
 test("generated thinking frames are stable inside one wall-clock bucket", function()
@@ -386,54 +295,6 @@ test("Lua accepts the publication ID marker shape published by Pi", function()
 
   assert(attention.get_attention(733) == "notify",
     "Pi's publication ID and extra fields must not change the marker type")
-end)
-
-test("a coarse clock clamps generated frames to one-second buckets", function()
-  assert(internal.clock_resolution_ms() == 1000,
-    "the LuaJIT harness has no wezterm.time and should bind the coarse fallback")
-  assert(internal.effective_frame_interval_ms() == 1000,
-    "the frame interval must not claim finer resolution than its clock")
-end)
-
-test("a later high-resolution clock failure binds the coarse fallback once", function()
-  local clock_calls = 0
-  wezterm.time = {
-    now = function()
-      return {
-        format_utc = function()
-          clock_calls = clock_calls + 1
-          if clock_calls == 1 then return "1000000000000" end
-          error("clock unavailable", 0)
-        end,
-      }
-    end,
-  }
-
-  local ok, err = pcall(function()
-    local clocked = dofile(repo_root .. "/plugin/init.lua")
-    clocked.apply_to_config({}, {
-      auto_poll = false,
-      dir = test_dir,
-      review_key = false,
-      frame_interval_ms = 10,
-    })
-    assert(clocked._internal.clock_resolution_ms() == 1, "load probe should bind the fine clock")
-
-    write_marker(734, "thinking")
-    local w = window_double({ tabs = { { 734 } }, focused = false })
-    clocked.poll(w)
-    assert(clocked._internal.clock_resolution_ms() == 1000,
-      "runtime failure should switch to coarse resolution")
-    local errors = drain_errors()
-    assert(#errors == 1 and errors[1]:find("high-resolution clock failed", 1, true),
-      "the fallback should log once")
-
-    clocked.poll(w)
-    assert(clock_calls == 2, "the failed high-resolution clock must not be retried")
-    assert(#drain_errors() == 0, "the bound fallback should not log again")
-  end)
-  wezterm.time = nil
-  if not ok then error(err, 0) end
 end)
 
 -- ── U2: read-only rendering ─────────────────────────────────────────────────
@@ -775,41 +636,6 @@ test("a focused window with no active pane acknowledges nothing", function()
   assert(#w.actions == 0, "there is no pane to perform an action through")
 end)
 
-test("a missing focus method reports acknowledgement and redraw degradation", function()
-  write_marker(822, "notify", "publication-a")
-  local w = window_double({
-    tabs = { { 822 } },
-    focused = true,
-    active_pane_id = 822,
-    omit = { is_focused = true },
-  })
-  attention.poll(w, { active_pane = mux_pane(822) })
-
-  assert(not acknowledgement_exists(822), "missing focus method must disable acknowledgement")
-  assert(w.action_calls == 0, "missing focus method must disable redraw")
-  local errors = drain_errors()
-  assert(#errors == 1 and errors[1]:find("acknowledgement and compatibility redraw are disabled", 1, true),
-    "warning should name both disabled behaviors")
-end)
-
-test("a missing active pane method retains event-pane redraw", function()
-  write_marker(823, "notify", "publication-a")
-  local w = window_double({
-    tabs = { { 823 } },
-    focused = true,
-    active_pane_id = 823,
-    omit = { active_pane = true },
-  })
-  attention.poll(w, { active_pane = mux_pane(823) })
-
-  assert(not acknowledgement_exists(823), "missing active pane method must disable acknowledgement")
-  assert(w.action_calls == 1, "event pane should still transport the redraw")
-  local errors = drain_errors()
-  assert(#errors == 1 and errors[1]:find("acknowledgement is disabled", 1, true)
-      and errors[1]:find("event pane", 1, true),
-    "warning should preserve the event-pane redraw path")
-end)
-
 -- ── U2: focus-safe redraw ───────────────────────────────────────────────────
 
 test("a focused visible change requests exactly one redraw through the active pane", function()
@@ -841,7 +667,7 @@ test("an unchanged tab bar requests no redraw", function()
   assert(#w.actions == 0, "nothing visible changed, so nothing should be redrawn")
 end)
 
-test("a change hidden behind a higher-priority pane requests no redraw", function()
+test("a masked cache change requests a harmless redraw", function()
   write_marker(851, "notify")
   write_marker(852, "notify")
   poll({ 850, 851, 852 })
@@ -852,7 +678,7 @@ test("a change hidden behind a higher-priority pane requests no redraw", functio
   write_marker(852, "stop")
   local w = poll_focused({ tabs = { { 850, 851, 852 } }, active_pane_id = 850 })
 
-  assert(#w.actions == 0, "a masked change should not cost a redraw, got " .. #w.actions)
+  assert(#w.actions == 1, "a cache change should request one redraw, got " .. #w.actions)
   assert(attention.get_attention(852) == "stop", "the cache should still have followed the marker")
 end)
 
@@ -901,72 +727,13 @@ test("redraw-induced polls terminate inside the current frame bucket", function(
   })
 
   attention.poll(w, { now_ms = 1000 })
-  assert(reentries == 2, "the compatibility action should induce two nested polls in this double")
+  assert(reentries == 2, "the redraw action should induce two nested polls in this double")
   assert(w.action_calls == 1, "neither nested poll may request another action")
 
   current_now = 2000
   attention.poll(w, { now_ms = current_now })
   assert(reentries == 4 and w.action_calls == 2,
     "the next bucket should permit exactly one more action")
-end)
-
-test("the per-window redraw budget caps feedback and logs once", function()
-  local w = window_double({ tabs = { { 870, 872 } }, focused = true, active_pane_id = 870 })
-  for i = 1, 8 do
-    if i % 2 == 1 then
-      write_marker(872, "notify")
-    else
-      os.remove(test_dir .. "/872")
-    end
-    attention.poll(w, { now_ms = 1000 })
-  end
-
-  assert(#w.actions == 4, "the default budget permits four redraws, got " .. #w.actions)
-  local errors = drain_errors()
-  assert(#errors == 1 and errors[1]:find("budget exhausted", 1, true),
-    "budget refusal should log once, got " .. tostring(errors[1]))
-end)
-
-test("a budget-rejected final projection is retried after reset", function()
-  local w = window_double({ tabs = { { 870, 874 } }, focused = true, active_pane_id = 870 })
-  for i = 1, 5 do
-    if i % 2 == 1 then
-      write_marker(874, "notify")
-    else
-      os.remove(test_dir .. "/874")
-    end
-    attention.poll(w, { now_ms = 1000 })
-  end
-  assert(#w.actions == 4, "precondition: fifth change is budget-rejected")
-
-  attention.poll(w, { now_ms = 2000 })
-  assert(#w.actions == 5, "the final projection should redraw after the budget resets")
-end)
-
-test("a pending redraw retry does not re-enter before the action returns", function()
-  local current_now = 1000
-  local w = window_double({
-    tabs = { { 870, 875 } },
-    focused = true,
-    active_pane_id = 870,
-    on_action = function(window)
-      attention.poll(window, { now_ms = current_now })
-    end,
-  })
-  for i = 1, 5 do
-    if i % 2 == 1 then
-      write_marker(875, "notify")
-    else
-      os.remove(test_dir .. "/875")
-    end
-    attention.poll(w, { now_ms = current_now })
-  end
-  assert(#w.actions == 4, "precondition: fifth change is pending")
-
-  current_now = 2000
-  attention.poll(w, { now_ms = current_now })
-  assert(#w.actions == 5,
-    "the pending retry must request exactly one action, got " .. #w.actions)
 end)
 
 test("a failed redraw action leaves marker and cache truth intact", function()
@@ -988,27 +755,8 @@ test("a failed redraw action leaves marker and cache truth intact", function()
 
   write_marker(881, "stop")
   attention.poll(w, { now_ms = 2000 })
-  assert(w.action_calls == 1, "a failed window should not retry the compatibility action")
+  assert(w.action_calls == 1, "a failed window should not retry the redraw action")
   assert(#drain_errors() == 0, "a disabled window should not repeat the runtime error")
-end)
-
-test("a build without perform_action skips the redraw and mutates nothing", function()
-  write_marker(891, "notify")
-
-  local w = poll_focused({
-    tabs           = { { 890, 891 } },
-    active_pane_id = 890,
-    omit           = { perform_action = true },
-  })
-
-  assert(marker_exists(891), "an unsupported redraw must not touch the marker")
-  assert(attention.get_attention(891) == "notify", "the cache should still be correct")
-  assert(#w.status_writes == 0 and #w.title_writes == 0,
-    "status and title are never a fallback for a missing redraw API")
-
-  local errors = drain_errors()
-  assert(#errors == 1 and errors[1]:find("perform_action", 1, true),
-    "the missing method should be reported once, got " .. tostring(errors[1]))
 end)
 
 -- ── U2: window scoping and composition root ─────────────────────────────────
@@ -1053,7 +801,7 @@ test("the registered update-status handler resolves current pane before acknowle
   assert(acknowledgement_exists(921), "the current active pane should be acknowledged")
 end)
 
-test("review toggles redraw only when the affected tab projection changes", function()
+test("review toggles redraw after a successful marker mutation", function()
   local review = dofile(repo_root .. "/plugin/init.lua")
   local config = {}
   review.apply_to_config(config, { auto_poll = false, dir = test_dir })
@@ -1066,7 +814,7 @@ test("review toggles redraw only when the affected tab projection changes", func
   review.poll(window_double({ tabs = { { 971, 972 } }, focused = false }), { now_ms = 1000 })
   toggle(masked, mux_pane(972))
   assert(not marker_exists(972), "the review marker should still be removed")
-  assert(masked.action_calls == 0, "notify still wins, so the tab did not visibly change")
+  assert(masked.action_calls == 1, "a successful review removal should redraw once")
 
   write_marker(973, "review", "review-973")
   local visible = window_double({ tabs = { { 973 } }, focused = true, active_pane_id = 973 })
