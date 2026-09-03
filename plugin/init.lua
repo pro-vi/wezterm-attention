@@ -271,15 +271,105 @@ local function read_effective_marker(dir, pane_id)
   return atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source, puppet
 end
 
---- Remove every file this plugin knows a pane by. The subagent sidecar goes
---- with the marker: the pane it described is gone (the absence sweep) or the
---- caller asked for that pane's state to be cleared, and a surviving sidecar
---- would keep a "+N" on a tab whose writer is no longer there to retract it.
-local function remove_marker(dir, pane_id)
+-- ── Review flag sidecar ─────────────────────────────────────────────────────
+-- The Alt+B review flag is the user's own, and it lives in its own file:
+--   <marker id>.review   {"publication_id":"<id>"}
+-- It used to be written into the marker file as {"type":"review"}, which meant
+-- it could only ever be set on a pane no process had written to. Every pane an
+-- agent has run in carries a thinking/stop/notify marker, so on exactly the
+-- panes the user wants to flag, Alt+B did nothing at all. As a sidecar the flag
+-- coexists with writer-owned truth instead of competing for the same file.
+
+local function review_path(dir, pane_id)
+  return dir .. "/" .. pane_id .. ".review"
+end
+
+--- The in-flight flag this process writes before renaming it into place. Named
+--- with this process's session token for the same reason the acknowledgement
+--- temp is: two WezTerm processes flagging the same pane must not delete each
+--- other's file mid-rename.
+local function review_tmp_path(dir, pane_id)
+  return review_path(dir, pane_id) .. "." .. publication_session .. ".tmp"
+end
+
+--- Is this pane flagged for review? The file's presence is the flag. Its body
+--- is read by nothing, so content that no parser would accept still counts as
+--- flagged: a truncated write must never silently drop a flag the user set by
+--- hand.
+local function review_flagged(dir, pane_id)
+  local file = io.open(review_path(dir, pane_id), "r")
+  if not file then return false end
+  file:close()
+  return true
+end
+
+local function write_review_flag(dir, pane_id)
+  local path = review_path(dir, pane_id)
+  local tmp = review_tmp_path(dir, pane_id)
+  os.remove(tmp)
+
+  local file, open_err = io.open(tmp, "w")
+  if not file then
+    wezterm.log_error(
+      "wezterm-attention: failed to write review flag " .. tmp .. ": " .. tostring(open_err))
+    return false
+  end
+
+  local wrote, write_err = file:write(
+    '{"publication_id":"' .. next_publication_id() .. '"}')
+  local closed, close_err = file:close()
+  if not wrote or not closed then
+    os.remove(tmp)
+    wezterm.log_error(
+      "wezterm-attention: failed to finish review flag " .. tmp .. ": "
+        .. tostring(write_err or close_err))
+    return false
+  end
+
+  local renamed, rename_err = os.rename(tmp, path)
+  if not renamed then
+    os.remove(tmp)
+    wezterm.log_error(
+      "wezterm-attention: failed to place review flag " .. path .. ": " .. tostring(rename_err))
+    return false
+  end
+  return true
+end
+
+local function clear_review_flag(dir, pane_id)
+  os.remove(review_tmp_path(dir, pane_id))
+  local path = review_path(dir, pane_id)
+  local existing = io.open(path, "r")
+  if not existing then return true end
+  existing:close()
+
+  local ok, err = os.remove(path)
+  if ok then return true end
+  report_error_once(
+    "clear-review:" .. pane_id,
+    "failed to remove review flag " .. path .. ": " .. tostring(err))
+  return false
+end
+
+--- Remove the writer's marker and the acknowledgement that referred to it, and
+--- nothing else. This is what an expired marker costs: the subagent sidecar and
+--- the user's review flag have their own lifetimes and neither of them aged out
+--- because a spinner did.
+local function remove_expired_marker(dir, pane_id)
   os.remove(dir .. "/" .. pane_id)
   clear_acknowledgement(dir, pane_id)
   os.remove(acknowledgement_tmp_path(dir, pane_id))
+end
+
+--- Remove every file this plugin knows a pane by. The subagent sidecar and the
+--- review flag go with the marker: the pane they described is gone (the absence
+--- sweep) or the caller asked for that pane's state to be cleared, and a
+--- surviving sidecar would keep a "+N" or a ◆ on a tab whose pane is no longer
+--- there to retract it.
+local function remove_marker(dir, pane_id)
+  remove_expired_marker(dir, pane_id)
   os.remove(subagents_path(dir, pane_id))
+  clear_review_flag(dir, pane_id)
 end
 
 -- ── Pane identity ───────────────────────────────────────────────────────────
@@ -453,6 +543,7 @@ local function same_cached_attention(a, b)
   return a.type == b.type
     and a.frame == b.frame
     and (a.subagents or 0) == (b.subagents or 0)
+    and (a.review == true) == (b.review == true)
 end
 
 --- Return the panes of the tab holding marker_id in a captured tab list.
@@ -479,20 +570,42 @@ end
 --- acknowledged while its window is in the background is a notification the user
 --- never saw.
 ---
-local function cache_marker_values(
-    id, atype, frame, raw, publication_id, observed_now, source, puppet, subagents)
-  subagents = tonumber(subagents) or 0
+--- Does the user's review flag outrank what the marker file says? Absent and
+--- acknowledged markers (both arrive here as a nil type) are outranked by
+--- anything, and a marker the configured priority order puts below `review`
+--- — `thinking` by default — is too. `stop` and `notify` outrank it, so a
+--- flagged pane that finishes still shows its ✓ first and falls back to the ◆
+--- once that ✓ has been acknowledged.
+local function review_outranks(atype)
+  if not atype then return true end
+  local priority = M._active_priority_map or {}
+  return (priority[atype] or 0) < (priority.review or 0)
+end
 
-  if not atype then
-    -- No marker. A pane whose subagents are still working keeps a count-only
-    -- entry so its tab can render "+N"; with nothing left to say, the entry
-    -- goes away entirely, as it always has.
+local function cache_marker_values(
+    id, atype, frame, raw, publication_id, observed_now, source, puppet, subagents, flagged)
+  subagents = tonumber(subagents) or 0
+  -- A marker file whose own type is "review" was written by an older Alt+B,
+  -- before the flag moved to its own file. It is the same user flag.
+  local review = flagged == true or atype == "review"
+
+  local effective = atype
+  if review and review_outranks(atype) then
+    effective = "review"
+    frame = nil
+  end
+
+  if not effective then
+    -- Nothing to show. A pane whose subagents are still working keeps a
+    -- count-only entry so its tab can render "+N"; with nothing left to say,
+    -- the entry goes away entirely, as it always has.
     if subagents > 0 then
       attention_cache[id] = {
         type        = nil,
         observed_at = observed_now,
         puppet      = false,
         subagents   = subagents,
+        review      = review,
       }
     else
       attention_cache[id] = nil
@@ -500,14 +613,18 @@ local function cache_marker_values(
     return
   end
 
-  if atype == "thinking" and frame == nil then
+  if effective == "thinking" and frame == nil then
     local cfg_indicators = M._active_indicators or defaults.indicators
     local frames = cfg_indicators.thinking_frames or defaults.indicators.thinking_frames
     frame = frame_for_now(observed_now, #frames)
   end
 
+  -- `raw`, `identity`, `source` and `puppet` always describe the marker file,
+  -- even when the review flag has taken over `type`. The marker is still the
+  -- thing acknowledgement compares against and TTL ages out; the flag only
+  -- decides what the tab shows.
   attention_cache[id] = {
-    type        = atype,
+    type        = effective,
     frame       = frame,
     observed_at = observed_now,
     raw         = raw,
@@ -515,7 +632,19 @@ local function cache_marker_values(
     source      = source,
     puppet      = puppet == true,
     subagents   = subagents,
+    review      = review,
   }
+end
+
+--- Re-read one pane's files and rebuild its cache entry. The Alt+B handler
+--- changes a pane's state outside the poll loop, and dropping the entry instead
+--- would blank a sibling's ✓ or a "+N" until the next tick.
+local function refresh_cached_pane(dir, id, now)
+  local atype, frame, _, _, raw, publication_id, source, puppet =
+    read_effective_marker(dir, id)
+  cache_marker_values(
+    id, atype, frame, raw, publication_id, now, source, puppet,
+    count_live_subagents(dir, id, now), review_flagged(dir, id))
 end
 
 local function acknowledge_focused_pane(pane_id, opts)
@@ -531,12 +660,16 @@ local function acknowledge_focused_pane(pane_id, opts)
   -- the marker only, so it must hand the count back unchanged; recomputing zero
   -- here would drop the "+N" and make every tick a visible change.
   local subagents = cached.subagents or 0
+  -- The user's review flag survives acknowledgement, and every cache write
+  -- below has to carry it: a flagged pane whose ✓ the user just looked at falls
+  -- back to showing the ◆, it does not go quiet.
+  local flagged = cached.review == true
 
   local current_type, current_frame, _, _, raw, publication_id, source, puppet =
     read_marker(dir, id)
   if not current_type then
     clear_acknowledgement(dir, id)
-    cache_marker_values(id, nil, nil, nil, nil, observed_now, nil, false, subagents)
+    cache_marker_values(id, nil, nil, nil, nil, observed_now, nil, false, subagents, flagged)
     return "absent"
   end
 
@@ -544,7 +677,7 @@ local function acknowledge_focused_pane(pane_id, opts)
   if cached.identity ~= current_identity then
     cache_marker_values(
       id, current_type, current_frame, raw, publication_id, observed_now, source, puppet,
-      subagents)
+      subagents, flagged)
     return "kept"
   end
 
@@ -552,7 +685,7 @@ local function acknowledge_focused_pane(pane_id, opts)
     clear_acknowledgement(dir, id)
     cache_marker_values(
       id, current_type, current_frame, raw, publication_id, observed_now, source, puppet,
-      subagents)
+      subagents, flagged)
     return "kept"
   end
 
@@ -560,7 +693,7 @@ local function acknowledge_focused_pane(pane_id, opts)
   if not write_ack(dir, id, current_identity) then
     cache_marker_values(
       id, current_type, current_frame, raw, publication_id, observed_now, source, puppet,
-      subagents)
+      subagents, flagged)
     return "failed"
   end
 
@@ -571,7 +704,7 @@ local function acknowledge_focused_pane(pane_id, opts)
     effective_source, effective_puppet = read_effective_marker(dir, id)
   cache_marker_values(
     id, effective_type, effective_frame, effective_raw, effective_publication_id, observed_now,
-    effective_source, effective_puppet, subagents)
+    effective_source, effective_puppet, subagents, flagged)
   return effective_type and "kept" or "acknowledged"
 end
 
@@ -620,10 +753,15 @@ end
 -- ── Public API ──────────────────────────────────────────────────────────────
 
 --- Read the cached attention state for a marker id (see M.pane_marker_id).
---- Returns (type, frame, source, puppet, subagents) or nil. `source` is the
---- marker's JSON `source` string when it carried one; `puppet` is true only
+--- Returns (type, frame, source, puppet, subagents, review) or nil. `source` is
+--- the marker's JSON `source` string when it carried one; `puppet` is true only
 --- when the marker set `"puppet": true`; `subagents` is how many of the pane's
---- subagents ran a tool call in the last ten minutes, 0 when none.
+--- subagents ran a tool call in the last ten minutes, 0 when none; `review` is
+--- true when the user has flagged the pane with Alt+B.
+---
+--- `type` is the effective one: it is `review` when the flag outranks the
+--- marker file, and the marker's own type when that outranks the flag — in
+--- which case the flag is still reported by the sixth return.
 ---
 --- A pane with live subagents and no marker returns (nil, nil, nil, false, n):
 --- the count is real even though there is no marker type to report.
@@ -632,11 +770,16 @@ function M.get_attention(marker_id, opts)
   if opts and opts.dir then
     local atype, frame, _, _, _, _, source, puppet = read_effective_marker(opts.dir, id)
     local now = (opts and opts.now_ms) or now_ms()
-    return atype, frame, source, puppet, count_live_subagents(opts.dir, id, now)
+    local flagged = review_flagged(opts.dir, id) or atype == "review"
+    if flagged and review_outranks(atype) then
+      atype, frame = "review", nil
+    end
+    return atype, frame, source, puppet, count_live_subagents(opts.dir, id, now), flagged
   end
   local cached = attention_cache[id]
   if cached then
-    return cached.type, cached.frame, cached.source, cached.puppet, cached.subagents or 0
+    return cached.type, cached.frame, cached.source, cached.puppet, cached.subagents or 0,
+      cached.review == true
   end
   return nil
 end
@@ -702,9 +845,10 @@ function M.poll(window, opts)
         before[id] = attention_cache[id]
         local atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source, puppet =
           read_marker(dir, id)
-        -- One sidecar read per pane per tick, with this tick's clock, whether or
-        -- not the pane has a marker.
+        -- One read of each sidecar per pane per tick, with this tick's clock,
+        -- whether or not the pane has a marker.
         local subagents = count_live_subagents(dir, id, now)
+        local flagged = review_flagged(dir, id)
         local acknowledged = acknowledgement_matches(dir, id, raw, publication_id)
         if atype then
           local cached = attention_cache[id]
@@ -716,12 +860,17 @@ function M.poll(window, opts)
           local effective_updated_at = updated_at or observed_at
           local ttl = stale_ttl_ms(atype, marker_ttl_ms)
           if ttl and now - effective_updated_at > ttl then
-            remove_marker(dir, id)
-            attention_cache[id] = nil
+            -- Only the writer's own state expires. The user's review flag and
+            -- the pane's subagents kept their own time and are still true, so
+            -- the pane keeps whatever they say about it.
+            remove_expired_marker(dir, id)
+            cache_marker_values(id, nil, nil, nil, nil, now, nil, false, subagents, flagged)
           elseif acknowledged then
-            -- The marker was already seen. Its subagents may still be working,
-            -- so the entry survives as a count when there is a count to keep.
-            cache_marker_values(id, nil, nil, nil, nil, observed_at, nil, false, subagents)
+            -- The marker was already seen. Its subagents may still be working
+            -- and the user's flag still stands, so the entry survives as
+            -- whatever they leave behind.
+            cache_marker_values(
+              id, nil, nil, nil, nil, observed_at, nil, false, subagents, flagged)
           else
             if atype == "thinking" and frame == nil then
               -- A frame is a function of time, never of poll count. The redraw
@@ -731,10 +880,11 @@ function M.poll(window, opts)
               frame = frame_for_now(now, frame_count)
             end
             cache_marker_values(
-              id, atype, frame, raw, publication_id, observed_at, source, puppet, subagents)
+              id, atype, frame, raw, publication_id, observed_at, source, puppet, subagents,
+              flagged)
           end
         else
-          cache_marker_values(id, nil, nil, nil, nil, now, nil, false, subagents)
+          cache_marker_values(id, nil, nil, nil, nil, now, nil, false, subagents, flagged)
         end
       end
     end
@@ -963,34 +1113,47 @@ function M.apply_to_config(config, opts)
         panes = panes or { pane }
 
         -- Decide and act on disk truth, never the cache. poll() rebuilds the
-        -- cache from files every tick, so the cache can lag a marker an external
-        -- process just rewrote. Trusting it here is unsafe two ways: a review on
-        -- disk but not yet cached would be missed (the clear skips it and the
-        -- next poll re-lights the tab), and — worse — a pane cached as review
-        -- whose file was just overwritten with stop/notify would be deleted by
-        -- the clear path, dropping a completion/failure notification. Read the
-        -- file so this destructive toggle only ever removes a real review marker.
-        local function is_review(id)
+        -- cache from files every tick, so the cache can lag a flag another
+        -- window's handler just wrote, and a clear that skipped a pane would
+        -- leave the tab lit and unclearable on the next poll.
+        --
+        -- A pane is flagged if its own sidecar is there, or if its marker file
+        -- itself says "review" — that is how an older version of this plugin
+        -- wrote the flag, and it is still the same user flag. Effective truth
+        -- is what counts for the legacy case: a review marker that was somehow
+        -- acknowledged shows nothing, and a press must then flag the pane
+        -- rather than silently clear what the user cannot see.
+        local function is_flagged(id)
+          if review_flagged(dir, id) then return true end
           return read_effective_marker(dir, id) == "review"
         end
 
-        local has_review = false
+        local has_flag = false
         for _, p in ipairs(panes) do
           local id = M.pane_marker_id(p)
-          if id and is_review(id) then
-            has_review = true
+          if id and is_flagged(id) then
+            has_flag = true
             break
           end
         end
 
-        -- Tab already flagged → clear review from all its panes (sibling
-        -- stop/notify/thinking markers are spared by the is_review guard).
-        if has_review then
+        -- Tab already flagged → clear the flag from all its panes. Only the
+        -- flag is removed: a sibling's thinking/stop/notify marker belongs to
+        -- its writer, and dropping one would drop a completion or failure the
+        -- user never saw.
+        if has_flag then
           for _, p in ipairs(panes) do
             local id = M.pane_marker_id(p)
-            if id and is_review(id) then
-              remove_marker(dir, id)
-              attention_cache[id] = nil
+            if id then
+              local cleared = review_flagged(dir, id) and clear_review_flag(dir, id)
+              if read_effective_marker(dir, id) == "review" then
+                -- The legacy shape. Removing the marker file is the only way to
+                -- clear a flag that was written into it, and a marker whose
+                -- type is "review" can only ever have been this keybind's.
+                remove_expired_marker(dir, id)
+                cleared = true
+              end
+              if cleared then refresh_cached_pane(dir, id, now_ms()) end
             end
           end
           request_tab_bar_redraw(win, pane)
@@ -1000,41 +1163,14 @@ function M.apply_to_config(config, opts)
         -- Tab not flagged → flag the focused pane (the active pane of its tab,
         -- always a member of `panes`, so flag and clear stay symmetric).
         --
-        -- Never clobber a process-owned marker that may have landed since the
-        -- last poll: review is a manual overlay, and stop/notify are terminal,
-        -- so overwriting one would silently drop a completion/failure signal.
-        -- Use physical writer truth here. An acknowledged terminal marker is
-        -- intentionally absent from effective attention but is still owned by
-        -- its writer and must not be replaced by the review overlay.
-        local existing = read_marker(dir, target_id)
-        if existing ~= nil and existing ~= "review" then
-          return
-        end
-
-        -- Write atomically (tmp + rename) so a concurrent poll() — including
-        -- one in another window — never reads a half-written marker, matching
-        -- the atomic-write protocol the README recommends. The directory was
-        -- created once in apply_to_config; this handler runs on the GUI thread
-        -- and does not shell out.
-        local path = dir .. "/" .. target_id
-        local tmp = path .. ".tmp"
-        local w = io.open(tmp, "w")
-        if not w then
-          wezterm.log_error("wezterm-attention: failed to write review marker " .. path)
-          return
-        end
-        local publication_id = next_publication_id()
-        local raw = '{"type":"review","publication_id":"' .. publication_id .. '"}'
-        w:write(raw)
-        w:close()
-        if os.rename(tmp, path) then
-          local existing_cache = attention_cache[target_id]
-          cache_marker_values(target_id, "review", nil, raw, publication_id, nil, nil, false,
-            existing_cache and existing_cache.subagents or 0)
+        -- The flag is written to its own "<id>.review" file, so it never
+        -- touches writer-owned truth and needs no permission from it. It used
+        -- to be written into the marker file, guarded against overwriting a
+        -- process marker — which meant it could only be set on a pane no agent
+        -- had ever run in, and pressing Alt+B in an agent pane did nothing.
+        if write_review_flag(dir, target_id) then
+          refresh_cached_pane(dir, target_id, now_ms())
           request_tab_bar_redraw(win, pane)
-        else
-          os.remove(tmp)
-          wezterm.log_error("wezterm-attention: failed to place review marker " .. path)
         end
       end),
     })
@@ -1046,6 +1182,7 @@ M._internal = {
   acknowledge_focused_pane = acknowledge_focused_pane,
   resolve_visible_attention = resolve_visible_attention,
   acknowledgement_tmp_path = acknowledgement_tmp_path,
+  review_tmp_path = review_tmp_path,
 }
 
 return M

@@ -128,6 +128,25 @@ local function subagents_exists(pane_id)
   return path_exists(test_dir .. "/" .. pane_id .. ".agents")
 end
 
+local function review_flag_exists(pane_id)
+  return path_exists(test_dir .. "/" .. pane_id .. ".review")
+end
+
+--- Write the review flag sidecar the way the Alt+B handler does.
+local function write_review_flag_file(pane_id, publication_id)
+  local file = assert(io.open(test_dir .. "/" .. pane_id .. ".review", "w"))
+  file:write(string.format(
+    '{"publication_id":"%s"}', publication_id or ("flag-" .. pane_id)))
+  file:close()
+end
+
+--- Write the flag sidecar byte for byte, for shapes a fixture cannot express.
+local function write_raw_review_flag(pane_id, content)
+  local file = assert(io.open(test_dir .. "/" .. pane_id .. ".review", "w"))
+  file:write(content)
+  file:close()
+end
+
 --- Write a pane's subagent activity sidecar.
 --- `entries` is a list of { id = string, type = string?, last_ms = number }.
 local function write_subagents(pane_id, entries)
@@ -913,22 +932,26 @@ test("review toggles redraw after a successful marker mutation", function()
   marker:close()
   assert(marker_bytes:find('"type":"notify"', 1, true),
     "review must not overwrite acknowledged writer truth")
+  assert(review_flag_exists(974), "the flag is written beside the marker instead")
 
-  local review_path = test_dir .. "/975"
+  local flag_path = test_dir .. "/975.review"
   local real_rename = os.rename
   os.rename = function(from, to)
-    if to == review_path then return nil, "permission denied" end
+    if to == flag_path then return nil, "permission denied" end
     return real_rename(from, to)
   end
   local failed = window_double({ tabs = { { 975 } }, focused = true, active_pane_id = 975 })
   local ok, toggle_err = pcall(toggle, failed, mux_pane(975))
   os.rename = real_rename
   assert(ok, "review rename failure should be contained: " .. tostring(toggle_err))
-  assert(not marker_exists(975), "failed review publication must not create canonical state")
-  assert(not path_exists(review_path .. ".tmp"), "failed review publication must remove its temp")
+  assert(not review_flag_exists(975), "a failed flag write must not create canonical state")
+  assert(not marker_exists(975), "and must not fall back to writing the marker file")
+  assert(not path_exists(internal.review_tmp_path(test_dir, "975")),
+    "failed flag publication must remove its temp")
+  assert(failed.action_calls == 0, "a failed flag write must not claim a redraw")
   local errors = drain_errors()
-  assert(#errors == 1 and errors[1]:find("failed to place review marker", 1, true),
-    "the real review rename failure should be logged")
+  assert(#errors == 1 and errors[1]:find("failed to place review flag", 1, true),
+    "the real flag rename failure should be logged, got " .. tostring(errors[1]))
 end)
 
 -- ── U3: which id names the marker file ──────────────────────────────────────
@@ -1285,6 +1308,173 @@ test("a pane that vanishes between polls loses its subagent sidecar too", functi
   assert(not marker_exists(7551), "a closed pane loses its marker")
   assert(not subagents_exists(7551), "and its subagent sidecar")
   assert(attention.get_attention(7551) == nil, "and its cache entry")
+end)
+
+-- ── U5: the manual review flag ──────────────────────────────────────────────
+
+test("the review flag outranks a thinking marker without replacing it", function()
+  write_marker(7601, "thinking")
+  write_review_flag_file(7601)
+
+  poll_at({ 7600, 7601 })
+
+  local atype, frame, _, _, _, flagged = attention.get_attention(7601)
+  assert(atype == "review", "the flag should outrank thinking, got " .. tostring(atype))
+  assert(frame == nil, "a review indicator carries no spinner frame, got " .. tostring(frame))
+  assert(flagged == true, "the entry should record the flag, got " .. tostring(flagged))
+
+  local marker = assert(io.open(test_dir .. "/7601", "r"))
+  local bytes = marker:read("*a")
+  marker:close()
+  assert(bytes:find('"type":"thinking"', 1, true),
+    "the writer's marker must be untouched, got " .. bytes)
+  assert(internal.resolve_visible_attention({ "7601" }).indicator == "◆ ",
+    "and the tab should show the review glyph")
+end)
+
+test("a stop marker outranks the flag until that stop is acknowledged", function()
+  write_marker(7611, "stop", "stop-7611")
+  write_review_flag_file(7611)
+
+  poll_at({ 7610, 7611 })
+  local atype, _, _, _, _, flagged = attention.get_attention(7611)
+  assert(atype == "stop", "stop outranks review, got " .. tostring(atype))
+  assert(flagged == true, "but the entry still carries the flag, got " .. tostring(flagged))
+  assert(internal.resolve_visible_attention({ "7611" }).indicator == "✓ ",
+    "and the tab shows the stop glyph")
+
+  poll_at({ 7610, 7611 }, { focused = true, active_pane_id = 7611 })
+  assert(acknowledgement_exists(7611), "precondition: the viewed stop is acknowledged")
+
+  local after, _, _, _, _, after_flagged = attention.get_attention(7611)
+  assert(after == "review",
+    "with the stop acknowledged the flag becomes visible, got " .. tostring(after))
+  assert(after_flagged == true, "and is still recorded, got " .. tostring(after_flagged))
+  assert(marker_exists(7611), "acknowledgement never removes writer truth")
+  assert(review_flag_exists(7611), "and never removes the flag")
+end)
+
+test("Alt+B flags a pane a process already owns, and one press clears the tab", function()
+  local review = dofile(repo_root .. "/plugin/init.lua")
+  local config = {}
+  review.apply_to_config(config, { auto_poll = false, dir = test_dir })
+  local toggle = assert(config.keys and config.keys[1] and config.keys[1].action,
+    "review key action was not registered")
+
+  write_marker(7621, "thinking")
+  write_marker(7622, "notify", "notify-7622")
+  local tabs = { { 7621, 7622 } }
+  review.poll(window_double({ tabs = tabs, focused = false }), { now_ms = 1000 })
+
+  local w = window_double({ tabs = tabs, focused = true, active_pane_id = 7621 })
+  toggle(w, mux_pane(7621))
+
+  assert(review_flag_exists(7621),
+    "Alt+B must flag a pane whose marker file a process already owns")
+  assert(review.get_attention(7621) == "review",
+    "and the flag must take the pane's indicator without another poll")
+  assert(w.action_calls == 1, "a successful flag should redraw once, got " .. w.action_calls)
+
+  -- The sibling was flagged by something else; one press must clear the tab.
+  write_review_flag_file(7622)
+  toggle(w, mux_pane(7621))
+
+  assert(not review_flag_exists(7621), "one press clears the flag from the pressed pane")
+  assert(not review_flag_exists(7622), "and from every other pane of its tab")
+  assert(marker_exists(7621) and marker_exists(7622),
+    "clearing the flag must leave both process markers on disk")
+  local sibling = assert(io.open(test_dir .. "/7622", "r"))
+  local sibling_bytes = sibling:read("*a")
+  sibling:close()
+  assert(sibling_bytes:find('"type":"notify"', 1, true),
+    "the sibling's notify must survive byte for byte, got " .. sibling_bytes)
+  assert(review.get_attention(7621) == "thinking",
+    "the pressed pane falls back to its own marker, got "
+      .. tostring(review.get_attention(7621)))
+  assert(review.get_attention(7622) == "notify", "and so does the sibling")
+end)
+
+test("an expired marker takes only its own state, not the flag or the subagents", function()
+  local file = assert(io.open(test_dir .. "/7631", "w"))
+  file:write('{"type":"thinking","publication_id":"pub-7631",'
+    .. '"updated_at_ms":1000000000000,"ttl_ms":1000}')
+  file:close()
+  write_review_flag_file(7631)
+  write_subagents(7631, { { id = "agent-a", last_ms = 1000000000000 } })
+
+  attention.poll(
+    window_double({ tabs = { { 7630, 7631 } }, focused = false }),
+    { now_ms = 1000000001001 })
+
+  assert(not marker_exists(7631), "the expired marker should be removed")
+  assert(review_flag_exists(7631), "the user's flag did not age out with an agent's spinner")
+  assert(subagents_exists(7631), "and neither did the subagent sidecar")
+
+  local atype, _, _, _, subagents, flagged = attention.get_attention(7631)
+  assert(atype == "review", "the pane still shows the flag, got " .. tostring(atype))
+  assert(flagged == true, "which is still recorded, got " .. tostring(flagged))
+  assert(subagents == 1, "and its live subagent is still counted, got " .. tostring(subagents))
+end)
+
+test("a pane that vanishes between polls loses its review flag too", function()
+  write_marker(7641, "stop")
+  write_review_flag_file(7641)
+  poll_at({ 7640, 7641 }, { window_id = 7640 })
+  assert(review_flag_exists(7641), "precondition: the flag exists")
+
+  -- 7641 is gone and 7640 remains, so its domain is still represented and the
+  -- disappearance reads as a closed pane rather than a detached domain.
+  poll_at({ 7640 }, { window_id = 7640 })
+
+  assert(not marker_exists(7641), "a closed pane loses its marker")
+  assert(not review_flag_exists(7641), "and the flag that pointed at it")
+  assert(attention.get_attention(7641) == nil, "and its cache entry")
+end)
+
+test("a review marker written by an older version is read as the same flag", function()
+  write_marker(7651, "review", "legacy-7651")
+
+  poll_at({ 7650, 7651 })
+
+  local atype, _, _, _, _, flagged = attention.get_attention(7651)
+  assert(atype == "review", "a legacy review marker still shows review, got " .. tostring(atype))
+  assert(flagged == true,
+    "and reports itself as flagged, so a clear can find it, got " .. tostring(flagged))
+end)
+
+test("an unreadable review flag still counts as flagged", function()
+  write_marker(7661, "thinking")
+  write_raw_review_flag(7661, "not json at all")
+  poll_at({ 7660, 7661 })
+  assert(attention.get_attention(7661) == "review",
+    "a flag whose body is corrupt must not silently disappear, got "
+      .. tostring(attention.get_attention(7661)))
+
+  write_raw_review_flag(7662, "")
+  poll_at({ 7660, 7662 })
+  local atype, _, _, _, _, flagged = attention.get_attention(7662)
+  assert(atype == "review" and flagged == true,
+    "an empty flag file is still a flag, got " .. tostring(atype))
+end)
+
+test("flagging a pane whose stop is already shown requests a redraw", function()
+  write_marker(7671, "stop")
+
+  -- 7670 is the active pane and carries no marker, so nothing is acknowledged
+  -- and the stop marker on 7671 stays byte-identical throughout.
+  local w = window_double({
+    tabs = { { 7670, 7671 } }, focused = true, active_pane_id = 7670,
+  })
+  attention.poll(w, { now_ms = SIDECAR_NOW })
+  assert(#w.actions == 1, "the marker appearing is the first visible change, got " .. #w.actions)
+  attention.poll(w, { now_ms = SIDECAR_NOW })
+  assert(#w.actions == 1, "an unchanged tick must not redraw again, got " .. #w.actions)
+
+  write_review_flag_file(7671)
+  attention.poll(w, { now_ms = SIDECAR_NOW })
+
+  assert(select(6, attention.get_attention(7671)) == true, "the flag should be recorded")
+  assert(#w.actions == 2, "the flag arriving is itself a change, got " .. #w.actions)
 end)
 
 os.execute("rm -rf " .. shell_quote(test_dir))

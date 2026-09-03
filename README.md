@@ -9,13 +9,15 @@ A WezTerm plugin that turns your tab bar into a notification system. Any CLI too
 | `thinking` | ◌ ◔ ◑ ◕ (animated) | Violet | Agent is working |
 | `stop` | ✓ | Mint | Agent finished — check results |
 | `notify` | ! | Rose | Something needs your attention |
-| `review` | ◆ | Gold | Manually flagged for review |
+| `review` | ◆ | Gold | Manually flagged for review (`Alt+B`) |
 
-Tabs light up when a background process writes a marker—even when another pane in that tab is currently focused, and even when the tab itself is not the one you are on. Focusing a pane acknowledges only that pane's `stop` and `notify`; markers from unfocused sibling panes remain visible until you visit them. `thinking` persists until its writer removes it or its TTL expires; `review` persists until explicitly removed.
+Tabs light up when a background process writes a marker—even when another pane in that tab is currently focused, and even when the tab itself is not the one you are on. Focusing a pane acknowledges only that pane's `stop` and `notify`; markers from unfocused sibling panes remain visible until you visit them. `thinking` persists until its writer removes it or its TTL expires; a `review` flag persists until you press `Alt+B` again.
 
 Only the active pane of the focused window is acknowledged. The writer-owned marker stays in place; the plugin records the exact displayed identity in a `.ack` sidecar, so unseen notifications remain visible.
 
 When multiple panes in a tab have different states, the highest-priority one wins: **notify > stop > review > thinking**.
+
+The `review` flag is yours, not a writer's: it lives in its own `.review` file beside the marker, so you can flag a pane that is mid-`thinking` or showing a `stop` without touching either. See [The review flag](#the-review-flag-the-review-sidecar).
 
 A pane can also report how many subagents are still working inside it. The tab appends that count to whatever indicator it is already showing — `✓+2` — or shows `+2` on its own when the pane has no marker left. See [Subagent activity](#subagent-activity-the-agents-sidecar).
 
@@ -30,7 +32,9 @@ attention.apply_to_config(config)
 
 Requires WezTerm `20221119-145034-49b9839f` or newer.
 
-By default, the plugin owns tab title formatting (`dir / title` + attention indicators). It also registers a marker poller and an `Alt+B` keybind to toggle review mode. `Alt+B` operates on the whole active tab: it flags the active pane, and clears the flag from every pane in the tab when any are already flagged (so split tabs can always be cleared with one press). It keys off whether `review` is set anywhere in the tab, independent of which indicator is currently rendered — a higher-priority `stop`/`notify` can mask the ◆.
+By default, the plugin owns tab title formatting (`dir / title` + attention indicators). It also registers a marker poller and an `Alt+B` keybind to toggle the review flag. `Alt+B` operates on the whole active tab: it flags the active pane, and clears the flag from every pane in the tab when any are already flagged (so split tabs can always be cleared with one press). It keys off whether the flag is set anywhere in the tab, independent of which indicator is currently rendered — a higher-priority `stop`/`notify` can mask the ◆.
+
+**`Alt+B` works on a pane in any state.** The flag is a separate file, so it never competes with the marker a process owns: flagging a pane that is thinking, or one showing an unacknowledged `stop`, changes nothing about that marker, and clearing the flag never removes it.
 
 > **Important:** WezTerm only runs the **first** registered `format-tab-title` handler. If another plugin (e.g. tabline.wez) registers one first, this plugin still polls and acknowledges markers, but its indicators and colors are not rendered. Make sure `apply_to_config` runs first, or use `renderer = "manual"` to integrate via the API instead.
 
@@ -137,7 +141,8 @@ Any process running inside WezTerm can write a marker. The contract is:
 5. **Optional:** `updated_at` or `updated_at_ms` records when the marker was refreshed. Seconds and milliseconds are both accepted.
 6. **Optional:** `ttl_ms` overrides stale cleanup for that marker. By default, stale `thinking` markers clear after 30 minutes.
 7. **Optional:** a `<WEZTERM_PANE>.agents` sidecar reports how many subagents are working in the pane — see [Subagent activity](#subagent-activity-the-agents-sidecar) below.
-8. **Cleanup** is automatic. The poller removes a marker whose pane it saw on the previous tick and does not see now (WezTerm emits no pane-close event, so a vanished pane is how a closed pane is detected), and removes a marker whose stale TTL has expired. Removing a marker takes its `.agents` sidecar with it. Focusing a pane writes an acknowledgement sidecar instead of removing writer-owned state.
+8. **Plugin-owned:** `<WEZTERM_PANE>.ack` records the marker publication you have already been shown, and `<WEZTERM_PANE>.review` is the `Alt+B` flag — see [The review flag](#the-review-flag-the-review-sidecar). Writers never touch either one.
+9. **Cleanup** is automatic. The poller removes a marker whose pane it saw on the previous tick and does not see now (WezTerm emits no pane-close event, so a vanished pane is how a closed pane is detected), and removes a marker whose stale TTL has expired. A closed pane loses everything — marker, `.ack`, `.agents` and `.review`. An expired marker loses only itself and its `.ack`: the subagent sidecar and your review flag keep their own lifetimes and neither of them aged out because a spinner did. Focusing a pane writes an acknowledgement sidecar instead of removing writer-owned state.
 
 The `WEZTERM_PANE` environment variable is injected by WezTerm into every shell it spawns. That's the pane's unique ID — always a non-negative integer. Validate it (`/^\d+$/`) before building a path from it: a stray `../…` value would otherwise write to, or delete, a file outside the marker directory. Every example and fragment below enforces this.
 
@@ -198,8 +203,9 @@ whatever id the writer uses for it. `last_ms` is when that subagent last ran a
 tool call, in epoch milliseconds. `type` is the writer's own label for the
 subagent; the plugin carries it in the file but does not interpret it.
 
-**The writer owns this file.** The plugin only reads it, and deletes it along
-with the marker when the pane closes or the marker is removed.
+**The writer owns this file.** The plugin only reads it, and deletes it when the
+pane closes or `remove_marker` is called. A marker that expires by TTL leaves it
+alone — the subagents are still running.
 
 An entry is **live for ten minutes** after its `last_ms`. Older entries are
 ignored, so a writer that never cleans up still stops reporting a subagent that
@@ -224,6 +230,46 @@ occupies:
 The count never decides which marker wins the tab — priority is settled by the
 markers alone. But a change in the count alone is a visible change, so it
 repaints the tab bar on the next poll like any other.
+
+### The review flag: the `.review` sidecar
+
+`Alt+B` flags a pane for your own attention. The flag is a file of its own:
+
+```
+~/.local/state/wezterm-attention/<WEZTERM_PANE>.review
+{"publication_id":"1756890000000-a1b2c3d4-7"}
+```
+
+Its **presence is the flag**; nothing reads the body, so a truncated write still
+counts as flagged rather than silently losing a flag you set by hand. The plugin
+writes it the same way it writes an acknowledgement — to a per-process temp name,
+then renamed into place — and removes it when you press `Alt+B` again or when the
+pane closes.
+
+It is a separate file because it is a separate claim. The marker file belongs to
+whatever process runs in the pane, and on a pane you actually want to flag there
+is almost always one there: an agent's `thinking`, or the `stop` it left behind.
+The flag used to be written into that file as `{"type":"review"}`, guarded so it
+would never overwrite a process marker — which meant `Alt+B` silently did nothing
+on exactly those panes. As a sidecar it coexists:
+
+| Marker file | `.review` | Tab shows |
+|-------------|-----------|-----------|
+| none | present | `◆ ` |
+| `thinking` | present | `◆ ` (the flag outranks `thinking`) |
+| `stop` unacknowledged | present | `✓ ` (the marker outranks the flag) |
+| `stop` acknowledged | present | `◆ ` |
+| `notify` | present | `! ` |
+
+Which one wins is the configured `priority` order, with the flag standing in for
+`review`: by default `notify > stop > review > thinking`. The flag is never
+acknowledged — `acknowledge_types` does not include `review` — so a flagged pane
+comes back to `◆` once its `stop` or `notify` has been seen, and stays there
+until you clear it.
+
+A marker file whose own type is `review` — written by an older version of this
+plugin, or by a writer that publishes `review` directly — is still read as the
+same flag, and `Alt+B` still clears it.
 
 **Atomic writes recommended:** To avoid partial reads, write to a `.tmp` file then rename:
 
@@ -299,13 +345,16 @@ local attention = wezterm.plugin.require("https://github.com/pro-vi/wezterm-atte
 local marker_id = attention.pane_marker_id(pane)
 
 -- Read cached attention state:
--- returns (type, frame, source, puppet, subagents) or nil.
+-- returns (type, frame, source, puppet, subagents, review) or nil.
 -- source is the marker's JSON "source" string (nil when it carried none);
 -- puppet is true only when the marker set "puppet": true;
 -- subagents is how many of the pane's subagents ran a tool call in the last
 -- ten minutes, 0 when none. A pane with live subagents and no marker returns
 -- (nil, nil, nil, false, n).
-local state, frame, source, puppet, subagents = attention.get_attention(marker_id)
+-- review is true when the pane carries the Alt+B flag. state is the effective
+-- type: "review" when the flag outranks the marker file, the marker's own type
+-- when that outranks the flag -- and then review is still true.
+local state, frame, source, puppet, subagents, review = attention.get_attention(marker_id)
 
 -- Clear a marker programmatically
 attention.remove_marker(marker_id)
@@ -535,6 +584,7 @@ No background threads, no FFI, no external dependencies — just filesystem read
 - Check file contents: `cat ~/.local/state/wezterm-attention/$WEZTERM_PANE` (should be valid JSON)
 - A `+N` with no glyph beside it is the [subagent count](#subagent-activity-the-agents-sidecar) for a pane whose own marker is gone or already acknowledged. `cat ~/.local/state/wezterm-attention/$WEZTERM_PANE.agents` shows the entries; ones older than ten minutes are not counted.
 - A matching `$WEZTERM_PANE.ack` means that publication was already displayed. Removing the sidecar makes it visible again; sidecars are plugin-owned and safe to remove before rolling back to an older plugin version.
+- A ◆ that no marker file explains is the `Alt+B` flag: `ls ~/.local/state/wezterm-attention/$WEZTERM_PANE.review`. Pressing `Alt+B` in that tab clears it, and so does deleting the file.
 - Ensure your hooks write to the same path as the plugin's `dir` setting
 - `status_update_interval` defaults to 1000ms; markers update on this interval. Lower it if indicators feel slow — the redraw request rides on the same tick.
 
@@ -548,6 +598,8 @@ No background threads, no FFI, no external dependencies — just filesystem read
 
 **Alt+B not working?**
 - Check for keybind conflicts. Set `review_key = false` and bind manually if needed.
+- It does work on a pane that already has a marker — the flag is the separate `$WEZTERM_PANE.review` file. If the tab still shows `✓` or `!` after a press, that marker simply outranks the flag; the ◆ appears once you have seen it.
+- On a mux-attached pane that has not published its `WEZTERM_PANE` user var, the press is refused and logged once, because the plugin cannot tell which pane's files to write. See [Publishing the pane id](#publishing-the-pane-id).
 
 ## Type annotations
 
