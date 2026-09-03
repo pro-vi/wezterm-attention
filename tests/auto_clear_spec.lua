@@ -20,6 +20,22 @@ local function drain_errors()
   return drained
 end
 
+--- The subagent sidecar's nested shape, for the json_parse double below.
+--- Returns nil when the content carries no readable "agents" object, which is
+--- what an empty or truncated file looks like to a real parser.
+local function parse_agents(content)
+  local body = content:match('"agents"%s*:%s*(%b{})')
+  if not body then return nil end
+  local agents = {}
+  for agent_id, entry in body:gmatch('"([^"]+)"%s*:%s*(%b{})') do
+    agents[agent_id] = {
+      type    = entry:match('"type"%s*:%s*"([^"]+)"'),
+      last_ms = tonumber(entry:match('"last_ms"%s*:%s*(%-?%d+)')),
+    }
+  end
+  return agents
+end
+
 local handlers = {}
 local wezterm = {
   home_dir = test_dir,
@@ -32,7 +48,14 @@ local wezterm = {
     end,
   },
   json_parse = function(content)
+    -- The real json_parse raises on content that is not JSON. The plugin wraps
+    -- every call in pcall, and that guard is only exercised if this double
+    -- refuses the same input.
+    if not content:match("^%s*{") then
+      error("invalid json: " .. tostring(content), 0)
+    end
     return {
+      agents = parse_agents(content),
       type = content:match('"type"%s*:%s*"([^"]+)"'),
       frame = tonumber(content:match('"frame"%s*:%s*(%d+)')),
       updated_at = tonumber(content:match('"updated_at"%s*:%s*(%d+)')),
@@ -99,6 +122,30 @@ end
 
 local function acknowledgement_exists(pane_id)
   return path_exists(test_dir .. "/" .. pane_id .. ".ack")
+end
+
+local function subagents_exists(pane_id)
+  return path_exists(test_dir .. "/" .. pane_id .. ".agents")
+end
+
+--- Write a pane's subagent activity sidecar.
+--- `entries` is a list of { id = string, type = string?, last_ms = number }.
+local function write_subagents(pane_id, entries)
+  local parts = {}
+  for _, entry in ipairs(entries) do
+    parts[#parts + 1] = string.format(
+      '"%s":{"type":"%s","last_ms":%d}', entry.id, entry.type or "general-purpose", entry.last_ms)
+  end
+  local file = assert(io.open(test_dir .. "/" .. pane_id .. ".agents", "w"))
+  file:write('{"agents":{' .. table.concat(parts, ",") .. "}}")
+  file:close()
+end
+
+--- Write a sidecar byte for byte, for the shapes a fixture cannot express.
+local function write_raw_subagents(pane_id, content)
+  local file = assert(io.open(test_dir .. "/" .. pane_id .. ".agents", "w"))
+  file:write(content)
+  file:close()
 end
 
 local function write_acknowledgement_file(pane_id, identity)
@@ -1060,6 +1107,184 @@ test("acknowledgement renames its sidecar into place without unlinking it first"
       .. tostring(renamed[1]))
   assert(acknowledgement_exists(7401), "the sidecar should now hold the new publication")
   assert(attention.get_attention(7401) == nil, "and the acknowledged marker should be suppressed")
+end)
+
+-- ── U4: the subagent activity sidecar ───────────────────────────────────────
+
+--- One fixed clock for this section. Every poll below is handed it, so a
+--- subagent's liveness is decided by the entry's own last_ms and nothing else.
+local SIDECAR_NOW = 1000000000000
+
+local function poll_at(pane_ids, spec)
+  spec = spec or {}
+  local w = window_double({
+    tabs           = { pane_ids },
+    focused        = spec.focused == true,
+    active_pane_id = spec.active_pane_id,
+    window_id      = spec.window_id,
+  })
+  attention.poll(w, { now_ms = SIDECAR_NOW })
+  return w
+end
+
+test("the sidecar reports live entries only, on the poll's own clock", function()
+  write_marker(7501, "stop")
+  write_subagents(7501, {
+    { id = "agent-a", last_ms = SIDECAR_NOW - 1000 },
+    { id = "agent-b", last_ms = SIDECAR_NOW - 599000 },
+    -- Older than the ten-minute window, so it is not counted.
+    { id = "agent-c", last_ms = SIDECAR_NOW - 700000 },
+  })
+
+  poll_at({ 7500, 7501 })
+
+  local atype, _, _, _, subagents = attention.get_attention(7501)
+  assert(atype == "stop", "the marker still reports its own type, got " .. tostring(atype))
+  assert(subagents == 2,
+    "two of the three entries are live, got " .. tostring(subagents))
+end)
+
+test("an unreadable sidecar counts zero and leaves the marker alone", function()
+  write_marker(7502, "notify")
+  write_raw_subagents(7502, '{"agents":{"agent-a":{"last_ms":')
+  poll_at({ 7500, 7502 })
+  local truncated_type, _, _, _, truncated_count = attention.get_attention(7502)
+  assert(truncated_type == "notify", "a corrupt sidecar must not disturb its marker")
+  assert(truncated_count == 0, "a truncated sidecar counts zero, got " .. tostring(truncated_count))
+
+  write_marker(7503, "notify")
+  write_raw_subagents(7503, "not json at all")
+  poll_at({ 7500, 7503 })
+  local garbage_type, _, _, _, garbage_count = attention.get_attention(7503)
+  assert(garbage_type == "notify", "nor must content that is not JSON at all")
+  assert(garbage_count == 0, "unparseable content counts zero, got " .. tostring(garbage_count))
+
+  write_marker(7504, "notify")
+  write_raw_subagents(7504, "")
+  poll_at({ 7500, 7504 })
+  assert(select(5, attention.get_attention(7504)) == 0, "an empty sidecar counts zero")
+end)
+
+test("live subagents keep a pane visible with no marker of its own", function()
+  write_subagents(7511, {
+    { id = "agent-a", last_ms = SIDECAR_NOW - 1000 },
+    { id = "agent-b", last_ms = SIDECAR_NOW - 2000 },
+  })
+
+  poll_at({ 7510, 7511 })
+
+  local atype, frame, source, puppet, subagents = attention.get_attention(7511)
+  assert(atype == nil, "a pane with no marker reports no type, got " .. tostring(atype))
+  assert(frame == nil and source == nil, "and no frame or source")
+  assert(puppet == false, "and is not a puppet, got " .. tostring(puppet))
+  assert(subagents == 2, "but its live subagents are reported, got " .. tostring(subagents))
+  assert(not marker_exists(7511), "the sidecar must not manufacture a marker file")
+end)
+
+test("an acknowledged marker leaves its pane's subagent count behind", function()
+  write_marker(7561, "stop", "publication-a")
+  write_subagents(7561, {
+    { id = "agent-a", last_ms = SIDECAR_NOW - 1000 },
+    { id = "agent-b", last_ms = SIDECAR_NOW - 2000 },
+  })
+
+  poll_at({ 7560, 7561 }, { focused = true, active_pane_id = 7561 })
+  assert(acknowledgement_exists(7561), "precondition: the viewed stop is acknowledged")
+
+  -- A second, unfocused tick: the acknowledged branch of the poll must keep the
+  -- count as surely as the acknowledgement itself did.
+  poll_at({ 7560, 7561 })
+
+  local atype, _, _, _, subagents = attention.get_attention(7561)
+  assert(atype == nil, "the acknowledged marker is no longer effective")
+  assert(subagents == 2, "but its subagents are still working, got " .. tostring(subagents))
+  assert(internal.resolve_visible_attention({ "7561" }).indicator == "+2 ",
+    "so its tab shows the count alone")
+end)
+
+test("the tab indicator carries the subagent count", function()
+  write_marker(7521, "stop")
+  write_subagents(7522, {
+    { id = "agent-a", last_ms = SIDECAR_NOW - 1000 },
+    { id = "agent-b", last_ms = SIDECAR_NOW - 2000 },
+  })
+
+  poll_at({ 7521, 7522 })
+
+  local visible = internal.resolve_visible_attention({ "7521", "7522" })
+  assert(visible.indicator == "✓+2 ",
+    "the count rides in the indicator's own trailing space, got " .. tostring(visible.indicator))
+  assert(visible.type == "stop", "the marker type is unchanged")
+  assert(visible.color == "#12271c", "and so is its tint")
+
+  local rendered = format_tab_title(tab(7521, 7522, true))
+  assert(type(rendered) == "table", "the tab still carries a tint")
+  assert(rendered[2].Text:find("✓+2 ", 1, true),
+    "the rendered title should carry the count, got " .. tostring(rendered[2].Text))
+
+  local count_only = internal.resolve_visible_attention({ "7522" })
+  assert(count_only.indicator == "+2 ",
+    "with no marker the count is the whole indicator, got " .. tostring(count_only.indicator))
+  assert(count_only.type == nil, "and it names no marker type")
+  assert(count_only.color == "#12271c", "a bare count is tinted as stop")
+end)
+
+test("a change in the subagent count alone requests a redraw", function()
+  write_marker(7531, "stop")
+  write_subagents(7531, {
+    { id = "agent-a", last_ms = SIDECAR_NOW - 1000 },
+    { id = "agent-b", last_ms = SIDECAR_NOW - 2000 },
+  })
+
+  -- 7530 is the active pane and carries no marker, so nothing is acknowledged
+  -- and the stop marker on 7531 stays byte-identical throughout.
+  local w = window_double({
+    tabs = { { 7530, 7531 } }, focused = true, active_pane_id = 7530,
+  })
+  attention.poll(w, { now_ms = SIDECAR_NOW })
+  assert(#w.actions == 1, "the marker appearing is the first visible change, got " .. #w.actions)
+
+  attention.poll(w, { now_ms = SIDECAR_NOW })
+  assert(#w.actions == 1, "an unchanged tick must not redraw again, got " .. #w.actions)
+
+  write_subagents(7531, {
+    { id = "agent-a", last_ms = SIDECAR_NOW - 1000 },
+    { id = "agent-b", last_ms = SIDECAR_NOW - 2000 },
+    { id = "agent-c", last_ms = SIDECAR_NOW - 3000 },
+  })
+  attention.poll(w, { now_ms = SIDECAR_NOW })
+
+  assert(select(5, attention.get_attention(7531)) == 3, "the third subagent should be counted")
+  assert(#w.actions == 2,
+    "the count changing is itself a visible change, got " .. #w.actions)
+end)
+
+test("removal takes the subagent sidecar with the marker", function()
+  write_marker(7541, "stop", "publication-a")
+  write_subagents(7541, { { id = "agent-a", last_ms = SIDECAR_NOW - 1000 } })
+  poll_at({ 7540, 7541 })
+  assert(subagents_exists(7541), "precondition: the sidecar exists")
+
+  attention.remove_marker(7541, { dir = test_dir })
+
+  assert(not marker_exists(7541), "the marker should be gone")
+  assert(not subagents_exists(7541), "and the subagent sidecar with it")
+  assert(attention.get_attention(7541) == nil, "and the cache entry")
+end)
+
+test("a pane that vanishes between polls loses its subagent sidecar too", function()
+  write_marker(7551, "stop")
+  write_subagents(7551, { { id = "agent-a", last_ms = SIDECAR_NOW - 1000 } })
+  poll_at({ 7550, 7551 }, { window_id = 7550 })
+  assert(subagents_exists(7551), "precondition: the sidecar exists")
+
+  -- 7551 is gone and 7550 remains, so its domain is still represented and the
+  -- disappearance reads as a closed pane rather than a detached domain.
+  poll_at({ 7550 }, { window_id = 7550 })
+
+  assert(not marker_exists(7551), "a closed pane loses its marker")
+  assert(not subagents_exists(7551), "and its subagent sidecar")
+  assert(attention.get_attention(7551) == nil, "and its cache entry")
 end)
 
 os.execute("rm -rf " .. shell_quote(test_dir))

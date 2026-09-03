@@ -112,6 +112,49 @@ local function read_marker(dir, pane_id)
   return nil
 end
 
+-- ── Subagent activity sidecar ───────────────────────────────────────────────
+-- Beside the marker file, a hook writer maintains "<marker id>.agents":
+--   {"agents":{"<agent id>":{"type":"<string>","last_ms":<epoch ms>}}}
+-- one entry per subagent that has run a tool call from that pane. An entry is
+-- live for ten minutes after its last_ms.
+--
+-- The file is independent of the marker. A pane can carry live subagents with
+-- no marker at all (the parent stopped and its check mark was acknowledged) or
+-- beside a marker of any type, so it is read for every pane, not only for panes
+-- whose marker parsed.
+
+local subagent_live_ms = 10 * 60 * 1000
+
+local function subagents_path(dir, pane_id)
+  return dir .. "/" .. pane_id .. ".agents"
+end
+
+--- How many of this pane's subagents ran a tool call recently. Absent, empty
+--- and unparseable files all count zero: the sidecar is an addition to the
+--- marker protocol, and a writer that corrupts it must not be able to disturb
+--- the marker it sits beside.
+local function count_live_subagents(dir, pane_id, now)
+  local file = io.open(subagents_path(dir, pane_id), "r")
+  if not file then return 0 end
+  local content = file:read("*a")
+  file:close()
+  if not content or content == "" then return 0 end
+
+  local ok, data = pcall(function()
+    return wezterm.json_parse(content)
+  end)
+  if not ok or type(data) ~= "table" or type(data.agents) ~= "table" then return 0 end
+
+  local live = 0
+  for _, entry in pairs(data.agents) do
+    if type(entry) == "table" then
+      local last_ms = normalize_epoch_ms(entry.last_ms)
+      if last_ms and now - last_ms <= subagent_live_ms then live = live + 1 end
+    end
+  end
+  return live
+end
+
 local reported_errors = {}
 local publication_counter = 0
 local publication_session = tostring({}):gsub("[^%w]", "")
@@ -228,10 +271,15 @@ local function read_effective_marker(dir, pane_id)
   return atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source, puppet
 end
 
+--- Remove every file this plugin knows a pane by. The subagent sidecar goes
+--- with the marker: the pane it described is gone (the absence sweep) or the
+--- caller asked for that pane's state to be cleared, and a surviving sidecar
+--- would keep a "+N" on a tab whose writer is no longer there to retract it.
 local function remove_marker(dir, pane_id)
   os.remove(dir .. "/" .. pane_id)
   clear_acknowledgement(dir, pane_id)
   os.remove(acknowledgement_tmp_path(dir, pane_id))
+  os.remove(subagents_path(dir, pane_id))
 end
 
 -- ── Pane identity ───────────────────────────────────────────────────────────
@@ -280,7 +328,12 @@ end
 -- thread). update-status fills this cache; acknowledgement performs one confirmation
 -- read only when acknowledging a cached terminal marker.
 
-local attention_cache = {} -- { [marker_id] = { type, frame?, observed_at?, raw, identity, source?, puppet } }
+--- { [marker_id] = { type, frame?, observed_at?, raw, identity, source?,
+---                    puppet, subagents } }
+--- `type` is nil for a pane that has no marker but does have live subagents:
+--- the entry exists only to carry the count, so every reader checks `type`
+--- before drawing a marker glyph or a tint from it.
+local attention_cache = {}
 
 --- Local GUI pane id → marker id, or false for a pane that has published none.
 --- format-tab-title is handed PaneInformation tables, which carry a pane_id and
@@ -347,19 +400,32 @@ local function resolve_visible_attention(pane_ids, opts)
   local best_priority = -1
   local best_frame    = nil
 
+  local subagents = 0
+
   for _, id in ipairs(pane_ids) do
     local cached = attention_cache[id]
     if cached then
-      local pri = cfg_priority[cached.type] or 0
-      if pri > best_priority then
-        best_type     = cached.type
-        best_priority = pri
-        best_frame    = cached.frame
+      subagents = subagents + (cached.subagents or 0)
+      -- A count-only entry has no type. It contributes its subagents and never
+      -- competes for the tab's marker glyph.
+      if cached.type then
+        local pri = cfg_priority[cached.type] or 0
+        if pri > best_priority then
+          best_type     = cached.type
+          best_priority = pri
+          best_frame    = cached.frame
+        end
       end
     end
   end
 
   if not best_type then
+    -- No marker anywhere in the tab, but subagents of one of its panes are
+    -- still running: show the count alone, tinted as stop. There is no marker
+    -- type to name here, so `type` stays nil.
+    if subagents > 0 then
+      return { indicator = "+" .. subagents .. " ", type = nil, color = cfg_colors.stop }
+    end
     return { indicator = "", type = nil, color = nil }
   end
 
@@ -373,12 +439,20 @@ local function resolve_visible_attention(pane_ids, opts)
     indicator = cfg_indicators[best_type]
   end
 
+  -- The count rides inside the indicator's own trailing space, so "✓ " with two
+  -- subagents renders "✓+2 " and the tab gains one column, not four.
+  if subagents > 0 then
+    indicator = indicator:gsub("%s+$", "") .. "+" .. subagents .. " "
+  end
+
   return { indicator = indicator, type = best_type, color = cfg_colors[best_type] }
 end
 
 local function same_cached_attention(a, b)
   if not a or not b then return a == b end
-  return a.type == b.type and a.frame == b.frame
+  return a.type == b.type
+    and a.frame == b.frame
+    and (a.subagents or 0) == (b.subagents or 0)
 end
 
 --- Return the panes of the tab holding marker_id in a captured tab list.
@@ -405,9 +479,24 @@ end
 --- acknowledged while its window is in the background is a notification the user
 --- never saw.
 ---
-local function cache_marker_values(id, atype, frame, raw, publication_id, observed_now, source, puppet)
+local function cache_marker_values(
+    id, atype, frame, raw, publication_id, observed_now, source, puppet, subagents)
+  subagents = tonumber(subagents) or 0
+
   if not atype then
-    attention_cache[id] = nil
+    -- No marker. A pane whose subagents are still working keeps a count-only
+    -- entry so its tab can render "+N"; with nothing left to say, the entry
+    -- goes away entirely, as it always has.
+    if subagents > 0 then
+      attention_cache[id] = {
+        type        = nil,
+        observed_at = observed_now,
+        puppet      = false,
+        subagents   = subagents,
+      }
+    else
+      attention_cache[id] = nil
+    end
     return
   end
 
@@ -425,6 +514,7 @@ local function cache_marker_values(id, atype, frame, raw, publication_id, observ
     identity    = marker_identity(raw, publication_id),
     source      = source,
     puppet      = puppet == true,
+    subagents   = subagents,
   }
 end
 
@@ -437,32 +527,40 @@ local function acknowledge_focused_pane(pane_id, opts)
   local cached = attention_cache[id]
   if not (cached and acknowledge_set[cached.type]) then return "absent" end
 
+  -- The count this tick's poll already read from disk. Acknowledgement is about
+  -- the marker only, so it must hand the count back unchanged; recomputing zero
+  -- here would drop the "+N" and make every tick a visible change.
+  local subagents = cached.subagents or 0
+
   local current_type, current_frame, _, _, raw, publication_id, source, puppet =
     read_marker(dir, id)
   if not current_type then
     clear_acknowledgement(dir, id)
-    attention_cache[id] = nil
+    cache_marker_values(id, nil, nil, nil, nil, observed_now, nil, false, subagents)
     return "absent"
   end
 
   local current_identity = marker_identity(raw, publication_id)
   if cached.identity ~= current_identity then
     cache_marker_values(
-      id, current_type, current_frame, raw, publication_id, observed_now, source, puppet)
+      id, current_type, current_frame, raw, publication_id, observed_now, source, puppet,
+      subagents)
     return "kept"
   end
 
   if not acknowledge_set[current_type] then
     clear_acknowledgement(dir, id)
     cache_marker_values(
-      id, current_type, current_frame, raw, publication_id, observed_now, source, puppet)
+      id, current_type, current_frame, raw, publication_id, observed_now, source, puppet,
+      subagents)
     return "kept"
   end
 
   local write_ack = (opts and opts.write_acknowledgement) or write_acknowledgement
   if not write_ack(dir, id, current_identity) then
     cache_marker_values(
-      id, current_type, current_frame, raw, publication_id, observed_now, source, puppet)
+      id, current_type, current_frame, raw, publication_id, observed_now, source, puppet,
+      subagents)
     return "failed"
   end
 
@@ -473,7 +571,7 @@ local function acknowledge_focused_pane(pane_id, opts)
     effective_source, effective_puppet = read_effective_marker(dir, id)
   cache_marker_values(
     id, effective_type, effective_frame, effective_raw, effective_publication_id, observed_now,
-    effective_source, effective_puppet)
+    effective_source, effective_puppet, subagents)
   return effective_type and "kept" or "acknowledged"
 end
 
@@ -522,17 +620,24 @@ end
 -- ── Public API ──────────────────────────────────────────────────────────────
 
 --- Read the cached attention state for a marker id (see M.pane_marker_id).
---- Returns (type, frame, source, puppet) or nil. `source` is the marker's
---- JSON `source` string when it carried one; `puppet` is true only when the
---- marker set `"puppet": true`.
+--- Returns (type, frame, source, puppet, subagents) or nil. `source` is the
+--- marker's JSON `source` string when it carried one; `puppet` is true only
+--- when the marker set `"puppet": true`; `subagents` is how many of the pane's
+--- subagents ran a tool call in the last ten minutes, 0 when none.
+---
+--- A pane with live subagents and no marker returns (nil, nil, nil, false, n):
+--- the count is real even though there is no marker type to report.
 function M.get_attention(marker_id, opts)
   local id = tostring(marker_id)
   if opts and opts.dir then
     local atype, frame, _, _, _, _, source, puppet = read_effective_marker(opts.dir, id)
-    return atype, frame, source, puppet
+    local now = (opts and opts.now_ms) or now_ms()
+    return atype, frame, source, puppet, count_live_subagents(opts.dir, id, now)
   end
   local cached = attention_cache[id]
-  if cached then return cached.type, cached.frame, cached.source, cached.puppet end
+  if cached then
+    return cached.type, cached.frame, cached.source, cached.puppet, cached.subagents or 0
+  end
   return nil
 end
 
@@ -597,6 +702,9 @@ function M.poll(window, opts)
         before[id] = attention_cache[id]
         local atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source, puppet =
           read_marker(dir, id)
+        -- One sidecar read per pane per tick, with this tick's clock, whether or
+        -- not the pane has a marker.
+        local subagents = count_live_subagents(dir, id, now)
         local acknowledged = acknowledgement_matches(dir, id, raw, publication_id)
         if atype then
           local cached = attention_cache[id]
@@ -611,7 +719,9 @@ function M.poll(window, opts)
             remove_marker(dir, id)
             attention_cache[id] = nil
           elseif acknowledged then
-            attention_cache[id] = nil
+            -- The marker was already seen. Its subagents may still be working,
+            -- so the entry survives as a count when there is a count to keep.
+            cache_marker_values(id, nil, nil, nil, nil, observed_at, nil, false, subagents)
           else
             if atype == "thinking" and frame == nil then
               -- A frame is a function of time, never of poll count. The redraw
@@ -620,10 +730,11 @@ function M.poll(window, opts)
               -- terminates at the visible-change comparison below.
               frame = frame_for_now(now, frame_count)
             end
-            cache_marker_values(id, atype, frame, raw, publication_id, observed_at, source, puppet)
+            cache_marker_values(
+              id, atype, frame, raw, publication_id, observed_at, source, puppet, subagents)
           end
         else
-          attention_cache[id] = nil
+          cache_marker_values(id, nil, nil, nil, nil, now, nil, false, subagents)
         end
       end
     end
@@ -917,7 +1028,9 @@ function M.apply_to_config(config, opts)
         w:write(raw)
         w:close()
         if os.rename(tmp, path) then
-          cache_marker_values(target_id, "review", nil, raw, publication_id, nil)
+          local existing_cache = attention_cache[target_id]
+          cache_marker_values(target_id, "review", nil, raw, publication_id, nil, nil, false,
+            existing_cache and existing_cache.subagents or 0)
           request_tab_bar_redraw(win, pane)
         else
           os.remove(tmp)

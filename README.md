@@ -17,6 +17,8 @@ Only the active pane of the focused window is acknowledged. The writer-owned mar
 
 When multiple panes in a tab have different states, the highest-priority one wins: **notify > stop > review > thinking**.
 
+A pane can also report how many subagents are still working inside it. The tab appends that count to whatever indicator it is already showing — `✓+2` — or shows `+2` on its own when the pane has no marker left. See [Subagent activity](#subagent-activity-the-agents-sidecar).
+
 ## Install
 
 Add one line to your `wezterm.lua`:
@@ -134,7 +136,8 @@ Any process running inside WezTerm can write a marker. The contract is:
 4. **Recommended:** `publication_id` is a new non-empty string for every publication. It lets an identical `stop` or `notify` payload become visible again after the previous publication was acknowledged. Without it, the plugin uses the exact JSON bytes as the legacy identity.
 5. **Optional:** `updated_at` or `updated_at_ms` records when the marker was refreshed. Seconds and milliseconds are both accepted.
 6. **Optional:** `ttl_ms` overrides stale cleanup for that marker. By default, stale `thinking` markers clear after 30 minutes.
-7. **Cleanup** is automatic. The poller removes a marker whose pane it saw on the previous tick and does not see now (WezTerm emits no pane-close event, so a vanished pane is how a closed pane is detected), and removes a marker whose stale TTL has expired. Focusing a pane writes an acknowledgement sidecar instead of removing writer-owned state.
+7. **Optional:** a `<WEZTERM_PANE>.agents` sidecar reports how many subagents are working in the pane — see [Subagent activity](#subagent-activity-the-agents-sidecar) below.
+8. **Cleanup** is automatic. The poller removes a marker whose pane it saw on the previous tick and does not see now (WezTerm emits no pane-close event, so a vanished pane is how a closed pane is detected), and removes a marker whose stale TTL has expired. Removing a marker takes its `.agents` sidecar with it. Focusing a pane writes an acknowledgement sidecar instead of removing writer-owned state.
 
 The `WEZTERM_PANE` environment variable is injected by WezTerm into every shell it spawns. That's the pane's unique ID — always a non-negative integer. Validate it (`/^\d+$/`) before building a path from it: a stray `../…` value would otherwise write to, or delete, a file outside the marker directory. Every example and fragment below enforces this.
 
@@ -175,6 +178,52 @@ nothing, because that number names some other pane's marker file.
 
 Panes in the GUI's own `local` domain need none of this — there `pane:pane_id()`
 and `$WEZTERM_PANE` are the same number whether it is published or not.
+
+### Subagent activity: the `.agents` sidecar
+
+A pane can have more than one thing running in it. Beside the marker file, the
+writer maintains `~/.local/state/wezterm-attention/<WEZTERM_PANE>.agents`:
+
+```json
+{
+  "agents": {
+    "agent-4f2a": { "type": "general-purpose", "last_ms": 1756890000000 },
+    "agent-91bd": { "type": "Explore",         "last_ms": 1756890042000 }
+  }
+}
+```
+
+One entry per subagent that has run a tool call from that pane, keyed by
+whatever id the writer uses for it. `last_ms` is when that subagent last ran a
+tool call, in epoch milliseconds. `type` is the writer's own label for the
+subagent; the plugin carries it in the file but does not interpret it.
+
+**The writer owns this file.** The plugin only reads it, and deletes it along
+with the marker when the pane closes or the marker is removed.
+
+An entry is **live for ten minutes** after its `last_ms`. Older entries are
+ignored, so a writer that never cleans up still stops reporting a subagent that
+has gone quiet. An absent, empty, or unparseable file counts as zero live
+subagents and never disturbs the marker beside it.
+
+The file is **independent of the marker.** A pane can carry live subagents with
+no marker at all — the parent agent stopped and you acknowledged its ✓ — or
+alongside a marker of any type.
+
+The tab renders the live count as `+N`, inside the space the indicator already
+occupies:
+
+| Marker | Live subagents | Tab shows |
+|--------|----------------|-----------|
+| `stop` | 0 | `✓ ` |
+| `stop` | 2 | `✓+2 ` |
+| `thinking` | 3 | `◑+3 ` |
+| `notify` | 1 | `!+1 ` |
+| none | 2 | `+2 ` (tinted mint, as `stop` is) |
+
+The count never decides which marker wins the tab — priority is settled by the
+markers alone. But a change in the count alone is a visible change, so it
+repaints the tab bar on the next poll like any other.
 
 **Atomic writes recommended:** To avoid partial reads, write to a `.tmp` file then rename:
 
@@ -249,10 +298,14 @@ local attention = wezterm.plugin.require("https://github.com/pro-vi/wezterm-atte
 -- var, else its pane id when the pane is in the "local" domain, else nil.
 local marker_id = attention.pane_marker_id(pane)
 
--- Read cached attention state: returns (type, frame, source, puppet) or nil.
+-- Read cached attention state:
+-- returns (type, frame, source, puppet, subagents) or nil.
 -- source is the marker's JSON "source" string (nil when it carried none);
--- puppet is true only when the marker set "puppet": true.
-local state, frame, source, puppet = attention.get_attention(marker_id)
+-- puppet is true only when the marker set "puppet": true;
+-- subagents is how many of the pane's subagents ran a tool call in the last
+-- ten minutes, 0 when none. A pane with live subagents and no marker returns
+-- (nil, nil, nil, false, n).
+local state, frame, source, puppet, subagents = attention.get_attention(marker_id)
 
 -- Clear a marker programmatically
 attention.remove_marker(marker_id)
@@ -480,6 +533,7 @@ No background threads, no FFI, no external dependencies — just filesystem read
 - Check the directory exists: `ls ~/.local/state/wezterm-attention/` (or your configured `dir`)
 - Verify `WEZTERM_PANE` is set: `echo $WEZTERM_PANE` (should print a number inside WezTerm)
 - Check file contents: `cat ~/.local/state/wezterm-attention/$WEZTERM_PANE` (should be valid JSON)
+- A `+N` with no glyph beside it is the [subagent count](#subagent-activity-the-agents-sidecar) for a pane whose own marker is gone or already acknowledged. `cat ~/.local/state/wezterm-attention/$WEZTERM_PANE.agents` shows the entries; ones older than ten minutes are not counted.
 - A matching `$WEZTERM_PANE.ack` means that publication was already displayed. Removing the sidecar makes it visible again; sidecars are plugin-owned and safe to remove before rolling back to an older plugin version.
 - Ensure your hooks write to the same path as the plugin's `dir` setting
 - `status_update_interval` defaults to 1000ms; markers update on this interval. Lower it if indicators feel slow — the redraw request rides on the same tick.
