@@ -39,6 +39,8 @@ local wezterm = {
       updated_at_ms = tonumber(content:match('"updated_at_ms"%s*:%s*(%d+)')),
       ttl_ms = tonumber(content:match('"ttl_ms"%s*:%s*(%d+)')),
       publication_id = content:match('"publication_id"%s*:%s*"([^"]+)"'),
+      source = content:match('"source"%s*:%s*"([^"]+)"'),
+      puppet = content:match('"puppet"%s*:%s*true') ~= nil,
     }
   end,
   log_error = function(message)
@@ -64,10 +66,10 @@ local format_tab_title = assert(
   "format-tab-title handler was not registered"
 )
 
-local pane_destroyed = assert(
-  handlers["pane-destroyed"] and handlers["pane-destroyed"][1],
-  "pane-destroyed handler was not registered"
-)
+-- WezTerm emits no "pane-destroyed" event. Registering for one was a handler
+-- that could never fire, so the plugin must not register it any more.
+assert(handlers["pane-destroyed"] == nil,
+  "the plugin must not register a handler for an event WezTerm never emits")
 
 local internal = assert(attention._internal, "internal seams were not exposed")
 
@@ -105,10 +107,30 @@ local function write_acknowledgement_file(pane_id, identity)
   file:close()
 end
 
-local function mux_pane(pane_id)
+--- A mux pane double.
+---
+--- `spec.domain` is the pane's domain name ("local" unless a test says
+--- otherwise) and `spec.published` is the value the pane has published as its
+--- WEZTERM_PANE user var. A plain number therefore describes the ordinary
+--- case: a local pane whose local id is also its marker id.
+local function mux_pane(pane_id, spec)
+  spec = spec or {}
+  local user_vars = {}
+  if spec.published ~= nil then user_vars.WEZTERM_PANE = tostring(spec.published) end
   return {
     pane_id = function() return pane_id end,
+    get_domain_name = function() return spec.domain or "local" end,
+    get_user_vars = function() return user_vars end,
   }
+end
+
+--- Tab entries in a window double are either a bare local pane id or
+--- { id, domain, published }.
+local function pane_from_entry(entry)
+  if type(entry) == "table" then
+    return mux_pane(entry.id, { domain = entry.domain, published = entry.published })
+  end
+  return mux_pane(entry)
 end
 
 local function gui_pane(pane_id)
@@ -137,8 +159,8 @@ local function window_double(spec)
   local mux_tabs = {}
   for _, pane_ids in ipairs(spec.tabs or {}) do
     local panes = {}
-    for _, pane_id in ipairs(pane_ids) do
-      table.insert(panes, mux_pane(pane_id))
+    for _, entry in ipairs(pane_ids) do
+      table.insert(panes, pane_from_entry(entry))
     end
     table.insert(mux_tabs, {
       panes = function() return panes end,
@@ -169,7 +191,7 @@ local function window_double(spec)
   function w.active_pane()
     w.active_pane_calls = w.active_pane_calls + 1
     if spec.active_pane_id == nil then return nil end
-    return mux_pane(spec.active_pane_id)
+    return pane_from_entry(spec.active_pane_id)
   end
 
   function w.perform_action(_, action, pane)
@@ -202,6 +224,7 @@ local function poll_focused(spec)
     action_error   = spec.action_error,
     on_action      = spec.on_action,
     on_focus_check = spec.on_focus_check,
+    window_id      = spec.window_id,
   })
   attention.poll(w, spec.opts)
   return w
@@ -504,7 +527,8 @@ test("acknowledgement rename failure removes its temp and leaves truth visible",
   assert(ok and outcome == "failed", "rename failure should return failed")
   assert(marker_exists(948), "canonical truth must remain")
   assert(not acknowledgement_exists(948), "failed rename must not install acknowledgement")
-  assert(not path_exists(ack_path .. ".tmp"), "failed rename must remove its temp file")
+  assert(not path_exists(internal.acknowledgement_tmp_path(test_dir, "948")),
+    "failed rename must remove its temp file")
   assert(attention.get_attention(948) == "notify", "failed acknowledgement must remain visible")
   local errors = drain_errors()
   assert(#errors == 1 and errors[1]:find("failed to place acknowledgement", 1, true),
@@ -546,16 +570,25 @@ test("public removal without opts uses the configured marker directory", functio
     "configured acknowledgement should be removed")
 end)
 
-test("pane destruction clears canonical marker and acknowledgement sidecar", function()
+test("a pane that vanishes between polls has its marker and sidecar removed", function()
   write_marker(945, "notify", "publication-a")
-  poll_focused({ tabs = { { 940, 945 } }, active_pane_id = 945 })
+  local window_id = 9450
+  poll_focused({
+    tabs = { { 940, 945 } },
+    active_pane_id = 945,
+    window_id = window_id,
+  })
   assert(acknowledgement_exists(945), "precondition: sidecar exists")
 
-  pane_destroyed(nil, mux_pane(945))
+  -- 945 is gone; 940 is still here, so its domain is still represented and the
+  -- disappearance reads as a closed pane rather than a detached domain.
+  attention.poll(window_double({
+    tabs = { { 940 } }, focused = false, window_id = window_id,
+  }))
 
-  assert(not marker_exists(945), "pane destruction should remove canonical marker")
-  assert(not acknowledgement_exists(945), "pane destruction should remove sidecar")
-  assert(attention.get_attention(945) == nil, "pane destruction should clear cache")
+  assert(not marker_exists(945), "a closed pane should lose its canonical marker")
+  assert(not acknowledgement_exists(945), "a closed pane should lose its sidecar")
+  assert(attention.get_attention(945) == nil, "a closed pane should leave the cache")
 end)
 
 test("TTL cleanup removes canonical marker and acknowledgement sidecar", function()
@@ -849,6 +882,184 @@ test("review toggles redraw after a successful marker mutation", function()
   local errors = drain_errors()
   assert(#errors == 1 and errors[1]:find("failed to place review marker", 1, true),
     "the real review rename failure should be logged")
+end)
+
+-- ── U3: which id names the marker file ──────────────────────────────────────
+
+test("a published WEZTERM_PANE user var names the marker, not the local pane id", function()
+  write_marker(7001, "notify")
+
+  -- A mux-client pane: the GUI numbered it 12, but the process inside it reads
+  -- 7001 from $WEZTERM_PANE and writes its marker under that name.
+  attention.poll(window_double({
+    tabs    = { { { id = 12, domain = "unix", published = 7001 } } },
+    focused = false,
+  }))
+
+  assert(attention.get_attention(7001) == "notify",
+    "the published id should be the cache key")
+  assert(attention.get_attention(12) == nil,
+    "the GUI's local id must never be read as a marker id")
+end)
+
+test("a local pane with no user var falls back to its own pane id", function()
+  local pane = mux_pane(7002)
+  assert(attention.pane_marker_id(pane) == "7002",
+    "a local pane's id is its marker id even unpublished")
+
+  write_marker(7002, "stop")
+  poll({ 7002 })
+  assert(attention.get_attention(7002) == "stop", "the local fallback should address the marker")
+end)
+
+test("a non-decimal user var is rejected in favour of the local fallback", function()
+  local escaping = mux_pane(31, { published = "../escape" })
+  assert(attention.pane_marker_id(escaping) == "31",
+    "a user var that is not a plain decimal must not become a path segment")
+
+  local padded = mux_pane(32, { published = "007" })
+  assert(attention.pane_marker_id(padded) == "32",
+    "a leading-zero id is not the canonical form WezTerm hands to $WEZTERM_PANE")
+end)
+
+test("a mux pane that has published nothing has no marker id and is skipped", function()
+  local unpublished = mux_pane(7003, { domain = "unix" })
+  assert(attention.pane_marker_id(unpublished) == nil,
+    "an unpublished remote pane's local id names some other pane's markers")
+
+  -- Cache marker "7003" from a genuinely local pane in one window.
+  write_marker(7003, "notify")
+  poll({ 7003 })
+  assert(attention.get_attention(7003) == "notify", "precondition: marker 7003 is cached")
+
+  -- Another window holds a remote pane the GUI also numbered 7003. Polling it
+  -- must neither read nor remove marker 7003.
+  attention.poll(window_double({
+    tabs    = { { { id = 7003, domain = "unix" } } },
+    focused = false,
+  }))
+  assert(marker_exists(7003), "an unpublished remote pane must not touch a marker file")
+  assert(attention.get_attention(7003) == "notify", "nor the cache entry that marker owns")
+
+  -- And its tab renders nothing, rather than the other pane's notify.
+  local rendered = format_tab_title(tab(7003, 7003, true))
+  assert(type(rendered) == "string",
+    "a tab of unresolvable panes must carry no tint")
+  assert(not rendered:find("! ", 1, true),
+    "a tab of unresolvable panes must not borrow another pane's indicator")
+end)
+
+-- ── U3: a closed pane versus a detached domain ──────────────────────────────
+
+test("a detached domain keeps the markers of panes still running on the server", function()
+  write_marker(7101, "notify")
+  local window_id = 7100
+
+  attention.poll(window_double({
+    tabs      = { { { id = 5, domain = "unix", published = 7101 }, 40 } },
+    focused   = false,
+    window_id = window_id,
+  }))
+  assert(attention.get_attention(7101) == "notify", "precondition: the remote marker is cached")
+
+  -- The unix domain is detached: every one of its panes leaves this window in
+  -- one tick, while the processes writing their markers keep running.
+  attention.poll(window_double({
+    tabs      = { { 40 } },
+    focused   = false,
+    window_id = window_id,
+  }))
+
+  assert(marker_exists(7101), "a detached domain's markers must survive the detach")
+  assert(attention.get_attention(7101) == "notify", "and stay visible for the reattach")
+end)
+
+-- ── U3: marker metadata on the public read ──────────────────────────────────
+
+test("get_attention reports the marker's source and puppet flag", function()
+  local file = assert(io.open(test_dir .. "/7201", "w"))
+  file:write('{"type":"notify","source":"codex","puppet":true,"publication_id":"pub-7201"}')
+  file:close()
+  poll({ 7201 })
+
+  local atype, frame, source, puppet = attention.get_attention(7201)
+  assert(atype == "notify", "the first two returns keep their meaning")
+  assert(frame == nil, "a notify marker carries no frame")
+  assert(source == "codex", "source should be the marker's source string, got " .. tostring(source))
+  assert(puppet == true, "puppet should be true when the marker says so")
+
+  write_marker(7202, "stop")
+  poll({ 7202 })
+  local _, _, plain_source, plain_puppet = attention.get_attention(7202)
+  assert(plain_source == nil, "a marker with no source reports none")
+  assert(plain_puppet == false, "a marker with no puppet flag is not a puppet")
+
+  local _, _, direct_source, direct_puppet = attention.get_attention(7201, { dir = test_dir })
+  assert(direct_source == "codex" and direct_puppet == true,
+    "a direct disk read should report the same source and puppet flag")
+end)
+
+-- ── U3: hosts that repaint their own titles ─────────────────────────────────
+
+test("request_redraw = false performs no action when attention changes", function()
+  local quiet = dofile(repo_root .. "/plugin/init.lua")
+  quiet.apply_to_config({}, {
+    auto_poll      = false,
+    dir            = test_dir,
+    review_key     = false,
+    request_redraw = false,
+  })
+
+  write_marker(7301, "notify")
+  local w = window_double({
+    tabs = { { 7300, 7301 } }, focused = true, active_pane_id = 7300,
+  })
+  quiet.poll(w, { now_ms = 1000 })
+
+  assert(quiet.get_attention(7301) == "notify", "polling still fills the cache")
+  assert(w.action_calls == 0, "no redraw action should be attempted at all")
+  assert(#w.actions == 0, "and none recorded")
+end)
+
+-- ── U3: acknowledgement replaces its sidecar atomically ─────────────────────
+
+test("acknowledgement renames its sidecar into place without unlinking it first", function()
+  write_marker(7401, "notify", "pub-b")
+  poll({ 7401 })
+  -- A sidecar from an earlier publication is already sitting there.
+  write_acknowledgement_file(7401, "publication\npub-a")
+
+  local ack_path = test_dir .. "/7401.ack"
+  local tmp_path = internal.acknowledgement_tmp_path(test_dir, "7401")
+  assert(tmp_path ~= ack_path .. ".tmp",
+    "the in-flight name must be private to this process, not a shared '<id>.ack.tmp'")
+
+  local removed, renamed = {}, {}
+  local real_remove, real_rename = os.remove, os.rename
+  os.remove = function(path)
+    table.insert(removed, path)
+    return real_remove(path)
+  end
+  os.rename = function(from, to)
+    table.insert(renamed, from .. " -> " .. to)
+    return real_rename(from, to)
+  end
+  local ok, outcome = pcall(internal.acknowledge_focused_pane, 7401, {
+    dir = test_dir,
+    now_ms = 1000,
+  })
+  os.remove, os.rename = real_remove, real_rename
+
+  assert(ok and outcome == "acknowledged", "the acknowledgement should succeed: " .. tostring(outcome))
+  for _, path in ipairs(removed) do
+    assert(path ~= ack_path,
+      "the sidecar must be replaced by rename, never unlinked first")
+  end
+  assert(renamed[1] == tmp_path .. " -> " .. ack_path,
+    "the only rename should place this process's temp over the sidecar, got "
+      .. tostring(renamed[1]))
+  assert(acknowledgement_exists(7401), "the sidecar should now hold the new publication")
+  assert(attention.get_attention(7401) == nil, "and the acknowledged marker should be suppressed")
 end)
 
 os.execute("rm -rf " .. shell_quote(test_dir))

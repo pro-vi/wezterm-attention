@@ -28,13 +28,13 @@ attention.apply_to_config(config)
 
 Requires WezTerm `20221119-145034-49b9839f` or newer.
 
-By default, the plugin owns tab title formatting (`dir / title` + attention indicators). It also registers pane cleanup, a marker poller, and an `Alt+B` keybind to toggle review mode. `Alt+B` operates on the whole active tab: it flags the active pane, and clears the flag from every pane in the tab when any are already flagged (so split tabs can always be cleared with one press). It keys off whether `review` is set anywhere in the tab, independent of which indicator is currently rendered — a higher-priority `stop`/`notify` can mask the ◆.
+By default, the plugin owns tab title formatting (`dir / title` + attention indicators). It also registers a marker poller and an `Alt+B` keybind to toggle review mode. `Alt+B` operates on the whole active tab: it flags the active pane, and clears the flag from every pane in the tab when any are already flagged (so split tabs can always be cleared with one press). It keys off whether `review` is set anywhere in the tab, independent of which indicator is currently rendered — a higher-priority `stop`/`notify` can mask the ◆.
 
 > **Important:** WezTerm only runs the **first** registered `format-tab-title` handler. If another plugin (e.g. tabline.wez) registers one first, this plugin still polls and acknowledges markers, but its indicators and colors are not rendered. Make sure `apply_to_config` runs first, or use `renderer = "manual"` to integrate via the API instead.
 
 ## Render modes
 
-The plugin supports three render modes:
+There are two render modes:
 
 | Mode | Who owns `format-tab-title` | Per-tab colors | Use when |
 |------|---------------------------|----------------|----------|
@@ -114,6 +114,13 @@ attention.apply_to_config(config, {
   -- Review toggle keybind (false to disable)
   review_key = { key = "b", mods = "ALT" },
 
+  -- Ask WezTerm to rebuild the tab bar when a pane's attention changes.
+  -- Set false only if your own code already repaints titles every tick
+  -- (renderer = "manual" with a title drawn from your update-status handler).
+  -- The plugin then never performs ActivateTabRelative(0), saving that
+  -- tab-activation pass; nothing else about polling or acknowledgement changes.
+  request_redraw = true,
+
 })
 ```
 
@@ -127,9 +134,47 @@ Any process running inside WezTerm can write a marker. The contract is:
 4. **Recommended:** `publication_id` is a new non-empty string for every publication. It lets an identical `stop` or `notify` payload become visible again after the previous publication was acknowledged. Without it, the plugin uses the exact JSON bytes as the legacy identity.
 5. **Optional:** `updated_at` or `updated_at_ms` records when the marker was refreshed. Seconds and milliseconds are both accepted.
 6. **Optional:** `ttl_ms` overrides stale cleanup for that marker. By default, stale `thinking` markers clear after 30 minutes.
-7. **Cleanup** is automatic — canonical markers are removed when panes close or stale TTL expires. Focusing a pane writes an acknowledgement sidecar instead of removing writer-owned state.
+7. **Cleanup** is automatic. The poller removes a marker whose pane it saw on the previous tick and does not see now (WezTerm emits no pane-close event, so a vanished pane is how a closed pane is detected), and removes a marker whose stale TTL has expired. Focusing a pane writes an acknowledgement sidecar instead of removing writer-owned state.
 
 The `WEZTERM_PANE` environment variable is injected by WezTerm into every shell it spawns. That's the pane's unique ID — always a non-negative integer. Validate it (`/^\d+$/`) before building a path from it: a stray `../…` value would otherwise write to, or delete, a file outside the marker directory. Every example and fragment below enforces this.
+
+### Publishing the pane id
+
+The plugin has to match a marker file to a pane on screen. Inside a pane,
+`$WEZTERM_PANE` is the number the marker is named after. From the config side,
+`pane:pane_id()` usually returns that same number — but not always.
+
+A GUI window attached to a mux server through a unix domain numbers the panes it
+displays itself. A process inside one of those panes still reads the *server's*
+id from `$WEZTERM_PANE` and writes its marker under that name, so the id the
+config sees and the id the file is named after are two different numbers. Every
+read, write, acknowledgement and removal the plugin performs for that pane would
+land on the wrong file.
+
+The fix is for the pane to publish its own id as the `WEZTERM_PANE` user
+variable, which `pane:get_user_vars()` reads back for local and mux-client panes
+alike. In zsh, publish it on every prompt so it survives a reattach:
+
+```zsh
+__wezterm_publish_pane() {
+  [[ -n "$WEZTERM_PANE" ]] || return
+  printf '\e]1337;SetUserVar=WEZTERM_PANE=%s\a' "$(printf %s "$WEZTERM_PANE" | base64)"
+}
+precmd_functions+=(__wezterm_publish_pane)
+```
+
+The value is base64-encoded because that is what the OSC 1337 `SetUserVar`
+sequence expects. A hook or agent that writes markers can emit the same sequence
+to `/dev/tty`, which covers panes whose shell has not been reloaded yet.
+
+**Without this, a mux-attached GUI cannot address markers at all.** The plugin
+treats a remote pane that has published nothing as having no marker id: it reads,
+writes, acknowledges and removes nothing for that pane, and the pane contributes
+no indicator to its tab. Guessing from the local id would be worse than doing
+nothing, because that number names some other pane's marker file.
+
+Panes in the GUI's own `local` domain need none of this — there `pane:pane_id()`
+and `$WEZTERM_PANE` are the same number whether it is published or not.
 
 **Atomic writes recommended:** To avoid partial reads, write to a `.tmp` file then rename:
 
@@ -200,11 +245,17 @@ The plugin exposes functions for use in your own WezTerm Lua code:
 ```lua
 local attention = wezterm.plugin.require("https://github.com/pro-vi/wezterm-attention")
 
--- Read cached attention state: returns (type, frame) or nil
-local state, frame = attention.get_attention(pane:pane_id())
+-- The id a pane's markers are named after: its published WEZTERM_PANE user
+-- var, else its pane id when the pane is in the "local" domain, else nil.
+local marker_id = attention.pane_marker_id(pane)
+
+-- Read cached attention state: returns (type, frame, source, puppet) or nil.
+-- source is the marker's JSON "source" string (nil when it carried none);
+-- puppet is true only when the marker set "puppet": true.
+local state, frame, source, puppet = attention.get_attention(marker_id)
 
 -- Clear a marker programmatically
-attention.remove_marker(pane:pane_id())
+attention.remove_marker(marker_id)
 
 -- Poll markers manually (for auto_poll = false)
 attention.poll(window, { active_pane = pane })
@@ -413,18 +464,19 @@ it isn't wired here yet.
 
 The plugin uses a **poller/renderer split** to avoid blocking WezTerm's GUI thread:
 
-1. **Poller** (`update-status` event) — runs on WezTerm's `config.status_update_interval` (default 1000ms). Reads marker files and acknowledgement sidecars, then updates an in-memory cache. It acknowledges the focused window's current active pane and asks WezTerm to rebuild the tab bar when a pane's effective attention changes.
+1. **Poller** (`update-status` event) — runs on WezTerm's `config.status_update_interval` (default 1000ms). Reads marker files and acknowledgement sidecars, then updates an in-memory cache. It acknowledges the focused window's current active pane and asks WezTerm to rebuild the tab bar when a pane's effective attention changes. It also removes the marker of any pane that was in the window on the previous tick and is gone now — unless every pane of that pane's domain went at once, which is a domain detach rather than a close, and those panes are still alive on the server.
 2. **Renderer** (`format-tab-title` event) — fires on every tab repaint (mouse hover, key press, redraws). Reads only from the cache — zero I/O, instant returns, and no writes of any kind.
 
 WezTerm rebuilds tab titles when something it knows about changes, and a marker file appearing on disk is not one of those things. When the poller sees a pane's effective attention change, it performs `ActivateTabRelative(0)` on the focused window. That re-activates the already-selected tab and makes WezTerm recompute every tab title. The plugin does not write either status string, the window title, or any user title.
 
-The redraw action can pass through WezTerm's normal tab-activation path, including terminal focus reporting. It therefore runs only when the window has keyboard focus and a valid active pane. Generated spinner frames use one-second wall-clock buckets, so polls induced by the action see the same frame and terminate. If an action fails, that window logs once and stops requesting redraws.
+Set `request_redraw = false` to switch that request off, for a host whose own `update-status` handler already redraws the titles it owns. The redraw action can pass through WezTerm's normal tab-activation path, including terminal focus reporting. It therefore runs only when the window has keyboard focus and a valid active pane. Generated spinner frames use one-second wall-clock buckets, so polls induced by the action see the same frame and terminate. If an action fails, that window logs once and stops requesting redraws.
 
 No background threads, no FFI, no external dependencies — just filesystem reads in Lua on a configurable interval.
 
 ## Troubleshooting
 
 **Markers not showing?**
+- If the window is attached to a mux server (`wezterm connect`, a unix domain), check the pane publishes its id: `wezterm cli list --format json` shows the server-side pane id, and the pane must emit that number as the `WEZTERM_PANE` user var. See [Publishing the pane id](#publishing-the-pane-id). Without it the plugin deliberately does nothing for that pane.
 - Check the directory exists: `ls ~/.local/state/wezterm-attention/` (or your configured `dir`)
 - Verify `WEZTERM_PANE` is set: `echo $WEZTERM_PANE` (should print a number inside WezTerm)
 - Check file contents: `cat ~/.local/state/wezterm-attention/$WEZTERM_PANE` (should be valid JSON)

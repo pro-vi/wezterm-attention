@@ -92,9 +92,32 @@ function enqueue(op: () => Promise<void>): Promise<void> {
 	return run;
 }
 
+// A GUI attached through a mux client numbers panes differently from the
+// server that owns this pty, so it cannot find this pane's marker from its own
+// ids. Publishing $WEZTERM_PANE as a WezTerm user var (OSC 1337 SetUserVar)
+// lets every attached GUI read the exact id with pane:get_user_vars(). Once per
+// process, best-effort: no controlling tty means no publish and no error.
+let panePublished = false;
+async function publishPaneId(id: string): Promise<void> {
+	if (panePublished) return;
+	panePublished = true;
+	try {
+		const { open } = await import("node:fs/promises");
+		const tty = await open("/dev/tty", "w");
+		try {
+			await tty.write(`\u001b]1337;SetUserVar=WEZTERM_PANE=${Buffer.from(id, "utf8").toString("base64")}\u0007`);
+		} finally {
+			await tty.close();
+		}
+	} catch {
+		// no tty (headless run) or the write lost: the GUI simply cannot address this pane yet
+	}
+}
+
 async function writeMarkerNow(state: AttentionState, label?: string): Promise<void> {
 	const id = paneId();
 	if (!id) return;
+	await publishPaneId(id);
 
 	const dir = markerDirectory();
 	if (!dir) return;

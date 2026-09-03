@@ -43,6 +43,10 @@ local defaults = {
 
   -- Keybind to toggle "review" marker on active pane (false to disable)
   review_key = { key = "b", mods = "ALT" },
+
+  -- Ask WezTerm to rebuild the tab bar when a pane's attention changes.
+  -- Set false when the host already repaints titles on its own tick.
+  request_redraw = true,
 }
 
 -- Known attention types (reject unknown values from marker files)
@@ -97,17 +101,18 @@ local function read_marker(dir, pane_id)
   if ok and data and valid_types[data.type] then
     local publication_id = type(data.publication_id) == "string"
       and data.publication_id ~= "" and data.publication_id or nil
+    local source = type(data.source) == "string" and data.source ~= "" and data.source or nil
     return data.type, data.frame, normalize_epoch_ms(data.updated_at or data.updated_at_ms),
-      data.ttl_ms, content, publication_id
+      data.ttl_ms, content, publication_id, source, data.puppet == true
   end
 
   -- Fallback: plain text (backward compat)
   local text = content:gsub("%s+", "")
-  if valid_types[text] then return text, nil, nil, nil, content end
+  if valid_types[text] then return text, nil, nil, nil, content, nil, nil, false end
   return nil
 end
 
-local acknowledgement_errors = {}
+local reported_errors = {}
 local publication_counter = 0
 local publication_session = tostring({}):gsub("[^%w]", "")
 
@@ -120,6 +125,14 @@ end
 
 local function acknowledgement_path(dir, pane_id)
   return dir .. "/" .. pane_id .. ".ack"
+end
+
+--- The in-flight sidecar this process writes before renaming it into place.
+--- The name carries this process's session token, so two WezTerm processes
+--- acknowledging the same pane never delete each other's in-flight file while
+--- it is being renamed. A bare "<id>.ack.tmp" was shared state.
+local function acknowledgement_tmp_path(dir, pane_id)
+  return acknowledgement_path(dir, pane_id) .. "." .. publication_session .. ".tmp"
 end
 
 local function marker_identity(raw, publication_id)
@@ -135,9 +148,11 @@ local function read_acknowledgement(dir, pane_id)
   return identity
 end
 
-local function report_acknowledgement_error_once(key, message)
-  if acknowledgement_errors[key] then return end
-  acknowledgement_errors[key] = true
+--- Log a message once per key, so a persistent failure does not fill the log
+--- on every poll tick.
+local function report_error_once(key, message)
+  if reported_errors[key] then return end
+  reported_errors[key] = true
   wezterm.log_error("wezterm-attention: " .. message)
 end
 
@@ -149,7 +164,7 @@ local function clear_acknowledgement(dir, pane_id)
 
   local ok, err = os.remove(path)
   if ok then return true end
-  report_acknowledgement_error_once(
+  report_error_once(
     "clear:" .. pane_id,
     "failed to remove acknowledgement " .. path .. ": " .. tostring(err))
   return false
@@ -157,11 +172,11 @@ end
 
 local function write_acknowledgement(dir, pane_id, identity)
   local path = acknowledgement_path(dir, pane_id)
-  local tmp = path .. ".tmp"
+  local tmp = acknowledgement_tmp_path(dir, pane_id)
   os.remove(tmp)
   local file, open_err = io.open(tmp, "w")
   if not file then
-    report_acknowledgement_error_once(
+    report_error_once(
       "write:" .. pane_id,
       "failed to write acknowledgement " .. tmp .. ": " .. tostring(open_err))
     return false
@@ -171,21 +186,20 @@ local function write_acknowledgement(dir, pane_id, identity)
   local closed, close_err = file:close()
   if not wrote or not closed then
     os.remove(tmp)
-    report_acknowledgement_error_once(
+    report_error_once(
       "write:" .. pane_id,
       "failed to finish acknowledgement " .. tmp .. ": " .. tostring(write_err or close_err))
     return false
   end
 
-  if not clear_acknowledgement(dir, pane_id) then
-    os.remove(tmp)
-    return false
-  end
-
+  -- No unlink of `path` here. os.rename replaces an existing file atomically on
+  -- POSIX, so removing the old sidecar first would only open a window in which
+  -- a concurrent reader sees no acknowledgement and re-displays a marker the
+  -- user already looked at.
   local renamed, rename_err = os.rename(tmp, path)
   if not renamed then
     os.remove(tmp)
-    report_acknowledgement_error_once(
+    report_error_once(
       "write:" .. pane_id,
       "failed to place acknowledgement " .. path .. ": " .. tostring(rename_err))
     return false
@@ -204,17 +218,61 @@ local function acknowledgement_matches(dir, pane_id, raw, publication_id)
 end
 
 local function read_effective_marker(dir, pane_id)
-  -- A crash can strand only the temporary sidecar. It was never authoritative.
-  os.remove(acknowledgement_path(dir, pane_id) .. ".tmp")
-  local atype, frame, updated_at, marker_ttl_ms, raw, publication_id = read_marker(dir, pane_id)
+  -- A crash can strand only this process's own temporary sidecar. It was never
+  -- authoritative. Another process's in-flight temp is not ours to remove: it
+  -- may be one instant away from being renamed into place.
+  os.remove(acknowledgement_tmp_path(dir, pane_id))
+  local atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source, puppet =
+    read_marker(dir, pane_id)
   if acknowledgement_matches(dir, pane_id, raw, publication_id) then return nil end
-  return atype, frame, updated_at, marker_ttl_ms, raw, publication_id
+  return atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source, puppet
 end
 
 local function remove_marker(dir, pane_id)
   os.remove(dir .. "/" .. pane_id)
   clear_acknowledgement(dir, pane_id)
-  os.remove(acknowledgement_path(dir, pane_id) .. ".tmp")
+  os.remove(acknowledgement_tmp_path(dir, pane_id))
+end
+
+-- ── Pane identity ───────────────────────────────────────────────────────────
+-- A marker file is named by the pane id a process reads from its own
+-- $WEZTERM_PANE. A GUI attached to a mux server over a unix domain gives its
+-- client panes fresh local ids, so pane:pane_id() there names a different pane
+-- than the writer did, and every marker read or write through it addresses the
+-- wrong file. The fix is a published id: the shell (and any hook) emits its
+-- $WEZTERM_PANE as the WEZTERM_PANE user var via OSC 1337 SetUserVar, and
+-- pane:get_user_vars() returns it for local and mux-client panes alike.
+
+local function canonical_pane_id(value)
+  if type(value) ~= "string" then return nil end
+  if not value:match("^%d+$") then return nil end
+  if #value > 1 and value:sub(1, 1) == "0" then return nil end
+  return value
+end
+
+local function pane_method(pane, name)
+  local fn = pane and pane[name]
+  if type(fn) ~= "function" then return nil end
+  local ok, result = pcall(fn, pane)
+  if not ok then return nil end
+  return result
+end
+
+--- The id under which this pane's markers are written, or nil when the pane
+--- has published nothing and its local id cannot be trusted to name them.
+function M.pane_marker_id(pane)
+  if not pane then return nil end
+
+  local vars = pane_method(pane, "get_user_vars")
+  local published = type(vars) == "table" and canonical_pane_id(vars.WEZTERM_PANE) or nil
+  if published then return published end
+
+  -- The GUI's own local domain numbers its panes exactly as $WEZTERM_PANE
+  -- does, so there the local id is the marker id even unpublished.
+  if pane_method(pane, "get_domain_name") == "local" then
+    return tostring(pane:pane_id())
+  end
+  return nil
 end
 
 -- ── In-memory cache ─────────────────────────────────────────────────────────
@@ -222,7 +280,19 @@ end
 -- thread). update-status fills this cache; acknowledgement performs one confirmation
 -- read only when acknowledging a cached terminal marker.
 
-local attention_cache = {} -- { [pane_id] = { type, frame?, observed_at?, raw, identity } }
+local attention_cache = {} -- { [marker_id] = { type, frame?, observed_at?, raw, identity, source?, puppet } }
+
+--- Local GUI pane id → marker id, or false for a pane that has published none.
+--- format-tab-title is handed PaneInformation tables, which carry a pane_id and
+--- no methods, so a marker id cannot be resolved there. poll() records the
+--- mapping for every pane it walks and the renderer reads it back.
+local marker_id_by_local = {}
+
+--- Per window, the marker ids its panes carried on the previous poll, each
+--- mapped to that pane's domain name. WezTerm has no pane-destroyed event, so
+--- this is how poll() notices a pane closed; the domain is what tells a closed
+--- pane apart from a detached domain.
+local seen_marker_ids_by_window = {}
 
 -- ── Internal helpers ────────────────────────────────────────────────────────
 
@@ -241,11 +311,24 @@ local function default_title(tab)
   return dir_name ~= "" and (dir_name .. " / " .. title) or title
 end
 
---- Pane IDs of one tab, as the GUI hands them to format-tab-title.
+--- Marker IDs of one tab, translated from the local pane ids the GUI hands to
+--- format-tab-title.
 local function gui_tab_pane_ids(tab)
   local ids = {}
   for _, p in ipairs(tab.panes) do
-    ids[#ids + 1] = tostring(p.pane_id)
+    local local_id = tostring(p.pane_id)
+    local mapped = marker_id_by_local[local_id]
+    if mapped then
+      ids[#ids + 1] = mapped
+    elseif mapped == nil then
+      -- No poll has walked this pane yet. The cache is empty for it either
+      -- way, and on a local pane the local id is the marker id, so the
+      -- untranslated id keeps single-machine setups rendering immediately.
+      ids[#ids + 1] = local_id
+    end
+    -- mapped == false: a mux-client pane that has not published its
+    -- $WEZTERM_PANE. Its local id names some other pane's markers, so it
+    -- contributes nothing rather than something wrong.
   end
   return ids
 end
@@ -298,12 +381,13 @@ local function same_cached_attention(a, b)
   return a.type == b.type and a.frame == b.frame
 end
 
---- Return the panes that contain pane_id in a captured tab list.
-local function tab_panes_containing(tabs, pane_id)
+--- Return the panes of the tab holding marker_id in a captured tab list.
+local function tab_panes_containing(tabs, marker_id)
+  if not marker_id then return nil end
   for _, tab in ipairs(tabs) do
     local panes = tab:panes()
     for _, p in ipairs(panes) do
-      if tostring(p:pane_id()) == pane_id then
+      if M.pane_marker_id(p) == marker_id then
         return panes
       end
     end
@@ -321,7 +405,7 @@ end
 --- acknowledged while its window is in the background is a notification the user
 --- never saw.
 ---
-local function cache_marker_values(id, atype, frame, raw, publication_id, observed_now)
+local function cache_marker_values(id, atype, frame, raw, publication_id, observed_now, source, puppet)
   if not atype then
     attention_cache[id] = nil
     return
@@ -339,6 +423,8 @@ local function cache_marker_values(id, atype, frame, raw, publication_id, observ
     observed_at = observed_now,
     raw         = raw,
     identity    = marker_identity(raw, publication_id),
+    source      = source,
+    puppet      = puppet == true,
   }
 end
 
@@ -351,7 +437,8 @@ local function acknowledge_focused_pane(pane_id, opts)
   local cached = attention_cache[id]
   if not (cached and acknowledge_set[cached.type]) then return "absent" end
 
-  local current_type, current_frame, _, _, raw, publication_id = read_marker(dir, id)
+  local current_type, current_frame, _, _, raw, publication_id, source, puppet =
+    read_marker(dir, id)
   if not current_type then
     clear_acknowledgement(dir, id)
     attention_cache[id] = nil
@@ -360,29 +447,33 @@ local function acknowledge_focused_pane(pane_id, opts)
 
   local current_identity = marker_identity(raw, publication_id)
   if cached.identity ~= current_identity then
-    cache_marker_values(id, current_type, current_frame, raw, publication_id, observed_now)
+    cache_marker_values(
+      id, current_type, current_frame, raw, publication_id, observed_now, source, puppet)
     return "kept"
   end
 
   if not acknowledge_set[current_type] then
     clear_acknowledgement(dir, id)
-    cache_marker_values(id, current_type, current_frame, raw, publication_id, observed_now)
+    cache_marker_values(
+      id, current_type, current_frame, raw, publication_id, observed_now, source, puppet)
     return "kept"
   end
 
   local write_ack = (opts and opts.write_acknowledgement) or write_acknowledgement
   if not write_ack(dir, id, current_identity) then
-    cache_marker_values(id, current_type, current_frame, raw, publication_id, observed_now)
+    cache_marker_values(
+      id, current_type, current_frame, raw, publication_id, observed_now, source, puppet)
     return "failed"
   end
 
   -- A writer may replace or clear the marker while the sidecar is being
   -- written. Re-read effective truth before updating the cache: only the exact
   -- identity that was viewed is suppressed.
-  local effective_type, effective_frame, _, _, effective_raw, effective_publication_id =
-    read_effective_marker(dir, id)
+  local effective_type, effective_frame, _, _, effective_raw, effective_publication_id,
+    effective_source, effective_puppet = read_effective_marker(dir, id)
   cache_marker_values(
-    id, effective_type, effective_frame, effective_raw, effective_publication_id, observed_now)
+    id, effective_type, effective_frame, effective_raw, effective_publication_id, observed_now,
+    effective_source, effective_puppet)
   return effective_type and "kept" or "acknowledged"
 end
 
@@ -407,7 +498,12 @@ end
 --- The caller must have established that the window is focused. Performing a
 --- key action against a background window can emit terminal focus events, so
 --- that guard is correctness, not economy.
+--- A host that renders tab titles itself (renderer = "manual", drawing on its
+--- own update-status tick) already repaints without being asked, so
+--- request_redraw = false turns this off and saves the tab-activation pass the
+--- action costs.
 local function request_tab_bar_redraw(window, pane)
+  if M._active_request_redraw == false then return false end
   if not pane then return false end
 
   local window_key = redraw_window_key(window)
@@ -425,22 +521,25 @@ end
 
 -- ── Public API ──────────────────────────────────────────────────────────────
 
---- Read the cached attention state for a pane.
---- Returns (type, frame) or nil.
-function M.get_attention(pane_id, opts)
-  local id = tostring(pane_id)
+--- Read the cached attention state for a marker id (see M.pane_marker_id).
+--- Returns (type, frame, source, puppet) or nil. `source` is the marker's
+--- JSON `source` string when it carried one; `puppet` is true only when the
+--- marker set `"puppet": true`.
+function M.get_attention(marker_id, opts)
+  local id = tostring(marker_id)
   if opts and opts.dir then
-    return read_effective_marker(opts.dir, id)
+    local atype, frame, _, _, _, _, source, puppet = read_effective_marker(opts.dir, id)
+    return atype, frame, source, puppet
   end
   local cached = attention_cache[id]
-  if cached then return cached.type, cached.frame end
+  if cached then return cached.type, cached.frame, cached.source, cached.puppet end
   return nil
 end
 
---- Remove the attention marker for a pane.
-function M.remove_marker(pane_id, opts)
+--- Remove the attention marker for a marker id (see M.pane_marker_id).
+function M.remove_marker(marker_id, opts)
   local dir = (opts and opts.dir) or M._active_dir or defaults.dir
-  local id = tostring(pane_id)
+  local id = tostring(marker_id)
   remove_marker(dir, id)
   attention_cache[id] = nil
 end
@@ -454,8 +553,8 @@ end
 --- entries are left alone — pruning them here would cause cache thrash when
 --- multiple windows fire update-status (each window would wipe the other's
 --- entries every tick, producing visible tab-indicator blinking). Stale
---- thinking markers are removed here by TTL; closed panes are cleaned up by
---- the pane-destroyed handler.
+--- thinking markers are removed here by TTL; a closed pane's marker is removed
+--- by the observed-then-gone sweep below.
 ---
 --- The redraw exists because caching alone is not enough: WezTerm calls
 --- format-tab-title when something it knows about changes, and a marker file
@@ -471,6 +570,8 @@ function M.poll(window, opts)
   local mux_tabs = mux_win:tabs()
   local pane_ids = {}
   local before = {}
+  local seen = {}             -- marker id → the domain name of the pane holding it
+  local domains_present = {}  -- domain names this window still holds a pane of
 
   local now = (opts and opts.now_ms) or now_ms()
   local cfg_indicators = M._active_indicators or defaults.indicators
@@ -479,40 +580,77 @@ function M.poll(window, opts)
 
   for _, tab in ipairs(mux_tabs) do
     for _, p in ipairs(tab:panes()) do
-      local id = tostring(p:pane_id())
-      pane_ids[#pane_ids + 1] = id
-      before[id] = attention_cache[id]
-      local atype, frame, updated_at, marker_ttl_ms, raw, publication_id = read_marker(dir, id)
-      local acknowledged = acknowledgement_matches(dir, id, raw, publication_id)
-      if atype then
-        local cached = attention_cache[id]
-        local observed_at = now
-        if cached and cached.raw == raw and cached.observed_at then
-          observed_at = cached.observed_at
-        end
+      local domain = pane_method(p, "get_domain_name") or "?"
+      domains_present[domain] = true
 
-        local effective_updated_at = updated_at or observed_at
-        local ttl = stale_ttl_ms(atype, marker_ttl_ms)
-        if ttl and now - effective_updated_at > ttl then
-          remove_marker(dir, id)
-          attention_cache[id] = nil
-        elseif acknowledged then
-          attention_cache[id] = nil
-        else
-          if atype == "thinking" and frame == nil then
-            -- A frame is a function of time, never of poll count. The redraw
-            -- action can induce immediate update-status events; every poll in
-            -- the same bucket therefore projects the same frame and the chain
-            -- terminates at the visible-change comparison below.
-            frame = frame_for_now(now, frame_count)
+      local id = M.pane_marker_id(p)
+      -- The renderer sees PaneInformation tables and cannot resolve this
+      -- itself, so record the translation for it. `false` is a pane whose
+      -- marker id is unknown: the renderer must skip it, not fall back.
+      marker_id_by_local[tostring(p:pane_id())] = id or false
+
+      -- A pane whose marker id is unknown is skipped entirely: reading or
+      -- writing under its local id would address another pane's markers.
+      if id then
+        seen[id] = domain
+        pane_ids[#pane_ids + 1] = id
+        before[id] = attention_cache[id]
+        local atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source, puppet =
+          read_marker(dir, id)
+        local acknowledged = acknowledgement_matches(dir, id, raw, publication_id)
+        if atype then
+          local cached = attention_cache[id]
+          local observed_at = now
+          if cached and cached.raw == raw and cached.observed_at then
+            observed_at = cached.observed_at
           end
-          cache_marker_values(id, atype, frame, raw, publication_id, observed_at)
+
+          local effective_updated_at = updated_at or observed_at
+          local ttl = stale_ttl_ms(atype, marker_ttl_ms)
+          if ttl and now - effective_updated_at > ttl then
+            remove_marker(dir, id)
+            attention_cache[id] = nil
+          elseif acknowledged then
+            attention_cache[id] = nil
+          else
+            if atype == "thinking" and frame == nil then
+              -- A frame is a function of time, never of poll count. The redraw
+              -- action can induce immediate update-status events; every poll in
+              -- the same bucket therefore projects the same frame and the chain
+              -- terminates at the visible-change comparison below.
+              frame = frame_for_now(now, frame_count)
+            end
+            cache_marker_values(id, atype, frame, raw, publication_id, observed_at, source, puppet)
+          end
+        else
+          attention_cache[id] = nil
         end
-      else
-        attention_cache[id] = nil
       end
     end
   end
+
+  -- WezTerm emits no pane-destroyed event, so a closed pane is detected by
+  -- absence: an id this window reported on the previous poll and does not
+  -- report now belonged to a pane that is gone, and its marker would otherwise
+  -- outlive it forever.
+  --
+  -- One case is not a closed pane. Detaching a mux domain drops every one of
+  -- its panes from this window in a single tick while those panes, and the
+  -- processes writing their markers, keep running on the server. So an id is
+  -- only swept when this window still holds some pane of that id's domain.
+  local window_key = redraw_window_key(window)
+  local previously_seen = seen_marker_ids_by_window[window_key]
+  if previously_seen then
+    for gone_id, gone_domain in pairs(previously_seen) do
+      if not seen[gone_id] and domains_present[gone_domain] then
+        pane_ids[#pane_ids + 1] = gone_id
+        before[gone_id] = attention_cache[gone_id]
+        remove_marker(dir, gone_id)
+        attention_cache[gone_id] = nil
+      end
+    end
+  end
+  seen_marker_ids_by_window[window_key] = seen
 
   -- Everything below is about the focused window only. An unfocused window
   -- must neither acknowledge a marker its user has not seen nor be sent a key
@@ -521,8 +659,8 @@ function M.poll(window, opts)
 
   local current_active_pane = window:active_pane()
   if current_active_pane then
-    local active_id = tostring(current_active_pane:pane_id())
-    if tab_panes_containing(mux_tabs, active_id) then
+    local active_id = M.pane_marker_id(current_active_pane)
+    if active_id and tab_panes_containing(mux_tabs, active_id) then
       acknowledge_focused_pane(active_id, { dir = dir, now_ms = now })
     end
   end
@@ -596,6 +734,14 @@ function M.apply_to_config(config, opts)
   local dir = opts.dir or defaults.dir
   local auto_poll = opts.auto_poll ~= false
   M._active_dir = dir
+  local request_redraw = opts.request_redraw
+  if request_redraw == nil then request_redraw = defaults.request_redraw end
+  M._active_request_redraw = request_redraw ~= false
+
+  -- Once, at config load. The Alt+B handler used to do this on the GUI thread
+  -- on every press; the directory does not change between presses.
+  local quoted_dir = dir:gsub("'", [['\'']])
+  os.execute("mkdir -p '" .. quoted_dir .. "'")
 
   -- Resolve renderer: support both new "renderer" and legacy "format_tab_title"
   local renderer = opts.renderer or defaults.renderer
@@ -640,13 +786,9 @@ function M.apply_to_config(config, opts)
     end)
   end
 
-  -- ── Cleanup marker when pane closes ───────────────────────────────────
-
-  wezterm.on("pane-destroyed", function(_window, pane)
-    local id = tostring(pane:pane_id())
-    remove_marker(dir, id)
-    attention_cache[id] = nil
-  end)
+  -- Nothing registers on "pane-destroyed": WezTerm emits no such event, so the
+  -- handler that used to be here never once fired and closed panes' markers
+  -- were never removed. poll() detects a closed pane by absence instead.
 
   -- ── Renderer: format-tab-title ────────────────────────────────────────
 
@@ -694,7 +836,15 @@ function M.apply_to_config(config, opts)
         -- tab stuck showing ◆ (the other pane is still flagged) and unclearable.
         -- Panes not in any tab (GUI overlays) fall back to per-pane behavior.
         local mux_win = win:mux_window()
-        local target_id = tostring(pane:pane_id())
+        local target_id = M.pane_marker_id(pane)
+        if not target_id then
+          -- A mux-client pane that has not published its $WEZTERM_PANE. Its
+          -- local id names some other pane's marker file, so there is nothing
+          -- here that can be safely written or removed.
+          report_error_once("review-unknown-pane",
+            "cannot toggle review: this pane has not published its WEZTERM_PANE user var")
+          return
+        end
         local panes
         if mux_win then
           panes = tab_panes_containing(mux_win:tabs(), target_id)
@@ -715,7 +865,8 @@ function M.apply_to_config(config, opts)
 
         local has_review = false
         for _, p in ipairs(panes) do
-          if is_review(tostring(p:pane_id())) then
+          local id = M.pane_marker_id(p)
+          if id and is_review(id) then
             has_review = true
             break
           end
@@ -725,8 +876,8 @@ function M.apply_to_config(config, opts)
         -- stop/notify/thinking markers are spared by the is_review guard).
         if has_review then
           for _, p in ipairs(panes) do
-            local id = tostring(p:pane_id())
-            if is_review(id) then
+            local id = M.pane_marker_id(p)
+            if id and is_review(id) then
               remove_marker(dir, id)
               attention_cache[id] = nil
             end
@@ -751,9 +902,9 @@ function M.apply_to_config(config, opts)
 
         -- Write atomically (tmp + rename) so a concurrent poll() — including
         -- one in another window — never reads a half-written marker, matching
-        -- the atomic-write protocol the README recommends.
-        local quoted_dir = dir:gsub("'", [['\'']])
-        os.execute("mkdir -p '" .. quoted_dir .. "'")
+        -- the atomic-write protocol the README recommends. The directory was
+        -- created once in apply_to_config; this handler runs on the GUI thread
+        -- and does not shell out.
         local path = dir .. "/" .. target_id
         local tmp = path .. ".tmp"
         local w = io.open(tmp, "w")
@@ -781,6 +932,7 @@ end
 M._internal = {
   acknowledge_focused_pane = acknowledge_focused_pane,
   resolve_visible_attention = resolve_visible_attention,
+  acknowledgement_tmp_path = acknowledgement_tmp_path,
 }
 
 return M
