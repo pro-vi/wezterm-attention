@@ -942,8 +942,13 @@ function M.poll(window, opts)
 end
 
 --- Apply the shared attention indicator and color decoration to a base title.
-local function decorate_tab_title(tab, visible, base)
-  local text = " " .. visible.indicator .. (tab.tab_index + 1) .. ": " .. base .. " "
+-- `2: ◔ name`: the index first, as WezTerm's own default renders it, then the
+-- attention indicator, then the base. `show_index` false drops the index the
+-- way `show_tab_index_in_tab_bar = false` does for the default renderer.
+local function decorate_tab_title(tab, visible, base, show_index)
+  local index = ""
+  if show_index ~= false then index = (tab.tab_index + 1) .. ": " end
+  local text = " " .. index .. visible.indicator .. base .. " "
   if visible.color then
     return {
       { Background = { Color = visible.color } },
@@ -1054,7 +1059,7 @@ function M.apply_to_config(config, opts)
   -- ── Renderer: format-tab-title ────────────────────────────────────────
 
   if renderer == "tab" then
-    wezterm.on("format-tab-title", function(tab)
+    wezterm.on("format-tab-title", function(tab, _tabs, _panes, cfg)
       -- Read-only. WezTerm may call this at any moment, including for a window
       -- the user is not looking at, so acknowledgement belongs in poll() where
       -- focus is known.
@@ -1062,6 +1067,7 @@ function M.apply_to_config(config, opts)
       -- Resolve what this tab shows, including an unfocused sibling marker
       -- on the active tab.
       local visible = resolve_visible_attention(gui_tab_pane_ids(tab))
+      local show_index = not (cfg and cfg.show_tab_index_in_tab_bar == false)
 
       -- Build base title (user callback or default)
       local base
@@ -1075,7 +1081,7 @@ function M.apply_to_config(config, opts)
         base = default_title(tab)
       end
 
-      return decorate_tab_title(tab, visible, base)
+      return decorate_tab_title(tab, visible, base, show_index)
     end)
   end
   -- renderer == "manual": no format-tab-title registered
