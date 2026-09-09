@@ -23,20 +23,16 @@ A pane can also report how many subagents are still working inside it. The tab a
 
 ## Install
 
-Add one line to your `wezterm.lua`:
+Add the plugin before any other `format-tab-title` handler:
 
 ```lua
 local attention = wezterm.plugin.require("https://github.com/pro-vi/wezterm-attention")
 attention.apply_to_config(config)
 ```
 
-Requires WezTerm `20221119-145034-49b9839f` or newer.
+The v1 reader and renderer require WezTerm `20221119-145034-49b9839f` or newer. Mux-native v2 requires POSIX and the Rust CLI built by running `scripts/install-cli.sh` in this checkout. `bin/attention` uses that installed Rust binary and names the install command if it is absent. The plugin exports its resolved checkout and state paths to new panes.
 
-By default, the plugin owns tab title formatting (`dir / title` + attention indicators). It also registers a marker poller and an `Alt+B` keybind to toggle the review flag. `Alt+B` operates on the whole active tab: it flags the active pane, and clears the flag from every pane in the tab when any are already flagged (so split tabs can always be cleared with one press). It keys off whether the flag is set anywhere in the tab, independent of which indicator is currently rendered — a higher-priority `stop`/`notify` can mask the ◆.
-
-**`Alt+B` works on a pane in any state.** The flag is a separate file, so it never competes with the marker a process owns: flagging a pane that is thinking, or one showing an unacknowledged `stop`, changes nothing about that marker, and clearing the flag never removes it.
-
-> **Important:** WezTerm only runs the **first** registered `format-tab-title` handler. If another plugin (e.g. tabline.wez) registers one first, this plugin still polls and acknowledges markers, but its indicators and colors are not rendered. Make sure `apply_to_config` runs first, or use `renderer = "manual"` to integrate via the API instead.
+Continue with [Mux setup](docs/mux-setup.md) for Bash or zsh launch claims and provider callbacks. Zsh uses the explicit `wezterm_attention_claim && <agent>` fallback; it does not claim automatic detection. See [Record contract](docs/record-contract.md) for precedence and [Mux pane moves](docs/mux-pane-moves.md) before moving the final pane out of a server tab.
 
 ## Render modes
 
@@ -130,9 +126,15 @@ attention.apply_to_config(config, {
 })
 ```
 
-## The protocol
+## Producer paths and V1 compatibility
 
-Any process running inside WezTerm can write a marker. The contract is:
+V2 producers call the Rust writer through `bin/attention`; they do not construct V2 record JSON. Use `attention mark` for custom activity and `attention hooks event PROVIDER EVENT` for provider callbacks after the shell has established a launch claim. See [Mux setup](docs/mux-setup.md) for the supported commands and activation boundary.
+
+The flat-file format below remains supported for existing V1 producers. The inspected bootstrap Claude/Codex helpers still use it; selecting the Rust binary does not migrate those registrations automatically.
+
+### V1 flat-marker protocol
+
+Any process running inside WezTerm can write a V1 marker. The compatibility contract is:
 
 1. **Write** a JSON file to `~/.local/state/wezterm-attention/<WEZTERM_PANE>`
 2. **Contents:** `{"type":"<state>"}` where state is `thinking`, `stop`, `notify`, or `review`
@@ -225,7 +227,7 @@ occupies:
 | `stop` | 2 | `✓+2 ` |
 | `thinking` | 3 | `◑+3 ` |
 | `notify` | 1 | `!+1 ` |
-| none | 2 | `+2 ` (tinted mint, as `stop` is) |
+| none | 2 | `+2 ` with default tab colors |
 
 The count never decides which marker wins the tab — priority is settled by the
 markers alone. But a change in the count alone is a visible change, so it
@@ -356,6 +358,11 @@ local marker_id = attention.pane_marker_id(pane)
 -- when that outranks the flag -- and then review is still true.
 local state, frame, source, puppet, subagents, review = attention.get_attention(marker_id)
 
+-- Read the cached full-pane v2 view without I/O. The returned table includes
+-- provider, binding_id, binding_phase, type, event_id, subagents, review, and
+-- reader_confidence. Mutating it does not change the plugin cache.
+local view = attention.get_attention_view(pane)
+
 -- Clear a marker programmatically
 attention.remove_marker(marker_id)
 
@@ -372,188 +379,45 @@ end))
 
 ## Pi extension
 
-[Pi](https://github.com/badlogic/pi-mono) is an extensible coding agent. This repo ships a Pi extension that writes attention markers for the current WezTerm pane — install it with one command:
+Install this repository as a Pi package:
 
 ```bash
 pi install git:github.com/pro-vi/wezterm-attention
 ```
 
-Once installed, it writes markers automatically from Pi's lifecycle. Outside WezTerm (`WEZTERM_PANE` unset) it's a silent no-op:
+The extension preserves print mode and registers no commands. It forwards `session_start`, `agent_start`, `tool_execution_start`, `agent_settled`, the `wezterm-attention:mark` bus, and `session_shutdown` through its serialized writer queue. `agent_end` is intentionally not terminal. Writer processes use Node's built-in child-process API, matching Pi's Node runtime.
 
-| Pi event | Marker | What happens |
-|----------|--------|--------------|
-| `agent_start` | `thinking` | Tab spins violet while Pi runs |
-| `tool_execution_start` | `thinking` | Spinner continues while Pi uses a tool |
-| `agent_settled` | `stop` | Tab turns mint with ✓ once Pi is fully done |
-
-`stop` hangs off `agent_settled`, not `agent_end`: `agent_end` fires at the end of every low-level run — including ones Pi will auto-retry or auto-continue after compaction — so using it would flash a false ✓ mid-task. `agent_settled` fires only once Pi will not continue running automatically, so the ✓ appears exactly once, at the real end. (This needs **Pi 0.80.5+** — `agent_settled` landed in the 0.80.4 changelog but 0.80.4 was never published to npm. On an older Pi the extension loads but the ✓ never fires; the spinner clears on its TTL instead.)
-
-`thinking` markers carry `ttl_ms`, so a Pi process that exits unexpectedly won't leave a stuck spinner. That's the whole extension — no commands, no configuration; the tab tracks Pi automatically.
-
-### The `notify` state, for other extensions
-
-Pi's lifecycle only produces `thinking` and `stop` — there's no lifecycle event for "blocked, waiting for a human", so the extension never raises the rose `!` on its own. Instead it listens on a shared event bus so **any other Pi extension can request a state** without knowing anything about marker files or `WEZTERM_PANE`. The typical caller is an ask-user extension flagging `notify` while it waits for you, then clearing it:
-
-```ts
-pi.events.emit("wezterm-attention:mark", { type: "notify" }); // waiting on you → rose !
-pi.events.emit("wezterm-attention:mark", { type: "clear" });  // answered → remove it
-```
-
-The payload is a bare string (`"notify"`) or an object (`{ type: "notify", label }`); accepted states are `thinking` / `stop` / `notify` / `review` / `clear` (with `busy`, `ready`, `pending`, `blocked` as aliases). Extensions that would rather not depend on this event can always [write the marker file directly](#the-protocol).
-
-### Environment
-
-| Variable | Default | Effect |
-|----------|---------|--------|
-| `WEZTERM_ATTENTION_DIR` | `~/.local/state/wezterm-attention` | Override the marker directory (match the plugin's `dir`) |
-| `PI_WEZTERM_ATTENTION_TTL_MS` | `1800000` (30 min) | Override the `thinking` marker TTL |
+Other extensions may emit `thinking`, `stop`, `notify`, `review`, or `clear`. Review uses the `pi-bus` owner. Clear writes an ordered activity-clear watermark, repairs v1 deletion, and clears that owner without suppressing newer activity. If the v2 checkout root is unavailable, shipped v1 marker behavior remains the fallback.
 
 ## Claude Code hooks
 
-Claude Code has [hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) that fire on lifecycle events. Add attention markers to each one:
+Claude hook registration remains user-owned. Pass original hook stdin to:
 
-| Hook event | Marker | What happens | Required? |
-|------------|--------|--------------|-----------|
-| `Stop` | `stop` | Tab turns mint with ✓ when agent finishes | **Yes** — core value |
-| `PreToolUse` | `thinking` | Spinner animates while agent works | Recommended |
-| `Notification` | `notify` | Tab turns rose with ! for notifications | Optional |
-| `PermissionRequest` | `notify` | Tab turns rose when agent needs approval | Optional |
-| `SessionEnd` | _(cleanup)_ | Marker file removed | Recommended |
-
-**Minimum viable setup:** Just the `Stop` hook gives you the "agent finished" indicator. Add the rest as desired.
-
-The snippets below are **fragments to paste into your hook files** — not standalone scripts. Each one guards on `WEZTERM_PANE` so it's safe to use outside WezTerm. If you don't have existing hooks, wrap the snippet in a Claude Code hook handler (see [hook docs](https://docs.anthropic.com/en/docs/claude-code/hooks)).
-
-> **Pane-ID contract.** WezTerm sets `WEZTERM_PANE` to a non-negative integer. Every fragment below gates on `/^\d+$/` before touching the filesystem — an unvalidated `../…` value would let a write clobber, or a delete remove, a file *outside* the marker dir.
-
-Register hooks in `~/.claude/settings.json`:
-```json
-{
-  "hooks": {
-    "Stop": [{ "matcher": "", "hooks": ["/bin/bash ~/.claude/hooks/stop.sh"] }],
-    "PreToolUse": [{ "matcher": "", "hooks": ["/bin/bash ~/.claude/hooks/pre_tool_use.sh"] }],
-    "SessionEnd": [{ "matcher": "", "hooks": ["/bin/bash ~/.claude/hooks/session_end.sh"] }]
-  }
-}
+```text
+attention hooks event claude SessionStart
+attention hooks event claude PreToolUse
+attention hooks event claude PermissionRequest
+attention hooks event claude Stop
+attention hooks event claude SubagentStop
+attention hooks event claude SessionEnd
 ```
 
-**PreToolUse** — animated thinking spinner:
-```typescript
-if (process.env.WEZTERM_PANE && /^\d+$/.test(process.env.WEZTERM_PANE)) {
-  const { mkdirSync, writeFileSync, readFileSync, renameSync } = require('fs');
-  const { randomUUID } = require('crypto');
-  const markerDir = `${process.env.HOME}/.local/state/wezterm-attention`;
-  const markerFile = `${markerDir}/${process.env.WEZTERM_PANE}`;
-
-  let frame = 0;
-  try {
-    const data = JSON.parse(readFileSync(markerFile, 'utf8'));
-    if (data.type === 'thinking') frame = ((data.frame || 0) + 1) % 4;
-  } catch {}
-
-  mkdirSync(markerDir, { recursive: true });
-  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'thinking', publication_id: randomUUID(), frame, updated_at: Date.now() }));
-  renameSync(markerFile + '.tmp', markerFile);
-}
-```
-
-**Stop** — agent finished:
-```typescript
-if (process.env.WEZTERM_PANE && /^\d+$/.test(process.env.WEZTERM_PANE)) {
-  const { mkdirSync, writeFileSync, renameSync } = require('fs');
-  const { randomUUID } = require('crypto');
-  const markerDir = `${process.env.HOME}/.local/state/wezterm-attention`;
-  const markerFile = `${markerDir}/${process.env.WEZTERM_PANE}`;
-  mkdirSync(markerDir, { recursive: true });
-  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'stop', publication_id: randomUUID(), updated_at: Date.now() }));
-  renameSync(markerFile + '.tmp', markerFile);
-}
-```
-
-**Notification / PermissionRequest** — needs attention:
-```typescript
-if (process.env.WEZTERM_PANE && /^\d+$/.test(process.env.WEZTERM_PANE)) {
-  const { mkdirSync, writeFileSync, renameSync } = require('fs');
-  const { randomUUID } = require('crypto');
-  const markerDir = `${process.env.HOME}/.local/state/wezterm-attention`;
-  const markerFile = `${markerDir}/${process.env.WEZTERM_PANE}`;
-  mkdirSync(markerDir, { recursive: true });
-  writeFileSync(markerFile + '.tmp', JSON.stringify({ type: 'notify', publication_id: randomUUID(), updated_at: Date.now() }));
-  renameSync(markerFile + '.tmp', markerFile);
-}
-```
-
-**SessionEnd** — cleanup:
-```typescript
-if (process.env.WEZTERM_PANE && /^\d+$/.test(process.env.WEZTERM_PANE)) {
-  const { unlinkSync } = require('fs');
-  try {
-    unlinkSync(`${process.env.HOME}/.local/state/wezterm-attention/${process.env.WEZTERM_PANE}`);
-  } catch {}
-}
-```
+Use `$WEZTERM_ATTENTION_ROOT/bin/attention`. Do not register `SubagentStart`: presence begins only after child tool work. `SubagentStop` writes stopped evidence for the same child ID. Claude root Stop does not clear all children because background children may outlive it. See [Mux setup](docs/mux-setup.md).
 
 ## Codex hooks
 
-Wire Codex through its **lifecycle hooks** (`~/.codex/hooks.json`). Avoid the older top-level
-`notify` field in `~/.codex/config.toml`: it is finish-only, and the desktop Codex "Computer Use"
-app silently rewrites it on launch (repointing it at a temp path that later disappears), so markers
-quietly stop firing. Lifecycle hooks aren't touched by that. They require a one-time trust approval —
-run `/hooks` in Codex and approve — and because trust is keyed to a hash of the hook definition,
-editing a hook re-prompts. See the [Codex hooks documentation](https://learn.chatgpt.com/docs/hooks)
-for the `hooks.json` schema that binds each event to a command.
+Codex hook registration remains user-owned. Pass original hook stdin to:
 
-Map each lifecycle event to a marker state (all tagged `source:"codex"`):
-
-| Codex lifecycle event | Marker state |
-|---|---|
-| `PreToolUse` | `thinking` (optionally cycle `frame` 0→3 for the spinner) |
-| `PermissionRequest` | `notify` |
-| `Stop` | `stop` |
-| `SessionStart` | **remove** the marker file |
-
-The three *write* states share one helper — a **writer-only fragment**, not a complete hook. Call it
-from the `PreToolUse` / `PermissionRequest` / `Stop` hooks with the matching state:
-
-```typescript
-async function writeWezTermMarker(marker: Record<string, unknown>): Promise<void> {
-  const paneId = process.env.WEZTERM_PANE;
-  const home = process.env.HOME;
-  // WezTerm injects WEZTERM_PANE as a non-negative integer. Validate it: a stray
-  // value like "../foo" would escape the marker dir — and on the SessionStart
-  // cleanup path below, the rm would then delete a file outside it.
-  if (!paneId || !home || !/^\d+$/.test(paneId)) return;
-
-  // `await import`, not `require`: this fragment is ESM-shaped, and bare
-  // `require` is undefined under Node in module mode (throws). `await import`
-  // works under both Node ESM and bun.
-  const { mkdir, writeFile, rename } = await import("node:fs/promises");
-  const { randomUUID } = await import("node:crypto");
-  const { join } = await import("node:path");
-
-  const dir = join(home, ".local", "state", "wezterm-attention");
-  await mkdir(dir, { recursive: true });
-  const file = join(dir, paneId);
-  await writeFile(file + ".tmp", JSON.stringify({ source: "codex", updated_at_ms: Date.now(), ...marker, publication_id: randomUUID() }));
-  await rename(file + ".tmp", file); // atomic
-}
-// PreToolUse:        writeWezTermMarker({ type: "thinking" })
-// PermissionRequest: writeWezTermMarker({ type: "notify" })
-// Stop:              writeWezTermMarker({ type: "stop" })
+```text
+attention hooks event codex SessionStart
+attention hooks event codex PreToolUse
+attention hooks event codex PermissionRequest
+attention hooks event codex Stop
+attention hooks event codex SubagentStop
+attention hooks event codex SessionEnd
 ```
 
-Two behaviours the fragment deliberately does **not** implement — wire them in your hooks if you want them:
-
-- **`SessionStart` cleanup** *removes* the marker rather than writing one: `rm(join(dir, paneId), { force: true })`, not `writeWezTermMarker`. Apply the same `paneId`/`home` guard first (`if (!paneId || !home || !/^\d+$/.test(paneId)) return;`) — the `rm` is the one path where an unvalidated pane id could delete a file *outside* the marker dir. (Skip cleanup on the `compact` startup reason so a mid-turn compaction keeps its spinner.)
-- **Spinner frame cycling** (`frame` 0→3 across repeated `PreToolUse`) needs reading the current marker and incrementing; omit it entirely and the plugin animates the spinner on its own poll. Optional.
-
-(`updated_at_ms` is accepted by the plugin alongside `updated_at`.)
-
-**Coverage caveat.** `PermissionRequest` fires for command / patch / network approvals *and* MCP
-tool-call approvals — but *not* for Codex's other human-input waits (`request_user_input`,
-`request_permissions`, and MCP *elicitation*). A turn blocked on one of those uncovered waits shows
-the `thinking` spinner, not `!`. Routing those to `notify` means detecting the tool in `PreToolUse`;
-it isn't wired here yet.
+Use `$WEZTERM_ATTENTION_ROOT/bin/attention`. Thread-spawned children carry the same `agent_id` through work and `SubagentStop`; internal and synthetic children emit neither callback. Root Stop writes lead Stop, then one child-clear watermark. `stop_hook_active` is not stored. Do not register `SubagentStart`. See [Mux setup](docs/mux-setup.md).
 
 ## Other use cases
 
@@ -573,7 +437,9 @@ WezTerm rebuilds tab titles when something it knows about changes, and a marker 
 
 Set `request_redraw = false` to switch that request off, for a host whose own `update-status` handler already redraws the titles it owns. The redraw action can pass through WezTerm's normal tab-activation path, including terminal focus reporting. It therefore runs only when the window has keyboard focus and a valid active pane. Generated spinner frames use one-second wall-clock buckets, so polls induced by the action see the same frame and terminate. If an action fails, that window logs once and stops requesting redraws.
 
-No background threads, no FFI, no external dependencies — just filesystem reads in Lua on a configurable interval.
+For mux domains, the poller also recovers identity after a GUI reconnect. It waits for the pane count to be stable across two polls, runs one realm publication, then retries after 2, 5, 10, and 30 seconds while any pane remains unpublished. The child PATH includes `wezterm.executable_dir`; publication writes terminal output and never pane input.
+
+The Lua implementation is split by responsibility under `plugin/`: protocol validation, record reading, runtime polling, overlays, legacy compatibility, title sampling, and formatting. `plugin/init.lua` owns configuration, composition, callback registration, and the public API.
 
 ## Troubleshooting
 

@@ -1,0 +1,131 @@
+{
+  "checked_at": "2026-09-08",
+  "head": "4d3d0a560e23cdc5e260a045361d5395270d7461",
+  "remote_main": "d9d3fe326397594b2e29d1aec2cf84b9982439ff",
+  "scope": "uncommitted Rust working tree; no product or live-configuration mutation",
+  "schema_validation": {
+    "validator": "/Users/provi/.codex/skills/code-review/scripts/validate-candidate-report.py",
+    "candidate_schema": "pass",
+    "adjudication_schema": "pass",
+    "exact_ids": "C1-C17",
+    "original_report_ids": "C1-C16",
+    "new_probe_finding": "C17",
+    "counts": {
+      "ACCEPT": 2,
+      "DOCUMENT": 7,
+      "REJECT": 7,
+      "DEFER": 1,
+      "PENDING": 0
+    },
+    "pending": []
+  },
+  "checks": {
+    "rust": {
+      "passed": 86,
+      "failed": 0,
+      "log": "evidence/rust-tests.log"
+    },
+    "bun": {
+      "passed": 23,
+      "failed": 7,
+      "total": 30,
+      "prescribed_command": true,
+      "log": "evidence/bun-prescribed.log"
+    },
+    "lua": {
+      "passed": 111,
+      "failed": 0,
+      "log": "evidence/lua-corrected-tail.log",
+      "log_scope": "tail and final count; the initial emitted chunk was not retained in this file"
+    },
+    "node_dispatch": {
+      "result": "failed in isolated environment",
+      "reason": "ENOENT for generated writer calls.log",
+      "log": "evidence/node-and-focused-bun.log"
+    },
+    "direct_pi_nonzero_writer": {
+      "result": "passed",
+      "warning_count": 1,
+      "fallback_state_created": false,
+      "log": "evidence/pi-nonzero-probe.log"
+    },
+    "wezterm_smoke": {
+      "result": "passed",
+      "parser_rows": 35,
+      "eligibility_rows": 10,
+      "gui_reattach_rehearsal": false
+    },
+    "independent_fixture_checker": {
+      "parser_rows": 35,
+      "eligibility_rows": 10,
+      "result": "passed"
+    },
+    "full_gate": "not run",
+    "typescript": "not run",
+    "clippy": "not run",
+    "diff_whitespace": "passed"
+  },
+  "instrument_notes": [
+    "The first isolated Lua run omitted PWD and failed 20 cases; the PWD-corrected run passed.",
+    "An early progress message incorrectly reused the prior 29-pass Bun count. It was explicitly corrected; current prescribed Bun run is 23/7.",
+    "Restricted-environment and focused Bun runs also failed; their downstream counts varied after the initial dispatch timeout.",
+    "Default Python jsonschema was unavailable; the supplied dependency-free validator was used.",
+    "Parallel reviewers were unavailable; verification continued locally."
+  ],
+  "digest_probe": {
+    "runtime": "installed WezTerm Lua",
+    "count": 1000,
+    "inputs": "synthetic short child IDs",
+    "cpu_ms": [
+      58.77,
+      59.982
+    ],
+    "scope": "microbenchmark including loop/assertion overhead, not total poll latency"
+  },
+  "source_hashes": {
+    "src/lifecycle.rs": "34e31645fa044c152768423d6c0e524a89a9d8a9ae8074cf02672170f5cf41de",
+    "src/records.rs": "36f5316687e736a73e9a2eabe891678f4aac6b8118a55fdc9f74fa56f5807e56",
+    "src/protocol.rs": "fcfe3e1f391c7ea3c0170fdd51fe0b0c2ccef7318ccaa497c98202253c8f366f",
+    "src/main.rs": "8db90d91c43b24e8258c74bb3dd39d2cb2a6608af9278c513bb73500762431c5",
+    "src/wezterm.rs": "e717888d245f2168bc9da308ed17f810bd27542938076dda25c3ba5b0faa86a7",
+    "plugin/runtime.lua": "21761d003bfac71c844b88bc3317e539e52a1ee8c206d6c9754d6d8df95a52c6",
+    "pi/index.ts": "be7bc98dd8e5b2772ad680e53f63b8cb054678ed10d19a4fcff58f51a5967f6b"
+  },
+  "provider_probe": {
+    "claude_version": "2.1.266",
+    "codex_version": "0.153.4",
+    "paid_calls": 1,
+    "permission_request_interaction": "passed: exit-0 zero-stdout hook preserved the normal prompt; command refused and not executed",
+    "live_hook_registration_changes": 0
+  },
+  "temporary_process_check": {
+    "captured_generated_writer_roots": 11,
+    "matching_processes_remaining": 0
+  },
+  "builder_followup": {
+    "checked_at": "2026-09-08",
+    "head": "4d3d0a560e23cdc5e260a045361d5395270d7461",
+    "pi_source_changed": false,
+    "bun_prescribed_runs": [
+      { "passed": 30, "failed": 0, "dispatch_ms": 390.28 },
+      { "passed": 30, "failed": 0, "dispatch_ms": 141.43 },
+      { "passed": 30, "failed": 0, "dispatch_ms": 132.2 }
+    ],
+    "node_dispatch": "3/3 passed",
+    "typescript": "passed",
+    "full_gate": "passed",
+    "full_gate_rust_tests": 83,
+    "fresh_cargo_target": "/tmp/attention-handoff-target.zXqsmN",
+    "discarded_shared_target_result": "86 Rust tests; contained three tests compiled from a different disposable source tree",
+    "claude_version": "2.1.266",
+    "synthetic_permission_hook": {
+      "exit": 0,
+      "stdout_bytes": 0,
+      "provider_interaction": false
+    },
+    "permission_ui_path": "passed in one authorized interactive contact; zero-stdout hook preserved the normal prompt",
+    "permission_request_command_executed": false,
+    "permission_request_target_exists": false,
+    "evidence": "evidence/builder-followup.md"
+  }
+}

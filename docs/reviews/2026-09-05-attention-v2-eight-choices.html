@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="source-sha256" content="3f9ced5f6a3b6c6405e8243c322109a5d40c3dee255bb2f35a2821657567bb81">
+<meta name="description" content="What these eight changes mean for you">
+<title>What these eight changes mean for you · attention-v2</title>
+<style>
+:root{color-scheme:dark;--paper:#0e1720;--surface:#16232e;--ink:#e7eef5;--muted:#afc0cf;--line:#3c5161;--link:#91cbf4;--terminal:#0b141c;--terminal-ink:#e0edf7;--terminal-rule:#627d8d;--note:#203240;--focus:#ffc18a;--mono:Menlo,Consolas,monospace;--reading:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+*{box-sizing:border-box}html{scroll-padding-top:24px}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.6 var(--reading)}
+a{color:var(--link);text-underline-offset:3px}a:hover{text-decoration-thickness:2px}a:focus-visible{outline:3px solid var(--focus);outline-offset:4px}
+main{max-width:1100px;margin:auto;padding:36px 32px 64px;display:grid;gap:30px}header{display:grid;gap:16px}
+.identity{font:12px/1.6 var(--mono);letter-spacing:.04em;color:var(--muted);display:flex;gap:16px;flex-wrap:wrap}
+h1,h2{font-family:var(--mono);line-height:1.25;text-wrap:balance;margin:0}h1{font-size:clamp(26px,3.1vw,38px);max-width:27ch;letter-spacing:-.035em}h2{font-size:24px;letter-spacing:-.035em}
+h3{font:600 19px/1.4 var(--mono);margin:8px 0 0;text-wrap:balance}li+li{margin-top:7px}
+p,pre,table,ul,ol{margin:0}header p{max-width:78ch}header p:first-of-type{font-size:19px;font-weight:550}
+nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));border-top:1px solid var(--line);border-left:1px solid var(--line)}
+nav a{padding:11px 14px;background:var(--surface);border-right:1px solid var(--line);border-bottom:1px solid var(--line);font:13px/1.5 var(--mono);text-decoration:none}
+nav a:hover{background:var(--note)}section{background:var(--surface);padding:28px;border:1px solid var(--line);display:grid;gap:18px;min-width:0}
+section>p{max-width:78ch}section>h2+p,section>blockquote+p{font-size:19px;line-height:1.5}strong{font-weight:650}
+blockquote{margin:0;padding:14px 18px;background:var(--note);color:var(--muted);max-width:82ch}blockquote strong{font:12px/1.5 var(--mono);color:var(--link)}
+pre{padding:19px 20px;background:var(--terminal);color:var(--terminal-ink);font:14px/1.65 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;border-top:5px solid var(--terminal-rule);min-width:0}
+pre code{font:inherit;background:none;padding:0;color:inherit}code{font-family:var(--mono);font-size:.88em;overflow-wrap:anywhere}
+.file-comparison{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:stretch;min-width:0}
+table{border-collapse:collapse;width:100%;font-size:16px;text-align:left}th,td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:top}th{font-family:var(--mono);font-size:12px;background:var(--note);letter-spacing:.03em}td{overflow-wrap:anywhere}
+.facts th:first-child,.facts td:first-child{width:24%}.facts td:first-child{font-weight:600}.samples th:first-child,.samples td:first-child{width:12%}.samples td{font-variant-numeric:tabular-nums}.samples td:last-child{font-family:var(--mono);font-weight:600}
+.comparison-table th:first-child{width:25%}.source-link{font-size:13px;line-height:1.5;color:var(--muted)}
+footer{display:grid;gap:5px;color:var(--muted);font-size:12px}footer code{font-size:11px}section[aria-labelledby="review-state"]{background:var(--note)}
+@media(max-width:780px){main{padding:22px 16px 36px;gap:20px}section{padding:20px;gap:16px}h2{font-size:20px}nav{grid-template-columns:1fr}.file-comparison{grid-template-columns:1fr}pre{font-size:13px;padding:14px 12px}.facts thead,.comparison-table thead{display:none}.facts,.facts tbody,.facts tr,.facts td,.comparison-table,.comparison-table tbody,.comparison-table tr,.comparison-table td{display:block}.facts tr,.comparison-table tr{padding:12px 0;border-bottom:1px solid var(--line)}.facts td,.comparison-table td{border:0;padding:3px 0}.facts td:first-child{width:auto;font-size:14px;color:var(--muted)}.comparison-table td::before{content:attr(data-label);display:block;font:12px/1.5 var(--mono);color:var(--muted);margin-top:7px}.samples th,.samples td{padding:9px 6px}.samples{font-size:14px}section>h2+p,section>blockquote+p{font-size:18px}}
+@media print{:root{color-scheme:light;--paper:#fff;--surface:#fff;--ink:#172a38;--muted:#506171;--line:#c9d5dd;--link:#185e8a;--terminal:#edf2f5;--terminal-ink:#172a38;--note:#e7eff5}main{padding:0;max-width:none}nav{display:none}section{break-inside:avoid}a{color:inherit}}
+</style></head><body><main>
+<header><div class="identity"><span>wezterm-attention / design review</span><span>Source-backed examples · no live changes</span></div><h1>What these eight changes mean for you</h1>
+<p>Keep separate binding/child files. Keep protection against stale child records. Treat history as optional unless retaining existing records is enough. The Rust draft needs revision before a build.</p>
+<p>Q1–Q8 match your questions. They are independent choices, not upgrade steps. The command, file and title examples below are illustrations, not live captures.</p>
+</header>
+<nav aria-label="Jump to a section"><a href="#q1">Q1 · Separate files and recovery</a>
+<a href="#q2">Q2 · Was the process scan periodic?</a>
+<a href="#q3">Q3 · Is history cheap enough to keep?</a>
+<a href="#q4">Q4 · What does attention “compaction” mean?</a>
+<a href="#q5">Q5 · Who does “manual polling”?</a>
+<a href="#q6">Q6 · What is a settled pane title?</a>
+<a href="#q7">Q7 · What changes when I upgrade?</a>
+<a href="#q8">Q8 · Why would launching an agent change?</a></nav><section aria-labelledby="q1"><h2 id="q1">Q1 · Separate files and recovery</h2>
+<blockquote>
+<p><strong>You asked:</strong> “i think we should keep the original design, it also helps recover right?”</p>
+</blockquote>
+<p><strong>Yes. Separate files help isolate read failures. Keeping old binding directories preserves earlier session records. Both layouts can recover after a reconnect.</strong></p>
+<p>Example: one child record cannot be read.</p>
+<div class="file-comparison"><pre><code class="language-text">Original binding folder
+  binding.json       readable
+  activity.json      readable
+  agents/child-A     UNREADABLE
+  agents/child-B     readable
+
+Fresh activity and child B are still available.
+Child A is unavailable; a valid cached copy
+can be reused under the existing scope rules.
+</code></pre><pre><code class="language-text">Proposed combined file
+  state.json         UNREADABLE
+
+No fresh provider state from this file.
+A valid earlier cache can still be available.
+</code></pre></div>
+<table class="facts">
+<thead>
+<tr><th>Question</th><th>Answer</th></tr>
+</thead>
+<tbody>
+<tr><td data-label="Question">Why the original design?</td><td data-label="Answer">Update separate facts without rewriting everything. Keep an old session's writes away from a new session's files.</td></tr>
+<tr><td data-label="Question">Trade-off</td><td data-label="Answer">More files and checks when combining them. Several related updates are not one atomic file replacement.</td></tr>
+<tr><td data-label="Question">What would consolidation lose?</td><td data-label="Answer">Some partial-failure isolation. This Rust draft also removes old binding directories, but that is a separate choice from combining files.</td></tr>
+<tr><td data-label="Question">Direction</td><td data-label="Answer">Keep the original separation. Reduce repeated implementation code without changing that storage decision.</td></tr>
+</tbody>
+</table>
+<p>Separate files are not backups. Disk loss can affect either layout. Reconnect recovery also needs identity republication; file separation alone does not restore missing GUI identity.</p>
+<p class="source-link"><a href="../../plugin/init.lua">Source: record-level cache and view composition in init.lua:678,1407</a></p>
+</section>
+<section aria-labelledby="q2"><h2 id="q2">Q2 · Was the process scan periodic?</h2>
+<blockquote>
+<p><strong>You asked:</strong> “how was it done? peridic scan?”</p>
+</blockquote>
+<p><strong>The repository does not schedule a periodic process scan. The scan is reached by explicit inspection or maintenance commands.</strong></p>
+<p><code>bindings</code> and <code>doctor</code> can inspect process evidence. Only an applied <code>sweep</code> can infer an ended binding from absence. Normal rendering does neither.</p>
+<pre><code class="language-text">First explicit applied sweep
+  pane absent + scoped process absent
+  -&gt; save first absence observation
+
+Different applied sweep, at least 60 seconds later
+  still absent + process still absent
+  -&gt; mark that binding ended
+
+Next applied sweep finds pane present
+  -&gt; clear the first observation
+Probe unavailable -&gt; do not infer ending
+</code></pre>
+<p>Preview mode writes nothing. Repeating the same operation ID cannot count as the second observation. An external scheduler could run these commands periodically, but this repository does not install one.</p>
+<table class="facts">
+<thead>
+<tr><th>Question</th><th>Answer</th></tr>
+</thead>
+<tbody>
+<tr><td data-label="Question">Why the original design?</td><td data-label="Answer">An agent can disappear without sending its ending hook. Repeated checks help distinguish absence from a failed probe or a GUI detach.</td></tr>
+<tr><td data-label="Question">Trade-off of removing it</td><td data-label="Answer">Less maintenance code, but more records with an unknown final state.</td></tr>
+<tr><td data-label="Question">What would we lose?</td><td data-label="Answer">The command's ability to mark abandoned bindings ended when no ending hook arrived.</td></tr>
+<tr><td data-label="Question">Direction</td><td data-label="Answer">Reassess it as explicit maintenance. It is not an ongoing polling cost to remove.</td></tr>
+</tbody>
+</table>
+<p>The automatic reattach publisher is different. It lists server panes and sends identity through their terminal output. It does not run this ending decision.</p>
+<p class="source-link"><a href="../../libexec/attention.py">Source: attention.py:1726,1983,2300,2392</a></p>
+</section>
+<section aria-labelledby="q3"><h2 id="q3">Q3 · Is history cheap enough to keep?</h2>
+<blockquote>
+<p><strong>You said:</strong> “if history is cheap we can build but if expensive lets wait”</p>
+</blockquote>
+<p><strong>Keeping binding records that were already written is less work than adding a new event-history system. Their total storage and query cost still need measurement.</strong></p>
+<pre><code class="language-text">One pane, three successive sessions
+  session A   older binding directory retained
+  session B   older binding directory retained
+  session C   current binding
+</code></pre>
+<table class="comparison-table">
+<thead>
+<tr><th>Kind of history</th><th>What it gives you</th><th>Additional work</th></tr>
+</thead>
+<tbody>
+<tr><td data-label="Kind of history">Retained binding snapshots</td><td data-label="What it gives you">Which sessions occupied the pane; latest saved facts for each</td><td data-label="Additional work">Existing layout already retains them. Listing and safe cleanup still cost code and I/O.</td></tr>
+<tr><td data-label="Kind of history">Recent lifecycle events</td><td data-label="What it gives you">Which accepted changes happened while a consumer was away</td><td data-label="Additional work">Sequence numbers, cursors, bounded retention, gaps and replay rules.</td></tr>
+</tbody>
+</table>
+<p>The proposed 64-event history was new work in the Rust draft. It was not part of the implemented binding catalogue.</p>
+<table class="facts">
+<thead>
+<tr><th>Question</th><th>Answer</th></tr>
+</thead>
+<tbody>
+<tr><td data-label="Question">Why retain old bindings?</td><td data-label="Answer">Find a previous session's ID and saved details for a restore tool, or see which session previously occupied the pane.</td></tr>
+<tr><td data-label="Question">Trade-off</td><td data-label="Answer">More retained files, plus eventual cleanup. Keeping files alone does not create an event timeline.</td></tr>
+<tr><td data-label="Question">What would we lose by waiting on event history?</td><td data-label="Answer">Catching up on missed transitions. Current state and retained session snapshots would still be readable.</td></tr>
+<tr><td data-label="Question">Recommendation</td><td data-label="Answer">Retain existing binding snapshots. Defer the new event-history system unless a consumer needs it. Measure stored size and listing time before adding richer history features.</td></tr>
+</tbody>
+</table>
+<p class="source-link"><a href="../../libexec/attention.py">Source: binding replacement and retention in attention.py:1139,2364</a></p>
+</section>
+<section aria-labelledby="q4"><h2 id="q4">Q4 · What does attention “compaction” mean?</h2>
+<blockquote>
+<p><strong>You asked:</strong> “by compaction you dont mean the session compaction right? why does attention need to compact? it sounds like a failure mode we should still handle tho”</p>
+</blockquote>
+<p><strong>It means cleanup of attention's old child records. It does not summarize or shorten the agent's conversation.</strong></p>
+<p>The failure to prevent is a finished child appearing active again because an older callback arrives late.</p>
+<pre><code class="language-text">Example event order (observations)
+  100  Child A works
+  200  Child A stops
+  100  Old work arrives late
+
+With stopped evidence: reject 100; child stays stopped.
+Delete that evidence:  100 can recreate a false +1.
+</code></pre>
+<p>Original safe cleanup first keeps an ordering cutoff, then deletes only inactive records that the cutoff covers. A delayed callback below that cutoff still loses. Eligible active children must not be removed or hidden by advancing the cutoff.</p>
+<table class="facts">
+<thead>
+<tr><th>Question</th><th>Answer</th></tr>
+</thead>
+<tbody>
+<tr><td data-label="Question">Why the original design?</td><td data-label="Answer">Bound old record growth without forgetting which delayed callbacks must be rejected.</td></tr>
+<tr><td data-label="Question">Trade-off</td><td data-label="Answer">The cleanup code must handle races, equal timestamps and crashes between keeping the cutoff and deleting records.</td></tr>
+<tr><td data-label="Question">What would the proposed cut lose?</td><td data-label="Answer">Safe cleanup during a long-lived session. The draft kept those records. If a later update would exceed the file-size limit, it refused that update and reported that some state was missing.</td></tr>
+<tr><td data-label="Question">Direction</td><td data-label="Answer">Keep the failure protection and a way to handle growth. Reconsider the implementation, not whether the failure matters.</td></tr>
+</tbody>
+</table>
+<p>The original cleanup runs through explicit sweep. It uses age and count policies, but its count cap cannot force deletion of eligible active children.</p>
+<p class="source-link"><a href="../../libexec/attention.py">Source: child compaction in attention.py:2086,2171</a></p>
+</section>
+<section aria-labelledby="q5"><h2 id="q5">Q5 · Who does “manual polling”?</h2>
+<blockquote>
+<p><strong>You asked:</strong> “irregular manual polling - what counts as manual here?”</p>
+</blockquote>
+<p><strong>Custom configuration code does it. You do not type a polling command.</strong></p>
+<pre><code class="language-text">Default setup
+  WezTerm update-status callback
+  -&gt; plugin calls attention.poll()
+
+Custom setup with auto_poll=false
+  your existing update-status callback
+  -&gt; your configuration calls attention.poll()
+</code></pre>
+<p>Both can run automatically on a regular interval. The custom setup avoids installing a second handler when your configuration already owns the callback.</p>
+<table class="facts">
+<thead>
+<tr><th>Question</th><th>Answer</th></tr>
+</thead>
+<tbody>
+<tr><td data-label="Question">Why the extra expiry timer?</td><td data-label="Answer">It asks for a new poll at the next expiry boundary, independently of the normal callback schedule.</td></tr>
+<tr><td data-label="Question">Trade-off of removing it</td><td data-label="Answer">Less timer logic; visible expiry waits for the next regular poll.</td></tr>
+<tr><td data-label="Question">What would we lose?</td><td data-label="Answer">An independent wakeup if custom configuration stops or delays polling. Regular custom polling is not inherently irregular.</td></tr>
+<tr><td data-label="Question">Recommendation</td><td data-label="Answer">Discuss timer removal separately from nanosecond precision. They are two different choices.</td></tr>
+</tbody>
+</table>
+<p class="source-link"><a href="../../plugin/init.lua">Source: expiry wakeup and default callback in init.lua:2256,2772</a></p>
+</section>
+<section aria-labelledby="q6"><h2 id="q6">Q6 · What is a settled pane title?</h2>
+<blockquote>
+<p><strong>You asked:</strong> “whats a settled-pane-title?”</p>
+</blockquote>
+<p><strong>A pane title that was the same in two consecutive polls.</strong> It is a last fallback when there is no server tab name or usable directory name.</p>
+<p>Illustration: neither a server tab name nor a directory is available.</p>
+<table class="samples">
+<thead>
+<tr><th>Poll</th><th>Pane reports</th><th>Settled fallback</th></tr>
+</thead>
+<tbody>
+<tr><td data-label="Poll">1</td><td data-label="Pane reports">Working</td><td data-label="Settled fallback">None yet</td></tr>
+<tr><td data-label="Poll">2</td><td data-label="Pane reports">Working</td><td data-label="Settled fallback">Working</td></tr>
+<tr><td data-label="Poll">3</td><td data-label="Pane reports">Done</td><td data-label="Settled fallback">None yet</td></tr>
+<tr><td data-label="Poll">4</td><td data-label="Pane reports">Done</td><td data-label="Settled fallback">Done</td></tr>
+</tbody>
+</table>
+<p>Two equal samples do not mean two seconds. A title changing on every sample never becomes settled. A server tab name or usable directory takes precedence throughout.</p>
+<table class="facts">
+<thead>
+<tr><th>Question</th><th>Answer</th></tr>
+</thead>
+<tbody>
+<tr><td data-label="Question">Why the original design?</td><td data-label="Answer">Use a helpful pane title without following every spinner change.</td></tr>
+<tr><td data-label="Question">Trade-off</td><td data-label="Answer">Keep a little sampling state and define when the title is usable.</td></tr>
+<tr><td data-label="Question">What would we lose?</td><td data-label="Answer">That last fallback. Server names, directory names and custom formatting would still work.</td></tr>
+<tr><td data-label="Question">Review point</td><td data-label="Answer">This is a small presentation choice. It is not required for agent identity, and removing it is unlikely to be the main code reduction.</td></tr>
+</tbody>
+</table>
+<p class="source-link"><a href="../../plugin/init.lua">Source: title sampling and precedence in init.lua:1793,1837</a></p>
+</section>
+<section aria-labelledby="q7"><h2 id="q7">Q7 · What changes when I upgrade?</h2>
+<blockquote>
+<p><strong>You asked:</strong> “explain this from a user who wants to upgrade”</p>
+</blockquote>
+<p><strong>Writing both formats keeps old flat-file readers working, including bridge. The plugin can still need an upgrade for the new wire version.</strong></p>
+<div class="file-comparison"><pre><code class="language-text">With temporary dual writes
+  upgrade plugin for the new wire version
+  new writer writes: new records + old records
+  old bridge still reads old records
+  upgrade bridge later
+</code></pre><pre><code class="language-text">Without dual writes
+  install new binary, keep it inactive
+  prepare new plugin and bridge together
+  activate the matching readers and writer
+
+Switch only the writer -&gt; old bridge misses new updates.
+</code></pre></div>
+<p>Here, the writer is the hook command. Readers include the plugin and bootstrap's bridge dashboard. The bridge directly reads old flat files; your GUI configuration already reads the plugin API.</p>
+<table class="facts">
+<thead>
+<tr><th>Question</th><th>Answer</th></tr>
+</thead>
+<tbody>
+<tr><td data-label="Question">Why the original design?</td><td data-label="Answer">Permit gradual upgrades and keep old file readers working.</td></tr>
+<tr><td data-label="Question">Trade-off of removing it</td><td data-label="Answer">One stored output format, but a coordinated upgrade and rollback.</td></tr>
+<tr><td data-label="Question">What would you lose?</td><td data-label="Answer">The ability to activate the new writer while leaving an old bridge unchanged.</td></tr>
+<tr><td data-label="Question">Recommendation</td><td data-label="Answer">Keep temporary compatibility if the upgrade cannot move those readers together. Do not make you repair a broken dashboard after upgrading.</td></tr>
+</tbody>
+</table>
+<p>For panes still using v1, the new plugin can keep reading old hook files. That does not require every new writer to produce them. Dual writes retain the old format's pane-ID limitations. They also do not make an old plugin understand a newer wire version; the existing reader refuses unknown future versions.</p>
+<p class="source-link"><a href="../../../../_setup/bootstrap/scripts/bridge">Source: bridge's flat-file reader</a> · <a href="../../plugin/init.lua">plugin's existing public query</a></p>
+</section>
+<section aria-labelledby="q8"><h2 id="q8">Q8 · Why would launching an agent change?</h2>
+<blockquote>
+<p><strong>You said:</strong> “i dont understand.. wtf”</p>
+</blockquote>
+<p><strong>The proposed Bash cut added a command you would have to remember. Rust does not require that change.</strong></p>
+<p>With the implemented v2 Bash integration sourced, launch claiming is automatic. This is an illustration, not an instruction to change your setup:</p>
+<pre><code class="language-sh"># Implemented Bash behavior
+codex
+
+# Proposed manual Bash behavior
+wezterm_attention_claim &amp;&amp; codex
+</code></pre>
+<p>The claim says that a new agent is starting in this pane. Hooks inherit that launch identity. It prevents an older agent's delayed callback from changing the new agent's state.</p>
+<table class="facts">
+<thead>
+<tr><th>Question</th><th>Answer</th></tr>
+</thead>
+<tbody>
+<tr><td data-label="Question">Why the original design?</td><td data-label="Answer">Give Bash users launch identity automatically when they type a supported agent command.</td></tr>
+<tr><td data-label="Question">Trade-off of removing it</td><td data-label="Answer">Less command parsing and DEBUG-trap handling, but a required extra launch step.</td></tr>
+<tr><td data-label="Question">What would you lose?</td><td data-label="Answer">Automatic Bash launch claiming. Without a fresh claim, hooks can inherit the previous launch ID or have none. The new agent then lacks a reliable new launch identity.</td></tr>
+<tr><td data-label="Question">Recommendation</td><td data-label="Answer">Preserve the ordinary launch experience. Do not approve manual Bash claiming as a code cleanup.</td></tr>
+</tbody>
+</table>
+<p>The current v2 zsh implementation already uses explicit claiming because its automatic detection could not distinguish all executed compound commands. That does not mean your live setup uses it; existing v1 hooks do not require that v2 claim. The zsh limitation does not justify making Bash manual too. How the Rust version preserves convenient launch commands remains a design question; no replacement launcher was implemented here.</p>
+<p class="source-link"><a href="../../shell/wezterm-attention.bash">Source: Bash integration</a> · <a href="../../shell/wezterm-attention.zsh">zsh integration</a></p>
+</section>
+<section aria-labelledby="review-state"><h2 id="review-state">Review state</h2>
+<p>Separate binding/child storage is retained by your direction. Growth and delayed-child protection remain requirements. The history preference is to keep what is cheap and defer expensive additions. The other changes are still under review; the earlier Rust draft is not ready to build.</p>
+<p>This explainer uses the current checkout, the earlier v2 plan and your latest questions. It reports source inspection, not new runtime tests or measured savings. The HTML is generated from this Markdown source.</p>
+</section>
+<footer><a href="./2026-09-05-attention-v2-eight-choices.md">Read the Markdown source</a><span>Generated offline from that source. No external fonts, scripts or images.</span><code>Source SHA-256: 3f9ced5f6a3b6c6405e8243c322109a5d40c3dee255bb2f35a2821657567bb81</code></footer>
+</main></body></html>

@@ -1,0 +1,453 @@
+{
+  "result": "candidates",
+  "candidates": [
+    {
+      "id": "C1",
+      "anchor": {
+        "path": "docs/reviews/triage-2026-09-08/raw-review.md",
+        "line_start": 11,
+        "line_end": 11,
+        "quote": "The module map is sound as a responsibility split, and it is mostly faithful to the uncommitted Python/Lua code. Two facts about reality are missing from it, and they change what the \"open decisions\" table should say. First, nothing in v2 runs on your machine today: the live Claude and Codex hooks are bootstrap's own bun scripts writing v1 flat markers, your shell is zsh with the v1 `WEZTERM_PANE` precmd, and neither v2 shell file is sourced. Second, the spec's reconnect flow describes the exact behavior that the two open inbox notes from 2026-09-05 show is broken. Everything below is ordered by how much it should change the rewrite of the Rust plan."
+      },
+      "observation": "The review says nothing v2 runs locally, Claude/Codex use Bun v1 writers, and zsh has no v2 launch integration.",
+      "claimed_consequence": "A plan can be mistaken for deployed behavior, and provider activation can fail for lack of claims.",
+      "proposed_remedy": "Document the actual writer, hook, GUI and shell activation boundaries separately.",
+      "intent_impact": "violates existing invariant",
+      "severity_prior": "P2",
+      "confidence_anchor": 50,
+      "sources": [
+        {
+          "kind": "direct-external",
+          "name": "User-pasted module review, prior to Rust rewrite",
+          "session_id": null,
+          "requested_model": null,
+          "reported_model": null
+        }
+      ],
+      "probe_evidence": [],
+      "family": "cross-module"
+    },
+    {
+      "id": "C2",
+      "anchor": {
+        "path": "docs/reviews/triage-2026-09-08/raw-review.md",
+        "line_start": 17,
+        "line_end": 17,
+        "quote": "**1. The spec has no continuously observable fallback, and every reference has one.** herdr removed the exact Claude hook set we register (`Stop`, `PermissionRequest`, `SubagentStop`, `SessionEnd`) and kept only `SessionStart` for resume identity. Its docs give the reason: session hooks miss permission-approval results and Escape interrupts, so the state machine drifts with nothing to re-anchor it. herdr re-anchors from the screen and the foreground process group. luvus re-anchors from the screen plus a lease TTL plus two consecutive process scans. orca stays hook-only but decays any non-done state after 30 minutes and reconciles on PTY exit. Our only re-anchors are the 30-minute `thinking` TTL and focus acknowledgement. The spec should say that plainly under \"Availability and health\", and it should name the cheap signal we already have and do not use: the shell prompt returning. `hooks publish` runs on every precmd, which is precisely herdr's \"foreground returned to the shell\" trigger. Recording \"prompt observed after launch X\" as ending evidence would make the two-observation process sweep a rare path instead of the only path. The known false positive is Ctrl-Z; the spec's existing \"new work after stop can reactivate\" rule covers it."
+      },
+      "observation": "The review says hook coverage gaps have no re-anchor beyond TTL/focus and proposes prompt return as ending evidence.",
+      "claimed_consequence": "Missed transitions can leave stale attention, and prompt evidence is proposed as a cheaper end signal.",
+      "proposed_remedy": "Use shell prompt observations, treating Ctrl-Z as a recoverable false positive.",
+      "intent_impact": "violates existing invariant",
+      "severity_prior": "P2",
+      "confidence_anchor": 50,
+      "sources": [
+        {
+          "kind": "direct-external",
+          "name": "User-pasted module review, prior to Rust rewrite",
+          "session_id": null,
+          "requested_model": null,
+          "reported_model": null
+        }
+      ],
+      "probe_evidence": [],
+      "family": "state-machine"
+    },
+    {
+      "id": "C3",
+      "anchor": {
+        "path": "docs/reviews/triage-2026-09-08/raw-review.md",
+        "line_start": 19,
+        "line_end": 19,
+        "quote": "**2. The reconnect flow codifies the two open bugs.** The `runtime.lua` boundary says \"one bounded reconnect publication request is the explicit exception\". The 2026-09-05 inbox notes measured that this single request fires before the GUI has attached most panes, and that under a Dock-launched GUI it fails outright because `shutil.which(\"wezterm\")` finds nothing on the launchd PATH. So `wezterm.rs` must own executable discovery with a fallback to WezTerm's own executable directory, and `runtime.lua` must retry with backoff until a poll sees no unpublished pane, not latch on spawn. herdr re-publishes a stable blocker every 800 ms because it does not trust even its own push path; orca deliberately leaves its endpoint file in place on shutdown. Repeat publishing is the norm, not an exception."
+      },
+      "observation": "The first publication request fires before all panes attach and is latched on spawn.",
+      "claimed_consequence": "Later panes stay unpublished and attention remains missing after reconnect.",
+      "proposed_remedy": "Retry with backoff until publication is observed, rather than treating spawn as success.",
+      "intent_impact": "violates existing invariant",
+      "severity_prior": "P1",
+      "confidence_anchor": 50,
+      "sources": [
+        {
+          "kind": "direct-external",
+          "name": "User-pasted module review, prior to Rust rewrite",
+          "session_id": null,
+          "requested_model": null,
+          "reported_model": null
+        }
+      ],
+      "probe_evidence": [],
+      "family": "temporal"
+    },
+    {
+      "id": "C4",
+      "anchor": {
+        "path": "docs/reviews/triage-2026-09-08/raw-review.md",
+        "line_start": 19,
+        "line_end": 19,
+        "quote": "**2. The reconnect flow codifies the two open bugs.** The `runtime.lua` boundary says \"one bounded reconnect publication request is the explicit exception\". The 2026-09-05 inbox notes measured that this single request fires before the GUI has attached most panes, and that under a Dock-launched GUI it fails outright because `shutil.which(\"wezterm\")` finds nothing on the launchd PATH. So `wezterm.rs` must own executable discovery with a fallback to WezTerm's own executable directory, and `runtime.lua` must retry with backoff until a poll sees no unpublished pane, not latch on spawn. herdr re-publishes a stable blocker every 800 ms because it does not trust even its own push path; orca deliberately leaves its endpoint file in place on shutdown. Repeat publishing is the norm, not an exception."
+      },
+      "observation": "The GUI child relies on PATH and cannot find WezTerm under a Dock/launchd environment.",
+      "claimed_consequence": "Republishing fails before reading any pane.",
+      "proposed_remedy": "Use WezTerm's executable directory and explicit executable fallbacks.",
+      "intent_impact": "violates existing invariant",
+      "severity_prior": "P1",
+      "confidence_anchor": 50,
+      "sources": [
+        {
+          "kind": "direct-external",
+          "name": "User-pasted module review, prior to Rust rewrite",
+          "session_id": null,
+          "requested_model": null,
+          "reported_model": null
+        }
+      ],
+      "probe_evidence": [],
+      "family": "cross-module"
+    },
+    {
+      "id": "C5",
+      "anchor": {
+        "path": "docs/reviews/triage-2026-09-08/raw-review.md",
+        "line_start": 21,
+        "line_end": 21,
+        "quote": "**3. Launch integration is the biggest open decision, and the spec understates it.** On your actual machine no launch claim exists, so every v2 hook would be rejected with `claim_stale` the moment bootstrap's hooks start calling the CLI. None of the three references claims from the shell. orca stamps a launch token at PTY spawn and lets a tokened, non-replay `SessionStart` re-mint the fence. herdr resets the sequence baseline when the process exits. Both do this from the agent side, not the shell side. The spec's \"specify the parent-shell claim/export handshake\" keeps the shell as the only minting path, which is why zsh is a problem at all. Fork for the rewrite:"
+      },
+      "observation": "The review proposes minting a launch in SessionStart without inherited launch identity and relying on /dev/tty, binding hashes and monotonic order.",
+      "claimed_consequence": "It would remove the zsh setup problem while purportedly preserving stale-callback protection.",
+      "proposed_remedy": "Enable SessionStart self-claim after verifying /dev/tty reachability.",
+      "intent_impact": "violates existing invariant",
+      "severity_prior": "P1",
+      "confidence_anchor": 50,
+      "sources": [
+        {
+          "kind": "direct-external",
+          "name": "User-pasted module review, prior to Rust rewrite",
+          "session_id": null,
+          "requested_model": null,
+          "reported_model": null
+        }
+      ],
+      "probe_evidence": [],
+      "family": "state-machine"
+    },
+    {
+      "id": "C6",
+      "anchor": {
+        "path": "docs/reviews/triage-2026-09-08/raw-review.md",
+        "line_start": 26,
+        "line_end": 26,
+        "quote": "**4. Wire equivalence: keep the manifest executed, and add the test luvus lacks.** luvus publishes JSON Schema files that no validator ever runs, keeps four hand-maintained copies of its contract, and is bound to reality only by a live conformance run. Our `protocol/v2.json` is already read at runtime by both Python and Lua, and the shared fixture file is checked by both. That is stronger than luvus, and the Rust plan's line \"retire protocol/v2.json as the authority\" would throw it away. Recommend: `include_str!` the manifest in Rust, and add one test asserting every enum and limit in the manifest equals the Rust constant, plus round-tripping every fixture row through the serde types. No code generation needed. This closes the \"generation or exhaustive contract fixtures\" question in the spec."
+      },
+      "observation": "The proposed Rust design would retire the executed manifest and rely on separately maintained contract copies.",
+      "claimed_consequence": "Rust/Lua meanings could diverge despite published schemas.",
+      "proposed_remedy": "Embed the manifest, execute its constraints and assert parity with fixtures/typed representations.",
+      "intent_impact": "violates existing invariant",
+      "severity_prior": "P2",
+      "confidence_anchor": 50,
+      "sources": [
+        {
+          "kind": "direct-external",
+          "name": "User-pasted module review, prior to Rust rewrite",
+          "session_id": null,
+          "requested_model": null,
+          "reported_model": null
+        }
+      ],
+      "probe_evidence": [],
+      "family": "representation"
+    },
+    {
+      "id": "C7",
+      "anchor": {
+        "path": "docs/reviews/triage-2026-09-08/raw-review.md",
+        "line_start": 28,
+        "line_end": 28,
+        "quote": "**5. Hook contract details worth adding to `main.rs`.** All three references guarantee the hook never blocks the agent, as we do. orca adds two things we do not state. It prints `{}` on stdout before anything else, because its authors found Claude permission hooks fail closed on empty stdout. And it treats \"no stdout on success\" as a contract, because `SessionStart` stdout is injected into the agent's context. Our CLI already prints nothing on success and only stderr on rejection. Write both down as promises, and verify the `{}` point against the installed Claude Code."
+      },
+      "observation": "The review cites an Orca workaround that prints an empty JSON object because empty permission-hook stdout allegedly fails closed.",
+      "claimed_consequence": "A silent attention hook could change permission behavior on the installed provider.",
+      "proposed_remedy": "Verify an empty object response against the installed Claude version before adopting it.",
+      "intent_impact": "violates existing invariant",
+      "severity_prior": "P2",
+      "confidence_anchor": 50,
+      "sources": [
+        {
+          "kind": "direct-external",
+          "name": "User-pasted module review, prior to Rust rewrite",
+          "session_id": null,
+          "requested_model": null,
+          "reported_model": null
+        }
+      ],
+      "probe_evidence": [],
+      "family": "cross-module"
+    },
+    {
+      "id": "C8",
+      "anchor": {
+        "path": "docs/reviews/triage-2026-09-08/raw-review.md",
+        "line_start": 28,
+        "line_end": 28,
+        "quote": "**5. Hook contract details worth adding to `main.rs`.** All three references guarantee the hook never blocks the agent, as we do. orca adds two things we do not state. It prints `{}` on stdout before anything else, because its authors found Claude permission hooks fail closed on empty stdout. And it treats \"no stdout on success\" as a contract, because `SessionStart` stdout is injected into the agent's context. Our CLI already prints nothing on success and only stderr on rejection. Write both down as promises, and verify the `{}` point against the installed Claude Code."
+      },
+      "observation": "SessionStart stdout can enter agent context, so successful observer hooks should remain quiet.",
+      "claimed_consequence": "Debug or progress output could contaminate the provider's context.",
+      "proposed_remedy": "State and test the quiet-success/stdout-versus-stderr contract.",
+      "intent_impact": "violates existing invariant",
+      "severity_prior": "P2",
+      "confidence_anchor": 50,
+      "sources": [
+        {
+          "kind": "direct-external",
+          "name": "User-pasted module review, prior to Rust rewrite",
+          "session_id": null,
+          "requested_model": null,
+          "reported_model": null
+        }
+      ],
+      "probe_evidence": [],
+      "family": "cross-module"
+    },
+    {
+      "id": "C9",
+      "anchor": {
+        "path": "docs/reviews/triage-2026-09-08/raw-review.md",
+        "line_start": 30,
+        "line_end": 30,
+        "quote": "**6. The Pi adapter violates the spec's own downgrade rule.** The spec says rejection of an established new-protocol claim must not silently downgrade to v1. In `pi/index.ts`, `invokeWriter` returns false on any non-zero exit, and `enqueueWriter` then writes a v1 marker. `hooks event` exits 0 on an ignored event, so that case is fine, but exit 3 (state dir unavailable, permissions) silently falls back. The adapter needs to separate \"no checkout root\" from \"root present, writer failed\"."
+      },
+      "observation": "Any nonzero writer exit causes Pi to write a v1 marker.",
+      "claimed_consequence": "Failure of an established v2 writer silently downgrades state.",
+      "proposed_remedy": "Distinguish unconfigured integration from configured writer failure.",
+      "intent_impact": "violates existing invariant",
+      "severity_prior": "P1",
+      "confidence_anchor": 50,
+      "sources": [
+        {
+          "kind": "direct-external",
+          "name": "User-pasted module review, prior to Rust rewrite",
+          "session_id": null,
+          "requested_model": null,
+          "reported_model": null
+        }
+      ],
+      "probe_evidence": [],
+      "family": "cross-module"
+    },
+    {
+      "id": "C10",
+      "anchor": {
+        "path": "docs/reviews/triage-2026-09-08/raw-review.md",
+        "line_start": 32,
+        "line_end": 32,
+        "quote": "**7. Module split lesson from herdr.** herdr keeps detection policy in a pure 556-line module with table-driven tests, while arbitration accreted into a 5,886-line struct that grew a field per race it hit. luvus's dispatch file is the same shape. Our `lifecycle.rs` contract is pure, which is right. But the spec's flow says \"command code\" does lock, reread, decide, apply. The Python has 14 lock sites across 7 command paths doing that choreography by hand. Put one `commit(scope, decide)` function in `records.rs` that owns lock, reread, decide, apply, and compat output, so `main.rs` never touches a lock."
+      },
+      "observation": "The older implementation repeats lock/reread/decide/write sequences across command paths.",
+      "claimed_consequence": "A new caller can omit one guard or compatibility repair stage.",
+      "proposed_remedy": "Centralize commit orchestration in records.rs so CLI dispatch does not implement locks.",
+      "intent_impact": "violates existing invariant",
+      "severity_prior": "P2",
+      "confidence_anchor": 50,
+      "sources": [
+        {
+          "kind": "direct-external",
+          "name": "User-pasted module review, prior to Rust rewrite",
+          "session_id": null,
+          "requested_model": null,
+          "reported_model": null
+        }
+      ],
+      "probe_evidence": [],
+      "family": "cross-module"
+    },
+    {
+      "id": "C11",
+      "anchor": {
+        "path": "docs/reviews/triage-2026-09-08/raw-review.md",
+        "line_start": 34,
+        "line_end": 34,
+        "quote": "**8. Subagent count has no precedent in herdr or luvus; orca supports it.** Both herdr and luvus suppress child events and carry a negative test asserting child events never reach the parent. orca keeps a live roster and holds the pane \"working\" while any child works. Our shipped `+N` and \"Claude root Stop does not clear children\" match orca. The spec's `providers.rs` proof \"child events never become lead activity\" is the right invariant. Add the negative test as an explicit fixture case so the Rust port cannot lose it."
+      },
+      "observation": "The review requests explicit negative coverage for child callbacks affecting lead state.",
+      "claimed_consequence": "The Rust port could convert child work or child stopping into parent activity.",
+      "proposed_remedy": "Keep child/lead negative cases in the provider fixtures and port tests.",
+      "intent_impact": "violates existing invariant",
+      "severity_prior": "P2",
+      "confidence_anchor": 50,
+      "sources": [
+        {
+          "kind": "direct-external",
+          "name": "User-pasted module review, prior to Rust rewrite",
+          "session_id": null,
+          "requested_model": null,
+          "reported_model": null
+        }
+      ],
+      "probe_evidence": [],
+      "family": "cross-module"
+    },
+    {
+      "id": "C12",
+      "anchor": {
+        "path": "docs/reviews/triage-2026-09-08/raw-review.md",
+        "line_start": 36,
+        "line_end": 36,
+        "quote": "**9. Acknowledgement matches the best of the references, with one open question.** herdr stores `seen` on the view struct, derives \"done\" at read time, and never lets a blocker be acknowledged. orca stores no acknowledgement in the record and instead flags a resumed session's idle landing so badges do not fire. Ours acknowledges one exact activity event id, and `SessionStart` produces a binding with no activity, so a resume never shows a spurious stop. Good by construction. The open question is herdr's rule that `blocked` is not ackable: today focusing a pane clears `notify`, so if you look at a permission prompt and switch away without answering, the tab goes quiet while the agent is still waiting. Decide whether `notify` should clear on focus or only on the next provider event."
+      },
+      "observation": "Focus acknowledges notify by default even if the provider is still waiting.",
+      "claimed_consequence": "A user can leave the pane after viewing a permission prompt and no longer see its alert.",
+      "proposed_remedy": "Decide whether notify clears on focus or only after later provider activity.",
+      "intent_impact": "violates existing invariant",
+      "severity_prior": "P2",
+      "confidence_anchor": 50,
+      "sources": [
+        {
+          "kind": "direct-external",
+          "name": "User-pasted module review, prior to Rust rewrite",
+          "session_id": null,
+          "requested_model": null,
+          "reported_model": null
+        }
+      ],
+      "probe_evidence": [],
+      "family": "state-machine"
+    },
+    {
+      "id": "C13",
+      "anchor": {
+        "path": "docs/reviews/triage-2026-09-08/raw-review.md",
+        "line_start": 40,
+        "line_end": 40,
+        "quote": "- `docs/record-contract.md` omits the launch-level `activity.json` and `ack.json` that the spec diagram shows. The code writes them (`apply_activity` targets the launch when no binding exists). The contract doc is stale, not the spec."
+      },
+      "observation": "The contract tree lacks launch-level activity.json and ack.json.",
+      "claimed_consequence": "Readers/builders could omit supported pre-binding activity targets.",
+      "proposed_remedy": "Add both paths to the record contract.",
+      "intent_impact": "violates existing invariant",
+      "severity_prior": "P2",
+      "confidence_anchor": 50,
+      "sources": [
+        {
+          "kind": "direct-external",
+          "name": "User-pasted module review, prior to Rust rewrite",
+          "session_id": null,
+          "requested_model": null,
+          "reported_model": null
+        }
+      ],
+      "probe_evidence": [],
+      "family": "representation"
+    },
+    {
+      "id": "C14",
+      "anchor": {
+        "path": "docs/reviews/triage-2026-09-08/raw-review.md",
+        "line_start": 43,
+        "line_end": 43,
+        "quote": "- `protocol.lua` keeps \"digest checks\". The plugin runs a pure-Lua SHA-256 on every child record it reads, every poll, to verify `agent_key`. The Rust plan wanted to drop that. The spec should list it under open decisions with a measurement, or decide that Rust verifies at write and Lua trusts the filename."
+      },
+      "observation": "Lua hashes child/review IDs while parsing records on polling reads.",
+      "claimed_consequence": "Digest validation can consume GUI CPU; the review proposes measuring or trusting Rust writes/filenames instead.",
+      "proposed_remedy": "Measure the cost; consider avoiding repeated work without weakening identity validation.",
+      "intent_impact": "violates existing invariant",
+      "severity_prior": "P2",
+      "confidence_anchor": 50,
+      "sources": [
+        {
+          "kind": "direct-external",
+          "name": "User-pasted module review, prior to Rust rewrite",
+          "session_id": null,
+          "requested_model": null,
+          "reported_model": null
+        }
+      ],
+      "probe_evidence": [],
+      "family": "representation"
+    },
+    {
+      "id": "C15",
+      "anchor": {
+        "path": "docs/reviews/triage-2026-09-08/raw-review.md",
+        "line_start": 44,
+        "line_end": 44,
+        "quote": "- The absence of a `changes` API is supported by the references: herdr keeps a 512-event ring but does not expose replay on the wire, and only luvus ships a cursor. Keeping this cut is fine."
+      },
+      "observation": "The review supports keeping the changes/replay API out of the current scope.",
+      "claimed_consequence": "Current/retained state remains available without claiming complete missed-event replay.",
+      "proposed_remedy": "Keep that API cut unless a named consumer requires it.",
+      "intent_impact": "risky scope expansion",
+      "severity_prior": "P2",
+      "confidence_anchor": 50,
+      "sources": [
+        {
+          "kind": "direct-external",
+          "name": "User-pasted module review, prior to Rust rewrite",
+          "session_id": null,
+          "requested_model": null,
+          "reported_model": null
+        }
+      ],
+      "probe_evidence": [],
+      "family": "cross-module"
+    },
+    {
+      "id": "C16",
+      "anchor": {
+        "path": "docs/reviews/triage-2026-09-08/raw-review.md",
+        "line_start": 45,
+        "line_end": 45,
+        "quote": "- The time section is correct. Python uses `CLOCK_MONOTONIC_RAW`; Rust must call the same clock through libc, since `Instant` exposes no raw value. Add that the coordinate is per boot and that socket-incarnation scoping is what makes cross-process comparison safe."
+      },
+      "observation": "Persisted ordering uses CLOCK_MONOTONIC_RAW, not a per-process Instant baseline.",
+      "claimed_consequence": "Changing the clock coordinate could invalidate ordering across hook processes.",
+      "proposed_remedy": "Call the same OS clock and state boot/scope limits.",
+      "intent_impact": "violates existing invariant",
+      "severity_prior": "P2",
+      "confidence_anchor": 50,
+      "sources": [
+        {
+          "kind": "direct-external",
+          "name": "User-pasted module review, prior to Rust rewrite",
+          "session_id": null,
+          "requested_model": null,
+          "reported_model": null
+        }
+      ],
+      "probe_evidence": [],
+      "family": "temporal"
+    },
+    {
+      "id": "C17",
+      "anchor": {
+        "path": "tests/pi_extension.test.ts",
+        "line_start": 208,
+        "line_end": 230,
+        "quote": "test(\"v2 dispatch: Pi lifecycle and bus requests use the serialized attention process queue\", async () => {"
+      },
+      "observation": "The current prescribed Bun test command fails at writer dispatch and subsequent queued cases; the isolated Node dispatch smoke cannot read its expected calls log.",
+      "claimed_consequence": "A fresh Pi integration/full-gate certification cannot be claimed even though source inspection and a direct failure probe confirm the old downgrade fix.",
+      "proposed_remedy": "Identify why generated test-writer execution does not complete, correct the responsible fixture/runtime/adapter boundary, and rerun the prescribed Bun and Node checks.",
+      "intent_impact": "violates existing invariant",
+      "severity_prior": "P2",
+      "confidence_anchor": 100,
+      "sources": [
+        {
+          "kind": "obligation-owner",
+          "name": "Current Pi verification during triage",
+          "session_id": null,
+          "requested_model": null,
+          "reported_model": null
+        }
+      ],
+      "probe_evidence": [
+        {
+          "command": "env -u WEZTERM_ATTENTION_DIR -u WEZTERM_ATTENTION_ROOT -u WEZTERM_PANE -u WEZTERM_UNIX_SOCKET bun test tests/pi_extension.test.ts",
+          "observed_output": "23 pass; 7 fail; Ran 30 tests across 1 file; first v2 writer-dispatch test timed out.",
+          "artifact": "/tmp/attention-current-triage.5NxBl4/bun-prescribed.log"
+        }
+      ],
+      "family": "cross-module"
+    }
+  ]
+}

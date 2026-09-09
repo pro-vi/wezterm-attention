@@ -1,0 +1,161 @@
+bun test v1.3.11 (af24e281)
+
+tests/pi_extension.test.ts:
+(pass) lifecycle: agent_start writes a thinking marker with ttl_ms, updated_at, source pi [2.68ms]
+(pass) lifecycle: tool_execution_start writes a thinking marker [2.72ms]
+(pass) lifecycle: agent_settled — not agent_end — writes the stop marker [4.12ms]
+(pass) lifecycle: handlers return before marker I/O lands (no agent-critical-path await) [0.96ms]
+(pass) registration: the extension listens on the wezterm-attention:mark channel [0.37ms]
+(pass) registration: the extension registers no commands [0.39ms]
+killed 1 dangling process
+(fail) v2 dispatch: Pi lifecycle and bus requests use the serialized attention process queue [5001.91ms]
+  ^ this test timed out after 5000ms.
+265 | 	const h = loadExt();
+266 |
+267 | 	await h.lifecycle["session_start"]!();
+268 | 	await h.lifecycle["session_shutdown"]!({ type: "session_shutdown", reason: "reload" }, testContext);
+269 |
+270 | 	const lines = readFileSync(log, "utf8").trim().split("\n");
+                     ^
+ENOENT: no such file or directory, open '/var/folders/sw/zn4xtdd96nq_y2jvwzyx0vk80000gn/T/wez-v2-reload-siS11P/calls.log'
+    path: "/var/folders/sw/zn4xtdd96nq_y2jvwzyx0vk80000gn/T/wez-v2-reload-siS11P/calls.log",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+      at <anonymous> (/Users/provi/Development/_projs/wezterm-attention/tests/pi_extension.test.ts:270:16)
+(fail) v2 dispatch: Pi reload drains queued writes without sending an end event or warning [2002.82ms]
+126 | 	}
+127 | 	return parsed;
+128 | }
+129 |
+130 | function readMarker(dir: string, pane = "42"): Record<string, unknown> {
+131 | 	return parseRecord(readFileSync(join(dir, pane), "utf8"));
+                          ^
+ENOENT: no such file or directory, open '/var/folders/sw/zn4xtdd96nq_y2jvwzyx0vk80000gn/T/wez-fallback-unset-ytfeIL/42'
+    path: "/var/folders/sw/zn4xtdd96nq_y2jvwzyx0vk80000gn/T/wez-fallback-unset-ytfeIL/42",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+      at readMarker (/Users/provi/Development/_projs/wezterm-attention/tests/pi_extension.test.ts:131:21)
+      at <anonymous> (/Users/provi/Development/_projs/wezterm-attention/tests/pi_extension.test.ts:283:9)
+(fail) fallback: an unset checkout root keeps the v1 marker path [2001.21ms]
+291 | 	const { lifecycle } = loadExt();
+292 | 	await lifecycle["session_start"]!();
+293 | 	await lifecycle["agent_start"]!();
+294 | 	await lifecycle["session_shutdown"]!();
+295 | 	expect(existsSync(join(dir, "42"))).toBe(false);
+296 | 	expect(notifications).toHaveLength(1);
+                             ^
+error: expect(received).toHaveLength(expected)
+
+Expected length: 1
+Received length: 0
+
+      at <anonymous> (/Users/provi/Development/_projs/wezterm-attention/tests/pi_extension.test.ts:296:24)
+(fail) fallback: a configured checkout without a writer logs once and writes no v1 marker [2003.22ms]
+309 | 	const { lifecycle } = loadExt();
+310 | 	await lifecycle["session_start"]!();
+311 | 	await lifecycle["agent_start"]!();
+312 | 	await lifecycle["session_shutdown"]!();
+313 | 	expect(existsSync(join(dir, "42"))).toBe(false);
+314 | 	expect(notifications).toHaveLength(1);
+                             ^
+error: expect(received).toHaveLength(expected)
+
+Expected length: 1
+Received length: 0
+
+      at <anonymous> (/Users/provi/Development/_projs/wezterm-attention/tests/pi_extension.test.ts:314:24)
+(fail) fallback: an invoked writer exit never creates a v1 marker and logs once [2002.58ms]
+329 | 	const { lifecycle } = loadExt();
+330 | 	await lifecycle["session_start"]!();
+331 | 	await lifecycle["agent_start"]!();
+332 | 	await lifecycle["session_shutdown"]!();
+333 | 	expect(existsSync(join(dir, "42"))).toBe(false);
+334 | 	expect(notifications).toHaveLength(1);
+                             ^
+error: expect(received).toHaveLength(expected)
+
+Expected length: 1
+Received length: 0
+
+      at <anonymous> (/Users/provi/Development/_projs/wezterm-attention/tests/pi_extension.test.ts:334:24)
+(fail) fallback: an exit-zero hook diagnostic is reported and never treated as success [2003.68ms]
+killed 1 dangling process
+(fail) event: emitting a notify object writes a labeled notify marker [5001.18ms]
+  ^ this test timed out after 5000ms.
+
+# Unhandled error between tests
+-------------------------------
+126 | 	}
+127 | 	return parsed;
+128 | }
+129 |
+130 | function readMarker(dir: string, pane = "42"): Record<string, unknown> {
+131 | 	return parseRecord(readFileSync(join(dir, pane), "utf8"));
+                          ^
+ENOENT: no such file or directory, open '/var/folders/sw/zn4xtdd96nq_y2jvwzyx0vk80000gn/T/wez-evt-evIdJq/42'
+    path: "/var/folders/sw/zn4xtdd96nq_y2jvwzyx0vk80000gn/T/wez-evt-evIdJq/42",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+      at readMarker (/Users/provi/Development/_projs/wezterm-attention/tests/pi_extension.test.ts:131:21)
+      at <anonymous> (/Users/provi/Development/_projs/wezterm-attention/tests/pi_extension.test.ts:343:12)
+-------------------------------
+
+(pass) event: a bare string state is accepted [5.62ms]
+
+# Unhandled error between tests
+-------------------------------
+226 | 	await h.emit({ type: "notify", label: "answer me" });
+227 | 	await h.emit("review");
+228 | 	await h.emit("clear");
+229 | 	await h.lifecycle["session_shutdown"]!();
+230 |
+231 | 	const lines = readFileSync(log, "utf8").trim().split("\n");
+                     ^
+ENOENT: no such file or directory, open '/var/folders/sw/zn4xtdd96nq_y2jvwzyx0vk80000gn/T/wez-v2-dispatch-F86DDM/calls.log'
+    path: "/var/folders/sw/zn4xtdd96nq_y2jvwzyx0vk80000gn/T/wez-v2-dispatch-F86DDM/calls.log",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+      at <anonymous> (/Users/provi/Development/_projs/wezterm-attention/tests/pi_extension.test.ts:231:16)
+-------------------------------
+
+(pass) publication: identical states receive distinct publication IDs [1.82ms]
+(pass) ordering: notify then clear leaves NO marker (last requested wins) [7.08ms]
+(pass) ordering: clear then notify leaves a notify marker [0.66ms]
+(pass) reload (real module re-eval): retire-at-registration collapses N fresh generations to one listener [2.01ms]
+(pass) reload: a new generation retires the previous listener (no accumulation) [0.29ms]
+(pass) failed reload: session_shutdown does NOT dispose the listener [0.40ms]
+(pass) session_shutdown drains in-flight writes before returning [0.37ms]
+(pass) traversal: a bad pane id writes NOTHING outside the marker dir [0.57ms]
+(pass) traversal: a bad pane id does NOT delete an outside file on clear [0.32ms]
+(pass) cleanup: a failed rename does not leak temp files [2.64ms]
+(pass) missing pane: lifecycle write is a silent no-op that creates no file [0.28ms]
+(pass) env: a unit-suffixed TTL ("30m") is rejected, not parsed as 30 [0.52ms]
+(pass) env: a relative WEZTERM_ATTENTION_DIR is rejected (no cwd scatter, no cwd delete) [0.12ms]
+(pass) env: TTL_MS="0" falls back to the default, not an instantly-stale marker [0.61ms]
+(pass) event: every documented alias maps to its canonical marker state [3.11ms]
+(pass) event: an unrecognized state is rejected, writing nothing [0.34ms]
+
+7 tests failed:
+(fail) v2 dispatch: Pi lifecycle and bus requests use the serialized attention process queue [5001.91ms]
+  ^ this test timed out after 5000ms.
+(fail) v2 dispatch: Pi reload drains queued writes without sending an end event or warning [2002.82ms]
+(fail) fallback: an unset checkout root keeps the v1 marker path [2001.21ms]
+(fail) fallback: a configured checkout without a writer logs once and writes no v1 marker [2003.22ms]
+(fail) fallback: an invoked writer exit never creates a v1 marker and logs once [2002.58ms]
+(fail) fallback: an exit-zero hook diagnostic is reported and never treated as success [2003.68ms]
+(fail) event: emitting a notify object writes a labeled notify marker [5001.18ms]
+  ^ this test timed out after 5000ms.
+
+ 23 pass
+ 7 fail
+ 2 errors
+ 52 expect() calls
+Ran 30 tests across 1 file. [20.17s]

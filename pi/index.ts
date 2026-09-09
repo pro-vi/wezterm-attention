@@ -1,5 +1,12 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	SessionShutdownEvent,
+	SessionStartEvent,
+} from "@earendil-works/pi-coding-agent";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { accessSync, constants } from "node:fs";
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -21,6 +28,32 @@ type Marker = {
 	label?: string;
 	ttl_ms?: number;
 };
+
+type PiStartSource = SessionStartEvent["reason"];
+
+type SessionFacts = {
+	sessionId: string;
+	sessionFile?: string;
+	cwd: string;
+	model?: string;
+};
+
+type WriterRequest =
+	| ({ kind: "binding"; startSource: PiStartSource } & SessionFacts)
+	| ({
+		kind: "activity";
+		state: "thinking" | "stop" | "notify";
+		event: "agent_start" | "tool_execution_start" | "agent_settled" | "bus";
+		label?: string;
+	} & SessionFacts)
+	| ({ kind: "review" } & SessionFacts)
+	| ({ kind: "clear" } & SessionFacts)
+	| ({ kind: "end"; reason: SessionShutdownEvent["reason"] } & SessionFacts);
+
+type WriterResult =
+	| { kind: "unconfigured" }
+	| { kind: "succeeded" }
+	| { kind: "failed"; message: string };
 
 // Resolve the marker dir and require it absolute — closes two degenerate-env holes:
 // WEZTERM_ATTENTION_DIR="" would make clear's rm() delete a cwd-relative file, and
@@ -165,6 +198,126 @@ function clearMarker(): Promise<void> {
 	return enqueue(() => clearMarkerNow());
 }
 
+function sessionFacts(ctx: ExtensionContext): SessionFacts | undefined {
+	const sessionId = ctx.sessionManager.getSessionId();
+	if (typeof sessionId !== "string" || sessionId.length === 0) return undefined;
+	const sessionFile = ctx.sessionManager.getSessionFile();
+	const model = typeof ctx.model?.id === "string" && ctx.model.id.length > 0 ? ctx.model.id : undefined;
+	return {
+		sessionId,
+		...(typeof sessionFile === "string" && sessionFile.length > 0 ? { sessionFile } : {}),
+		cwd: ctx.cwd,
+		...(model ? { model } : {}),
+	};
+}
+
+function requestFromSessionStart(event: SessionStartEvent, ctx: ExtensionContext): WriterRequest | undefined {
+	const facts = sessionFacts(ctx);
+	return facts ? { kind: "binding", startSource: event.reason, ...facts } : undefined;
+}
+
+function writerExecutable(): { kind: "unconfigured" } | { kind: "ready"; executable: string } | { kind: "failed"; message: string } {
+	const root = process.env.WEZTERM_ATTENTION_ROOT;
+	if (root === undefined) return { kind: "unconfigured" };
+	if (!root || !isAbsolute(root)) {
+		return { kind: "failed", message: "wezterm-attention: WEZTERM_ATTENTION_ROOT must name an absolute checkout" };
+	}
+	const executable = join(root, "bin", "attention");
+	try {
+		accessSync(executable, constants.X_OK);
+	} catch {
+		return { kind: "failed", message: "wezterm-attention: configured checkout has no executable bin/attention" };
+	}
+	return { kind: "ready", executable };
+}
+
+function writerInvocation(request: WriterRequest): { event: string; payload: Record<string, unknown> } {
+	const common: Record<string, unknown> = {
+		session_id: request.sessionId,
+		cwd: request.cwd,
+		...(request.sessionFile ? { session_file: request.sessionFile } : {}),
+		...(request.model ? { model: request.model } : {}),
+	};
+	switch (request.kind) {
+		case "binding":
+			return { event: "session_start", payload: { ...common, start_source: request.startSource } };
+		case "activity":
+			return {
+				event: request.event,
+				payload: request.event === "bus"
+					? { ...common, state: request.state, ...(request.label ? { label: request.label } : {}) }
+					: common,
+			};
+		case "review":
+			return { event: "bus", payload: { ...common, state: "review" } };
+		case "clear":
+			return { event: "bus", payload: { ...common, state: "clear" } };
+		case "end":
+			return { event: "session_shutdown", payload: { ...common, reason: request.reason } };
+	}
+}
+
+async function invokeWriter(request: WriterRequest): Promise<WriterResult> {
+	const target = writerExecutable();
+	if (target.kind !== "ready") return target;
+	const invocation = writerInvocation(request);
+	return new Promise<WriterResult>((resolve) => {
+		let settled = false;
+		let diagnosticReceived = false;
+		const finish = (result: WriterResult) => {
+			if (settled) return;
+			settled = true;
+			resolve(result);
+		};
+		try {
+			const child = spawn(
+				target.executable,
+				["hooks", "event", "pi", invocation.event],
+				{ env: process.env, stdio: ["pipe", "ignore", "pipe"] },
+			);
+			child.once("error", () => finish({ kind: "failed", message: "wezterm-attention: writer process could not start" }));
+			child.stderr.on("data", (chunk: Buffer | string) => {
+				if (chunk.length > 0) diagnosticReceived = true;
+			});
+			child.stderr.once("error", () => finish({ kind: "failed", message: "wezterm-attention: writer diagnostics failed" }));
+			child.once("close", (code) => finish(code === 0 && !diagnosticReceived
+				? { kind: "succeeded" }
+				: { kind: "failed", message: code === 0
+					? "wezterm-attention: writer rejected the event"
+					: `wezterm-attention: writer exited with status ${code ?? "signal"}` }));
+			child.stdin.once("error", () => finish({ kind: "failed", message: "wezterm-attention: writer input failed" }));
+			child.stdin.end(JSON.stringify(invocation.payload));
+		} catch {
+			finish({ kind: "failed", message: "wezterm-attention: writer process could not start" });
+		}
+	});
+}
+
+async function applyLegacyFallback(request: WriterRequest): Promise<void> {
+	switch (request.kind) {
+		case "activity":
+			await writeMarkerNow(request.state, request.label);
+			return;
+		case "review":
+			await writeMarkerNow("review");
+			return;
+		case "clear":
+			await clearMarkerNow();
+			return;
+		case "binding":
+		case "end":
+			return;
+	}
+}
+
+function enqueueWriter(request: WriterRequest, reportFailure: (message: string) => void): Promise<void> {
+	return enqueue(async () => {
+		const result = await invokeWriter(request);
+		if (result.kind === "unconfigured") await applyLegacyFallback(request);
+		else if (result.kind === "failed") reportFailure(result.message);
+	});
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -215,7 +368,7 @@ function busRegistry(): WeakMap<object, () => void> {
 // This function is the seam the bus-owned-controller design would replace.
 function installBusListener(pi: ExtensionAPI, handler: (data: unknown) => unknown): void {
 	const registry = busRegistry();
-	const bus = pi.events as unknown as object;
+	const bus: object = pi.events;
 	const prev = registry.get(bus);
 	const disposeEvent = pi.events.on(ATTENTION_EVENT, handler);
 	registry.set(bus, disposeEvent);
@@ -227,6 +380,29 @@ function installBusListener(pi: ExtensionAPI, handler: (data: unknown) => unknow
 }
 
 export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
+	let currentSession: SessionFacts | undefined;
+	let currentContext: ExtensionContext | undefined;
+	let writerFailureReported = false;
+	const reportWriterFailure = (message: string) => {
+		if (writerFailureReported) return;
+		writerFailureReported = true;
+		if (currentContext) currentContext.ui.notify(message, "warning");
+		else console.error(message);
+	};
+
+	pi.on("session_start", (event, ctx) => {
+		const request = requestFromSessionStart(event, ctx);
+		if (!request) return;
+		currentContext = ctx;
+		currentSession = {
+			sessionId: request.sessionId,
+			...(request.sessionFile ? { sessionFile: request.sessionFile } : {}),
+			cwd: request.cwd,
+			...(request.model ? { model: request.model } : {}),
+		};
+		void enqueueWriter(request, reportWriterFailure).catch(() => {});
+	});
+
 	// Automatic: Pi lifecycle → WezTerm tab state. Lifecycle handlers are per-instance,
 	// replaced wholesale on reload, so they don't accumulate (unlike the shared bus
 	// listener below — no dedup needed here).
@@ -240,12 +416,20 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 	// chains synchronously at call time, so emit order == apply order regardless of the
 	// await. The session_shutdown drain now guarantees these land before a reload; don't
 	// weaken it.
-	pi.on("agent_start", () => {
-		void mark("thinking").catch(() => {});
+	pi.on("agent_start", (_event, ctx) => {
+		const facts = sessionFacts(ctx);
+		if (!facts) return;
+		currentContext = ctx;
+		currentSession = facts;
+		void enqueueWriter({ kind: "activity", state: "thinking", event: "agent_start", ...facts }, reportWriterFailure).catch(() => {});
 	});
 
-	pi.on("tool_execution_start", () => {
-		void mark("thinking").catch(() => {});
+	pi.on("tool_execution_start", (_event, ctx) => {
+		const facts = sessionFacts(ctx);
+		if (!facts) return;
+		currentContext = ctx;
+		currentSession = facts;
+		void enqueueWriter({ kind: "activity", state: "thinking", event: "tool_execution_start", ...facts }, reportWriterFailure).catch(() => {});
 	});
 
 	// `agent_settled`, NOT `agent_end`: agent_end fires at the end of every
@@ -253,8 +437,12 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 	// continue with queued follow-up messages — writing `stop` there flashes a
 	// false ✓ mid-task. agent_settled fires only once Pi will not continue
 	// running automatically. Requires Pi >= 0.80.5.
-	pi.on("agent_settled", () => {
-		void mark("stop").catch(() => {});
+	pi.on("agent_settled", (_event, ctx) => {
+		const facts = sessionFacts(ctx);
+		if (!facts) return;
+		currentContext = ctx;
+		currentSession = facts;
+		void enqueueWriter({ kind: "activity", state: "stop", event: "agent_settled", ...facts }, reportWriterFailure).catch(() => {});
 	});
 
 	// Cooperative: any other Pi extension (e.g. an ask-user extension) can emit
@@ -266,7 +454,19 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 	installBusListener(pi, (data) => {
 		const request = normalizeEventData(data);
 		if (!request) return;
-		return request.state === "clear" ? clearMarker() : mark(request.state, request.label);
+		if (!currentSession) {
+			if (process.env.WEZTERM_ATTENTION_ROOT === undefined) {
+				return request.state === "clear" ? clearMarker() : mark(request.state, request.label);
+			}
+			reportWriterFailure("wezterm-attention: no Pi session is available for the configured writer");
+			return;
+		}
+		if (request.state === "clear") return enqueueWriter({ kind: "clear", ...currentSession }, reportWriterFailure);
+		if (request.state === "review") return enqueueWriter({ kind: "review", ...currentSession }, reportWriterFailure);
+		return enqueueWriter({
+			kind: "activity", state: request.state, event: "bus",
+			...(request.label ? { label: request.label } : {}), ...currentSession,
+		}, reportWriterFailure);
 	});
 
 	// Drain in-flight writes on teardown: Pi awaits session_shutdown before re-loading,
@@ -294,7 +494,16 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 	// mailbox → bounds memory but breaks the FIFO ordering the tests lock. The real fix
 	// is the deferred bus-owned controller (one per bus, owning the listener + mutation
 	// state, re-asserting the last requested state after an abandoned write lands).
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (event, ctx) => {
+		const facts = sessionFacts(ctx) ?? currentSession;
+		currentContext = ctx;
+		// Pi emits shutdown before attempting an extension reload. The provider's
+		// contract keeps the current binding for that reason, so there is no writer
+		// mutation to request and no diagnostic to reinterpret. Earlier queued writes
+		// still drain below before the replacement generation starts.
+		if (facts && event.reason !== "reload") {
+			void enqueueWriter({ kind: "end", reason: event.reason, ...facts }, reportWriterFailure).catch(() => {});
+		}
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		await Promise.race([
 			mutationChain,

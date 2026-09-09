@@ -1,0 +1,135 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/debug/deps/wezterm_attention-88f1437cf51835ff)
+
+running 3 tests
+test wezterm::tests::process_environment_token_accepts_an_interior_space ... ok
+test records::tests::parent_directory_sync_failure_is_reported ... ok
+test wezterm::tests::write_revalidates_the_descriptor_returned_by_open ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/attention-c26154b1d35972c2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/rust/claim_publish_spec.rs (target/debug/deps/claim_publish_spec-1489986a69291bc8)
+
+running 28 tests
+test embedded_manifest_equals_protocol_file_byte_for_byte ... ok
+test durable_record_writes_use_posix_fsync_instead_of_apple_fullfsync ... ok
+test identity_digest_recipes_match_python_known_answers ... ok
+test executable_resolution_uses_the_explicit_fallback_when_path_is_empty ... ok
+test manifest_rejects_unknown_field_type_at_load ... ok
+test pane_enumeration_accepts_numeric_ids_and_rejects_malformed_rows ... ok
+test pane_enumeration_keeps_rows_without_a_tty_for_per_row_skipping ... ok
+test equal_pane_numbers_in_two_sockets_have_distinct_addresses ... ok
+test executable_resolution_rejects_a_fallback_below_a_group_writable_directory ... ok
+test opened_tty_descriptor_is_revalidated ... ok
+test real_disposable_pty_receives_osc_output ... ok
+test socket_rebirth_before_commit_is_rejected_without_a_claim_write ... ok
+test committed_claim_reports_pending_when_tty_publication_fails ... ok
+test realm_publish_skips_only_the_row_without_a_tty ... ok
+test claim_is_private_durable_and_published ... ok
+test claim_mints_a_launch_id_when_the_shell_has_none ... ok
+test claimed_pane_has_no_bindings_yet ... ok
+test delayed_older_claim_loses ... ok
+test duplicate_claim_republishes_without_rewrite ... ok
+test bindings_query_probes_presence_once_per_pane ... ok
+test missing_incarnation_manifest_fails_presence_closed ... ok
+test bindings_query_returns_all_identity_axes_and_rejects_path_mismatch ... ok
+test bindings_query_rejects_foreign_end_pointer_and_claim_records ... ok
+test lock_contention_is_bounded_and_diagnosed ... ok
+ok - 35 protocol rows; 10 eligibility rows
+test shared_protocol_rows_match_the_independent_checker_verdicts ... ok
+test full_tty_output_queue_does_not_block_later_realm_panes ... ok
+test full_tty_output_queue_returns_a_pending_claim_within_the_deadline ... ok
+test tty_input_guard_records_zero_stdin_bytes_during_a_real_claim ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.15s
+
+     Running tests/rust/cli_shell_spec.rs (target/debug/deps/cli_shell_spec-3a7526d84d3040ec)
+
+running 7 tests
+test rust_cli_help_errors_and_empty_hook_input_keep_the_documented_shape ... ok
+test installed_shim_names_the_install_command_when_the_rust_binary_is_missing ... ok
+test json_publication_and_binding_output_report_bounded_completeness ... ok
+test zsh_explicit_claim_uses_selected_ids_and_clears_inherited_id_on_failure ... ok
+test installer_creates_libexec_in_a_fresh_checkout ... ok
+test installed_default_shim_claims_without_python_on_path ... ok
+test bash_automatic_claim_preserves_debug_trap_and_keeps_pending_publication_id ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.37s
+
+     Running tests/rust/lifecycle_spec.rs (target/debug/deps/lifecycle_spec-f4d986aed5deabf0)
+
+running 27 tests
+test malformed_agent_type_is_ignored_and_long_paths_use_the_path_limit ... ok
+test non_start_without_a_claim_is_stale_for_every_provider ... ok
+test provider_fixtures_equal_the_closed_action_vocabulary ... ok
+test bindings_rejects_invalid_realm_and_provider_filters ... ok
+^D
+running 1 test
+test real_macos_controlling_tty_path_is_rejected_in_a_pty_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 0.00s
+
+test real_macos_controlling_tty_path_is_rejected_in_a_pty_child ... ok
+test future_review_is_never_deleted_or_replaced ... ok
+test fresh_manual_activity_is_fenced_by_an_existing_clear ... ok
+test pi_review_and_clear_share_the_current_binding_without_ending_it ... ok
+test nested_startup_conflicts_and_nested_resume_replaces ... ok
+test manual_mark_targets_the_launch_and_duplicate_repairs_legacy_projection ... ok
+test matching_wezpup_pane_marks_v2_and_projection_as_puppet_activity ... ok
+test prompt_return_failure_does_not_block_tty_publication ... ok
+test covered_activity_never_recreates_the_flat_projection ... ok
+test duplicate_codex_stop_keeps_a_child_newer_than_the_surviving_activity ... ok
+test real_hook_process_preserves_matching_wezpup_pane_provenance ... ok
+test hooks_event_debug_uses_stderr_and_lifecycle_errors_are_non_strict ... ok
+test prompt_return_clears_lead_only_and_newer_hook_reactivates ... ok
+test codex_parent_stop_clears_children_with_the_same_observation ... ok
+test same_session_resume_reopens_an_older_end ... ok
+test session_start_self_claims_only_when_the_standin_gate_is_enabled ... ok
+test tty_matching_claim_resolves_without_an_inherited_launch ... ok
+test stopped_child_fences_an_older_inflight_tool_event ... ok
+test stale_pi_clear_preserves_newer_activity_and_review ... ok
+test delayed_pi_clear_cannot_remove_a_new_launch_review ... ok
+test missing_or_foreign_wezpup_pane_is_not_puppet_activity ... ok
+test hook_observation_is_captured_before_waiting_for_stdin ... ok
+test every_review_writer_obeys_claim_and_owner_locks ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.04s
+
+     Running tests/rust/maintenance_spec.rs (target/debug/deps/maintenance_spec-a3dd628b8e97c649)
+
+running 21 tests
+test binding_history_cap_is_calculated_per_realm ... ok
+test every_emitted_diagnostic_literal_is_declared_by_the_manifest ... ok
+test doctor_reports_a_future_claim_without_any_binding ... ok
+test absence_process_negative_is_scoped_to_socket_and_pane ... ok
+test negative_wall_age_reports_clock_skew_and_preserves_child ... ok
+test doctor_rejects_a_valid_record_at_the_wrong_depth ... ok
+test foreign_retention_floor_never_deletes_children ... ok
+test sweep_never_follows_a_symlinked_binding_tree_outside_the_state_root ... ok
+test malformed_claim_is_contained_to_its_binding_selection ... ok
+test doctor_reports_embedded_manifest_digest_and_confirmed_binding ... ok
+test unavailable_process_probe_never_counts_as_absence ... ok
+test live_pane_clears_the_first_absence_probe ... ok
+test sweep_apply_uses_the_binding_reread_after_selection ... ok
+test missing_claim_preserves_old_binding_history ... ok
+test retention_preserves_unknown_files_inside_an_old_binding ... ok
+test old_noncurrent_binding_is_pruned_but_current_binding_is_preserved ... ok
+test compaction_advances_floor_before_delete_and_replays_operation ... ok
+test compaction_apply_revalidates_reactivated_child ... ok
+test sweep_preview_writes_nothing_and_two_absences_end_one_binding ... ok
+test unknown_binding_file_and_future_child_are_preserved ... ok
+test equal_order_active_child_blocks_the_whole_cap_group ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+   Doc-tests wezterm_attention
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

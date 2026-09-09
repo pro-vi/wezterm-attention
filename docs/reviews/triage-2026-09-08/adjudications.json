@@ -1,0 +1,655 @@
+[
+  {
+    "candidate_id": "C1",
+    "anchor": "bin/attention:10; docs/reviews/2026-09-06-attention-v2-modules.md:1; checked user hook configuration and bootstrap helpers",
+    "observation": "The review says nothing v2 runs locally, Claude/Codex use Bun v1 writers, and zsh has no v2 launch integration.",
+    "claimed_consequence": "A plan can be mistaken for deployed behavior, and provider activation can fail for lack of claims.",
+    "proposed_remedy": "Document the actual writer, hook, GUI and shell activation boundaries separately.",
+    "evidence": [
+      {
+        "kind": "code",
+        "locator": "bin/attention:10",
+        "observed": "The stable shim now execs libexec/attention-rs and has no Python branch."
+      },
+      {
+        "kind": "runtime",
+        "locator": "tests/rust/cli_shell_spec.rs::installed_default_shim_claims_without_python_on_path",
+        "observed": "Passed in the fresh 2026-09-08 Rust test run."
+      },
+      {
+        "kind": "code",
+        "locator": "/Users/provi/.claude/settings.json; /Users/provi/.codex/hooks.json; bootstrap configs/*/hooks/utils/*attention.ts",
+        "observed": "Redacted extraction found Bun script registrations, not direct bin/attention calls; traced helpers write v1 flat records. Live Claude helper matched the inspected bootstrap helper byte-for-byte."
+      },
+      {
+        "kind": "code",
+        "locator": "bootstrap/configs/zshrc:64",
+        "observed": "The inspected configuration installs the v1 WEZTERM_PANE prompt publisher. Running shell state and every personal override were not enumerated."
+      }
+    ],
+    "fact_status": "PARTIAL",
+    "reachability": "common-path",
+    "reachability_basis": "The inspected behavior is reachable through the documented configuration, normal callback, reader or explicit CLI path.",
+    "invariant": "When documentation describes deployment, it must distinguish the selected Rust binary from provider-hook registration and the code actually exercised.",
+    "invariant_status": "anchored",
+    "change_relationship": "EXPOSED",
+    "smallest_complete_fix": "Refresh document status and source links; record the checked provider registrations and retained v1 helper paths without claiming every running shell was inspected.",
+    "fix_class": "LOCAL",
+    "risk_if_deferred": "The module spec still links retired Python code and readers can confuse an activated shim with migrated provider hooks.",
+    "risk_if_fixed_now": "A broad statement about all live processes would overclaim the inspected settings; keep the inventory scoped.",
+    "merge_impact": "NON-BLOCK",
+    "disposition": "ACCEPT",
+    "action": "Accept a documentation refresh in the next spec pass. No spec or live configuration was changed by this verification.",
+    "disproof": null,
+    "draft_response": "The Rust shim is now selected, while the inspected provider hooks still use v1 helpers. The old all-or-nothing deployment statement is stale."
+  },
+  {
+    "candidate_id": "C2",
+    "anchor": "src/lifecycle.rs:1622; src/main.rs:290; docs/record-contract.md",
+    "observation": "The review says hook coverage gaps have no re-anchor beyond TTL/focus and proposes prompt return as ending evidence.",
+    "claimed_consequence": "Missed transitions can leave stale attention, and prompt evidence is proposed as a cheaper end signal.",
+    "proposed_remedy": "Use shell prompt observations, treating Ctrl-Z as a recoverable false positive.",
+    "evidence": [
+      {
+        "kind": "code",
+        "locator": "src/lifecycle.rs:1622",
+        "observed": "prompt_return validates the inherited claim and writes an activity-clear watermark, not an end record."
+      },
+      {
+        "kind": "runtime",
+        "locator": "tests/rust/lifecycle_spec.rs::prompt_return_clears_lead_only_and_newer_hook_reactivates",
+        "observed": "Passed; child records survive, no end.json is created and newer work reactivates lead activity."
+      },
+      {
+        "kind": "contract",
+        "locator": "https://code.claude.com/docs/en/hooks#stop",
+        "observed": "Current vendor documentation distinguishes user interruption from a normal Stop callback."
+      }
+    ],
+    "fact_status": "PARTIAL",
+    "reachability": "specific-interleaving",
+    "reachability_basis": "A missed hook, suspended/background process, or prompt-return ordering is required; current prompt handling is a limited recovery signal.",
+    "invariant": "A shell prompt observation must not assert provider-session termination, because suspension, background execution and nested shells can also return a prompt.",
+    "invariant_status": "anchored",
+    "change_relationship": "EXPOSED",
+    "smallest_complete_fix": "Retain current lead-only prompt clear and its stated limitations; document that an in-agent interrupt can still wait for TTL.",
+    "fix_class": "ARCHITECTURAL",
+    "risk_if_deferred": "If the limits are omitted, downstream tools can confuse quiet attention with ended work.",
+    "risk_if_fixed_now": "Writing end.json on prompt return could make suspended/background sessions eligible for ending/retention semantics.",
+    "merge_impact": "NON-BLOCK",
+    "disposition": "DOCUMENT",
+    "action": "Document that the Rust port already uses prompt return as lead-activity clear, not binding end. Do not adopt the stronger end inference.",
+    "disproof": "Current prompt_return writes activity-clear.json only; its test asserts no end.json and no agents-clear.json.",
+    "draft_response": "Prompt recovery already exists in Rust with weaker, safer semantics. It clears lead attention; it does not prove that the agent ended."
+  },
+  {
+    "candidate_id": "C3",
+    "anchor": "plugin/runtime.lua:287-467; tests/auto_clear_spec.lua",
+    "observation": "The first publication request fires before all panes attach and is latched on spawn.",
+    "claimed_consequence": "Later panes stay unpublished and attention remains missing after reconnect.",
+    "proposed_remedy": "Retry with backoff until publication is observed, rather than treating spawn as success.",
+    "evidence": [
+      {
+        "kind": "code",
+        "locator": "plugin/runtime.lua:287-467",
+        "observed": "Retry state is per realm with per-window observations; resolution and closed windows are reconciled explicitly."
+      },
+      {
+        "kind": "runtime",
+        "locator": "tests/auto_clear_spec.lua: publication retry cases",
+        "observed": "Fresh PWD-corrected run passed all 111 cases, including late/unpublished panes, alternating windows, window closure and failed-spawn retry."
+      }
+    ],
+    "fact_status": "REFUTED",
+    "reachability": "specific-interleaving",
+    "reachability_basis": "The earlier condition was checked against the current Rust-era code; the cited implementation or test disproves it as a remaining defect.",
+    "invariant": "Unpublished panes must keep recovery eligible until current observations resolve them, without one window cancelling another window's work.",
+    "invariant_status": "anchored",
+    "change_relationship": "EXPOSED",
+    "smallest_complete_fix": null,
+    "fix_class": null,
+    "risk_if_deferred": "No deferral: the cited one-shot implementation was replaced.",
+    "risk_if_fixed_now": "Reapplying the old repair could disturb working multi-window retry ownership.",
+    "merge_impact": "NON-BLOCK",
+    "disposition": "REJECT",
+    "action": "Reject as a current defect; retain the Rust-era Lua retry implementation and tests.",
+    "disproof": "Current runtime uses 2/5/10/30-second retries, stable-pane observations, per-window ownership and token cancellation rather than the old one-shot latch.",
+    "draft_response": "Fixed by the Rust-era Lua rewrite. The fresh retry cases pass; a full live GUI reattach rehearsal was not repeated in this triage."
+  },
+  {
+    "candidate_id": "C4",
+    "anchor": "src/wezterm.rs:245; plugin/runtime.lua:300",
+    "observation": "The GUI child relies on PATH and cannot find WezTerm under a Dock/launchd environment.",
+    "claimed_consequence": "Republishing fails before reading any pane.",
+    "proposed_remedy": "Use WezTerm's executable directory and explicit executable fallbacks.",
+    "evidence": [
+      {
+        "kind": "code",
+        "locator": "src/wezterm.rs:245-283; plugin/runtime.lua:300",
+        "observed": "Both the Lua executable-directory handoff and Rust fallback resolution are present."
+      },
+      {
+        "kind": "runtime",
+        "locator": "tests/rust/claim_publish_spec.rs::executable_resolution_uses_the_explicit_fallback_when_path_is_empty",
+        "observed": "Passed in the current Rust suite; unsafe writable fallback paths are also tested."
+      },
+      {
+        "kind": "runtime",
+        "locator": "tests/run_wezterm_smoke.sh",
+        "observed": "Installed WezTerm protocol/formatter smoke passed with 35 parser and 10 eligibility rows."
+      }
+    ],
+    "fact_status": "REFUTED",
+    "reachability": "common-path",
+    "reachability_basis": "The earlier condition was checked against the current Rust-era code; the cited implementation or test disproves it as a remaining defect.",
+    "invariant": "A GUI-owned publisher must resolve its executable without assuming an interactive-shell PATH.",
+    "invariant_status": "anchored",
+    "change_relationship": "EXPOSED",
+    "smallest_complete_fix": null,
+    "fix_class": null,
+    "risk_if_deferred": "The missing-path mechanism has a current implementation and regression tests.",
+    "risk_if_fixed_now": "Another discovery implementation would duplicate the resolver and risk inconsistent trust checks.",
+    "merge_impact": "NON-BLOCK",
+    "disposition": "REJECT",
+    "action": "Reject as a current defect; retain the current executable resolver and GUI PATH handoff.",
+    "disproof": "Lua prepends wezterm.executable_dir. Rust supports configured and trusted application-path fallbacks.",
+    "draft_response": "Fixed in current code. Empty-PATH resolution passes; the smoke is not a claim that every Dock launch was exercised."
+  },
+  {
+    "candidate_id": "C5",
+    "anchor": "src/lifecycle.rs:175-253; tests/rust/lifecycle_spec.rs:881,993",
+    "observation": "The review proposes minting a launch in SessionStart without inherited launch identity and relying on /dev/tty, binding hashes and monotonic order.",
+    "claimed_consequence": "It would remove the zsh setup problem while purportedly preserving stale-callback protection.",
+    "proposed_remedy": "Enable SessionStart self-claim after verifying /dev/tty reachability.",
+    "evidence": [
+      {
+        "kind": "code",
+        "locator": "src/lifecycle.rs:175-253",
+        "observed": "The resolver first checks inherited launch, then a tty-matching stored claim; minting requires an explicit gate."
+      },
+      {
+        "kind": "runtime",
+        "locator": "tests/rust/lifecycle_spec.rs::real_macos_controlling_tty_path_is_rejected_in_a_pty_child",
+        "observed": "Fresh controlled-pty test passed its assertion that the macOS /dev/tty alias cannot establish pane identity."
+      },
+      {
+        "kind": "runtime",
+        "locator": "tests/rust/lifecycle_spec.rs::session_start_self_claims_only_when_the_standin_gate_is_enabled",
+        "observed": "Fresh test passed for both stand-in enabled and default-disabled paths."
+      },
+      {
+        "kind": "contract",
+        "locator": "https://code.claude.com/docs/en/hooks#hook-input-and-output",
+        "observed": "Current Claude command-hook contract runs hooks in a separate session without a controlling terminal. This is vendor documentation, not a paid provider contact test."
+      }
+    ],
+    "fact_status": "PARTIAL",
+    "reachability": "common-path",
+    "reachability_basis": "A fresh launch without an inherited or usable stored claim reaches the default-disabled self-claim gate.",
+    "invariant": "Before automatic lifecycle activation, every hook must resolve the exact process generation and pane; opening a terminal alias or hashing a session ID is not sufficient ownership evidence.",
+    "invariant_status": "anchored",
+    "change_relationship": "EXPOSED",
+    "smallest_complete_fix": "Verify a provider-supported pane/process-generation correlation mechanism, including later callbacks and same-session resume, before enabling the gated path.",
+    "fix_class": "ARCHITECTURAL",
+    "risk_if_deferred": "Ordinary unclaimed provider launches remain outside v2, but the current gate prevents an unsupported automatic attribution path.",
+    "risk_if_fixed_now": "Enabling it from a synthetic tty proof can misattribute generations or fail under the provider's real process-spawn contract.",
+    "merge_impact": "NON-BLOCK",
+    "disposition": "DEFER",
+    "action": "Keep WEZTERM_ATTENTION_ENABLE_SELF_CLAIM disabled by default. Follow-up scope and activation block are recorded in followups.md#automatic-launch-correlation.",
+    "disproof": "The current macOS test opens /dev/tty but rejects its identity; current Claude documentation states command hooks have no controlling terminal. A newer observation also cannot identify which generation emitted an otherwise identical same-session callback.",
+    "draft_response": "The launch gap is real, but route A is not a complete production design. The Rust implementation correctly keeps it gated; do not enable it based only on the old recommendation."
+  },
+  {
+    "candidate_id": "C6",
+    "anchor": "src/protocol.rs:11,197-244; tests/rust/claim_publish_spec.rs:254,269,338",
+    "observation": "The proposed Rust design would retire the executed manifest and rely on separately maintained contract copies.",
+    "claimed_consequence": "Rust/Lua meanings could diverge despite published schemas.",
+    "proposed_remedy": "Embed the manifest, execute its constraints and assert parity with fixtures/typed representations.",
+    "evidence": [
+      {
+        "kind": "code",
+        "locator": "src/protocol.rs:11,197-244,306-456",
+        "observed": "The embedded manifest is parsed and used by record validation; it is not passive documentation."
+      },
+      {
+        "kind": "runtime",
+        "locator": "tests/rust/claim_publish_spec.rs::embedded_manifest_equals_protocol_file_byte_for_byte; ::manifest_rejects_unknown_field_type_at_load; ::shared_protocol_rows_match_the_independent_checker_verdicts",
+        "observed": "All passed in the current Rust suite."
+      }
+    ],
+    "fact_status": "REFUTED",
+    "reachability": "common-path",
+    "reachability_basis": "The earlier condition was checked against the current Rust-era code; the cited implementation or test disproves it as a remaining defect.",
+    "invariant": "The shared wire constraints must affect production validation and their language mirrors must be tested.",
+    "invariant_status": "anchored",
+    "change_relationship": "EXPOSED",
+    "smallest_complete_fix": null,
+    "fix_class": null,
+    "risk_if_deferred": "The current implementation already embeds and interprets the manifest.",
+    "risk_if_fixed_now": "Adding duplicate constants solely to compare them would create another representation to maintain.",
+    "merge_impact": "NON-BLOCK",
+    "disposition": "REJECT",
+    "action": "Reject the stale retirement claim. Preserve manifest execution and existing parity tests; assess any future typed mirror when it is introduced.",
+    "disproof": "protocol.rs uses include_str!, typed Manifest/FieldType parsing, and runtime limits/enums. Byte parity, unknown-field-type rejection and shared corpus tests pass.",
+    "draft_response": "Fixed by the Rust port. Most limits/enums are read from the manifest, so a test of nonexistent duplicate constants is not itself a missing feature."
+  },
+  {
+    "candidate_id": "C7",
+    "anchor": "src/main.rs::HookCommand::Event; installed Claude Code 2.1.266",
+    "observation": "The review cites an Orca workaround that prints an empty JSON object because empty permission-hook stdout allegedly fails closed.",
+    "claimed_consequence": "A silent attention hook could change permission behavior on the installed provider.",
+    "proposed_remedy": "Verify an empty object response against the installed Claude version before adopting it.",
+    "evidence": [
+      {
+        "kind": "code",
+        "locator": "src/main.rs:350-426",
+        "observed": "The current hook dispatch is quiet on success and writes diagnostics to stderr."
+      },
+      {
+        "kind": "code",
+        "locator": "/Users/provi/Development/_sources/orca/src/main/agent-hooks/runtime-home-hook-command.ts:22",
+        "observed": "Orca has a conditional neutral-JSON fallback; that alone does not establish this installed provider's behavior."
+      },
+      {
+        "kind": "runtime",
+        "locator": "docs/reviews/triage-2026-09-08/evidence/claude-permission-live-contact.log",
+        "observed": "A single authorized Claude 2.1.266 interaction invoked an exit-0, zero-stdout PermissionRequest hook, then displayed the normal permission prompt. The command was refused and its target file remained absent."
+      },
+      {
+        "kind": "contract",
+        "locator": "https://code.claude.com/docs/en/hooks#permissionrequest",
+        "observed": "Current docs distinguish non-interactive denial when no decision is available from a hook parse failure. An empty object itself supplies no allow/deny decision."
+      }
+    ],
+    "fact_status": "REFUTED",
+    "reachability": "common-path",
+    "reachability_basis": "The installed interactive provider reached a Bash PermissionRequest with the same quiet-success hook shape and preserved the normal permission decision UI.",
+    "invariant": "An observational attention hook must not grant, deny or unexpectedly block a provider permission decision.",
+    "invariant_status": "anchored",
+    "change_relationship": "PRE-EXISTING",
+    "smallest_complete_fix": null,
+    "fix_class": null,
+    "risk_if_deferred": "The installed-provider probe establishes no regression in the existing quiet hook contract.",
+    "risk_if_fixed_now": "A blanket stdout change could alter other event contracts and would be an unverified compatibility workaround.",
+    "merge_impact": "NON-BLOCK",
+    "disposition": "REJECT",
+    "action": "Reject the blanket neutral-JSON workaround; retain zero stdout for the observational PermissionRequest hook.",
+    "disproof": "Claude 2.1.266 invoked the exit-0, zero-stdout hook and then showed its normal permission prompt without a parse error or implicit decision.",
+    "draft_response": "Refuted on the installed provider. Empty successful stdout preserves the normal permission prompt; no {} workaround is needed."
+  },
+  {
+    "candidate_id": "C8",
+    "anchor": "src/main.rs:350-426; docs/reviews/2026-09-06-attention-v2-modules.md:66",
+    "observation": "SessionStart stdout can enter agent context, so successful observer hooks should remain quiet.",
+    "claimed_consequence": "Debug or progress output could contaminate the provider's context.",
+    "proposed_remedy": "State and test the quiet-success/stdout-versus-stderr contract.",
+    "evidence": [
+      {
+        "kind": "code",
+        "locator": "src/main.rs:350-426",
+        "observed": "Successful event dispatch returns without stdout; debug/error responses use stderr."
+      },
+      {
+        "kind": "runtime",
+        "locator": "tests/rust/lifecycle_spec.rs::hooks_event_debug_uses_stderr_and_lifecycle_errors_are_non_strict",
+        "observed": "Passed in the fresh Rust suite."
+      },
+      {
+        "kind": "contract",
+        "locator": "docs/reviews/2026-09-06-attention-v2-modules.md:66",
+        "observed": "The updated spec already states successful hooks write no stdout."
+      }
+    ],
+    "fact_status": "CONFIRMED",
+    "reachability": "common-path",
+    "reachability_basis": "The inspected behavior is reachable through the documented configuration, normal callback, reader or explicit CLI path.",
+    "invariant": "Successful observational hooks must keep stdout reserved for explicitly supported provider control output, never ordinary diagnostics.",
+    "invariant_status": "anchored",
+    "change_relationship": "PRE-EXISTING",
+    "smallest_complete_fix": null,
+    "fix_class": null,
+    "risk_if_deferred": "No missing runtime fix: the boundary is implemented and documented.",
+    "risk_if_fixed_now": "Changing all hook stdout based on a separate permission workaround would weaken this contract.",
+    "merge_impact": "NON-BLOCK",
+    "disposition": "DOCUMENT",
+    "action": "Retain the current quiet-success contract and stdout/stderr tests; no implementation change.",
+    "disproof": null,
+    "draft_response": "Confirmed and already protected. No new quiet-output implementation is needed."
+  },
+  {
+    "candidate_id": "C9",
+    "anchor": "pi/index.ts:214-310; tests/pi_extension.test.ts:277-336",
+    "observation": "Any nonzero writer exit causes Pi to write a v1 marker.",
+    "claimed_consequence": "Failure of an established v2 writer silently downgrades state.",
+    "proposed_remedy": "Distinguish unconfigured integration from configured writer failure.",
+    "evidence": [
+      {
+        "kind": "code",
+        "locator": "pi/index.ts:214-310",
+        "observed": "Writer results are unconfigured/ready/failed/succeeded; only unconfigured invokes the v1 fallback."
+      },
+      {
+        "kind": "runtime",
+        "locator": "/tmp/attention-current-triage.5NxBl4/native-failure probe",
+        "observed": "The real Pi adapter invoked a configured /usr/bin/false stand-in with pane 42 and queued activity. It reported status 1 once and created no fallback state directory. Repository Bun tests did not pass; see C17."
+      }
+    ],
+    "fact_status": "REFUTED",
+    "reachability": "common-path",
+    "reachability_basis": "The earlier condition was checked against the current Rust-era code; the cited implementation or test disproves it as a remaining defect.",
+    "invariant": "A configured lifecycle writer failure must not silently produce fallback legacy truth.",
+    "invariant_status": "anchored",
+    "change_relationship": "EXPOSED",
+    "smallest_complete_fix": null,
+    "fix_class": null,
+    "risk_if_deferred": "The reported fallback path has already been removed.",
+    "risk_if_fixed_now": "Reapplying the old fix could undo the additional exit-zero diagnostic handling.",
+    "merge_impact": "NON-BLOCK",
+    "disposition": "REJECT",
+    "action": "Reject as a current defect. Retain WriterResult classification and failure logging.",
+    "disproof": "enqueueWriter falls back only for kind=unconfigured. Configured/missing writers, nonzero exits and exit-zero diagnostics are classified as failures.",
+    "draft_response": "The old downgrade path is removed and a direct nonzero-writer probe confirms no fallback. Separate repository test failures remain under C17."
+  },
+  {
+    "candidate_id": "C10",
+    "anchor": "src/records.rs:648-751; src/lifecycle.rs; src/maintenance.rs",
+    "observation": "The older implementation repeats lock/reread/decide/write sequences across command paths.",
+    "claimed_consequence": "A new caller can omit one guard or compatibility repair stage.",
+    "proposed_remedy": "Centralize commit orchestration in records.rs so CLI dispatch does not implement locks.",
+    "evidence": [
+      {
+        "kind": "code",
+        "locator": "src/records.rs:648-751",
+        "observed": "Shared commit functions centralize single, nested and triple lock scopes with after-apply work."
+      },
+      {
+        "kind": "runtime",
+        "locator": "tests/rust/lifecycle_spec.rs::every_review_writer_obeys_claim_and_owner_locks; claim/retention race cases",
+        "observed": "Fresh Rust suite passed these and the delayed-claim/retention revalidation cases."
+      }
+    ],
+    "fact_status": "REFUTED",
+    "reachability": "common-path",
+    "reachability_basis": "The earlier condition was checked against the current Rust-era code; the cited implementation or test disproves it as a remaining defect.",
+    "invariant": "Mutating command paths must use the shared lock/read/apply boundary and maintain the required lock ordering.",
+    "invariant_status": "anchored",
+    "change_relationship": "EXPOSED",
+    "smallest_complete_fix": null,
+    "fix_class": null,
+    "risk_if_deferred": "The old repeated command choreography has a current shared implementation.",
+    "risk_if_fixed_now": "Further flattening lock variants without checking claim/launch/owner order could introduce races.",
+    "merge_impact": "NON-BLOCK",
+    "disposition": "REJECT",
+    "action": "Reject as a current missing abstraction; retain commit, commit_with and nested-scope variants.",
+    "disproof": "The records module owns lock, validated reread, decide callback, apply and post-apply work; main.rs dispatches operations rather than acquiring record locks.",
+    "draft_response": "Already implemented. The existence of scope-specific wrappers is not evidence that command code still owns locks."
+  },
+  {
+    "candidate_id": "C11",
+    "anchor": "tests/fixtures/providers/claude.json; tests/fixtures/providers/codex.json; tests/rust/lifecycle_spec.rs:249",
+    "observation": "The review requests explicit negative coverage for child callbacks affecting lead state.",
+    "claimed_consequence": "The Rust port could convert child work or child stopping into parent activity.",
+    "proposed_remedy": "Keep child/lead negative cases in the provider fixtures and port tests.",
+    "evidence": [
+      {
+        "kind": "code",
+        "locator": "tests/fixtures/providers/claude.json; tests/fixtures/providers/codex.json",
+        "observed": "Child tool/permission and child stop rows normalize separately from lead activity; SubagentStart is inert."
+      },
+      {
+        "kind": "runtime",
+        "locator": "tests/rust/lifecycle_spec.rs::provider_fixtures_equal_the_closed_action_vocabulary; ::stopped_child_fences_an_older_inflight_tool_event",
+        "observed": "Both passed in the current Rust suite."
+      },
+      {
+        "kind": "code",
+        "locator": "src/lifecycle.rs::apply_provider_event and apply_child",
+        "observed": "Child actions dispatch to the scoped child record path and child projection, not the lead activity writer."
+      }
+    ],
+    "fact_status": "PARTIAL",
+    "reachability": "common-path",
+    "reachability_basis": "The inspected behavior is reachable through the documented configuration, normal callback, reader or explicit CLI path.",
+    "invariant": "A child-context callback must target that child's presence rather than overwrite lead activity.",
+    "invariant_status": "anchored",
+    "change_relationship": "PRE-EXISTING",
+    "smallest_complete_fix": null,
+    "fix_class": null,
+    "risk_if_deferred": "The requested provider classification and child lifecycle paths are already covered; direct parent-byte assertions can strengthen future edits.",
+    "risk_if_fixed_now": "Duplicating equivalent fixture rows without a new failure assertion adds little protection.",
+    "merge_impact": "NON-BLOCK",
+    "disposition": "DOCUMENT",
+    "action": "Retain the existing negative fixture classification and child lifecycle regressions. Do not report the invariant as absent; an additional byte-for-byte parent preservation assertion is optional test strengthening.",
+    "disproof": null,
+    "draft_response": "The invariant is correct and already represented in the current fixtures/port. Keep it; do not treat reference systems' child suppression as a reason to remove +N."
+  },
+  {
+    "candidate_id": "C12",
+    "anchor": "plugin/init.lua:39,495; plugin/overlays.lua:399; plugin/reader.lua",
+    "observation": "Focus acknowledges notify by default even if the provider is still waiting.",
+    "claimed_consequence": "A user can leave the pane after viewing a permission prompt and no longer see its alert.",
+    "proposed_remedy": "Decide whether notify clears on focus or only after later provider activity.",
+    "evidence": [
+      {
+        "kind": "code",
+        "locator": "plugin/init.lua:39,495",
+        "observed": "Default acknowledged types include stop and notify; opts.auto_clear can change the set."
+      },
+      {
+        "kind": "code",
+        "locator": "plugin/overlays.lua::acknowledge_focused_v2_pane",
+        "observed": "An exact acknowledgement is written without deleting the provider activity record."
+      },
+      {
+        "kind": "runtime",
+        "locator": "tests/auto_clear_spec.lua",
+        "observed": "Fresh 111-case suite passed focus/exact-ack and configured acknowledgement behavior."
+      }
+    ],
+    "fact_status": "CONFIRMED",
+    "reachability": "common-path",
+    "reachability_basis": "The inspected behavior is reachable through the documented configuration, normal callback, reader or explicit CLI path.",
+    "invariant": "Changing acknowledgement policy must preserve the distinction between viewed notification, outstanding provider wait and ended work.",
+    "invariant_status": "proposed",
+    "change_relationship": "PRE-EXISTING",
+    "smallest_complete_fix": "Choose alert policy explicitly; the existing auto_clear option can exclude notify. Distinguishing permission waits from every other notify may need a separate fact.",
+    "fix_class": "ARCHITECTURAL",
+    "risk_if_deferred": "Current shipped focus behavior remains; some unanswered prompts can be visually quiet.",
+    "risk_if_fixed_now": "A blanket change affects manual/general notifications as well as permission prompts and can create persistent alerts.",
+    "merge_impact": "NON-BLOCK",
+    "disposition": "DOCUMENT",
+    "action": "Record as a user-policy decision, not an accepted runtime bug. Keep the existing default until the user chooses; do not rewrite every notify as blocked.",
+    "disproof": null,
+    "draft_response": "Confirmed behavior, but not a settled defect. The trade-off is notification policy; existing configuration already supports stop-only acknowledgement."
+  },
+  {
+    "candidate_id": "C13",
+    "anchor": "docs/record-contract.md:15-34; src/records.rs::RecordIdentity::from_state_path",
+    "observation": "The contract tree lacks launch-level activity.json and ack.json.",
+    "claimed_consequence": "Readers/builders could omit supported pre-binding activity targets.",
+    "proposed_remedy": "Add both paths to the record contract.",
+    "evidence": [
+      {
+        "kind": "contract",
+        "locator": "docs/record-contract.md:15-34",
+        "observed": "Current tree contains activity.json and ack.json at launch scope."
+      },
+      {
+        "kind": "runtime",
+        "locator": "tests/rust/lifecycle_spec.rs::manual_mark_targets_the_launch_and_duplicate_repairs_legacy_projection",
+        "observed": "Passed in the current Rust suite."
+      }
+    ],
+    "fact_status": "REFUTED",
+    "reachability": "common-path",
+    "reachability_basis": "The earlier condition was checked against the current Rust-era code; the cited implementation or test disproves it as a remaining defect.",
+    "invariant": "The contract tree must show supported launch and binding target locations.",
+    "invariant_status": "anchored",
+    "change_relationship": "EXPOSED",
+    "smallest_complete_fix": null,
+    "fix_class": null,
+    "risk_if_deferred": "Both paths are now documented.",
+    "risk_if_fixed_now": "No new change needed; duplicate documentation could diverge.",
+    "merge_impact": "NON-BLOCK",
+    "disposition": "REJECT",
+    "action": "Reject as stale; retain the corrected diagram and launch-target tests.",
+    "disproof": "The current docs/record-contract.md tree includes both files directly under launches/<launch>/.",
+    "draft_response": "Already corrected in the current record contract."
+  },
+  {
+    "candidate_id": "C14",
+    "anchor": "plugin/protocol.lua:179,443-447",
+    "observation": "Lua hashes child/review IDs while parsing records on polling reads.",
+    "claimed_consequence": "Digest validation can consume GUI CPU; the review proposes measuring or trusting Rust writes/filenames instead.",
+    "proposed_remedy": "Measure the cost; consider avoiding repeated work without weakening identity validation.",
+    "evidence": [
+      {
+        "kind": "code",
+        "locator": "plugin/protocol.lua:443-447",
+        "observed": "Parsed child and owner IDs are hashed and compared with their stored keys."
+      },
+      {
+        "kind": "runtime",
+        "locator": "Installed WezTerm --skip-config SHA microbenchmark, 2026-09-08",
+        "observed": "Two config evaluations each hashed 1000 synthetic short child IDs: 58.770 and 59.982 CPU ms. This is not whole-poll latency or a live-load measurement."
+      },
+      {
+        "kind": "runtime",
+        "locator": "tests/auto_clear_spec.lua digest/forged-child cases",
+        "observed": "Passed in the fresh Lua suite."
+      }
+    ],
+    "fact_status": "PARTIAL",
+    "reachability": "common-path",
+    "reachability_basis": "The inspected behavior is reachable through the documented configuration, normal callback, reader or explicit CLI path.",
+    "invariant": "A reader accepting a record from disk must retain the required path/interior identity checks; a writer's past validation does not validate every later file read.",
+    "invariant_status": "anchored",
+    "change_relationship": "PRE-EXISTING",
+    "smallest_complete_fix": null,
+    "fix_class": null,
+    "risk_if_deferred": "Cost scales with record count and ID size; the actual live population and total poll cost were not measured.",
+    "risk_if_fixed_now": "Trusting filenames alone would reopen forged/copy identity cases previously fixed.",
+    "merge_impact": "NON-BLOCK",
+    "disposition": "DOCUMENT",
+    "action": "Retain digest checks. Record the microbenchmark; profile total polls before optimizing, and consider validated-byte caching rather than dropping the check.",
+    "disproof": null,
+    "draft_response": "The repeated work exists. The measurement supports evaluating cache reuse, not trusting an unchecked filename."
+  },
+  {
+    "candidate_id": "C15",
+    "anchor": "src/main.rs::Command; docs/reviews/2026-09-06-attention-v2-modules.md",
+    "observation": "The review supports keeping the changes/replay API out of the current scope.",
+    "claimed_consequence": "Current/retained state remains available without claiming complete missed-event replay.",
+    "proposed_remedy": "Keep that API cut unless a named consumer requires it.",
+    "evidence": [
+      {
+        "kind": "code",
+        "locator": "src/main.rs:24-44",
+        "observed": "The public command enum has no changes/replay command."
+      },
+      {
+        "kind": "contract",
+        "locator": "docs/reviews/2026-09-06-attention-v2-modules.md",
+        "observed": "The spec explicitly says no committed changes/event-log API."
+      }
+    ],
+    "fact_status": "CONFIRMED",
+    "reachability": "common-path",
+    "reachability_basis": "The inspected behavior is reachable through the documented configuration, normal callback, reader or explicit CLI path.",
+    "invariant": "Snapshot APIs must not promise durable replay of transitions that they do not retain.",
+    "invariant_status": "anchored",
+    "change_relationship": "PRE-EXISTING",
+    "smallest_complete_fix": null,
+    "fix_class": null,
+    "risk_if_deferred": "Consumers must query state and cannot assume replay.",
+    "risk_if_fixed_now": "Adding a cursor/event-retention protocol would be new scope, not a fix to this review.",
+    "merge_impact": "NON-BLOCK",
+    "disposition": "DOCUMENT",
+    "action": "Retain the documented absence of a changes API; no event archive is added.",
+    "disproof": null,
+    "draft_response": "Confirmed scope. Retained binding records and transition replay remain different capabilities."
+  },
+  {
+    "candidate_id": "C16",
+    "anchor": "src/identity.rs:168; src/wezterm.rs:79",
+    "observation": "Persisted ordering uses CLOCK_MONOTONIC_RAW, not a per-process Instant baseline.",
+    "claimed_consequence": "Changing the clock coordinate could invalidate ordering across hook processes.",
+    "proposed_remedy": "Call the same OS clock and state boot/scope limits.",
+    "evidence": [
+      {
+        "kind": "code",
+        "locator": "src/identity.rs:168-183",
+        "observed": "monotonic_ns20 calls libc::clock_gettime(CLOCK_MONOTONIC_RAW) without a process-local fallback."
+      },
+      {
+        "kind": "code",
+        "locator": "src/wezterm.rs:79-92",
+        "observed": "SystemClock exposes raw monotonic and Unix wall time separately."
+      },
+      {
+        "kind": "runtime",
+        "locator": "tests/rust/lifecycle_spec.rs::hook_observation_is_captured_before_waiting_for_stdin",
+        "observed": "Passed in the fresh real-hook subprocess test."
+      }
+    ],
+    "fact_status": "CONFIRMED",
+    "reachability": "common-path",
+    "reachability_basis": "The inspected behavior is reachable through the documented configuration, normal callback, reader or explicit CLI path.",
+    "invariant": "Compared persisted observations must use the same OS clock coordinate and valid identity lifetime; wall age must not choose writer precedence.",
+    "invariant_status": "anchored",
+    "change_relationship": "PRE-EXISTING",
+    "smallest_complete_fix": null,
+    "fix_class": null,
+    "risk_if_deferred": "The current implementation already uses the required raw clock; documentation should retain the scope restriction.",
+    "risk_if_fixed_now": "A fallback to elapsed Instant or another clock would silently make stored values incomparable.",
+    "merge_impact": "NON-BLOCK",
+    "disposition": "DOCUMENT",
+    "action": "Retain CLOCK_MONOTONIC_RAW and the separate wall-age clock. Explain that the OS clock supplies comparability and incarnation identity limits stale namespaces; the ID itself is not a clock.",
+    "disproof": null,
+    "draft_response": "Already implemented. Keep the per-boot clock-coordinate and incarnation-scope distinction explicit."
+  },
+  {
+    "candidate_id": "C17",
+    "anchor": "tests/pi_extension.test.ts:208; tests/pi_node_runtime.mjs:48; pi/index.ts::invokeWriter",
+    "observation": "The current prescribed Bun test command fails at writer dispatch and subsequent queued cases; the isolated Node dispatch smoke cannot read its expected calls log.",
+    "claimed_consequence": "A fresh Pi integration/full-gate certification cannot be claimed even though source inspection and a direct failure probe confirm the old downgrade fix.",
+    "proposed_remedy": "Identify why generated test-writer execution does not complete, correct the responsible fixture/runtime/adapter boundary, and rerun the prescribed Bun and Node checks.",
+    "evidence": [
+      {
+        "kind": "runtime",
+        "locator": "/tmp/attention-current-triage.5NxBl4/bun-prescribed.log",
+        "observed": "The exact Bun command from tests/gate.sh finished with 23 passed, 7 failed across 30 tests; first v2 dispatch timed out at 5000 ms."
+      },
+      {
+        "kind": "runtime",
+        "locator": "/tmp/attention-current-triage.5NxBl4/node-and-focused-bun.log",
+        "observed": "The isolated Node smoke reported ENOENT for its generated writer calls.log. A focused Bun v2-dispatch case also timed out."
+      },
+      {
+        "kind": "runtime",
+        "locator": "/tmp/attention-current-triage.5NxBl4/probe-writer.sh",
+        "observed": "A generated script executed through /bin/sh completed; one direct Node script execution timed out. The stable repository shim completed --help. These controls narrow the investigation but do not prove the cause."
+      },
+      {
+        "kind": "runtime",
+        "locator": "/tmp/attention-current-triage.5NxBl4/native-failure probe",
+        "observed": "A stable native executable returning nonzero was correctly classified by the Pi adapter, with a warning and no v1 fallback file."
+      }
+    ],
+    "fact_status": "CONFIRMED",
+    "reachability": "common-path",
+    "reachability_basis": "The prescribed repository Bun test command reproduced the failure, not only the more restricted env -i runs. Impact on actual provider-hosted execution is not yet established.",
+    "invariant": "Before certifying the current Pi integration, its prescribed dispatch and failure tests must complete; passing Rust or Lua tests cannot substitute for that evidence.",
+    "invariant_status": "anchored",
+    "change_relationship": "UNKNOWN",
+    "smallest_complete_fix": "Diagnose the generated-writer execution boundary under the supported Node/Bun environment and restore the dispatch/failure proofs without weakening no-downgrade, queue ordering or shutdown contracts.",
+    "fix_class": "COORDINATED",
+    "risk_if_deferred": "The current full gate is not green and Pi delivery could be misreported as verified. Actual provider impact remains unknown.",
+    "risk_if_fixed_now": "A blind timeout increase or queue rewrite could mask a fixture/host execution problem; root cause must precede any patch.",
+    "merge_impact": "BLOCK",
+    "disposition": "ACCEPT",
+    "action": "Accept the verification failure for diagnosis before fresh Pi/full-gate certification. No product or test fix was applied. Follow-up evidence is recorded in followups.md#pi-dispatch-verification.",
+    "disproof": null,
+    "draft_response": "Fresh checks are not fully green: current Pi tests fail. The original fallback defect is separately resolved, so this is a new verification finding rather than evidence that the old branch still exists."
+  }
+]

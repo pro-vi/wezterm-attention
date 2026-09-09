@@ -13,7 +13,11 @@ local config = wezterm.config_builder()
 -- Tab indicators for CLI tools (Claude Code, Codex, builds, scripts).
 -- See: https://github.com/pro-vi/wezterm-attention
 
-attention.apply_to_config(config, { auto_poll = false })
+attention.apply_to_config(config, {
+  auto_poll = false,
+  -- Optional closed provider suffix: " · Claude", " · Codex", or " · Pi".
+  show_provider = true,
+})
 
 -- ── Keybindings ─────────────────────────────────────────────────────────────
 
@@ -162,7 +166,7 @@ config.status_update_interval = 5000
 local git_cache = { cwd = "", diff = "", branch = "", untracked = 0, ahead = 0, is_repo = false, last = 0 }
 
 wezterm.on('update-status', function(window, pane)
-  -- Poll attention markers (manual mode — plugin doesn't own this event).
+  -- Poll attention markers manually; the plugin still owns tab formatting.
   -- Passing the event pane gives older WezTerm builds a compatibility
   -- transport for redraws. Current builds resolve the active pane at use time.
   attention.poll(window, { active_pane = pane })

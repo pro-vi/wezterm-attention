@@ -4,7 +4,12 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "test": "bun test"
+    "test": "bun test",
+    "test:lua": "luajit tests/auto_clear_spec.lua",
+    "test:protocol": "python3 tests/fixtures/v2/check.py",
+    "test:wezterm": "sh tests/run_wezterm_smoke.sh",
+    "typecheck": "tsc --noEmit --target ES2022 --module ESNext --moduleResolution Bundler --allowImportingTsExtensions --skipLibCheck --types bun pi/index.ts examples/hook.ts",
+    "gate": "sh tests/gate.sh"
   },
   "keywords": ["pi-package"],
   "pi": {
@@ -17,5 +22,10 @@
     "@earendil-works/pi-coding-agent": {
       "optional": true
     }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@types/bun": "1.4.1",
+    "typescript": "7.0.2"
   }
 }

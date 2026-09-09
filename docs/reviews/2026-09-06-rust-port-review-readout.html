@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="source-sha256" content="23a15b90d80e38fcc9d461daf62eb0ac881ccaf40f90133d2f30f9cc0bfb1d15">
+<meta name="description" content="Rust port review readout">
+<title>Rust port review readout · attention-v2</title>
+<style>
+:root{color-scheme:dark;--paper:#0e1720;--surface:#16232e;--ink:#e7eef5;--muted:#afc0cf;--line:#3c5161;--link:#91cbf4;--terminal:#0b141c;--terminal-ink:#e0edf7;--terminal-rule:#627d8d;--note:#203240;--focus:#ffc18a;--mono:Menlo,Consolas,monospace;--reading:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+*{box-sizing:border-box}html{scroll-padding-top:24px}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.6 var(--reading)}
+a{color:var(--link);text-underline-offset:3px}a:hover{text-decoration-thickness:2px}a:focus-visible{outline:3px solid var(--focus);outline-offset:4px}
+main{max-width:1100px;margin:auto;padding:36px 32px 64px;display:grid;gap:30px}header{display:grid;gap:16px}
+.identity{font:12px/1.6 var(--mono);letter-spacing:.04em;color:var(--muted);display:flex;gap:16px;flex-wrap:wrap}
+h1,h2{font-family:var(--mono);line-height:1.25;text-wrap:balance;margin:0}h1{font-size:clamp(26px,3.1vw,38px);max-width:27ch;letter-spacing:-.035em}h2{font-size:24px;letter-spacing:-.035em}
+h3{font:600 19px/1.4 var(--mono);margin:8px 0 0;text-wrap:balance}li+li{margin-top:7px}
+p,pre,table,ul,ol{margin:0}header p{max-width:78ch}header p:first-of-type{font-size:19px;font-weight:550}
+nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));border-top:1px solid var(--line);border-left:1px solid var(--line)}
+nav a{padding:11px 14px;background:var(--surface);border-right:1px solid var(--line);border-bottom:1px solid var(--line);font:13px/1.5 var(--mono);text-decoration:none}
+nav a:hover{background:var(--note)}section{background:var(--surface);padding:28px;border:1px solid var(--line);display:grid;gap:18px;min-width:0}
+section>p{max-width:78ch}section>h2+p,section>blockquote+p{font-size:19px;line-height:1.5}strong{font-weight:650}
+blockquote{margin:0;padding:14px 18px;background:var(--note);color:var(--muted);max-width:82ch}blockquote strong{font:12px/1.5 var(--mono);color:var(--link)}
+pre{padding:19px 20px;background:var(--terminal);color:var(--terminal-ink);font:14px/1.65 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;border-top:5px solid var(--terminal-rule);min-width:0}
+pre code{font:inherit;background:none;padding:0;color:inherit}code{font-family:var(--mono);font-size:.88em;overflow-wrap:anywhere}
+.file-comparison{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:stretch;min-width:0}
+table{border-collapse:collapse;width:100%;font-size:16px;text-align:left}th,td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:top}th{font-family:var(--mono);font-size:12px;background:var(--note);letter-spacing:.03em}td{overflow-wrap:anywhere}
+.facts th:first-child,.facts td:first-child{width:24%}.facts td:first-child{font-weight:600}.samples th:first-child,.samples td:first-child{width:12%}.samples td{font-variant-numeric:tabular-nums}.samples td:last-child{font-family:var(--mono);font-weight:600}
+.comparison-table th:first-child{width:25%}.source-link{font-size:13px;line-height:1.5;color:var(--muted)}
+footer{display:grid;gap:5px;color:var(--muted);font-size:12px}footer code{font-size:11px}section[aria-labelledby="review-state"]{background:var(--note)}
+@media(max-width:780px){main{padding:22px 16px 36px;gap:20px}section{padding:20px;gap:16px}h2{font-size:20px}nav{grid-template-columns:1fr}.file-comparison{grid-template-columns:1fr}pre{font-size:13px;padding:14px 12px}.facts thead,.comparison-table thead{display:none}.facts,.facts tbody,.facts tr,.facts td,.comparison-table,.comparison-table tbody,.comparison-table tr,.comparison-table td{display:block}.facts tr,.comparison-table tr{padding:12px 0;border-bottom:1px solid var(--line)}.facts td,.comparison-table td{border:0;padding:3px 0}.facts td:first-child{width:auto;font-size:14px;color:var(--muted)}.comparison-table td::before{content:attr(data-label);display:block;font:12px/1.5 var(--mono);color:var(--muted);margin-top:7px}.samples th,.samples td{padding:9px 6px}.samples{font-size:14px}section>h2+p,section>blockquote+p{font-size:18px}}
+@media print{:root{color-scheme:light;--paper:#fff;--surface:#fff;--ink:#172a38;--muted:#506171;--line:#c9d5dd;--link:#185e8a;--terminal:#edf2f5;--terminal-ink:#172a38;--note:#e7eff5}main{padding:0;max-width:none}nav{display:none}section{break-inside:avoid}a{color:inherit}}
+</style></head><body><main>
+<header><div class="identity"><span>wezterm-attention / design review</span><span>Source-backed examples · no live changes</span></div><hr />
+</header>
+<nav aria-label="Jump to a section"><a href="#title-rust-port-review-readout-u9-u10-u12-date-2026-09-06-plan-plans-2026-09-06-001-feat-attention-rust-lifecycle-plan-md-raw-reports-research-rust-port-review-2026-09-06-status-findings-not-yet-triaged-into-fixes">title: Rust port review readout (U9, U10, U12)
+date: 2026-09-06
+plan: ../plans/2026-09-06-001-feat-attention-rust-lifecycle-plan.md
+raw_reports: ../../.research/rust-port-review-2026-09-06/
+status: findings, not yet triaged into fixes</a>
+<a href="#read-this-first">Read this first</a>
+<a href="#three-shared-root-causes">Three shared root causes</a>
+<a href="#findings-that-change-what-the-tab-shows">Findings that change what the tab shows</a>
+<a href="#test-instrument-gaps-evidence-voiding">Test-instrument gaps (evidence-voiding)</a>
+<a href="#decision-items-not-patches">Decision items, not patches</a>
+<a href="#verified-by-me-independently-of-the-reviewers">Verified by me, independently of the reviewers</a>
+<a href="#suggested-fix-order-for-the-builder">Suggested fix order for the builder</a></nav><section aria-labelledby="title-rust-port-review-readout-u9-u10-u12-date-2026-09-06-plan-plans-2026-09-06-001-feat-attention-rust-lifecycle-plan-md-raw-reports-research-rust-port-review-2026-09-06-status-findings-not-yet-triaged-into-fixes"><h2 id="title-rust-port-review-readout-u9-u10-u12-date-2026-09-06-plan-plans-2026-09-06-001-feat-attention-rust-lifecycle-plan-md-raw-reports-research-rust-port-review-2026-09-06-status-findings-not-yet-triaged-into-fixes">title: Rust port review readout (U9, U10, U12)
+date: 2026-09-06
+plan: ../plans/2026-09-06-001-feat-attention-rust-lifecycle-plan.md
+raw_reports: ../../.research/rust-port-review-2026-09-06/
+status: findings, not yet triaged into fixes</h2>
+<h1>Rust port review readout</h1>
+<p>Three independent <code>code-review</code> runs, one per built unit, each dispatching its own read-only reviewer
+workers (Opus and Sonnet only) against disposable state directories. Nothing in the repository was
+edited by the reviews. <code>cargo test</code> is green (39 tests) and catches none of what follows.</p>
+</section>
+<section aria-labelledby="read-this-first"><h2 id="read-this-first">Read this first</h2>
+<ul>
+<li><strong>Every reviewer is the same model family.</strong> Agreement between workers promoted nothing; only
+executed probes did. Counts of probed findings: U9 all 12 probed or held by probe; U10 18 of 20;
+U12 21 of 26. The unprobed ones are marked in the raw reports.</li>
+<li><strong>Nothing is live.</strong> <code>bin/attention:12</code> still defaults to Python. These are pre-activation parity
+defects in a candidate binary.</li>
+<li><strong>The plan's tty mechanism is dead on macOS.</strong> Verified by the U10 reviewer and again by me with a
+<code>pty.fork</code> probe: <code>/dev/tty</code> is a cloning device, <code>ttyname</code> returns the literal <code>/dev/tty</code> owned by
+root, and a child with closed stdio shows no controlling tty in <code>ps</code> or <code>kinfo_proc</code>. O5's tty arms
+cannot work for a hook subprocess. The plan's reversal condition 1 applies: self-claim stays off and
+R7 rests on the shell claim. The unit tests did not see this because <code>FakeTty</code> overrides both
+<code>controlling_path</code> and <code>fingerprint</code>.</li>
+</ul>
+</section>
+<section aria-labelledby="three-shared-root-causes"><h2 id="three-shared-root-causes">Three shared root causes</h2>
+<table class="comparison-table">
+<thead>
+<tr><th>Root cause</th><th>Where it surfaces</th><th>Python does</th></tr>
+</thead>
+<tbody>
+<tr><td data-label="Root cause"><code>read_record</code> validates shape only; the record's interior <code>address</code>/<code>launch_id</code>/<code>binding_id</code> is never checked against the path it was read from. <code>path_matches</code> exists but is called only by <code>doctor</code> on <code>binding.json</code></td><td data-label="Where it surfaces">U9 F1; U10 F3; U12 C1, C4, C5, C7, C8, C9, C12 (15 of 26)</td><td data-label="Python does">fences every sibling read (<code>attention.py:1105-1111</code>, <code>:1320-1331</code>, <code>:2275-2281</code>) and reports <code>record_invalid</code></td></tr>
+<tr><td data-label="Root cause">Decisions computed before the locks are applied inside them unchanged: every sweep closure passed to <code>commit_nested_with</code> is <code>|_|</code> and discards the re-read</td><td data-label="Where it surfaces">U12 C2 (P0); U10 F13 (review file has three writers under three locks)</td><td data-label="Python does">re-reads under the locks and aborts with <code>record_invalid &quot;binding changed before sweep apply&quot;</code> (<code>:2337-2340</code>)</td></tr>
+<tr><td data-label="Root cause">No pane-presence cache: one <code>wezterm cli list</code> per binding row</td><td data-label="Where it surfaces">U9 F3; U12 C-uncached (40 bindings: 3.4 s vs 0.14 s; duplicate diagnostics evict real ones)</td><td data-label="Python does">one enumeration per query (<code>:1719-1773</code>)</td></tr>
+</tbody>
+</table>
+<p>Fixing the first two at the record layer closes more than half of all findings at once.</p>
+</section>
+<section aria-labelledby="findings-that-change-what-the-tab-shows"><h2 id="findings-that-change-what-the-tab-shows">Findings that change what the tab shows</h2>
+<table class="comparison-table">
+<thead>
+<tr><th>Sev</th><th>Unit</th><th>Anchor</th><th>Failure</th><th>Verified by</th></tr>
+</thead>
+<tbody>
+<tr><td data-label="Sev">P0</td><td data-label="Unit">U10</td><td data-label="Anchor"><code>src/lifecycle.rs:1183-1194</code></td><td data-label="Failure">After a resume, no second <code>end.json</code> is ever written: <code>SessionStart(startup) → SessionEnd → SessionStart(resume) → SessionEnd</code> leaves the binding active forever. Python <code>attention.py:1470</code></td><td data-label="Verified by">reviewer probe</td></tr>
+<tr><td data-label="Sev">P0</td><td data-label="Unit">U9</td><td data-label="Anchor"><code>src/wezterm.rs:59</code></td><td data-label="Failure"><code>PaneRow.tty_name</code> is a non-optional <code>String</code>; one pane row with <code>null</code> (ssh or tmux panes) fails the whole enumeration, so realm publish and U15's retry loop strand</td><td data-label="Verified by">reviewer probe, confirmed in source</td></tr>
+<tr><td data-label="Sev">P0</td><td data-label="Unit">U9/U12</td><td data-label="Anchor"><code>src/query.rs:226-267</code></td><td data-label="Failure">A foreign <code>end.json</code> flips a live binding to <code>ended</code>/<code>valid</code>; a pointer naming another launch yields <code>current: true</code></td><td data-label="Verified by">reviewer probe; shared root 1</td></tr>
+<tr><td data-label="Sev">P0</td><td data-label="Unit">U12</td><td data-label="Anchor"><code>src/maintenance.rs:315-322</code>, <code>:368-385</code></td><td data-label="Failure">Foreign <code>agents-floor.json</code> plus a matching <code>--operation-id</code> deletes every child including an active in-TTL one, exit 0</td><td data-label="Verified by">reviewer probe</td></tr>
+<tr><td data-label="Sev">P0</td><td data-label="Unit">U12</td><td data-label="Anchor"><code>src/maintenance.rs:620-740</code></td><td data-label="Failure">Sweep decisions run unlocked and are applied without re-validation</td><td data-label="Verified by">reviewer flock probe, confirmed in source</td></tr>
+<tr><td data-label="Sev">P1</td><td data-label="Unit">U10</td><td data-label="Anchor"><code>src/lifecycle.rs:612-629</code></td><td data-label="Failure">Duplicate Codex <code>Stop</code> stamps <code>agents-clear</code> with the incoming observation, burying a child that arrived after the first Stop. Python <code>:1587-1590</code> uses the surviving activity's observation</td><td data-label="Verified by">reviewer probe</td></tr>
+<tr><td data-label="Sev">P1</td><td data-label="Unit">U10</td><td data-label="Anchor"><code>src/providers.rs:215-216</code>, <code>:157-162</code></td><td data-label="Failure"><code>agent_type</code> parse failure kills root events; <code>cwd</code> capped at 256 bytes instead of 4096, so deep project paths get no state at all</td><td data-label="Verified by">reviewer probe</td></tr>
+<tr><td data-label="Sev">P1</td><td data-label="Unit">U10</td><td data-label="Anchor"><code>src/main.rs:221-227</code>, <code>:326-328</code>, <code>:329-349</code></td><td data-label="Failure">Prompt return aborts the identity publication on lock contention; the monotonic observation is captured after stdin is read; <code>record_invalid</code> exits 3 without <code>--strict</code>; <code>--debug</code> writes its envelope to stdout</td><td data-label="Verified by">reviewer probes</td></tr>
+<tr><td data-label="Sev">P1</td><td data-label="Unit">U12</td><td data-label="Anchor"><code>src/wezterm.rs:375-380</code></td><td data-label="Failure">A socket path containing a space breaks the process negative: live pane reads absent, <code>end.json</code> after 60 s</td><td data-label="Verified by">reviewer probe</td></tr>
+<tr><td data-label="Sev">P1</td><td data-label="Unit">U12</td><td data-label="Anchor"><code>src/maintenance.rs:579-589</code>, <code>:794-807</code>, <code>:579</code></td><td data-label="Failure">Missing <code>claim.json</code> prunes the binding directory; one malformed <code>claim.json</code> aborts the whole sweep</td><td data-label="Verified by">reviewer probe</td></tr>
+<tr><td data-label="Sev">P1</td><td data-label="Unit">U9</td><td data-label="Anchor"><code>src/wezterm.rs:210-219</code></td><td data-label="Failure">Hardcoded bundle fallback executes <code>/opt/homebrew/bin/wezterm</code> from a group-writable directory with no ownership check; Python has no fallback</td><td data-label="Verified by">reviewer inspection</td></tr>
+<tr><td data-label="Sev">P1</td><td data-label="Unit">U9/U12</td><td data-label="Anchor"><code>src/query.rs:122-125</code></td><td data-label="Failure">Missing <code>incarnation.json</code> reads as present/confirmed, then as verified absent; Python fails closed</td><td data-label="Verified by">reviewer probe</td></tr>
+</tbody>
+</table>
+<p>The full ranked lists, including the P2 and P3 rows, are in the raw reports.</p>
+</section>
+<section aria-labelledby="test-instrument-gaps-evidence-voiding"><h2 id="test-instrument-gaps-evidence-voiding">Test-instrument gaps (evidence-voiding)</h2>
+<ul>
+<li><code>tests/gate.sh</code> runs no <code>cargo</code> command and never invokes <code>tests/tty_input_guard.py</code>; U9's stated checkpoint is enforced by nothing.</li>
+<li>The protocol-fixture test reads 35 of 58 rows and never invokes <code>check.py</code> despite its name; the 13 skipped rows are the path-versus-interior-identity ones, exactly the shared root above.</li>
+<li>Four U12 tests and two U9 tests pass for a weaker reason than their name claims; eleven Python sweep/doctor/bindings tests have no Rust counterpart, so U12's &quot;every Python test has a counterpart&quot; is not met.</li>
+<li>O7's scrape misses <code>AttentionError::usage</code>, <code>record_json</code> and variable-code call sites, so <code>bad_usage</code> is never observed.</li>
+<li><code>src/maintenance.rs:225</code> bakes <code>env!(&quot;CARGO_MANIFEST_DIR&quot;)</code> into the doctor manifest comparison; U14's activation gate would pass vacuously for a binary installed anywhere else.</li>
+</ul>
+</section>
+<section aria-labelledby="decision-items-not-patches"><h2 id="decision-items-not-patches">Decision items, not patches</h2>
+<ul>
+<li><code>subagent_presence.source</code> carries <code>agent_type</code>, but schema 2 declares <code>optional: []</code>, so O8 and exact Python parity cannot both hold (U10 F15).</li>
+<li>Self-claim and tty resolution: see &quot;Read this first&quot;. O5 needs rewriting to two arms unless a macOS controlling-tty mechanism is found for a non-<code>setsid</code> child.</li>
+</ul>
+</section>
+<section aria-labelledby="verified-by-me-independently-of-the-reviewers"><h2 id="verified-by-me-independently-of-the-reviewers">Verified by me, independently of the reviewers</h2>
+<ul>
+<li>macOS <code>/dev/tty</code> behavior (probe above).</li>
+<li><code>PaneRow.tty_name</code> non-optional (source).</li>
+<li>Sweep closures discard the locked re-read (source).</li>
+<li><code>CLAUDE_JOB_DIR</code> and <code>CURSOR_AGENT</code> rejections are ported (<code>src/providers.rs:237</code>, <code>:244</code>).</li>
+<li><code>src/lifecycle.rs</code> performs no direct file I/O but loads records at seven sites; the plan's &quot;pure&quot; label is not true today.</li>
+</ul>
+</section>
+<section aria-labelledby="suggested-fix-order-for-the-builder"><h2 id="suggested-fix-order-for-the-builder">Suggested fix order for the builder</h2>
+<ol>
+<li>Record layer: <code>read_record</code> takes the expected identity and rejects a mismatch (<code>record_invalid</code>); make every sweep closure use the re-read value or abort on change. Re-run all three raw reports' probes; expect roughly half the findings to close.</li>
+<li><code>PaneRow.tty_name: Option&lt;String&gt;</code>, skip rows without a tty per pane as Python does.</li>
+<li>The U10 lifecycle divergences: second <code>end.json</code>, agents-clear observation, <code>agent_type</code> and path caps, observation before stdin, exit codes, <code>--debug</code> to stderr, publish never aborted by the prompt-return step.</li>
+<li>Presence cache in <code>query.rs</code>; bounded diagnostics.</li>
+<li>Test instruments: cargo and tty-guard steps in <code>tests/gate.sh</code>, the full 58-row fixture through <code>check.py</code>, the eleven missing counterparts.</li>
+<li>Plan: rewrite O5 per the macOS finding; decide U10 F15.</li>
+</ol>
+</section>
+<footer><a href="./2026-09-06-rust-port-review-readout.md">Read the Markdown source</a><span>Generated offline from that source. No external fonts, scripts or images.</span><code>Source SHA-256: 23a15b90d80e38fcc9d461daf62eb0ac881ccaf40f90133d2f30f9cc0bfb1d15</code></footer>
+</main></body></html>

@@ -18,16 +18,41 @@
 // test below covers genuine module re-evaluation via `import(...?gen=N)`; that
 // one is what actually locks retire-at-registration against the WeakMap-scope
 // and key-choice regressions.
-import { test, expect, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, existsSync, readFileSync, readdirSync, writeFileSync, rmSync } from "node:fs";
+import { test, expect, beforeEach, afterEach } from "bun:test";
+import { chmodSync, mkdtempSync, mkdirSync, existsSync, readFileSync, readdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ext from "../pi/index.ts";
 
 type Handler = (data: unknown) => void | Promise<void>;
+type TestEvent = Record<string, unknown>;
+type TestContext = {
+	cwd: string;
+	sessionManager: { getSessionId(): string; getSessionFile(): string | undefined };
+	model: { id: string } | undefined;
+	ui: { notify(message: string, level?: string): void };
+};
+
+const notifications: Array<{ message: string; level?: string }> = [];
+
+const testContext: TestContext = {
+	cwd: "/tmp/pi-project",
+	sessionManager: {
+		getSessionId: () => "pi-test-session",
+		getSessionFile: () => "/tmp/pi-test-session.jsonl",
+	},
+	model: { id: "pi-test-model" },
+	ui: { notify: (message, level) => notifications.push({ message, ...(level ? { level } : {}) }) },
+};
+
+function lifecycleEvent(name: string): TestEvent {
+	if (name === "session_start") return { type: name, reason: "startup" };
+	if (name === "session_shutdown") return { type: name, reason: "quit" };
+	return { type: name };
+}
 
 function loadExt() {
-	const lifecycle: Record<string, () => Promise<void> | void> = {};
+	const lifecycle: Record<string, (event?: TestEvent, ctx?: TestContext) => Promise<void> | void> = {};
 	const handlers: Handler[] = [];
 	const channels: string[] = [];
 	let commandCalls = 0;
@@ -42,8 +67,8 @@ function loadExt() {
 				};
 			},
 		},
-		on: (event: string, h: () => Promise<void> | void) => {
-			lifecycle[event] = h;
+		on: (event: string, h: (event: TestEvent, ctx: TestContext) => Promise<void> | void) => {
+			lifecycle[event] = (eventValue = lifecycleEvent(event), ctx = testContext) => h(eventValue, ctx);
 		},
 		registerCommand: () => {
 			commandCalls++;
@@ -51,7 +76,7 @@ function loadExt() {
 	};
 	// load() re-invokes the extension's default export against the SAME pi — the
 	// in-process stand-in for a fresh extension instance after Pi's /reload.
-	const load = () => ext(pi as any);
+	const load = () => ext(pi as Parameters<typeof ext>[0]);
 	// emit() fans a payload out to every registered event handler, mirroring the
 	// real bus, and awaits them so assertions never run before the write settles.
 	const emit = (data: unknown) => Promise.all(handlers.map((h) => h(data)));
@@ -65,11 +90,19 @@ function loadExt() {
 // are iterating on a red test, and leaving WEZTERM_PANE set to a traversal path
 // after the traversal tests.
 const tempDirs: string[] = [];
-afterEach(() => {
-	for (const d of tempDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+function clearAttentionEnvironment(): void {
 	delete process.env.WEZTERM_PANE;
 	delete process.env.WEZTERM_ATTENTION_DIR;
 	delete process.env.PI_WEZTERM_ATTENTION_TTL_MS;
+	delete process.env.WEZTERM_ATTENTION_ROOT;
+	delete process.env.WEZTERM_ATTENTION_TEST_LOG;
+}
+
+beforeEach(clearAttentionEnvironment);
+afterEach(() => {
+	for (const d of tempDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+	notifications.length = 0;
+	clearAttentionEnvironment();
 });
 
 // A temp dir registered for automatic teardown.
@@ -86,8 +119,16 @@ function freshDir(prefix: string): string {
 	return d;
 }
 
+function parseRecord(text: string): Record<string, unknown> {
+	const parsed: unknown = JSON.parse(text);
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+		throw new Error("value is not a JSON object");
+	}
+	return parsed;
+}
+
 function readMarker(dir: string, pane = "42"): Record<string, unknown> {
-	return JSON.parse(readFileSync(join(dir, pane), "utf8"));
+	return parseRecord(readFileSync(join(dir, pane), "utf8"));
 }
 
 test("lifecycle: agent_start writes a thinking marker with ttl_ms, updated_at, source pi", async () => {
@@ -162,6 +203,136 @@ test("registration: the extension registers no commands", () => {
 	freshDir("wez-nocmd-");
 	const { commandCount } = loadExt();
 	expect(commandCount()).toBe(0);
+});
+
+test("v2 dispatch: Pi lifecycle and bus requests use the serialized attention process queue", async () => {
+	const root = tempDir("wez-v2-dispatch-");
+	const bin = join(root, "bin");
+	const log = join(root, "calls.log");
+	mkdirSync(bin);
+	writeFileSync(
+		join(bin, "attention"),
+		'#!/bin/sh\nprintf "%s\\n" "$*" >> "$WEZTERM_ATTENTION_TEST_LOG"\nIFS= read -r payload\nprintf "%s\\n" "$payload" >> "$WEZTERM_ATTENTION_TEST_LOG"\n',
+	);
+	chmodSync(join(bin, "attention"), 0o755);
+	process.env.WEZTERM_ATTENTION_ROOT = root;
+	process.env.WEZTERM_ATTENTION_TEST_LOG = log;
+	const h = loadExt();
+
+	await h.lifecycle["session_start"]!();
+	await h.lifecycle["agent_start"]!();
+	await h.lifecycle["tool_execution_start"]!();
+	await h.lifecycle["agent_settled"]!();
+	await h.emit({ type: "notify", label: "answer me" });
+	await h.emit("review");
+	await h.emit("clear");
+	await h.lifecycle["session_shutdown"]!();
+
+	const lines = readFileSync(log, "utf8").trim().split("\n");
+	const commands = lines.filter((_, index) => index % 2 === 0);
+	const payloads = lines.filter((_, index) => index % 2 === 1).map(parseRecord);
+	expect(commands).toEqual([
+		"hooks event pi session_start",
+		"hooks event pi agent_start",
+		"hooks event pi tool_execution_start",
+		"hooks event pi agent_settled",
+		"hooks event pi bus",
+		"hooks event pi bus",
+		"hooks event pi bus",
+		"hooks event pi session_shutdown",
+	]);
+	expect(payloads.every((payload) => payload.session_id === "pi-test-session")).toBe(true);
+	expect(payloads[0]?.start_source).toBe("startup");
+	expect(payloads[4]?.state).toBe("notify");
+	expect(payloads[4]?.label).toBe("answer me");
+	expect(payloads[5]?.state).toBe("review");
+	expect(payloads[6]?.state).toBe("clear");
+	expect(payloads[7]?.reason).toBe("quit");
+});
+
+test("v2 dispatch: Pi reload drains queued writes without sending an end event or warning", async () => {
+	const root = tempDir("wez-v2-reload-");
+	const bin = join(root, "bin");
+	const log = join(root, "calls.log");
+	mkdirSync(bin);
+	writeFileSync(
+		join(bin, "attention"),
+		'#!/bin/sh\nprintf "%s\\n" "$*" >> "$WEZTERM_ATTENTION_TEST_LOG"\nIFS= read -r payload\nprintf "%s\\n" "$payload" >> "$WEZTERM_ATTENTION_TEST_LOG"\ncase "$*" in *session_shutdown*) printf "%s\\n" "attention: integration_version_mismatch: Pi reload keeps the current binding" >&2;; esac\n',
+	);
+	chmodSync(join(bin, "attention"), 0o755);
+	process.env.WEZTERM_ATTENTION_ROOT = root;
+	process.env.WEZTERM_ATTENTION_TEST_LOG = log;
+	const h = loadExt();
+
+	await h.lifecycle["session_start"]!();
+	await h.lifecycle["session_shutdown"]!({ type: "session_shutdown", reason: "reload" }, testContext);
+
+	const lines = readFileSync(log, "utf8").trim().split("\n");
+	expect(lines.filter((_, index) => index % 2 === 0)).toEqual([
+		"hooks event pi session_start",
+	]);
+	expect(notifications).toEqual([]);
+});
+
+test("fallback: an unset checkout root keeps the v1 marker path", async () => {
+	const dir = freshDir("wez-fallback-unset-");
+	process.env.WEZTERM_PANE = "42";
+	const { lifecycle } = loadExt();
+	await lifecycle["agent_start"]!();
+	await lifecycle["session_shutdown"]!();
+	expect(readMarker(dir).type).toBe("thinking");
+	expect(notifications).toEqual([]);
+});
+
+test("fallback: a configured checkout without a writer logs once and writes no v1 marker", async () => {
+	const dir = freshDir("wez-fallback-missing-");
+	process.env.WEZTERM_PANE = "42";
+	process.env.WEZTERM_ATTENTION_ROOT = tempDir("wez-root-missing-");
+	const { lifecycle } = loadExt();
+	await lifecycle["session_start"]!();
+	await lifecycle["agent_start"]!();
+	await lifecycle["session_shutdown"]!();
+	expect(existsSync(join(dir, "42"))).toBe(false);
+	expect(notifications).toHaveLength(1);
+	expect(notifications[0]?.message).toContain("no executable bin/attention");
+	expect(notifications[0]?.level).toBe("warning");
+});
+
+test("fallback: an invoked writer exit never creates a v1 marker and logs once", async () => {
+	const dir = freshDir("wez-fallback-exit-");
+	process.env.WEZTERM_PANE = "42";
+	const root = tempDir("wez-root-exit-");
+	mkdirSync(join(root, "bin"));
+	writeFileSync(join(root, "bin", "attention"), "#!/bin/sh\nIFS= read -r payload || :\nexit 3\n");
+	chmodSync(join(root, "bin", "attention"), 0o755);
+	process.env.WEZTERM_ATTENTION_ROOT = root;
+	const { lifecycle } = loadExt();
+	await lifecycle["session_start"]!();
+	await lifecycle["agent_start"]!();
+	await lifecycle["session_shutdown"]!();
+	expect(existsSync(join(dir, "42"))).toBe(false);
+	expect(notifications).toHaveLength(1);
+	expect(notifications[0]?.message).toContain("status 3");
+});
+
+test("fallback: an exit-zero hook diagnostic is reported and never treated as success", async () => {
+	const dir = freshDir("wez-fallback-diagnostic-");
+	process.env.WEZTERM_PANE = "42";
+	const root = tempDir("wez-root-diagnostic-");
+	mkdirSync(join(root, "bin"));
+	writeFileSync(
+		join(root, "bin", "attention"),
+		"#!/bin/sh\nIFS= read -r payload || :\nprintf '%s\\n' 'attention: identity_unpublished: test rejection' >&2\nexit 0\n",
+	);
+	chmodSync(join(root, "bin", "attention"), 0o755);
+	process.env.WEZTERM_ATTENTION_ROOT = root;
+	const { lifecycle } = loadExt();
+	await lifecycle["session_start"]!();
+	await lifecycle["agent_start"]!();
+	await lifecycle["session_shutdown"]!();
+	expect(existsSync(join(dir, "42"))).toBe(false);
+	expect(notifications).toHaveLength(1);
+	expect(notifications[0]?.message).toContain("rejected the event");
 });
 
 test("event: emitting a notify object writes a labeled notify marker", async () => {
@@ -253,7 +424,7 @@ test("reload (real module re-eval): retire-at-registration collapses N fresh gen
 	for (let gen = 0; gen < 4; gen++) {
 		currentGen = gen;
 		const mod = await import(`../pi/index.ts?realreload=${gen}`);
-		mod.default(makePi() as any);
+		mod.default(makePi() as Parameters<typeof mod.default>[0]);
 	}
 	expect(handlers.length).toBe(1); // all four generations collapsed to one live listener
 	// The survivor is the NEWEST generation. This asserts listener IDENTITY because
