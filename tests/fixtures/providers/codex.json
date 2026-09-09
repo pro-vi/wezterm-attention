@@ -1,0 +1,32 @@
+{
+  "provider": "codex",
+  "base": {
+    "session_id": "codex-thread-a",
+    "turn_id": "turn-a",
+    "transcript_path": "/tmp/codex-thread-a.jsonl",
+    "cwd": "/tmp/project",
+    "hook_event_name": "SessionStart",
+    "model": "gpt"
+  },
+  "cases": [
+    { "id": "startup_binding", "event": "SessionStart", "patch": { "source": "startup" }, "expected": "binding" },
+    { "id": "self_claim_binding", "event": "SessionStart", "patch": { "source": "startup" }, "env": { "WEZTERM_ATTENTION_ENABLE_SELF_CLAIM": "1" }, "expected": "binding", "lifecycle_expected": "applied" },
+    { "id": "resume_binding", "event": "SessionStart", "patch": { "source": "resume" }, "expected": "binding" },
+    { "id": "clear_binding", "event": "SessionStart", "patch": { "source": "clear" }, "expected": "binding" },
+    { "id": "compact_confirmation", "event": "SessionStart", "patch": { "source": "compact" }, "expected": "binding" },
+    { "id": "root_tool_activity", "event": "PreToolUse", "patch": { "tool_name": "shell" }, "expected": "activity", "activity_type": "thinking" },
+    { "id": "no_launch_non_start_is_stale", "event": "PreToolUse", "patch": { "tool_name": "shell" }, "expected": "activity", "activity_type": "thinking", "lifecycle_diagnostic": "claim_stale" },
+    { "id": "human_input_tool_notifies", "event": "PreToolUse", "patch": { "tool_name": "request_user_input" }, "expected": "activity", "activity_type": "notify" },
+    { "id": "child_tool_activity", "event": "PreToolUse", "patch": { "tool_name": "shell", "agent_id": "child-a", "agent_type": "worker" }, "expected": "child_active" },
+    { "id": "root_permission_activity", "event": "PermissionRequest", "patch": { "tool_name": "shell" }, "expected": "activity", "activity_type": "notify" },
+    { "id": "root_stop_activity_and_clear", "event": "Stop", "patch": { "stop_hook_active": false }, "expected": "parent_stop", "activity_type": "stop" },
+    { "id": "child_stop_fence", "event": "SubagentStop", "patch": { "agent_id": "child-a", "agent_type": "worker", "stop_hook_active": false }, "expected": "child_stopped" },
+    { "id": "session_end", "event": "SessionEnd", "patch": { "reason": "other" }, "expected": "end" },
+    { "id": "subagent_start_is_inert", "event": "SubagentStart", "patch": { "agent_id": "child-a", "agent_type": "worker" }, "expected": "ignored" },
+    { "id": "missing_stop_id_is_inert", "event": "SubagentStop", "patch": { "stop_hook_active": false }, "expected": "ignored", "diagnostic": "record_invalid" },
+    { "id": "root_thread_mismatch_is_inert", "event": "SessionStart", "patch": { "source": "startup" }, "env": { "CODEX_THREAD_ID": "other-thread" }, "expected": "ignored", "diagnostic": "claim_stale" },
+    { "id": "nested_child_session_mismatch_is_inert", "event": "PreToolUse", "patch": { "tool_name": "shell", "agent_id": "child-a" }, "env": { "CODEX_THREAD_ID": "outer-thread" }, "expected": "ignored", "diagnostic": "claim_stale" },
+    { "id": "notification_is_not_a_codex_event", "event": "Notification", "patch": { "notification_type": "permission_prompt" }, "expected": "ignored", "diagnostic": "integration_version_mismatch" },
+    { "id": "unknown_source_is_inert", "event": "SessionStart", "patch": { "source": "mystery" }, "expected": "ignored", "diagnostic": "integration_version_mismatch" }
+  ]
+}

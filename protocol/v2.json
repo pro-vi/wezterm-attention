@@ -1,0 +1,270 @@
+{
+  "manifest_schema": 1,
+  "wire_version": 2,
+  "record_schema": 2,
+  "writer_version": "2.0.0",
+  "digests": {
+    "algorithm": "sha256",
+    "encoding": "lowercase_hex",
+    "agent_key_input": "utf8(agent_id)",
+    "owner_key_input": "utf8(owner_id)",
+    "realm_id_input": "utf8(canonical_socket_path)",
+    "incarnation_id_input": "lp64be(realm_id,socket_device,socket_inode,socket_ctime_ns_decimal)",
+    "tty_fingerprint_input": "lp64be(tty_device,tty_inode,tty_rdevice)",
+    "binding_id_input": "utf8(provider) || 0x00 || utf8(provider_session_id) || 0x00 || utf8(launch_id)"
+  },
+  "limits": {
+    "pane_id_max_digits": 20,
+    "canonical_decimal_max_digits": 20,
+    "safe_label_max_bytes": 256,
+    "path_max_bytes": 4096,
+    "model_max_bytes": 256,
+    "writer_version_max_bytes": 64,
+    "ttl_ms_max": 2147483647,
+    "frame_max": 1000000,
+    "subagent_ttl_ms": 600000,
+    "max_json_bytes": 1048576
+  },
+  "enums": {
+    "activity_types": ["thinking", "stop", "notify"],
+    "binding_health": ["valid", "conflicted", "invalid", "future_schema"],
+    "binding_phase": ["active", "ended"],
+    "diagnostic_codes": [
+      "identity_unpublished",
+      "claim_stale",
+      "unsafe_tty",
+      "realm_unavailable",
+      "incarnation_changed",
+      "record_invalid",
+      "future_schema",
+      "binding_conflict",
+      "probe_unavailable",
+      "clock_skew",
+      "integration_version_mismatch",
+      "state_permissions",
+      "bad_usage"
+    ],
+    "end_reasons": ["session_end", "sweep_absent"],
+    "pane_presence": ["present", "verified_absent", "unavailable"],
+    "providers": ["claude", "codex", "pi"],
+    "reader_confidence": ["confirmed", "unconfirmed"],
+    "subagent_providers": ["claude", "codex"],
+    "subagent_statuses": ["active", "stopped"]
+  },
+  "wire": {
+    "required": ["wire", "address", "launch_id"],
+    "optional": [],
+    "types": {
+      "wire": "wire_version",
+      "address": "pane_address",
+      "launch_id": "uuid"
+    }
+  },
+  "records": {
+    "realm": {
+      "required": ["kind", "schema", "realm_id", "socket_path", "writer_version"],
+      "optional": [],
+      "types": {
+        "kind": "record_kind",
+        "schema": "record_schema",
+        "realm_id": "hex64",
+        "socket_path": "absolute_path",
+        "writer_version": "writer_version"
+      }
+    },
+    "incarnation": {
+      "required": ["kind", "schema", "realm_id", "incarnation_id", "socket_path", "socket_device", "socket_inode", "socket_ctime_ns", "writer_version"],
+      "optional": ["server_pid"],
+      "types": {
+        "kind": "record_kind",
+        "schema": "record_schema",
+        "realm_id": "hex64",
+        "incarnation_id": "hex64",
+        "socket_path": "absolute_path",
+        "socket_device": "canonical_decimal",
+        "socket_inode": "canonical_decimal",
+        "socket_ctime_ns": "decimal_ns20",
+        "writer_version": "writer_version",
+        "server_pid": "canonical_decimal"
+      }
+    },
+    "claim": {
+      "required": ["kind", "schema", "address", "launch_id", "tty_path", "tty_fingerprint", "observed_mono_ns"],
+      "optional": [],
+      "types": {
+        "kind": "record_kind",
+        "schema": "record_schema",
+        "address": "pane_address",
+        "launch_id": "uuid",
+        "tty_path": "absolute_path",
+        "tty_fingerprint": "hex64",
+        "observed_mono_ns": "monotonic_ns20"
+      }
+    },
+    "binding": {
+      "required": ["kind", "schema", "address", "launch_id", "binding_id", "event_id", "provider", "provider_session_id", "start_source", "observed_mono_ns", "written_at_unix_ns", "writer_version"],
+      "optional": ["expected_session_id", "transcript_path", "cwd", "config_dir", "model"],
+      "types": {
+        "kind": "record_kind",
+        "schema": "record_schema",
+        "address": "pane_address",
+        "launch_id": "uuid",
+        "binding_id": "hex64",
+        "event_id": "uuid",
+        "provider": "provider",
+        "provider_session_id": "safe_label",
+        "start_source": "safe_label",
+        "observed_mono_ns": "monotonic_ns20",
+        "written_at_unix_ns": "unix_ns20",
+        "writer_version": "writer_version",
+        "expected_session_id": "safe_label",
+        "transcript_path": "absolute_path",
+        "cwd": "absolute_path",
+        "config_dir": "absolute_path",
+        "model": "model"
+      }
+    },
+    "current_binding": {
+      "required": ["kind", "schema", "address", "launch_id", "binding_id"],
+      "optional": [],
+      "types": {
+        "kind": "record_kind",
+        "schema": "record_schema",
+        "address": "pane_address",
+        "launch_id": "uuid",
+        "binding_id": "hex64"
+      }
+    },
+    "activity": {
+      "required": ["kind", "schema", "address", "launch_id", "target", "event_id", "type", "source", "puppet", "observed_mono_ns", "written_at_unix_ns"],
+      "optional": ["frame", "label", "ttl_ms"],
+      "types": {
+        "kind": "record_kind",
+        "schema": "record_schema",
+        "address": "pane_address",
+        "launch_id": "uuid",
+        "target": "activity_target",
+        "event_id": "uuid",
+        "type": "activity_type",
+        "source": "safe_label",
+        "puppet": "boolean",
+        "observed_mono_ns": "monotonic_ns20",
+        "written_at_unix_ns": "unix_ns20",
+        "frame": "nonnegative_integer",
+        "label": "safe_label",
+        "ttl_ms": "positive_integer"
+      }
+    },
+    "activity_clear": {
+      "required": ["kind", "schema", "address", "launch_id", "binding_id", "event_id", "observed_mono_ns"],
+      "optional": [],
+      "types": {
+        "kind": "record_kind",
+        "schema": "record_schema",
+        "address": "pane_address",
+        "launch_id": "uuid",
+        "binding_id": "hex64",
+        "event_id": "uuid",
+        "observed_mono_ns": "monotonic_ns20"
+      }
+    },
+    "review": {
+      "required": ["kind", "schema", "address", "owner_id", "owner_key", "event_id"],
+      "optional": [],
+      "types": {
+        "kind": "record_kind",
+        "schema": "record_schema",
+        "address": "pane_address",
+        "owner_id": "safe_label",
+        "owner_key": "hex64",
+        "event_id": "uuid"
+      }
+    },
+    "binding_end": {
+      "required": ["kind", "schema", "address", "launch_id", "binding_id", "reason", "event_id", "observed_mono_ns", "written_at_unix_ns"],
+      "optional": ["operation_id"],
+      "types": {
+        "kind": "record_kind",
+        "schema": "record_schema",
+        "address": "pane_address",
+        "launch_id": "uuid",
+        "binding_id": "hex64",
+        "reason": "end_reason",
+        "event_id": "uuid",
+        "observed_mono_ns": "monotonic_ns20",
+        "written_at_unix_ns": "unix_ns20",
+        "operation_id": "uuid"
+      }
+    },
+    "acknowledgement": {
+      "required": ["kind", "schema", "address", "launch_id", "target", "activity_event_id", "event_id"],
+      "optional": [],
+      "types": {
+        "kind": "record_kind",
+        "schema": "record_schema",
+        "address": "pane_address",
+        "launch_id": "uuid",
+        "target": "activity_target",
+        "activity_event_id": "uuid",
+        "event_id": "uuid"
+      }
+    },
+    "absence_probe": {
+      "required": ["kind", "schema", "address", "operation_id", "observed_mono_ns"],
+      "optional": [],
+      "types": {
+        "kind": "record_kind",
+        "schema": "record_schema",
+        "address": "pane_address",
+        "operation_id": "uuid",
+        "observed_mono_ns": "monotonic_ns20"
+      }
+    },
+    "subagent_presence": {
+      "required": ["kind", "schema", "address", "launch_id", "binding_id", "provider", "agent_id", "agent_key", "source", "status", "event_id", "observed_mono_ns", "written_at_unix_ns", "ttl_ms"],
+      "optional": [],
+      "types": {
+        "kind": "record_kind",
+        "schema": "record_schema",
+        "address": "pane_address",
+        "launch_id": "uuid",
+        "binding_id": "hex64",
+        "provider": "subagent_provider",
+        "agent_id": "safe_label",
+        "agent_key": "hex64",
+        "source": "safe_label",
+        "status": "subagent_status",
+        "event_id": "uuid",
+        "observed_mono_ns": "monotonic_ns20",
+        "written_at_unix_ns": "unix_ns20",
+        "ttl_ms": "subagent_ttl_ms"
+      }
+    },
+    "subagent_clear": {
+      "required": ["kind", "schema", "address", "launch_id", "binding_id", "event_id", "observed_mono_ns"],
+      "optional": [],
+      "types": {
+        "kind": "record_kind",
+        "schema": "record_schema",
+        "address": "pane_address",
+        "launch_id": "uuid",
+        "binding_id": "hex64",
+        "event_id": "uuid",
+        "observed_mono_ns": "monotonic_ns20"
+      }
+    },
+    "subagent_retention_floor": {
+      "required": ["kind", "schema", "address", "launch_id", "binding_id", "floor_mono_ns", "operation_id"],
+      "optional": [],
+      "types": {
+        "kind": "record_kind",
+        "schema": "record_schema",
+        "address": "pane_address",
+        "launch_id": "uuid",
+        "binding_id": "hex64",
+        "floor_mono_ns": "monotonic_ns20",
+        "operation_id": "uuid"
+      }
+    }
+  }
+}

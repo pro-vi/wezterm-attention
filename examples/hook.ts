@@ -1,44 +1,19 @@
 #!/usr/bin/env bun
-//
-// Minimal example: write a WezTerm attention marker from a CLI hook.
-// Adapt this for any tool that wants to signal "I'm done" or "look at me"
-// to the WezTerm tab bar.
-//
-// Protocol:
-//   Write {"type":"<state>"} to ~/.local/state/wezterm-attention/<WEZTERM_PANE>
-//   Valid types: "thinking", "stop", "notify", "review"
-//   Optional: {"type":"thinking","frame":0} for animated spinner (0-3)
-//
-// The WEZTERM_PANE env var is set automatically by WezTerm for every shell.
+// Direct custom marker example. Provider hooks should instead forward their
+// original stdin to `attention hooks event <provider> <event>`.
 
-import { mkdir, writeFile, rename } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
-type AttentionType = "thinking" | "stop" | "notify" | "review";
-
-async function writeMarker(type: AttentionType, frame?: number): Promise<void> {
-  const paneId = process.env.WEZTERM_PANE;
-  const home = process.env.HOME;
-  // WezTerm sets WEZTERM_PANE to a non-negative integer; validate it so a stray
-  // value can't build a path outside the marker directory.
-  if (!paneId || !home || !/^\d+$/.test(paneId)) return;
-
-  const dir = join(home, ".local", "state", "wezterm-attention");
-  await mkdir(dir, { recursive: true });
-
-  const data: Record<string, unknown> = {
-    type,
-    publication_id: randomUUID(),
-    updated_at: Date.now(),
-  };
-  if (frame !== undefined) data.frame = frame;
-
-  // Atomic write: tmp file + rename avoids partial reads
-  const file = join(dir, paneId);
-  await writeFile(file + ".tmp", JSON.stringify(data));
-  await rename(file + ".tmp", file);
+const root = process.env.WEZTERM_ATTENTION_ROOT;
+if (!root || !isAbsolute(root)) {
+  console.error("wezterm-attention: WEZTERM_ATTENTION_ROOT must be an absolute checkout path");
+  process.exit(3);
 }
 
-// Example: signal that work is done
-await writeMarker("stop");
+const child = Bun.spawn({
+  cmd: [join(root, "bin", "attention"), "mark", "stop", "--source", "example"],
+  stdin: "ignore",
+  stdout: "inherit",
+  stderr: "inherit",
+});
+process.exit(await child.exited);

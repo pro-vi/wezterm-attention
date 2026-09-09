@@ -1,0 +1,16 @@
+#!/bin/sh
+
+set -eu
+
+case $0 in
+  */*) script_dir=${0%/*} ;;
+  *) script_dir=. ;;
+esac
+ROOT=$(CDPATH= cd -- "$script_dir/.." && pwd)
+
+if [ ! -x "$ROOT/libexec/attention-rs" ]; then
+  printf '%s\n' 'attention: Rust binary is missing; run scripts/install-cli.sh and retry.' >&2
+  exit 3
+fi
+
+exec "$ROOT/libexec/attention-rs" "$@"

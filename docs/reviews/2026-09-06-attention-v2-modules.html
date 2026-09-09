@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="source-sha256" content="519348243e74019f7c670989c8236b190cef669bcbb5d3417a9f1de6a83f87f4">
+<meta name="description" content="Attention v2: module specification">
+<title>Attention v2: module specification · attention-v2</title>
+<style>
+:root{color-scheme:dark;--paper:#0e1720;--surface:#16232e;--ink:#e7eef5;--muted:#afc0cf;--line:#3c5161;--link:#91cbf4;--terminal:#0b141c;--terminal-ink:#e0edf7;--terminal-rule:#627d8d;--note:#203240;--focus:#ffc18a;--mono:Menlo,Consolas,monospace;--reading:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+*{box-sizing:border-box}html{scroll-padding-top:24px}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.6 var(--reading)}
+a{color:var(--link);text-underline-offset:3px}a:hover{text-decoration-thickness:2px}a:focus-visible{outline:3px solid var(--focus);outline-offset:4px}
+main{max-width:1100px;margin:auto;padding:36px 32px 64px;display:grid;gap:30px}header{display:grid;gap:16px}
+.identity{font:12px/1.6 var(--mono);letter-spacing:.04em;color:var(--muted);display:flex;gap:16px;flex-wrap:wrap}
+h1,h2{font-family:var(--mono);line-height:1.25;text-wrap:balance;margin:0}h1{font-size:clamp(26px,3.1vw,38px);max-width:27ch;letter-spacing:-.035em}h2{font-size:24px;letter-spacing:-.035em}
+h3{font:600 19px/1.4 var(--mono);margin:8px 0 0;text-wrap:balance}li+li{margin-top:7px}
+p,pre,table,ul,ol{margin:0}header p{max-width:78ch}header p:first-of-type{font-size:19px;font-weight:550}
+nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));border-top:1px solid var(--line);border-left:1px solid var(--line)}
+nav a{padding:11px 14px;background:var(--surface);border-right:1px solid var(--line);border-bottom:1px solid var(--line);font:13px/1.5 var(--mono);text-decoration:none}
+nav a:hover{background:var(--note)}section{background:var(--surface);padding:28px;border:1px solid var(--line);display:grid;gap:18px;min-width:0}
+section>p{max-width:78ch}section>h2+p,section>blockquote+p{font-size:19px;line-height:1.5}strong{font-weight:650}
+blockquote{margin:0;padding:14px 18px;background:var(--note);color:var(--muted);max-width:82ch}blockquote strong{font:12px/1.5 var(--mono);color:var(--link)}
+pre{padding:19px 20px;background:var(--terminal);color:var(--terminal-ink);font:14px/1.65 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;border-top:5px solid var(--terminal-rule);min-width:0}
+pre code{font:inherit;background:none;padding:0;color:inherit}code{font-family:var(--mono);font-size:.88em;overflow-wrap:anywhere}
+.file-comparison{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:stretch;min-width:0}
+table{border-collapse:collapse;width:100%;font-size:16px;text-align:left}th,td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:top}th{font-family:var(--mono);font-size:12px;background:var(--note);letter-spacing:.03em}td{overflow-wrap:anywhere}
+.facts th:first-child,.facts td:first-child{width:24%}.facts td:first-child{font-weight:600}.samples th:first-child,.samples td:first-child{width:12%}.samples td{font-variant-numeric:tabular-nums}.samples td:last-child{font-family:var(--mono);font-weight:600}
+.comparison-table th:first-child{width:25%}.source-link{font-size:13px;line-height:1.5;color:var(--muted)}
+footer{display:grid;gap:5px;color:var(--muted);font-size:12px}footer code{font-size:11px}section[aria-labelledby="review-state"]{background:var(--note)}
+@media(max-width:780px){main{padding:22px 16px 36px;gap:20px}section{padding:20px;gap:16px}h2{font-size:20px}nav{grid-template-columns:1fr}.file-comparison{grid-template-columns:1fr}pre{font-size:13px;padding:14px 12px}.facts thead,.comparison-table thead{display:none}.facts,.facts tbody,.facts tr,.facts td,.comparison-table,.comparison-table tbody,.comparison-table tr,.comparison-table td{display:block}.facts tr,.comparison-table tr{padding:12px 0;border-bottom:1px solid var(--line)}.facts td,.comparison-table td{border:0;padding:3px 0}.facts td:first-child{width:auto;font-size:14px;color:var(--muted)}.comparison-table td::before{content:attr(data-label);display:block;font:12px/1.5 var(--mono);color:var(--muted);margin-top:7px}.samples th,.samples td{padding:9px 6px}.samples{font-size:14px}section>h2+p,section>blockquote+p{font-size:18px}}
+@media print{:root{color-scheme:light;--paper:#fff;--surface:#fff;--ink:#172a38;--muted:#506171;--line:#c9d5dd;--link:#185e8a;--terminal:#edf2f5;--terminal-ink:#172a38;--note:#e7eff5}main{padding:0;max-width:none}nav{display:none}section{break-inside:avoid}a{color:inherit}}
+</style></head><body><main>
+<header><div class="identity"><span>wezterm-attention / design review</span><span>Source-backed examples · no live changes</span></div><h1>Attention v2: module specification</h1>
+<p><strong>Implemented module map; provider activation remains separate.</strong> The Rust and split-Lua modules below exist in this checkout, <code>bin/attention</code> selects the installed Rust executable, and the Python writer is retired. The inspected bootstrap Claude/Codex helpers still write V1 flat markers and the inspected zsh setup still publishes only the V1 pane identity, so an installed Rust shim is not evidence that provider hooks use V2. Automatic launch self-claim remains disabled; its macOS tty premise failed verification. Current certification is in <a href="2026-09-07-rust-port-certification.md">Rust port certification</a>, with later verification in <a href="triage-2026-09-08/report.md">Hook review triage</a>.</p>
+</header>
+<section aria-labelledby="runtime-module-map"><h2 id="runtime-module-map">Runtime module map</h2>
+<p>One Rust executable, one Lua plugin, and their adapters. Rust and Lua communicate through records and published pane identity.</p>
+<div class="file-comparison"><pre><code class="language-text">Rust: one attention executable
+src/
+├── main.rs         commands
+├── protocol.rs     record types
+├── identity.rs     exact IDs
+├── providers.rs    hook adapters
+├── lifecycle.rs    transitions
+├── records.rs      file I/O
+├── wezterm.rs      mux / tty
+├── query.rs        read API
+├── maintenance.rs  cleanup
+└── compat.rs       V1 compatibility projection
+</code></pre><pre><code class="language-text">Lua: one WezTerm plugin
+plugin/
+├── init.lua        public API
+├── protocol.lua    validation
+├── reader.lua      read / merge
+├── runtime.lua     poll / cache
+├── overlays.lua    ack / review
+├── legacy.lua      v1 adapter
+├── titles.lua      title policy
+└── format.lua      rendering
+</code></pre></div>
+<pre><code class="language-text">Producer and delivery code
+shell/
+  wezterm-attention.bash
+  wezterm-attention.zsh
+pi/index.ts            Pi adapter
+bin/attention          command path
+scripts/install-cli.sh installer
+tests/                 verification
+</code></pre>
+<p>The implemented split has nine Rust responsibility modules, one compatibility module, and eight Lua responsibility modules. The shell pair and Pi extension can connect provider processes to the core when their host configuration adopts them. Installer and test files support delivery; they are not more runtime services. <code>Cargo.toml</code>, <code>Cargo.lock</code> and <code>src/lib.rs</code> provide package wiring.</p>
+<blockquote>
+<p><strong>Your request:</strong> “I want to see all the modules. I want you to $show me all the modules that you will. That v2 will involve. A tech spec if you will.”</p>
+</blockquote>
+<p>A module owns a code responsibility; a feature can use several modules. Safe child cleanup uses lifecycle rules, record storage and maintenance. A separate record file does not require a separate source module.</p>
+</section><nav aria-label="Jump to a section"><a href="#runtime-module-map">Runtime module map</a>
+<a href="#rust-module-contracts">Rust module contracts</a>
+<a href="#lua-module-contracts">Lua module contracts</a>
+<a href="#producer-adapters-and-consumers">Producer adapters and consumers</a>
+<a href="#shared-facts-and-public-interfaces">Shared facts and public interfaces</a>
+<a href="#record-layout-and-write-ownership">Record layout and write ownership</a>
+<a href="#runtime-flows">Runtime flows</a>
+<a href="#where-the-eight-reviewed-features-belong">Where the eight reviewed features belong</a>
+<a href="#delivery-verification-and-open-decisions">Delivery, verification and open decisions</a></nav><section aria-labelledby="rust-module-contracts"><h2 id="rust-module-contracts">Rust module contracts</h2>
+<table class="comparison-table">
+<thead>
+<tr><th>Module</th><th>Owns</th><th>Input → output</th><th>Required proof</th></tr>
+</thead>
+<tbody>
+<tr><td data-label="Module"><code>protocol.rs</code></td><td data-label="Owns">Typed record/result shapes, shared event definitions, closed variants and limits</td><td data-label="Input → output">Serialized protocol JSON → validated record/result values or a diagnostic</td><td data-label="Required proof">Shared Rust/Lua vectors; reject null, invalid identity fields, unknown record versions and unknown schema types</td></tr>
+<tr><td data-label="Module"><code>identity.rs</code></td><td data-label="Owns">Full pane address and launch/binding/child/owner identifiers; one definition per identity</td><td data-label="Input → output">Validated socket/pane/provider facts → exact identifiers</td><td data-label="Required proof">Equal pane numbers in different mux instances stay distinct; old socket lifetime cannot claim a new pane</td></tr>
+<tr><td data-label="Module"><code>providers.rs</code></td><td data-label="Owns">Claude, Codex and Pi callback meanings</td><td data-label="Input → output">Provider + event name + bounded payload → normalized event</td><td data-label="Required proof">Each supported/rejected provider fixture; child events never become lead activity; missing launch identity remains <code>claim_stale</code> while automatic correlation is unresolved</td></tr>
+<tr><td data-label="Module"><code>lifecycle.rs</code></td><td data-label="Owns">Claim rotation, binding selection, lead activity, child active/stopped, prompt-return evidence, exact ending, clear rules and source-owned review</td><td data-label="Input → output">Validated event + environment + locked record reads + observation → accepted transition or rejection</td><td data-label="Required proof">Delayed writers lose; duplicate retries are safe; new child work after stop can reactivate; manual/provider activity share one rule; a prompt return ends the current activity until a strictly newer provider event reactivates it</td></tr>
+<tr><td data-label="Module"><code>records.rs</code></td><td data-label="Owns">Record paths, path/interior checks, private permissions, lock scopes, atomic file replacement, inventory and the one commit helper (lock, reread, decide, apply, compatibility output)</td><td data-label="Input → output">Typed addresses/records → validated reads and durable file operations</td><td data-label="Required proof">Missing differs from invalid/unavailable; future records survive; failures and interrupted multi-file operations remain recoverable; <code>main.rs</code> never holds a lock</td></tr>
+<tr><td data-label="Module"><code>wezterm.rs</code></td><td data-label="Owns">Server pane enumeration, socket/tty evidence, identity publication and <code>wezterm</code> executable discovery with a fallback to WezTerm's own executable directory; scoped presence probes where retained</td><td data-label="Input → output">Connection facts + validated claim → pane observations or tty output</td><td data-label="Required proof">Opened tty is checked before writing; no bytes enter agent stdin; republish never mints a launch; enumeration works under the launchd PATH</td></tr>
+<tr><td data-label="Module"><code>query.rs</code></td><td data-label="Owns">Validated facts for external readers, current versus historical selection, duplicate-binding findings</td><td data-label="Input → output">Records + relevant observations → bounded binding/state results</td><td data-label="Required proof">Follow the pane's current claim; expose provider without visible activity; never choose silently between conflicting bindings</td></tr>
+<tr><td data-label="Module"><code>maintenance.rs</code></td><td data-label="Owns">Explicit doctor/sweep work, safe retention, child-record compaction and immediate revalidation</td><td data-label="Input → output">Inventory + time + operation intent → report, preview or guarded maintenance result</td><td data-label="Required proof">Active children survive; floor precedes covered deletion; replay cannot advance absence twice; unknown files survive</td></tr>
+<tr><td data-label="Module"><code>main.rs</code></td><td data-label="Owns">CLI parsing, adapter construction, bounded stdin, response envelopes and exits</td><td data-label="Input → output">Arguments/stdin → dispatched operation and result</td><td data-label="Required proof">Capture ordering time before stdin; hook failures do not block provider work; a successful hook writes nothing to stdout because <code>SessionStart</code> stdout enters the agent's context; <code>PermissionRequest</code> stdout behavior is verified against the installed provider; JSON is bounded and composable</td></tr>
+<tr><td data-label="Module"><code>compat.rs</code></td><td data-label="Owns">V1 activity/child output and retry repair while old consumers remain</td><td data-label="Input → output">Accepted new state → V1 activity/child projection</td><td data-label="Required proof">Only current launch can update flat output; retry repairs missing output without changing the new event</td></tr>
+</tbody>
+</table>
+<p><code>identity.rs</code> owns the meaning of identifiers. <code>protocol.rs</code> uses those identifiers in record shapes. Raw provider callback interpretation belongs to <code>providers.rs</code>. <code>lifecycle.rs</code> owns semantic decisions and the commit closures that request record reads; <code>records.rs</code> owns the lock/read/apply mechanics. Query and maintenance use the same validated record reader and identity vocabulary, with selection rules local to their own modules.</p>
+<p>Clock capture belongs at the command boundary. Ordering and wall-age types belong in the shared contract. OS clock access is an injected runtime dependency, not a timer service or a new daemon. Independent processes must share the ordering coordinate; a new Rust <code>Instant</code> measured from process startup cannot be persisted as that coordinate. The coordinate is <code>CLOCK_MONOTONIC_RAW</code>, valid within one boot; socket-incarnation scoping is what keeps cross-process comparison safe.</p>
+<p>The shared manifest <code>protocol/v2.json</code> is the executed authority. Rust embeds it, Lua reads it, and the independent fixture checker supplies a separate verdict. Tests require every shared protocol row to receive the same Rust and checker verdict and require the embedded manifest to equal the on-disk file byte for byte. No generation framework. Modules must not independently invent schemas.</p>
+<p><a href="../../src/lib.rs">Rust library</a> · <a href="../../src/main.rs">Rust command</a> · <a href="../../protocol/v2.json">current protocol manifest</a></p>
+</section>
+<section aria-labelledby="lua-module-contracts"><h2 id="lua-module-contracts">Lua module contracts</h2>
+<table class="comparison-table">
+<thead>
+<tr><th>Module</th><th>Owns</th><th>Input → output</th><th>Boundary that must hold</th></tr>
+</thead>
+<tbody>
+<tr><td data-label="Module"><code>init.lua</code></td><td data-label="Owns">Public API, configuration defaults, module composition, plugin/binary discovery and callback registration</td><td data-label="Input → output">WezTerm config/options → installed handlers and public functions</td><td data-label="Boundary that must hold">One documented setup path; retain existing public APIs</td></tr>
+<tr><td data-label="Module"><code>protocol.lua</code></td><td data-label="Owns">Lua validation of shared wire/records, address keys, digest checks and time arithmetic</td><td data-label="Input → output">User-var/file JSON → validated values or diagnostics</td><td data-label="Boundary that must hold">Cross-language parity; future data never becomes plausible v1 data</td></tr>
+<tr><td data-label="Module"><code>reader.lua</code></td><td data-label="Owns">Reading separate records and deriving one named <code>AttentionView</code></td><td data-label="Input → output">Full address + records + previous validated records + current time → view and next expiry</td><td data-label="Boundary that must hold">Recover each unavailable record only within its exact scope; fresh successful reads win</td></tr>
+<tr><td data-label="Module"><code>runtime.lua</code></td><td data-label="Owns">Full-address cache, per-window polling/focus, redraw, expiry wakeups and reconnect publication requests</td><td data-label="Input → output">GUI callbacks → refreshed cache and allowed GUI effects</td><td data-label="Boundary that must hold">No process scan or per-poll subprocess; the reconnect publication is the exception, retried with backoff while any pane in the domain stays unpublished, never latched on spawn, with a failed child visible in the GUI log</td></tr>
+<tr><td data-label="Module"><code>overlays.lua</code></td><td data-label="Owns">Exact acknowledgement and user-owned review writes</td><td data-label="Input → output">Focused activity identity or user review action → independent overlay files</td><td data-label="Boundary that must hold">Child refresh cannot revive an acknowledgement; user actions cannot erase process activity</td></tr>
+<tr><td data-label="Module"><code>legacy.lua</code></td><td data-label="Owns">Tolerant v1 reading and legacy ack/review/expiry behavior</td><td data-label="Input → output">Existing flat files → legacy attention behavior</td><td data-label="Boundary that must hold">Preserve old inputs and six-value API behavior where identity is unambiguous</td></tr>
+<tr><td data-label="Module"><code>titles.lua</code></td><td data-label="Owns">Server-name/directory/settled-title choice and title sampling</td><td data-label="Input → output">Pane metadata sampled during polling → cached title facts</td><td data-label="Boundary that must hold">Two equal samples for the settled fallback; never write a server or pane title</td></tr>
+<tr><td data-label="Module"><code>format.lua</code></td><td data-label="Owns">Tab aggregation, priority, glyph/count/color, formatter context and retained display options</td><td data-label="Input → output">Cached views/title facts → formatted title</td><td data-label="Boundary that must hold">No filesystem, clock sampling or process work; count-only state stays neutral</td></tr>
+</tbody>
+</table>
+<p><code>runtime.lua</code> owns the cache. <code>reader.lua</code> receives previous records and returns a new view; it does not keep a second global cache. <code>format.lua</code> receives values only. <code>titles.lua</code> samples during polling, so title formatting never fetches live data.</p>
+<p>Keep existing title and expiry behavior visible in this map. Whether to remove a specific title option, reduce timestamp precision or remove an extra expiry wakeup remains a separate decision. Those changes do not require deleting the module that owns them.</p>
+<p><a href="../../plugin/init.lua">Current Lua implementation: init.lua</a> · <a href="../../tests/auto_clear_spec.lua">existing Lua regression cases</a></p>
+</section>
+<section aria-labelledby="producer-adapters-and-consumers"><h2 id="producer-adapters-and-consumers">Producer adapters and consumers</h2>
+<table class="comparison-table">
+<thead>
+<tr><th>Component</th><th>What attention owns</th><th>What stays outside</th></tr>
+</thead>
+<tbody>
+<tr><td data-label="Component">Bash and zsh integration</td><td data-label="What attention owns">Establish a new launch identity before the agent where the shell can; export it to hooks; republish at prompts, which is also the prompt-return evidence</td><td data-label="What stays outside">General shell parsing or a terminal/session launcher beyond the supported integration</td></tr>
+<tr><td data-label="Component">Pi extension</td><td data-label="What attention owns">Translate Pi events, serialize requests through its queue, handle reload/shutdown and v1 fallback only when no checkout root exists</td><td data-label="What stays outside">Provider conversation execution and Pi's internal agent loop</td></tr>
+<tr><td data-label="Component">Claude/Codex registration</td><td data-label="What attention owns">Documented callback commands and payload handling</td><td data-label="What stays outside">Actual user settings and bootstrap-owned hook registration; inspected 2026-09-08, bootstrap's hook helpers still write V1 markers directly, while the live plugin directory is a symlink into this checkout</td></tr>
+<tr><td data-label="Component">Title bar</td><td data-label="What attention owns">Cached attention display and formatter extension point</td><td data-label="What stays outside">A new terminal UI application</td></tr>
+<tr><td data-label="Component">Relay</td><td data-label="What attention owns">Exact cached pane/provider/binding facts</td><td data-label="What stays outside">Reply capture, reply records, selection, routing and pasting</td></tr>
+<tr><td data-label="Component">Bridge dashboard</td><td data-label="What attention owns">Validated binding/state output with full pane identity</td><td data-label="What stays outside">Slot, repository, PR and CI joins; cockpit presentation</td></tr>
+<tr><td data-label="Component">Recovery tooling</td><td data-label="What attention owns">Validated provider/session facts and retained binding candidates</td><td data-label="What stays outside">Choosing and executing resume commands; restoring windows or pane placement</td></tr>
+</tbody>
+</table>
+<p>Ordinary launch convenience is a retained goal. The inspected live zsh configuration publishes <code>WEZTERM_PANE</code> at each prompt but does not run the V2 claim command. The implemented Bash adapter claims supported commands automatically; the implemented zsh adapter needs an explicit call and is not evidence of installed shell activation.</p>
+<p><strong>Current launch status (2026-09-08):</strong> automatic <code>SessionStart</code> self-claim is disabled. On macOS, opening <code>/dev/tty</code> from the tested hook-like child does not identify the pane's real pty, and current Claude documentation says command hooks have no controlling terminal. Explicit shell claims remain supported. A replacement automatic-correlation design must prove the pane and process generation across every later callback; it is deferred in <a href="triage-2026-09-08/followups.md#automatic-launch-correlation">Hook review follow-ups</a>.</p>
+<p>Pi remains a Node-hosted TypeScript adapter that calls the Rust binary. Rust replaces the Python production writer; it does not replace Pi's host API or WezTerm's Lua API. The adapter falls back to V1 only when no checkout root is configured. A configured missing, nonzero, or diagnostic writer is reported and never downgraded. A reload drains queued writes without sending the provider-defined no-op end request.</p>
+<p><a href="../../shell/wezterm-attention.bash">Bash</a> · <a href="../../shell/wezterm-attention.zsh">zsh</a> · <a href="../../pi/index.ts">Pi</a></p>
+</section>
+<section aria-labelledby="shared-facts-and-public-interfaces"><h2 id="shared-facts-and-public-interfaces">Shared facts and public interfaces</h2>
+<table class="comparison-table">
+<thead>
+<tr><th>Fact</th><th>Meaning and owner</th><th>Important distinction</th></tr>
+</thead>
+<tbody>
+<tr><td data-label="Fact">Pane address</td><td data-label="Meaning and owner">Mux connection + socket lifetime + server pane ID; identity module</td><td data-label="Important distinction">A GUI-local pane number is not storage identity</td></tr>
+<tr><td data-label="Fact">Launch</td><td data-label="Meaning and owner">One top-level agent process; lifecycle claim operation</td><td data-label="Important distinction">Starting another agent needs a new launch identity</td></tr>
+<tr><td data-label="Fact">Binding</td><td data-label="Meaning and owner">Actual provider/session associated with that launch</td><td data-label="Important distinction">A notification is not a substitute for session identity</td></tr>
+<tr><td data-label="Fact">Activity</td><td data-label="Meaning and owner">Latest accepted lead activity and its event ID</td><td data-label="Important distinction">Reported Stop is not proof that a task succeeded</td></tr>
+<tr><td data-label="Fact">Child presence</td><td data-label="Meaning and owner">Ordered active/stopped evidence per child</td><td data-label="Important distinction">Parent and child work can have different lifetimes</td></tr>
+<tr><td data-label="Fact">Acknowledgement</td><td data-label="Meaning and owner">GUI dismissal of one exact activity</td><td data-label="Important distinction">It does not end the session or clear child work</td></tr>
+<tr><td data-label="Fact">Review</td><td data-label="Meaning and owner">An explicit request owned by a user or source</td><td data-label="Important distinction">Source clear does not remove another owner's request</td></tr>
+<tr><td data-label="Fact">Availability and health</td><td data-label="Meaning and owner">What this reader can prove from its observations</td><td data-label="Important distinction">Missing, unavailable, invalid and ended remain distinct</td></tr>
+</tbody>
+</table>
+<p>Callbacks miss transitions. An Escape interrupt and a denied permission emit no hook, and herdr replaced this same Claude hook set with screen reading for that reason. This design accepts bounded drift instead and names what re-anchors a record: <code>thinking</code> expires by TTL (30 minutes by default), <code>notify</code> and <code>stop</code> clear on focus acknowledgement, a prompt return ends the launch's activity, and the explicit sweep is the last resort. Every reference pairs hooks with a continuously observable signal; the prompt return is ours.</p>
+<p>Current public contract:</p>
+<table class="comparison-table">
+<thead>
+<tr><th>Surface</th><th>Call or command</th><th>Promise</th></tr>
+</thead>
+<tbody>
+<tr><td data-label="Surface">Provider callbacks</td><td data-label="Call or command"><code>attention hooks event PROVIDER EVENT</code></td><td data-label="Promise">Bounded original JSON on stdin; normalized guarded mutation; default failure does not block the agent; nothing on stdout when accepted</td></tr>
+<tr><td data-label="Surface">Shell launch</td><td data-label="Call or command"><code>attention hooks claim</code></td><td data-label="Promise">Commit a claim and print its launch ID for parent-shell export; provider callbacks without a valid launch remain stale</td></tr>
+<tr><td data-label="Surface">Prompt/reattach</td><td data-label="Call or command"><code>attention hooks publish</code></td><td data-label="Promise">Republish existing identity and record that the prompt returned after the current launch; never create a replacement launch</td></tr>
+<tr><td data-label="Surface">Human/tool activity</td><td data-label="Call or command"><code>attention mark …</code></td><td data-label="Promise">Use the same transition rules as provider callers; source-owned review remains separate</td></tr>
+<tr><td data-label="Surface">External readers</td><td data-label="Call or command"><code>attention bindings --json</code></td><td data-label="Promise">Validated full-address binding identity and liveness facts; no resume command and no complete activity/review/subagent view</td></tr>
+<tr><td data-label="Surface">Operator</td><td data-label="Call or command"><code>attention doctor</code>, <code>attention sweep</code></td><td data-label="Promise">Diagnosis and preview-first, explicitly applied maintenance</td></tr>
+<tr><td data-label="Surface">Existing Lua consumers</td><td data-label="Call or command"><code>get_attention</code>, <code>pane_marker_id</code>, <code>poll</code>, <code>remove_marker</code>, <code>wrap_title_formatter</code>, <code>apply_to_config</code>, <code>doctor</code></td><td data-label="Promise">Preserve documented legacy API behavior; do not resolve ambiguous new addresses by guessing</td></tr>
+<tr><td data-label="Surface">New Lua consumers</td><td data-label="Call or command"><code>get_attention_view(pane)</code></td><td data-label="Promise">Cached pane view, including provider/binding when no alert is drawn; no I/O in the accessor</td></tr>
+</tbody>
+</table>
+<p>Provider lifecycle state and GUI visibility must remain separately queryable. A consumer must not interpret “no icon” as “no agent.” New consumers must use full pane identity. The scalar v1 API cannot represent two different mux panes that share a number.</p>
+<p>There is <strong>no committed <code>changes</code>/event-log API</strong> in this module specification. Reading retained session records is different from replaying missed transitions. The earlier 64-event proposal is not part of this baseline.</p>
+</section>
+<section aria-labelledby="record-layout-and-write-ownership"><h2 id="record-layout-and-write-ownership">Record layout and write ownership</h2>
+<p>This is the implemented separate-record structure. The pane subtree is shown below; mux connection and socket-lifetime manifests live above it. Placeholder IDs are shortened. <code>protocol/v2.json</code> owns the selected wire and record schema versions.</p>
+<pre><code class="language-text">pane/
+├── claim.json
+├── reviews/&lt;owner&gt;.json
+├── absence-probe.json
+└── launches/&lt;launch&gt;/
+    ├── current-binding.json
+    ├── activity.json
+    ├── ack.json
+    └── bindings/&lt;binding&gt;/
+        ├── binding.json
+        ├── activity.json
+        ├── activity-clear.json
+        ├── end.json
+        ├── ack.json
+        ├── agents-clear.json
+        ├── agents-floor.json
+        └── agents/&lt;child&gt;.json
+</code></pre>
+<p>Launch-level activity/ack records cover the period before a current binding. Binding-level activity is selected after binding. A review request remains pane-owned. Files shown are record kinds, not separate source modules. Lock files are omitted from this drawing.</p>
+<table class="comparison-table">
+<thead>
+<tr><th>Writer</th><th>Allowed records</th><th>Never inferred from its action</th></tr>
+</thead>
+<tbody>
+<tr><td data-label="Writer">Rust lifecycle</td><td data-label="Allowed records">Claims, binding selection, activity, child records, provider ending/clear and source review</td><td data-label="Never inferred from its action">Provider completion does not acknowledge what the user saw</td></tr>
+<tr><td data-label="Writer">Rust maintenance</td><td data-label="Allowed records">Absence observations, approved inferred ending, retention floor and covered deletions</td><td data-label="Never inferred from its action">Missing/failed probe does not prove absence; cleanup is not conversation compression</td></tr>
+<tr><td data-label="Writer">Lua GUI actions</td><td data-label="Allowed records">Exact ack, user review and explicit review clear</td><td data-label="Never inferred from its action">Acknowledgement does not mutate provider truth</td></tr>
+<tr><td data-label="Writer">Optional compatibility output</td><td data-label="Allowed records">Derived v1 activity/child files</td><td data-label="Never inferred from its action">An old flat record does not become new-protocol authority</td></tr>
+</tbody>
+</table>
+<p>Individual replacements are atomic; a sequence of separate-file replacements is not one transaction. Binding-before-pointer publication, Stop/clear retry repair and floor-before-delete ordering remain explicit contracts. A single record I/O helper cannot remove those obligations.</p>
+</section>
+<section aria-labelledby="runtime-flows"><h2 id="runtime-flows">Runtime flows</h2>
+<p>Each numbered list is an execution sequence. The module lists above are responsibilities, not a build order.</p>
+<h3>Provider work or child completion</h3>
+<ol>
+<li>An activated shell integration establishes and exports launch identity before the agent starts. The inspected live zsh configuration has not adopted this step.</li>
+<li>A provider hook or Pi adapter calls <code>bin/attention</code>.</li>
+<li><code>main.rs</code> captures ordering time before reading bounded input; <code>providers.rs</code> normalizes the callback.</li>
+<li><code>records.rs</code> runs the one commit helper: take the scope lock, reread current records, call <code>lifecycle.rs</code> to decide, apply the ordered file replacements and any compatibility output. <code>main.rs</code> never holds a lock. The Python version repeats this choreography at fourteen call sites; herdr's arbitration grew to 5,886 lines the same way.</li>
+<li><code>runtime.lua</code> calls <code>reader.lua</code> on a poll. The reader validates records and derives activity, child eligibility and health.</li>
+<li><code>format.lua</code> renders cached values. Relay can read the same cached pane identity through the public accessor.</li>
+</ol>
+<h3>Focus and acknowledgement</h3>
+<ol>
+<li><code>runtime.lua</code> verifies that this GUI is focused and selects its current pane.</li>
+<li><code>overlays.lua</code> rereads the current scoped activity and writes an acknowledgement for that exact event.</li>
+<li>The affected view is refreshed and redrawn. Provider identity and child state remain available.</li>
+</ol>
+<h3>GUI reconnect</h3>
+<ol>
+<li>A poll finds a mux pane without published identity.</li>
+<li>The Lua runtime spawns a background <code>hooks publish</code> for that mux connection with WezTerm's executable directory on the child's PATH, and repeats it with backoff on later polls while any pane in the domain stays unpublished.</li>
+<li>Rust validates server pane and opened tty evidence, then writes identity to terminal output, not agent input. The mux server forwards a user variable only to panes already attached, so one publication cannot cover a GUI that is still attaching.</li>
+<li>A later poll resolves the restored identity and reads retained records. No new provider event is required for this recovery. Recovered views stay <code>unconfirmed</code> until a newer event confirms them.</li>
+</ol>
+<p>Both failures of the once-only request were measured on 2026-09-05: it fired before the GUI had attached most panes, and under a Dock-launched GUI the child could not find <code>wezterm</code> on the launchd PATH.</p>
+<h3>Explicit maintenance</h3>
+<ol>
+<li><code>main.rs</code> dispatches a requested doctor/sweep operation to query/maintenance code.</li>
+<li>Queries read validated records and the required current observations. Preview does not write.</li>
+<li>Apply reacquires the relevant locks and rechecks the target immediately before mutation.</li>
+<li>Cleanup retains the ordering evidence needed to reject delayed callbacks before deleting covered records. Any retained inferred-ending policy requires its own successful absence observations.</li>
+</ol>
+<p>Nothing in this module map installs a periodic process scan. The current scan is reached by explicit commands. An external scheduler is a separate owner.</p>
+</section>
+<section aria-labelledby="where-the-eight-reviewed-features-belong"><h2 id="where-the-eight-reviewed-features-belong">Where the eight reviewed features belong</h2>
+<table class="comparison-table">
+<thead>
+<tr><th>Reviewed item</th><th>Module ownership</th><th>Current review position</th></tr>
+</thead>
+<tbody>
+<tr><td data-label="Reviewed item">Separate binding/child files</td><td data-label="Module ownership">Rust records/protocol; Lua protocol/reader</td><td data-label="Current review position">Retain separation and scoped recovery</td></tr>
+<tr><td data-label="Reviewed item">Process-based ending inference</td><td data-label="Module ownership">WezTerm observations, query and maintenance</td><td data-label="Current review position">Prompt-return evidence from <code>hooks publish</code> becomes the ordinary ending signal; the two-observation sweep stays as the explicit last resort</td></tr>
+<tr><td data-label="Reviewed item">Retained binding history</td><td data-label="Module ownership">Records, query and maintenance</td><td data-label="Current review position">Preserve existing records where useful; measure cost before richer history</td></tr>
+<tr><td data-label="Reviewed item">Child-record compaction</td><td data-label="Module ownership">Lifecycle eligibility rules, maintenance and record I/O</td><td data-label="Current review position">Keep safe growth handling and delayed-writer protection</td></tr>
+<tr><td data-label="Reviewed item">Precision and expiry wakeups</td><td data-label="Module ownership">Shared protocol/time rules; Lua reader/runtime</td><td data-label="Current review position">Precision and timer removal are separate open choices</td></tr>
+<tr><td data-label="Reviewed item">Title options</td><td data-label="Module ownership">Lua titles and format</td><td data-label="Current review position">Keep ownership clear; review individual options rather than deleting the capability</td></tr>
+<tr><td data-label="Reviewed item">V1 output mirroring</td><td data-label="Module ownership">Rust compat and migration tooling</td><td data-label="Current review position">Required while inspected provider helpers and bridge consumers remain V1; retire only after those real consumers migrate</td></tr>
+<tr><td data-label="Reviewed item">Automatic launch claiming</td><td data-label="Module ownership">Shell integration and Rust lifecycle claim</td><td data-label="Current review position">Automatic provider self-claim remains disabled; explicit claims work, and automatic correlation is deferred</td></tr>
+</tbody>
+</table>
+</section>
+<section aria-labelledby="delivery-verification-and-open-decisions"><h2 id="delivery-verification-and-open-decisions">Delivery, verification and open decisions</h2>
+<p><code>bin/attention</code> is the stable command path. It locates the installed Rust binary and never compiles during a hook. <code>scripts/install-cli.sh</code> performs the explicit build/install step; packaging remains one Cargo package.</p>
+<p>Tests are part of the delivery specification, not more product modules:</p>
+<ul>
+<li>Rust identity, parsing, transition, lock, retry, query and retention cases.</li>
+<li>Shared Rust/Lua record and expiry fixtures; keep an independent oracle where useful.</li>
+<li>Lua cache, focus, review, rendering and legacy regression cases.</li>
+<li>Bash/zsh inheritance and command-behavior checks; Pi Node dispatch and queue checks.</li>
+<li>Installed-WezTerm module/JSON/formatter contact, disposable reconnect and zero-stdin proofs.</li>
+<li>Consumer contract exercises for Relay, bridge and recovery; compatibility/upgrade rehearsal before live activation.</li>
+</ul>
+<p>The implementation is built. These product or activation decisions remain open and do not hide any module from this map:</p>
+<table class="comparison-table">
+<thead>
+<tr><th>Decision</th><th>What must be settled</th></tr>
+</thead>
+<tbody>
+<tr><td data-label="Decision">Automatic launch correlation</td><td data-label="What must be settled">A provider-supported pane and process-generation signal for callbacks without an explicit shell claim</td></tr>
+<tr><td data-label="Decision">Acknowledgement of <code>notify</code></td><td data-label="What must be settled">Whether focus clears a pending prompt, as shipped, or only a newer provider event clears it; herdr never acknowledges a blocker</td></tr>
+<tr><td data-label="Decision">Lua digests</td><td data-label="What must be settled">Whether the Lua reader keeps recomputing SHA-256 for every child record on every poll, or trusts filenames that Rust verified at write; measure before deciding</td></tr>
+<tr><td data-label="Decision">Provider activation</td><td data-label="What must be settled">When bootstrap-owned shell and provider hooks move from V1 helpers to the Rust command; installed shim selection alone does not perform this migration</td></tr>
+<tr><td data-label="Decision">Presentation</td><td data-label="What must be settled">Which optional title features remain; do not let this change lifecycle facts</td></tr>
+</tbody>
+</table>
+<p>No event archive, workflow engine, reply store, topology manager, daemon or native Lua library is implied. If a later consumer needs one, it requires a separate justification. Keeping the current implementation as a behavioral reference does not make its duplicated helpers mandatory.</p>
+<p>The <a href="../plans/2026-09-05-001-feat-attention-rust-lifecycle-plan.md">earlier Rust implementation plan</a> is <strong>superseded</strong> by the <a href="../plans/2026-09-06-001-feat-attention-rust-lifecycle-plan.md">2026-09-06 plan</a>, which was written from this spec. Neither approves the earlier single-pane snapshot, capacity-refusal replacement for cleanup, manual Bash cut or 64-event catch-up system.</p>
+<p>This specification began from the Python/Lua/Pi/shell implementation and the 2026-09-06 review. The Rust and split-Lua module paths are now implemented; <a href="2026-09-07-rust-port-certification.md">Rust port certification</a> records activation and test evidence. The source remains uncommitted in this checkout, the live plugin is linked here, and the provider hook/shell activation boundary remains separate as described above. Updated 2026-09-08 to remove retired Python anchors and distinguish implemented code from inspected live registration.</p>
+</section>
+<footer><a href="./2026-09-06-attention-v2-modules.md">Read the Markdown source</a><span>Generated offline from that source. No external fonts, scripts or images.</span><code>Source SHA-256: 519348243e74019f7c670989c8236b190cef669bcbb5d3417a9f1de6a83f87f4</code></footer>
+</main></body></html>

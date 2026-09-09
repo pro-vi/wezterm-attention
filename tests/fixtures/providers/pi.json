@@ -1,0 +1,29 @@
+{
+  "provider": "pi",
+  "base": {
+    "session_id": "pi-session-a",
+    "session_file": "/tmp/pi-session-a.jsonl",
+    "cwd": "/tmp/project",
+    "model": "model-a"
+  },
+  "cases": [
+    { "id": "startup_binding", "event": "session_start", "patch": { "start_source": "startup" }, "expected": "binding" },
+    { "id": "self_claim_binding", "event": "session_start", "patch": { "start_source": "startup" }, "env": { "WEZTERM_ATTENTION_ENABLE_SELF_CLAIM": "1" }, "expected": "binding", "lifecycle_expected": "applied" },
+    { "id": "reload_confirmation", "event": "session_start", "patch": { "start_source": "reload" }, "expected": "binding" },
+    { "id": "new_binding", "event": "session_start", "patch": { "start_source": "new" }, "expected": "binding" },
+    { "id": "resume_binding", "event": "session_start", "patch": { "start_source": "resume" }, "expected": "binding" },
+    { "id": "fork_binding", "event": "session_start", "patch": { "start_source": "fork" }, "expected": "binding" },
+    { "id": "agent_start_thinks", "event": "agent_start", "expected": "activity", "activity_type": "thinking" },
+    { "id": "no_launch_non_start_is_stale", "event": "agent_start", "expected": "activity", "activity_type": "thinking", "lifecycle_diagnostic": "claim_stale" },
+    { "id": "tool_start_thinks", "event": "tool_execution_start", "expected": "activity", "activity_type": "thinking" },
+    { "id": "settled_stops", "event": "agent_settled", "expected": "activity", "activity_type": "stop" },
+    { "id": "agent_end_is_inert", "event": "agent_end", "expected": "ignored" },
+    { "id": "reload_shutdown_is_inert", "event": "session_shutdown", "patch": { "reason": "reload" }, "expected": "ignored" },
+    { "id": "quit_shutdown_ends", "event": "session_shutdown", "patch": { "reason": "quit" }, "expected": "end" },
+    { "id": "bus_notify", "event": "bus", "patch": { "state": "notify" }, "expected": "activity", "activity_type": "notify" },
+    { "id": "bus_review", "event": "bus", "patch": { "state": "review" }, "expected": "review" },
+    { "id": "bus_clear", "event": "bus", "patch": { "state": "clear" }, "expected": "clear" },
+    { "id": "invalid_bus_state", "event": "bus", "patch": { "state": "unknown" }, "expected": "ignored", "diagnostic": "record_invalid" },
+    { "id": "unknown_event", "event": "turn_end", "expected": "ignored", "diagnostic": "integration_version_mismatch" }
+  ]
+}

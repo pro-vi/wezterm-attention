@@ -1,0 +1,72 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$WEZTERM_ATTENTION_ROOT/tests/provider_contact_hook.py\" claude SessionStart",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$WEZTERM_ATTENTION_ROOT/tests/provider_contact_hook.py\" claude PreToolUse",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$WEZTERM_ATTENTION_ROOT/tests/provider_contact_hook.py\" claude PermissionRequest",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$WEZTERM_ATTENTION_ROOT/tests/provider_contact_hook.py\" claude Stop",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$WEZTERM_ATTENTION_ROOT/tests/provider_contact_hook.py\" claude SubagentStop",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$WEZTERM_ATTENTION_ROOT/tests/provider_contact_hook.py\" claude SessionEnd",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,10 +1,9 @@
 #!/usr/bin/env sh
-# Direct custom marker example. The shell integration must have claimed the
-# current launch before this runs.
+set -eu
 
 if [ -z "${WEZTERM_ATTENTION_ROOT:-}" ] || [ ! -x "$WEZTERM_ATTENTION_ROOT/bin/attention" ]; then
   printf '%s\n' 'wezterm-attention: WEZTERM_ATTENTION_ROOT does not name an executable checkout' >&2
   exit 3
 fi
 
-exec "$WEZTERM_ATTENTION_ROOT/bin/attention" mark stop --source example
+exec "$WEZTERM_ATTENTION_ROOT/bin/attention" hooks event claude Stop

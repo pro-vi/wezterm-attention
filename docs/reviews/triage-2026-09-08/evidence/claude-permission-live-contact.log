@@ -1,0 +1,18 @@
+checked_at=2026-09-08
+claude_version=2.1.266
+authorized_provider_interactions=1
+hook_event=PermissionRequest
+hook_exit=0
+hook_stdout_bytes=0
+hook_invoked=true
+normal_permission_prompt_shown=true
+parse_or_hook_error_matches=0
+permission_response=No
+requested_command_executed=false
+target_exists_before=false
+target_exists_after=false
+live_hook_registration_changes=0
+
+Two startup attempts ended before provider contact: one failed local MCP argument
+validation; the other stopped at the disposable workspace trust screen. Neither
+ran the hook or sent the test prompt to the provider.

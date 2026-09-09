@@ -1,0 +1,35 @@
+ok - an activity clear watermark hides older activity and permits newer activity
+ok - an unreadable activity clear watermark fails closed
+ok - a newer same-binding confirmation reopens an older end snapshot
+ok - raw subagent and review ids never become fixture paths
+ok - one v2 poll samples UTC once and formatting samples no clock
+ok - call_after only wakes a fresh TTL read
+ok - unavailable UTC omits TTL children but preserves non-TTL activity
+ok - invalid and future v2 identity never downgrade to a plausible v1 marker
+ok - a core interior-address mismatch makes the v2 view invalid
+ok - a future core record blocks v1 downgrade and stays visible as future schema
+ok - an unreadable core v2 record is unavailable rather than absent
+ok - a poll read failure preserves the last v2 view as unavailable
+ok - invalid child wall ages do not poison a valid sibling
+ok - cache recovery never crosses a launch identity boundary
+ok - cache recovery recalculates TTL and never rearms an expired deadline
+ok - matching forged child filenames cannot duplicate one raw agent id
+ok - v1 identity clears a stale scalar-to-v2 cache projection
+ok - an unbound launch reads and applies its exact acknowledgement
+ok - a fresh binding pointer prevents recovery of an older binding
+ok - fresh acknowledgement and stopped child survive an unrelated review read failure
+ok - record recovery rejects cached TTL state when UTC precedes its write
+ok - focused v2 acknowledgement targets only the active pane's exact event
+ok - Alt+B uses full v2 addresses and clear-all preserves activity
+ok - v2 user actions never replace future acknowledgement or review records
+ok - unpublished mux pane schedules one realm publish from the resolved plugin root
+ok - unpublished mux panes retry on the bounded schedule and stop when resolved
+ok - a pane-count change restarts stabilization without doubling the schedule
+ok - unequal pane counts in alternating windows start one realm publication
+ok - a resolved window cannot cancel another window's unpublished realm
+ok - a window leaving a realm cancels its stale publication retry
+ok - closing an unpublished window cancels its stale publication retry
+ok - a failed publish logs once and keeps its retry schedule
+ok - get_attention_view returns cached provider facts without exposing the cache table
+ok - a missing protocol module logs once and keeps the v1 reader available
+111 passed, 0 failed

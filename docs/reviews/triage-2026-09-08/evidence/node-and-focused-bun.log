@@ -1,0 +1,25 @@
+node:fs:440
+    return binding.readFileUtf8(path, stringToFlags(options.flag));
+                   ^
+
+Error: ENOENT: no such file or directory, open '/tmp/attention-pi-node-1jg4pK/calls.log'
+    at readFileSync (node:fs:440:20)
+    at file:///Users/provi/Development/_projs/wezterm-attention/tests/pi_node_runtime.mjs:48:16 {
+  errno: -2,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: '/tmp/attention-pi-node-1jg4pK/calls.log'
+}
+
+Node.js v24.14.0
+bun test v1.3.11 (af24e281)
+
+tests/pi_extension.test.ts:
+killed 1 dangling process
+(fail) v2 dispatch: Pi lifecycle and bus requests use the serialized attention process queue [5003.42ms]
+  ^ this test timed out after 5000ms.
+
+ 0 pass
+ 29 filtered out
+ 1 fail
+Ran 1 test across 1 file. [5.13s]

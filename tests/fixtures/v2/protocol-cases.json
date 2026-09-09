@@ -1,0 +1,297 @@
+{
+  "fixture_schema": 1,
+  "wire_sample": {
+    "wire": 2,
+    "address": {
+      "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pane_id": "42"
+    },
+    "launch_id": "00000000-0000-4000-8000-000000000001"
+  },
+  "record_samples": {
+    "realm": {
+      "kind": "realm",
+      "schema": 2,
+      "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "socket_path": "/tmp/attention-v2/socket",
+      "writer_version": "2.0.0"
+    },
+    "incarnation": {
+      "kind": "incarnation",
+      "schema": 2,
+      "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "socket_path": "/tmp/attention-v2/socket",
+      "socket_device": "16777234",
+      "socket_inode": "1234567",
+      "socket_ctime_ns": "01788401900000000000",
+      "writer_version": "2.0.0",
+      "server_pid": "43210"
+    },
+    "claim": {
+      "kind": "claim",
+      "schema": 2,
+      "address": {
+        "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pane_id": "42"
+      },
+      "launch_id": "00000000-0000-4000-8000-000000000001",
+      "tty_path": "/dev/ttys042",
+      "tty_fingerprint": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "observed_mono_ns": "00000000001000000000"
+    },
+    "binding": {
+      "kind": "binding",
+      "schema": 2,
+      "address": {
+        "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pane_id": "42"
+      },
+      "launch_id": "00000000-0000-4000-8000-000000000001",
+      "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "event_id": "00000000-0000-4000-8000-000000000002",
+      "provider": "claude",
+      "provider_session_id": "session-42",
+      "expected_session_id": "session-42",
+      "transcript_path": "/tmp/attention-v2/transcript.jsonl",
+      "cwd": "/tmp/attention-v2/project",
+      "config_dir": "/tmp/attention-v2/config",
+      "model": "opus",
+      "start_source": "startup",
+      "observed_mono_ns": "00000000002000000000",
+      "written_at_unix_ns": "00000000010000000000",
+      "writer_version": "2.0.0"
+    },
+    "current_binding": {
+      "kind": "current_binding",
+      "schema": 2,
+      "address": {
+        "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pane_id": "42"
+      },
+      "launch_id": "00000000-0000-4000-8000-000000000001",
+      "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "activity": {
+      "kind": "activity",
+      "schema": 2,
+      "address": {
+        "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pane_id": "42"
+      },
+      "launch_id": "00000000-0000-4000-8000-000000000001",
+      "target": {
+        "kind": "binding",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "event_id": "00000000-0000-4000-8000-000000000003",
+      "type": "notify",
+      "source": "claude",
+      "label": "ready",
+      "puppet": false,
+      "observed_mono_ns": "00000000003000000000",
+      "written_at_unix_ns": "00000000010000000000"
+    },
+    "activity_clear": {
+      "kind": "activity_clear",
+      "schema": 2,
+      "address": {
+        "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pane_id": "42"
+      },
+      "launch_id": "00000000-0000-4000-8000-000000000001",
+      "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "event_id": "00000000-0000-4000-8000-000000000012",
+      "observed_mono_ns": "00000000002000000000"
+    },
+    "review": {
+      "kind": "review",
+      "schema": 2,
+      "address": {
+        "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pane_id": "42"
+      },
+      "owner_id": "user",
+      "owner_key": "04f8996da763b7a969b1028ee3007569eaf3a635486ddab211d512c85b9df8fb",
+      "event_id": "00000000-0000-4000-8000-000000000005"
+    },
+    "binding_end": {
+      "kind": "binding_end",
+      "schema": 2,
+      "address": {
+        "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pane_id": "42"
+      },
+      "launch_id": "00000000-0000-4000-8000-000000000001",
+      "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "reason": "session_end",
+      "event_id": "00000000-0000-4000-8000-000000000006",
+      "observed_mono_ns": "00000000004000000000",
+      "written_at_unix_ns": "00000000020000000000"
+    },
+    "acknowledgement": {
+      "kind": "acknowledgement",
+      "schema": 2,
+      "address": {
+        "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pane_id": "42"
+      },
+      "launch_id": "00000000-0000-4000-8000-000000000001",
+      "target": {
+        "kind": "binding",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "activity_event_id": "00000000-0000-4000-8000-000000000099",
+      "event_id": "00000000-0000-4000-8000-000000000007"
+    },
+    "absence_probe": {
+      "kind": "absence_probe",
+      "schema": 2,
+      "address": {
+        "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pane_id": "42"
+      },
+      "operation_id": "00000000-0000-4000-8000-000000000008",
+      "observed_mono_ns": "00000000005000000000"
+    },
+    "subagent_presence": {
+      "kind": "subagent_presence",
+      "schema": 2,
+      "address": {
+        "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pane_id": "42"
+      },
+      "launch_id": "00000000-0000-4000-8000-000000000001",
+      "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "provider": "claude",
+      "agent_id": "child-alpha",
+      "agent_key": "219264af6a9830685abfb94da44705f051594227429253be94bfc39402af3458",
+      "source": "tool",
+      "status": "active",
+      "event_id": "00000000-0000-4000-8000-000000000009",
+      "observed_mono_ns": "00000000300000000000",
+      "written_at_unix_ns": "00000000010000000000",
+      "ttl_ms": 600000
+    },
+    "subagent_clear": {
+      "kind": "subagent_clear",
+      "schema": 2,
+      "address": {
+        "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pane_id": "42"
+      },
+      "launch_id": "00000000-0000-4000-8000-000000000001",
+      "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "event_id": "00000000-0000-4000-8000-000000000010",
+      "observed_mono_ns": "00000000200000000000"
+    },
+    "subagent_retention_floor": {
+      "kind": "subagent_retention_floor",
+      "schema": 2,
+      "address": {
+        "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pane_id": "42"
+      },
+      "launch_id": "00000000-0000-4000-8000-000000000001",
+      "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "floor_mono_ns": "00000000150000000000",
+      "operation_id": "00000000-0000-4000-8000-000000000011"
+    }
+  },
+  "parse_cases": [
+    { "id": "wire_valid", "parser": "wire", "expected": "valid" },
+    { "id": "wire_future", "parser": "wire", "patch": { "wire": 3 }, "expected": "future_schema" },
+    { "id": "wire_non_table", "parser": "wire", "value": "not-an-object", "expected": "record_invalid" },
+    { "id": "wire_bad_pane", "parser": "wire", "patch": { "address.pane_id": "042" }, "expected": "record_invalid" },
+    { "id": "wire_unknown_field", "parser": "wire", "patch": { "extra": true }, "expected": "record_invalid" },
+    { "id": "wire_unknown_null_field", "parser": "wire_json", "raw": "{\"wire\":2,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\"},\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"unknown\":null}", "expected": "record_invalid" },
+    { "id": "realm_valid", "parser": "record", "sample": "realm", "expected": "valid" },
+    { "id": "record_unknown_null_field", "parser": "record_json", "raw": "{\"kind\":\"realm\",\"schema\":2,\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"socket_path\":\"/tmp/attention-v2/socket\",\"writer_version\":\"2.0.0\",\"unknown\":null}", "expected": "record_invalid" },
+    { "id": "incarnation_valid", "parser": "record", "sample": "incarnation", "expected": "valid" },
+    { "id": "claim_valid", "parser": "record", "sample": "claim", "expected": "valid" },
+    { "id": "binding_valid", "parser": "record", "sample": "binding", "expected": "valid" },
+    { "id": "current_binding_valid", "parser": "record", "sample": "current_binding", "expected": "valid" },
+    { "id": "activity_valid", "parser": "record", "sample": "activity", "expected": "valid" },
+    { "id": "activity_clear_valid", "parser": "record", "sample": "activity_clear", "expected": "valid" },
+    { "id": "review_valid_without_clock", "parser": "record", "sample": "review", "expected": "valid" },
+    { "id": "binding_end_valid", "parser": "record", "sample": "binding_end", "expected": "valid" },
+    { "id": "acknowledgement_valid", "parser": "record", "sample": "acknowledgement", "expected": "valid" },
+    { "id": "absence_probe_valid", "parser": "record", "sample": "absence_probe", "expected": "valid" },
+    { "id": "subagent_presence_valid", "parser": "record", "sample": "subagent_presence", "expected": "valid" },
+    { "id": "subagent_clear_valid", "parser": "record", "sample": "subagent_clear", "expected": "valid" },
+    { "id": "subagent_retention_floor_valid", "parser": "record", "sample": "subagent_retention_floor", "expected": "valid" },
+    { "id": "record_future", "parser": "record", "sample": "activity", "patch": { "schema": 3 }, "expected": "future_schema" },
+    { "id": "record_missing_required", "parser": "record", "sample": "activity", "remove": ["written_at_unix_ns"], "expected": "record_invalid" },
+    { "id": "record_unknown_field", "parser": "record", "sample": "claim", "patch": { "unknown": "value" }, "expected": "record_invalid" },
+    { "id": "record_bad_realm", "parser": "record", "sample": "claim", "patch": { "address.realm_id": "ABC" }, "expected": "record_invalid" },
+    { "id": "record_pane_id_must_be_string", "parser": "record", "sample": "claim", "patch": { "address.pane_id": 42 }, "expected": "record_invalid" },
+    { "id": "record_bad_uuid", "parser": "record", "sample": "claim", "patch": { "launch_id": "not-a-uuid" }, "expected": "record_invalid" },
+    { "id": "record_tty_path_rejects_control", "parser": "record", "sample": "claim", "patch": { "tty_path": "/dev/tty\nreplacement" }, "expected": "record_invalid" },
+    { "id": "record_tty_path_rejects_more_than_4096_bytes", "parser": "record", "sample": "claim", "repeat_patch": { "tty_path": { "prefix": "/", "text": "x", "count": 4096 } }, "expected": "record_invalid" },
+    { "id": "record_bad_unix_width", "parser": "record", "sample": "activity", "patch": { "written_at_unix_ns": "1788401900000000000" }, "expected": "record_invalid" },
+    { "id": "record_socket_inode_too_wide", "parser": "record", "sample": "incarnation", "patch": { "socket_inode": "123456789012345678901" }, "expected": "record_invalid" },
+    { "id": "record_review_rejects_old_monotonic_field", "parser": "record", "sample": "review", "patch": { "observed_mono_ns": "00000000001000000000" }, "expected": "record_invalid" },
+    { "id": "record_review_owner_key_matches_owner_id", "parser": "record", "sample": "review", "patch": { "owner_key": "9999999999999999999999999999999999999999999999999999999999999999" }, "expected": "record_invalid" },
+    { "id": "record_subagent_key_matches_agent_id", "parser": "record", "sample": "subagent_presence", "patch": { "agent_key": "9999999999999999999999999999999999999999999999999999999999999999" }, "expected": "record_invalid" },
+    { "id": "record_subagent_ttl_is_fixed", "parser": "record", "sample": "subagent_presence", "patch": { "ttl_ms": 599999 }, "expected": "record_invalid" }
+  ],
+  "eligibility_cases": [
+    { "id": "exact_600_seconds", "now_unix_ns": "00000000610000000000", "expected": true },
+    { "id": "one_nanosecond_after_600_seconds", "now_unix_ns": "00000000610000000001", "expected": false },
+    { "id": "cross_second_borrow_before_boundary", "written_at_unix_ns": "00000000010999999999", "now_unix_ns": "00000000610999999999", "expected": true },
+    { "id": "cross_second_borrow_after_boundary", "written_at_unix_ns": "00000000010999999999", "now_unix_ns": "00000000611000000000", "expected": false },
+    { "id": "clear_covers_equal_observation", "now_unix_ns": "00000000011000000000", "observed_mono_ns": "00000000200000000000", "expected": false },
+    { "id": "floor_covers_equal_observation", "now_unix_ns": "00000000011000000000", "observed_mono_ns": "00000000150000000000", "clear_mono_ns": false, "expected": false },
+    { "id": "stopped_is_not_eligible", "now_unix_ns": "00000000011000000000", "status": "stopped", "expected": false },
+    { "id": "future_write_reports_clock_skew", "written_at_unix_ns": "00000000620000000000", "now_unix_ns": "00000000610000000000", "expected": false, "diagnostic": "clock_skew" },
+    { "id": "malformed_write_is_invalid", "written_at_unix_ns": "bad", "now_unix_ns": "00000000610000000000", "expected": false, "diagnostic": "record_invalid" },
+    { "id": "unavailable_clock_fails_closed", "now_unix_ns": false, "expected": false, "diagnostic": "probe_unavailable" }
+  ],
+  "state_case": {
+    "id": "complete-notify-with-one-child",
+    "now_unix_ns": "00000000610000000000",
+    "files": [
+      { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/realm.json", "sample": "realm" },
+      { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/incarnation.json", "sample": "incarnation" },
+      { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/panes/42/claim.json", "sample": "claim" },
+      { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/panes/42/reviews/04f8996da763b7a969b1028ee3007569eaf3a635486ddab211d512c85b9df8fb.json", "sample": "review" },
+      { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/panes/42/launches/00000000-0000-4000-8000-000000000001/current-binding.json", "sample": "current_binding" },
+      { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/panes/42/launches/00000000-0000-4000-8000-000000000001/bindings/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/binding.json", "sample": "binding" },
+      { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/panes/42/launches/00000000-0000-4000-8000-000000000001/bindings/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/activity.json", "sample": "activity" },
+      { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/panes/42/launches/00000000-0000-4000-8000-000000000001/bindings/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/activity-clear.json", "sample": "activity_clear" },
+      { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/panes/42/launches/00000000-0000-4000-8000-000000000001/bindings/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/end.json", "sample": "binding_end" },
+      { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/panes/42/launches/00000000-0000-4000-8000-000000000001/bindings/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/ack.json", "sample": "acknowledgement" },
+      { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/panes/42/launches/00000000-0000-4000-8000-000000000001/bindings/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/agents-clear.json", "sample": "subagent_clear" },
+      { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/panes/42/launches/00000000-0000-4000-8000-000000000001/bindings/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/agents-floor.json", "sample": "subagent_retention_floor" },
+      { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/panes/42/launches/00000000-0000-4000-8000-000000000001/bindings/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/agents/219264af6a9830685abfb94da44705f051594227429253be94bfc39402af3458.json", "sample": "subagent_presence" }
+    ],
+    "expected_view": {
+      "activity_type": "notify",
+      "binding_phase": "ended",
+      "pane_presence": "present",
+      "reader_confidence": "confirmed",
+      "binding_health": "valid",
+      "provider": "claude",
+      "subagents": 1,
+      "review": true
+    },
+    "expected_render": {
+      "indicator": "!+1 ",
+      "type": "notify",
+      "color": "#240f16"
+    }
+  }
+}

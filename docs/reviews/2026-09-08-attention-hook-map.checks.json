@@ -1,0 +1,31 @@
+{
+  "source": "/Users/provi/Development/_projs/wezterm-attention/docs/reviews/2026-09-08-attention-hook-map.md",
+  "source_sha256": "dbbed6fd83b49c889c07daa69f5b374e11ea94d093769633e80e45610dd3d325",
+  "catalog_sha256": "e5be3fcfcdee1860baec06f851a7555130d64d638d8f35c515a6a038798dd6bf",
+  "tables": 6,
+  "lifecycle_rows": 63,
+  "coverage": [
+    {
+      "provider": "Claude Code",
+      "total": 33,
+      "mapped": 33,
+      "missing": []
+    },
+    {
+      "provider": "Codex",
+      "total": 12,
+      "mapped": 12,
+      "missing": []
+    },
+    {
+      "provider": "Pi",
+      "total": 36,
+      "mapped": 36,
+      "missing": []
+    }
+  ],
+  "claude_notification_types": {
+    "mapped": 12,
+    "missing": []
+  }
+}
