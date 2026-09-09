@@ -3,3 +3,9 @@ __pycache__/
 *.py[cod]
 target/
 libexec/attention-rs
+
+# Local agent sessions, provenance, inboxes, and research runs.
+.claude/
+.inbox/
+.prov/
+.research/
