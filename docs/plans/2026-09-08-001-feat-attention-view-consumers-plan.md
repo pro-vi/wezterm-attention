@@ -180,13 +180,15 @@ Omitted-state challenge:
 
 ### U1. Expose independent cached facts
 
+**Ownership update:** implementation is transferred to [lifecycle plan U2](2026-09-09-001-feat-lifecycle-observation-facts-plan.md). This unit remains an acceptance checklist here, not a second implementation. It is delegated, not completed. This plan keeps U5 puppet ingestion, U3 Relay and U4 activation.
+
 - **Goal:** `get_attention_view` returns the supported independent facts without exposing cache-owned tables.
 - **Requirements:** R1, R2, R5, R6
-- **Dependencies:** U5
+- **Dependencies:** lifecycle plan U2 for the getter; this plan's U5 only for the final writer-side R6 provenance check. The getter projection does not wait for U5.
 - **Files:**
   - Modify: `plugin/runtime.lua`
   - Test: `tests/auto_clear_spec.lua`
-- **Approach:** Extend the current explicit return-table allowlist. Copy `address` by value. Preserve `type`, existing fields, nil/false behavior, and the cache-only implementation; do not return the cached table wholesale.
+- **Approach:** Verify the getter implemented by lifecycle U2 against this checklist. It exposes the full base allowlist plus the lifecycle facet, copies `address`, preserves `type` and nil/false behavior, and remains cache-only. Do not replace it from an older prepared copy. Copying cached `puppet` does not fulfill writer-side R6.
 - **Patterns to follow:** `plugin/reader.lua:340-364` for field meanings; `plugin/runtime.lua:544-559` for the existing copied-accessor shape; `tests/auto_clear_spec.lua:3068-3090` for cache mutation coverage.
 - **Test scenarios:**
   - *Happy path:* thinking plus review with review ranked higher → `type=review`, `activity_type=thinking`, `review=true`, and source/puppet/identity/assessment fields match the cached view.
@@ -198,13 +200,15 @@ Omitted-state challenge:
 
 ### U2. Teach current producers and fact consumers
 
+**Ownership update:** implementation is transferred to [lifecycle plan U8](2026-09-09-001-feat-lifecycle-observation-facts-plan.md). This unit remains an acceptance checklist here, not a second implementation. It is delegated, not completed. This plan keeps U5 puppet ingestion, U3 Relay and U4 activation.
+
 - **Goal:** A cold reader learns the Rust writer path first and can choose a consumer surface and presentation policy without confusing independent facts with the bundled renderer's winner.
 - **Requirements:** R3, R5, R6
-- **Dependencies:** U1
+- **Dependencies:** lifecycle plan U8, which consumes its U2 getter. This is documentation acceptance here, not another guide writer.
 - **Files:**
   - Modify: `README.md`, `docs/record-contract.md`
   - Create: `docs/consumer-guide.md`
-- **Approach:** Replace the README's general direct-write framing with `bin/attention` producer examples, then retain the existing file format under an explicit V1 compatibility heading. Put the detailed consumer rubric in one guide rather than expanding the README into a second protocol spec.
+- **Approach:** Verify the shared documents produced by lifecycle U8. README already contains Rust-first producer and V1-compatibility wording; preserve it. One guide combines this rubric with the lifecycle contract. Do not overwrite it from an older prepared copy or promise unfinished puppet ingestion.
 - **Patterns to follow:** `examples/hook.sh` for the canonical producer command; `README.md:332-372` for public API examples; `docs/record-contract.md` for low-level authority statements.
 - **Test scenarios:**
   - *Documentation contract:* producer entry path calls `bin/attention`; V1 direct writes are visibly labeled; public field table matches U1; `type` is described as derived while activity/review remain independent.

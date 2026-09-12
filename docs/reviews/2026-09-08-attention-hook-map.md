@@ -1,6 +1,8 @@
 # Attention v2: lifecycle hook map
 
-Rows are lifecycle observations. Provider columns show exact hook names and current handling. The last column proposes support to add, retain, or leave out.
+**Scope update:** the Next labels below preserve the September 8 proposal, not the current build scope. The [current 18-row lifecycle plan](../plans/2026-09-09-001-feat-lifecycle-observation-facts-plan.md) defers Pi UI open/close and compaction failure, keeps Pi input, and claims no native Pi question-tool outcome. Its active row table governs implementation; this page retains the broader native catalog and the original proposal for reference.
+
+Rows are lifecycle observations. Provider columns show exact hook names and current handling. The last column preserves the original proposal to add, retain, or leave out.
 
 **Now = this checkout under its existing guards, not live activation. Next = proposed, not implemented.** No provider hooks were executed for this map.
 
