@@ -12,11 +12,23 @@ const outputUrl = new URL(sourceUrl.href.replace(/\.md$/, '.html'));
 const sourceName = basename(fileURLToPath(sourceUrl));
 const isEightChoices = sourceName === '2026-09-05-attention-v2-eight-choices.md';
 const isModuleSpec = sourceName.endsWith('-modules.md');
+const isPlan = sourceName.endsWith('-plan.md');
 const source = readFileSync(sourceUrl, 'utf8');
 const digest = createHash('sha256').update(source).digest('hex');
-let body = Bun.markdown.html(source);
+const frontmatter = source.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/);
+let body = Bun.markdown.html(frontmatter ? source.slice(frontmatter[0].length) : source);
 const title = body.match(/<h1>(.*?)<\/h1>/s)?.[1];
 if (!title) throw new Error('Source must contain a title');
+
+const units = [];
+if (isPlan) {
+  body = body.replace(/<h3>(U([1-9][0-9]*)\. [\s\S]*?)<\/h3>/g, (_, text, number) => {
+    const id = `u${number}`;
+    if (units.some(unit => unit.id === id)) throw new Error('Unit IDs must be distinct');
+    units.push({ id, text });
+    return `<h3 id="${id}">${text}</h3>`;
+  });
+}
 
 const headings = [];
 body = body.replace(/<h2>([\s\S]*?)<\/h2>/g, (_, text) => {
@@ -29,6 +41,18 @@ body = body.replace(/<h2>([\s\S]*?)<\/h2>/g, (_, text) => {
 });
 if (isEightChoices && headings.filter(heading => /^q[1-8]$/.test(heading.id)).length !== 8) {
   throw new Error('Expected all eight source questions');
+}
+if (isPlan) {
+  const anchors = new Set([...headings, ...units].map(item => item.id));
+  body = body.replace(/<h3>([\s\S]*?)<\/h3>/g, (_, text) => {
+    const plain = text.replace(/<[^>]+>/g, '').trim();
+    const stem = plain.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    if (!stem) throw new Error('Plan subsection must have a readable anchor');
+    let id = stem;
+    for (let suffix = 2; anchors.has(id); suffix++) id = `${stem}-${suffix}`;
+    anchors.add(id);
+    return `<h3 id="${id}">${text}</h3>`;
+  });
 }
 body = body.replace(/<table>([\s\S]*?)<\/table>/g, (_, contents) => {
   const headers = [...contents.matchAll(/<th(?:\s[^>]*)?>([\s\S]*?)<\/th>/g)]
@@ -56,9 +80,17 @@ const sectionMarkup = sections.map(section => {
 const navigation = isEightChoices ? headings.filter(heading => /^q[1-8]$/.test(heading.id)) : headings;
 const nav = navigation.map(({ id, text }) => `<a href="#${id}">${text}</a>`).join('\n');
 const navigationMarkup = `<nav aria-label="Jump to a section">${nav}</nav>`;
-const content = isModuleSpec
-  ? sectionMarkup[0] + navigationMarkup + sectionMarkup.slice(1).join('\n')
-  : navigationMarkup + sectionMarkup.join('\n');
+const unitNavigation = units.length
+  ? `<nav class="unit-navigation" aria-label="Implementation units">${units.map(({ id, text }) => `<a href="#${id}">${text}</a>`).join('\n')}</nav>`
+  : '';
+const content = isPlan
+  ? `<details class="metadata"><summary>Browse the full plan contract (${headings.length} sections)</summary>${navigationMarkup}</details>` + sectionMarkup.join('\n').replace(/(<h2 id="implementation-units">[\s\S]*?<\/h2>)/, `$1${unitNavigation}`)
+  : isModuleSpec
+    ? sectionMarkup[0] + navigationMarkup + sectionMarkup.slice(1).join('\n')
+    : navigationMarkup + sectionMarkup.join('\n');
+const metadata = frontmatter
+  ? `<details class="metadata"><summary>Canonical plan metadata</summary><pre>${Bun.escapeHTML(frontmatter[1])}</pre></details>`
+  : '';
 
 // Terminal records, callbacks and commands are the page's material.
 // Mono headings identify those subjects; sans text explains; mono blocks show instances.
@@ -81,6 +113,7 @@ p,pre,table,ul,ol{margin:0}header p{max-width:78ch}header p:first-of-type{font-s
 nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));border-top:1px solid var(--line);border-left:1px solid var(--line)}
 nav a{padding:11px 14px;background:var(--surface);border-right:1px solid var(--line);border-bottom:1px solid var(--line);font:13px/1.5 var(--mono);text-decoration:none}
 nav a:hover{background:var(--note)}section{background:var(--surface);padding:28px;border:1px solid var(--line);display:grid;gap:18px;min-width:0}
+.unit-navigation{grid-template-columns:repeat(2,minmax(0,1fr))}.unit-navigation a{font-size:14px}.metadata{font-size:14px;min-width:0}.metadata summary{cursor:pointer;color:var(--muted);padding:8px 0}.metadata pre{margin-top:12px}summary:focus-visible{outline:3px solid var(--focus);outline-offset:4px}
 section>p{max-width:78ch}section>h2+p,section>blockquote+p{font-size:19px;line-height:1.5}strong{font-weight:650}
 blockquote{margin:0;padding:14px 18px;background:var(--note);color:var(--muted);max-width:82ch}blockquote strong{font:12px/1.5 var(--mono);color:var(--link)}
 pre{padding:19px 20px;background:var(--terminal);color:var(--terminal-ink);font:14px/1.65 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;border-top:5px solid var(--terminal-rule);min-width:0}
@@ -92,9 +125,11 @@ table{border-collapse:collapse;width:100%;font-size:16px;text-align:left}th,td{p
 footer{display:grid;gap:5px;color:var(--muted);font-size:12px}footer code{font-size:11px}section[aria-labelledby="review-state"]{background:var(--note)}
 @media(max-width:780px){main{padding:22px 16px 36px;gap:20px}section{padding:20px;gap:16px}h2{font-size:20px}nav{grid-template-columns:1fr}.file-comparison{grid-template-columns:1fr}pre{font-size:13px;padding:14px 12px}.facts thead,.comparison-table thead{display:none}.facts,.facts tbody,.facts tr,.facts td,.comparison-table,.comparison-table tbody,.comparison-table tr,.comparison-table td{display:block}.facts tr,.comparison-table tr{padding:12px 0;border-bottom:1px solid var(--line)}.facts td,.comparison-table td{border:0;padding:3px 0}.facts td:first-child{width:auto;font-size:14px;color:var(--muted)}.comparison-table td::before{content:attr(data-label);display:block;font:12px/1.5 var(--mono);color:var(--muted);margin-top:7px}.samples th,.samples td{padding:9px 6px}.samples{font-size:14px}section>h2+p,section>blockquote+p{font-size:18px}}
 @media print{:root{color-scheme:light;--paper:#fff;--surface:#fff;--ink:#172a38;--muted:#506171;--line:#c9d5dd;--link:#185e8a;--terminal:#edf2f5;--terminal-ink:#172a38;--note:#e7eff5}main{padding:0;max-width:none}nav{display:none}section{break-inside:avoid}a{color:inherit}}
+@media(max-width:780px){.unit-navigation{grid-template-columns:1fr}}
 </style></head><body><main>
-<header><div class="identity"><span>wezterm-attention / design review</span><span>Source-backed examples · no live changes</span></div>${intro}</header>
+<header><div class="identity"><span>wezterm-attention / ${isPlan ? 'architecture proposal' : 'design review'}</span><span>Source-backed examples · no live changes</span></div>${intro}</header>
 ${content}
+${metadata}
 <footer><a href="./${Bun.escapeHTML(sourceName)}">Read the Markdown source</a><span>Generated offline from that source. No external fonts, scripts or images.</span><code>Source SHA-256: ${digest}</code></footer>
 </main></body></html>`;
 writeFileSync(outputUrl, html);

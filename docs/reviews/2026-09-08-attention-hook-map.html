@@ -1,7 +1,7 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
-<meta name="source-sha256" content="dbbed6fd83b49c889c07daa69f5b374e11ea94d093769633e80e45610dd3d325"><title>Attention v2: lifecycle hook map</title>
+<meta name="source-sha256" content="fe249bfcd953895ed871005551b85562131da5d72e4c2ca424f5e7ce838586fd"><title>Attention v2: lifecycle hook map</title>
 <style>
 :root{color-scheme:dark;--paper:#0e1720;--surface:#16232e;--ink:#e7eef5;--muted:#b6c6d4;--line:#405766;--link:#9cd1f5;--next:#ffc18a;--keep:#a8dcc2;--gap:#ffb9be;--toolbar-height:66px;--mono:Menlo,Consolas,monospace;--body:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 *{box-sizing:border-box}html{scroll-padding-top:calc(var(--toolbar-height) + 20px)}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.5 var(--body)}
@@ -23,7 +23,8 @@ tbody th,td{vertical-align:top;text-align:left;padding:15px 12px;border-right:1p
 @media print{.controls,nav{display:none}thead th{position:static}body{font-size:12px}main{padding:0}table{font-size:10px}tr{break-inside:avoid}section{break-inside:auto}}
 </style></head><body><main>
 <header><div class="identity">WEZTERM-ATTENTION / LIFECYCLE CONTRACT MAP / 2026-09-08</div><h1>Attention v2: lifecycle hook map</h1>
-<p>Rows are lifecycle observations. Provider columns show exact hook names and current handling. The last column proposes support to add, retain, or leave out.</p>
+<p><strong>Scope update:</strong> the Next labels below preserve the September 8 proposal, not the current build scope. The <a href="../plans/2026-09-09-001-feat-lifecycle-observation-facts-plan.md">current 18-row lifecycle plan</a> defers Pi UI open/close and compaction failure, keeps Pi input, and claims no native Pi question-tool outcome. Its active row table governs implementation; this page retains the broader native catalog and the original proposal for reference.</p>
+<p>Rows are lifecycle observations. Provider columns show exact hook names and current handling. The last column preserves the original proposal to add, retain, or leave out.</p>
 <p><strong>Now = this checkout under its existing guards, not live activation. Next = proposed, not implemented.</strong> No provider hooks were executed for this map.</p>
 <p>Claude Code <strong>2.1.266</strong> · Codex <strong>0.153.4</strong> · Pi <strong>0.84.4</strong>. Complete native catalogs: <strong>33 / 12 / 36</strong> names respectively, plus Claude's 12 notification types.</p>
 <details>
@@ -188,7 +189,7 @@ tbody th,td{vertical-align:top;text-align:left;padding:15px 12px;border-right:1p
 </section>
 <footer><span>63 lifecycle rows. Catalog check: Claude Code 33/33 · Codex 12/12 · Pi 36/36. Claude notification types 12/12.</span>
 <span>Generated from <a href="./2026-09-08-attention-hook-map.md">Markdown</a> and checked against the <a href="./2026-09-08-attention-hook-map.catalog.json">provider catalog</a>. No external assets or changes to attention state.</span>
-<code>Markdown SHA-256: dbbed6fd83b49c889c07daa69f5b374e11ea94d093769633e80e45610dd3d325</code></footer>
+<code>Markdown SHA-256: fe249bfcd953895ed871005551b85562131da5d72e4c2ca424f5e7ce838586fd</code></footer>
 </main><script>
 const rows=[...document.querySelectorAll('.lifecycle-row')];
 const groups=[...document.querySelectorAll('.matrix-section')];
