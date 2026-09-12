@@ -575,7 +575,14 @@ fn equal_order_active_child_blocks_the_whole_cap_group() {
 fn old_noncurrent_binding_is_pruned_but_current_binding_is_preserved() {
     let setup = Setup::new();
     setup.claim_and_bind();
+    setup.provider_event(
+        "PreToolUse",
+        "session-a",
+        json!({"tool_name":"Bash","tool_use_id":"retained-fact"}),
+        "00000000000000000250",
+    );
     let old_dir = setup.binding_dir();
+    assert!(old_dir.join("lifecycle.json").exists());
     setup.clock.set_unix(1);
     setup.provider_event(
         "SessionEnd",

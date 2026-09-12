@@ -358,9 +358,8 @@ local marker_id = attention.pane_marker_id(pane)
 -- when that outranks the flag -- and then review is still true.
 local state, frame, source, puppet, subagents, review = attention.get_attention(marker_id)
 
--- Read the cached full-pane v2 view without I/O. The returned table includes
--- provider, binding_id, binding_phase, type, event_id, subagents, review, and
--- reader_confidence. Mutating it does not change the plugin cache.
+-- Read sixteen cached base fields plus independent lifecycle evidence, without
+-- I/O. Nested returned values do not share mutable state with the plugin cache.
 local view = attention.get_attention_view(pane)
 
 -- Clear a marker programmatically
@@ -379,6 +378,8 @@ end))
 
 ## Pi extension
 
+For cached lifecycle observations, question-publication evidence and consumer-owned presentation, see the [consumer guide](docs/consumer-guide.md). This does not imply live registration or a universal unanswered-question signal.
+
 Install this repository as a Pi package:
 
 ```bash
@@ -396,8 +397,18 @@ Claude hook registration remains user-owned. Pass original hook stdin to:
 ```text
 attention hooks event claude SessionStart
 attention hooks event claude PreToolUse
+attention hooks event claude PostToolUse
+attention hooks event claude PostToolUseFailure
+attention hooks event claude UserPromptSubmit
 attention hooks event claude PermissionRequest
+attention hooks event claude PermissionDenied
+attention hooks event claude Elicitation
+attention hooks event claude ElicitationResult
+attention hooks event claude Notification
 attention hooks event claude Stop
+attention hooks event claude StopFailure
+attention hooks event claude PreCompact
+attention hooks event claude PostCompact
 attention hooks event claude SubagentStop
 attention hooks event claude SessionEnd
 ```
@@ -411,13 +422,18 @@ Codex hook registration remains user-owned. Pass original hook stdin to:
 ```text
 attention hooks event codex SessionStart
 attention hooks event codex PreToolUse
+attention hooks event codex PostToolUse
+attention hooks event codex UserPromptSubmit
 attention hooks event codex PermissionRequest
 attention hooks event codex Stop
+attention hooks event codex Interrupt
+attention hooks event codex PreCompact
+attention hooks event codex PostCompact
 attention hooks event codex SubagentStop
 attention hooks event codex SessionEnd
 ```
 
-Use `$WEZTERM_ATTENTION_ROOT/bin/attention`. Thread-spawned children carry the same `agent_id` through work and `SubagentStop`; internal and synthetic children emit neither callback. Root Stop writes lead Stop, then one child-clear watermark. `stop_hook_active` is not stored. Do not register `SubagentStart`. See [Mux setup](docs/mux-setup.md).
+Use `$WEZTERM_ATTENTION_ROOT/bin/attention`. Child attribution requires matching native `agent_id` values; see [contact evidence](docs/reviews/lifecycle-contact-results.md) for exercised paths. Root Stop writes lead Stop, then one child-clear watermark. `stop_hook_active` is retained as response-completion context, not a badge-policy change. Do not register `SubagentStart`. See [Mux setup](docs/mux-setup.md).
 
 ## Other use cases
 

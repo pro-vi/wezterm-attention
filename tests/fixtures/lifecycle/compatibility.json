@@ -1,0 +1,5 @@
+{
+  "baseline_commit": "c9cc3e1d9906a3a3a4d70ac4bae9c9752a0c3b5e",
+  "reader_files": ["plugin/init.lua", "plugin/protocol.lua", "plugin/legacy.lua", "plugin/overlays.lua", "plugin/reader.lua", "plugin/runtime.lua", "plugin/titles.lua", "plugin/format.lua"],
+  "contract": "Frozen Lua core reads the additive manifest and ignores lifecycle.json; the original Rust manifest stays embedded in the frozen binary."
+}

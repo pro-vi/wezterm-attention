@@ -545,6 +545,7 @@ return function()
       local read = resolve_pane_read(pane)
       local cached = read.cache_key and attention_cache[read.cache_key] or nil
       if not cached then return nil end
+      if read.kind == "v2" and cached.launch_id ~= read.launch_id then return nil end
       return {
         provider = cached.provider,
         binding_id = cached.binding_id,
@@ -554,6 +555,15 @@ return function()
         subagents = cached.subagents or 0,
         review = cached.review == true,
         reader_confidence = cached.reader_confidence,
+        activity_type = cached.activity_type,
+        source = cached.source,
+        puppet = cached.puppet,
+        address = cached.address and context.deep_copy(cached.address) or nil,
+        launch_id = cached.launch_id,
+        marker_id = cached.marker_id,
+        pane_presence = cached.pane_presence,
+        binding_health = cached.binding_health,
+        lifecycle = cached.lifecycle and context.deep_copy(cached.lifecycle) or nil,
       }
     end
 

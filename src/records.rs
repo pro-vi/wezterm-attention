@@ -233,6 +233,7 @@ impl RecordIdentity {
         }
         let expected_name = match kind {
             "binding" => "binding.json",
+            "lifecycle_snapshot" => "lifecycle.json",
             "activity" => "activity.json",
             "activity_clear" => "activity-clear.json",
             "binding_end" => "end.json",
@@ -472,13 +473,26 @@ pub fn read_record(
         }
     };
     let mut bytes = Vec::new();
-    file.take((manifest()?.limits.max_json_bytes + 1) as u64)
+    let maximum = if expected_kind == Some("lifecycle_snapshot") {
+        manifest()?.limits.lifecycle_max_json_bytes
+    } else {
+        manifest()?.limits.max_json_bytes
+    };
+    file.take((maximum + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| AttentionError::new("record_invalid", "state record could not be read"))?;
-    if bytes.len() > manifest()?.limits.max_json_bytes {
+    if bytes.len() > maximum {
         return Err(AttentionError::new(
             "record_invalid",
             "state record exceeds its bound",
+        ));
+    }
+    if expected_kind == Some("lifecycle_snapshot")
+        && !crate::protocol::bounded_lifecycle_json(&bytes)
+    {
+        return Err(AttentionError::new(
+            "record_invalid",
+            "lifecycle JSON nesting exceeds its bound",
         ));
     }
     let value: Value = serde_json::from_slice(&bytes)
@@ -496,9 +510,33 @@ pub fn read_record(
 }
 
 pub fn atomic_replace(path: &Path, value: &Value) -> Result<()> {
-    if value.get("kind").is_some() {
-        validate_record(value, value.get("kind").and_then(Value::as_str))?;
+    PreparedRecordWrite::new(path.to_owned(), value)?.apply()
+}
+
+/// Validated, immutable bytes prepared before applying other outputs of a mutation.
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedRecordWrite {
+    path: PathBuf,
+    bytes: Vec<u8>,
+}
+
+impl PreparedRecordWrite {
+    pub(crate) fn new(path: PathBuf, value: &Value) -> Result<Self> {
+        if value.get("kind").is_some() {
+            validate_record(value, value.get("kind").and_then(Value::as_str))?;
+        }
+        Ok(Self {
+            path,
+            bytes: canonical_json(value)?,
+        })
     }
+
+    pub(crate) fn apply(&self) -> Result<()> {
+        atomic_replace_bytes(&self.path, &self.bytes)
+    }
+}
+
+fn atomic_replace_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| AttentionError::new("state_permissions", "state path has no parent"))?;
@@ -522,7 +560,7 @@ pub fn atomic_replace(path: &Path, value: &Value) -> Result<()> {
                     "temporary state record could not be created",
                 )
             })?;
-        file.write_all(&canonical_json(value)?)
+        file.write_all(bytes)
             .and_then(|()| sync_via_fsync(&file))
             .map_err(|_| {
                 AttentionError::new(
@@ -752,7 +790,29 @@ mod tests {
     use std::io;
     use std::path::Path;
 
-    use super::sync_parent_directory_with;
+    use super::{PreparedRecordWrite, sync_parent_directory_with};
+
+    #[test]
+    fn prepared_record_freezes_validated_bytes_before_filesystem_effects() {
+        let root =
+            std::env::temp_dir().join(format!("attention-prepared-{}", uuid::Uuid::new_v4()));
+        let path = root.join("lifecycle.json");
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/lifecycle/observations.json"
+        ))
+        .unwrap();
+        let mut value = fixtures["cases"][1]["value"].clone();
+        let prepared = PreparedRecordWrite::new(path.clone(), &value).unwrap();
+        assert!(!root.exists(), "preparation must not touch the filesystem");
+        value["schema"] = serde_json::json!("invalid");
+        assert!(PreparedRecordWrite::new(path.clone(), &value).is_err());
+        assert!(!root.exists(), "invalid preparation must not create state");
+        prepared.apply().unwrap();
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(stored, fixtures["cases"][1]["value"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn parent_directory_sync_failure_is_reported() {

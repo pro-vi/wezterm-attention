@@ -89,6 +89,7 @@ fn state_kind(path: &Path) -> Option<&'static str> {
         "binding.json" => Some("binding"),
         "activity.json" => Some("activity"),
         "activity-clear.json" => Some("activity_clear"),
+        "lifecycle.json" => Some("lifecycle_snapshot"),
         "end.json" => Some("binding_end"),
         "ack.json" => Some("acknowledgement"),
         "absence-probe.json" => Some("absence_probe"),
@@ -572,6 +573,7 @@ fn binding_known_and_prunable(
     let identity = RecordIdentity::binding(&address, launch_id, binding_id);
     let known: BTreeSet<_> = [
         "binding.json",
+        "lifecycle.json",
         "activity.json",
         "activity-clear.json",
         "end.json",

@@ -103,14 +103,14 @@ def stage_python_baseline(
     return [sys.executable, str(writer)]
 
 
-def measure(implementation: str, command: list[str], scratch: pathlib.Path) -> dict[str, Any]:
+def measure(implementation: str, command: list[str], scratch: pathlib.Path, *, full_lifecycle: bool = False) -> dict[str, Any]:
     state = scratch / f"state-{implementation}"
     socket_path = scratch / "mux.sock"
     socket_path.unlink(missing_ok=True)
     listener = socket.socket(socket.AF_UNIX)
     listener.bind(str(socket_path))
     master, slave = pty.openpty()
-    environment = os.environ.copy()
+    environment = {"HOME": str(scratch), "PATH": "/usr/bin:/bin"}
     environment.update(
         {
             "WEZTERM_ATTENTION_ROOT": str(ROOT),
@@ -136,11 +136,17 @@ def measure(implementation: str, command: list[str], scratch: pathlib.Path) -> d
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
         }
+        if full_lifecycle:
+            # Both binaries see identical native callbacks. The candidate starts
+            # its timed runs with both observation pools at capacity.
+            for tool in ["AskUserQuestion", "Bash"]:
+                for index in range(64):
+                    run([*command, "hooks", "event", "claude", "PreToolUse", "--strict"], environment, {**activity, "tool_name": tool, "tool_use_id": f"seed-{tool}-{index}"})
         for _ in range(5):
             run([*command, "hooks", "event", "claude", "PreToolUse", "--strict"], environment, activity)
         sequential = [
-            run([*command, "hooks", "event", "claude", "PreToolUse", "--strict"], environment, activity)
-            for _ in range(HOOK_COUNT)
+            run([*command, "hooks", "event", "claude", "PreToolUse", "--strict"], environment, {**activity, "tool_use_id": f"timed-{index}"} if full_lifecycle else activity)
+            for index in range(HOOK_COUNT)
         ]
 
         def child(index: int) -> float:
@@ -182,7 +188,9 @@ def measure(implementation: str, command: list[str], scratch: pathlib.Path) -> d
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--python-writer", type=pathlib.Path, required=True)
+    baseline = parser.add_mutually_exclusive_group(required=True)
+    baseline.add_argument("--python-writer", type=pathlib.Path)
+    baseline.add_argument("--baseline-rust", type=pathlib.Path)
     parser.add_argument(
         "--rust-binary",
         type=pathlib.Path,
@@ -194,6 +202,31 @@ def main() -> None:
         default=ROOT / "protocol" / "v2.json",
     )
     args = parser.parse_args()
+    if args.baseline_rust:
+        baseline_path, candidate_path = args.baseline_rust.resolve(), args.rust_binary.resolve()
+        identities = {"baseline": artifact_sha256(baseline_path), "candidate": artifact_sha256(candidate_path)}
+        if identities["baseline"] == identities["candidate"]:
+            parser.error("baseline and candidate have the same artifact identity")
+        rounds = []
+        with tempfile.TemporaryDirectory(prefix="attention-rust-measure-") as directory:
+            scratch = pathlib.Path(directory)
+            for index, order in enumerate([("baseline", "candidate"), ("candidate", "baseline")]):
+                measured = {}
+                for name in order:
+                    executable = baseline_path if name == "baseline" else candidate_path
+                    measured[name] = measure(f"{name}-{index}", [str(executable)], scratch, full_lifecycle=True)
+                    measured[name]["state"].pop("_file_bytes")
+                measured["order"] = list(order)
+                measured["checks"] = {
+                    "sequential_p95_within_2x": measured["candidate"]["sequential"]["p95_ms"] <= 2 * measured["baseline"]["sequential"]["p95_ms"],
+                    "child_burst_within_2x": measured["candidate"]["concurrent_child_burst"]["wall_ms"] <= 2 * measured["baseline"]["concurrent_child_burst"]["wall_ms"],
+                }
+                rounds.append(measured)
+        passed = all(all(item["checks"].values()) for item in rounds)
+        print(json.dumps({"mode": "rust-baseline", "implementation_identities": identities, "rounds": rounds, "passed": passed}, indent=2))
+        if not passed:
+            raise SystemExit(1)
+        return
     try:
         rust_command, identities = resolve_measurement_artifacts(
             args.python_writer.resolve(), args.rust_binary.resolve()

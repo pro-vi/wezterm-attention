@@ -2,6 +2,7 @@ pub mod compat;
 pub mod identity;
 pub mod lifecycle;
 pub mod maintenance;
+pub mod observations;
 pub mod protocol;
 pub mod providers;
 pub mod query;

@@ -3,6 +3,10 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::observations::{
+    Actor, AttemptOutcome, ElicitationMode, LifecycleObservation, NativeCorrelation, NoticeSubtype,
+    ObservationBody, QuestionMode, ResultSurface, SelectionAction, classify_tool,
+};
 use crate::protocol::{AttentionError, Diagnostic, manifest};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,10 +46,11 @@ pub enum ProviderAction {
     Review,
     Clear,
     Ignored,
+    Observation,
 }
 
 impl ProviderAction {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Binding,
         Self::Activity,
         Self::ParentStop,
@@ -55,6 +60,7 @@ impl ProviderAction {
         Self::Review,
         Self::Clear,
         Self::Ignored,
+        Self::Observation,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -68,12 +74,15 @@ impl ProviderAction {
             Self::Review => "review",
             Self::Clear => "clear",
             Self::Ignored => "ignored",
+            Self::Observation => "observation",
         }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct ProviderEvent {
+    pub observation: Option<LifecycleObservation>,
+    pub observation_diagnostic: Option<Diagnostic>,
     pub action: ProviderAction,
     pub provider: Option<Provider>,
     pub provider_session_id: Option<String>,
@@ -94,6 +103,8 @@ pub struct ProviderEvent {
 impl ProviderEvent {
     fn ignored(provider: Option<Provider>, code: &str, message: &str) -> Self {
         Self {
+            observation: None,
+            observation_diagnostic: None,
             action: ProviderAction::Ignored,
             provider,
             provider_session_id: None,
@@ -237,6 +248,8 @@ fn parse_provider_common(
         None => None,
     };
     let event = ProviderEvent {
+        observation: None,
+        observation_diagnostic: None,
         action: ProviderAction::Ignored,
         provider: Some(provider),
         provider_session_id: Some(provider_session_id),
@@ -286,6 +299,11 @@ fn parse_claude_or_codex(
     }
     let supported = [
         "SessionStart",
+        "UserPromptSubmit",
+        "PreCompact",
+        "PostCompact",
+        "StopFailure",
+        "Interrupt",
         "SessionEnd",
         "PreToolUse",
         "PermissionRequest",
@@ -293,9 +311,24 @@ fn parse_claude_or_codex(
         "Stop",
         "SubagentStop",
         "SubagentStart",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "PermissionDenied",
+        "Elicitation",
+        "ElicitationResult",
     ];
     if !supported.contains(&event_name)
-        || (provider == Provider::Codex && event_name == "Notification")
+        || (provider == Provider::Claude && event_name == "Interrupt")
+        || (provider == Provider::Codex
+            && matches!(
+                event_name,
+                "Notification"
+                    | "StopFailure"
+                    | "PostToolUseFailure"
+                    | "PermissionDenied"
+                    | "Elicitation"
+                    | "ElicitationResult"
+            ))
     {
         return ProviderEvent::ignored(
             Some(provider),
@@ -328,6 +361,29 @@ fn parse_claude_or_codex(
             "claim_stale",
             "Codex hook identity differs from the inherited thread",
         );
+    }
+    if matches!(
+        event_name,
+        "PostToolUse"
+            | "UserPromptSubmit"
+            | "PreCompact"
+            | "PostCompact"
+            | "StopFailure"
+            | "Interrupt"
+            | "PostToolUseFailure"
+            | "PermissionDenied"
+            | "Elicitation"
+            | "ElicitationResult"
+    ) {
+        if event_name == "Interrupt" && event.agent_id.is_some() {
+            return ProviderEvent::ignored(
+                Some(provider),
+                "record_invalid",
+                "Interrupt is a root-turn observation",
+            );
+        }
+        event.action = ProviderAction::Observation;
+        return event;
     }
     if event_name == "SubagentStart" {
         return ProviderEvent::ignored(
@@ -432,6 +488,10 @@ fn parse_claude_or_codex(
         }
         "Notification" => {
             let notification = payload.get("notification_type").and_then(Value::as_str);
+            if notification == Some("elicitation_url_dialog") {
+                event.action = ProviderAction::Observation;
+                return event;
+            }
             if notification == Some("idle_prompt") {
                 return ProviderEvent::ignored(
                     Some(provider),
@@ -476,9 +536,14 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
         "session_shutdown",
         "agent_start",
         "tool_execution_start",
+        "tool_execution_end",
         "agent_settled",
         "agent_end",
         "bus",
+        "input",
+        "message_end",
+        "session_before_compact",
+        "session_compact",
     ];
     if !supported.contains(&event_name) {
         return ProviderEvent::ignored(
@@ -513,6 +578,25 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
         None
     };
     match event_name {
+        "input" | "session_before_compact" | "session_compact" => {
+            event.action = ProviderAction::Observation
+        }
+        "tool_execution_end" => event.action = ProviderAction::Observation,
+        "message_end" => {
+            if payload.get("role").and_then(Value::as_str) != Some("assistant")
+                || !matches!(
+                    payload.get("stop_reason").and_then(Value::as_str),
+                    Some("error" | "aborted")
+                )
+            {
+                return ProviderEvent::ignored(
+                    Some(Provider::Pi),
+                    "integration_version_mismatch",
+                    "Pi message has no supported attempt outcome",
+                );
+            }
+            event.action = ProviderAction::Observation;
+        }
         "session_start" => {
             let source = payload
                 .get("start_source")
@@ -602,10 +686,374 @@ pub fn parse_provider_event(
             "provider payload is not an object",
         );
     }
-    match provider {
+    // Ownership is validated before the legacy dispatcher can choose lead state.
+    if let Some(agent) = payload.get("agent_id")
+        && safe_label(agent, "agent_id").is_err()
+    {
+        return ProviderEvent::ignored(
+            Some(provider),
+            "record_invalid",
+            "child identity is invalid",
+        );
+    }
+    if provider == Provider::Pi && payload.get("agent_id").is_some() {
+        return ProviderEvent::ignored(
+            Some(provider),
+            "record_invalid",
+            "Pi has no native child identity contract",
+        );
+    }
+    let mut event = match provider {
         Provider::Pi => parse_pi(event_name, payload, env),
         Provider::Claude | Provider::Codex => {
             parse_claude_or_codex(provider, event_name, payload, env)
         }
+    };
+    if event.action != ProviderAction::Ignored {
+        let parsed = match event_name {
+            "PreToolUse"
+            | "PostToolUse"
+            | "PostToolUseFailure"
+            | "tool_execution_start"
+            | "tool_execution_end" => {
+                parse_tool_observation(provider, event_name, payload, &event).map(Some)
+            }
+            "PermissionRequest" | "PermissionDenied" | "Elicitation" | "ElicitationResult"
+            | "Notification" => parse_request_observation(provider, event_name, payload, &event),
+            "UserPromptSubmit" | "Stop" | "StopFailure" | "Interrupt" | "input" | "message_end"
+            | "agent_settled" => {
+                parse_run_observation(provider, event_name, payload, &event).map(Some)
+            }
+            "PreCompact" | "PostCompact" | "session_before_compact" | "session_compact" => {
+                parse_compaction_observation(provider, event_name, payload, &event).map(Some)
+            }
+            _ => Ok(None),
+        };
+        match parsed {
+            Ok(observation) => event.observation = observation,
+            Err(problem) => event.observation_diagnostic = Some(problem),
+        }
     }
+    event
+}
+
+fn strict_optional_label(
+    payload: &Value,
+    name: &str,
+) -> std::result::Result<Option<String>, Diagnostic> {
+    payload
+        .get(name)
+        .map(|value| safe_label(value, name))
+        .transpose()
+}
+
+fn parse_tool_observation(
+    provider: Provider,
+    event_name: &str,
+    payload: &Value,
+    event: &ProviderEvent,
+) -> std::result::Result<LifecycleObservation, Diagnostic> {
+    let tool_name = safe_label(&payload["tool_name"], "tool_name")?;
+    let (tool_class, question_mode) = classify_tool(provider.as_str(), &tool_name);
+    let body = if matches!(event_name, "PreToolUse" | "tool_execution_start") {
+        ObservationBody::ToolPreflight {
+            tool_name,
+            tool_class,
+            question_mode,
+        }
+    } else {
+        let is_error = if provider == Provider::Pi {
+            Some(
+                payload
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| {
+                        AttentionError::new("record_invalid", "Pi tool result requires is_error")
+                            .diagnostic
+                    })?,
+            )
+        } else if event_name == "PostToolUseFailure" {
+            Some(true)
+        } else {
+            None
+        };
+        let interrupted = payload
+            .get("is_interrupt")
+            .map(|value| {
+                value.as_bool().ok_or_else(|| {
+                    AttentionError::new("record_invalid", "tool interruption flag is invalid")
+                        .diagnostic
+                })
+            })
+            .transpose()?;
+        if question_mode == Some(QuestionMode::Nonblocking)
+            && (event.agent_id.is_some()
+                || interrupted == Some(true)
+                || payload
+                    .get("is_error")
+                    .is_some_and(|value| value != &Value::Bool(false))
+                || !accepted_async_receipt(&payload["tool_response"]))
+        {
+            return Err(AttentionError::new(
+                "record_invalid",
+                "async question publication receipt is invalid",
+            )
+            .diagnostic);
+        }
+        ObservationBody::ToolResult {
+            tool_name,
+            tool_class,
+            question_mode,
+            result_surface: if provider == Provider::Pi {
+                ResultSurface::ExecutionEnd
+            } else if provider == Provider::Claude && event_name == "PostToolUse" {
+                ResultSurface::SuccessHook
+            } else {
+                ResultSurface::PostHook
+            },
+            is_error,
+            interrupted,
+        }
+    };
+    observation_for_body(provider, event_name, payload, event, body)
+}
+
+fn observation_for_body(
+    provider: Provider,
+    event_name: &str,
+    payload: &Value,
+    event: &ProviderEvent,
+    body: ObservationBody,
+) -> std::result::Result<LifecycleObservation, Diagnostic> {
+    let tool_event = matches!(
+        event_name,
+        "PreToolUse"
+            | "PostToolUse"
+            | "PostToolUseFailure"
+            | "PermissionDenied"
+            | "tool_execution_start"
+            | "tool_execution_end"
+    );
+    let elicitation = matches!(event_name, "Elicitation" | "ElicitationResult");
+    let correlation = NativeCorrelation {
+        tool_call_id: if tool_event {
+            strict_optional_label(payload, "tool_use_id")?
+        } else {
+            None
+        },
+        turn_id: if provider == Provider::Codex {
+            strict_optional_label(payload, "turn_id")?
+        } else {
+            None
+        },
+        elicitation_id: if elicitation {
+            strict_optional_label(payload, "elicitation_id")?
+        } else {
+            None
+        },
+        mcp_server_name: if elicitation {
+            Some(safe_label(&payload["mcp_server_name"], "mcp_server_name")?)
+        } else {
+            None
+        },
+        ..NativeCorrelation::default()
+    };
+    let observation_id = if provider == Provider::Pi {
+        payload
+            .get("transport_id")
+            .map(|value| {
+                let id = safe_label(value, "transport_id")?;
+                if !uuid::Uuid::parse_str(&id).is_ok_and(|parsed| parsed.to_string() == id) {
+                    return Err(AttentionError::new(
+                        "record_invalid",
+                        "Pi transport ID is invalid",
+                    )
+                    .diagnostic);
+                }
+                Ok(id)
+            })
+            .transpose()?
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+    } else {
+        uuid::Uuid::new_v4().to_string()
+    };
+    Ok(LifecycleObservation {
+        observation_id,
+        source_event: event_name.to_owned(),
+        source_version: None,
+        observed_mono_ns: "00000000000000000000".to_owned(),
+        written_at_unix_ns: "00000000000000000000".to_owned(),
+        actor: match &event.agent_id {
+            Some(id) => Actor::Child {
+                agent_id: id.clone(),
+                agent_key: crate::protocol::sha256_hex(id.as_bytes()),
+            },
+            None => Actor::Lead,
+        },
+        correlation: if correlation == NativeCorrelation::default() {
+            None
+        } else {
+            Some(correlation)
+        },
+        body,
+    })
+}
+
+fn parse_request_observation(
+    provider: Provider,
+    event_name: &str,
+    payload: &Value,
+    event: &ProviderEvent,
+) -> std::result::Result<Option<LifecycleObservation>, Diagnostic> {
+    let invalid = || {
+        AttentionError::new("record_invalid", "request observation metadata is invalid").diagnostic
+    };
+    let body = match event_name {
+        "PermissionRequest" => ObservationBody::ApprovalRequested {
+            tool_name: strict_optional_label(payload, "tool_name")?,
+        },
+        "PermissionDenied" => {
+            if payload.get("permission_mode").and_then(Value::as_str) != Some("auto") {
+                return Err(invalid());
+            }
+            ObservationBody::AutomaticDenial {
+                tool_name: safe_label(&payload["tool_name"], "tool_name")?,
+                policy_scope: "auto_mode".into(),
+            }
+        }
+        "Elicitation" => ObservationBody::ElicitationRequested {
+            mode: match payload.get("mode").and_then(Value::as_str) {
+                Some("form") => ElicitationMode::Form,
+                Some("url") => ElicitationMode::Url,
+                _ => return Err(invalid()),
+            },
+        },
+        "ElicitationResult" => ObservationBody::ElicitationActionSelected {
+            action: match payload.get("action").and_then(Value::as_str) {
+                Some("accept") => SelectionAction::Accept,
+                Some("decline") => SelectionAction::Decline,
+                Some("cancel") => SelectionAction::Cancel,
+                _ => return Err(invalid()),
+            },
+        },
+        "Notification" => ObservationBody::Notice {
+            subtype: match payload.get("notification_type").and_then(Value::as_str) {
+                Some("permission_prompt") => NoticeSubtype::PermissionPrompt,
+                Some("elicitation_dialog") => NoticeSubtype::ElicitationDialog,
+                Some("elicitation_url_dialog") => NoticeSubtype::ElicitationUrlDialog,
+                _ => return Ok(None),
+            },
+        },
+        _ => return Ok(None),
+    };
+    observation_for_body(provider, event_name, payload, event, body).map(Some)
+}
+
+// Codex 0.154.0 collapses one InputText item to FunctionCallOutputBody::Text.
+// Native contact pins tool_response to a JSON string containing this receipt.
+// It acknowledges publication, not a human answer; no output is retained.
+fn accepted_async_receipt(value: &Value) -> bool {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Receipt {
+        accepted: bool,
+    }
+    value.as_str().is_some_and(|text| {
+        serde_json::from_str::<Receipt>(text).is_ok_and(|receipt| receipt.accepted)
+    })
+}
+
+fn optional_observation_enum(
+    payload: &Value,
+    field: &str,
+    vocabulary: &str,
+) -> std::result::Result<Option<String>, Diagnostic> {
+    let value = strict_optional_label(payload, field)?;
+    if value.as_ref().is_some_and(|value| {
+        !manifest().expect("manifest was validated").lifecycle_enums[vocabulary].contains(value)
+    }) {
+        return Err(AttentionError::new(
+            "integration_version_mismatch",
+            "native lifecycle enum is unsupported",
+        )
+        .diagnostic);
+    }
+    Ok(value)
+}
+
+fn parse_run_observation(
+    provider: Provider,
+    name: &str,
+    payload: &Value,
+    event: &ProviderEvent,
+) -> std::result::Result<LifecycleObservation, Diagnostic> {
+    let body = match name {
+        "UserPromptSubmit" => ObservationBody::PromptSubmitted { input_source: None },
+        "input" => ObservationBody::PromptSubmitted {
+            input_source: optional_observation_enum(payload, "source", "input_source")?,
+        },
+        "Stop" => ObservationBody::ResponseFinished {
+            stop_hook_active: payload
+                .get("stop_hook_active")
+                .map(|value| {
+                    value.as_bool().ok_or_else(|| {
+                        AttentionError::new("record_invalid", "stop continuation flag is invalid")
+                            .diagnostic
+                    })
+                })
+                .transpose()?,
+        },
+        "StopFailure" => ObservationBody::AttemptOutcome {
+            outcome: AttemptOutcome::Failed,
+            error_category: optional_observation_enum(payload, "error", "error_category")?,
+        },
+        "message_end" => ObservationBody::AttemptOutcome {
+            outcome: if payload["stop_reason"] == "error" {
+                AttemptOutcome::Failed
+            } else {
+                AttemptOutcome::Aborted
+            },
+            error_category: None,
+        },
+        "Interrupt" => ObservationBody::UserInterrupt,
+        "agent_settled" => ObservationBody::RunSettled,
+        _ => unreachable!("run observation dispatcher is closed"),
+    };
+    observation_for_body(provider, name, payload, event, body)
+}
+
+fn parse_compaction_observation(
+    provider: Provider,
+    name: &str,
+    payload: &Value,
+    event: &ProviderEvent,
+) -> std::result::Result<LifecycleObservation, Diagnostic> {
+    let trigger = optional_observation_enum(
+        payload,
+        if provider == Provider::Pi {
+            "reason"
+        } else {
+            "trigger"
+        },
+        "compaction_trigger",
+    )?;
+    if trigger.as_ref().is_some_and(|value| {
+        if provider == Provider::Pi {
+            !["manual", "threshold", "overflow"].contains(&value.as_str())
+        } else {
+            !["manual", "auto"].contains(&value.as_str())
+        }
+    }) {
+        return Err(AttentionError::new(
+            "integration_version_mismatch",
+            "provider compaction trigger is unsupported",
+        )
+        .diagnostic);
+    }
+    let body = if matches!(name, "PreCompact" | "session_before_compact") {
+        ObservationBody::CompactionAttempted { trigger }
+    } else {
+        ObservationBody::CompactionSucceeded { trigger }
+    };
+    observation_for_body(provider, name, payload, event, body)
 }

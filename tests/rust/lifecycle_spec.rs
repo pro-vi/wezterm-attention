@@ -15,6 +15,7 @@ use wezterm_attention::identity::pane_address;
 use wezterm_attention::lifecycle::{
     apply_mark_activity, apply_mark_review, apply_provider_event, binding_id, prompt_return,
 };
+use wezterm_attention::observations::LifecycleSnapshot;
 use wezterm_attention::providers::{ProviderAction, ProviderEvent, parse_provider_event};
 use wezterm_attention::query::read_bindings;
 use wezterm_attention::records::{atomic_replace, launch_path, pane_path, state_root, with_lock};
@@ -182,6 +183,1082 @@ fn rust_command(setup: &Setup) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_attention"));
     command.env_clear().envs(&setup.env);
     command
+}
+
+#[test]
+fn same_claim_event_reaches_snapshot() {
+    let setup = Setup::new();
+    setup.claim();
+    setup.apply(
+        &event(
+            "codex",
+            "SessionStart",
+            "facts",
+            json!({"source":"startup"}),
+        ),
+        "00000000000000000200",
+    );
+    let tool = event(
+        "codex",
+        "PreToolUse",
+        "facts",
+        json!({"tool_name":"shell", "tool_use_id":"call-1"}),
+    );
+    setup.apply(&tool, "00000000000000000300");
+    let directory = setup.binding_dir("codex", "facts");
+    let before: Value =
+        serde_json::from_slice(&fs::read(directory.join("activity.json")).unwrap()).unwrap();
+    let first: LifecycleSnapshot =
+        serde_json::from_slice(&fs::read(directory.join("lifecycle.json")).unwrap()).unwrap();
+    assert_eq!(first.pools.general.observations.len(), 1);
+    setup.apply(&tool, "00000000000000000400");
+    let after: Value =
+        serde_json::from_slice(&fs::read(directory.join("activity.json")).unwrap()).unwrap();
+    assert_eq!(before, after, "facts must not refresh an equal badge");
+    let second: LifecycleSnapshot =
+        serde_json::from_slice(&fs::read(directory.join("lifecycle.json")).unwrap()).unwrap();
+    assert_eq!(
+        first, second,
+        "native retry retains exact observation identity"
+    );
+}
+
+#[test]
+fn lifecycle_manifest_and_typed_union_agree() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../fixtures/lifecycle/observations.json")).unwrap();
+    let protocol = wezterm_attention::protocol::manifest().unwrap();
+    let mut kinds = BTreeSet::new();
+    for case in fixture["raw_cases"].as_array().unwrap() {
+        let value: Value = serde_json::from_str(case["raw"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            wezterm_attention::protocol::parse_record_value(&value, protocol).as_str(),
+            case["expected"].as_str().unwrap(),
+            "{}",
+            case["id"]
+        );
+    }
+    for case in fixture["cases"].as_array().unwrap() {
+        let verdict = wezterm_attention::protocol::parse_record_value(&case["value"], protocol);
+        assert_eq!(
+            verdict.as_str(),
+            case["expected"].as_str().unwrap(),
+            "{}",
+            case["id"]
+        );
+        if verdict == wezterm_attention::protocol::Verdict::Valid {
+            let typed: LifecycleSnapshot = serde_json::from_value(case["value"].clone()).unwrap();
+            assert_eq!(serde_json::to_value(&typed).unwrap(), case["value"]);
+            for item in typed
+                .pools
+                .requests
+                .observations
+                .iter()
+                .chain(&typed.pools.general.observations)
+            {
+                kinds.insert(
+                    serde_json::to_value(item).unwrap()["kind"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    assert_eq!(kinds, protocol.lifecycle_variants.keys().cloned().collect());
+    assert_eq!(kinds.len(), 14);
+    assert_eq!(protocol.limits.lifecycle_pool_max_count, 64);
+    assert_eq!(protocol.limits.lifecycle_pool_max_bytes, 122_880);
+    assert_eq!(protocol.limits.lifecycle_observation_max_bytes, 2_048);
+    assert_eq!(protocol.limits.lifecycle_max_json_bytes, 262_144);
+    assert_eq!(protocol.limits.lifecycle_envelope_max_bytes, 16_384);
+    assert_eq!(protocol.limits.lifecycle_max_depth, 8);
+}
+
+#[test]
+fn observation_pools_preserve_each_other_and_fence_evicted_receipts() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../fixtures/lifecycle/observations.json")).unwrap();
+    let mut snapshot: LifecycleSnapshot =
+        serde_json::from_value(fixture["cases"][14]["value"].clone()).unwrap();
+    let request_pool = snapshot.pools.requests.clone();
+    let generic: LifecycleSnapshot =
+        serde_json::from_value(fixture["cases"][1]["value"].clone()).unwrap();
+    let template = generic.pools.general.observations[0].clone();
+    for index in 0..130 {
+        let mut item = template.clone();
+        item.observation_id = Uuid::new_v4().to_string();
+        item.observed_mono_ns = format!("{:020}", 1000 + index);
+        assert!(snapshot.reduce(item).unwrap());
+        assert_eq!(snapshot.pools.requests, request_pool);
+    }
+    assert_eq!(snapshot.pools.general.observations.len(), 64);
+    assert_eq!(
+        snapshot.pools.general.retention_floor_mono_ns.as_deref(),
+        Some("00000000000000001065")
+    );
+    let retained = snapshot.clone();
+    let mut delayed = template.clone();
+    delayed.observed_mono_ns = "00000000000000001065".to_owned();
+    assert!(!snapshot.reduce(delayed).unwrap());
+    assert_eq!(snapshot, retained);
+    let mut oversized = template;
+    oversized.source_version = Some("x".repeat(2048));
+    assert!(snapshot.reduce(oversized).is_err());
+    assert_eq!(snapshot, retained);
+}
+
+#[test]
+fn malformed_child_identity_never_becomes_lead() {
+    for bad in [Value::Null, json!(17), json!(""), json!("bad\nchild")] {
+        let parsed = event(
+            "codex",
+            "PreToolUse",
+            "facts",
+            json!({"tool_name":"shell", "agent_id":bad}),
+        );
+        assert_eq!(parsed.action, ProviderAction::Ignored);
+        assert!(parsed.observation.is_none());
+    }
+}
+
+#[test]
+fn rich_rejection_preserves_legacy_contract() {
+    let setup = Setup::new();
+    setup.claim();
+    setup.apply(
+        &event(
+            "codex",
+            "SessionStart",
+            "facts",
+            json!({"source":"startup"}),
+        ),
+        "00000000000000000200",
+    );
+    let result = setup.apply(
+        &event(
+            "codex",
+            "PreToolUse",
+            "facts",
+            json!({"tool_name":"shell", "tool_use_id":17}),
+        ),
+        "00000000000000000300",
+    );
+    assert_eq!(result.disposition, "partial");
+    assert!(
+        setup
+            .binding_dir("codex", "facts")
+            .join("activity.json")
+            .exists()
+    );
+    assert!(
+        !setup
+            .binding_dir("codex", "facts")
+            .join("lifecycle.json")
+            .exists()
+    );
+}
+
+#[test]
+fn tty_presence_is_not_execution_identity() {
+    let mut setup = Setup::new();
+    setup.claim();
+    setup.apply(
+        &event(
+            "codex",
+            "SessionStart",
+            "facts",
+            json!({"source":"startup"}),
+        ),
+        "00000000000000000200",
+    );
+    let directory = setup.binding_dir("codex", "facts");
+    setup.env.remove("WEZTERM_ATTENTION_LAUNCH_ID");
+    let result = setup.apply(
+        &event("codex", "PreToolUse", "facts", json!({"tool_name":"shell"})),
+        "00000000000000000300",
+    );
+    assert_eq!(result.disposition, "partial");
+    assert!(directory.join("activity.json").exists());
+    assert!(!directory.join("lifecycle.json").exists());
+}
+
+#[test]
+fn real_cli_tool_snapshot_reaches_installed_wezterm() {
+    let setup = Setup::new();
+    setup.claim();
+    let started = run_hook(
+        &setup,
+        &["hooks", "event", "codex", "SessionStart", "--strict"],
+        &payload(
+            "codex",
+            "SessionStart",
+            "cli-facts",
+            json!({"source":"startup"}),
+        ),
+    );
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let tool = run_hook(
+        &setup,
+        &["hooks", "event", "codex", "PreToolUse", "--strict"],
+        &payload(
+            "codex",
+            "PreToolUse",
+            "cli-facts",
+            json!({"tool_name":"shell", "tool_use_id":"cli-call"}),
+        ),
+    );
+    assert!(
+        tool.status.success(),
+        "{}",
+        String::from_utf8_lossy(&tool.stderr)
+    );
+    assert!(tool.stdout.is_empty());
+    let (address, _) = pane_address(&setup.env).unwrap();
+    let wire =
+        json!({"wire":2,"address":address,"launch_id":setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]});
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let result = setup._scratch.0.join("wezterm-result");
+    let output = Command::new("/opt/homebrew/bin/wezterm")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("WEZTERM_ATTENTION_SMOKE_RESULT", &result)
+        .env("WEZTERM_ATTENTION_TEST_ROOT", &root)
+        .env(
+            "WEZTERM_ATTENTION_LIFECYCLE_FIXTURE_DIR",
+            &setup.env["WEZTERM_ATTENTION_DIR"],
+        )
+        .env("WEZTERM_ATTENTION_LIFECYCLE_FIXTURE_WIRE", wire.to_string())
+        .args(["--config-file"])
+        .arg(root.join("tests/wezterm_protocol_smoke.lua"))
+        .args(["show-keys", "--lua"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let evidence = fs::read_to_string(result).unwrap();
+    assert!(evidence.starts_with("ok -"), "{evidence}");
+}
+
+#[test]
+fn lifecycle_raw_read_is_bounded_before_decode() {
+    use wezterm_attention::protocol::{bounded_lifecycle_json, manifest};
+    let limit = manifest().unwrap().limits.lifecycle_max_json_bytes;
+    assert!(!bounded_lifecycle_json(&vec![b' '; limit + 1]));
+    assert!(!bounded_lifecycle_json(b"[[[[[[[[[]]]]]]]]]"));
+    assert!(bounded_lifecycle_json(br#"{"quoted":"[[[[[[[[[[[[["}"#));
+    let setup = Setup::new();
+    let file = setup._scratch.0.join("lifecycle.json");
+    fs::write(&file, vec![b' '; limit + 1]).unwrap();
+    let (address, _) = pane_address(&setup.env).unwrap();
+    assert!(
+        wezterm_attention::records::read_record(
+            &file,
+            Some("lifecycle_snapshot"),
+            &wezterm_attention::records::RecordIdentity::pane(&address)
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn same_key_order_conflict_and_equal_time_eviction() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../fixtures/lifecycle/observations.json")).unwrap();
+    let mut snapshot: LifecycleSnapshot =
+        serde_json::from_value(fixture["cases"][1]["value"].clone()).unwrap();
+    let mut item = snapshot.pools.general.observations.remove(0);
+    item.correlation = Some(wezterm_attention::observations::NativeCorrelation {
+        tool_call_id: Some("stable".into()),
+        ..Default::default()
+    });
+    assert!(snapshot.reduce(item.clone()).unwrap());
+    let mut older = item.clone();
+    older.observed_mono_ns = "00000000000000000001".into();
+    older.source_version = Some("old".into());
+    assert!(!snapshot.reduce(older).unwrap());
+    let mut conflict = item.clone();
+    conflict.source_version = Some("conflict".into());
+    assert!(snapshot.reduce(conflict).is_err());
+    for _ in 0..64 {
+        let mut sibling = item.clone();
+        sibling.observation_id = Uuid::new_v4().to_string();
+        sibling.correlation = None;
+        snapshot.reduce(sibling).unwrap();
+    }
+    assert!(snapshot.pools.general.observations.is_empty());
+    assert_eq!(
+        snapshot.pools.general.retention_floor_mono_ns,
+        Some(item.observed_mono_ns)
+    );
+    assert!(snapshot.pools.requests.retention_floor_mono_ns.is_none());
+}
+
+#[test]
+fn tool_post_failure_and_future_snapshot_preserve_badge_identity() {
+    let setup = Setup::new();
+    setup.claim();
+    setup.apply(
+        &event(
+            "claude",
+            "SessionStart",
+            "tool-phases",
+            json!({"source":"startup"}),
+        ),
+        "00000000000000000200",
+    );
+    setup.apply(
+        &event(
+            "claude",
+            "PreToolUse",
+            "tool-phases",
+            json!({"tool_name":"Bash","tool_use_id":"tool-1"}),
+        ),
+        "00000000000000000300",
+    );
+    let directory = setup.binding_dir("claude", "tool-phases");
+    let badge = fs::read(directory.join("activity.json")).unwrap();
+    for (name, order) in [
+        ("PostToolUse", "00000000000000000400"),
+        ("PostToolUseFailure", "00000000000000000500"),
+    ] {
+        let result = setup.apply(&event("claude", name, "tool-phases", json!({"tool_name":"Bash","tool_use_id":"tool-1","tool_response":"SYNTHETIC-PRIVATE-SENTINEL"})), order);
+        assert_eq!(result.disposition, "applied");
+        assert_eq!(fs::read(directory.join("activity.json")).unwrap(), badge);
+    }
+    let raw = fs::read_to_string(directory.join("lifecycle.json")).unwrap();
+    assert!(!raw.contains("SYNTHETIC-PRIVATE-SENTINEL"));
+    let snapshot: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        snapshot["pools"]["general"]["observations"][1]["is_error"],
+        true
+    );
+    let mut future = snapshot;
+    future["schema"] = json!(3);
+    let future_bytes = serde_json::to_vec(&future).unwrap();
+    fs::write(directory.join("lifecycle.json"), &future_bytes).unwrap();
+    let result = setup.apply(
+        &event(
+            "claude",
+            "PreToolUse",
+            "tool-phases",
+            json!({"tool_name":"Read","tool_use_id":"tool-2"}),
+        ),
+        "00000000000000000600",
+    );
+    assert_eq!(result.disposition, "partial");
+    assert_eq!(
+        fs::read(directory.join("lifecycle.json")).unwrap(),
+        future_bytes
+    );
+    assert_eq!(fs::read(directory.join("activity.json")).unwrap(), badge);
+}
+
+#[test]
+fn request_observations_are_passive_and_namespaced() {
+    let setup = Setup::new();
+    setup.claim();
+    setup.apply(
+        &event(
+            "claude",
+            "SessionStart",
+            "requests",
+            json!({"source":"startup"}),
+        ),
+        "00000000000000000200",
+    );
+    setup.apply(
+        &event(
+            "claude",
+            "PermissionRequest",
+            "requests",
+            json!({"tool_name":"Bash"}),
+        ),
+        "00000000000000000300",
+    );
+    let directory = setup.binding_dir("claude", "requests");
+    let badge = fs::read(directory.join("activity.json")).unwrap();
+    for (index, (name, patch)) in [
+        ("PermissionDenied", json!({"tool_name":"Bash","tool_use_id":"denied-1","permission_mode":"auto"})),
+        ("Elicitation", json!({"mcp_server_name":"server-a","elicitation_id":"same-id","mode":"form"})),
+        ("ElicitationResult", json!({"mcp_server_name":"server-b","elicitation_id":"same-id","action":"accept"})),
+        ("Notification", json!({"notification_type":"elicitation_url_dialog","message":"SYNTHETIC-PRIVATE-SENTINEL"})),
+    ].into_iter().enumerate() {
+        let result = setup.apply(&event("claude", name, "requests", patch), &format!("{:020}", 400 + index));
+        assert_eq!(result.disposition, "applied");
+        assert_eq!(fs::read(directory.join("activity.json")).unwrap(), badge);
+    }
+    let raw = fs::read_to_string(directory.join("lifecycle.json")).unwrap();
+    assert!(!raw.contains("SYNTHETIC-PRIVATE-SENTINEL"));
+    let snapshot: LifecycleSnapshot = serde_json::from_str(&raw).unwrap();
+    assert_eq!(snapshot.pools.requests.observations.len(), 5);
+}
+
+#[test]
+fn async_post_only_publication_requires_exact_success_receipt() {
+    let setup = Setup::new();
+    setup.claim();
+    setup.apply(
+        &event(
+            "codex",
+            "SessionStart",
+            "async",
+            json!({"source":"startup"}),
+        ),
+        "00000000000000000200",
+    );
+    let patch = json!({"tool_name":"request_user_input_async","tool_use_id":"question-call","turn_id":"turn-a","tool_response":"{\"accepted\":true}"});
+    let result = setup.apply(
+        &event("codex", "PostToolUse", "async", patch.clone()),
+        "00000000000000000300",
+    );
+    assert_eq!(result.disposition, "applied");
+    let directory = setup.binding_dir("codex", "async");
+    assert!(!directory.join("activity.json").exists());
+    let before = fs::read(directory.join("lifecycle.json")).unwrap();
+    for receipt in [
+        json!([{"type":"input_text","text":"{\"accepted\":true}"}]),
+        json!("{\"accepted\":false}"),
+        json!("{\"accepted\":true,\"answer\":\"private\"}"),
+        json!(null),
+    ] {
+        let mut rejected = patch.clone();
+        rejected["tool_response"] = receipt;
+        let result = setup.apply(
+            &event("codex", "PostToolUse", "async", rejected),
+            "00000000000000000400",
+        );
+        assert_eq!(result.disposition, "partial");
+        assert_eq!(fs::read(directory.join("lifecycle.json")).unwrap(), before);
+    }
+}
+
+#[test]
+fn attempt_failure_retry_and_settling_do_not_end_a_binding() {
+    for provider in ["claude", "codex", "pi"] {
+        let setup = Setup::new();
+        setup.claim();
+        let (start, start_patch) = if provider == "pi" {
+            ("session_start", json!({"start_source":"startup"}))
+        } else {
+            ("SessionStart", json!({"source":"startup"}))
+        };
+        setup.apply(
+            &event(provider, start, "run", start_patch),
+            "00000000000000000200",
+        );
+        let cases = match provider {
+            "claude" => vec![
+                (
+                    "UserPromptSubmit",
+                    json!({"prompt":"SYNTHETIC-PRIVATE-SENTINEL"}),
+                ),
+                (
+                    "StopFailure",
+                    json!({"error":"rate_limit","error_details":"SYNTHETIC-PRIVATE-SENTINEL"}),
+                ),
+                (
+                    "PreToolUse",
+                    json!({"tool_name":"Read","tool_use_id":"retry"}),
+                ),
+                ("Stop", json!({"stop_hook_active":true})),
+            ],
+            "codex" => vec![
+                (
+                    "UserPromptSubmit",
+                    json!({"turn_id":"turn-1","prompt":"SYNTHETIC-PRIVATE-SENTINEL"}),
+                ),
+                ("Interrupt", json!({"turn_id":"turn-1"})),
+                (
+                    "PreToolUse",
+                    json!({"tool_name":"shell","tool_use_id":"retry","turn_id":"turn-2"}),
+                ),
+                ("Stop", json!({"stop_hook_active":false,"turn_id":"turn-2"})),
+            ],
+            _ => vec![
+                ("input", json!({"source":"extension"})),
+                (
+                    "message_end",
+                    json!({"role":"assistant","stop_reason":"aborted"}),
+                ),
+                ("agent_start", json!({})),
+                ("agent_settled", json!({})),
+            ],
+        };
+        for (index, (name, patch)) in cases.into_iter().enumerate() {
+            let result = setup.apply(
+                &event(provider, name, "run", patch),
+                &format!("{:020}", 300 + index),
+            );
+            assert_eq!(result.disposition, "applied", "{provider}:{name}");
+            assert!(!setup.binding_dir(provider, "run").join("end.json").exists());
+        }
+        let raw =
+            fs::read_to_string(setup.binding_dir(provider, "run").join("lifecycle.json")).unwrap();
+        assert!(!raw.contains("SYNTHETIC-PRIVATE-SENTINEL"));
+        assert!(raw.contains("prompt_submitted"));
+        assert!(raw.contains(if provider == "pi" {
+            "run_settled"
+        } else {
+            "response_finished"
+        }));
+        assert!(raw.contains(if provider == "codex" {
+            "user_interrupt"
+        } else {
+            "attempt_outcome"
+        }));
+    }
+    for patch in [
+        json!({"role":"user","stop_reason":"error"}),
+        json!({"role":"assistant","stop_reason":"stop"}),
+    ] {
+        assert_eq!(
+            event("pi", "message_end", "run", patch).action,
+            ProviderAction::Ignored
+        );
+    }
+}
+
+#[test]
+fn actual_pi_runner_dispatches_through_the_real_writer() {
+    let setup = Setup::new();
+    setup.claim();
+    let bridge_root = setup._scratch.0.join("bridge");
+    fs::create_dir_all(bridge_root.join("bin")).unwrap();
+    std::os::unix::fs::symlink(
+        env!("CARGO_BIN_EXE_attention"),
+        bridge_root.join("bin/attention"),
+    )
+    .unwrap();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut command = Command::new("/opt/homebrew/bin/node");
+    command
+        .env_clear()
+        .envs(&setup.env)
+        .env("PATH", "/usr/bin:/bin")
+        .env("WEZTERM_ATTENTION_ROOT", &bridge_root)
+        .arg(root.join("tests/pi_lifecycle_runtime.mjs"));
+    if let Ok(runtime) = std::env::var("ATTENTION_PI_RUNTIME_ROOT") {
+        command.env("ATTENTION_PI_RUNTIME_ROOT", runtime);
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let raw =
+        fs::read_to_string(setup.binding_dir("pi", "pi-runtime").join("lifecycle.json")).unwrap();
+    assert!(!raw.contains("SYNTHETIC-PRIVATE-SENTINEL"));
+    let snapshot: Value = serde_json::from_str(&raw).unwrap();
+    let observations = snapshot["pools"]["general"]["observations"]
+        .as_array()
+        .unwrap();
+    assert_eq!(observations.len(), 8);
+    assert!(
+        observations
+            .iter()
+            .any(|item| item["kind"] == "compaction_attempted" && item["trigger"] == "threshold")
+    );
+    assert!(
+        observations
+            .iter()
+            .any(|item| item["kind"] == "compaction_succeeded" && item["trigger"] == "manual")
+    );
+    assert!(observations.iter().any(|item| item["kind"] == "tool_result"
+        && item["is_error"] == true
+        && item["tool_class"] == "generic"));
+    assert!(
+        observations
+            .iter()
+            .any(|item| item["kind"] == "attempt_outcome" && item["outcome"] == "aborted")
+    );
+    assert!(
+        !setup
+            .binding_dir("pi", "pi-runtime")
+            .join("end.json")
+            .exists(),
+        "reload keeps the binding"
+    );
+}
+
+#[test]
+fn compaction_is_not_agent_completion() {
+    for provider in ["claude", "codex"] {
+        let setup = Setup::new();
+        setup.claim();
+        setup.apply(
+            &event(
+                provider,
+                "SessionStart",
+                "compact",
+                json!({"source":"startup"}),
+            ),
+            "00000000000000000200",
+        );
+        setup.apply(
+            &event(
+                provider,
+                "PreToolUse",
+                "compact",
+                json!({"tool_name":"Read", "tool_use_id":"work"}),
+            ),
+            "00000000000000000300",
+        );
+        let directory = setup.binding_dir(provider, "compact");
+        let badge = fs::read(directory.join("activity.json")).unwrap();
+        for (name, order) in [
+            ("PostCompact", "00000000000000000400"),
+            ("PreCompact", "00000000000000000500"),
+        ] {
+            let result = setup.apply(
+                &event(provider, name, "compact", json!({"trigger":"manual"})),
+                order,
+            );
+            assert_eq!(result.disposition, "applied");
+            assert_eq!(fs::read(directory.join("activity.json")).unwrap(), badge);
+            assert!(!directory.join("end.json").exists());
+            assert!(!directory.join("agents-clear.json").exists());
+        }
+        let before = fs::read(directory.join("lifecycle.json")).unwrap();
+        setup.apply(
+            &event(
+                provider,
+                "SessionStart",
+                "compact",
+                json!({"source":"compact"}),
+            ),
+            "00000000000000000600",
+        );
+        assert_eq!(
+            fs::read(directory.join("lifecycle.json")).unwrap(),
+            before,
+            "compact metadata does not rebind evidence"
+        );
+        let bad = setup.apply(
+            &event(
+                provider,
+                "PreCompact",
+                "compact",
+                json!({"trigger":"overflow"}),
+            ),
+            "00000000000000000700",
+        );
+        assert_eq!(bad.disposition, "partial");
+        assert_eq!(fs::read(directory.join("lifecycle.json")).unwrap(), before);
+    }
+    assert_eq!(
+        event("pi", "session_compact_failed", "compact", json!({})).action,
+        ProviderAction::Ignored
+    );
+}
+
+#[test]
+fn byte_pressure_is_pool_local_with_maximal_valid_metadata() {
+    use wezterm_attention::observations::{
+        Actor, NativeCorrelation, ObservationBody, ResultSurface, ToolClass,
+    };
+    let cases: Value =
+        serde_json::from_str(include_str!("../fixtures/lifecycle/observations.json")).unwrap();
+    for requests in [false, true] {
+        let mut snapshot: LifecycleSnapshot =
+            serde_json::from_value(cases["cases"][1]["value"].clone()).unwrap();
+        snapshot.provider = "claude".into();
+        let mut item = snapshot.pools.general.observations[0].clone();
+        item.source_version = Some("v".repeat(256));
+        let agent_id = "a".repeat(256);
+        item.actor = Actor::Child {
+            agent_key: wezterm_attention::protocol::sha256_hex(agent_id.as_bytes()),
+            agent_id,
+        };
+        item.correlation = Some(NativeCorrelation {
+            tool_call_id: Some("t".repeat(256)),
+            turn_id: Some("n".repeat(256)),
+            message_id: Some("m".repeat(256)),
+            ..Default::default()
+        });
+        if requests {
+            item.source_event = "PermissionRequest".into();
+            item.body = ObservationBody::ApprovalRequested {
+                tool_name: Some("x".repeat(256)),
+            };
+        } else {
+            item.source_event = "PostToolUse".into();
+            item.body = ObservationBody::ToolResult {
+                tool_name: "x".repeat(256),
+                tool_class: ToolClass::Generic,
+                question_mode: None,
+                result_surface: ResultSurface::SuccessHook,
+                is_error: Some(false),
+                interrupted: Some(false),
+            };
+        }
+        let size = serde_json::to_vec(&item).unwrap().len();
+        assert!(
+            size <= 2048 && size * 64 > 122880,
+            "metadata must exercise bytes before count: {size}"
+        );
+        let other = if requests {
+            snapshot.pools.general.clone()
+        } else {
+            snapshot.pools.requests.clone()
+        };
+        for index in 0..80 {
+            let mut candidate = item.clone();
+            candidate.observation_id = Uuid::new_v4().to_string();
+            candidate.observed_mono_ns = format!("{:020}", 1000 + index);
+            candidate.correlation.as_mut().unwrap().tool_call_id =
+                Some(format!("{}{:010}", "t".repeat(246), index));
+            snapshot.reduce(candidate).unwrap();
+        }
+        let (changed, unchanged) = if requests {
+            (&snapshot.pools.requests, &snapshot.pools.general)
+        } else {
+            (&snapshot.pools.general, &snapshot.pools.requests)
+        };
+        assert_eq!(unchanged, &other);
+        assert!(changed.observations.len() < 64 && changed.retention_floor_mono_ns.is_some());
+        let value = serde_json::to_value(&snapshot).unwrap();
+        wezterm_attention::protocol::validate_record(&value, Some("lifecycle_snapshot")).unwrap();
+    }
+}
+
+#[test]
+fn frozen_reader_accepts_new_manifest_and_ignores_sidecar() {
+    let setup = Setup::new();
+    setup.claim();
+    let start = run_hook(
+        &setup,
+        &["hooks", "event", "codex", "SessionStart", "--strict"],
+        &payload(
+            "codex",
+            "SessionStart",
+            "compat",
+            json!({"source":"startup"}),
+        ),
+    );
+    assert!(start.status.success());
+    let tool = run_hook(
+        &setup,
+        &["hooks", "event", "codex", "PreToolUse", "--strict"],
+        &payload(
+            "codex",
+            "PreToolUse",
+            "compat",
+            json!({"tool_name":"shell","tool_use_id":"compat-call"}),
+        ),
+    );
+    assert!(tool.status.success());
+    let sidecar = setup.binding_dir("codex", "compat").join("lifecycle.json");
+    let bytes = fs::read(&sidecar).unwrap();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let contract: Value =
+        serde_json::from_str(include_str!("../fixtures/lifecycle/compatibility.json")).unwrap();
+    let frozen = setup._scratch.0.join("frozen-reader");
+    fs::create_dir_all(frozen.join("plugin")).unwrap();
+    fs::create_dir_all(frozen.join("protocol")).unwrap();
+    for file in contract["reader_files"].as_array().unwrap() {
+        let file = file.as_str().unwrap();
+        let output = Command::new("/usr/bin/git")
+            .current_dir(&root)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .args([
+                "show",
+                &format!("{}:{file}", contract["baseline_commit"].as_str().unwrap()),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "frozen reader source must exist: {file}"
+        );
+        fs::write(frozen.join(file), output.stdout).unwrap();
+    }
+    fs::copy(
+        root.join("protocol/v2.json"),
+        frozen.join("protocol/v2.json"),
+    )
+    .unwrap();
+    let result_path = setup._scratch.0.join("compat-result");
+    let (address, _) = pane_address(&setup.env).unwrap();
+    let wire =
+        json!({"wire":2,"address":address,"launch_id":setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]});
+    let output = Command::new("/opt/homebrew/bin/wezterm")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("ATTENTION_FROZEN_READER_ROOT", frozen)
+        .env("ATTENTION_COMPAT_RESULT", &result_path)
+        .env("WEZTERM_ATTENTION_DIR", &setup.env["WEZTERM_ATTENTION_DIR"])
+        .env("ATTENTION_TEST_WIRE", wire.to_string())
+        .arg("--config-file")
+        .arg(root.join("tests/fixtures/lifecycle/compatibility.lua"))
+        .args(["show-keys", "--lua"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let result = fs::read_to_string(result_path).unwrap();
+    assert!(result.starts_with("ok -"), "{result}");
+    assert_eq!(
+        fs::read(sidecar).unwrap(),
+        bytes,
+        "old reader must not modify the sidecar"
+    );
+}
+
+#[test]
+fn native_codex_async_tool_hooks_reach_the_snapshot() {
+    let setup = Setup::new();
+    setup.claim();
+    let bridge = setup._scratch.0.join("native-bridge");
+    fs::create_dir_all(bridge.join("bin")).unwrap();
+    std::os::unix::fs::symlink(
+        env!("CARGO_BIN_EXE_attention"),
+        bridge.join("bin/attention"),
+    )
+    .unwrap();
+    let output = Command::new("/opt/homebrew/bin/node")
+        .env_clear()
+        .envs(&setup.env)
+        .env("PATH", "/usr/bin:/bin:/opt/homebrew/bin")
+        .env("WEZTERM_ATTENTION_ROOT", &bridge)
+        .env(
+            "ATTENTION_CODEX_SOURCE",
+            std::env::var("ATTENTION_CODEX_SOURCE")
+                .unwrap_or_else(|_| "/Users/provi/Development/_sources/codex".into()),
+        )
+        .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/lifecycle_contact_probe.mjs"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let session = report["session_id"].as_str().unwrap();
+    let record: Value = serde_json::from_slice(
+        &fs::read(setup.binding_dir("codex", session).join("lifecycle.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        record["pools"]["requests"]["observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["kind"] == "tool_result" && item["question_mode"] == "nonblocking")
+    );
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let result_path = setup._scratch.0.join("native-consumer-smoke");
+    let (address, _) = pane_address(&setup.env).unwrap();
+    let wire =
+        json!({"wire":2,"address":address,"launch_id":setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]});
+    let output = Command::new("/opt/homebrew/bin/wezterm")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("WEZTERM_ATTENTION_TEST_ROOT", &root)
+        .env("WEZTERM_ATTENTION_SMOKE_RESULT", &result_path)
+        .env(
+            "WEZTERM_ATTENTION_LIFECYCLE_FIXTURE_DIR",
+            &setup.env["WEZTERM_ATTENTION_DIR"],
+        )
+        .env("WEZTERM_ATTENTION_LIFECYCLE_FIXTURE_WIRE", wire.to_string())
+        .env("WEZTERM_ATTENTION_LIFECYCLE_SCENARIO", "publication")
+        .arg("--config-file")
+        .arg(root.join("tests/wezterm_protocol_smoke.lua"))
+        .args(["show-keys", "--lua"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let result = fs::read_to_string(result_path).unwrap();
+    assert!(result.starts_with("ok -"), "{result}");
+}
+
+#[test]
+#[ignore = "requires test-only xterm/headless; the full gate supplies its module path"]
+fn native_codex_queued_input_is_not_blocked_by_a_pending_question() {
+    let setup = Setup::new();
+    setup.claim();
+    let bridge = setup._scratch.0.join("native-ui-bridge");
+    fs::create_dir_all(bridge.join("bin")).unwrap();
+    std::os::unix::fs::symlink(
+        env!("CARGO_BIN_EXE_attention"),
+        bridge.join("bin/attention"),
+    )
+    .unwrap();
+    let module = std::env::var("ATTENTION_XTERM_MODULE")
+        .expect("set the disposable xterm/headless module path");
+    let output = Command::new("/opt/homebrew/bin/node")
+        .env_clear()
+        .envs(&setup.env)
+        .env("PATH", "/usr/bin:/bin:/opt/homebrew/bin")
+        .env("WEZTERM_ATTENTION_ROOT", &bridge)
+        .env("ATTENTION_NATIVE_UI", "1")
+        .env(
+            "ATTENTION_CODEX_SOURCE",
+            std::env::var("ATTENTION_CODEX_SOURCE")
+                .unwrap_or_else(|_| "/Users/provi/Development/_sources/codex".into()),
+        )
+        .env("ATTENTION_XTERM_MODULE", module)
+        .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/lifecycle_contact_probe.mjs"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["ui_question_and_queue"], true);
+    assert_eq!(report["queue_drained"], true);
+}
+
+#[test]
+fn every_active_lifecycle_row_reaches_the_production_writer() {
+    let registry: Value =
+        serde_json::from_str(include_str!("../fixtures/lifecycle/contact-cases.json")).unwrap();
+    for row in registry["rows"].as_array().unwrap() {
+        for case in row["cases"].as_array().unwrap() {
+            let setup = Setup::new();
+            setup.claim();
+            let provider = case["provider"].as_str().unwrap();
+            let (start, patch) = if provider == "pi" {
+                ("session_start", json!({"start_source":"startup"}))
+            } else {
+                ("SessionStart", json!({"source":"startup"}))
+            };
+            setup.apply(
+                &event(provider, start, "coverage", patch),
+                "00000000000000000200",
+            );
+            let name = case["event"].as_str().unwrap();
+            let mut patch = case["patch"].clone();
+            patch["prompt"] = json!("SYNTHETIC-PRIVATE-SENTINEL");
+            patch["tool_input"] = json!({"private":"SYNTHETIC-PRIVATE-SENTINEL"});
+            let output = run_hook(
+                &setup,
+                &["hooks", "event", provider, name, "--strict"],
+                &payload(provider, name, "coverage", patch),
+            );
+            assert!(
+                output.status.success(),
+                "{} {provider} {name}: {}",
+                row["id"],
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.stdout.is_empty());
+            let directory = setup.binding_dir(provider, "coverage");
+            let raw = fs::read_to_string(directory.join("lifecycle.json")).unwrap();
+            assert!(!raw.contains("SYNTHETIC-PRIVATE-SENTINEL"));
+            let snapshot: LifecycleSnapshot = serde_json::from_str(&raw).unwrap();
+            let observation = snapshot
+                .pools
+                .requests
+                .observations
+                .iter()
+                .chain(&snapshot.pools.general.observations)
+                .find(|item| item.body.kind() == case["kind"].as_str().unwrap())
+                .unwrap();
+            assert_eq!(observation.source_event, name);
+            if row["id"] == "H18" {
+                assert!(
+                    !directory.join("activity.json").exists(),
+                    "child work cannot become lead activity"
+                );
+            }
+            if case["patch"]["notification_type"] == "elicitation_url_dialog" {
+                assert!(
+                    !directory.join("activity.json").exists(),
+                    "new URL notice cannot create a badge"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn launch_rotation_after_resolution_cannot_add_old_execution_facts() {
+    struct PausingClock {
+        entered: std::sync::Barrier,
+        released: std::sync::Barrier,
+    }
+    impl Clock for PausingClock {
+        fn monotonic_ns20(&self) -> wezterm_attention::protocol::Result<String> {
+            Ok("00000000000000000300".into())
+        }
+        fn unix_ns20(&self) -> wezterm_attention::protocol::Result<String> {
+            self.entered.wait();
+            self.released.wait();
+            Ok("00000000012345678900".into())
+        }
+    }
+    let setup = Setup::new();
+    setup.claim();
+    setup.apply(
+        &event("codex", "SessionStart", "old", json!({"source":"startup"})),
+        "00000000000000000200",
+    );
+    setup.apply(
+        &event(
+            "codex",
+            "PreToolUse",
+            "old",
+            json!({"tool_name":"shell","tool_use_id":"first"}),
+        ),
+        "00000000000000000250",
+    );
+    let path = setup.binding_dir("codex", "old").join("lifecycle.json");
+    let before = fs::read(&path).unwrap();
+    let clock = PausingClock {
+        entered: std::sync::Barrier::new(2),
+        released: std::sync::Barrier::new(2),
+    };
+    thread::scope(|scope| {
+        let pending = scope.spawn(|| {
+            let ports = RuntimePorts {
+                clock: &clock,
+                tty: &setup.tty,
+                panes: &setup.panes,
+            };
+            apply_provider_event(
+                &event(
+                    "codex",
+                    "PreToolUse",
+                    "old",
+                    json!({"tool_name":"shell","tool_use_id":"delayed"}),
+                ),
+                &setup.env,
+                "00000000000000000300",
+                &ports,
+            )
+            .unwrap()
+        });
+        clock.entered.wait();
+        let mut newer = setup.env.clone();
+        newer.insert(
+            "WEZTERM_ATTENTION_LAUNCH_ID".into(),
+            Uuid::new_v4().to_string(),
+        );
+        let newer_clock = FixedClock {
+            monotonic: "00000000000000001000",
+            unix: "00000000012345678900",
+        };
+        let ports = RuntimePorts {
+            clock: &newer_clock,
+            tty: &setup.tty,
+            panes: &setup.panes,
+        };
+        let claimed = wezterm_attention::claim_launch(&newer, &ports);
+        clock.released.wait();
+        claimed.unwrap();
+        let result = pending.join().unwrap();
+        assert_eq!(result.disposition, "partial");
+        assert_eq!(result.diagnostic.unwrap().code, "claim_stale");
+    });
+    assert_eq!(fs::read(path).unwrap(), before);
 }
 
 fn run_hook(setup: &Setup, arguments: &[&str], payload: &Value) -> std::process::Output {

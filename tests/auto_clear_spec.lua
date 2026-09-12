@@ -3090,6 +3090,286 @@ test("get_attention_view returns cached provider facts without exposing the cach
     "the accessor must return a copy, not the cache table")
 end)
 
+test("lifecycle facts reach the cached reader without changing the badge", function()
+  materialize_state_case(protocol_fixture.state_case)
+  local samples = protocol_fixture.record_samples
+  local file = assert(io.open(repo_root .. "/tests/fixtures/lifecycle/observations.json", "r"))
+  local fixture = decode_json(file:read("*a"))
+  file:close()
+  local snapshot = fixture.cases[2].value
+  snapshot.address, snapshot.launch_id = samples.claim.address, samples.claim.launch_id
+  snapshot.binding_id, snapshot.provider = samples.binding.binding_id, samples.binding.provider
+  snapshot.pools.requests.observations = fixture.cases[4].value.pools.requests.observations
+  local binding_dir = test_dir .. "/v2/realms/" .. snapshot.address.realm_id
+    .. "/incarnations/" .. snapshot.address.incarnation_id
+    .. "/panes/42/launches/" .. snapshot.launch_id .. "/bindings/" .. snapshot.binding_id
+  write_json_path(binding_dir .. "/lifecycle.json", snapshot)
+  local reloaded = dofile(repo_root .. "/plugin/init.lua")
+  reloaded.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false })
+  local wire = protocol_fixture.wire_sample
+  local window = window_double({ tabs = { { { id = 9961, domain = "unix", attention = wire } } }, focused = false })
+  local pane = mux_pane(9961, { domain = "unix", attention = wire })
+  reloaded.poll(window, { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+  local view = assert(reloaded.get_attention_view(pane))
+  assert(view.type == "notify" and view.lifecycle.availability == "available")
+  assert(#view.lifecycle.observations == 2)
+  view.lifecycle.observations[1].actor.kind = "mutated"
+  assert(reloaded.get_attention_view(pane).lifecycle.observations[1].actor.kind == "lead")
+  local ack = decode_json(encode_json(samples.acknowledgement))
+  ack.activity_event_id = samples.activity.event_id
+  write_json_path(binding_dir .. "/ack.json", ack)
+  local stopped = decode_json(encode_json(samples.subagent_presence))
+  stopped.status = "stopped"
+  write_json_path(binding_dir .. "/agents/" .. stopped.agent_key .. ".json", stopped)
+  local original_open = io.open
+  io.open = function(path, mode)
+    if path == binding_dir .. "/lifecycle.json" then return nil, "Permission denied" end
+    return original_open(path, mode)
+  end
+  local ok, failure = pcall(reloaded.poll, window, { now_unix_ns = "00000000000000000000", call_after = function() end })
+  io.open = original_open
+  assert(ok, failure)
+  local cached = assert(reloaded.get_attention_view(pane))
+  assert(cached.lifecycle.availability == "cached" and #cached.lifecycle.observations == 2)
+  assert(cached.activity_type == nil and cached.subagents == 0, "cached facts cannot undo fresh ack or child stop")
+  local skew = false
+  for _, problem in ipairs(cached.lifecycle.diagnostics) do if problem.code == "clock_skew" then skew = true end end
+  assert(skew, "cached facts retain written UTC and report negative age")
+  write_json_path(binding_dir .. "/ack.json", samples.acknowledgement)
+  local raw = assert(io.open(binding_dir .. "/lifecycle.json", "w"))
+  raw:write('{"schema":3}'); raw:close()
+  reloaded.poll(window, { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+  local future = assert(reloaded.get_attention_view(pane))
+  assert(future.type == "notify" and future.lifecycle.availability == "unsupported")
+  assert(#future.lifecycle.observations == 0, "successful future read must not recover cached facts")
+  write_json_path(binding_dir .. "/lifecycle.json", snapshot)
+  reloaded.poll(window, { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+  assert(#reloaded.get_attention_view(pane).lifecycle.observations == 2)
+  local next_id = string.rep("e", 64)
+  local launch_dir = assert(binding_dir:match("^(.*)/bindings/[^/]+$"))
+  local next_binding = decode_json(encode_json(samples.binding)); next_binding.binding_id = next_id
+  local next_pointer = decode_json(encode_json(samples.current_binding)); next_pointer.binding_id = next_id
+  write_json_path(launch_dir .. "/bindings/" .. next_id .. "/binding.json", next_binding)
+  write_json_path(launch_dir .. "/current-binding.json", next_pointer)
+  io.open = function(path, mode)
+    if path == launch_dir .. "/bindings/" .. next_id .. "/lifecycle.json" then return nil, "Permission denied" end
+    return original_open(path, mode)
+  end
+  ok, failure = pcall(reloaded.poll, window, { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+  io.open = original_open
+  assert(ok, failure)
+  local replaced = assert(reloaded.get_attention_view(pane))
+  assert(replaced.binding_id == next_id and replaced.lifecycle.availability == "unavailable")
+  assert(#replaced.lifecycle.observations == 0, "new binding cannot recover old binding facts")
+  os.remove(binding_dir .. "/lifecycle.json")
+end)
+
+test("question publication, tool return, and badge dismissal stay independent", function()
+  local wire = materialize_v2_fixture(9971)
+  local samples = protocol_fixture.record_samples
+  local binding = decode_json(encode_json(samples.binding))
+  binding.address, binding.provider = wire.address, "codex"
+  local directory = test_dir .. "/v2/realms/" .. wire.address.realm_id .. "/incarnations/" .. wire.address.incarnation_id
+    .. "/panes/9971/launches/" .. wire.launch_id .. "/bindings/" .. binding.binding_id
+  write_json_path(directory .. "/binding.json", binding)
+  os.remove(directory .. "/end.json")
+  for _, entry in ipairs(protocol_fixture.state_case.files) do
+    if entry.path:find("/agents/", 1, true) then
+      local presence = decode_json(encode_json(samples[entry.sample]))
+      presence.address, presence.provider = wire.address, "codex"
+      write_json_path(test_dir .. "/" .. entry.path:gsub("/panes/42/", "/panes/9971/", 1), presence)
+    end
+  end
+  local file = assert(io.open(repo_root .. "/tests/fixtures/lifecycle/observations.json", "r"))
+  local fixture = decode_json(file:read("*a")); file:close()
+  local snapshot = fixture.cases[18].value -- nonblocking tool result, without Pre
+  snapshot.address, snapshot.launch_id, snapshot.binding_id = wire.address, wire.launch_id, binding.binding_id
+  snapshot.pools.general = fixture.cases[1].value.pools.general
+  local post = snapshot.pools.requests.observations[1]
+  post.correlation = { tool_call_id = "question-q1", turn_id = "turn-1" }
+  local reloaded = dofile(repo_root .. "/plugin/init.lua")
+  reloaded.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false })
+  local window = window_double({ tabs = { { { id = 9971, domain = "unix", attention = wire } } }, focused = false })
+  local pane = mux_pane(9971, { domain = "unix", attention = wire })
+  local function read(focused)
+    write_json_path(directory .. "/lifecycle.json", snapshot)
+    local target = focused and window_double({ tabs = { { { id = 9971, domain = "unix", attention = wire } } }, focused = true, active_pane_id = { id = 9971, domain = "unix", attention = wire } }) or window
+    reloaded.poll(target, { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+    return assert(reloaded.get_attention_view(pane))
+  end
+  local view = read(false)
+  local consumer = dofile(repo_root .. "/tests/fixtures/lifecycle/consumer.lua").new()
+  local other_consumer = dofile(repo_root .. "/tests/fixtures/lifecycle/consumer.lua").new()
+  assert(consumer.appearance(view) == "follow_up" and other_consumer.appearance(view) == "follow_up")
+  consumer.dismiss()
+  assert(consumer.appearance(reloaded.get_attention_view(pane)) == "base")
+  assert(other_consumer.appearance(reloaded.get_attention_view(pane)) == "follow_up")
+  assert(view.lifecycle.requests[1].question_mode == "nonblocking")
+  assert(#view.lifecycle.requests[1].request_observation_ids == 0)
+  assert(view.lifecycle.requests[1].publication_observation_ids[1] == post.observation_id)
+  assert(#view.lifecycle.requests[1].relations == 0 and #view.lifecycle.requests[1].result_observation_ids == 0)
+  local pre = fixture.cases[17].value.pools.requests.observations[1]
+  pre.correlation = post.correlation
+  pre.observed_mono_ns = "00000000000000000600"
+  snapshot.pools.requests.observations[2] = pre
+  view = read(false)
+  assert(#view.lifecycle.requests == 1 and #view.lifecycle.requests[1].request_observation_ids == 1)
+  assert(view.lifecycle.requests[1].publication_observation_ids[1] == post.observation_id, "late Pre cannot mint a publication")
+  local dismissed = read(true)
+  assert(consumer.appearance(dismissed) == "base", "badge focus and a late Pre cannot undo consumer dismissal")
+  assert(dismissed.lifecycle.badge_acknowledgement.activity_event_id == samples.activity.event_id)
+  assert(#dismissed.lifecycle.requests[1].publication_observation_ids == 1, "focus is not an answer")
+  assert(dismissed.address.pane_id == "9971" and dismissed.launch_id == wire.launch_id and dismissed.binding_health == "valid")
+  dismissed.lifecycle.requests[1].publication_observation_ids[1] = "mutated"
+  dismissed.address.pane_id = "changed"
+  local again = reloaded.get_attention_view(pane)
+  assert(again.address.pane_id == "9971" and again.lifecycle.requests[1].publication_observation_ids[1] == post.observation_id)
+  post.tool_name, post.question_mode, pre.tool_name, pre.question_mode = "request_user_input", "blocking", "request_user_input", "blocking"
+  view = read(false)
+  assert(#view.lifecycle.requests[1].publication_observation_ids == 0)
+  assert(view.lifecycle.requests[1].relations[1].kind == "tool_result_observed", "blocking return is separate from async publication")
+  post.correlation = nil
+  view = read(false)
+  assert(#view.lifecycle.requests == 2, "ID-less return cannot join by name")
+  pre.correlation = { tool_call_id = post.observation_id }
+  view = read(false)
+  assert(#view.lifecycle.requests == 2, "local observation UUID is not a native tool ID")
+  post.correlation = pre.correlation
+  post.actor = { kind = "child", agent_id = "child-a", agent_key = internal.sha256("child-a") }
+  pre.actor = { kind = "child", agent_id = "child-b", agent_key = internal.sha256("child-b") }
+  view = read(false)
+  assert(#view.lifecycle.requests == 2 and #view.lifecycle.requests[1].relations == 0 and #view.lifecycle.requests[2].relations == 0,
+    "sibling children cannot correlate equal native tool IDs")
+  assert(view._records == nil and view.cache_key == nil and view.next_wakeup_unix_ns == nil)
+end)
+
+test("consumer dismissal is scoped to displayed publications and never implies an answer", function()
+  local module = dofile(repo_root .. "/tests/fixtures/lifecycle/consumer.lua")
+  local view = {
+    address = { realm_id = string.rep("a", 64), incarnation_id = string.rep("b", 64), pane_id = "42" },
+    launch_id = "00000000-0000-4000-8000-000000000001", binding_id = string.rep("c", 64),
+    binding_phase = "active", binding_health = "valid", reader_confidence = "confirmed", pane_presence = "present", activity_type = "thinking",
+    lifecycle = { availability = "available", retention_floors = {}, requests = { { kind = "question", question_mode = "nonblocking", publication_observation_ids = { "publication-1" } } } },
+  }
+  local first, second = module.new(), module.new()
+  assert(first.appearance(view) == "follow_up" and second.appearance(view) == "follow_up")
+  view.lifecycle.requests[1].publication_observation_ids[2] = "publication-2"
+  first.dismiss() -- rendered before publication-2 arrived
+  assert(first.appearance(view) == "follow_up", "unseen Q2 must not be dismissed with Q1")
+  first.dismiss()
+  view.activity_type = "stop"
+  view.lifecycle.badge_acknowledgement = { activity_event_id = "badge-1" }
+  view.lifecycle.snapshot_id = "unrelated-snapshot-rewrite"
+  assert(first.appearance(view) == "base" and second.appearance(view) == "follow_up")
+  assert(view.lifecycle.requests[1].publication_observation_ids[1] == "publication-1")
+  view.lifecycle.requests[1].publication_observation_ids = { "publication-2" }
+  view.lifecycle.retention_floors.requests = "00000000000000000100"
+  assert(first.appearance(view) == "unknown", "eviction is not resolution")
+  view.lifecycle.availability = "cached"
+  assert(first.appearance(view) == "unknown")
+  view.binding_phase = "ended"
+  assert(first.appearance(view) == "unknown", "ended binding loses its tint")
+  view.binding_phase, view.binding_id = "active", string.rep("d", 64)
+  view.lifecycle.availability, view.lifecycle.retention_floors = "available", {}
+  assert(first.appearance(view) == "follow_up", "new binding does not inherit dismissal")
+end)
+
+test("twenty full lifecycle panes keep polling and getter work bounded", function()
+  local file = assert(io.open(repo_root .. "/tests/fixtures/lifecycle/observations.json", "r"))
+  local fixture = decode_json(file:read("*a")); file:close()
+  local entries, paths = {}, {}
+  for index = 1, 20 do
+    local id = 11000 + index
+    local wire = materialize_v2_fixture(id)
+    entries[#entries + 1] = { id = id, domain = "unix", attention = wire }
+    for _, entry in ipairs(protocol_fixture.state_case.files) do
+      paths[#paths + 1] = test_dir .. "/" .. entry.path:gsub("/panes/42/", "/panes/" .. id .. "/", 1)
+    end
+    local snapshot = decode_json(encode_json(fixture.cases[2].value))
+    snapshot.address, snapshot.launch_id = wire.address, wire.launch_id
+    snapshot.binding_id, snapshot.provider = protocol_fixture.record_samples.binding.binding_id, "claude"
+    snapshot.pools.requests.observations, snapshot.pools.general.observations = {}, {}
+    for member = 1, 64 do
+      for _, pool in ipairs({ "requests", "general" }) do
+        local item = decode_json(encode_json(fixture.cases[2].value.pools.general.observations[1]))
+        item.observation_id = string.format("00000000-0000-4000-8000-%012d", member + (pool == "requests" and 1000 or 2000))
+        item.observed_mono_ns = string.format("%020d", member)
+        item.correlation = { tool_call_id = pool .. member }
+        if pool == "requests" then item.tool_name, item.tool_class, item.question_mode = "AskUserQuestion", "question", "blocking" end
+        snapshot.pools[pool].observations[member] = item
+      end
+    end
+    local directory = test_dir .. "/v2/realms/" .. wire.address.realm_id .. "/incarnations/" .. wire.address.incarnation_id
+      .. "/panes/" .. id .. "/launches/" .. wire.launch_id .. "/bindings/" .. snapshot.binding_id
+    write_json_path(directory .. "/lifecycle.json", snapshot)
+  end
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false })
+  local window = window_double({ tabs = { entries }, focused = false })
+  local old_open, old_popen = io.open, io.popen
+  local reads, writes, globs = 0, 0, 0
+  io.open = function(path, mode)
+    if mode and mode:find("w", 1, true) then writes = writes + 1 end
+    if path:match("/lifecycle%.json$") then reads = reads + 1 end
+    return old_open(path, mode)
+  end
+  io.popen = function() error("lifecycle polling/getter cannot launch a subprocess") end
+  local started = os.clock()
+  local ok, failure = pcall(function()
+    for _ = 1, 2 do
+      instance.poll(window, { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end,
+        glob = function(pattern)
+          globs = globs + 1
+          local directory = assert(pattern:match("^(.*)/%*%.json$"))
+          assert(directory:match("/reviews$") or directory:match("/agents$"), "no historical directory walk")
+          local matches = {}
+          for _, path in ipairs(paths) do if dirname(path) == directory then matches[#matches + 1] = path end end
+          return matches
+        end,
+      })
+    end
+    local before_getters = reads
+    for _, entry in ipairs(entries) do
+      local view = assert(instance.get_attention_view(mux_pane(entry.id, entry)))
+      assert(view.lifecycle.availability == "available" and #view.lifecycle.observations == 128)
+    end
+    assert(reads == before_getters, "getters cannot read files")
+  end)
+  local cpu_ms = (os.clock() - started) * 1000
+  io.open, io.popen = old_open, old_popen
+  assert(ok, failure)
+  assert(reads == 40 and globs == 80 and writes == 0, "exactly one sidecar read per pane/poll and no writes")
+  io.write(string.format("lifecycle workload: 20 panes, 2 polls, 128 observations each; CPU %.2f ms; 40 snapshot reads; 0 writes\n", cpu_ms))
+end)
+
+test("lifecycle snapshot grammar agrees with the shared fixture", function()
+  local api = dofile(repo_root .. "/plugin/protocol.lua")({ wezterm = wezterm, protocol_path = repo_root .. "/protocol/v2.json" })
+  local file = assert(io.open(repo_root .. "/tests/fixtures/lifecycle/observations.json", "r"))
+  local fixture = assert(api.decode_json(file:read("*a")))
+  file:close()
+  for _, case in ipairs(fixture.cases) do
+    local parsed, problem = api.parse_v2_record(case.value, "lifecycle_snapshot")
+    assert((parsed and "valid" or problem.code) == case.expected, case.id)
+  end
+  for _, case in ipairs(fixture.raw_cases) do
+    local parsed, problem = api.parse_v2_record_json(case.raw, "lifecycle_snapshot")
+    assert((parsed and "valid" or problem.code) == case.expected, case.id)
+  end
+  local original_open = io.open
+  io.open = function(path, mode)
+    if path ~= "/synthetic/lifecycle.json" then return original_open(path, mode) end
+    return { read = function(_, count)
+      assert(count == 262145, "lifecycle read must stop at bound plus one byte")
+      return string.rep(" ", count)
+    end, close = function() return true end }
+  end
+  local ok, result, problem, status = pcall(api.read_record_file, "/synthetic/lifecycle.json", "lifecycle_snapshot")
+  io.open = original_open
+  assert(ok and not result and problem.code == "record_invalid" and status == "invalid")
+  local parsed = api.parse_v2_record_json(string.rep("[", 9) .. string.rep("]", 9), "lifecycle_snapshot")
+  assert(not parsed, "deep lifecycle containers must reject")
+end)
+
 test("a missing protocol module logs once and keeps the v1 reader available", function()
   local module_path = repo_root .. "/plugin/protocol.lua"
   local hidden_path = module_path .. ".missing"

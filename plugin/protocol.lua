@@ -4,19 +4,61 @@ return function(context)
   local M = context.M
   local defaults = context.defaults
 
-  local function read_all(path)
+  local container_kinds = setmetatable({}, { __mode = "k" })
+  local function read_all(path, maximum)
     local file, open_err = io.open(path, "r")
     if not file then return nil, open_err end
-    local content, read_err = file:read("*a")
+    local content, read_err = file:read(maximum and maximum + 1 or "*a")
+    if maximum and content == nil and read_err == nil then content = "" end
     local closed, close_err = file:close()
     if not content then return nil, read_err end
     if not closed then return nil, close_err end
+    if maximum and #content > maximum then return nil, "lifecycle record exceeds its bound", "invalid" end
     return content
   end
 
   local function decode_json(content)
     local ok, value = pcall(wezterm.json_parse, content)
     if not ok then return nil, value end
+    -- Preserve raw container kinds, including empty [] versus {}, which some
+    -- WezTerm JSON decoders otherwise collapse to the same Lua table.
+    local cursor = 1
+    local function whitespace() cursor = content:find("%S", cursor) or (#content + 1) end
+    local function quoted()
+      local start = cursor
+      cursor = cursor + 1
+      while cursor <= #content do
+        local char = content:sub(cursor, cursor)
+        cursor = cursor + 1
+        if char == "\\" then cursor = cursor + 1 elseif char == '"' then break end
+      end
+      return wezterm.json_parse(content:sub(start, cursor - 1))
+    end
+    local walk
+    walk = function(node)
+      whitespace()
+      local char = content:sub(cursor, cursor)
+      if char == '"' then quoted(); return end
+      if char ~= "{" and char ~= "[" then
+        cursor = content:find("[,}%]%s]", cursor) or (#content + 1)
+        return
+      end
+      if type(node) == "table" then container_kinds[node] = char end
+      cursor = cursor + 1
+      whitespace()
+      local index, closing = 1, char == "{" and "}" or "]"
+      while content:sub(cursor, cursor) ~= closing do
+        local key = index
+        if char == "{" then key = quoted(); whitespace(); cursor = cursor + 1 end
+        walk(type(node) == "table" and node[key] or nil)
+        whitespace()
+        if content:sub(cursor, cursor) ~= "," then break end
+        cursor = cursor + 1; index = index + 1; whitespace()
+      end
+      cursor = cursor + 1
+    end
+    local shaped = pcall(walk, value)
+    if not shaped then return nil, "JSON container shape unavailable" end
     return value
   end
 
@@ -326,8 +368,27 @@ return function(context)
     return nil, "invalid activity target kind"
   end
 
+  local validate_shape
   local function validate_field(field_type, value, expected_kind)
     local limits = protocol.limits
+    if field_type == "lifecycle_pools" or field_type == "observation_pool" or field_type == "native_correlation" then
+      local name = field_type == "lifecycle_pools" and "pools" or (field_type == "observation_pool" and "pool" or "correlation")
+      return validate_shape(value, protocol.lifecycle_shapes[name]) ~= nil
+    elseif field_type == "lifecycle_actor" then
+      return type(value) == "table" and (value.kind == "lead" or value.kind == "child")
+        and validate_shape(value, protocol.lifecycle_shapes[value.kind], value.kind) ~= nil
+    elseif field_type == "observation_array" then
+      if type(value) ~= "table" or container_kinds[value] == "{" or #value > limits.lifecycle_pool_max_count then return false end
+      for key in pairs(value) do if type(key) ~= "number" or key % 1 ~= 0 or key < 1 or key > #value then return false end end
+      container_kinds[value] = "["
+      for _, item in ipairs(value) do
+        local spec = type(item) == "table" and protocol.lifecycle_variants[item.kind]
+        if not spec or not validate_shape(item, spec, item.kind) then return false end
+      end
+      return true
+    elseif protocol.lifecycle_enums and protocol.lifecycle_enums[field_type] then
+      return list_contains(protocol.lifecycle_enums[field_type], value)
+    end
     if field_type == "record_kind" then
       return value == expected_kind
     elseif field_type == "record_schema" then
@@ -377,7 +438,8 @@ return function(context)
     return false
   end
 
-  local function validate_shape(value, spec, expected_kind)
+  validate_shape = function(value, spec, expected_kind)
+    if type(value) == "table" and container_kinds[value] == "[" then return nil, "array is not an object" end
     local ok, err = exact_fields(value, spec.required, spec.optional)
     if not ok then return nil, err end
     for field, field_value in pairs(value) do
@@ -387,6 +449,77 @@ return function(context)
       end
     end
     return value
+  end
+
+  local function compact_size(value)
+    local kind = type(value)
+    if kind == "string" then return #value + 2 + select(2, value:gsub('[\\"]', "")) end
+    if kind == "boolean" then return value and 4 or 5 end
+    if kind == "number" then return #string.format("%.0f", value) end
+    if kind ~= "table" then return math.huge end
+    local bytes, count = 2, 0
+    for key, item in pairs(value) do
+      bytes = bytes + compact_size(item)
+      if container_kinds[value] ~= "[" then bytes = bytes + compact_size(key) + 1 end
+      count = count + 1
+    end
+    return bytes + math.max(0, count - 1)
+  end
+
+  local function observation_pool(item)
+    if item.kind == "tool_preflight" or item.kind == "tool_result" then return item.tool_class == "generic" and "general" or "requests" end
+    if item.kind == "approval_requested" or item.kind == "automatic_denial" or item.kind == "elicitation_requested" or item.kind == "elicitation_action_selected" or item.kind == "notice" then return "requests" end
+    return "general"
+  end
+
+  local function observation_key(item)
+    local c = item.correlation or {}
+    local namespace, id
+    if item.kind == "tool_preflight" or item.kind == "tool_result" or item.kind == "approval_requested" or item.kind == "automatic_denial" then namespace, id = "tool_call_id", c.tool_call_id
+    elseif item.kind == "elicitation_requested" or item.kind == "elicitation_action_selected" then namespace, id = "elicitation_id", c.elicitation_id
+    elseif c.message_id then namespace, id = "message_id", c.message_id else namespace, id = "turn_id", c.turn_id end
+    if not id then namespace = "observation_id" end
+    -- Length prefixes prevent safe-label separators from merging identities.
+    local parts = {}
+    for _, text in ipairs({ item.kind, item.actor.kind, item.actor.agent_id or "", namespace or "", id or item.observation_id, c.turn_id or "", c.mcp_server_name or "" }) do parts[#parts + 1] = #text .. ":" .. text end
+    return table.concat(parts)
+  end
+
+  local function classify_lifecycle_tool(provider, tool_name)
+    if (provider == "claude" and tool_name == "AskUserQuestion") or (provider == "codex" and tool_name == "request_user_input") then return "question", "blocking" end
+    if provider == "codex" and tool_name == "request_user_input_async" then return "question", "nonblocking" end
+    if provider == "codex" and tool_name == "request_permissions" then return "permission", nil end
+    return "generic", nil
+  end
+
+  local function validate_lifecycle(value)
+    local limits, keys, ids = protocol.limits, {}, {}
+    for name, pool in pairs(value.pools) do
+      if #pool.observations > limits.lifecycle_pool_max_count or compact_size(pool) > limits.lifecycle_pool_max_bytes then return false end
+      local prior
+      for _, item in ipairs(pool.observations) do
+        local allowed_sources = protocol.lifecycle_sources[value.provider] and protocol.lifecycle_sources[value.provider][item.kind]
+        if not list_contains(allowed_sources, item.source_event) then return false end
+        if item.correlation and item.correlation.mcp_server_name and item.kind ~= "elicitation_requested" and item.kind ~= "elicitation_action_selected" then return false end
+        local key, order = observation_key(item), item.observed_mono_ns .. item.observation_id
+        if keys[key] or ids[item.observation_id] or (prior and prior > order) or observation_pool(item) ~= name
+          or compact_size(item) > limits.lifecycle_observation_max_bytes
+          or (pool.retention_floor_mono_ns and item.observed_mono_ns <= pool.retention_floor_mono_ns) then return false end
+        keys[key], ids[item.observation_id], prior = true, true, order
+        if item.correlation and item.correlation.elicitation_id and not item.correlation.mcp_server_name then return false end
+        if item.actor.kind == "child" and (value.provider == "pi" or sha256(item.actor.agent_id) ~= item.actor.agent_key) then return false end
+        if item.kind == "tool_preflight" or item.kind == "tool_result" then
+          local class, mode = classify_lifecycle_tool(value.provider, item.tool_name)
+          if item.tool_class ~= class or item.question_mode ~= mode then return false end
+          if mode == "nonblocking" then
+            if item.actor.kind ~= "lead" then return false end
+            if item.kind == "tool_result" and (item.source_event ~= "PostToolUse" or item.result_surface ~= "post_hook" or item.is_error == true or item.interrupted == true) then return false end
+          end
+        end
+      end
+    end
+    local bytes = compact_size(value) + 1
+    return bytes <= limits.lifecycle_max_json_bytes and bytes - compact_size(value.pools.requests) - compact_size(value.pools.general) <= limits.lifecycle_envelope_max_bytes
   end
 
   local function parse_wire_value(value)
@@ -446,7 +579,32 @@ return function(context)
     if kind == "review" and sha256(parsed.owner_id) ~= parsed.owner_key then
       return nil, invalid("review owner_key does not match owner_id")
     end
+    if kind == "lifecycle_snapshot" and not validate_lifecycle(parsed) then return nil, invalid("lifecycle snapshot violates its contract") end
     return parsed
+  end
+
+  local function lifecycle_raw_valid(content)
+    if #content > protocol.limits.lifecycle_max_json_bytes then return false end
+    local quoted, escaped, depth, index = false, false, 0, 1
+    while index <= #content do
+      local char = content:sub(index, index)
+      if quoted then
+        if escaped then escaped = false elseif char:byte() == 92 then escaped = true elseif char == '"' then quoted = false end
+      elseif char == '"' then quoted = true
+      elseif char == "{" or char == "[" then
+        depth = depth + 1
+        if depth > protocol.limits.lifecycle_max_depth then return false end
+      elseif char == "}" or char == "]" then depth = depth - 1
+      elseif char:match("[%d%-]") then
+        local finish = content:find("[^0-9eE+%.%-]", index) or (#content + 1)
+        local token = content:sub(index, finish - 1)
+        -- The only numeric wire fields here are unsigned integer schema values.
+        if not is_canonical_decimal(token, 20) or (#token == 20 and token > "18446744073709551615") then return false end
+        index = finish - 1
+      end
+      index = index + 1
+    end
+    return depth == 0 and not quoted
   end
 
   local function parse_v2_record_json(content, expected_kind)
@@ -459,9 +617,15 @@ return function(context)
     if json_contains_null_literal(content) then
       return nil, invalid("record contains unsupported null")
     end
+    if expected_kind == "lifecycle_snapshot" and not lifecycle_raw_valid(content) then
+      return nil, invalid("lifecycle JSON exceeds its bounds or contains a noncanonical integer")
+    end
     local value, parse_err = decode_json(content)
     if value == nil then
       return nil, invalid("record is not valid JSON", { detail = tostring(parse_err) })
+    end
+    if type(value) == "table" and value.kind == "lifecycle_snapshot" and expected_kind ~= "lifecycle_snapshot" and not lifecycle_raw_valid(content) then
+      return nil, invalid("lifecycle JSON exceeds its bounds or contains a noncanonical integer")
     end
     return parse_v2_record(value, expected_kind)
   end
@@ -555,8 +719,9 @@ return function(context)
   end
 
   local function read_record_file(path, expected_kind)
-    local content, read_err = read_all(path)
+    local content, read_err, read_status = read_all(path, expected_kind == "lifecycle_snapshot" and protocol.limits.lifecycle_max_json_bytes or nil)
     if not content then
+      if read_status == "invalid" then return nil, invalid("lifecycle record exceeds its bound"), "invalid" end
       local message = tostring(read_err or "")
       if message:find("No such file", 1, true) or message:find("no such file", 1, true) then
         return nil, nil, "missing"
@@ -703,6 +868,7 @@ return function(context)
     seen = seen or {}
     if seen[value] then return seen[value] end
     local copied = {}
+    container_kinds[copied] = container_kinds[value]
     seen[value] = copied
     for key, item in pairs(value) do copied[deep_copy(key, seen)] = deep_copy(item, seen) end
     return copied
@@ -856,6 +1022,7 @@ return function(context)
 
 
   return {
+    classify_lifecycle_tool = classify_lifecycle_tool,
     is_integer = is_integer,
     is_hex64 = is_hex64,
     is_uuid = is_uuid,
