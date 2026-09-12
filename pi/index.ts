@@ -1,6 +1,7 @@
 import type {
 	ExtensionAPI,
 	ExtensionContext,
+	ExtensionEvent,
 	SessionShutdownEvent,
 	SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
@@ -36,6 +37,7 @@ type SessionFacts = {
 	sessionFile?: string;
 	cwd: string;
 	model?: string;
+	launchId?: string;
 };
 
 type WriterRequest =
@@ -43,9 +45,14 @@ type WriterRequest =
 	| ({
 		kind: "activity";
 		state: "thinking" | "stop" | "notify";
-		event: "agent_start" | "tool_execution_start" | "agent_settled" | "bus";
+		event: "agent_start" | "agent_settled" | "bus";
 		label?: string;
 	} & SessionFacts)
+	| ({ kind: "tool_start"; toolCallId: string; toolName: string } & SessionFacts)
+	| ({ kind: "tool_end"; toolCallId: string; toolName: string; isError: boolean } & SessionFacts)
+	| ({ kind: "input"; source: Extract<ExtensionEvent, { type: "input" }>["source"] } & SessionFacts)
+	| ({ kind: "attempt_outcome"; stopReason: "error" | "aborted" } & SessionFacts)
+	| ({ kind: "compaction"; event: "session_before_compact" | "session_compact"; reason: Extract<ExtensionEvent, { type: "session_compact" }>["reason"] } & SessionFacts)
 	| ({ kind: "review" } & SessionFacts)
 	| ({ kind: "clear" } & SessionFacts)
 	| ({ kind: "end"; reason: SessionShutdownEvent["reason"] } & SessionFacts);
@@ -205,6 +212,7 @@ function sessionFacts(ctx: ExtensionContext): SessionFacts | undefined {
 	const model = typeof ctx.model?.id === "string" && ctx.model.id.length > 0 ? ctx.model.id : undefined;
 	return {
 		sessionId,
+		launchId: process.env.WEZTERM_ATTENTION_LAUNCH_ID,
 		...(typeof sessionFile === "string" && sessionFile.length > 0 ? { sessionFile } : {}),
 		cwd: ctx.cwd,
 		...(model ? { model } : {}),
@@ -239,6 +247,16 @@ function writerInvocation(request: WriterRequest): { event: string; payload: Rec
 		...(request.model ? { model: request.model } : {}),
 	};
 	switch (request.kind) {
+		case "compaction":
+			return { event: request.event, payload: { ...common, reason: request.reason } };
+		case "tool_start":
+			return { event: "tool_execution_start", payload: { ...common, tool_name: request.toolName, tool_use_id: request.toolCallId } };
+		case "tool_end":
+			return { event: "tool_execution_end", payload: { ...common, tool_name: request.toolName, tool_use_id: request.toolCallId, is_error: request.isError } };
+		case "input":
+			return { event: "input", payload: { ...common, source: request.source } };
+		case "attempt_outcome":
+			return { event: "message_end", payload: { ...common, role: "assistant", stop_reason: request.stopReason } };
 		case "binding":
 			return { event: "session_start", payload: { ...common, start_source: request.startSource } };
 		case "activity":
@@ -257,7 +275,7 @@ function writerInvocation(request: WriterRequest): { event: string; payload: Rec
 	}
 }
 
-async function invokeWriter(request: WriterRequest): Promise<WriterResult> {
+async function invokeWriter(request: WriterRequest, transportId: string): Promise<WriterResult> {
 	const target = writerExecutable();
 	if (target.kind !== "ready") return target;
 	const invocation = writerInvocation(request);
@@ -273,7 +291,7 @@ async function invokeWriter(request: WriterRequest): Promise<WriterResult> {
 			const child = spawn(
 				target.executable,
 				["hooks", "event", "pi", invocation.event],
-				{ env: process.env, stdio: ["pipe", "ignore", "pipe"] },
+				{ env: { ...process.env, WEZTERM_ATTENTION_LAUNCH_ID: request.launchId }, stdio: ["pipe", "ignore", "pipe"] },
 			);
 			child.once("error", () => finish({ kind: "failed", message: "wezterm-attention: writer process could not start" }));
 			child.stderr.on("data", (chunk: Buffer | string) => {
@@ -286,7 +304,7 @@ async function invokeWriter(request: WriterRequest): Promise<WriterResult> {
 					? "wezterm-attention: writer rejected the event"
 					: `wezterm-attention: writer exited with status ${code ?? "signal"}` }));
 			child.stdin.once("error", () => finish({ kind: "failed", message: "wezterm-attention: writer input failed" }));
-			child.stdin.end(JSON.stringify(invocation.payload));
+			child.stdin.end(JSON.stringify({ ...invocation.payload, transport_id: transportId }));
 		} catch {
 			finish({ kind: "failed", message: "wezterm-attention: writer process could not start" });
 		}
@@ -295,6 +313,15 @@ async function invokeWriter(request: WriterRequest): Promise<WriterResult> {
 
 async function applyLegacyFallback(request: WriterRequest): Promise<void> {
 	switch (request.kind) {
+		case "tool_start":
+			await writeMarkerNow("thinking");
+			return;
+		case "tool_end":
+		case "input":
+		case "attempt_outcome":
+			return;
+		case "compaction":
+			return;
 		case "activity":
 			await writeMarkerNow(request.state, request.label);
 			return;
@@ -311,8 +338,9 @@ async function applyLegacyFallback(request: WriterRequest): Promise<void> {
 }
 
 function enqueueWriter(request: WriterRequest, reportFailure: (message: string) => void): Promise<void> {
+	const transportId = randomUUID();
 	return enqueue(async () => {
-		const result = await invokeWriter(request);
+		const result = await invokeWriter(request, transportId);
 		if (result.kind === "unconfigured") await applyLegacyFallback(request);
 		else if (result.kind === "failed") reportFailure(result.message);
 	});
@@ -396,6 +424,7 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 		currentContext = ctx;
 		currentSession = {
 			sessionId: request.sessionId,
+			launchId: request.launchId,
 			...(request.sessionFile ? { sessionFile: request.sessionFile } : {}),
 			cwd: request.cwd,
 			...(request.model ? { model: request.model } : {}),
@@ -424,12 +453,39 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 		void enqueueWriter({ kind: "activity", state: "thinking", event: "agent_start", ...facts }, reportWriterFailure).catch(() => {});
 	});
 
-	pi.on("tool_execution_start", (_event, ctx) => {
+	pi.on("tool_execution_start", (event, ctx) => {
 		const facts = sessionFacts(ctx);
 		if (!facts) return;
 		currentContext = ctx;
 		currentSession = facts;
-		void enqueueWriter({ kind: "activity", state: "thinking", event: "tool_execution_start", ...facts }, reportWriterFailure).catch(() => {});
+		void enqueueWriter({ kind: "tool_start", toolName: event.toolName, toolCallId: event.toolCallId, ...facts }, reportWriterFailure).catch(() => {});
+	});
+
+	pi.on("tool_execution_end", (event, ctx) => {
+		const facts = sessionFacts(ctx);
+		if (!facts) return;
+		void enqueueWriter({ kind: "tool_end", toolName: event.toolName, toolCallId: event.toolCallId, isError: event.isError, ...facts }, reportWriterFailure).catch(() => {});
+	});
+	pi.on("input", (event, ctx) => {
+		const facts = sessionFacts(ctx);
+		if (!facts) return;
+		void enqueueWriter({ kind: "input", source: event.source, ...facts }, reportWriterFailure).catch(() => {});
+	});
+	pi.on("message_end", (event, ctx) => {
+		if (event.message.role !== "assistant" || (event.message.stopReason !== "error" && event.message.stopReason !== "aborted")) return;
+		const facts = sessionFacts(ctx);
+		if (!facts) return;
+		void enqueueWriter({ kind: "attempt_outcome", stopReason: event.message.stopReason, ...facts }, reportWriterFailure).catch(() => {});
+	});
+	pi.on("session_before_compact", (event, ctx) => {
+		const facts = sessionFacts(ctx);
+		if (!facts) return;
+		void enqueueWriter({ kind: "compaction", event: event.type, reason: event.reason, ...facts }, reportWriterFailure).catch(() => {});
+	});
+	pi.on("session_compact", (event, ctx) => {
+		const facts = sessionFacts(ctx);
+		if (!facts) return;
+		void enqueueWriter({ kind: "compaction", event: event.type, reason: event.reason, ...facts }, reportWriterFailure).catch(() => {});
 	});
 
 	// `agent_settled`, NOT `agent_end`: agent_end fires at the end of every

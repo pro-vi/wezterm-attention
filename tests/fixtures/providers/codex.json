@@ -9,6 +9,7 @@
     "model": "gpt"
   },
   "cases": [
+    { "id": "tool_post_observation", "event": "PostToolUse", "patch": { "tool_name": "shell", "tool_use_id": "call-1" }, "expected": "observation" },
     { "id": "startup_binding", "event": "SessionStart", "patch": { "source": "startup" }, "expected": "binding" },
     { "id": "self_claim_binding", "event": "SessionStart", "patch": { "source": "startup" }, "env": { "WEZTERM_ATTENTION_ENABLE_SELF_CLAIM": "1" }, "expected": "binding", "lifecycle_expected": "applied" },
     { "id": "resume_binding", "event": "SessionStart", "patch": { "source": "resume" }, "expected": "binding" },

@@ -404,7 +404,10 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
                 }
             };
-            let failed = matches!(result.disposition.as_str(), "ignored" | "conflict");
+            let failed = matches!(
+                result.disposition.as_str(),
+                "ignored" | "conflict" | "partial"
+            );
             if args.debug {
                 let response = Response {
                     schema: 1,

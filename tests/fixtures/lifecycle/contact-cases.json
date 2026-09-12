@@ -1,0 +1,481 @@
+{
+  "rows": [
+    {
+      "id": "H01",
+      "historical_label": "User submits a prompt",
+      "cases": [
+        {
+          "provider": "claude",
+          "event": "UserPromptSubmit",
+          "kind": "prompt_submitted",
+          "patch": {}
+        },
+        {
+          "provider": "codex",
+          "event": "UserPromptSubmit",
+          "kind": "prompt_submitted",
+          "patch": {
+            "turn_id": "coverage-turn"
+          }
+        },
+        {
+          "provider": "pi",
+          "event": "input",
+          "kind": "prompt_submitted",
+          "patch": {
+            "source": "interactive"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H02",
+      "historical_label": "Tool preflight begins",
+      "cases": [
+        {
+          "provider": "claude",
+          "event": "PreToolUse",
+          "kind": "tool_preflight",
+          "patch": {
+            "tool_name": "Bash",
+            "tool_use_id": "coverage-tool"
+          }
+        },
+        {
+          "provider": "codex",
+          "event": "PreToolUse",
+          "kind": "tool_preflight",
+          "patch": {
+            "tool_name": "shell",
+            "tool_use_id": "coverage-tool",
+            "turn_id": "coverage-turn"
+          }
+        },
+        {
+          "provider": "pi",
+          "event": "tool_execution_start",
+          "kind": "tool_preflight",
+          "patch": {
+            "tool_name": "read",
+            "tool_use_id": "pi-call"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H03",
+      "historical_label": "Tool produces an execution result",
+      "cases": [
+        {
+          "provider": "claude",
+          "event": "PostToolUse",
+          "kind": "tool_result",
+          "patch": {
+            "tool_name": "Bash",
+            "tool_use_id": "coverage-tool"
+          }
+        },
+        {
+          "provider": "codex",
+          "event": "PostToolUse",
+          "kind": "tool_result",
+          "patch": {
+            "tool_name": "shell",
+            "tool_use_id": "coverage-tool",
+            "turn_id": "coverage-turn"
+          }
+        },
+        {
+          "provider": "pi",
+          "event": "tool_execution_end",
+          "kind": "tool_result",
+          "patch": {
+            "tool_name": "read",
+            "tool_use_id": "pi-call",
+            "is_error": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "H04",
+      "historical_label": "Tool failure is observed",
+      "cases": [
+        {
+          "provider": "claude",
+          "event": "PostToolUseFailure",
+          "kind": "tool_result",
+          "patch": {
+            "tool_name": "Bash",
+            "tool_use_id": "coverage-tool"
+          }
+        },
+        {
+          "provider": "pi",
+          "event": "tool_execution_end",
+          "kind": "tool_result",
+          "patch": {
+            "tool_name": "read",
+            "tool_use_id": "pi-call",
+            "is_error": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "H05",
+      "historical_label": "Lead response finishes / agent settles",
+      "cases": [
+        {
+          "provider": "claude",
+          "event": "Stop",
+          "kind": "response_finished",
+          "patch": {
+            "stop_hook_active": false
+          }
+        },
+        {
+          "provider": "codex",
+          "event": "Stop",
+          "kind": "response_finished",
+          "patch": {
+            "stop_hook_active": false,
+            "turn_id": "coverage-turn"
+          }
+        },
+        {
+          "provider": "pi",
+          "event": "agent_settled",
+          "kind": "run_settled",
+          "patch": {}
+        }
+      ]
+    },
+    {
+      "id": "H06",
+      "historical_label": "Agent attempt fails",
+      "cases": [
+        {
+          "provider": "claude",
+          "event": "StopFailure",
+          "kind": "attempt_outcome",
+          "patch": {
+            "error": "rate_limit"
+          }
+        },
+        {
+          "provider": "pi",
+          "event": "message_end",
+          "kind": "attempt_outcome",
+          "patch": {
+            "role": "assistant",
+            "stop_reason": "error"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H07",
+      "historical_label": "Active attempt is interrupted or aborted",
+      "cases": [
+        {
+          "provider": "codex",
+          "event": "Interrupt",
+          "kind": "user_interrupt",
+          "patch": {
+            "turn_id": "coverage-turn"
+          }
+        },
+        {
+          "provider": "pi",
+          "event": "message_end",
+          "kind": "attempt_outcome",
+          "patch": {
+            "role": "assistant",
+            "stop_reason": "aborted"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H08",
+      "historical_label": "Tool approval is requested",
+      "cases": [
+        {
+          "provider": "claude",
+          "event": "PermissionRequest",
+          "kind": "approval_requested",
+          "patch": {
+            "tool_name": "Bash"
+          }
+        },
+        {
+          "provider": "codex",
+          "event": "PermissionRequest",
+          "kind": "approval_requested",
+          "patch": {
+            "tool_name": "shell",
+            "turn_id": "coverage-turn"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H09",
+      "historical_label": "Permission prompt remains outstanding long enough to notify",
+      "cases": [
+        {
+          "provider": "claude",
+          "event": "Notification",
+          "kind": "notice",
+          "patch": {
+            "notification_type": "permission_prompt"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H10",
+      "historical_label": "Auto-mode policy denies a tool",
+      "cases": [
+        {
+          "provider": "claude",
+          "event": "PermissionDenied",
+          "kind": "automatic_denial",
+          "patch": {
+            "tool_name": "Bash",
+            "tool_use_id": "coverage-tool",
+            "permission_mode": "auto"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H11",
+      "historical_label": "Agent asks a structured question",
+      "cases": [
+        {
+          "provider": "claude",
+          "event": "PreToolUse",
+          "kind": "tool_preflight",
+          "patch": {
+            "tool_name": "AskUserQuestion",
+            "tool_use_id": "question"
+          }
+        },
+        {
+          "provider": "codex",
+          "event": "PreToolUse",
+          "kind": "tool_preflight",
+          "patch": {
+            "tool_name": "request_user_input",
+            "tool_use_id": "question"
+          }
+        },
+        {
+          "provider": "codex",
+          "event": "PreToolUse",
+          "kind": "tool_preflight",
+          "patch": {
+            "tool_name": "request_user_input_async",
+            "tool_use_id": "async-question"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H12",
+      "historical_label": "A structured-question tool returns",
+      "cases": [
+        {
+          "provider": "claude",
+          "event": "PostToolUse",
+          "kind": "tool_result",
+          "patch": {
+            "tool_name": "AskUserQuestion",
+            "tool_use_id": "question"
+          }
+        },
+        {
+          "provider": "codex",
+          "event": "PostToolUse",
+          "kind": "tool_result",
+          "patch": {
+            "tool_name": "request_user_input",
+            "tool_use_id": "question"
+          }
+        },
+        {
+          "provider": "codex",
+          "event": "PostToolUse",
+          "kind": "tool_result",
+          "patch": {
+            "tool_name": "request_user_input_async",
+            "tool_use_id": "async-question",
+            "tool_response": "{\"accepted\":true}"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H15",
+      "historical_label": "MCP server requests user input",
+      "cases": [
+        {
+          "provider": "claude",
+          "event": "Elicitation",
+          "kind": "elicitation_requested",
+          "patch": {
+            "mode": "form",
+            "elicitation_id": "elicit",
+            "mcp_server_name": "fixture-mcp"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H16",
+      "historical_label": "MCP elicitation response is selected",
+      "cases": [
+        {
+          "provider": "claude",
+          "event": "ElicitationResult",
+          "kind": "elicitation_action_selected",
+          "patch": {
+            "action": "accept",
+            "elicitation_id": "elicit",
+            "mcp_server_name": "fixture-mcp"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H17",
+      "historical_label": "MCP form or URL prompt produces a notice",
+      "cases": [
+        {
+          "provider": "claude",
+          "event": "Notification",
+          "kind": "notice",
+          "patch": {
+            "notification_type": "elicitation_dialog"
+          }
+        },
+        {
+          "provider": "claude",
+          "event": "Notification",
+          "kind": "notice",
+          "patch": {
+            "notification_type": "elicitation_url_dialog"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H18",
+      "historical_label": "Child work is observed active",
+      "cases": [
+        {
+          "provider": "claude",
+          "event": "PreToolUse",
+          "kind": "tool_preflight",
+          "patch": {
+            "tool_name": "Bash",
+            "tool_use_id": "coverage-tool",
+            "agent_id": "coverage-child"
+          }
+        },
+        {
+          "provider": "codex",
+          "event": "PermissionRequest",
+          "kind": "approval_requested",
+          "patch": {
+            "tool_name": "shell",
+            "agent_id": "coverage-child"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H19",
+      "historical_label": "Context compaction begins",
+      "cases": [
+        {
+          "provider": "claude",
+          "event": "PreCompact",
+          "kind": "compaction_attempted",
+          "patch": {
+            "trigger": "auto"
+          }
+        },
+        {
+          "provider": "codex",
+          "event": "PreCompact",
+          "kind": "compaction_attempted",
+          "patch": {
+            "trigger": "manual"
+          }
+        },
+        {
+          "provider": "pi",
+          "event": "session_before_compact",
+          "kind": "compaction_attempted",
+          "patch": {
+            "reason": "threshold"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H20",
+      "historical_label": "Context compaction succeeds",
+      "cases": [
+        {
+          "provider": "claude",
+          "event": "PostCompact",
+          "kind": "compaction_succeeded",
+          "patch": {
+            "trigger": "auto"
+          }
+        },
+        {
+          "provider": "codex",
+          "event": "PostCompact",
+          "kind": "compaction_succeeded",
+          "patch": {
+            "trigger": "manual"
+          }
+        },
+        {
+          "provider": "pi",
+          "event": "session_compact",
+          "kind": "compaction_succeeded",
+          "patch": {
+            "reason": "manual"
+          }
+        }
+      ]
+    }
+  ],
+  "deferred": [
+    {
+      "id": "H13",
+      "historical_label": "Extension UI waiting span opens"
+    },
+    {
+      "id": "H14",
+      "historical_label": "Extension UI waiting span closes"
+    },
+    {
+      "id": "H21",
+      "historical_label": "Context compaction fails or aborts"
+    }
+  ],
+  "native_codex_fixture": {
+    "version": "0.154.0",
+    "source_revision": "6b9826e3aa83b1a5947db50f4332cb9c65f1b340",
+    "receipt": {
+      "tool_response": "{\"accepted\":true}"
+    }
+  }
+}

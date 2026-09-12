@@ -21,6 +21,43 @@ local function read_json(path)
 end
 
   local fixture = read_json(root .. "/tests/fixtures/v2/protocol-cases.json")
+  local protocol_api = dofile(root .. "/plugin/protocol.lua")({ wezterm = wezterm, protocol_path = root .. "/protocol/v2.json" })
+  local lifecycle_file = assert(io.open(root .. "/tests/fixtures/lifecycle/observations.json", "r"))
+  local lifecycle_cases = assert(protocol_api.decode_json(lifecycle_file:read("*a")))
+  lifecycle_file:close()
+  for _, case in ipairs(lifecycle_cases.cases) do
+    local parsed, problem = protocol_api.parse_v2_record(case.value, "lifecycle_snapshot")
+    assert((parsed and "valid" or problem.code) == case.expected, "lifecycle " .. case.id)
+  end
+  for _, case in ipairs(lifecycle_cases.raw_cases) do
+    local parsed, problem = protocol_api.parse_v2_record_json(case.raw, "lifecycle_snapshot")
+    assert((parsed and "valid" or problem.code) == case.expected, "lifecycle " .. case.id)
+  end
+  local lifecycle_dir = os.getenv("WEZTERM_ATTENTION_LIFECYCLE_FIXTURE_DIR")
+  if lifecycle_dir then
+    local wire = assert(internal.parse_wire_json(os.getenv("WEZTERM_ATTENTION_LIFECYCLE_FIXTURE_WIRE")))
+    local view = internal.read_attention_view({ address = wire.address, launch_id = wire.launch_id, marker_id = wire.address.pane_id, cache_key = internal.address_cache_key(wire.address) }, "99999999999999999999", { dir = lifecycle_dir })
+    assert(view.lifecycle.availability == "available", "real CLI snapshot did not reach reader")
+    local publication = os.getenv("WEZTERM_ATTENTION_LIFECYCLE_SCENARIO") == "publication"
+    if not publication then
+      assert(#view.lifecycle.observations == 1 and view.lifecycle.observations[1].correlation.tool_call_id == "cli-call", "real CLI lost native tool identity")
+      assert(view.activity_type == "thinking", "lifecycle changed the legacy badge")
+    end
+    internal.attention_cache[internal.address_cache_key(wire.address)] = view
+    local pane = { get_user_vars = function() return { WEZTERM_ATTENTION = os.getenv("WEZTERM_ATTENTION_LIFECYCLE_FIXTURE_WIRE") } end }
+    local copy = assert(attention.get_attention_view(pane))
+    if publication then
+      local module = dofile(root .. "/tests/fixtures/lifecycle/consumer.lua")
+      local consumer, second = module.new(), module.new()
+      assert(copy.activity_type == "stop" and consumer.appearance(copy) == "follow_up", "publication remains usable after Stop")
+      consumer.dismiss()
+      assert(consumer.appearance(attention.get_attention_view(pane)) == "base")
+      assert(second.appearance(attention.get_attention_view(pane)) == "follow_up", "dismissal cannot modify another consumer")
+    else
+      copy.lifecycle.observations[1].correlation.tool_call_id = "mutated"
+      assert(attention.get_attention_view(pane).lifecycle.observations[1].correlation.tool_call_id == "cli-call", "getter shared nested lifecycle state")
+    end
+  end
   local parse_results = internal.parse_fixture_cases(fixture)
 assert(#parse_results == #fixture.parse_cases, "not every protocol parse row ran")
 for _, result in ipairs(parse_results) do

@@ -14,11 +14,12 @@ use crate::compat::{
     reconcile_agents, reconcile_launch_activity,
 };
 use crate::identity::{PaneAddress, canonical_uuid, pane_address};
+use crate::observations::{LifecycleSnapshot, ObservationPools};
 use crate::protocol::{AttentionError, Diagnostic, Result, manifest};
 use crate::providers::{ProviderAction, ProviderEvent};
 use crate::records::{
-    CommitPlan, RecordIdentity, Replacement, commit_nested_with, commit_triple_with, commit_with,
-    launch_path, pane_path, read_record, state_root,
+    CommitPlan, PreparedRecordWrite, RecordIdentity, Replacement, commit_nested_with,
+    commit_triple_with, commit_with, launch_path, pane_path, read_record, state_root,
 };
 use crate::wezterm::RuntimePorts;
 
@@ -74,6 +75,7 @@ enum Projection {
 struct Mutation {
     result: LifecycleResult,
     projection: Projection,
+    lifecycle_replacement: Option<PreparedRecordWrite>,
 }
 
 impl Mutation {
@@ -81,6 +83,7 @@ impl Mutation {
         Self {
             result,
             projection: Projection::None,
+            lifecycle_replacement: None,
         }
     }
 }
@@ -285,7 +288,7 @@ fn binding_mutation(
         .join(&binding_id)
         .join("binding.json");
     let pointer_path = launch.join("current-binding.json");
-    let (mutation, ()) = commit_with(
+    let (mutation, _) = commit_with(
         &launch.join(".lock"),
         &pointer_path,
         Some("current_binding"),
@@ -511,6 +514,139 @@ fn semantic_activity(mut value: Value) -> Value {
     value
 }
 
+// Called inside the selected launch's lock. Rich rejection does not discard an
+// independently valid legacy mutation, and the sidecar is always written last.
+fn append_observation(
+    resolved: &ResolvedLaunch,
+    event: &ProviderEvent,
+    observation: &str,
+    written_at: &str,
+    mut plan: CommitPlan<Mutation>,
+) -> CommitPlan<Mutation> {
+    let prepared = (|| -> Result<Option<PreparedRecordWrite>> {
+        if let Some(diagnostic) = &event.observation_diagnostic {
+            return Err(AttentionError {
+                diagnostic: diagnostic.clone(),
+                exit_code: 3,
+            });
+        }
+        let Some(draft) = &event.observation else {
+            return Ok(None);
+        };
+        let binding_id = event_binding_id(event, &resolved.launch_id)?;
+        let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
+        let claim = load_claim(&resolved.root, &resolved.address)?;
+        if claim.as_ref().is_none_or(|record| {
+            !record_matches_launch(record, &resolved.address, &resolved.launch_id)
+        }) {
+            return Err(AttentionError::new(
+                "claim_stale",
+                "lifecycle claim changed",
+            ));
+        }
+        let pointer = read_record(
+            &launch.join("current-binding.json"),
+            Some("current_binding"),
+            &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
+        )?;
+        let (_, binding) = read_current(&launch, pointer, &resolved.address, &resolved.launch_id)?;
+        if binding.as_ref().is_none_or(|record| {
+            !record_matches_binding(record, &resolved.address, &resolved.launch_id, &binding_id)
+        }) {
+            return Err(AttentionError::new(
+                "claim_stale",
+                "lifecycle binding changed",
+            ));
+        }
+        let path = launch
+            .join("bindings")
+            .join(&binding_id)
+            .join("lifecycle.json");
+        let existing = read_record(
+            &path,
+            Some("lifecycle_snapshot"),
+            &RecordIdentity::binding(&resolved.address, &resolved.launch_id, &binding_id),
+        )?;
+        let mut snapshot = match existing {
+            Some(value) => serde_json::from_value::<LifecycleSnapshot>(value).map_err(|_| {
+                AttentionError::new("record_invalid", "lifecycle snapshot is invalid")
+            })?,
+            None => LifecycleSnapshot {
+                kind: "lifecycle_snapshot".to_owned(),
+                schema: manifest()?.record_schema,
+                address: resolved.address.clone(),
+                launch_id: resolved.launch_id.clone(),
+                binding_id,
+                provider: provider_name(event)?.to_owned(),
+                snapshot_id: Uuid::new_v4().to_string(),
+                written_at_unix_ns: written_at.to_owned(),
+                pools: ObservationPools::default(),
+            },
+        };
+        if snapshot.provider != provider_name(event)? {
+            return Err(AttentionError::new(
+                "record_invalid",
+                "lifecycle provider mismatches its binding",
+            ));
+        }
+        let mut candidate = draft.clone();
+        candidate.observed_mono_ns = observation.to_owned();
+        candidate.written_at_unix_ns = written_at.to_owned();
+        if !snapshot.reduce(candidate)? {
+            return Ok(None);
+        }
+        let value = serde_json::to_value(snapshot).map_err(AttentionError::record_json)?;
+        Ok(Some(PreparedRecordWrite::new(path, &value)?))
+    })();
+    match prepared {
+        Ok(Some(replacement)) => plan.result.lifecycle_replacement = Some(replacement),
+        Ok(None) => {}
+        Err(error) => {
+            plan.result.result.disposition = "partial".to_owned();
+            plan.result.result.diagnostic = Some(error.diagnostic);
+        }
+    }
+    plan
+}
+
+fn apply_observation(
+    resolved: &ResolvedLaunch,
+    event: &ProviderEvent,
+    observation: &str,
+    written_at: &str,
+) -> Result<LifecycleResult> {
+    let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
+    let (mutation, _) = commit_with(
+        &launch.join(".lock"),
+        &launch.join("current-binding.json"),
+        Some("current_binding"),
+        &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
+        Duration::from_secs(2),
+        |_| {
+            Ok(append_observation(
+                resolved,
+                event,
+                observation,
+                written_at,
+                CommitPlan {
+                    result: Mutation::plain(LifecycleResult::new("applied")),
+                    replacements: Vec::new(),
+                    removals: Vec::new(),
+                    private_dirs: Vec::new(),
+                },
+            ))
+        },
+        |mutation| {
+            apply_observed_outputs(
+                resolved,
+                &event_binding_id(event, &resolved.launch_id)?,
+                mutation,
+            )
+        },
+    )?;
+    Ok(mutation.result)
+}
+
 fn apply_activity(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
@@ -678,12 +814,22 @@ fn apply_activity(
             } else {
                 Projection::Activity(projection_activity)
             };
-            Ok(CommitPlan {
-                result: Mutation { result, projection },
-                replacements,
-                removals: Vec::new(),
-                private_dirs: Vec::new(),
-            })
+            Ok(append_observation(
+                resolved,
+                event,
+                observation,
+                written_at,
+                CommitPlan {
+                    result: Mutation {
+                        result,
+                        projection,
+                        lifecycle_replacement: None,
+                    },
+                    replacements,
+                    removals: Vec::new(),
+                    private_dirs: Vec::new(),
+                },
+            ))
         },
         |mutation| match &mutation.projection {
             Projection::ActivityClear(clear_order) => reconcile_activity_clear_locked(
@@ -693,7 +839,7 @@ fn apply_activity(
                 &binding_id,
                 clear_order,
             ),
-            _ => apply_projection(resolved, &binding_id, mutation),
+            _ => apply_observed_outputs(resolved, &binding_id, mutation),
         },
     )?;
     let mut result = mutation.result;
@@ -702,6 +848,37 @@ fn apply_activity(
         result.repaired_projection = true;
     }
     Ok(result)
+}
+
+fn apply_observed_outputs(
+    resolved: &ResolvedLaunch,
+    binding_id: &str,
+    mutation: &Mutation,
+) -> Result<bool> {
+    apply_observed_outputs_with(resolved, binding_id, mutation, PreparedRecordWrite::apply)
+}
+
+fn apply_observed_outputs_with(
+    resolved: &ResolvedLaunch,
+    binding_id: &str,
+    mutation: &Mutation,
+    replace: impl FnOnce(&PreparedRecordWrite) -> Result<()>,
+) -> Result<bool> {
+    let projected = apply_projection(resolved, binding_id, mutation)?;
+    if let Some(replacement) = &mutation.lifecycle_replacement {
+        replace(replacement).map_err(|mut error| {
+            error
+                .diagnostic
+                .context
+                .insert("legacy_applied".into(), json!(true));
+            error
+                .diagnostic
+                .context
+                .insert("lifecycle_write".into(), json!("unconfirmed"));
+            error
+        })?;
+    }
+    Ok(projected)
 }
 
 fn apply_projection(
@@ -957,7 +1134,11 @@ pub fn apply_mark_activity(
                 }
             };
             Ok(CommitPlan {
-                result: Mutation { result, projection },
+                result: Mutation {
+                    result,
+                    projection,
+                    lifecycle_replacement: None,
+                },
                 replacements,
                 removals: Vec::new(),
                 private_dirs: Vec::new(),
@@ -1177,15 +1358,22 @@ fn apply_child(
                     &mut replacements,
                 )?
             };
-            Ok(CommitPlan {
-                result: Mutation {
-                    result,
-                    projection: Projection::Agents(binding_dir.clone()),
+            Ok(append_observation(
+                resolved,
+                event,
+                observation,
+                written_at,
+                CommitPlan {
+                    result: Mutation {
+                        lifecycle_replacement: None,
+                        result,
+                        projection: Projection::Agents(binding_dir.clone()),
+                    },
+                    replacements,
+                    removals: Vec::new(),
+                    private_dirs: Vec::new(),
                 },
-                replacements,
-                removals: Vec::new(),
-                private_dirs: Vec::new(),
-            })
+            ))
         },
         |mutation| match &mutation.projection {
             Projection::ActivityClear(clear_order) => reconcile_activity_clear_locked(
@@ -1195,7 +1383,7 @@ fn apply_child(
                 &binding_id,
                 clear_order,
             ),
-            _ => apply_projection(resolved, &binding_id, mutation),
+            _ => apply_observed_outputs(resolved, &binding_id, mutation),
         },
     )?;
     let mut result = mutation.result;
@@ -1592,6 +1780,7 @@ fn apply_clear_event(
             }
             Ok(CommitPlan {
                 result: Mutation {
+                    lifecycle_replacement: None,
                     result,
                     projection: Projection::ActivityClear(clear_order),
                 },
@@ -1685,6 +1874,7 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
                     .map(str::to_owned);
                 return Ok(CommitPlan {
                     result: Mutation {
+                        lifecycle_replacement: None,
                         result,
                         projection: Projection::ActivityClear(observation.to_owned()),
                     },
@@ -1707,6 +1897,7 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
             result.event_id = Some(event_id);
             Ok(CommitPlan {
                 result: Mutation {
+                    lifecycle_replacement: None,
                     result,
                     projection: Projection::ActivityClear(observation.to_owned()),
                 },
@@ -1770,7 +1961,22 @@ pub fn apply_provider_event(
         Err(error) => return Ok(LifecycleResult::ignored_error(error)),
     };
     let written_at = ports.clock.unix_ns20()?;
+    let mut admitted = event.clone();
+    if admitted.observation.is_some() && !env.contains_key("WEZTERM_ATTENTION_LAUNCH_ID") {
+        admitted.observation = None;
+        admitted.observation_diagnostic = Some(
+            AttentionError::new(
+                "claim_stale",
+                "tty recovery does not prove lifecycle execution identity",
+            )
+            .diagnostic,
+        );
+    }
+    let event = &admitted;
     match event.action {
+        ProviderAction::Observation => {
+            apply_observation(&resolved, event, observation, &written_at)
+        }
         ProviderAction::Binding => {
             Ok(binding_mutation(&resolved, event, observation, &written_at)?.result)
         }
@@ -1787,5 +1993,71 @@ pub fn apply_provider_event(
         ProviderAction::Review => apply_review_event(&resolved, event, false),
         ProviderAction::Clear => apply_clear_event(&resolved, event, observation),
         ProviderAction::Ignored => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_write_tests {
+    use super::*;
+    #[test]
+    fn failure_between_legacy_and_snapshot_reports_partial_state() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/v2/protocol-cases.json")).unwrap();
+        let samples = &fixture["record_samples"];
+        let root = std::env::temp_dir().join(format!("attention-output-fault-{}", Uuid::new_v4()));
+        let address: PaneAddress =
+            serde_json::from_value(samples["claim"]["address"].clone()).unwrap();
+        let launch_id = samples["claim"]["launch_id"].as_str().unwrap().to_owned();
+        let binding_id = samples["binding"]["binding_id"].as_str().unwrap();
+        let resolved = ResolvedLaunch {
+            root: root.clone(),
+            address: address.clone(),
+            launch_id: launch_id.clone(),
+        };
+        let launch = launch_path(&root, &address, &launch_id);
+        crate::records::atomic_replace(
+            &pane_path(&root, &address).join("claim.json"),
+            &samples["claim"],
+        )
+        .unwrap();
+        crate::records::atomic_replace(
+            &launch.join("current-binding.json"),
+            &samples["current_binding"],
+        )
+        .unwrap();
+        let cases: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/lifecycle/observations.json"
+        ))
+        .unwrap();
+        let mut snapshot = cases["cases"][1]["value"].clone();
+        snapshot["provider"] = json!("claude");
+        crate::protocol::validate_record(&snapshot, Some("lifecycle_snapshot")).unwrap();
+        let path = launch
+            .join("bindings")
+            .join(binding_id)
+            .join("lifecycle.json");
+        let mutation = Mutation {
+            result: LifecycleResult::new("applied"),
+            projection: Projection::Activity(Some(samples["activity"].clone())),
+            lifecycle_replacement: Some(PreparedRecordWrite::new(path.clone(), &snapshot).unwrap()),
+        };
+        let error =
+            crate::records::with_lock(&launch.join(".lock"), Duration::from_secs(2), || {
+                apply_observed_outputs_with(&resolved, binding_id, &mutation, |_| {
+                    assert!(
+                        root.join("42").exists(),
+                        "legacy projection precedes snapshot replacement"
+                    );
+                    Err(AttentionError::new(
+                        "state_permissions",
+                        "synthetic snapshot write failure",
+                    ))
+                })
+            })
+            .unwrap_err();
+        assert_eq!(error.diagnostic.context["legacy_applied"], true);
+        assert_eq!(error.diagnostic.context["lifecycle_write"], "unconfirmed");
+        assert!(!path.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

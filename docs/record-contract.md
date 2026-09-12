@@ -30,6 +30,7 @@ v2/realms/<realm>/
           activity-clear.json
           end.json
           ack.json
+          lifecycle.json
           agents-clear.json
           agents-floor.json
           agents/<agent-key>.json
@@ -75,6 +76,16 @@ activity records unchanged. V1 panes keep their shipped `.ack` and `.review` beh
 Acknowledgement records are Lua-owned. Rust validates and prunes them during reads and maintenance, but Rust never creates an acknowledgement.
 
 ## Consumer boundary
+
+`get_attention_view(pane)` exposes sixteen copied base fields plus an independent cached `lifecycle` facet. See the [consumer guide](consumer-guide.md) for exact availability, request/publication relations, acknowledgement meaning, and display ownership. No `answered`, `currently_waiting`, or complete pending-count claim is made.
+
+Lifecycle evidence stays outside `activity.json` because adding request IDs to activity would change `semantic_activity` equality and could redisplay an acknowledged badge. `append_observation` and the request/focus/result tests enforce that separation. Revisit it only if badge identity is deliberately redesigned, not to simplify one consumer.
+
+`lifecycle.json` has schema 2 and kind `lifecycle_snapshot`. Its full address, launch, binding and provider scope a closed fourteen-kind observation union. Each of its required request/general pools has a separate 64-entry/122,880-byte budget and optional monotonic retention floor. One observation is at most 2,048 compact UTF-8 bytes; the file read is bounded at 262,144 bytes plus one overflow-detection byte before decoding, with at most eight container levels. Both pools and floors are validated and replaced together. The lifecycle file has no TTL.
+
+Unknown fields, nulls, object-shaped arrays, invalid nested child digests, wrong pool membership, duplicate identities, below-floor members, and incompatible provider/tool/question-mode tuples are rejected. Native elicitation correlation includes the MCP server namespace. A local receipt UUID cannot stand in for a native request identifier.
+
+Existing legacy mutations and projection run before lifecycle replacement. There is no multi-file atomicity promise. An independently valid legacy effect can survive rich-evidence rejection or a failed sidecar write; partial work is diagnostic and strict hook mode fails. A post-rename failure requires reading actual state before retry.
 
 `attention bindings --json` returns validated facts and four independent axes: binding phase, pane
 presence, reader confidence, and binding health. It never returns a resume command. Consumers build

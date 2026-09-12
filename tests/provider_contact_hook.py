@@ -19,9 +19,12 @@ SAFE_FIELDS = (
     "agent_type",
     "source",
     "notification_type",
-    "reason",
     "tool_name",
     "stop_hook_active",
+    "turn_id",
+    "tool_use_id",
+    "elicitation_id",
+    "mcp_server_name",
 )
 
 
@@ -46,8 +49,29 @@ def main() -> int:
         if isinstance(payload, dict):
             for field in SAFE_FIELDS:
                 value = payload.get(field)
-                if isinstance(value, (str, bool)):
+                if isinstance(value, bool) or (isinstance(value, str) and len(value.encode("utf-8")) <= 256 and not any(ord(char) < 32 or ord(char) == 127 for char in value)):
                     record[field] = value
+            response = payload.get("tool_response")
+            if "tool_response" in payload:
+                record["tool_response_shape"] = type(response).__name__
+                if isinstance(response, dict):
+                    record["tool_response_keys"] = sorted(response)
+                if isinstance(response, str):
+                    try:
+                        receipt = json.loads(response)
+                    except json.JSONDecodeError:
+                        receipt = None
+                    if isinstance(receipt, dict) and set(receipt) == {"accepted"} and receipt["accepted"] is True:
+                        record["accepted_publication_receipt"] = True
+            if isinstance(response, list) and len(response) == 1 and isinstance(response[0], dict):
+                content = response[0]
+                if content.get("type") == "input_text" and isinstance(content.get("text"), str):
+                    try:
+                        receipt = json.loads(content["text"])
+                    except json.JSONDecodeError:
+                        receipt = None
+                    if isinstance(receipt, dict) and set(receipt) == {"accepted"} and receipt["accepted"] is True:
+                        record["accepted_publication_receipt"] = True
         log_path = pathlib.Path(contact_log)
         log_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as handle:

@@ -93,6 +93,10 @@ pub struct Manifest {
     pub enums: Enums,
     pub wire: ShapeSpec,
     pub records: BTreeMap<String, ShapeSpec>,
+    pub lifecycle_shapes: BTreeMap<String, ShapeSpec>,
+    pub lifecycle_variants: BTreeMap<String, ShapeSpec>,
+    pub lifecycle_enums: BTreeMap<String, BTreeSet<String>>,
+    pub lifecycle_sources: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -121,6 +125,12 @@ pub struct Limits {
     pub frame_max: u64,
     pub subagent_ttl_ms: u64,
     pub max_json_bytes: usize,
+    pub lifecycle_max_json_bytes: usize,
+    pub lifecycle_max_depth: usize,
+    pub lifecycle_pool_max_count: usize,
+    pub lifecycle_pool_max_bytes: usize,
+    pub lifecycle_envelope_max_bytes: usize,
+    pub lifecycle_observation_max_bytes: usize,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -149,6 +159,22 @@ pub struct ShapeSpec {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldType {
+    LifecyclePools,
+    ObservationPool,
+    ObservationArray,
+    LifecycleActor,
+    NativeCorrelation,
+    ToolClass,
+    QuestionMode,
+    ResultSurface,
+    AttemptOutcome,
+    ElicitationMode,
+    SelectionAction,
+    NoticeSubtype,
+    PolicyScope,
+    InputSource,
+    ErrorCategory,
+    CompactionTrigger,
     RecordKind,
     RecordSchema,
     WireVersion,
@@ -311,6 +337,72 @@ fn validate_field(
 ) -> bool {
     let limits = &protocol.limits;
     match field_type {
+        FieldType::LifecyclePools | FieldType::ObservationPool | FieldType::NativeCorrelation => {
+            let shape = match field_type {
+                FieldType::LifecyclePools => "pools",
+                FieldType::ObservationPool => "pool",
+                _ => "correlation",
+            };
+            protocol
+                .lifecycle_shapes
+                .get(shape)
+                .is_some_and(|spec| validate_shape(value, spec, protocol, None))
+        }
+        FieldType::LifecycleActor => {
+            value
+                .get("kind")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| {
+                    ["lead", "child"].contains(&kind)
+                        && protocol
+                            .lifecycle_shapes
+                            .get(kind)
+                            .is_some_and(|spec| validate_shape(value, spec, protocol, Some(kind)))
+                })
+        }
+        FieldType::ObservationArray => value.as_array().is_some_and(|items| {
+            items.len() <= protocol.limits.lifecycle_pool_max_count
+                && items.iter().all(|item| {
+                    item.get("kind")
+                        .and_then(Value::as_str)
+                        .is_some_and(|kind| {
+                            protocol.lifecycle_variants.get(kind).is_some_and(|spec| {
+                                validate_shape(item, spec, protocol, Some(kind))
+                            })
+                        })
+                })
+        }),
+        FieldType::ToolClass
+        | FieldType::QuestionMode
+        | FieldType::ResultSurface
+        | FieldType::AttemptOutcome
+        | FieldType::ElicitationMode
+        | FieldType::SelectionAction
+        | FieldType::NoticeSubtype
+        | FieldType::PolicyScope
+        | FieldType::InputSource
+        | FieldType::ErrorCategory
+        | FieldType::CompactionTrigger => {
+            let name = match field_type {
+                FieldType::ToolClass => "tool_class",
+                FieldType::QuestionMode => "question_mode",
+                FieldType::ResultSurface => "result_surface",
+                FieldType::AttemptOutcome => "attempt_outcome",
+                FieldType::ElicitationMode => "elicitation_mode",
+                FieldType::SelectionAction => "selection_action",
+                FieldType::NoticeSubtype => "notice_subtype",
+                FieldType::PolicyScope => "policy_scope",
+                FieldType::InputSource => "input_source",
+                FieldType::ErrorCategory => "error_category",
+                _ => "compaction_trigger",
+            };
+            value.as_str().is_some_and(|text| {
+                protocol
+                    .lifecycle_enums
+                    .get(name)
+                    .is_some_and(|values| values.contains(text))
+            })
+        }
         FieldType::RecordKind => value.as_str() == expected_kind,
         FieldType::RecordSchema => value.as_u64() == Some(protocol.record_schema),
         FieldType::WireVersion => value.as_u64() == Some(protocol.wire_version),
@@ -370,16 +462,14 @@ fn validate_shape(
     let Some(object) = value.as_object() else {
         return false;
     };
-    let keys: BTreeSet<_> = object.keys().cloned().collect();
-    if !spec.required.is_subset(&keys)
-        || !keys.is_subset(&spec.required.union(&spec.optional).cloned().collect())
-    {
+    if !spec.required.iter().all(|field| object.contains_key(field)) {
         return false;
     }
     object.iter().all(|(field, value)| {
-        spec.types
-            .get(field)
-            .is_some_and(|field_type| validate_field(*field_type, value, protocol, expected_kind))
+        (spec.required.contains(field) || spec.optional.contains(field))
+            && spec.types.get(field).is_some_and(|field_type| {
+                validate_field(*field_type, value, protocol, expected_kind)
+            })
     })
 }
 
@@ -416,6 +506,8 @@ pub fn parse_record_value(value: &Value, protocol: &Manifest) -> Verdict {
         return Verdict::RecordInvalid;
     }
     let digest_matches = match kind {
+        "lifecycle_snapshot" => crate::observations::LifecycleSnapshot::deserialize(value)
+            .is_ok_and(|snapshot| snapshot.validate_semantics().is_ok()),
         "subagent_presence" => value
             .get("agent_id")
             .and_then(Value::as_str)
@@ -453,6 +545,46 @@ pub fn validate_record(value: &Value, expected_kind: Option<&str>) -> Result<()>
             "state record is invalid",
         )),
     }
+}
+
+/// Scan containers before recursive JSON decoding. Syntax remains serde's job.
+pub fn bounded_lifecycle_json(bytes: &[u8]) -> bool {
+    let Ok(protocol) = manifest() else {
+        return false;
+    };
+    if bytes.len() > protocol.limits.lifecycle_max_json_bytes {
+        return false;
+    }
+    let (mut depth, mut quoted, mut escaped) = (0usize, false, false);
+    for byte in bytes {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                quoted = false;
+            }
+        } else {
+            match byte {
+                b'"' => quoted = true,
+                b'{' | b'[' => {
+                    depth += 1;
+                    if depth > protocol.limits.lifecycle_max_depth {
+                        return false;
+                    }
+                }
+                b'}' | b']' => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    depth == 0 && !quoted
 }
 
 pub fn eligible_subagent_presence(

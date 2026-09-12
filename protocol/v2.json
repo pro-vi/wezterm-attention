@@ -23,7 +23,13 @@
     "ttl_ms_max": 2147483647,
     "frame_max": 1000000,
     "subagent_ttl_ms": 600000,
-    "max_json_bytes": 1048576
+    "max_json_bytes": 1048576,
+    "lifecycle_max_json_bytes": 262144,
+    "lifecycle_max_depth": 8,
+    "lifecycle_pool_max_count": 64,
+    "lifecycle_pool_max_bytes": 122880,
+    "lifecycle_envelope_max_bytes": 16384,
+    "lifecycle_observation_max_bytes": 2048
   },
   "enums": {
     "activity_types": ["thinking", "stop", "notify"],
@@ -51,6 +57,589 @@
     "subagent_providers": ["claude", "codex"],
     "subagent_statuses": ["active", "stopped"]
   },
+  "lifecycle_sources": {
+    "claude": {
+      "prompt_submitted": [
+        "UserPromptSubmit"
+      ],
+      "tool_preflight": [
+        "PreToolUse"
+      ],
+      "tool_result": [
+        "PostToolUse",
+        "PostToolUseFailure"
+      ],
+      "approval_requested": [
+        "PermissionRequest"
+      ],
+      "automatic_denial": [
+        "PermissionDenied"
+      ],
+      "response_finished": [
+        "Stop"
+      ],
+      "attempt_outcome": [
+        "StopFailure"
+      ],
+      "elicitation_requested": [
+        "Elicitation"
+      ],
+      "elicitation_action_selected": [
+        "ElicitationResult"
+      ],
+      "notice": [
+        "Notification"
+      ],
+      "compaction_attempted": [
+        "PreCompact"
+      ],
+      "compaction_succeeded": [
+        "PostCompact"
+      ]
+    },
+    "codex": {
+      "prompt_submitted": [
+        "UserPromptSubmit"
+      ],
+      "tool_preflight": [
+        "PreToolUse"
+      ],
+      "tool_result": [
+        "PostToolUse"
+      ],
+      "approval_requested": [
+        "PermissionRequest"
+      ],
+      "response_finished": [
+        "Stop"
+      ],
+      "user_interrupt": [
+        "Interrupt"
+      ],
+      "compaction_attempted": [
+        "PreCompact"
+      ],
+      "compaction_succeeded": [
+        "PostCompact"
+      ]
+    },
+    "pi": {
+      "prompt_submitted": [
+        "input"
+      ],
+      "tool_preflight": [
+        "tool_execution_start"
+      ],
+      "tool_result": [
+        "tool_execution_end"
+      ],
+      "run_settled": [
+        "agent_settled"
+      ],
+      "attempt_outcome": [
+        "message_end"
+      ],
+      "compaction_attempted": [
+        "session_before_compact"
+      ],
+      "compaction_succeeded": [
+        "session_compact"
+      ]
+    }
+  },
+  "lifecycle_shapes": {
+    "pools": {
+      "required": [
+        "requests",
+        "general"
+      ],
+      "optional": [],
+      "types": {
+        "requests": "observation_pool",
+        "general": "observation_pool"
+      }
+    },
+    "pool": {
+      "required": [
+        "observations"
+      ],
+      "optional": [
+        "retention_floor_mono_ns"
+      ],
+      "types": {
+        "observations": "observation_array",
+        "retention_floor_mono_ns": "monotonic_ns20"
+      }
+    },
+    "lead": {
+      "required": [
+        "kind"
+      ],
+      "optional": [],
+      "types": {
+        "kind": "record_kind"
+      }
+    },
+    "child": {
+      "required": [
+        "kind",
+        "agent_id",
+        "agent_key"
+      ],
+      "optional": [],
+      "types": {
+        "kind": "record_kind",
+        "agent_id": "safe_label",
+        "agent_key": "hex64"
+      }
+    },
+    "correlation": {
+      "required": [],
+      "optional": [
+        "mcp_server_name",
+        "turn_id",
+        "tool_call_id",
+        "elicitation_id",
+        "message_id"
+      ],
+      "types": {
+        "mcp_server_name": "safe_label",
+        "turn_id": "safe_label",
+        "tool_call_id": "safe_label",
+        "elicitation_id": "safe_label",
+        "message_id": "safe_label"
+      }
+    }
+  },
+  "lifecycle_variants": {
+    "prompt_submitted": {
+      "required": [
+        "kind",
+        "observation_id",
+        "source_event",
+        "observed_mono_ns",
+        "written_at_unix_ns",
+        "actor"
+      ],
+      "optional": [
+        "source_version",
+        "correlation",
+        "input_source"
+      ],
+      "types": {
+        "kind": "record_kind",
+        "observation_id": "uuid",
+        "source_event": "safe_label",
+        "source_version": "safe_label",
+        "observed_mono_ns": "monotonic_ns20",
+        "written_at_unix_ns": "unix_ns20",
+        "actor": "lifecycle_actor",
+        "correlation": "native_correlation",
+        "input_source": "input_source"
+      }
+    },
+    "tool_preflight": {
+      "required": [
+        "kind",
+        "observation_id",
+        "source_event",
+        "observed_mono_ns",
+        "written_at_unix_ns",
+        "actor",
+        "tool_name",
+        "tool_class"
+      ],
+      "optional": [
+        "source_version",
+        "correlation",
+        "question_mode"
+      ],
+      "types": {
+        "kind": "record_kind",
+        "observation_id": "uuid",
+        "source_event": "safe_label",
+        "source_version": "safe_label",
+        "observed_mono_ns": "monotonic_ns20",
+        "written_at_unix_ns": "unix_ns20",
+        "actor": "lifecycle_actor",
+        "correlation": "native_correlation",
+        "tool_name": "safe_label",
+        "tool_class": "tool_class",
+        "question_mode": "question_mode"
+      }
+    },
+    "tool_result": {
+      "required": [
+        "kind",
+        "observation_id",
+        "source_event",
+        "observed_mono_ns",
+        "written_at_unix_ns",
+        "actor",
+        "tool_name",
+        "tool_class",
+        "result_surface"
+      ],
+      "optional": [
+        "source_version",
+        "correlation",
+        "question_mode",
+        "is_error",
+        "interrupted"
+      ],
+      "types": {
+        "kind": "record_kind",
+        "observation_id": "uuid",
+        "source_event": "safe_label",
+        "source_version": "safe_label",
+        "observed_mono_ns": "monotonic_ns20",
+        "written_at_unix_ns": "unix_ns20",
+        "actor": "lifecycle_actor",
+        "correlation": "native_correlation",
+        "tool_name": "safe_label",
+        "tool_class": "tool_class",
+        "question_mode": "question_mode",
+        "result_surface": "result_surface",
+        "is_error": "boolean",
+        "interrupted": "boolean"
+      }
+    },
+    "approval_requested": {
+      "required": [
+        "kind",
+        "observation_id",
+        "source_event",
+        "observed_mono_ns",
+        "written_at_unix_ns",
+        "actor"
+      ],
+      "optional": [
+        "source_version",
+        "correlation",
+        "tool_name"
+      ],
+      "types": {
+        "kind": "record_kind",
+        "observation_id": "uuid",
+        "source_event": "safe_label",
+        "source_version": "safe_label",
+        "observed_mono_ns": "monotonic_ns20",
+        "written_at_unix_ns": "unix_ns20",
+        "actor": "lifecycle_actor",
+        "correlation": "native_correlation",
+        "tool_name": "safe_label"
+      }
+    },
+    "automatic_denial": {
+      "required": [
+        "kind",
+        "observation_id",
+        "source_event",
+        "observed_mono_ns",
+        "written_at_unix_ns",
+        "actor",
+        "tool_name",
+        "policy_scope"
+      ],
+      "optional": [
+        "source_version",
+        "correlation"
+      ],
+      "types": {
+        "kind": "record_kind",
+        "observation_id": "uuid",
+        "source_event": "safe_label",
+        "source_version": "safe_label",
+        "observed_mono_ns": "monotonic_ns20",
+        "written_at_unix_ns": "unix_ns20",
+        "actor": "lifecycle_actor",
+        "correlation": "native_correlation",
+        "tool_name": "safe_label",
+        "policy_scope": "policy_scope"
+      }
+    },
+    "response_finished": {
+      "required": [
+        "kind",
+        "observation_id",
+        "source_event",
+        "observed_mono_ns",
+        "written_at_unix_ns",
+        "actor"
+      ],
+      "optional": [
+        "source_version",
+        "correlation",
+        "stop_hook_active"
+      ],
+      "types": {
+        "kind": "record_kind",
+        "observation_id": "uuid",
+        "source_event": "safe_label",
+        "source_version": "safe_label",
+        "observed_mono_ns": "monotonic_ns20",
+        "written_at_unix_ns": "unix_ns20",
+        "actor": "lifecycle_actor",
+        "correlation": "native_correlation",
+        "stop_hook_active": "boolean"
+      }
+    },
+    "run_settled": {
+      "required": [
+        "kind",
+        "observation_id",
+        "source_event",
+        "observed_mono_ns",
+        "written_at_unix_ns",
+        "actor"
+      ],
+      "optional": [
+        "source_version",
+        "correlation"
+      ],
+      "types": {
+        "kind": "record_kind",
+        "observation_id": "uuid",
+        "source_event": "safe_label",
+        "source_version": "safe_label",
+        "observed_mono_ns": "monotonic_ns20",
+        "written_at_unix_ns": "unix_ns20",
+        "actor": "lifecycle_actor",
+        "correlation": "native_correlation"
+      }
+    },
+    "attempt_outcome": {
+      "required": [
+        "kind",
+        "observation_id",
+        "source_event",
+        "observed_mono_ns",
+        "written_at_unix_ns",
+        "actor",
+        "outcome"
+      ],
+      "optional": [
+        "source_version",
+        "correlation",
+        "error_category"
+      ],
+      "types": {
+        "kind": "record_kind",
+        "observation_id": "uuid",
+        "source_event": "safe_label",
+        "source_version": "safe_label",
+        "observed_mono_ns": "monotonic_ns20",
+        "written_at_unix_ns": "unix_ns20",
+        "actor": "lifecycle_actor",
+        "correlation": "native_correlation",
+        "outcome": "attempt_outcome",
+        "error_category": "error_category"
+      }
+    },
+    "user_interrupt": {
+      "required": [
+        "kind",
+        "observation_id",
+        "source_event",
+        "observed_mono_ns",
+        "written_at_unix_ns",
+        "actor"
+      ],
+      "optional": [
+        "source_version",
+        "correlation"
+      ],
+      "types": {
+        "kind": "record_kind",
+        "observation_id": "uuid",
+        "source_event": "safe_label",
+        "source_version": "safe_label",
+        "observed_mono_ns": "monotonic_ns20",
+        "written_at_unix_ns": "unix_ns20",
+        "actor": "lifecycle_actor",
+        "correlation": "native_correlation"
+      }
+    },
+    "elicitation_requested": {
+      "required": [
+        "kind",
+        "observation_id",
+        "source_event",
+        "observed_mono_ns",
+        "written_at_unix_ns",
+        "actor",
+        "mode"
+      ],
+      "optional": [
+        "source_version",
+        "correlation"
+      ],
+      "types": {
+        "kind": "record_kind",
+        "observation_id": "uuid",
+        "source_event": "safe_label",
+        "source_version": "safe_label",
+        "observed_mono_ns": "monotonic_ns20",
+        "written_at_unix_ns": "unix_ns20",
+        "actor": "lifecycle_actor",
+        "correlation": "native_correlation",
+        "mode": "elicitation_mode"
+      }
+    },
+    "elicitation_action_selected": {
+      "required": [
+        "kind",
+        "observation_id",
+        "source_event",
+        "observed_mono_ns",
+        "written_at_unix_ns",
+        "actor",
+        "action"
+      ],
+      "optional": [
+        "source_version",
+        "correlation"
+      ],
+      "types": {
+        "kind": "record_kind",
+        "observation_id": "uuid",
+        "source_event": "safe_label",
+        "source_version": "safe_label",
+        "observed_mono_ns": "monotonic_ns20",
+        "written_at_unix_ns": "unix_ns20",
+        "actor": "lifecycle_actor",
+        "correlation": "native_correlation",
+        "action": "selection_action"
+      }
+    },
+    "notice": {
+      "required": [
+        "kind",
+        "observation_id",
+        "source_event",
+        "observed_mono_ns",
+        "written_at_unix_ns",
+        "actor",
+        "subtype"
+      ],
+      "optional": [
+        "source_version",
+        "correlation"
+      ],
+      "types": {
+        "kind": "record_kind",
+        "observation_id": "uuid",
+        "source_event": "safe_label",
+        "source_version": "safe_label",
+        "observed_mono_ns": "monotonic_ns20",
+        "written_at_unix_ns": "unix_ns20",
+        "actor": "lifecycle_actor",
+        "correlation": "native_correlation",
+        "subtype": "notice_subtype"
+      }
+    },
+    "compaction_attempted": {
+      "required": [
+        "kind",
+        "observation_id",
+        "source_event",
+        "observed_mono_ns",
+        "written_at_unix_ns",
+        "actor"
+      ],
+      "optional": [
+        "source_version",
+        "correlation",
+        "trigger"
+      ],
+      "types": {
+        "kind": "record_kind",
+        "observation_id": "uuid",
+        "source_event": "safe_label",
+        "source_version": "safe_label",
+        "observed_mono_ns": "monotonic_ns20",
+        "written_at_unix_ns": "unix_ns20",
+        "actor": "lifecycle_actor",
+        "correlation": "native_correlation",
+        "trigger": "compaction_trigger"
+      }
+    },
+    "compaction_succeeded": {
+      "required": [
+        "kind",
+        "observation_id",
+        "source_event",
+        "observed_mono_ns",
+        "written_at_unix_ns",
+        "actor"
+      ],
+      "optional": [
+        "source_version",
+        "correlation",
+        "trigger"
+      ],
+      "types": {
+        "kind": "record_kind",
+        "observation_id": "uuid",
+        "source_event": "safe_label",
+        "source_version": "safe_label",
+        "observed_mono_ns": "monotonic_ns20",
+        "written_at_unix_ns": "unix_ns20",
+        "actor": "lifecycle_actor",
+        "correlation": "native_correlation",
+        "trigger": "compaction_trigger"
+      }
+    }
+  },
+  "lifecycle_enums": {
+    "tool_class": [
+      "generic",
+      "question",
+      "permission"
+    ],
+    "question_mode": [
+      "blocking",
+      "nonblocking"
+    ],
+    "result_surface": [
+      "success_hook",
+      "post_hook",
+      "execution_end"
+    ],
+    "attempt_outcome": [
+      "failed",
+      "aborted"
+    ],
+    "elicitation_mode": [
+      "form",
+      "url"
+    ],
+    "selection_action": [
+      "accept",
+      "decline",
+      "cancel"
+    ],
+    "notice_subtype": [
+      "permission_prompt",
+      "elicitation_dialog",
+      "elicitation_url_dialog"
+    ],
+    "policy_scope": [
+      "auto_mode"
+    ],
+    "input_source": [
+      "interactive",
+      "rpc",
+      "extension"
+    ],
+    "error_category": ["rate_limit", "overloaded", "authentication_failed", "oauth_org_not_allowed", "account_on_hold", "billing_error", "invalid_request", "model_not_found", "server_error", "max_output_tokens", "cloud_credential_error", "unknown"],
+    "compaction_trigger": [
+      "auto",
+      "manual",
+      "threshold",
+      "overflow"
+    ]
+  },
   "wire": {
     "required": ["wire", "address", "launch_id"],
     "optional": [],
@@ -61,6 +650,7 @@
     }
   },
   "records": {
+    "lifecycle_snapshot": {"required":["kind","schema","address","launch_id","binding_id","provider","snapshot_id","written_at_unix_ns","pools"],"optional":[],"types":{"kind":"record_kind","schema":"record_schema","address":"pane_address","launch_id":"uuid","binding_id":"hex64","provider":"provider","snapshot_id":"uuid","written_at_unix_ns":"unix_ns20","pools":"lifecycle_pools"}},
     "realm": {
       "required": ["kind", "schema", "realm_id", "socket_path", "writer_version"],
       "optional": [],

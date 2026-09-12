@@ -1,0 +1,1201 @@
+{
+  "cases": [
+    {
+      "id": "prompt_submitted",
+      "expected": "valid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "prompt_submitted",
+                "observation_id": "00000000-0000-4000-8000-000000000010",
+                "source_event": "UserPromptSubmit",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "tool_preflight",
+      "expected": "valid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "tool_preflight",
+                "tool_name": "shell",
+                "tool_class": "generic",
+                "observation_id": "00000000-0000-4000-8000-000000000011",
+                "source_event": "PreToolUse",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "tool_result",
+      "expected": "valid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "tool_result",
+                "tool_name": "shell",
+                "tool_class": "generic",
+                "result_surface": "post_hook",
+                "observation_id": "00000000-0000-4000-8000-000000000012",
+                "source_event": "PostToolUse",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "approval_requested",
+      "expected": "valid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": [
+              {
+                "kind": "approval_requested",
+                "observation_id": "00000000-0000-4000-8000-000000000013",
+                "source_event": "PermissionRequest",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                }
+              }
+            ]
+          },
+          "general": {
+            "observations": []
+          }
+        }
+      }
+    },
+    {
+      "id": "automatic_denial",
+      "expected": "valid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "claude",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": [
+              {
+                "kind": "automatic_denial",
+                "tool_name": "Bash",
+                "policy_scope": "auto_mode",
+                "observation_id": "00000000-0000-4000-8000-000000000014",
+                "source_event": "PermissionDenied",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                }
+              }
+            ]
+          },
+          "general": {
+            "observations": []
+          }
+        }
+      }
+    },
+    {
+      "id": "response_finished",
+      "expected": "valid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "response_finished",
+                "observation_id": "00000000-0000-4000-8000-000000000015",
+                "source_event": "Stop",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "run_settled",
+      "expected": "valid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "pi",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "run_settled",
+                "observation_id": "00000000-0000-4000-8000-000000000016",
+                "source_event": "agent_settled",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "attempt_outcome",
+      "expected": "valid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "claude",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "attempt_outcome",
+                "outcome": "failed",
+                "observation_id": "00000000-0000-4000-8000-000000000017",
+                "source_event": "StopFailure",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "user_interrupt",
+      "expected": "valid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "user_interrupt",
+                "observation_id": "00000000-0000-4000-8000-000000000018",
+                "source_event": "Interrupt",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "elicitation_requested",
+      "expected": "valid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "claude",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": [
+              {
+                "kind": "elicitation_requested",
+                "mode": "form",
+                "observation_id": "00000000-0000-4000-8000-000000000019",
+                "source_event": "Elicitation",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                }
+              }
+            ]
+          },
+          "general": {
+            "observations": []
+          }
+        }
+      }
+    },
+    {
+      "id": "elicitation_action_selected",
+      "expected": "valid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "claude",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": [
+              {
+                "kind": "elicitation_action_selected",
+                "action": "accept",
+                "observation_id": "00000000-0000-4000-8000-000000000020",
+                "source_event": "ElicitationResult",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                }
+              }
+            ]
+          },
+          "general": {
+            "observations": []
+          }
+        }
+      }
+    },
+    {
+      "id": "notice",
+      "expected": "valid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "claude",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": [
+              {
+                "kind": "notice",
+                "subtype": "permission_prompt",
+                "observation_id": "00000000-0000-4000-8000-000000000021",
+                "source_event": "Notification",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                }
+              }
+            ]
+          },
+          "general": {
+            "observations": []
+          }
+        }
+      }
+    },
+    {
+      "id": "compaction_attempted",
+      "expected": "valid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "compaction_attempted",
+                "observation_id": "00000000-0000-4000-8000-000000000022",
+                "source_event": "PreCompact",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "compaction_succeeded",
+      "expected": "valid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "compaction_succeeded",
+                "observation_id": "00000000-0000-4000-8000-000000000023",
+                "source_event": "PostCompact",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "blocking-tool_preflight",
+      "expected": "valid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": [
+              {
+                "kind": "tool_preflight",
+                "observation_id": "00000000-0000-4000-8000-000000000044",
+                "source_event": "PreToolUse",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "tool_name": "request_user_input",
+                "tool_class": "question",
+                "question_mode": "blocking"
+              }
+            ]
+          },
+          "general": {
+            "observations": []
+          }
+        }
+      }
+    },
+    {
+      "id": "blocking-tool_result",
+      "expected": "valid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": [
+              {
+                "kind": "tool_result",
+                "observation_id": "00000000-0000-4000-8000-000000000045",
+                "source_event": "PostToolUse",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "tool_name": "request_user_input",
+                "tool_class": "question",
+                "question_mode": "blocking",
+                "result_surface": "post_hook"
+              }
+            ]
+          },
+          "general": {
+            "observations": []
+          }
+        }
+      }
+    },
+    {
+      "id": "nonblocking-tool_preflight",
+      "expected": "valid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": [
+              {
+                "kind": "tool_preflight",
+                "observation_id": "00000000-0000-4000-8000-000000000046",
+                "source_event": "PreToolUse",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "tool_name": "request_user_input_async",
+                "tool_class": "question",
+                "question_mode": "nonblocking"
+              }
+            ]
+          },
+          "general": {
+            "observations": []
+          }
+        }
+      }
+    },
+    {
+      "id": "nonblocking-tool_result",
+      "expected": "valid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": [
+              {
+                "kind": "tool_result",
+                "observation_id": "00000000-0000-4000-8000-000000000047",
+                "source_event": "PostToolUse",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "tool_name": "request_user_input_async",
+                "tool_class": "question",
+                "question_mode": "nonblocking",
+                "result_surface": "post_hook"
+              }
+            ]
+          },
+          "general": {
+            "observations": []
+          }
+        }
+      }
+    },
+    {
+      "id": "missing-mode",
+      "expected": "record_invalid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": [
+              {
+                "kind": "tool_result",
+                "observation_id": "00000000-0000-4000-8000-000000000047",
+                "source_event": "PostToolUse",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "tool_name": "request_user_input_async",
+                "tool_class": "question",
+                "result_surface": "post_hook"
+              }
+            ]
+          },
+          "general": {
+            "observations": []
+          }
+        }
+      }
+    },
+    {
+      "id": "null-mode",
+      "expected": "record_invalid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": [
+              {
+                "kind": "tool_result",
+                "observation_id": "00000000-0000-4000-8000-000000000047",
+                "source_event": "PostToolUse",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "tool_name": "request_user_input_async",
+                "tool_class": "question",
+                "question_mode": null,
+                "result_surface": "post_hook"
+              }
+            ]
+          },
+          "general": {
+            "observations": []
+          }
+        }
+      }
+    },
+    {
+      "id": "wrong-mode",
+      "expected": "record_invalid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": [
+              {
+                "kind": "tool_result",
+                "observation_id": "00000000-0000-4000-8000-000000000047",
+                "source_event": "PostToolUse",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "tool_name": "request_user_input_async",
+                "tool_class": "question",
+                "question_mode": "blocking",
+                "result_surface": "post_hook"
+              }
+            ]
+          },
+          "general": {
+            "observations": []
+          }
+        }
+      }
+    },
+    {
+      "id": "error-publication",
+      "expected": "record_invalid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": [
+              {
+                "kind": "tool_result",
+                "observation_id": "00000000-0000-4000-8000-000000000047",
+                "source_event": "PostToolUse",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "tool_name": "request_user_input_async",
+                "tool_class": "question",
+                "question_mode": "nonblocking",
+                "result_surface": "post_hook",
+                "is_error": true
+              }
+            ]
+          },
+          "general": {
+            "observations": []
+          }
+        }
+      }
+    },
+    {
+      "id": "wrong-pool",
+      "expected": "record_invalid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "tool_result",
+                "observation_id": "00000000-0000-4000-8000-000000000047",
+                "source_event": "PostToolUse",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "tool_name": "request_user_input_async",
+                "tool_class": "question",
+                "question_mode": "nonblocking",
+                "result_surface": "post_hook"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "at-floor",
+      "expected": "record_invalid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": [
+              {
+                "kind": "tool_result",
+                "observation_id": "00000000-0000-4000-8000-000000000047",
+                "source_event": "PostToolUse",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "tool_name": "request_user_input_async",
+                "tool_class": "question",
+                "question_mode": "nonblocking",
+                "result_surface": "post_hook"
+              }
+            ],
+            "retention_floor_mono_ns": "00000000000000000500"
+          },
+          "general": {
+            "observations": []
+          }
+        }
+      }
+    },
+    {
+      "id": "object-not-array",
+      "expected": "record_invalid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": [
+              {
+                "kind": "tool_result",
+                "observation_id": "00000000-0000-4000-8000-000000000047",
+                "source_event": "PostToolUse",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "tool_name": "request_user_input_async",
+                "tool_class": "question",
+                "question_mode": "nonblocking",
+                "result_surface": "post_hook"
+              }
+            ]
+          },
+          "general": {
+            "observations": {}
+          }
+        }
+      }
+    },
+    {
+      "id": "duplicate-identity",
+      "expected": "record_invalid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": [
+              {
+                "kind": "tool_result",
+                "observation_id": "00000000-0000-4000-8000-000000000047",
+                "source_event": "PostToolUse",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "tool_name": "request_user_input_async",
+                "tool_class": "question",
+                "question_mode": "nonblocking",
+                "result_surface": "post_hook"
+              },
+              {
+                "kind": "tool_result",
+                "observation_id": "00000000-0000-4000-8000-000000000047",
+                "source_event": "PostToolUse",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "tool_name": "request_user_input_async",
+                "tool_class": "question",
+                "question_mode": "nonblocking",
+                "result_surface": "post_hook"
+              }
+            ]
+          },
+          "general": {
+            "observations": []
+          }
+        }
+      }
+    },
+    {
+      "id": "forged-child",
+      "expected": "record_invalid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": [
+              {
+                "kind": "tool_result",
+                "observation_id": "00000000-0000-4000-8000-000000000047",
+                "source_event": "PostToolUse",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "child",
+                  "agent_id": "child",
+                  "agent_key": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                },
+                "tool_name": "request_user_input_async",
+                "tool_class": "question",
+                "question_mode": "nonblocking",
+                "result_surface": "post_hook"
+              }
+            ]
+          },
+          "general": {
+            "observations": []
+          }
+        }
+      }
+    },
+    {
+      "id": "unknown-field",
+      "expected": "record_invalid",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 2,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": [
+              {
+                "kind": "tool_result",
+                "observation_id": "00000000-0000-4000-8000-000000000047",
+                "source_event": "PostToolUse",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "tool_name": "request_user_input_async",
+                "tool_class": "question",
+                "question_mode": "nonblocking",
+                "result_surface": "post_hook",
+                "answer": "SYNTHETIC-PRIVATE-SENTINEL"
+              }
+            ]
+          },
+          "general": {
+            "observations": []
+          }
+        }
+      }
+    },
+    {
+      "id": "future",
+      "expected": "future_schema",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 3,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": [
+              {
+                "kind": "tool_result",
+                "observation_id": "00000000-0000-4000-8000-000000000047",
+                "source_event": "PostToolUse",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "tool_name": "request_user_input_async",
+                "tool_class": "question",
+                "question_mode": "nonblocking",
+                "result_surface": "post_hook"
+              }
+            ]
+          },
+          "general": {
+            "observations": []
+          }
+        }
+      }
+    }
+  ],
+  "raw_cases": [
+    {
+      "id": "integer-schema-valid",
+      "raw": "{\"kind\":\"lifecycle_snapshot\",\"schema\":2,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\"},\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"binding_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"provider\":\"codex\",\"snapshot_id\":\"00000000-0000-4000-8000-000000000002\",\"written_at_unix_ns\":\"00000000000000001000\",\"pools\":{\"requests\":{\"observations\":[]},\"general\":{\"observations\":[{\"kind\":\"prompt_submitted\",\"observation_id\":\"00000000-0000-4000-8000-000000000010\",\"source_event\":\"UserPromptSubmit\",\"observed_mono_ns\":\"00000000000000000500\",\"written_at_unix_ns\":\"00000000000000001000\",\"actor\":{\"kind\":\"lead\"}}]}}}",
+      "expected": "valid"
+    },
+    {
+      "id": "float-schema",
+      "raw": "{\"kind\":\"lifecycle_snapshot\",\"schema\":2.0,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\"},\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"binding_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"provider\":\"codex\",\"snapshot_id\":\"00000000-0000-4000-8000-000000000002\",\"written_at_unix_ns\":\"00000000000000001000\",\"pools\":{\"requests\":{\"observations\":[]},\"general\":{\"observations\":[{\"kind\":\"prompt_submitted\",\"observation_id\":\"00000000-0000-4000-8000-000000000010\",\"source_event\":\"UserPromptSubmit\",\"observed_mono_ns\":\"00000000000000000500\",\"written_at_unix_ns\":\"00000000000000001000\",\"actor\":{\"kind\":\"lead\"}}]}}}",
+      "expected": "record_invalid"
+    },
+    {
+      "id": "exponent-schema",
+      "raw": "{\"kind\":\"lifecycle_snapshot\",\"schema\":2e0,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\"},\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"binding_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"provider\":\"codex\",\"snapshot_id\":\"00000000-0000-4000-8000-000000000002\",\"written_at_unix_ns\":\"00000000000000001000\",\"pools\":{\"requests\":{\"observations\":[]},\"general\":{\"observations\":[{\"kind\":\"prompt_submitted\",\"observation_id\":\"00000000-0000-4000-8000-000000000010\",\"source_event\":\"UserPromptSubmit\",\"observed_mono_ns\":\"00000000000000000500\",\"written_at_unix_ns\":\"00000000000000001000\",\"actor\":{\"kind\":\"lead\"}}]}}}",
+      "expected": "record_invalid"
+    },
+    {
+      "id": "nested-null",
+      "raw": "{\"kind\":\"lifecycle_snapshot\",\"schema\":2,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\"},\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"binding_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"provider\":\"codex\",\"snapshot_id\":\"00000000-0000-4000-8000-000000000002\",\"written_at_unix_ns\":\"00000000000000001000\",\"pools\":{\"requests\":{\"observations\":[]},\"general\":{\"observations\":[{\"kind\":\"prompt_submitted\",\"observation_id\":\"00000000-0000-4000-8000-000000000010\",\"source_event\":\"UserPromptSubmit\",\"observed_mono_ns\":\"00000000000000000500\",\"written_at_unix_ns\":\"00000000000000001000\",\"source_version\":null,\"actor\":{\"kind\":\"lead\"}}]}}}",
+      "expected": "record_invalid"
+    },
+    {
+      "id": "escaped-text-valid",
+      "raw": "{\"kind\":\"lifecycle_snapshot\",\"schema\":2,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\"},\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"binding_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"provider\":\"codex\",\"snapshot_id\":\"00000000-0000-4000-8000-000000000002\",\"written_at_unix_ns\":\"00000000000000001000\",\"pools\":{\"requests\":{\"observations\":[]},\"general\":{\"observations\":[{\"kind\":\"prompt_submitted\",\"observation_id\":\"00000000-0000-4000-8000-000000000010\",\"source_event\":\"UserPromptSubmit\",\"observed_mono_ns\":\"00000000000000000500\",\"written_at_unix_ns\":\"00000000000000001000\",\"actor\":{\"kind\":\"lead\"},\"source_version\":\"label\\\"with\\\\escapes\"}]}}}",
+      "expected": "valid"
+    },
+    {
+      "id": "maximum-u64-future-schema",
+      "raw": "{\"kind\":\"lifecycle_snapshot\",\"schema\":18446744073709551615,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\"},\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"binding_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"provider\":\"codex\",\"snapshot_id\":\"00000000-0000-4000-8000-000000000002\",\"written_at_unix_ns\":\"00000000000000001000\",\"pools\":{\"requests\":{\"observations\":[]},\"general\":{\"observations\":[{\"kind\":\"prompt_submitted\",\"observation_id\":\"00000000-0000-4000-8000-000000000010\",\"source_event\":\"UserPromptSubmit\",\"observed_mono_ns\":\"00000000000000000500\",\"written_at_unix_ns\":\"00000000000000001000\",\"actor\":{\"kind\":\"lead\"}}]}}}",
+      "expected": "future_schema"
+    },
+    {
+      "id": "overflow-u64-schema",
+      "raw": "{\"kind\":\"lifecycle_snapshot\",\"schema\":18446744073709551616,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\"},\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"binding_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"provider\":\"codex\",\"snapshot_id\":\"00000000-0000-4000-8000-000000000002\",\"written_at_unix_ns\":\"00000000000000001000\",\"pools\":{\"requests\":{\"observations\":[]},\"general\":{\"observations\":[{\"kind\":\"prompt_submitted\",\"observation_id\":\"00000000-0000-4000-8000-000000000010\",\"source_event\":\"UserPromptSubmit\",\"observed_mono_ns\":\"00000000000000000500\",\"written_at_unix_ns\":\"00000000000000001000\",\"actor\":{\"kind\":\"lead\"}}]}}}",
+      "expected": "record_invalid"
+    }
+  ]
+}

@@ -89,7 +89,24 @@ def validate_typed_field(
     expected_kind: str | None,
 ) -> None:
     limits = manifest["limits"]
-    if field_type == "record_kind":
+    if field_type in {"lifecycle_pools", "observation_pool", "native_correlation"}:
+        name = {"lifecycle_pools": "pools", "observation_pool": "pool", "native_correlation": "correlation"}[field_type]
+        validate_shape(value, manifest["lifecycle_shapes"][name], manifest, None)
+    elif field_type == "lifecycle_actor":
+        if not isinstance(value, dict) or value.get("kind") not in {"lead", "child"}:
+            raise InvalidRecord("invalid actor")
+        validate_shape(value, manifest["lifecycle_shapes"][value["kind"]], manifest, value["kind"])
+    elif field_type == "observation_array":
+        if not isinstance(value, list) or len(value) > limits["lifecycle_pool_max_count"]:
+            raise InvalidRecord("invalid observation array")
+        for item in value:
+            if not isinstance(item, dict) or item.get("kind") not in manifest["lifecycle_variants"]:
+                raise InvalidRecord("invalid observation kind")
+            validate_shape(item, manifest["lifecycle_variants"][item["kind"]], manifest, item["kind"])
+    elif field_type in manifest.get("lifecycle_enums", {}):
+        if not isinstance(value, str) or value not in manifest["lifecycle_enums"][field_type]:
+            raise InvalidRecord("unsupported lifecycle enum")
+    elif field_type == "record_kind":
         if value != expected_kind:
             raise InvalidRecord("record kind mismatch")
     elif field_type == "record_schema":
@@ -207,6 +224,8 @@ def parse_record(value: Any, manifest: dict[str, Any]) -> str:
     if not isinstance(value, dict):
         return "record_invalid"
     schema = value.get("schema")
+    if value.get("kind") == "lifecycle_snapshot" and (type(schema) is not int or not 0 <= schema < 2**64):
+        return "record_invalid"
     if isinstance(schema, int) and schema > manifest["record_schema"]:
         return "future_schema"
     kind = value.get("kind")
@@ -215,6 +234,8 @@ def parse_record(value: Any, manifest: dict[str, Any]) -> str:
         return "record_invalid"
     try:
         validate_shape(value, spec, manifest, kind)
+        if kind == "lifecycle_snapshot":
+            validate_lifecycle(value, manifest)
     except InvalidRecord:
         return "record_invalid"
     if kind == "subagent_presence" and hashlib.sha256(
@@ -226,6 +247,101 @@ def parse_record(value: Any, manifest: dict[str, Any]) -> str:
     ]:
         return "record_invalid"
     return "valid"
+
+
+def compact_size(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def read_lifecycle_record(path: Path, manifest: dict[str, Any]) -> str:
+    """Read one bounded record, rejecting deep containers before JSON decoding."""
+    with path.open("rb") as handle:
+        raw = handle.read(manifest["limits"]["lifecycle_max_json_bytes"] + 1)
+    if len(raw) > manifest["limits"]["lifecycle_max_json_bytes"]:
+        return "record_invalid"
+    depth, quoted, escaped = 0, False, False
+    for byte in raw:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == 92:
+                escaped = True
+            elif byte == 34:
+                quoted = False
+        elif byte == 34:
+            quoted = True
+        elif byte in (91, 123):
+            depth += 1
+            if depth > manifest["limits"]["lifecycle_max_depth"]:
+                return "record_invalid"
+        elif byte in (93, 125):
+            depth -= 1
+    try:
+        return parse_record(json.loads(raw), manifest)
+    except (ValueError, UnicodeError):
+        return "record_invalid"
+
+
+def validate_lifecycle(value: dict[str, Any], manifest: dict[str, Any]) -> None:
+    if type(value["schema"]) is not int:
+        raise InvalidRecord("lifecycle schema must be an integer")
+    limits = manifest["limits"]
+    keys: set[tuple[Any, ...]] = set()
+    ids: set[str] = set()
+    for name, pool in value["pools"].items():
+        if compact_size(pool) > limits["lifecycle_pool_max_bytes"]:
+            raise InvalidRecord("pool byte bound")
+        prior: tuple[str, str] | None = None
+        for item in pool["observations"]:
+            kind, actor, correlation = item["kind"], item["actor"], item.get("correlation", {})
+            if item["source_event"] not in manifest["lifecycle_sources"].get(value["provider"], {}).get(kind, []):
+                raise InvalidRecord("unsupported native source")
+            if "mcp_server_name" in correlation and kind not in {"elicitation_requested", "elicitation_action_selected"}:
+                raise InvalidRecord("unexpected MCP namespace")
+            if kind in {"tool_preflight", "tool_result", "approval_requested", "automatic_denial"}:
+                namespace = "tool_call_id"
+            elif kind in {"elicitation_requested", "elicitation_action_selected"}:
+                namespace = "elicitation_id"
+            else:
+                namespace = "message_id" if "message_id" in correlation else "turn_id"
+            if namespace not in correlation:
+                namespace = "observation_id"
+            key = (kind, actor["kind"], actor.get("agent_id"), namespace, correlation.get(namespace, item["observation_id"]), correlation.get("turn_id"), correlation.get("mcp_server_name"))
+            if "elicitation_id" in correlation and "mcp_server_name" not in correlation:
+                raise InvalidRecord("elicitation namespace is missing")
+            order = (item["observed_mono_ns"], item["observation_id"])
+            if key in keys or item["observation_id"] in ids or (prior and prior > order):
+                raise InvalidRecord("duplicate or unordered observation")
+            keys.add(key)
+            ids.add(item["observation_id"])
+            prior = order
+            request = kind in {"approval_requested", "automatic_denial", "elicitation_requested", "elicitation_action_selected", "notice"}
+            if kind in {"tool_preflight", "tool_result"}:
+                request = item["tool_class"] != "generic"
+                provider_tool = (value["provider"], item["tool_name"])
+                expected = {
+                    ("claude", "AskUserQuestion"): ("question", "blocking"),
+                    ("codex", "request_user_input"): ("question", "blocking"),
+                    ("codex", "request_user_input_async"): ("question", "nonblocking"),
+                    ("codex", "request_permissions"): ("permission", None),
+                }.get(provider_tool, ("generic", None))
+                if (item["tool_class"], item.get("question_mode")) != expected:
+                    raise InvalidRecord("tool classification mismatch")
+                if item.get("question_mode") == "nonblocking":
+                    if actor["kind"] != "lead":
+                        raise InvalidRecord("async question is root only")
+                    if kind == "tool_result" and (item["source_event"] != "PostToolUse" or item["result_surface"] != "post_hook" or item.get("is_error") is True or item.get("interrupted") is True):
+                        raise InvalidRecord("invalid publication result")
+            if name != ("requests" if request else "general") or compact_size(item) > limits["lifecycle_observation_max_bytes"]:
+                raise InvalidRecord("observation membership or bound")
+            if item["observed_mono_ns"] <= pool.get("retention_floor_mono_ns", ""):
+                raise InvalidRecord("observation below pool floor")
+            if actor["kind"] == "child" and (value["provider"] == "pi" or hashlib.sha256(actor["agent_id"].encode("utf-8")).hexdigest() != actor["agent_key"]):
+                raise InvalidRecord("child identity mismatch")
+    size = compact_size(value) + 1
+    envelope = size - sum(compact_size(pool) for pool in value["pools"].values())
+    if size > limits["lifecycle_max_json_bytes"] or envelope > limits["lifecycle_envelope_max_bytes"]:
+        raise InvalidRecord("snapshot byte bound")
 
 
 def assign_path(value: dict[str, Any], dotted: str, replacement: Any) -> None:
@@ -427,7 +543,23 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--render", action="store_true")
     args = parser.parse_args()
-    return run(args.render)
+    result = run(args.render)
+    manifest = load_json(MANIFEST_PATH)
+    lifecycle = load_json(ROOT / "tests/fixtures/lifecycle/observations.json")
+    cases = lifecycle["cases"]
+    for case in cases:
+        actual = parse_record(case["value"], manifest)
+        if actual != case["expected"]:
+            print(f"not ok - lifecycle {case['id']}: {actual}", file=sys.stderr)
+            result = 1
+    print(f"checked {len(cases)} lifecycle protocol rows")
+    for case in lifecycle["raw_cases"]:
+        actual = parse_record(json.loads(case["raw"]), manifest)
+        if actual != case["expected"]:
+            print(f"not ok - lifecycle raw {case['id']}: {actual}", file=sys.stderr)
+            result = 1
+    print(f"checked {len(lifecycle['raw_cases'])} lifecycle raw JSON rows")
+    return result
 
 
 if __name__ == "__main__":
