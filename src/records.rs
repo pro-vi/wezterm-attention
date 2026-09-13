@@ -462,25 +462,73 @@ pub fn read_record(
     expected_kind: Option<&str>,
     expected_identity: &RecordIdentity,
 ) -> Result<Option<Value>> {
+    match read_record_typed(path, expected_kind, expected_identity) {
+        RecordRead::Present(value) => Ok(Some(value)),
+        RecordRead::Missing => Ok(None),
+        RecordRead::Unavailable(error)
+        | RecordRead::Invalid(error)
+        | RecordRead::Unsupported(error) => Err(error),
+    }
+}
+
+/// Read evidence without turning an I/O failure into invalid bytes or absence.
+#[derive(Clone, Debug)]
+pub enum RecordRead {
+    Present(Value),
+    Missing,
+    Unavailable(AttentionError),
+    Invalid(AttentionError),
+    Unsupported(AttentionError),
+}
+
+pub fn read_record_typed(
+    path: &Path,
+    expected_kind: Option<&str>,
+    expected_identity: &RecordIdentity,
+) -> RecordRead {
     let file = match File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return RecordRead::Missing,
         Err(_) => {
-            return Err(AttentionError::new(
+            return RecordRead::Unavailable(AttentionError::new(
                 "record_invalid",
                 "state record could not be read",
             ));
         }
     };
     let mut bytes = Vec::new();
-    let maximum = if expected_kind == Some("lifecycle_snapshot") {
-        manifest()?.limits.lifecycle_max_json_bytes
-    } else {
-        manifest()?.limits.max_json_bytes
+    let protocol = match manifest() {
+        Ok(protocol) => protocol,
+        Err(error) => return RecordRead::Unsupported(error),
     };
-    file.take((maximum + 1) as u64)
+    let maximum = if expected_kind == Some("lifecycle_snapshot") {
+        protocol.limits.lifecycle_max_json_bytes
+    } else {
+        protocol.limits.max_json_bytes
+    };
+    if file
+        .take((maximum + 1) as u64)
         .read_to_end(&mut bytes)
-        .map_err(|_| AttentionError::new("record_invalid", "state record could not be read"))?;
+        .is_err()
+    {
+        return RecordRead::Unavailable(AttentionError::new(
+            "record_invalid",
+            "state record could not be read",
+        ));
+    }
+    match decode_record(&bytes, maximum, expected_kind, expected_identity) {
+        Ok(value) => RecordRead::Present(value),
+        Err(error) if error.diagnostic.code == "future_schema" => RecordRead::Unsupported(error),
+        Err(error) => RecordRead::Invalid(error),
+    }
+}
+
+fn decode_record(
+    bytes: &[u8],
+    maximum: usize,
+    expected_kind: Option<&str>,
+    expected_identity: &RecordIdentity,
+) -> Result<Value> {
     if bytes.len() > maximum {
         return Err(AttentionError::new(
             "record_invalid",
@@ -488,14 +536,14 @@ pub fn read_record(
         ));
     }
     if expected_kind == Some("lifecycle_snapshot")
-        && !crate::protocol::bounded_lifecycle_json(&bytes)
+        && !crate::protocol::bounded_lifecycle_json(bytes)
     {
         return Err(AttentionError::new(
             "record_invalid",
             "lifecycle JSON nesting exceeds its bound",
         ));
     }
-    let value: Value = serde_json::from_slice(&bytes)
+    let value: Value = serde_json::from_slice(bytes)
         .map_err(|_| AttentionError::new("record_invalid", "state record is invalid"))?;
     if let Some(kind) = expected_kind {
         validate_record(&value, Some(kind))?;
@@ -506,7 +554,7 @@ pub fn read_record(
         ));
     }
     expected_identity.validate(&value)?;
-    Ok(Some(value))
+    Ok(value)
 }
 
 pub fn atomic_replace(path: &Path, value: &Value) -> Result<()> {

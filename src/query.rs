@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::identity::PaneAddress;
 use crate::identity::socket_identity;
 use crate::protocol::{AttentionError, Diagnostic, Result};
-use crate::records::{RecordIdentity, read_record};
+use crate::records::{RecordIdentity, RecordRead, read_record, read_record_typed};
 use crate::wezterm::{PaneLister, Presence, ProcessProbe};
 
 #[derive(Clone, Debug, Serialize)]
@@ -36,6 +36,113 @@ pub struct BindingRow {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_source: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct BindingQueryScope {
+    pub realm_id: String,
+    pub incarnation_id: String,
+}
+
+pub fn validate_socket_selector(socket: &str) -> Result<()> {
+    if !Path::new(socket).is_absolute()
+        || socket.len() > crate::protocol::manifest()?.limits.path_max_bytes
+        || socket.chars().any(|c| c < ' ' || c == '\u{7f}')
+    {
+        return Err(AttentionError::usage(
+            "--socket must be an absolute path within the path bound",
+        ));
+    }
+    Ok(())
+}
+
+pub fn read_bindings_for_socket_with_ports(
+    root: &Path,
+    socket: &str,
+    panes: Option<&dyn PaneLister>,
+    processes: Option<&dyn ProcessProbe>,
+) -> Result<(BindingQueryScope, Vec<BindingRow>, Vec<Diagnostic>)> {
+    validate_socket_selector(socket)?;
+    let (realm_id, incarnation_id, _) = socket_identity(socket)?;
+    let scope = BindingQueryScope {
+        realm_id,
+        incarnation_id,
+    };
+    let selected = root
+        .join("v2/realms")
+        .join(&scope.realm_id)
+        .join("incarnations")
+        .join(&scope.incarnation_id);
+    let mut files = Vec::new();
+    let mut diagnostics = Vec::new();
+    collect_selected_binding_files(&selected, &mut files, &mut diagnostics, true);
+    let (rows, mut read_diagnostics) = assemble_bindings(root, files, panes, processes, true)?;
+    diagnostics.append(&mut read_diagnostics);
+    let after = socket_identity(socket)?;
+    if after.0 != scope.realm_id || after.1 != scope.incarnation_id {
+        let mut error = AttentionError::new(
+            "incarnation_changed",
+            "selected socket identity changed during discovery",
+        );
+        error.exit_code = 1;
+        return Err(error);
+    }
+    Ok((scope, rows, diagnostics))
+}
+
+fn collect_selected_binding_files(
+    path: &Path,
+    output: &mut Vec<PathBuf>,
+    diagnostics: &mut Vec<Diagnostic>,
+    missing_ok: bool,
+) {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if missing_ok && error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(_) => {
+            diagnostics.push(diagnostic(
+                "record_invalid",
+                "selected binding directory could not be enumerated",
+            ));
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                diagnostics.push(diagnostic(
+                    "record_invalid",
+                    "selected binding directory entry could not be read",
+                ));
+                continue;
+            }
+        };
+        match entry.file_type() {
+            Ok(kind) if entry.file_name() == "binding.json" => {
+                if kind.is_symlink() {
+                    diagnostics.push(diagnostic(
+                        "record_invalid",
+                        "selected binding record is a symlink",
+                    ));
+                } else {
+                    output.push(entry.path());
+                }
+            }
+            Ok(kind) if kind.is_dir() => {
+                collect_selected_binding_files(&entry.path(), output, diagnostics, false)
+            }
+            Ok(kind) if kind.is_symlink() => diagnostics.push(diagnostic(
+                "record_invalid",
+                "selected binding directory contains a symlink that was not traversed",
+            )),
+            Err(_) => diagnostics.push(diagnostic(
+                "record_invalid",
+                "selected binding entry type is unavailable",
+            )),
+            _ => {}
+        }
+    }
 }
 
 fn collect_binding_files(path: &Path, output: &mut Vec<PathBuf>) {
@@ -183,6 +290,30 @@ pub fn read_bindings_with_ports(
 ) -> Result<(Vec<BindingRow>, Vec<Diagnostic>)> {
     let mut files = Vec::new();
     collect_binding_files(&root.join("v2/realms"), &mut files);
+    assemble_bindings(root, files, panes, processes, false)
+}
+
+fn assemble_bindings(
+    root: &Path,
+    mut files: Vec<PathBuf>,
+    panes: Option<&dyn PaneLister>,
+    processes: Option<&dyn ProcessProbe>,
+    typed: bool,
+) -> Result<(Vec<BindingRow>, Vec<Diagnostic>)> {
+    let read_record = |path: &Path, kind: Option<&str>, identity: &RecordIdentity| {
+        if !typed {
+            return read_record(path, kind, identity);
+        }
+        match read_record_typed(path, kind, identity) {
+            RecordRead::Present(value) => Ok(Some(value)),
+            RecordRead::Missing => Ok(None),
+            RecordRead::Unavailable(mut error) => {
+                error.diagnostic.message = "selected state record I/O is unavailable".into();
+                Err(error)
+            }
+            RecordRead::Invalid(error) | RecordRead::Unsupported(error) => Err(error),
+        }
+    };
     files.sort();
     let mut rows = Vec::new();
     let mut diagnostics = Vec::new();
@@ -321,6 +452,12 @@ pub fn read_bindings_with_ports(
             presence_cache.insert(presence_key, observed.clone());
             observed
         };
+        if typed && presence == "unavailable" && diagnostics.is_empty() {
+            diagnostics.push(diagnostic(
+                "probe_unavailable",
+                "selected binding presence is unavailable",
+            ));
+        }
         let binding_health = end_health
             .map(str::to_owned)
             .or(claim_health)

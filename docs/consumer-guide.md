@@ -97,3 +97,18 @@ Older readers can ignore the additive sidecar. Older maintenance preserves unfam
 `attention bindings --json` is the CLI boundary for validated binding identity and liveness assessment. It is not a lifecycle replay or full-facts API, and it does not return a ready-made resume command. Build provider argv from its closed provider/session fields, and do not treat an uncertain record as proof of a live process.
 
 Live Claude/Codex registration, shell setup, bootstrap Relay activation, and provider-paid contact remain separate operator work. An inherited launch claim is required for rich admission; tty presence alone is not an execution-generation proof.
+
+## Discover bindings for an existing socket
+
+```sh
+attention bindings --socket /absolute/path/to/mux.sock --json
+attention hooks publish --socket /absolute/path/to/mux.sock --json
+```
+
+Socket-selected discovery resolves the socket before enumerating its exact realm and incarnation, then checks the original path again after reading. Stable responses add `result.scope` with exactly `realm_id` and `incarnation_id`, including when `rows` is empty. Existing `rows`, `scanned`, `returned`, `truncated`, `--provider`, `--limit` and `--all` retain their meanings. `--socket` conflicts with `--realm`.
+
+Complete stable reads exit 0. Selected-record or directory failures and detected identity rotation exit 1. Invalid arguments exit 2. Socket resolution or required mux/process probe failures exit 3. Degraded socket responses and truncation set `complete=false`. Identity failure or rotation supplies no usable scope or rows. Empty bindings do not prove that no agents exist.
+
+The socket query creates no state directories, takes no writer locks, and performs no publication, acknowledgement or maintenance. Its WezTerm pane query explicitly supplies `--no-auto-start`. Queries without `--socket` retain the existing response shape.
+
+For publication, `hooks publish --socket <PATH>` is preferred. The path-valued `hooks publish --realm <PATH>` alias remains supported; using both is rejected. Publication without either selector retains pane publication and prompt-return behavior. `bindings --realm <ID>` and `sweep --realm <ID>` still take realm identifiers.

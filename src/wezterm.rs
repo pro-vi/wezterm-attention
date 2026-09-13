@@ -210,6 +210,9 @@ fn tty_name_for_fd(fd: libc::c_int) -> Result<String> {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WeztermPaneLister;
 
+/// Explicit read-only transport; an unavailable server must not be started.
+pub struct ExistingWeztermPaneLister;
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemProcessProbe;
 
@@ -296,78 +299,84 @@ pub fn parse_pane_rows(bytes: &[u8]) -> Result<Vec<PaneRow>> {
 
 impl PaneLister for WeztermPaneLister {
     fn list(&self, socket_path: &str) -> Result<Vec<PaneRow>> {
-        let executable = wezterm_executable()?;
-        let mut child = Command::new(executable)
-            .args([
-                "--skip-config",
-                "cli",
-                "--prefer-mux",
-                "list",
-                "--format",
-                "json",
-            ])
-            .env_clear()
-            .env("WEZTERM_UNIX_SOCKET", socket_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| AttentionError::new("realm_unavailable", "wezterm cli list failed"))?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            AttentionError::new(
-                "realm_unavailable",
-                "wezterm cli list stdout is unavailable",
-            )
-        })?;
-        let maximum = manifest()?.limits.max_json_bytes;
-        let reader = thread::spawn(move || {
-            let mut bytes = Vec::new();
-            stdout
-                .take((maximum + 1) as u64)
-                .read_to_end(&mut bytes)
-                .map(|_| bytes)
-        });
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-                Ok(None) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = reader.join();
-                    return Err(AttentionError::new(
-                        "realm_unavailable",
-                        "wezterm cli list timed out",
-                    ));
-                }
-                Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = reader.join();
-                    return Err(AttentionError::new(
-                        "realm_unavailable",
-                        "wezterm cli list failed",
-                    ));
-                }
-            }
-        };
-        let bytes = reader
-            .join()
-            .map_err(|_| {
-                AttentionError::new("realm_unavailable", "wezterm cli list reader failed")
-            })?
-            .map_err(|_| {
-                AttentionError::new("realm_unavailable", "wezterm cli list could not be read")
-            })?;
-        if !status.success() {
-            return Err(AttentionError::new(
-                "realm_unavailable",
-                "wezterm cli list failed",
-            ));
-        }
-        parse_pane_rows(&bytes)
+        list_wezterm_panes(socket_path, false)
     }
+}
+
+impl PaneLister for ExistingWeztermPaneLister {
+    fn list(&self, socket_path: &str) -> Result<Vec<PaneRow>> {
+        list_wezterm_panes(socket_path, true)
+    }
+}
+
+fn list_wezterm_panes(socket_path: &str, no_auto_start: bool) -> Result<Vec<PaneRow>> {
+    let executable = wezterm_executable()?;
+    let mut command = Command::new(executable);
+    command.args(["--skip-config", "cli", "--prefer-mux"]);
+    if no_auto_start {
+        command.arg("--no-auto-start");
+    }
+    let mut child = command
+        .args(["list", "--format", "json"])
+        .env_clear()
+        .env("WEZTERM_UNIX_SOCKET", socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| AttentionError::new("realm_unavailable", "wezterm cli list failed"))?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        AttentionError::new(
+            "realm_unavailable",
+            "wezterm cli list stdout is unavailable",
+        )
+    })?;
+    let maximum = manifest()?.limits.max_json_bytes;
+    let reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout
+            .take((maximum + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(AttentionError::new(
+                    "realm_unavailable",
+                    "wezterm cli list timed out",
+                ));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(AttentionError::new(
+                    "realm_unavailable",
+                    "wezterm cli list failed",
+                ));
+            }
+        }
+    };
+    let bytes = reader
+        .join()
+        .map_err(|_| AttentionError::new("realm_unavailable", "wezterm cli list reader failed"))?
+        .map_err(|_| {
+            AttentionError::new("realm_unavailable", "wezterm cli list could not be read")
+        })?;
+    if !status.success() {
+        return Err(AttentionError::new(
+            "realm_unavailable",
+            "wezterm cli list failed",
+        ));
+    }
+    parse_pane_rows(&bytes)
 }
 
 impl ProcessProbe for SystemProcessProbe {

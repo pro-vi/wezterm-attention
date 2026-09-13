@@ -1,0 +1,41 @@
+{
+  "plan": "docs/plans/2026-09-12-001-feat-public-consumer-contracts-plan.md",
+  "plan_sha256": "89aa1bb60e33f91198cb26baa45332255eaa3c3cdfdfc56ce55f648bc2a82299",
+  "base": "db6d9ae48191cd35025db1f6f04b220453afb9ba",
+  "preflight": "BUILDABLE with public-layout triage pending; independent U7 proceeds",
+  "slot": "No wezterm-attention manifest exists",
+  "order": ["U7", "U1", "U3", "U4", "U2", "U5", "U6"],
+  "units": {
+    "U7": {"status": "unit_verified; final candidate proof pending", "first_action": "Introduce RecordRead in the existing decoder owner", "completion": "Socket selection, rotation, typed reads, no-auto-start, bounds and publication alias tests"},
+    "U1": {"status": "classification implemented; registration declaration and describe pending public-layout triage", "first_action": "Extend the existing manifest and its bundled readers", "completion": "Description, dispatcher coverage and Rust/Lua classification parity"},
+    "U3": {"status": "pending", "first_action": "Carry admission and persistence evidence out of the existing apply path", "completion": "Transient exact reply, partial-write and bounded child-process matrix"},
+    "U4": {"status": "pending", "first_action": "Use validated reader selection for per-window callback baselines", "completion": "Callback transition matrix, disabled title work and default UI compatibility"},
+    "U2": {"status": "pending", "first_action": "Validate PaneScope before traversing selected records", "completion": "Facet outcomes, scope races, Lua relation parity and read-only CLI"},
+    "U5": {"status": "pending", "first_action": "Consume pinned public examples from owning units", "completion": "Hook, GUI, checkpoint and scoped inspector recipes execute"},
+    "U6": {"status": "pending", "first_action": "Read the current gate and invoked scripts, then copy the exact candidate", "completion": "Full gate, clean installation, local commit and evidenced handoff"}
+  },
+  "prospective_contracts": [
+    {"units": ["U1"], "anchor": "O4", "property": "Provider declarations preserve exact native admission and classification", "variants": ["unknown provider/tool", "ignored native event", "manifest mismatch"], "tests": ["describe admission coverage", "shared classification parity"]},
+    {"units": ["U7", "U2"], "anchor": "O3/O7", "property": "Reads stay in the selected identity and discard facts when that identity changes", "variants": ["missing", "unreadable", "invalid", "unsupported", "socket or pointer rotation"], "tests": ["typed read outcomes", "scope races", "read-only snapshots"]},
+    {"units": ["U3"], "anchor": "O2/O6", "property": "Consumer identity belongs to admitted application; consumer effects occur after locks release", "variants": ["partial persistence", "spawn failure", "blocked stdin", "timeout", "duplicate invocation"], "tests": ["released-lock consumer", "effect matrix", "no content in state or diagnostics"]},
+    {"units": ["U4"], "anchor": "O5/D1/DX1/DX2", "property": "Each window receives meaningful scoped changes independently, without disabled title work", "variants": ["scope replacement", "degraded selection", "cached recovery", "two windows", "reload", "callback error/reentry"], "tests": ["GUI transition matrix", "zero disabled title calls"]}
+  ],
+  "decisions_not_covered": [
+    "U7's new test file is a submodule of maintenance_spec to reuse its existing isolated fixture; no new test framework or fixture owner.",
+    "Use a separate ExistingWeztermPaneLister over the existing transport implementation so legacy publication and discovery keep their argv contract."
+  ],
+  "pending_triage": "docs/reviews/public-consumer-layout-proposal.json makes the pending public-layout choice concrete",
+  "gate": {
+    "scope": "Current U7 and U1 classification changes only; not the full seven-unit build",
+    "lenses": ["naming", "legacy", "overbuild", "invariance", "failure-mode", "perf"],
+    "compatibility": "Required existing read_record projection, non-socket bindings shape, publication alias and V1/default GUI behavior preserved",
+    "findings_fixed": ["Lua classification validation must reject a missing byte bound instead of throwing", "Socket-mode state-root errors must be incomplete", "Skipped symlink subtrees cannot support a complete discovery result"],
+    "performance": "Socket traversal is O(selected-incarnation entries), assembly sorts O(bindings log bindings), pane probes are cached by address. Classification uses the once-loaded four-entry manifest table. Checkpoint two-query cost is deferred to U5's required measured recipe, not claimed negligible.",
+    "recheck": "All three findings fixed and regression checks passed; no remaining finding in this scoped gate. Full tests/gate.sh remains U6 work."
+  },
+  "verification": ["cargo check passed", "cargo clippy --all-targets -- -D warnings passed", "cargo test -- --test-threads=1 passed: 122 regular tests; one separately gated terminal test ignored", "Lua suite: 124 passed", "Protocol fixture checker: 35 protocol, 10 eligibility, 29 lifecycle and 7 raw-JSON cases passed"],
+  "evidence_directory": "/tmp/attention-consumers-check.3ZJaDl",
+  "evidence_files": ["clippy.log", "rust.log", "lua.log", "protocol.log"],
+  "readiness": {"bootstrap_launch": "not ready: U1 registration, U3/U4 and U5/U6 incomplete", "bootstrap_socket_discovery": "unit fixtures verified; full candidate and checkpoint recipe pending", "wezpup_headless": "not ready: U2 not implemented"},
+  "activation": "Not authorized or performed"
+}

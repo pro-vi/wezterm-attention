@@ -2819,7 +2819,7 @@ test("unpublished mux pane schedules one realm publish from the resolved plugin 
       and spawned[1][3] == expected_root .. "/bin/attention",
     "publication must use the resolved checkout command")
   assert(table.concat(spawned[1], " "):find(
-    "hooks publish --realm /tmp/attention-u2-test.sock --quiet", 1, true),
+    "hooks publish --socket /tmp/attention-u2-test.sock --quiet", 1, true),
     "publication must use the nested quiet realm command")
   assert(config.set_environment_variables.WEZTERM_ATTENTION_ROOT == expected_root,
     "apply_to_config must expose the resolved plugin root")
@@ -3349,6 +3349,39 @@ test("twenty full lifecycle panes keep polling and getter work bounded", functio
   assert(ok, failure)
   assert(reads == 40 and globs == 80 and writes == 0, "exactly one sidecar read per pane/poll and no writes")
   io.write(string.format("lifecycle workload: 20 panes, 2 polls, 128 observations each; CPU %.2f ms; 40 snapshot reads; 0 writes\n", cpu_ms))
+end)
+
+test("consumer manifest classification agrees with Rust and rejects incompatible metadata", function()
+  local load = dofile(repo_root .. "/plugin/protocol.lua")
+  local api = load({ wezterm = wezterm, protocol_path = repo_root .. "/protocol/v2.json" })
+  for _, row in ipairs({
+    { "claude", "AskUserQuestion", "question", "blocking" },
+    { "codex", "request_user_input", "question", "blocking" },
+    { "codex", "request_user_input_async", "question", "nonblocking" },
+    { "codex", "request_permissions", "permission" },
+    { "pi", "AskUserQuestion", "generic" },
+    { "unknown", "request_permissions", "generic" },
+    { "codex", "request_user_input_async_extra", "generic" },
+  }) do
+    local class, mode = api.classify_lifecycle_tool(row[1], row[2])
+    assert(class == row[3] and mode == row[4])
+  end
+  local manifest_file = assert(io.open(repo_root .. "/protocol/v2.json", "r"))
+  local raw = manifest_file:read("*a"); manifest_file:close()
+  local incompatible = test_dir .. "/consumer-manifest.json"
+  write_json_path(incompatible, decode_json(raw:gsub('"manifest_schema": 2', '"manifest_schema": 1', 1)))
+  local old = load({ wezterm = wezterm, protocol_path = incompatible })
+  assert(old.protocol == nil and old.protocol_load_error)
+  local invalid = decode_json(raw)
+  invalid.tool_classification.codex.request_permissions.question_mode = "blocking"
+  write_json_path(incompatible, invalid)
+  local rejected = load({ wezterm = wezterm, protocol_path = incompatible })
+  assert(rejected.protocol == nil and rejected.protocol_load_error)
+  invalid = decode_json(raw)
+  invalid.limits.safe_label_max_bytes = nil
+  write_json_path(incompatible, invalid)
+  local missing_bound = load({ wezterm = wezterm, protocol_path = incompatible })
+  assert(missing_bound.protocol == nil and missing_bound.protocol_load_error)
 end)
 
 test("lifecycle snapshot grammar agrees with the shared fixture", function()

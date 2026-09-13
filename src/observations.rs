@@ -290,16 +290,12 @@ impl LifecycleObservation {
 }
 
 pub fn classify_tool(provider: &str, name: &str) -> (ToolClass, Option<QuestionMode>) {
-    match (provider, name) {
-        ("claude", "AskUserQuestion") | ("codex", "request_user_input") => {
-            (ToolClass::Question, Some(QuestionMode::Blocking))
-        }
-        ("codex", "request_user_input_async") => {
-            (ToolClass::Question, Some(QuestionMode::Nonblocking))
-        }
-        ("codex", "request_permissions") => (ToolClass::Permission, None),
-        _ => (ToolClass::Generic, None),
-    }
+    manifest()
+        .ok()
+        .and_then(|protocol| protocol.tool_classification.get(provider))
+        .and_then(|tools| tools.get(name))
+        .map(|class| (class.tool_class, class.question_mode))
+        .unwrap_or((ToolClass::Generic, None))
 }
 
 fn invalid() -> AttentionError {

@@ -1,8 +1,17 @@
 {
-  "manifest_schema": 1,
+  "manifest_schema": 2,
   "wire_version": 2,
   "record_schema": 2,
   "writer_version": "2.0.0",
+  "tool_classification": {
+    "claude": {"AskUserQuestion": {"tool_class": "question", "question_mode": "blocking"}},
+    "codex": {
+      "request_user_input": {"tool_class": "question", "question_mode": "blocking"},
+      "request_user_input_async": {"tool_class": "question", "question_mode": "nonblocking"},
+      "request_permissions": {"tool_class": "permission"}
+    },
+    "pi": {}
+  },
   "digests": {
     "algorithm": "sha256",
     "encoding": "lowercase_hex",
