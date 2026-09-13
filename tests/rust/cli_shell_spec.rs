@@ -457,7 +457,7 @@ fn json_publication_and_binding_output_report_bounded_completeness() {
         fs::write(
             binding_dir.join("binding.json"),
             serde_json::to_vec(&json!({
-                "kind":"binding","schema":2,"address":address,"launch_id":launch_id,
+                "kind":"binding","schema":3,"address":address,"launch_id":launch_id,
                 "binding_id":binding_id,"event_id":format!("00000000-0000-4000-8000-00000000070{index}"),
                 "provider":"claude","provider_session_id":format!("session-{index}"),
                 "start_source":"startup","observed_mono_ns":format!("0000000000000000070{index}"),

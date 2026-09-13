@@ -194,7 +194,6 @@ return function(context)
       activity_type = nil,
       frame = nil,
       source = nil,
-      puppet = false,
       subagents = 0,
       review = false,
       binding_phase = nil,
@@ -457,7 +456,6 @@ return function(context)
       activity_type = activity_type,
       frame = effective_type == activity_type and activity and activity.frame or nil,
       source = activity and activity.source or nil,
-      puppet = activity and activity.puppet == true or false,
       subagents = subagents,
       review = review,
       binding_phase = binding_end and binding

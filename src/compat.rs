@@ -65,10 +65,6 @@ fn projection_value(activity: &Value) -> Result<Value> {
         "updated_at_ms".to_owned(),
         json!((written / 1_000_000) as u64),
     );
-    projection.insert(
-        "puppet".to_owned(),
-        activity.get("puppet").cloned().unwrap_or(json!(false)),
-    );
     for field in ["frame", "label", "ttl_ms"] {
         if let Some(value) = activity.get(field) {
             projection.insert(field.to_owned(), value.clone());

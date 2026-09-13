@@ -94,7 +94,6 @@ return function()
         and a.event_id == b.event_id
         and a.source == b.source
         and a.provider == b.provider
-        and (a.puppet == true) == (b.puppet == true)
         and (a.subagents or 0) == (b.subagents or 0)
         and (a.review == true) == (b.review == true)
         and a.binding_phase == b.binding_phase
@@ -158,7 +157,7 @@ return function()
     end
 
     local function cache_marker_values(
-        id, atype, frame, raw, publication_id, observed_now, source, puppet, subagents, flagged)
+        id, atype, frame, raw, publication_id, observed_now, source, subagents, flagged)
       subagents = tonumber(subagents) or 0
       -- A marker file whose own type is "review" was written by an older Alt+B,
       -- before the flag moved to its own file. It is the same user flag.
@@ -178,7 +177,6 @@ return function()
           attention_cache[id] = {
             type        = nil,
             observed_at = observed_now,
-            puppet      = false,
             subagents   = subagents,
             review      = review,
           }
@@ -194,7 +192,7 @@ return function()
         frame = frame_for_now(observed_now, #frames)
       end
 
-      -- `raw`, `identity`, `source` and `puppet` always describe the marker file,
+      -- `raw`, `identity` and `source` always describe the marker file,
       -- even when the review flag has taken over `type`. The marker is still the
       -- thing acknowledgement compares against and TTL ages out; the flag only
       -- decides what the tab shows.
@@ -205,7 +203,6 @@ return function()
         raw         = raw,
         identity    = marker_identity(raw, publication_id),
         source      = source,
-        puppet      = puppet == true,
         subagents   = subagents,
         review      = review,
       }
@@ -215,10 +212,10 @@ return function()
     --- changes a pane's state outside the poll loop, and dropping the entry instead
     --- would blank a sibling's ✓ or a "+N" until the next tick.
     local function refresh_cached_pane(dir, id, now)
-      local atype, frame, _, _, raw, publication_id, source, puppet =
+      local atype, frame, _, _, raw, publication_id, source =
         read_effective_marker(dir, id)
       cache_marker_values(
-        id, atype, frame, raw, publication_id, now, source, puppet,
+        id, atype, frame, raw, publication_id, now, source,
         count_live_subagents(dir, id, now), review_flagged(dir, id))
     end
 
@@ -240,18 +237,18 @@ return function()
       -- back to showing the ◆, it does not go quiet.
       local flagged = cached.review == true
 
-      local current_type, current_frame, _, _, raw, publication_id, source, puppet =
+      local current_type, current_frame, _, _, raw, publication_id, source =
         read_marker(dir, id)
       if not current_type then
         clear_acknowledgement(dir, id)
-        cache_marker_values(id, nil, nil, nil, nil, observed_now, nil, false, subagents, flagged)
+        cache_marker_values(id, nil, nil, nil, nil, observed_now, nil, subagents, flagged)
         return "absent"
       end
 
       local current_identity = marker_identity(raw, publication_id)
       if cached.identity ~= current_identity then
         cache_marker_values(
-          id, current_type, current_frame, raw, publication_id, observed_now, source, puppet,
+          id, current_type, current_frame, raw, publication_id, observed_now, source,
           subagents, flagged)
         return "kept"
       end
@@ -259,7 +256,7 @@ return function()
       if not acknowledge_set[current_type] then
         clear_acknowledgement(dir, id)
         cache_marker_values(
-          id, current_type, current_frame, raw, publication_id, observed_now, source, puppet,
+          id, current_type, current_frame, raw, publication_id, observed_now, source,
           subagents, flagged)
         return "kept"
       end
@@ -267,7 +264,7 @@ return function()
       local write_ack = (opts and opts.write_acknowledgement) or write_acknowledgement
       if not write_ack(dir, id, current_identity) then
         cache_marker_values(
-          id, current_type, current_frame, raw, publication_id, observed_now, source, puppet,
+          id, current_type, current_frame, raw, publication_id, observed_now, source,
           subagents, flagged)
         return "failed"
       end
@@ -276,10 +273,10 @@ return function()
       -- written. Re-read effective truth before updating the cache: only the exact
       -- identity that was viewed is suppressed.
       local effective_type, effective_frame, _, _, effective_raw, effective_publication_id,
-        effective_source, effective_puppet = read_effective_marker(dir, id)
+        effective_source = read_effective_marker(dir, id)
       cache_marker_values(
         id, effective_type, effective_frame, effective_raw, effective_publication_id, observed_now,
-        effective_source, effective_puppet, subagents, flagged)
+        effective_source, subagents, flagged)
       return effective_type and "kept" or "acknowledged"
     end
 
@@ -569,9 +566,9 @@ return function()
     -- ── Public API ──────────────────────────────────────────────────────────────
 
     --- Read the cached attention state for a marker id (see M.pane_marker_id).
-    --- Returns (type, frame, source, puppet, subagents, review) or nil. `source` is
-    --- the marker's JSON `source` string when it carried one; `puppet` is true only
-    --- when the marker set `"puppet": true`; `subagents` is how many of the pane's
+    --- Returns (type, frame, source, reserved, subagents, review) or nil. `source` is
+    --- the marker's JSON `source` string when it carried one; `reserved` is always
+    --- false to retain tuple positions; `subagents` is how many of the pane's
     --- subagents ran a tool call in the last ten minutes, 0 when none; `review` is
     --- true when the user has flagged the pane with Alt+B.
     ---
@@ -586,20 +583,20 @@ return function()
     function M.get_attention(marker_id, opts)
       local id = tostring(marker_id)
       if opts and opts.dir then
-        local atype, frame, _, _, _, _, source, puppet = read_effective_marker(opts.dir, id)
+        local atype, frame, _, _, _, _, source = read_effective_marker(opts.dir, id)
         local now = (opts and opts.now_ms) or now_ms()
         local flagged = review_flagged(opts.dir, id) or atype == "review"
         if flagged and review_outranks(atype) then
           atype, frame = "review", nil
         end
-        return atype, frame, source, puppet, count_live_subagents(opts.dir, id, now), flagged
+        return atype, frame, source, false, count_live_subagents(opts.dir, id, now), flagged
       end
       local mapped = legacy_cache_key_by_marker_id[id]
       if mapped == false then return nil end -- More than one observed full address.
       local cached = mapped and attention_cache[mapped] or nil
       if not cached then cached = attention_cache[id] end
       if cached then
-        return cached.type, cached.frame, cached.source, cached.puppet, cached.subagents or 0,
+        return cached.type, cached.frame, cached.source, false, cached.subagents or 0,
           cached.review == true
       end
       return nil
@@ -619,7 +616,6 @@ return function()
         reader_confidence = cached.reader_confidence,
         activity_type = cached.activity_type,
         source = cached.source,
-        puppet = cached.puppet,
         address = cached.address and context.deep_copy(cached.address) or nil,
         launch_id = cached.launch_id,
         marker_id = cached.marker_id,
@@ -855,7 +851,7 @@ return function()
             seen[id] = { domain = domain, kind = "v1", marker_id = id, local_id = local_id }
             pane_ids[#pane_ids + 1] = id
             before[id] = attention_cache[id]
-            local atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source, puppet =
+            local atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source =
               read_marker(dir, id)
             -- One read of each sidecar per pane per tick, with this tick's clock,
             -- whether or not the pane has a marker.
@@ -873,20 +869,20 @@ return function()
               local ttl = stale_ttl_ms(atype, marker_ttl_ms)
               if ttl and now - effective_updated_at > ttl then
                 remove_expired_marker(dir, id)
-                cache_marker_values(id, nil, nil, nil, nil, now, nil, false, subagents, flagged)
+                cache_marker_values(id, nil, nil, nil, nil, now, nil, subagents, flagged)
               elseif acknowledged then
                 cache_marker_values(
-                  id, nil, nil, nil, nil, observed_at, nil, false, subagents, flagged)
+                  id, nil, nil, nil, nil, observed_at, nil, subagents, flagged)
               else
                 if atype == "thinking" and frame == nil then
                   frame = frame_for_now(now, frame_count)
                 end
                 cache_marker_values(
-                  id, atype, frame, raw, publication_id, observed_at, source, puppet, subagents,
+                  id, atype, frame, raw, publication_id, observed_at, source, subagents,
                   flagged)
               end
             else
-              cache_marker_values(id, nil, nil, nil, nil, now, nil, false, subagents, flagged)
+              cache_marker_values(id, nil, nil, nil, nil, now, nil, subagents, flagged)
             end
           elseif read.kind == "unpublished" then
             unpublished_by_domain[read.domain] = true

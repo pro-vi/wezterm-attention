@@ -40,7 +40,6 @@ return function(context)
     local best_frame    = nil
     local best_source   = nil
     local best_provider = nil
-    local best_puppet   = false
     local best_review   = false
     local best_health   = nil
 
@@ -53,9 +52,6 @@ return function(context)
         -- A count-only entry has no type. It contributes its subagents and never
         -- competes for the tab's marker glyph.
         local candidate_type = cached.type
-        if M._active_show_puppet == false and cached.puppet == true then
-          candidate_type = cached.review == true and "review" or nil
-        end
         if candidate_type then
           local pri = cfg_priority[candidate_type] or 0
           if pri > best_priority then
@@ -63,10 +59,10 @@ return function(context)
             best_priority = pri
             best_frame    = candidate_type == "thinking" and cached.frame or nil
             if candidate_type == "review" then
-              best_source, best_provider, best_puppet = nil, nil, false
+              best_source, best_provider = nil, nil
             else
-              best_source, best_provider, best_puppet =
-                cached.source, cached.provider, cached.puppet == true
+              best_source, best_provider =
+                cached.source, cached.provider
             end
             best_review   = cached.review == true
             best_health   = cached.binding_health
@@ -82,12 +78,12 @@ return function(context)
       if subagents > 0 then
         return {
           indicator = "+" .. subagents .. " ", type = nil, color = nil,
-          subagents = subagents, source = nil, provider = nil, puppet = false,
+          subagents = subagents, source = nil, provider = nil,
         }
       end
       return {
         indicator = "", type = nil, color = nil, subagents = 0,
-        source = nil, provider = nil, puppet = false,
+        source = nil, provider = nil,
       }
     end
 
@@ -116,7 +112,6 @@ return function(context)
       subagents = subagents,
       source = best_source,
       provider = best_provider,
-      puppet = best_puppet,
       review = best_review,
       binding_health = best_health,
       agent_suffix = show_provider and provider_display[best_provider] or nil,
@@ -149,7 +144,6 @@ return function(context)
       subagents = visible.subagents or 0,
       source = visible.source,
       provider = visible.provider,
-      puppet = visible.puppet == true,
       review = visible.review == true,
       binding_health = visible.binding_health,
     }
@@ -171,7 +165,6 @@ return function(context)
       subagents = attention.subagents,
       source = attention.source,
       provider = attention.provider,
-      puppet = attention.puppet,
       review = attention.review,
       binding_health = attention.binding_health,
     }

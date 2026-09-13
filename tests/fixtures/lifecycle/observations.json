@@ -5,7 +5,7 @@
       "expected": "valid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -42,7 +42,7 @@
       "expected": "valid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -81,7 +81,7 @@
       "expected": "valid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -121,7 +121,7 @@
       "expected": "valid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -158,7 +158,7 @@
       "expected": "valid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -197,7 +197,7 @@
       "expected": "valid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -234,7 +234,7 @@
       "expected": "valid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -271,7 +271,7 @@
       "expected": "valid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -309,7 +309,7 @@
       "expected": "valid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -346,7 +346,7 @@
       "expected": "valid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -384,7 +384,7 @@
       "expected": "valid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -422,7 +422,7 @@
       "expected": "valid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -460,7 +460,7 @@
       "expected": "valid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -497,7 +497,7 @@
       "expected": "valid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -534,7 +534,7 @@
       "expected": "valid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -574,7 +574,7 @@
       "expected": "valid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -615,7 +615,7 @@
       "expected": "valid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -655,7 +655,7 @@
       "expected": "valid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -696,7 +696,7 @@
       "expected": "record_invalid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -736,7 +736,7 @@
       "expected": "record_invalid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -777,7 +777,7 @@
       "expected": "record_invalid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -818,7 +818,7 @@
       "expected": "record_invalid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -860,7 +860,7 @@
       "expected": "record_invalid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -901,7 +901,7 @@
       "expected": "record_invalid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -943,7 +943,7 @@
       "expected": "record_invalid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -984,7 +984,7 @@
       "expected": "record_invalid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -1039,7 +1039,7 @@
       "expected": "record_invalid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -1082,7 +1082,7 @@
       "expected": "record_invalid",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 2,
+        "schema": 3,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -1124,7 +1124,7 @@
       "expected": "future_schema",
       "value": {
         "kind": "lifecycle_snapshot",
-        "schema": 3,
+        "schema": 4,
         "address": {
           "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -1164,27 +1164,27 @@
   "raw_cases": [
     {
       "id": "integer-schema-valid",
-      "raw": "{\"kind\":\"lifecycle_snapshot\",\"schema\":2,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\"},\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"binding_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"provider\":\"codex\",\"snapshot_id\":\"00000000-0000-4000-8000-000000000002\",\"written_at_unix_ns\":\"00000000000000001000\",\"pools\":{\"requests\":{\"observations\":[]},\"general\":{\"observations\":[{\"kind\":\"prompt_submitted\",\"observation_id\":\"00000000-0000-4000-8000-000000000010\",\"source_event\":\"UserPromptSubmit\",\"observed_mono_ns\":\"00000000000000000500\",\"written_at_unix_ns\":\"00000000000000001000\",\"actor\":{\"kind\":\"lead\"}}]}}}",
+      "raw": "{\"kind\":\"lifecycle_snapshot\",\"schema\":3,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\"},\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"binding_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"provider\":\"codex\",\"snapshot_id\":\"00000000-0000-4000-8000-000000000002\",\"written_at_unix_ns\":\"00000000000000001000\",\"pools\":{\"requests\":{\"observations\":[]},\"general\":{\"observations\":[{\"kind\":\"prompt_submitted\",\"observation_id\":\"00000000-0000-4000-8000-000000000010\",\"source_event\":\"UserPromptSubmit\",\"observed_mono_ns\":\"00000000000000000500\",\"written_at_unix_ns\":\"00000000000000001000\",\"actor\":{\"kind\":\"lead\"}}]}}}",
       "expected": "valid"
     },
     {
       "id": "float-schema",
-      "raw": "{\"kind\":\"lifecycle_snapshot\",\"schema\":2.0,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\"},\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"binding_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"provider\":\"codex\",\"snapshot_id\":\"00000000-0000-4000-8000-000000000002\",\"written_at_unix_ns\":\"00000000000000001000\",\"pools\":{\"requests\":{\"observations\":[]},\"general\":{\"observations\":[{\"kind\":\"prompt_submitted\",\"observation_id\":\"00000000-0000-4000-8000-000000000010\",\"source_event\":\"UserPromptSubmit\",\"observed_mono_ns\":\"00000000000000000500\",\"written_at_unix_ns\":\"00000000000000001000\",\"actor\":{\"kind\":\"lead\"}}]}}}",
+      "raw": "{\"kind\":\"lifecycle_snapshot\",\"schema\":3.0,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\"},\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"binding_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"provider\":\"codex\",\"snapshot_id\":\"00000000-0000-4000-8000-000000000002\",\"written_at_unix_ns\":\"00000000000000001000\",\"pools\":{\"requests\":{\"observations\":[]},\"general\":{\"observations\":[{\"kind\":\"prompt_submitted\",\"observation_id\":\"00000000-0000-4000-8000-000000000010\",\"source_event\":\"UserPromptSubmit\",\"observed_mono_ns\":\"00000000000000000500\",\"written_at_unix_ns\":\"00000000000000001000\",\"actor\":{\"kind\":\"lead\"}}]}}}",
       "expected": "record_invalid"
     },
     {
       "id": "exponent-schema",
-      "raw": "{\"kind\":\"lifecycle_snapshot\",\"schema\":2e0,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\"},\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"binding_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"provider\":\"codex\",\"snapshot_id\":\"00000000-0000-4000-8000-000000000002\",\"written_at_unix_ns\":\"00000000000000001000\",\"pools\":{\"requests\":{\"observations\":[]},\"general\":{\"observations\":[{\"kind\":\"prompt_submitted\",\"observation_id\":\"00000000-0000-4000-8000-000000000010\",\"source_event\":\"UserPromptSubmit\",\"observed_mono_ns\":\"00000000000000000500\",\"written_at_unix_ns\":\"00000000000000001000\",\"actor\":{\"kind\":\"lead\"}}]}}}",
+      "raw": "{\"kind\":\"lifecycle_snapshot\",\"schema\":3e0,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\"},\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"binding_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"provider\":\"codex\",\"snapshot_id\":\"00000000-0000-4000-8000-000000000002\",\"written_at_unix_ns\":\"00000000000000001000\",\"pools\":{\"requests\":{\"observations\":[]},\"general\":{\"observations\":[{\"kind\":\"prompt_submitted\",\"observation_id\":\"00000000-0000-4000-8000-000000000010\",\"source_event\":\"UserPromptSubmit\",\"observed_mono_ns\":\"00000000000000000500\",\"written_at_unix_ns\":\"00000000000000001000\",\"actor\":{\"kind\":\"lead\"}}]}}}",
       "expected": "record_invalid"
     },
     {
       "id": "nested-null",
-      "raw": "{\"kind\":\"lifecycle_snapshot\",\"schema\":2,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\"},\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"binding_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"provider\":\"codex\",\"snapshot_id\":\"00000000-0000-4000-8000-000000000002\",\"written_at_unix_ns\":\"00000000000000001000\",\"pools\":{\"requests\":{\"observations\":[]},\"general\":{\"observations\":[{\"kind\":\"prompt_submitted\",\"observation_id\":\"00000000-0000-4000-8000-000000000010\",\"source_event\":\"UserPromptSubmit\",\"observed_mono_ns\":\"00000000000000000500\",\"written_at_unix_ns\":\"00000000000000001000\",\"source_version\":null,\"actor\":{\"kind\":\"lead\"}}]}}}",
+      "raw": "{\"kind\":\"lifecycle_snapshot\",\"schema\":3,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\"},\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"binding_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"provider\":\"codex\",\"snapshot_id\":\"00000000-0000-4000-8000-000000000002\",\"written_at_unix_ns\":\"00000000000000001000\",\"pools\":{\"requests\":{\"observations\":[]},\"general\":{\"observations\":[{\"kind\":\"prompt_submitted\",\"observation_id\":\"00000000-0000-4000-8000-000000000010\",\"source_event\":\"UserPromptSubmit\",\"observed_mono_ns\":\"00000000000000000500\",\"written_at_unix_ns\":\"00000000000000001000\",\"source_version\":null,\"actor\":{\"kind\":\"lead\"}}]}}}",
       "expected": "record_invalid"
     },
     {
       "id": "escaped-text-valid",
-      "raw": "{\"kind\":\"lifecycle_snapshot\",\"schema\":2,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\"},\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"binding_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"provider\":\"codex\",\"snapshot_id\":\"00000000-0000-4000-8000-000000000002\",\"written_at_unix_ns\":\"00000000000000001000\",\"pools\":{\"requests\":{\"observations\":[]},\"general\":{\"observations\":[{\"kind\":\"prompt_submitted\",\"observation_id\":\"00000000-0000-4000-8000-000000000010\",\"source_event\":\"UserPromptSubmit\",\"observed_mono_ns\":\"00000000000000000500\",\"written_at_unix_ns\":\"00000000000000001000\",\"actor\":{\"kind\":\"lead\"},\"source_version\":\"label\\\"with\\\\escapes\"}]}}}",
+      "raw": "{\"kind\":\"lifecycle_snapshot\",\"schema\":3,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\"},\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"binding_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"provider\":\"codex\",\"snapshot_id\":\"00000000-0000-4000-8000-000000000002\",\"written_at_unix_ns\":\"00000000000000001000\",\"pools\":{\"requests\":{\"observations\":[]},\"general\":{\"observations\":[{\"kind\":\"prompt_submitted\",\"observation_id\":\"00000000-0000-4000-8000-000000000010\",\"source_event\":\"UserPromptSubmit\",\"observed_mono_ns\":\"00000000000000000500\",\"written_at_unix_ns\":\"00000000000000001000\",\"actor\":{\"kind\":\"lead\"},\"source_version\":\"label\\\"with\\\\escapes\"}]}}}",
       "expected": "valid"
     },
     {

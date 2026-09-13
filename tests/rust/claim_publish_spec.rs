@@ -1102,7 +1102,7 @@ fn binding_record(
 ) -> Value {
     json!({
         "kind": "binding",
-        "schema": 2,
+        "schema": 3,
         "address": address,
         "launch_id": launch_id,
         "binding_id": binding_id,
@@ -1139,7 +1139,7 @@ fn bindings_query_returns_all_identity_axes_and_rejects_path_mismatch() {
         &launch.join("current-binding.json"),
         &json!({
             "kind": "current_binding",
-            "schema": 2,
+            "schema": 3,
             "address": address,
             "launch_id": launch_id,
             "binding_id": binding_id,
@@ -1189,7 +1189,7 @@ fn bindings_query_rejects_foreign_end_pointer_and_claim_records() {
     atomic_replace(
         &launch.join("current-binding.json"),
         &json!({
-            "kind":"current_binding","schema":2,"address":address,
+            "kind":"current_binding","schema":3,"address":address,
             "launch_id":"00000000-0000-4000-8000-000000000999","binding_id":binding_id
         }),
     )
@@ -1197,7 +1197,7 @@ fn bindings_query_rejects_foreign_end_pointer_and_claim_records() {
     atomic_replace(
         &binding_dir.join("end.json"),
         &json!({
-            "kind":"binding_end","schema":2,"address":address,
+            "kind":"binding_end","schema":3,"address":address,
             "launch_id":"00000000-0000-4000-8000-000000000999",
             "binding_id":"f".repeat(64),"reason":"session_end",
             "event_id":"00000000-0000-4000-8000-000000000998",
@@ -1280,7 +1280,7 @@ fn missing_incarnation_manifest_fails_presence_closed() {
     .expect("write binding");
     atomic_replace(
         &launch.join("current-binding.json"),
-        &json!({"kind":"current_binding","schema":2,"address":address,"launch_id":launch_id,"binding_id":binding_id}),
+        &json!({"kind":"current_binding","schema":3,"address":address,"launch_id":launch_id,"binding_id":binding_id}),
     )
     .expect("write pointer");
     fs::remove_file(

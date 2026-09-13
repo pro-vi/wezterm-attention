@@ -1259,27 +1259,29 @@ end)
 
 -- ── U3: marker metadata on the public read ──────────────────────────────────
 
-test("get_attention reports the marker's source and puppet flag", function()
+test("get_attention reports the marker's source and reserved tuple slot", function()
   local file = assert(io.open(test_dir .. "/7201", "w"))
-  file:write('{"type":"notify","source":"codex","puppet":true,"publication_id":"pub-7201"}')
+  file:write('{"type":"notify","source":"codex","controller":true,"publication_id":"pub-7201"}')
   file:close()
   poll({ 7201 })
 
-  local atype, frame, source, puppet = attention.get_attention(7201)
+  local atype, frame, source, reserved = attention.get_attention(7201)
   assert(atype == "notify", "the first two returns keep their meaning")
   assert(frame == nil, "a notify marker carries no frame")
   assert(source == "codex", "source should be the marker's source string, got " .. tostring(source))
-  assert(puppet == true, "puppet should be true when the marker says so")
+  assert(reserved == false, "the fourth tuple slot is reserved and always false")
+  assert(attention.get_attention_view(mux_pane(7201)).controller == nil,
+    "application metadata in a flat marker must not become a public fact")
 
   write_marker(7202, "stop")
   poll({ 7202 })
-  local _, _, plain_source, plain_puppet = attention.get_attention(7202)
+  local _, _, plain_source, plain_reserved = attention.get_attention(7202)
   assert(plain_source == nil, "a marker with no source reports none")
-  assert(plain_puppet == false, "a marker with no puppet flag is not a puppet")
+  assert(plain_reserved == false, "the reserved tuple slot remains false")
 
-  local _, _, direct_source, direct_puppet = attention.get_attention(7201, { dir = test_dir })
-  assert(direct_source == "codex" and direct_puppet == true,
-    "a direct disk read should report the same source and puppet flag")
+  local _, _, direct_source, direct_reserved = attention.get_attention(7201, { dir = test_dir })
+  assert(direct_source == "codex" and direct_reserved == false,
+    "a direct disk read should report the same source and reserved tuple slot")
 end)
 
 -- ── U3: hosts that repaint their own titles ─────────────────────────────────
@@ -1409,10 +1411,10 @@ test("live subagents keep a pane visible with no marker of its own", function()
 
   poll_at({ 7510, 7511 })
 
-  local atype, frame, source, puppet, subagents = attention.get_attention(7511)
+  local atype, frame, source, reserved, subagents = attention.get_attention(7511)
   assert(atype == nil, "a pane with no marker reports no type, got " .. tostring(atype))
   assert(frame == nil and source == nil, "and no frame or source")
-  assert(puppet == false, "and is not a puppet, got " .. tostring(puppet))
+  assert(reserved == false, "the fourth tuple slot stays false, got " .. tostring(reserved))
   assert(subagents == 2, "but its live subagents are reported, got " .. tostring(subagents))
   assert(not marker_exists(7511), "the sidecar must not manufacture a marker file")
 end)
@@ -1467,7 +1469,7 @@ end)
 
 test("count-only uses default colors for v1 and native v2 views", function()
   local sentinel = { colors = { stop = "SENTINEL" } }
-  internal.attention_cache["7591"] = { type = nil, subagents = 2, puppet = false }
+  internal.attention_cache["7591"] = { type = nil, subagents = 2 }
   local v1_visible = internal.resolve_visible_attention({ "7591" }, sentinel)
   assert(v1_visible.indicator == "+2 " and v1_visible.type == nil and v1_visible.color == nil,
     "the v1 adapter must not turn a count into stop state")
@@ -1508,7 +1510,7 @@ test("built-in and manual formatter contexts expose identical named attention", 
   })
   built._internal.attention_cache["7601"] = {
     type = "notify", activity_type = "notify", frame = nil, source = "claude",
-    provider = "claude", puppet = false, subagents = 2, review = false,
+    provider = "claude", subagents = 2, review = false,
     binding_health = "valid",
   }
   local built_handler = handlers["format-tab-title"][built_handlers_before + 1]
@@ -1522,7 +1524,7 @@ test("built-in and manual formatter contexts expose identical named attention", 
   })
   manual._internal.attention_cache["7601"] = {
     type = "notify", activity_type = "notify", frame = nil, source = "claude",
-    provider = "claude", puppet = false, subagents = 2, review = false,
+    provider = "claude", subagents = 2, review = false,
     binding_health = "valid",
   }
   local manual_rendered = manual.wrap_title_formatter(function(_, ctx)
@@ -1532,7 +1534,7 @@ test("built-in and manual formatter contexts expose identical named attention", 
 
   for _, field in ipairs({
     "indicator", "attention_type", "attention_color", "subagents", "source",
-    "provider", "puppet", "review", "binding_health",
+    "provider", "review", "binding_health",
   }) do
     assert(built_ctx[field] == manual_ctx[field], field .. " differs between formatter contexts")
   end
@@ -1548,34 +1550,16 @@ test("built-in and manual formatter contexts expose identical named attention", 
     "manual output must apply the same decoration")
 end)
 
-test("puppet filtering preserves review and count as independent inputs", function()
-  local filtered = dofile(repo_root .. "/plugin/init.lua")
-  filtered.apply_to_config({}, {
-    renderer = "manual", auto_poll = false, dir = test_dir, review_key = false,
-    show_puppet = false,
-  })
-  filtered._internal.attention_cache["7611"] = {
-    type = "notify", puppet = true, subagents = 2, review = false,
-  }
-  local count = filtered._internal.resolve_visible_attention({ "7611" })
-  assert(count.type == nil and count.indicator == "+2 " and count.color == nil,
-    "hidden puppet activity must not hide its independent child count or tint it")
-  filtered._internal.attention_cache["7611"].review = true
-  local review = filtered._internal.resolve_visible_attention({ "7611" })
-  assert(review.type == "review" and review.puppet == false,
-    "a user review remains visible when the underlying activity is puppet-owned")
-end)
-
 test("all rendered view fields participate in redraw equality", function()
   local baseline = {
     type = "notify", frame = 0, activity_type = "notify", event_id = "a",
-    source = "claude", provider = "claude", puppet = false, subagents = 1,
+    source = "claude", provider = "claude", subagents = 1,
     review = false, binding_phase = "active", pane_presence = "present",
     reader_confidence = "confirmed", binding_health = "valid",
     base_title = "base", settled_title = "settled",
   }
   for _, field in ipairs({
-    "type", "frame", "activity_type", "event_id", "source", "provider", "puppet",
+    "type", "frame", "activity_type", "event_id", "source", "provider",
     "subagents", "review", "binding_phase", "pane_presence", "reader_confidence",
     "binding_health", "base_title", "settled_title",
   }) do
@@ -2272,7 +2256,7 @@ test("a future core record blocks v1 downgrade and stays visible as future schem
   local future_wire = decode_json(encode_json(protocol_fixture.wire_sample))
   future_wire.address.pane_id = "44"
   local future_claim = decode_json(encode_json(protocol_fixture.record_samples.claim))
-  future_claim.schema = 3
+  future_claim.schema = 4
   future_claim.address.pane_id = "44"
   local claim_path = test_dir .. "/v2/realms/" .. future_wire.address.realm_id
     .. "/incarnations/" .. future_wire.address.incarnation_id
@@ -3146,7 +3130,7 @@ test("lifecycle facts reach the cached reader without changing the badge", funct
   assert(skew, "cached facts retain written UTC and report negative age")
   write_json_path(binding_dir .. "/ack.json", samples.acknowledgement)
   local raw = assert(io.open(binding_dir .. "/lifecycle.json", "w"))
-  raw:write('{"schema":3}'); raw:close()
+  raw:write('{"schema":4}'); raw:close()
   reloaded.poll(window, { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
   local future = assert(reloaded.get_attention_view(pane))
   assert(future.type == "notify" and future.lifecycle.availability == "unsupported")

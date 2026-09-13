@@ -200,10 +200,10 @@ return function(context)
     -- authoritative. Another process's in-flight temp is not ours to remove: it
     -- may be one instant away from being renamed into place.
     os.remove(acknowledgement_tmp_path(dir, pane_id))
-    local atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source, puppet =
+    local atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source =
       read_marker(dir, pane_id)
     if acknowledgement_matches(dir, pane_id, raw, publication_id) then return nil end
-    return atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source, puppet
+    return atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source
   end
 
   -- ── Review flag sidecar ─────────────────────────────────────────────────────

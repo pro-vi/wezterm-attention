@@ -613,7 +613,6 @@ fn activity_base(
         "target": {"kind": "binding", "binding_id": binding_id},
         "type": activity_type,
         "source": provider_name(event)?,
-        "puppet": false,
     });
     if let Some(label) = &event.label {
         value["label"] = json!(label);
@@ -1219,7 +1218,6 @@ pub fn apply_mark_activity(
                 "target": target,
                 "type": activity_type,
                 "source": source,
-                "puppet": false,
             });
             if let Some(frame) = frame {
                 base["frame"] = json!(frame);

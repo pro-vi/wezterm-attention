@@ -120,7 +120,7 @@ assert(joined == seconds .. fractional, "UTC %s%9f did not preserve seconds plus
 assert(padded and #padded == 20 and padded:match("^%d+$"),
   "UTC value did not left-pad to UnixNs20")
 
-  internal.attention_cache["9001"] = { type = nil, subagents = 2, puppet = false }
+  internal.attention_cache["9001"] = { type = nil, subagents = 2 }
   local visible = internal.resolve_visible_attention({ "9001" }, {
     colors = { stop = "SENTINEL" },
   })

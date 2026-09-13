@@ -257,7 +257,7 @@ impl Setup {
         atomic_replace(
             &path,
             &json!({
-                "kind":"subagent_presence","schema":2,"address":address,
+                "kind":"subagent_presence","schema":3,"address":address,
                 "launch_id":launch_id,"binding_id":binding_id,"provider":"claude",
                 "agent_id":agent,"agent_key":agent_key,"source":"worker","status":status,
                 "event_id":Uuid::new_v4().to_string(),
@@ -696,7 +696,7 @@ fn foreign_retention_floor_never_deletes_children() {
     atomic_replace(
         &setup.binding_dir().join("agents-floor.json"),
         &json!({
-            "kind":"subagent_retention_floor","schema":2,"address":address,
+            "kind":"subagent_retention_floor","schema":3,"address":address,
             "launch_id":"00000000-0000-4000-8000-000000000999",
             "binding_id":"f".repeat(64),"floor_mono_ns":"00000009999999999999",
             "operation_id":operation
@@ -837,7 +837,7 @@ fn doctor_rejects_a_valid_record_at_the_wrong_depth() {
             .join("agents")
             .join(format!("{agent_key}.json")),
         &json!({
-            "kind":"subagent_presence","schema":2,"address":address,
+            "kind":"subagent_presence","schema":3,"address":address,
             "launch_id":launch_id,"binding_id":binding_id,"provider":"claude",
             "agent_id":"misplaced","agent_key":agent_key,"source":"worker","status":"stopped",
             "event_id":"00000000-0000-4000-8000-000000000726",
