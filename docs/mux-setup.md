@@ -56,22 +56,11 @@ hook still republishes the current claim automatically.
 ## Provider hooks
 
 Provider registration remains user-owned. This repository does not edit Claude or Codex settings.
-Each command receives the provider's original JSON on stdin:
+Read the package-owned registration descriptions: For each `registration=register` row, prepend the resolved Attention executable to `arguments` and forward the original callback JSON to that invocation. Ignored rows are not registrations. `requires_launch_identity` qualifies rich facts and executable delivery; it does not remove legacy support. Evidence references describe parser, fixture and native-contact coverage, not live activation. For Pi, install the reported `extension_entrypoint`; its bus event is `wezterm-attention:mark`.
 
-```text
-$WEZTERM_ATTENTION_ROOT/bin/attention hooks event claude SessionStart
-$WEZTERM_ATTENTION_ROOT/bin/attention hooks event claude PreToolUse
-$WEZTERM_ATTENTION_ROOT/bin/attention hooks event claude PermissionRequest
-$WEZTERM_ATTENTION_ROOT/bin/attention hooks event claude Stop
-$WEZTERM_ATTENTION_ROOT/bin/attention hooks event claude SubagentStop
-$WEZTERM_ATTENTION_ROOT/bin/attention hooks event claude SessionEnd
-
-$WEZTERM_ATTENTION_ROOT/bin/attention hooks event codex SessionStart
-$WEZTERM_ATTENTION_ROOT/bin/attention hooks event codex PreToolUse
-$WEZTERM_ATTENTION_ROOT/bin/attention hooks event codex PermissionRequest
-$WEZTERM_ATTENTION_ROOT/bin/attention hooks event codex Stop
-$WEZTERM_ATTENTION_ROOT/bin/attention hooks event codex SubagentStop
-$WEZTERM_ATTENTION_ROOT/bin/attention hooks event codex SessionEnd
+```sh
+attention hooks describe --provider claude --json
+attention hooks describe --provider codex --json
 ```
 
 Do not register a `SubagentStart` attention writer. A child becomes visible only after its first

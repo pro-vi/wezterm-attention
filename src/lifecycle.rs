@@ -1,7 +1,9 @@
 //! Pure lifecycle decisions and their record-application boundary.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -10,9 +12,10 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::compat::{
-    reconcile_activity, reconcile_activity_clear, reconcile_activity_clear_locked,
-    reconcile_agents, reconcile_launch_activity,
+    ProjectionOutcome, reconcile_activity_clear_locked_outcome, reconcile_activity_clear_outcome,
+    reconcile_activity_outcome, reconcile_agents_outcome, reconcile_launch_activity_outcome,
 };
+use crate::consumer::{AdmittedHook, BindingTarget, HookPersistence, HookScope, Persistence};
 use crate::identity::{PaneAddress, canonical_uuid, pane_address};
 use crate::observations::{LifecycleSnapshot, ObservationPools};
 use crate::protocol::{AttentionError, Diagnostic, Result, manifest};
@@ -22,6 +25,117 @@ use crate::records::{
     commit_triple_with, commit_with, launch_path, pane_path, read_record, state_root,
 };
 use crate::wezterm::RuntimePorts;
+
+#[derive(Debug)]
+pub struct HookOutcome {
+    pub result: Result<LifecycleResult>,
+    pub admission: Option<AdmittedHook>,
+    pub persistence: HookPersistence,
+    pub observation_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct HookEvidence {
+    event: ProviderEvent,
+    inherited: bool,
+    persistence: HookPersistence,
+    admission: Option<AdmittedHook>,
+    planned_native: Option<bool>,
+    pending_observation_id: Option<String>,
+    observation_id: Option<String>,
+}
+
+fn accepted(result: &LifecycleResult) -> bool {
+    matches!(
+        result.disposition.as_str(),
+        "applied" | "confirmed" | "replaced" | "skipped" | "repaired_projection"
+    )
+}
+
+// Called only by the native mutation's locked after-apply path. This records
+// evidence; it never invokes consumers or resolves a later occupant for them.
+fn confirm_native(resolved: &ResolvedLaunch, binding_id: &str, mutation: &Mutation) {
+    let Some(cell) = &resolved.evidence else {
+        return;
+    };
+    let mut evidence = cell.borrow_mut();
+    let admitted = evidence
+        .planned_native
+        .unwrap_or_else(|| accepted(&mutation.result));
+    if evidence.persistence.native_state != Persistence::NotRequested {
+        evidence.persistence.native_state = if admitted {
+            Persistence::Confirmed
+        } else {
+            Persistence::Rejected
+        };
+    }
+    if evidence.persistence.activity != Persistence::NotRequested {
+        evidence.persistence.activity = if admitted {
+            Persistence::Confirmed
+        } else {
+            Persistence::Rejected
+        };
+    }
+    if !evidence.inherited {
+        return;
+    }
+    let context = (|| -> Result<Option<AdmittedHook>> {
+        let claim = load_claim(&resolved.root, &resolved.address)?;
+        if claim.as_ref().is_none_or(|claim| {
+            !record_matches_launch(claim, &resolved.address, &resolved.launch_id)
+        }) {
+            return Ok(None);
+        }
+        let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
+        let pointer = read_record(
+            &launch.join("current-binding.json"),
+            Some("current_binding"),
+            &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
+        )?;
+        let (_, binding) = read_current(&launch, pointer, &resolved.address, &resolved.launch_id)?;
+        let Some(binding) = binding.filter(|binding| {
+            record_matches_binding(binding, &resolved.address, &resolved.launch_id, binding_id)
+        }) else {
+            return Ok(None);
+        };
+        let event = &evidence.event;
+        if binding["provider"].as_str() != event.provider.map(|p| p.as_str())
+            || binding["provider_session_id"].as_str() != event.provider_session_id.as_deref()
+        {
+            return Ok(None);
+        }
+        let actor = event
+            .observation
+            .as_ref()
+            .map(|o| o.actor.clone())
+            .unwrap_or_else(|| match &event.agent_id {
+                Some(id) => crate::observations::Actor::Child {
+                    agent_id: id.clone(),
+                    agent_key: crate::protocol::sha256_hex(id.as_bytes()),
+                },
+                None => crate::observations::Actor::Lead,
+            });
+        Ok(Some(AdmittedHook {
+            action: event.action,
+            scope: HookScope {
+                address: resolved.address.clone(),
+                launch_id: resolved.launch_id.clone(),
+                target: BindingTarget::Binding {
+                    binding_id: binding_id.into(),
+                },
+            },
+            provider: provider_name(event)?.into(),
+            provider_session_id: event.provider_session_id.clone().unwrap_or_default(),
+            source_event: event.source_event.clone(),
+            actor,
+            correlation: event
+                .observation
+                .as_ref()
+                .and_then(|o| o.correlation.clone()),
+        }))
+    })();
+    evidence.admission = context.ok().flatten();
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct LifecycleResult {
@@ -56,6 +170,7 @@ impl LifecycleResult {
 
 #[derive(Clone, Debug)]
 struct ResolvedLaunch {
+    evidence: Option<Rc<RefCell<HookEvidence>>>,
     root: PathBuf,
     address: PaneAddress,
     launch_id: String,
@@ -190,6 +305,7 @@ fn resolve_launch(
             .is_some_and(|record| record_matches_launch(record, &address, &inherited))
         {
             return Ok(ResolvedLaunch {
+                evidence: None,
                 root,
                 address,
                 launch_id: inherited,
@@ -209,6 +325,7 @@ fn resolve_launch(
     {
         let launch_id = claim["launch_id"].as_str().unwrap_or_default().to_owned();
         return Ok(ResolvedLaunch {
+            evidence: None,
             root,
             address,
             launch_id,
@@ -249,6 +366,7 @@ fn resolve_launch(
     claimed_env.insert("WEZTERM_ATTENTION_LAUNCH_ID".to_owned(), launch_id.clone());
     crate::claim_launch_at_tty(&claimed_env, ports, &controlling)?;
     Ok(ResolvedLaunch {
+        evidence: None,
         root,
         address,
         launch_id,
@@ -465,7 +583,10 @@ fn binding_mutation(
                 private_dirs: Vec::new(),
             })
         },
-        |_| Ok(()),
+        |mutation| {
+            confirm_native(resolved, &binding_id, mutation);
+            Ok(())
+        },
     )?;
     Ok(mutation)
 }
@@ -523,6 +644,9 @@ fn append_observation(
     written_at: &str,
     mut plan: CommitPlan<Mutation>,
 ) -> CommitPlan<Mutation> {
+    if let Some(evidence) = &resolved.evidence {
+        evidence.borrow_mut().planned_native = Some(accepted(&plan.result.result));
+    }
     let prepared = (|| -> Result<Option<PreparedRecordWrite>> {
         if let Some(diagnostic) = &event.observation_diagnostic {
             return Err(AttentionError {
@@ -593,7 +717,13 @@ fn append_observation(
         candidate.observed_mono_ns = observation.to_owned();
         candidate.written_at_unix_ns = written_at.to_owned();
         if !snapshot.reduce(candidate)? {
+            if let Some(evidence) = &resolved.evidence {
+                evidence.borrow_mut().persistence.lifecycle = Persistence::Rejected;
+            }
             return Ok(None);
+        }
+        if let Some(evidence) = &resolved.evidence {
+            evidence.borrow_mut().pending_observation_id = Some(draft.observation_id.clone());
         }
         let value = serde_json::to_value(snapshot).map_err(AttentionError::record_json)?;
         Ok(Some(PreparedRecordWrite::new(path, &value)?))
@@ -602,6 +732,9 @@ fn append_observation(
         Ok(Some(replacement)) => plan.result.lifecycle_replacement = Some(replacement),
         Ok(None) => {}
         Err(error) => {
+            if let Some(evidence) = &resolved.evidence {
+                evidence.borrow_mut().persistence.lifecycle = Persistence::Rejected;
+            }
             plan.result.result.disposition = "partial".to_owned();
             plan.result.result.diagnostic = Some(error.diagnostic);
         }
@@ -831,16 +964,7 @@ fn apply_activity(
                 },
             ))
         },
-        |mutation| match &mutation.projection {
-            Projection::ActivityClear(clear_order) => reconcile_activity_clear_locked(
-                &resolved.root,
-                &resolved.address,
-                &resolved.launch_id,
-                &binding_id,
-                clear_order,
-            ),
-            _ => apply_observed_outputs(resolved, &binding_id, mutation),
-        },
+        |mutation| apply_locked_outputs(resolved, &binding_id, mutation),
     )?;
     let mut result = mutation.result;
     if projected && result.disposition == "skipped" {
@@ -856,6 +980,35 @@ fn apply_observed_outputs(
     mutation: &Mutation,
 ) -> Result<bool> {
     apply_observed_outputs_with(resolved, binding_id, mutation, PreparedRecordWrite::apply)
+}
+
+fn apply_locked_outputs(
+    resolved: &ResolvedLaunch,
+    binding_id: &str,
+    mutation: &Mutation,
+) -> Result<bool> {
+    if let Projection::ActivityClear(order) = &mutation.projection {
+        confirm_native(resolved, binding_id, mutation);
+        let result = reconcile_activity_clear_locked_outcome(
+            &resolved.root,
+            &resolved.address,
+            &resolved.launch_id,
+            binding_id,
+            order,
+        );
+        if let Ok(outcome) = &result
+            && let Some(cell) = &resolved.evidence
+        {
+            cell.borrow_mut().persistence.compatibility = if outcome.confirmed {
+                Persistence::Confirmed
+            } else {
+                Persistence::Rejected
+            };
+        }
+        result.map(|outcome| outcome.changed)
+    } else {
+        apply_observed_outputs(resolved, binding_id, mutation)
+    }
 }
 
 fn apply_observed_outputs_with(
@@ -877,6 +1030,11 @@ fn apply_observed_outputs_with(
                 .insert("lifecycle_write".into(), json!("unconfirmed"));
             error
         })?;
+        if let Some(cell) = &resolved.evidence {
+            let mut evidence = cell.borrow_mut();
+            evidence.persistence.lifecycle = Persistence::Confirmed;
+            evidence.observation_id = evidence.pending_observation_id.clone();
+        }
     }
     Ok(projected)
 }
@@ -886,29 +1044,49 @@ fn apply_projection(
     binding_id: &str,
     mutation: &Mutation,
 ) -> Result<bool> {
+    confirm_native(resolved, binding_id, mutation);
+    let result = apply_projection_inner(resolved, binding_id, mutation);
+    if let Ok(outcome) = &result
+        && !matches!(mutation.projection, Projection::None)
+        && let Some(cell) = &resolved.evidence
+    {
+        cell.borrow_mut().persistence.compatibility = if outcome.confirmed {
+            Persistence::Confirmed
+        } else {
+            Persistence::Rejected
+        };
+    }
+    result.map(|outcome| outcome.changed)
+}
+
+fn apply_projection_inner(
+    resolved: &ResolvedLaunch,
+    binding_id: &str,
+    mutation: &Mutation,
+) -> Result<ProjectionOutcome> {
     match &mutation.projection {
-        Projection::None => Ok(false),
-        Projection::LaunchActivity(activity) => reconcile_launch_activity(
+        Projection::None => Ok(ProjectionOutcome::confirmed(false)),
+        Projection::LaunchActivity(activity) => reconcile_launch_activity_outcome(
             &resolved.root,
             &resolved.address,
             &resolved.launch_id,
             activity,
         ),
-        Projection::Activity(activity) => reconcile_activity(
+        Projection::Activity(activity) => reconcile_activity_outcome(
             &resolved.root,
             &resolved.address,
             &resolved.launch_id,
             binding_id,
             activity.as_ref(),
         ),
-        Projection::ActivityClear(clear_order) => reconcile_activity_clear(
+        Projection::ActivityClear(clear_order) => reconcile_activity_clear_outcome(
             &resolved.root,
             &resolved.address,
             &resolved.launch_id,
             binding_id,
             clear_order,
         ),
-        Projection::Agents(binding_dir) => reconcile_agents(
+        Projection::Agents(binding_dir) => reconcile_agents_outcome(
             &resolved.root,
             &resolved.address,
             &resolved.launch_id,
@@ -916,21 +1094,24 @@ fn apply_projection(
             binding_dir,
         ),
         Projection::ActivityAndAgents(activity, binding_dir) => {
-            let activity_changed = reconcile_activity(
+            let activity_changed = reconcile_activity_outcome(
                 &resolved.root,
                 &resolved.address,
                 &resolved.launch_id,
                 binding_id,
                 activity.as_ref(),
             )?;
-            let agents_changed = reconcile_agents(
+            let agents_changed = reconcile_agents_outcome(
                 &resolved.root,
                 &resolved.address,
                 &resolved.launch_id,
                 binding_id,
                 binding_dir,
             )?;
-            Ok(activity_changed || agents_changed)
+            Ok(ProjectionOutcome {
+                changed: activity_changed.changed || agents_changed.changed,
+                confirmed: activity_changed.confirmed && agents_changed.confirmed,
+            })
         }
     }
 }
@@ -990,6 +1171,7 @@ pub fn apply_mark_activity(
         ));
     }
     let resolved = ResolvedLaunch {
+        evidence: None,
         root,
         address,
         launch_id,
@@ -1375,16 +1557,7 @@ fn apply_child(
                 },
             ))
         },
-        |mutation| match &mutation.projection {
-            Projection::ActivityClear(clear_order) => reconcile_activity_clear_locked(
-                &resolved.root,
-                &resolved.address,
-                &resolved.launch_id,
-                &binding_id,
-                clear_order,
-            ),
-            _ => apply_observed_outputs(resolved, &binding_id, mutation),
-        },
+        |mutation| apply_locked_outputs(resolved, &binding_id, mutation),
     )?;
     let mut result = mutation.result;
     if projected && result.disposition == "skipped" {
@@ -1542,7 +1715,10 @@ fn apply_end(
                 private_dirs: Vec::new(),
             })
         },
-        |_| Ok(()),
+        |mutation| {
+            confirm_native(resolved, &binding_id, mutation);
+            Ok(())
+        },
     )?;
     Ok(mutation.result)
 }
@@ -1655,7 +1831,10 @@ fn apply_review_event(
                 private_dirs: Vec::new(),
             })
         },
-        |_| Ok(()),
+        |mutation| {
+            confirm_native(resolved, &binding_id, mutation);
+            Ok(())
+        },
     )?;
     Ok(mutation.result)
 }
@@ -1789,16 +1968,7 @@ fn apply_clear_event(
                 private_dirs: Vec::new(),
             })
         },
-        |mutation| match &mutation.projection {
-            Projection::ActivityClear(clear_order) => reconcile_activity_clear_locked(
-                &resolved.root,
-                &resolved.address,
-                &resolved.launch_id,
-                &binding_id,
-                clear_order,
-            ),
-            _ => apply_projection(resolved, &binding_id, mutation),
-        },
+        |mutation| apply_locked_outputs(resolved, &binding_id, mutation),
     )?;
     let mut result = mutation.result;
     if projected && result.disposition == "skipped" {
@@ -1922,6 +2092,7 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
             }
             apply_projection(
                 &ResolvedLaunch {
+                    evidence: None,
                     root: root.clone(),
                     address: address.clone(),
                     launch_id: launch_id.clone(),
@@ -1945,6 +2116,84 @@ pub fn apply_provider_event(
     observation: &str,
     ports: &RuntimePorts<'_>,
 ) -> Result<LifecycleResult> {
+    apply_provider_event_inner(event, env, observation, ports, None)
+}
+
+pub fn apply_provider_event_with_outcome(
+    event: &ProviderEvent,
+    env: &BTreeMap<String, String>,
+    observation: &str,
+    ports: &RuntimePorts<'_>,
+) -> HookOutcome {
+    let requested = |yes| {
+        if yes {
+            Persistence::Unconfirmed
+        } else {
+            Persistence::NotRequested
+        }
+    };
+    let cell = Rc::new(RefCell::new(HookEvidence {
+        event: event.clone(),
+        inherited: env.contains_key("WEZTERM_ATTENTION_LAUNCH_ID"),
+        admission: None,
+        planned_native: None,
+        pending_observation_id: None,
+        observation_id: None,
+        persistence: HookPersistence {
+            native_state: requested(!matches!(
+                event.action,
+                ProviderAction::Observation | ProviderAction::Ignored
+            )),
+            activity: requested(matches!(
+                event.action,
+                ProviderAction::Activity | ProviderAction::ParentStop | ProviderAction::Clear
+            )),
+            compatibility: requested(matches!(
+                event.action,
+                ProviderAction::Activity
+                    | ProviderAction::ParentStop
+                    | ProviderAction::ChildActive
+                    | ProviderAction::ChildStopped
+                    | ProviderAction::Clear
+            )),
+            lifecycle: requested(
+                event.observation.is_some() || event.observation_diagnostic.is_some(),
+            ),
+        },
+    }));
+    let result = apply_provider_event_inner(event, env, observation, ports, Some(cell.clone()));
+    let mut evidence = cell.borrow_mut();
+    if result
+        .as_ref()
+        .is_ok_and(|r| matches!(r.disposition.as_str(), "ignored" | "conflict"))
+    {
+        let p = &mut evidence.persistence;
+        for value in [
+            &mut p.native_state,
+            &mut p.activity,
+            &mut p.compatibility,
+            &mut p.lifecycle,
+        ] {
+            if *value == Persistence::Unconfirmed {
+                *value = Persistence::Rejected;
+            }
+        }
+    }
+    HookOutcome {
+        result,
+        admission: evidence.admission.clone(),
+        persistence: evidence.persistence.clone(),
+        observation_id: evidence.observation_id.clone(),
+    }
+}
+
+fn apply_provider_event_inner(
+    event: &ProviderEvent,
+    env: &BTreeMap<String, String>,
+    observation: &str,
+    ports: &RuntimePorts<'_>,
+    evidence: Option<Rc<RefCell<HookEvidence>>>,
+) -> Result<LifecycleResult> {
     if event.action == ProviderAction::Ignored {
         let mut result = LifecycleResult::new("ignored");
         result.diagnostic = event.diagnostic.clone();
@@ -1956,10 +2205,11 @@ pub fn apply_provider_event(
             "observation is invalid",
         ));
     }
-    let resolved = match resolve_launch(event, env, ports) {
+    let mut resolved = match resolve_launch(event, env, ports) {
         Ok(resolved) => resolved,
         Err(error) => return Ok(LifecycleResult::ignored_error(error)),
     };
+    resolved.evidence = evidence;
     let written_at = ports.clock.unix_ns20()?;
     let mut admitted = event.clone();
     if admitted.observation.is_some() && !env.contains_key("WEZTERM_ATTENTION_LAUNCH_ID") {
@@ -2009,7 +2259,27 @@ mod lifecycle_write_tests {
             serde_json::from_value(samples["claim"]["address"].clone()).unwrap();
         let launch_id = samples["claim"]["launch_id"].as_str().unwrap().to_owned();
         let binding_id = samples["binding"]["binding_id"].as_str().unwrap();
+        let evidence = Rc::new(RefCell::new(HookEvidence {
+            event: crate::providers::parse_provider_event(
+                "claude",
+                "Stop",
+                &json!({"hook_event_name":"Stop", "session_id":samples["binding"]["provider_session_id"]}),
+                &BTreeMap::new(),
+            ),
+            inherited: true,
+            admission: None,
+            planned_native: Some(true),
+            pending_observation_id: None,
+            observation_id: None,
+            persistence: HookPersistence {
+                native_state: Persistence::Unconfirmed,
+                activity: Persistence::Unconfirmed,
+                compatibility: Persistence::Unconfirmed,
+                lifecycle: Persistence::Unconfirmed,
+            },
+        }));
         let resolved = ResolvedLaunch {
+            evidence: Some(evidence.clone()),
             root: root.clone(),
             address: address.clone(),
             launch_id: launch_id.clone(),
@@ -2036,6 +2306,8 @@ mod lifecycle_write_tests {
             .join("bindings")
             .join(binding_id)
             .join("lifecycle.json");
+        crate::records::atomic_replace(&path.with_file_name("binding.json"), &samples["binding"])
+            .unwrap();
         let mutation = Mutation {
             result: LifecycleResult::new("applied"),
             projection: Projection::Activity(Some(samples["activity"].clone())),
@@ -2058,6 +2330,44 @@ mod lifecycle_write_tests {
         assert_eq!(error.diagnostic.context["legacy_applied"], true);
         assert_eq!(error.diagnostic.context["lifecycle_write"], "unconfirmed");
         assert!(!path.exists());
+        let evidence = evidence.borrow();
+        assert_eq!(evidence.persistence.native_state, Persistence::Confirmed);
+        assert_eq!(evidence.persistence.activity, Persistence::Confirmed);
+        assert_eq!(evidence.persistence.compatibility, Persistence::Confirmed);
+        assert_eq!(evidence.persistence.lifecycle, Persistence::Unconfirmed);
+        assert!(evidence.observation_id.is_none());
+        drop(evidence);
+        assert!(!apply_projection(&resolved, binding_id, &mutation).unwrap());
+        assert_eq!(
+            resolved
+                .evidence
+                .as_ref()
+                .unwrap()
+                .borrow()
+                .persistence
+                .compatibility,
+            Persistence::Confirmed,
+            "unchanged desired bytes are confirmed"
+        );
+        let mut changed_claim = samples["claim"].clone();
+        changed_claim["launch_id"] = json!(Uuid::new_v4().to_string());
+        crate::records::atomic_replace(
+            &pane_path(&root, &address).join("claim.json"),
+            &changed_claim,
+        )
+        .unwrap();
+        assert!(!apply_projection(&resolved, binding_id, &mutation).unwrap());
+        assert_eq!(
+            resolved
+                .evidence
+                .as_ref()
+                .unwrap()
+                .borrow()
+                .persistence
+                .compatibility,
+            Persistence::Rejected,
+            "a fenced projection is not confirmed merely because its call returned Ok"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

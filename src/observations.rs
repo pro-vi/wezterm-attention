@@ -169,6 +169,306 @@ pub struct LifecycleSnapshot {
     pub pools: ObservationPools,
 }
 
+vocabulary!(LifecycleAvailability {
+    Available,
+    Absent,
+    Unavailable,
+    Invalid,
+    Unsupported
+});
+vocabulary!(Coverage { BoundedWindow });
+vocabulary!(RequestKind {
+    Question,
+    Permission,
+    Approval,
+    Elicitation,
+    Notice
+});
+vocabulary!(RelationKind {
+    ToolResultObserved,
+    ElicitationActionSelected,
+    AutomaticDenialObserved
+});
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PooledObservation {
+    pub pool: String,
+    #[serde(flatten)]
+    pub observation: LifecycleObservation,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RequestRelation {
+    pub kind: RelationKind,
+    pub observation_id: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RequestEvidence {
+    pub kind: RequestKind,
+    pub actor: Actor,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation: Option<NativeCorrelation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question_mode: Option<QuestionMode>,
+    pub request_observation_ids: Vec<String>,
+    pub result_observation_ids: Vec<String>,
+    pub selection_observation_ids: Vec<String>,
+    pub denial_observation_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publication_observation_ids: Option<Vec<String>>,
+    pub relations: Vec<RequestRelation>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct LifecycleView {
+    pub availability: LifecycleAvailability,
+    pub coverage: Coverage,
+    pub observations: Vec<PooledObservation>,
+    pub requests: Vec<RequestEvidence>,
+    pub retention_floors: std::collections::BTreeMap<String, String>,
+    pub diagnostics: Vec<crate::protocol::Diagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub badge_acknowledgement: Option<Value>,
+}
+
+impl LifecycleView {
+    pub fn empty(availability: LifecycleAvailability) -> Self {
+        Self {
+            availability,
+            coverage: Coverage::BoundedWindow,
+            observations: vec![],
+            requests: vec![],
+            retention_floors: Default::default(),
+            diagnostics: vec![],
+            snapshot_id: None,
+            badge_acknowledgement: None,
+        }
+    }
+
+    pub fn from_snapshot(snapshot: &LifecycleSnapshot, now: Option<&str>) -> Result<Self> {
+        crate::protocol::validate_record(
+            &serde_json::to_value(snapshot).map_err(AttentionError::record_json)?,
+            Some("lifecycle_snapshot"),
+        )?;
+        let mut view = Self::empty(LifecycleAvailability::Available);
+        view.snapshot_id = Some(snapshot.snapshot_id.clone());
+        for (name, pool) in [
+            ("requests", &snapshot.pools.requests),
+            ("general", &snapshot.pools.general),
+        ] {
+            if let Some(floor) = &pool.retention_floor_mono_ns {
+                view.retention_floors.insert(name.into(), floor.clone());
+            }
+            for observation in &pool.observations {
+                if now.is_some_and(|now| now < observation.written_at_unix_ns.as_str())
+                    && view.diagnostics.len() < 8
+                {
+                    view.diagnostics.push(
+                        AttentionError::new("clock_skew", "lifecycle write time is ahead of UTC")
+                            .diagnostic,
+                    );
+                }
+                view.observations.push(PooledObservation {
+                    pool: name.into(),
+                    observation: observation.clone(),
+                });
+            }
+        }
+        view.observations.sort_by(|a, b| {
+            (
+                &a.observation.observed_mono_ns,
+                &a.observation.observation_id,
+            )
+                .cmp(&(
+                    &b.observation.observed_mono_ns,
+                    &b.observation.observation_id,
+                ))
+        });
+        view.requests = request_evidence(&view.observations, &snapshot.provider);
+        Ok(view)
+    }
+}
+
+fn request_evidence(observations: &[PooledObservation], provider: &str) -> Vec<RequestEvidence> {
+    use std::collections::BTreeMap;
+    #[derive(Clone, Copy)]
+    enum Role {
+        Request,
+        Result,
+        Publication,
+        Selection,
+        Denial,
+    }
+    let mut indices = BTreeMap::new();
+    let mut groups: Vec<RequestEvidence> = Vec::new();
+    for pooled in observations {
+        let item = &pooled.observation;
+        let c = item.correlation.clone().unwrap_or_default();
+        let from_class = |class| match class {
+            ToolClass::Question => RequestKind::Question,
+            ToolClass::Permission => RequestKind::Permission,
+            ToolClass::Generic => RequestKind::Approval,
+        };
+        let (kind, role, tool_name, mode, namespace, native_id) = match &item.body {
+            ObservationBody::ToolPreflight {
+                tool_name,
+                tool_class,
+                question_mode,
+            } if *tool_class != ToolClass::Generic => (
+                from_class(*tool_class),
+                Role::Request,
+                Some(tool_name.clone()),
+                *question_mode,
+                "tool",
+                c.tool_call_id.as_deref(),
+            ),
+            ObservationBody::ToolResult {
+                tool_name,
+                tool_class,
+                question_mode,
+                ..
+            } if *tool_class != ToolClass::Generic => (
+                from_class(*tool_class),
+                if *question_mode == Some(QuestionMode::Nonblocking) {
+                    Role::Publication
+                } else {
+                    Role::Result
+                },
+                Some(tool_name.clone()),
+                *question_mode,
+                "tool",
+                c.tool_call_id.as_deref(),
+            ),
+            ObservationBody::ApprovalRequested { tool_name } => (
+                RequestKind::Approval,
+                Role::Request,
+                tool_name.clone(),
+                None,
+                "tool",
+                c.tool_call_id.as_deref(),
+            ),
+            ObservationBody::AutomaticDenial { tool_name, .. } => {
+                let (class, mode) = classify_tool(provider, tool_name);
+                (
+                    from_class(class),
+                    Role::Denial,
+                    Some(tool_name.clone()),
+                    mode,
+                    "tool",
+                    c.tool_call_id.as_deref(),
+                )
+            }
+            ObservationBody::ElicitationRequested { .. } => (
+                RequestKind::Elicitation,
+                Role::Request,
+                None,
+                None,
+                "elicitation",
+                c.elicitation_id.as_deref(),
+            ),
+            ObservationBody::ElicitationActionSelected { .. } => (
+                RequestKind::Elicitation,
+                Role::Selection,
+                None,
+                None,
+                "elicitation",
+                c.elicitation_id.as_deref(),
+            ),
+            ObservationBody::Notice { .. } => {
+                (RequestKind::Notice, Role::Request, None, None, "", None)
+            }
+            _ => continue,
+        };
+        let (actor, agent) = match &item.actor {
+            Actor::Lead => ("lead", ""),
+            Actor::Child { agent_id, .. } => ("child", agent_id.as_str()),
+        };
+        let key = vec![
+            format!("{kind:?}"),
+            actor.into(),
+            agent.into(),
+            if native_id.is_some() {
+                namespace.into()
+            } else {
+                "observation_id".into()
+            },
+            native_id.unwrap_or(&item.observation_id).into(),
+            c.turn_id.clone().unwrap_or_default(),
+            c.mcp_server_name.clone().unwrap_or_default(),
+            tool_name.clone().unwrap_or_default(),
+            format!("{mode:?}"),
+        ];
+        let index = *indices.entry(key).or_insert_with(|| {
+            let index = groups.len();
+            groups.push(RequestEvidence {
+                kind,
+                actor: item.actor.clone(),
+                correlation: item.correlation.clone(),
+                tool_name,
+                question_mode: if kind == RequestKind::Question {
+                    mode
+                } else {
+                    None
+                },
+                request_observation_ids: vec![],
+                result_observation_ids: vec![],
+                selection_observation_ids: vec![],
+                denial_observation_ids: vec![],
+                publication_observation_ids: (kind == RequestKind::Question).then(Vec::new),
+                relations: vec![],
+            });
+            index
+        });
+        let group = &mut groups[index];
+        let ids = match role {
+            Role::Request => &mut group.request_observation_ids,
+            Role::Result => &mut group.result_observation_ids,
+            Role::Selection => &mut group.selection_observation_ids,
+            Role::Denial => &mut group.denial_observation_ids,
+            Role::Publication => group
+                .publication_observation_ids
+                .as_mut()
+                .expect("validated nonblocking question"),
+        };
+        ids.push(item.observation_id.clone());
+    }
+    for group in &mut groups {
+        if group.request_observation_ids.is_empty() {
+            continue;
+        }
+        // Lexical kind order matches the Lua projection, independent of arrival.
+        for (kind, ids) in [
+            (
+                RelationKind::AutomaticDenialObserved,
+                &group.denial_observation_ids,
+            ),
+            (
+                RelationKind::ElicitationActionSelected,
+                &group.selection_observation_ids,
+            ),
+            (
+                RelationKind::ToolResultObserved,
+                &group.result_observation_ids,
+            ),
+        ] {
+            let mut ids = ids.clone();
+            ids.sort();
+            group
+                .relations
+                .extend(ids.into_iter().map(|observation_id| RequestRelation {
+                    kind,
+                    observation_id,
+                }));
+        }
+    }
+    groups
+}
+
 impl ObservationBody {
     pub fn kind(&self) -> &'static str {
         match self {

@@ -8,6 +8,9 @@ local resurrect = wezterm.plugin.require("https://github.com/MLFlexer/resurrect.
 
 local act = wezterm.action
 local config = wezterm.config_builder()
+-- Copy examples/follow-up.lua beside this config. This consumer only chooses
+-- a local display state; it performs no action when a view first appears.
+local follow_up = dofile(wezterm.config_dir .. "/follow-up.lua").for_windows()
 
 -- ── Attention plugin ────────────────────────────────────────────────────────
 -- Tab indicators for CLI tools (Claude Code, Codex, builds, scripts).
@@ -17,6 +20,7 @@ attention.apply_to_config(config, {
   auto_poll = false,
   -- Optional closed provider suffix: " · Claude", " · Codex", or " · Pi".
   show_provider = true,
+  on_view_change = follow_up.on_view_change,
 })
 
 -- ── Keybindings ─────────────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 {
-  "status": "proposed; not an implemented API or a second authority",
+  "status": "approved by the user; implemented layouts are pinned by source and consumer tests, not this design record",
   "authority": "docs/plans/2026-09-12-001-feat-public-consumer-contracts-plan.md",
   "decision": "Use the existing record/getter field names below for the plan's new public representations. No new CLI flags or lifecycle meanings are proposed.",
   "NativeHookSpec": {
@@ -32,16 +32,16 @@
   "HookDelivery": {
     "unit": "U3",
     "source_evidence": ["src/lifecycle.rs::LifecycleResult", "src/lifecycle.rs::ResolvedLaunch", "src/lifecycle.rs::apply_observed_outputs_with", "src/observations.rs::LifecycleObservation"],
-    "fields": ["schema", "delivery_id", "scope", "provider", "provider_session_id", "source_event", "actor", "correlation", "observation_id", "persistence", "reply"],
+    "fields": ["schema", "delivery_id", "scope", "action", "provider", "provider_session_id", "source_event", "actor", "correlation", "observation_id", "persistence", "reply"],
     "scope_fields": ["address", "launch_id", "target"],
     "target": "Existing binding target with binding_id; not a controller grant",
     "optional": ["correlation", "observation_id"],
-    "persistence_fields": ["activity", "compatibility", "lifecycle"],
+    "persistence_fields": ["native_state", "activity", "compatibility", "lifecycle"],
     "persistence_values": ["not_requested", "confirmed", "rejected", "unconfirmed"],
     "reply_fields": ["availability", "text"],
     "reply_values": ["not_requested", "available", "absent", "unsupported", "invalid", "too_large"],
     "text": "Present exactly when availability is available; excluded from diagnostics and stored facts",
-    "consumer_outcome_fields": ["executable", "stage", "exit_code", "effect"],
+    "consumer_outcome_fields": ["executable", "stage", "exit_code", "effect", "reason"],
     "consumer_stage_values": ["not_dispatched", "not_started", "completed", "failed", "timed_out", "stdin_failed"],
     "consumer_effect_values": ["none", "possible"],
     "exit_code": "Present only when the started child supplies an exit code"
@@ -57,5 +57,5 @@
     "view": "Detached existing get_attention_view projection"
   },
   "tradeoff": "These explicit layouts add public field names that consumers will rely on. Reusing current names reduces translation; separate availability and effect fields preserve distinct meanings.",
-  "held_actions": "Pinning and implementing these public serialized layouts in U1-U5; U7's already specified layout and internal metadata work remain independent"
+  "held_actions": "None for source implementation. Live activation, push, PR, merge, publication and real-provider spend remain outside the grant."
 }

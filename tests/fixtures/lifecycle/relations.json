@@ -1,0 +1,12 @@
+{
+  "cases": [
+    {"id":"blocking_pair","request":"blocking-tool_preflight","result":"blocking-tool_result","variant":"same","groups":1,"relations":1},
+    {"id":"blocking_result_first","request":"blocking-tool_preflight","result":"blocking-tool_result","variant":"reversed","groups":1,"relations":1},
+    {"id":"idless_independent","request":"blocking-tool_preflight","result":"blocking-tool_result","variant":"idless","groups":2,"relations":0},
+    {"id":"turn_namespace","request":"blocking-tool_preflight","result":"blocking-tool_result","variant":"turn","groups":2,"relations":0},
+    {"id":"actor_namespace","request":"blocking-tool_preflight","result":"blocking-tool_result","variant":"actor","groups":2,"relations":0},
+    {"id":"publication_is_not_result","request":"nonblocking-tool_preflight","result":"nonblocking-tool_result","variant":"same","groups":1,"relations":0},
+    {"id":"elicitation_pair","request":"elicitation_requested","result":"elicitation_action_selected","variant":"same","groups":1,"relations":1},
+    {"id":"mcp_namespace","request":"elicitation_requested","result":"elicitation_action_selected","variant":"mcp","groups":2,"relations":0}
+  ]
+}

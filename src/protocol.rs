@@ -89,6 +89,7 @@ pub struct Manifest {
     pub record_schema: u64,
     pub writer_version: String,
     pub tool_classification: BTreeMap<String, BTreeMap<String, ToolClassification>>,
+    pub native_hooks: BTreeMap<String, BTreeMap<String, crate::providers::NativeHookDeclaration>>,
     pub digests: DigestRecipes,
     pub limits: Limits,
     pub enums: Enums,
@@ -239,6 +240,28 @@ pub fn parse_manifest(source: &str) -> Result<Manifest> {
         return Err(AttentionError::new(
             "integration_version_mismatch",
             "manifest schema is unsupported",
+        ));
+    }
+    if parsed.native_hooks.keys().cloned().collect::<BTreeSet<_>>() != parsed.enums.providers
+        || parsed.native_hooks.iter().any(|(provider, hooks)| {
+            crate::providers::Provider::parse(provider).is_none()
+                || hooks.is_empty()
+                || hooks.iter().any(|(name, declaration)| {
+                    name.is_empty()
+                        || name.len() > parsed.limits.safe_label_max_bytes
+                        || name.chars().any(|c| c < ' ' || c == '\u{7f}')
+                        || declaration.native_event.is_empty()
+                        || declaration.native_event.len() > parsed.limits.safe_label_max_bytes
+                        || declaration
+                            .native_event
+                            .chars()
+                            .any(|c| c < ' ' || c == '\u{7f}')
+                })
+        })
+    {
+        return Err(AttentionError::new(
+            "integration_version_mismatch",
+            "manifest native hooks are invalid",
         ));
     }
     if parsed

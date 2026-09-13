@@ -481,6 +481,54 @@ pub enum RecordRead {
     Unsupported(AttentionError),
 }
 
+/// Injectable filesystem boundary for scoped, read-only fact assembly.
+pub trait RecordReader {
+    fn read(&self, path: &Path, kind: Option<&str>, identity: &RecordIdentity) -> RecordRead;
+    fn entries(&self, directory: &Path) -> Result<Vec<PathBuf>>;
+}
+
+pub struct FileRecords;
+
+impl RecordReader for FileRecords {
+    fn read(&self, path: &Path, kind: Option<&str>, identity: &RecordIdentity) -> RecordRead {
+        read_record_typed(path, kind, identity)
+    }
+
+    fn entries(&self, directory: &Path) -> Result<Vec<PathBuf>> {
+        let entries = match fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(_) => {
+                return Err(AttentionError::new(
+                    "probe_unavailable",
+                    "record directory could not be enumerated",
+                ));
+            }
+        };
+        let mut paths = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|_| {
+                AttentionError::new("probe_unavailable", "record directory entry is unavailable")
+            })?;
+            if entry.path().extension().and_then(|v| v.to_str()) != Some("json") {
+                continue;
+            }
+            let kind = entry.file_type().map_err(|_| {
+                AttentionError::new("probe_unavailable", "record entry type is unavailable")
+            })?;
+            if kind.is_symlink() {
+                return Err(AttentionError::new(
+                    "record_invalid",
+                    "record collection contains a symlink",
+                ));
+            }
+            paths.push(entry.path());
+        }
+        paths.sort();
+        Ok(paths)
+    }
+}
+
 pub fn read_record_typed(
     path: &Path,
     expected_kind: Option<&str>,

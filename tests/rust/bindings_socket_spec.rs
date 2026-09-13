@@ -416,3 +416,28 @@ fn invalid_state_root_is_incomplete_in_socket_mode() {
     let response: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["complete"], false);
 }
+
+#[test]
+fn a_record_failure_cannot_hide_another_rows_unavailable_probe() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let root = state_root(&setup.env).unwrap();
+    let address = pane_address(&setup.env).unwrap().0;
+    let launch = launch_path(&root, &address, &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]);
+    let bad = launch
+        .join("bindings")
+        .join("0".repeat(64))
+        .join("binding.json");
+    fs::create_dir_all(bad.parent().unwrap()).unwrap();
+    fs::write(bad, "invalid").unwrap();
+    fs::remove_file(
+        root.join("v2/realms")
+            .join(&address.realm_id)
+            .join("realm.json"),
+    )
+    .unwrap();
+    let (_, rows, diagnostics) = query(&setup);
+    assert_eq!(rows.len(), 1);
+    assert!(diagnostics.iter().any(|d| d.code == "record_invalid"));
+    assert!(diagnostics.iter().any(|d| d.code == "probe_unavailable"));
+}
