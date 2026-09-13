@@ -37,12 +37,7 @@ fn public_checkpoint_inspector_and_reply_sink_recipes_execute() {
         ),
     );
     let bindings = rust_command(&setup)
-        .args([
-            "bindings",
-            "--socket",
-            &setup.env["WEZTERM_UNIX_SOCKET"],
-            "--json",
-        ])
+        .args(["bindings", "--socket", &setup.env["WEZTERM_UNIX_SOCKET"]])
         .output()
         .unwrap();
     assert!(bindings.status.success());
@@ -55,7 +50,7 @@ fn public_checkpoint_inspector_and_reply_sink_recipes_execute() {
         .unwrap();
     let scope = json!({"address":row["address"],"launch_id":row["launch_id"],"binding_id":row["binding_id"]});
     let mut child = rust_command(&setup)
-        .args(["inspect", "--scope", "-", "--json"])
+        .args(["inspect", "--scope", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

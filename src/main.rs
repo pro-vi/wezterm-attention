@@ -14,7 +14,7 @@ use wezterm_attention::wezterm::{
 #[command(
     name = "attention",
     about = "Publish and maintain mux-native WezTerm attention state.",
-    after_help = "Example: attention hooks claim"
+    after_help = "Example: attention bindings --socket /absolute/mux.sock\nRead commands (bindings, inspect, hooks describe) return JSON by default.\nCheck status and complete before using query results.\nRegistration requirements: attention hooks describe --provider claude"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -59,22 +59,26 @@ enum HookCommand {
 struct EventArgs {
     provider: String,
     event: String,
+    /// Return nonzero on native or consumer failure; default hooks exit zero.
     #[arg(long)]
     strict: bool,
+    /// Write structured diagnostics to stderr; hook stdout stays empty.
     #[arg(long)]
     debug: bool,
     /// Absolute executable receiving one transient envelope on stdin; repeatable.
     #[arg(long)]
     consumer: Vec<String>,
+    /// Positive deadline per consumer, covering stdin and exit; required with --consumer.
     #[arg(long)]
     consumer_timeout_ms: Option<u64>,
+    /// Include supported native reply text only in transient consumer stdin, never records.
     #[arg(long)]
     include_reply: bool,
 }
 
 fn provider_event_help() -> String {
     let mut help =
-        "Registration details: attention hooks describe --provider <provider> --json".to_owned();
+        "Example: attention hooks event claude Stop --consumer /absolute/reply-sink --consumer-timeout-ms 1000 --include-reply --strict < callback.json\nConsumers run after native locks release. Retrying may repeat consumer effects.\nRegistration details: attention hooks describe --provider <provider> --json".to_owned();
     if let Ok(manifest) = wezterm_attention::protocol::manifest() {
         for (provider, hooks) in &manifest.native_hooks {
             let events = hooks
@@ -99,17 +103,26 @@ struct OutputArgs {
 }
 
 #[derive(Clone, Debug, Args)]
+#[command(
+    after_help = "Example: attention hooks describe --provider claude\nReturns registration requirements, not proof that hooks are installed.\nFor supported provider names: attention hooks event --help"
+)]
 struct DescribeArgs {
     #[arg(long)]
     provider: String,
+    /// Return the JSON envelope (also the default).
     #[arg(long)]
     json: bool,
 }
 
 #[derive(Clone, Debug, Args)]
+#[command(
+    after_help = "Example: attention inspect --scope - < scope.json\nScope: {\"address\":{\"realm_id\":\"<64 lowercase hex>\",\"incarnation_id\":\"<64 lowercase hex>\",\"pane_id\":\"42\"},\"launch_id\":\"<UUID>\",\"binding_id\":\"<optional 64 lowercase hex>\"}\nObtain address, launch_id and binding_id from a current row in:\n  attention bindings --socket /absolute/mux.sock\nCheck status=ok and complete=true before selecting a row. Omit binding_id for launch selection.\nExit 0: complete response; 1: changed/degraded evidence; 2: invalid input. No GUI cache fallback."
+)]
 struct InspectArgs {
+    /// Read the exact expected scope from JSON stdin; '-' is the only accepted value.
     #[arg(long, value_parser=["-"])]
     scope: String,
+    /// Return the JSON envelope (also the default).
     #[arg(long)]
     json: bool,
 }
@@ -131,18 +144,26 @@ struct PublishArgs {
 }
 
 #[derive(Clone, Debug, Args)]
+#[command(
+    after_help = "Example: attention bindings --socket /absolute/mux.sock --limit 25\nCheck status and complete: exit zero can still carry truncated results.\nIf truncated, narrow with --provider, raise --limit (maximum 1000), or explicitly use --all.\n--socket queries prevent WezTerm auto-start; --realm selects a recorded realm ID."
+)]
 struct BindingsArgs {
+    /// Return the JSON envelope (also the default).
     #[arg(long)]
     json: bool,
+    /// Filter by a 64-character lowercase hex realm ID, not a socket path.
     #[arg(long)]
     realm: Option<String>,
     /// Restrict discovery to this existing socket's exact incarnation.
     #[arg(long, conflicts_with = "realm")]
     socket: Option<String>,
+    /// Filter by a supported provider; see hooks event --help.
     #[arg(long)]
     provider: Option<String>,
+    /// Maximum returned rows, 1..=1000; truncation sets complete=false.
     #[arg(long, default_value_t = 100)]
     limit: usize,
+    /// Return every matching row instead of limiting output.
     #[arg(long)]
     all: bool,
 }
@@ -187,11 +208,15 @@ struct Response<T: Serialize> {
     diagnostics: Vec<Diagnostic>,
 }
 
+fn query_json(command: &str) -> bool {
+    matches!(command, "bindings" | "inspect" | "hooks describe")
+}
+
 fn emit<T: Serialize>(response: &Response<T>, as_json: bool, quiet: bool) {
     if quiet {
         return;
     }
-    if as_json {
+    if as_json || query_json(&response.command) {
         println!(
             "{}",
             serde_json::to_string(response).expect("response serializes")
@@ -211,7 +236,11 @@ fn emit_error_with_complete(
     command: &str,
     complete: bool,
 ) -> ExitCode {
-    if as_json {
+    let mut error = error.clone();
+    if error.exit_code == 2 {
+        error.diagnostic.help = format!("attention {command} --help");
+    }
+    if as_json || query_json(command) {
         let response = Response {
             schema: 1,
             command: command.to_owned(),
@@ -609,7 +638,17 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     .is_ok_and(|manifest| !manifest.enums.providers.contains(provider))
             }) {
                 return Err((
-                    Box::new(AttentionError::usage("--provider is not supported")),
+                    Box::new(AttentionError::usage(format!(
+                        "--provider is not supported; expected one of: {}",
+                        wezterm_attention::protocol::manifest()
+                            .expect("manifest was validated above")
+                            .enums
+                            .providers
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))),
                     args.json,
                     "bindings".to_owned(),
                 ));
@@ -728,9 +767,15 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 ));
             }
             let scope: wezterm_attention::query::PaneScope = serde_json::from_slice(&bytes)
-                .map_err(|_| {
+                .map_err(|error| {
                     (
-                        Box::new(AttentionError::usage("scope JSON is invalid")),
+                        Box::new(AttentionError::usage(match error.classify() {
+                            serde_json::error::Category::Eof if bytes.is_empty() =>
+                                "scope stdin is empty; pipe a scope JSON object or use < scope.json".to_owned(),
+                            serde_json::error::Category::Syntax | serde_json::error::Category::Eof =>
+                                format!("scope JSON syntax is invalid at line {}, column {}", error.line(), error.column()),
+                            _ => "scope requires address (realm_id and incarnation_id: 64 lowercase hex; pane_id: canonical decimal string), launch_id (UUID), and optional binding_id (64 lowercase hex); no extra fields".to_owned(),
+                        })),
                         args.json,
                         "inspect".into(),
                     )
@@ -917,15 +962,20 @@ fn main() -> ExitCode {
                 let _ = error.print();
                 return ExitCode::SUCCESS;
             }
-            if arguments
-                .iter()
-                .skip(1)
-                .any(|argument| argument == "--json")
+            let command = match (
+                arguments.get(1).and_then(|arg| arg.to_str()),
+                arguments.get(2).and_then(|arg| arg.to_str()),
+            ) {
+                (Some("hooks"), Some("describe")) => "hooks describe",
+                (Some(command), _) => command,
+                _ => "attention",
+            };
+            if query_json(command)
+                || arguments
+                    .iter()
+                    .skip(1)
+                    .any(|argument| argument == "--json")
             {
-                let command = arguments
-                    .get(1)
-                    .and_then(|argument| argument.to_str())
-                    .unwrap_or("attention");
                 return emit_error(&AttentionError::usage(error.to_string()), true, command);
             }
             let exit_code = error.exit_code();
