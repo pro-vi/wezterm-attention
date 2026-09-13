@@ -199,6 +199,93 @@ fn rust_cli_help_errors_and_empty_hook_input_keep_the_documented_shape() {
 }
 
 #[test]
+fn query_defaults_errors_and_help_support_agent_composition() {
+    use std::io::Write;
+    let binary = env!("CARGO_BIN_EXE_attention");
+    let run = |args: &[&str]| {
+        Command::new(binary)
+            .env_clear()
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let default = run(&["hooks", "describe", "--provider", "claude"]);
+    let explicit = run(&["hooks", "describe", "--provider", "claude", "--json"]);
+    assert!(default.status.success() && explicit.status.success());
+    assert_eq!(default.stdout, explicit.stdout);
+    assert!(default.stderr.is_empty());
+    let description: Value = serde_json::from_slice(&default.stdout).unwrap();
+    assert_eq!(description["command"], "hooks describe");
+    for args in [
+        vec!["hooks", "describe", "--provider", "unsupported"],
+        vec!["bindings", "--provider", "unsupported"],
+    ] {
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(2));
+        let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let message = error["diagnostics"][0]["message"].as_str().unwrap();
+        for provider in &wezterm_attention::protocol::manifest()
+            .unwrap()
+            .enums
+            .providers
+        {
+            assert!(message.contains(provider));
+        }
+    }
+    for (input, expected) in [
+        ("", "stdin is empty"),
+        ("{", "syntax is invalid"),
+        ("{}", "scope requires address"),
+        (
+            "{\"unexpected\":\"synthetic-private-content\"}",
+            "scope requires address",
+        ),
+    ] {
+        let mut child = Command::new(binary)
+            .env_clear()
+            .args(["inspect", "--scope", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stderr.is_empty());
+        let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            error["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains(expected)
+        );
+        assert_eq!(error["diagnostics"][0]["help"], "attention inspect --help");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-private-content"));
+    }
+    let malformed = run(&["hooks", "describe"]);
+    assert_eq!(malformed.status.code(), Some(2));
+    let error: Value = serde_json::from_slice(&malformed.stdout).unwrap();
+    assert_eq!(error["command"], "hooks describe");
+    assert_eq!(
+        error["diagnostics"][0]["help"],
+        "attention hooks describe --help"
+    );
+    let help = run(&["inspect", "--help"]);
+    let text = String::from_utf8(help.stdout).unwrap();
+    assert!(text.contains("scope.json") && text.contains("complete=true"));
+    let help = run(&["hooks", "event", "--help"]);
+    let text = String::from_utf8(help.stdout).unwrap();
+    assert!(text.contains("required with --consumer") && text.contains("Retrying"));
+    assert!(text.contains("stdout stays empty") && text.contains("default hooks exit zero"));
+}
+
+#[test]
 fn installed_shim_names_the_install_command_when_the_rust_binary_is_missing() {
     let scratch = Scratch::new();
     let bin = scratch.0.join("bin");

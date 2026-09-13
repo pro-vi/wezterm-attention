@@ -94,7 +94,7 @@ Older readers can ignore the additive sidecar. Older maintenance preserves unfam
 
 `renderer="manual"` gives your formatter ownership of rendering; it does not disable polling. Use `auto_poll=false` only when your integration calls `attention.poll(window, ...)` itself. Getters and formatters do not launch a CLI to refresh data.
 
-`attention bindings --json` is the CLI boundary for validated binding identity and liveness assessment. It is not a lifecycle replay or full-facts API, and it does not return a ready-made resume command. Build provider argv from its closed provider/session fields, and do not treat an uncertain record as proof of a live process.
+`attention bindings --json` is the CLI boundary for validated binding identity and liveness assessment. It is not a lifecycle replay or full-facts API, and it does not return a ready-made resume command. Build provider argv from its closed provider/session fields, and do not treat an uncertain record as proof of a live process. Read commands (`bindings`, `inspect`, `hooks describe`) now return the existing JSON envelope by default on both terminals and pipes; `--json` remains accepted. This replaces their former bare status output. Check both `status` and `complete`; a truncated binding query can exit zero with `complete=false`. Hook stdout/exit behavior and mutating-command output defaults remain unchanged.
 
 Live Claude/Codex registration, shell setup, bootstrap Relay activation, and provider-paid contact remain separate operator work. An inherited launch claim is required for rich admission; tty presence alone is not an execution-generation proof.
 

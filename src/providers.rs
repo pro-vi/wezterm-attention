@@ -55,10 +55,18 @@ pub struct HookDescription {
 
 pub fn describe_hooks(provider: &str) -> crate::protocol::Result<HookDescription> {
     let protocol = manifest()?;
-    let hooks = protocol
-        .native_hooks
-        .get(provider)
-        .ok_or_else(|| AttentionError::usage("--provider is not supported"))?;
+    let hooks = protocol.native_hooks.get(provider).ok_or_else(|| {
+        AttentionError::usage(format!(
+            "--provider is not supported; expected one of: {}",
+            protocol
+                .enums
+                .providers
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    })?;
     Ok(HookDescription {
         manifest_schema: protocol.manifest_schema,
         wire_version: protocol.wire_version,
