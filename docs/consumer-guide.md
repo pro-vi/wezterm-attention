@@ -17,16 +17,16 @@ Use the full pane object. A server pane ID alone is not globally unique across m
 | Fields | Meaning |
 |---|---|
 | `type` | Existing display winner after activity/review priority |
-| `activity_type`, `event_id`, `source`, `puppet` | Eligible lead activity, independently of review |
+| `activity_type`, `event_id`, `source` | Eligible lead activity, independently of review |
 | `review`, `subagents` | Owner-scoped review presence and eligible child count |
 | `provider`, `binding_id`, `binding_phase` | Validated provider binding; a quiet binding can still identify its provider |
 | `address`, `launch_id`, `marker_id` | Full realm/incarnation/pane address, launch, and compatibility marker ID |
 | `pane_presence`, `reader_confidence`, `binding_health` | Read assessment; preserve uncertainty instead of treating it as absence |
 | `lifecycle` | Optional bounded observations and derived request evidence |
 
-These are sixteen base fields plus the lifecycle facet. Nil remains nil and false remains false. Internal records, cache keys, formatter state, deadlines, and root diagnostics are private. The old `get_attention` six-value API remains unchanged.
+These are fifteen base fields plus the lifecycle facet. Nil remains nil and false remains false. Internal records, cache keys, formatter state, deadlines, and root diagnostics are private. The scalar `get_attention` keeps six positions; its fourth return is reserved and always false. The full view has no corresponding field.
 
-`puppet` exposes the value already cached. This change does not implement the separate producer-side provenance work. Consumers choose whether puppet activity matters; the bundled `show_puppet` option retains its own display policy.
+Controller ownership and permissions belong to consumers. Key application-owned policy by the full address, launch and binding identity from `get_attention_view` or `PaneFacts`; use `on_view_change` to refresh custom presentation. Attention records and views contain no controller-ownership flag, and the bundled renderer does not filter activity by controller ownership.
 
 ## Lifecycle availability
 
@@ -115,7 +115,7 @@ For publication, `hooks publish --socket <PATH>` is preferred. The path-valued `
 
 ## Public consumer contracts
 
-CLI envelopes and `HookDelivery` use consumer schema **1**. Package metadata uses manifest schema **2**; record schema **2** and wire version **2** are unchanged. Ship the manifest with its matching Rust/Lua readers. The following interfaces are source capabilities, not evidence that a machine has registered or activated them.
+CLI envelopes and `HookDelivery` use consumer schema **1**. Package metadata uses manifest schema **2**; records now use schema **3**, while pane identity wire version **2** is unchanged. Schema-2 records are rejected without rewriting or deleting them. Activation requires a fresh Attention state root and fresh sessions started through supported launchers; do not mix old and new writers in one root. Legacy flat markers remain readable; unrelated extra marker fields are ignored. Ship the manifest with its matching Rust/Lua readers. The following interfaces are source capabilities, not evidence that a machine has registered or activated them.
 
 ### Registration description
 

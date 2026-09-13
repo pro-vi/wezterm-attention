@@ -21,7 +21,7 @@ return function(context)
         and data.publication_id ~= "" and data.publication_id or nil
       local source = type(data.source) == "string" and data.source ~= "" and data.source or nil
       return data.type, data.frame, normalize_epoch_ms(data.updated_at or data.updated_at_ms),
-        data.ttl_ms, content, publication_id, source, data.puppet == true
+        data.ttl_ms, content, publication_id, source
     end
 
     -- Fallback: plain text (backward compat)

@@ -347,18 +347,18 @@ local attention = wezterm.plugin.require("https://github.com/pro-vi/wezterm-atte
 local marker_id = attention.pane_marker_id(pane)
 
 -- Read cached attention state:
--- returns (type, frame, source, puppet, subagents, review) or nil.
+-- returns (type, frame, source, reserved, subagents, review) or nil.
 -- source is the marker's JSON "source" string (nil when it carried none);
--- puppet is true only when the marker set "puppet": true;
+-- reserved is always false; it preserves the positions of later tuple values;
 -- subagents is how many of the pane's subagents ran a tool call in the last
 -- ten minutes, 0 when none. A pane with live subagents and no marker returns
 -- (nil, nil, nil, false, n).
 -- review is true when the pane carries the Alt+B flag. state is the effective
 -- type: "review" when the flag outranks the marker file, the marker's own type
 -- when that outranks the flag -- and then review is still true.
-local state, frame, source, puppet, subagents, review = attention.get_attention(marker_id)
+local state, frame, source, reserved, subagents, review = attention.get_attention(marker_id)
 
--- Read sixteen cached base fields plus independent lifecycle evidence, without
+-- Read fifteen cached base fields plus independent lifecycle evidence, without
 -- I/O. Nested returned values do not share mutable state with the plugin cache.
 local view = attention.get_attention_view(pane)
 

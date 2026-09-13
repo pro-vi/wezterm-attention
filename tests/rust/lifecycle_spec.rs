@@ -614,7 +614,7 @@ fn tool_post_failure_and_future_snapshot_preserve_badge_identity() {
         true
     );
     let mut future = snapshot;
-    future["schema"] = json!(3);
+    future["schema"] = json!(4);
     let future_bytes = serde_json::to_vec(&future).unwrap();
     fs::write(directory.join("lifecycle.json"), &future_bytes).unwrap();
     let result = setup.apply(

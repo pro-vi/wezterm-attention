@@ -65,7 +65,7 @@ The flat activity projection writes `updated_at` in seconds and `updated_at_ms` 
 
 A valid v2 claim selects v2. Invalid or future v2 is reported and never downgraded to plausible v1.
 V1 is read only when no v2 claim exists. The public Lua query remains six values:
-`type, frame, source, puppet, subagents, review`. Without an explicit legacy directory, `get_attention(id)` returns unavailable (`nil`) when the scalar ID is observed at multiple full pane addresses. `get_attention_view(pane)` selects the exact pane instead.
+`type, frame, source, reserved, subagents, review`. Without an explicit legacy directory, `get_attention(id)` returns unavailable (`nil`) when the scalar ID is observed at multiple full pane addresses. `get_attention_view(pane)` selects the exact pane instead. The fourth return is reserved and always false; controller ownership is not an Attention fact.
 
 For a v2 pane, focusing the active pane writes an exact acknowledgement for the displayed activity
 event. `Alt+B` writes the `user` owner claim under that pane's full address. Its clear-all action
@@ -76,11 +76,11 @@ Acknowledgement records are Lua-owned. Rust validates and prunes them during rea
 
 ## Consumer boundary
 
-`get_attention_view(pane)` exposes sixteen copied base fields plus an independent cached `lifecycle` facet. See the [consumer guide](consumer-guide.md) for exact availability, request/publication relations, acknowledgement meaning, and display ownership. No `answered`, `currently_waiting`, or complete pending-count claim is made.
+`get_attention_view(pane)` exposes fifteen copied base fields plus an independent cached `lifecycle` facet. See the [consumer guide](consumer-guide.md) for exact availability, request/publication relations, acknowledgement meaning, and display ownership. No `answered`, `currently_waiting`, or complete pending-count claim is made.
 
 Lifecycle evidence stays outside `activity.json` because adding request IDs to activity would change `semantic_activity` equality and could redisplay an acknowledged badge. `append_observation` and the request/focus/result tests enforce that separation. Revisit it only if badge identity is deliberately redesigned, not to simplify one consumer.
 
-`lifecycle.json` has schema 2 and kind `lifecycle_snapshot`. Its full address, launch, binding and provider scope a closed fourteen-kind observation union. Each of its required request/general pools has a separate 64-entry/122,880-byte budget and optional monotonic retention floor. One observation is at most 2,048 compact UTF-8 bytes; the file read is bounded at 262,144 bytes plus one overflow-detection byte before decoding, with at most eight container levels. Both pools and floors are validated and replaced together. The lifecycle file has no TTL.
+`lifecycle.json` has schema 3 and kind `lifecycle_snapshot`. Its full address, launch, binding and provider scope a closed fourteen-kind observation union. Each of its required request/general pools has a separate 64-entry/122,880-byte budget and optional monotonic retention floor. One observation is at most 2,048 compact UTF-8 bytes; the file read is bounded at 262,144 bytes plus one overflow-detection byte before decoding, with at most eight container levels. Both pools and floors are validated and replaced together. The lifecycle file has no TTL.
 
 Unknown fields, nulls, object-shaped arrays, invalid nested child digests, wrong pool membership, duplicate identities, below-floor members, and incompatible provider/tool/question-mode tuples are rejected. Native elicitation correlation includes the MCP server namespace. A local receipt UUID cannot stand in for a native request identifier.
 

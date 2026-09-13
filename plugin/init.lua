@@ -52,10 +52,6 @@ local defaults = {
   -- Optional provider suffix. Off preserves the shipped title shape.
   show_provider = false,
 
-  -- Consumers that distinguish puppet activity may hide only that activity;
-  -- review claims and subagent counts remain independent.
-  show_puppet = true,
-
   -- Base-title sources: server name, then directory, then a two-poll settled
   -- process title. The raw process title is never read by the formatter.
   show_directory = true,
@@ -463,9 +459,6 @@ function M.apply_to_config(config, opts)
   if request_redraw == nil then request_redraw = defaults.request_redraw end
   M._active_request_redraw = request_redraw ~= false
   M._active_show_provider = opts.show_provider == true
-  local show_puppet = opts.show_puppet
-  if show_puppet == nil then show_puppet = defaults.show_puppet end
-  M._active_show_puppet = show_puppet ~= false
   local show_directory = opts.show_directory
   if show_directory == nil then show_directory = defaults.show_directory end
   M._active_show_directory = show_directory ~= false

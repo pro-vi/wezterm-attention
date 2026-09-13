@@ -1,7 +1,7 @@
 {
   "manifest_schema": 2,
   "wire_version": 2,
-  "record_schema": 2,
+  "record_schema": 3,
   "writer_version": "2.0.0",
   "native_hooks": {
     "claude": {
@@ -907,7 +907,7 @@
       }
     },
     "activity": {
-      "required": ["kind", "schema", "address", "launch_id", "target", "event_id", "type", "source", "puppet", "observed_mono_ns", "written_at_unix_ns"],
+      "required": ["kind", "schema", "address", "launch_id", "target", "event_id", "type", "source", "observed_mono_ns", "written_at_unix_ns"],
       "optional": ["frame", "label", "ttl_ms"],
       "types": {
         "kind": "record_kind",
@@ -918,7 +918,6 @@
         "event_id": "uuid",
         "type": "activity_type",
         "source": "safe_label",
-        "puppet": "boolean",
         "observed_mono_ns": "monotonic_ns20",
         "written_at_unix_ns": "unix_ns20",
         "frame": "nonnegative_integer",
