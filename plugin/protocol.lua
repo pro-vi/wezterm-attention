@@ -64,11 +64,34 @@ return function(context)
 
   local protocol
   local protocol_load_error
+  local function valid_tool_classification(parsed)
+    local declarations = parsed.tool_classification
+    if type(declarations) ~= "table" then return false end
+    local providers = {}
+    for _, provider in ipairs(parsed.enums and parsed.enums.providers or {}) do
+      providers[provider] = true
+      if type(declarations[provider]) ~= "table" then return false end
+    end
+    for provider, tools in pairs(declarations) do
+      if not providers[provider] or type(tools) ~= "table" then return false end
+      for name, class in pairs(tools) do
+        if type(name) ~= "string" or #name == 0 or #name > parsed.limits.safe_label_max_bytes
+            or name:find("[%z\1-\31\127]") or type(class) ~= "table" then return false end
+        for key in pairs(class) do if key ~= "tool_class" and key ~= "question_mode" then return false end end
+        if class.tool_class == "question" then
+          if class.question_mode ~= "blocking" and class.question_mode ~= "nonblocking" then return false end
+        elseif (class.tool_class ~= "generic" and class.tool_class ~= "permission") or class.question_mode ~= nil then return false end
+      end
+    end
+    return true
+  end
   if protocol_path then
     local raw, read_err = read_all(protocol_path)
     if raw then
       local parsed, parse_err = decode_json(raw)
       if type(parsed) == "table"
+          and parsed.manifest_schema == 2
+          and type(parsed.tool_classification) == "table"
           and type(parsed.limits) == "table"
           and type(parsed.enums) == "table"
           and type(parsed.records) == "table"
@@ -76,7 +99,10 @@ return function(context)
           and type(parsed.digests) == "table"
           and parsed.digests.algorithm == "sha256"
           and parsed.digests.encoding == "lowercase_hex"
-          and type(parsed.limits.canonical_decimal_max_digits) == "number" then
+          and type(parsed.limits.canonical_decimal_max_digits) == "number"
+          and type(parsed.limits.safe_label_max_bytes) == "number"
+          and type(parsed.enums.providers) == "table"
+          and valid_tool_classification(parsed) then
         protocol = parsed
       else
         protocol_load_error = parse_err or "manifest is not a protocol object"
@@ -486,9 +512,9 @@ return function(context)
   end
 
   local function classify_lifecycle_tool(provider, tool_name)
-    if (provider == "claude" and tool_name == "AskUserQuestion") or (provider == "codex" and tool_name == "request_user_input") then return "question", "blocking" end
-    if provider == "codex" and tool_name == "request_user_input_async" then return "question", "nonblocking" end
-    if provider == "codex" and tool_name == "request_permissions" then return "permission", nil end
+    local tools = protocol and protocol.tool_classification[provider]
+    local class = tools and tools[tool_name]
+    if class then return class.tool_class, class.question_mode end
     return "generic", nil
   end
 

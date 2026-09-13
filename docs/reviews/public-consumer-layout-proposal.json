@@ -1,0 +1,61 @@
+{
+  "status": "proposed; not an implemented API or a second authority",
+  "authority": "docs/plans/2026-09-12-001-feat-public-consumer-contracts-plan.md",
+  "decision": "Use the existing record/getter field names below for the plan's new public representations. No new CLI flags or lifecycle meanings are proposed.",
+  "NativeHookSpec": {
+    "unit": "U1",
+    "source_evidence": ["src/providers.rs::parse_claude_or_codex", "src/providers.rs::parse_pi", "src/main.rs::Response", "docs/reviews/lifecycle-contact-results.md"],
+    "describe_result_fields": ["manifest_schema", "wire_version", "record_schema", "writer_version", "provider", "native_hooks"],
+    "hook_fields": ["native_event", "arguments", "requires_launch_identity", "registration", "evidence"],
+    "registration_values": ["register", "ignored"],
+    "arguments_example": ["hooks", "event", "codex", "Stop"],
+    "evidence": "References to checked parser/fixture/contact documents; never a live activation claim",
+    "pi": "Include extension_entrypoint=pi/index.ts and describe extension events; no settings-file recipe"
+  },
+  "PaneScope": {
+    "unit": "U2",
+    "fields": ["address", "launch_id", "binding_id"],
+    "optional": ["binding_id"],
+    "meaning": "launch_id and optional binding_id are expectations; a changed occupant is reported, never followed"
+  },
+  "PaneFacts": {
+    "unit": "U2",
+    "source_evidence": ["src/query.rs::BindingRow", "plugin/runtime.lua::get_attention_view", "plugin/reader.lua::lifecycle_facet"],
+    "fields": ["scope", "scope_relation", "binding", "pane_presence", "reader_confidence", "binding_health", "activity", "binding_end", "children", "review", "lifecycle"],
+    "scope_relation_values": ["matched", "launch_changed", "binding_changed", "unavailable"],
+    "record_facet_fields": ["availability", "record", "diagnostics"],
+    "record_facet_values": ["present", "absent", "unavailable", "invalid", "unsupported"],
+    "activity_additional_values": ["cleared", "expired"],
+    "children_fields": ["availability", "count", "evidence", "coverage", "diagnostics"],
+    "lifecycle": "Reuse existing Lua availability, coverage, observations, requests, retention_floors, diagnostics, snapshot_id and badge_acknowledgement names; exclude cached from headless availability"
+  },
+  "HookDelivery": {
+    "unit": "U3",
+    "source_evidence": ["src/lifecycle.rs::LifecycleResult", "src/lifecycle.rs::ResolvedLaunch", "src/lifecycle.rs::apply_observed_outputs_with", "src/observations.rs::LifecycleObservation"],
+    "fields": ["schema", "delivery_id", "scope", "provider", "provider_session_id", "source_event", "actor", "correlation", "observation_id", "persistence", "reply"],
+    "scope_fields": ["address", "launch_id", "target"],
+    "target": "Existing binding target with binding_id; not a controller grant",
+    "optional": ["correlation", "observation_id"],
+    "persistence_fields": ["activity", "compatibility", "lifecycle"],
+    "persistence_values": ["not_requested", "confirmed", "rejected", "unconfirmed"],
+    "reply_fields": ["availability", "text"],
+    "reply_values": ["not_requested", "available", "absent", "unsupported", "invalid", "too_large"],
+    "text": "Present exactly when availability is available; excluded from diagnostics and stored facts",
+    "consumer_outcome_fields": ["executable", "stage", "exit_code", "effect"],
+    "consumer_stage_values": ["not_dispatched", "not_started", "completed", "failed", "timed_out", "stdin_failed"],
+    "consumer_effect_values": ["none", "possible"],
+    "exit_code": "Present only when the started child supplies an exit code"
+  },
+  "ViewChange": {
+    "unit": "U4",
+    "source_evidence": ["plugin/runtime.lua::get_attention_view", "plugin/reader.lua::read_attention_view", "plugin/init.lua::apply_to_config"],
+    "initial_and_updated_fields": ["kind", "window_id", "scope", "view"],
+    "scope_lost_fields": ["kind", "window_id", "previous_scope"],
+    "kind_values": ["initial", "updated", "scope_lost"],
+    "scope_fields": ["address", "launch_id", "target"],
+    "target": "Existing launch or binding target; independent from GUI-local window_id",
+    "view": "Detached existing get_attention_view projection"
+  },
+  "tradeoff": "These explicit layouts add public field names that consumers will rely on. Reusing current names reduces translation; separate availability and effect fields preserve distinct meanings.",
+  "held_actions": "Pinning and implementing these public serialized layouts in U1-U5; U7's already specified layout and internal metadata work remain independent"
+}

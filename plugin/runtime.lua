@@ -346,7 +346,7 @@ return function()
       argv[#argv + 1] = root .. "/bin/attention"
       argv[#argv + 1] = "hooks"
       argv[#argv + 1] = "publish"
-      argv[#argv + 1] = "--realm"
+      argv[#argv + 1] = "--socket"
       argv[#argv + 1] = socket
       argv[#argv + 1] = "--quiet"
       local ok, started = pcall(wezterm.background_child_process, argv)

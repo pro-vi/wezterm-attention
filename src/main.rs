@@ -71,6 +71,10 @@ struct OutputArgs {
 
 #[derive(Clone, Debug, Args)]
 struct PublishArgs {
+    /// Existing socket path (preferred spelling).
+    #[arg(long, conflicts_with = "realm")]
+    socket: Option<String>,
+    /// Compatibility alias for --socket; this value is a path, not a realm ID.
     #[arg(long)]
     realm: Option<String>,
     #[arg(long)]
@@ -87,6 +91,9 @@ struct BindingsArgs {
     json: bool,
     #[arg(long)]
     realm: Option<String>,
+    /// Restrict discovery to this existing socket's exact incarnation.
+    #[arg(long, conflicts_with = "realm")]
+    socket: Option<String>,
     #[arg(long)]
     provider: Option<String>,
     #[arg(long, default_value_t = 100)]
@@ -150,6 +157,15 @@ fn emit<T: Serialize>(response: &Response<T>, as_json: bool, quiet: bool) {
 }
 
 fn emit_error(error: &AttentionError, as_json: bool, command: &str) -> ExitCode {
+    emit_error_with_complete(error, as_json, command, true)
+}
+
+fn emit_error_with_complete(
+    error: &AttentionError,
+    as_json: bool,
+    command: &str,
+    complete: bool,
+) -> ExitCode {
     if as_json {
         let response = Response {
             schema: 1,
@@ -160,7 +176,7 @@ fn emit_error(error: &AttentionError, as_json: bool, command: &str) -> ExitCode 
                 "unavailable"
             }
             .to_owned(),
-            complete: true,
+            complete,
             result: serde_json::json!({}),
             diagnostics: vec![error.diagnostic.clone()],
         };
@@ -285,12 +301,13 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     "hooks publish".to_owned(),
                 ));
             }
-            let mut report = match args.realm.as_deref() {
+            let selected_socket = args.socket.as_deref().or(args.realm.as_deref());
+            let mut report = match selected_socket {
                 Some(socket) => wezterm_attention::publish_realm(socket, &environment, &ports),
                 None => wezterm_attention::publish_current(&environment, &ports),
             }
             .map_err(|error| (Box::new(error), args.json, "hooks publish".to_owned()))?;
-            if args.realm.is_none()
+            if selected_socket.is_none()
                 && environment
                     .get("WEZTERM_ATTENTION_LAUNCH_ID")
                     .is_some_and(|value| !value.is_empty())
@@ -431,6 +448,10 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             })
         }
         Some(Command::Bindings(args)) => {
+            if let Some(socket) = &args.socket {
+                wezterm_attention::query::validate_socket_selector(socket)
+                    .map_err(|error| (Box::new(error), args.json, "bindings".to_owned()))?;
+            }
             if !(1..=1000).contains(&args.limit) {
                 return Err((
                     Box::new(AttentionError::usage("--limit must be between 1 and 1000")),
@@ -462,11 +483,37 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     "bindings".to_owned(),
                 ));
             }
-            let root = wezterm_attention::records::state_root(&environment)
-                .map_err(|error| (Box::new(error), args.json, "bindings".to_owned()))?;
-            let (mut rows, diagnostics) =
-                read_bindings_with_ports(&root, Some(&panes), Some(&processes))
-                    .map_err(|error| (Box::new(error), args.json, "bindings".to_owned()))?;
+            let root = match wezterm_attention::records::state_root(&environment) {
+                Ok(root) => root,
+                Err(error) if args.socket.is_some() => {
+                    return Ok(emit_error_with_complete(
+                        &error, args.json, "bindings", false,
+                    ));
+                }
+                Err(error) => return Err((Box::new(error), args.json, "bindings".to_owned())),
+            };
+            let (scope, mut rows, diagnostics) = if let Some(socket) = &args.socket {
+                let (scope, rows, diagnostics) =
+                    match wezterm_attention::query::read_bindings_for_socket_with_ports(
+                        &root,
+                        socket,
+                        Some(&wezterm_attention::wezterm::ExistingWeztermPaneLister),
+                        Some(&processes),
+                    ) {
+                        Ok(result) => result,
+                        Err(error) => {
+                            return Ok(emit_error_with_complete(
+                                &error, args.json, "bindings", false,
+                            ));
+                        }
+                    };
+                (Some(scope), rows, diagnostics)
+            } else {
+                let (rows, diagnostics) =
+                    read_bindings_with_ports(&root, Some(&panes), Some(&processes))
+                        .map_err(|error| (Box::new(error), args.json, "bindings".to_owned()))?;
+                (None, rows, diagnostics)
+            };
             if let Some(realm) = args.realm {
                 rows.retain(|row| row.address.realm_id == realm);
             }
@@ -479,12 +526,16 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             }
             let returned = rows.len();
             let truncated = returned < scanned;
-            let result = serde_json::json!({
+            let mut result = serde_json::json!({
                 "rows": rows,
                 "scanned": scanned,
                 "returned": returned,
                 "truncated": truncated,
             });
+            let socket_mode = scope.is_some();
+            if let Some(scope) = scope {
+                result["scope"] = serde_json::to_value(scope).expect("scope serializes");
+            }
             emit(
                 &Response {
                     schema: 1,
@@ -495,7 +546,12 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                         "findings"
                     }
                     .to_owned(),
-                    complete: !truncated && diagnostics.len() <= 50,
+                    complete: !truncated
+                        && if socket_mode {
+                            diagnostics.is_empty()
+                        } else {
+                            diagnostics.len() <= 50
+                        },
                     result,
                     diagnostics: diagnostics.iter().take(50).cloned().collect(),
                 },
@@ -504,6 +560,15 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             );
             Ok(if diagnostics.is_empty() {
                 ExitCode::SUCCESS
+            } else if socket_mode
+                && diagnostics.iter().any(|item| {
+                    matches!(
+                        item.code.as_str(),
+                        "probe_unavailable" | "realm_unavailable"
+                    )
+                })
+            {
+                ExitCode::from(3)
             } else {
                 ExitCode::from(1)
             })

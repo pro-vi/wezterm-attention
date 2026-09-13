@@ -88,6 +88,7 @@ pub struct Manifest {
     pub wire_version: u64,
     pub record_schema: u64,
     pub writer_version: String,
+    pub tool_classification: BTreeMap<String, BTreeMap<String, ToolClassification>>,
     pub digests: DigestRecipes,
     pub limits: Limits,
     pub enums: Enums,
@@ -97,6 +98,13 @@ pub struct Manifest {
     pub lifecycle_variants: BTreeMap<String, ShapeSpec>,
     pub lifecycle_enums: BTreeMap<String, BTreeSet<String>>,
     pub lifecycle_sources: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolClassification {
+    pub tool_class: crate::observations::ToolClass,
+    pub question_mode: Option<crate::observations::QuestionMode>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -227,10 +235,31 @@ pub fn parse_manifest(source: &str) -> Result<Manifest> {
             format!("manifest is invalid: {error}"),
         )
     })?;
-    if parsed.manifest_schema != 1 {
+    if parsed.manifest_schema != 2 {
         return Err(AttentionError::new(
             "integration_version_mismatch",
             "manifest schema is unsupported",
+        ));
+    }
+    if parsed
+        .tool_classification
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        != parsed.enums.providers
+        || parsed.tool_classification.values().any(|tools| {
+            tools.iter().any(|(name, class)| {
+                name.is_empty()
+                    || name.len() > parsed.limits.safe_label_max_bytes
+                    || name.chars().any(|c| c < ' ' || c == '\u{7f}')
+                    || (class.tool_class == crate::observations::ToolClass::Question)
+                        != class.question_mode.is_some()
+            })
+        })
+    {
+        return Err(AttentionError::new(
+            "integration_version_mismatch",
+            "manifest tool classification is invalid",
         ));
     }
     if parsed.digests.algorithm != "sha256" || parsed.digests.encoding != "lowercase_hex" {
@@ -620,4 +649,41 @@ pub fn eligible_subagent_presence(
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+#[cfg(test)]
+mod consumer_manifest_tests {
+    use super::*;
+    use crate::observations::{QuestionMode, ToolClass, classify_tool};
+
+    #[test]
+    fn classifications_keep_exact_names_and_reject_mixed_manifests() {
+        assert_eq!(
+            classify_tool("claude", "AskUserQuestion"),
+            (ToolClass::Question, Some(QuestionMode::Blocking))
+        );
+        assert_eq!(
+            classify_tool("codex", "request_user_input_async"),
+            (ToolClass::Question, Some(QuestionMode::Nonblocking))
+        );
+        assert_eq!(
+            classify_tool("codex", "request_permissions"),
+            (ToolClass::Permission, None)
+        );
+        for (provider, name) in [
+            ("pi", "AskUserQuestion"),
+            ("codex", "request_user_input_async_extra"),
+            ("unknown", "request_permissions"),
+        ] {
+            assert_eq!(classify_tool(provider, name), (ToolClass::Generic, None));
+        }
+        let baseline: Value = serde_json::from_str(EMBEDDED_MANIFEST).unwrap();
+        let mut old = baseline.clone();
+        old["manifest_schema"] = Value::from(1);
+        assert!(parse_manifest(&old.to_string()).is_err());
+        let mut invalid = baseline;
+        invalid["tool_classification"]["codex"]["request_permissions"]["question_mode"] =
+            Value::from("blocking");
+        assert!(parse_manifest(&invalid.to_string()).is_err());
+    }
 }

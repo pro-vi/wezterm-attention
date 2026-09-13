@@ -19,6 +19,9 @@ use wezterm_attention::wezterm::{
     Clock, PaneLister, PaneRow, Presence, ProcessProbe, RuntimePorts, TtyWriter,
 };
 
+#[path = "bindings_socket_spec.rs"]
+mod bindings_socket_spec;
+
 struct Scratch(PathBuf);
 
 impl Scratch {
