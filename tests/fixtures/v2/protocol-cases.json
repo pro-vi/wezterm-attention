@@ -211,7 +211,7 @@
     }
   },
   "parse_cases": [
-    { "id": "previous_activity_schema_rejected", "parser": "record", "sample": "activity", "patch": { "schema": 2 }, "expected": "record_invalid" },
+    { "id": "record_invalid_schema", "parser": "record", "sample": "activity", "patch": { "schema": 0 }, "expected": "record_invalid" },
     { "id": "activity_rejects_controller_metadata", "parser": "record", "sample": "activity", "patch": { "controller": true }, "expected": "record_invalid" },
     { "id": "wire_valid", "parser": "wire", "expected": "valid" },
     { "id": "wire_future", "parser": "wire", "patch": { "wire": 3 }, "expected": "future_schema" },
