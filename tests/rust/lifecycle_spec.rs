@@ -23,6 +23,74 @@ use wezterm_attention::wezterm::{Clock, PaneLister, PaneRow, RuntimePorts, TtyWr
 
 struct Scratch(PathBuf);
 
+#[test]
+fn c2_plain_text_projection_is_repairable() {
+    let setup = Setup::new();
+    setup.claim();
+    setup.apply(
+        &event(
+            "claude",
+            "SessionStart",
+            "repair",
+            json!({"source":"startup"}),
+        ),
+        "00000000000000000200",
+    );
+    let marker = state_root(&setup.env).unwrap().join("42");
+    fs::write(&marker, "thinking\n").unwrap();
+    let result = apply_provider_event(
+        &event("claude", "Stop", "repair", json!({})),
+        &setup.env,
+        "00000000000000000300",
+        &setup.ports(),
+    );
+    assert!(
+        result.is_ok(),
+        "legacy marker blocked projection: {result:?}"
+    );
+    let projected: Value = serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+    assert_eq!(projected["type"], "stop");
+}
+
+#[test]
+fn c6_incomplete_agent_inventory_preserves_projection() {
+    let setup = Setup::new();
+    setup.claim();
+    setup.apply(
+        &event(
+            "claude",
+            "SessionStart",
+            "inventory",
+            json!({"source":"startup"}),
+        ),
+        "00000000000000000200",
+    );
+    let root = state_root(&setup.env).unwrap();
+    let dir = setup.binding_dir("claude", "inventory");
+    let agents = dir.join("agents");
+    if agents.exists() {
+        fs::remove_dir(&agents).unwrap();
+    }
+    fs::write(&agents, "not a directory").unwrap();
+    let sidecar = root.join("42.agents");
+    let prior = br#"{"agents":{"known":{"type":"claude","last_ms":123}}}"#;
+    fs::write(&sidecar, prior).unwrap();
+    let (address, _) = pane_address(&setup.env).unwrap();
+    let launch = &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"];
+    let result = wezterm_attention::compat::reconcile_agents(
+        &root,
+        &address,
+        launch,
+        &binding_id("claude", "inventory", launch),
+        &dir,
+    );
+    assert!(
+        result.is_err(),
+        "inventory failure became empty: {result:?}"
+    );
+    assert_eq!(fs::read(sidecar).unwrap(), prior);
+}
+
 impl Scratch {
     fn new() -> Self {
         let path = PathBuf::from("/tmp").join(format!("wl-{}", Uuid::new_v4().simple()));

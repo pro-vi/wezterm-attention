@@ -18,7 +18,7 @@ attention.apply_to_config(config, {
 })
 ```
 
-The plugin exports `WEZTERM_ATTENTION_ROOT` and `WEZTERM_ATTENTION_DIR` to new panes. After a GUI attaches to an existing mux, it waits for two polls with the same pane count, republishes valid claims, and retries after 2, 5, 10, and 30 seconds while any pane remains unpublished. One schedule is shared per socket. The child PATH includes WezTerm's executable directory.
+The plugin exports `WEZTERM_ATTENTION_ROOT` and `WEZTERM_ATTENTION_DIR` to new panes. After a GUI attaches to an existing mux, it waits for two polls with the same pane count, republishes valid claims, and retries after 2, 5, 10, and 30 seconds while any pane remains unpublished. One schedule is shared per socket. The child PATH includes WezTerm's executable directory. A timer rechecks GUI-window inventory before retrying. If inventory is unavailable, another pane poll must renew the unpublished observation; otherwise that retry is retired. Fresh polls can restart publication. This retires retry evidence, not pane state.
 
 Publication validates the socket, pane ID, tty owner, character-device type, claim, and opened tty fingerprint. It writes terminal output only; it never writes pane input.
 

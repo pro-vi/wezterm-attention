@@ -44,6 +44,46 @@ return function()
     local gui_tab_pane_ids = context.gui_tab_pane_ids
     local resolve_visible_attention = context.resolve_visible_attention
 
+    local function rebuild_scalar_projection()
+      for id in pairs(legacy_cache_key_by_marker_id) do legacy_cache_key_by_marker_id[id] = nil end
+      for _, observations in pairs(seen_marker_ids_by_window) do
+        for key, observation in pairs(observations) do
+          local id = type(observation) == "table" and observation.marker_id or key
+          local previous = legacy_cache_key_by_marker_id[id]
+          if previous == nil then legacy_cache_key_by_marker_id[id] = key
+          elseif previous ~= key then legacy_cache_key_by_marker_id[id] = false end
+        end
+      end
+    end
+
+    local function observed_in_other_window(key, window_key)
+      for other_window, observations in pairs(seen_marker_ids_by_window) do
+        if other_window ~= window_key and observations[key] then return true end
+      end
+      return false
+    end
+
+    local function observe_pane(window, pane, read)
+      if not read.cache_key or (read.kind ~= "v1" and read.kind ~= "v2") then return end
+      local window_key = tostring(window:window_id())
+      local local_id = tostring(pane_method(pane, "pane_id"))
+      local observations = seen_marker_ids_by_window[window_key] or {}
+      for key, previous in pairs(observations) do
+        if key ~= read.cache_key and type(previous) == "table" and previous.local_id == local_id then
+          observations[key] = nil
+          if not observed_in_other_window(key, window_key) then attention_cache[key] = nil end
+        end
+      end
+      observations[read.cache_key] = {
+        kind = read.kind, marker_id = read.marker_id,
+        domain = pane_method(pane, "get_domain_name") or "?",
+        local_id = local_id,
+      }
+      marker_id_by_local[local_id] = read.cache_key
+      seen_marker_ids_by_window[window_key] = observations
+      rebuild_scalar_projection()
+    end
+
     local function same_cached_attention(a, b)
       if not a or not b then return a == b end
       return a.type == b.type
@@ -369,6 +409,9 @@ return function()
       -- The callback's window is authoritative even if WezTerm's inventory is
       -- between insertion and publication for a newly created GUI window.
       live[current_window_key] = true
+      for window_key in pairs(seen_marker_ids_by_window) do
+        if not live[window_key] then seen_marker_ids_by_window[window_key] = nil end
+      end
       for window_key in pairs(publish_domains_by_window) do
         if not live[window_key] then publish_domains_by_window[window_key] = nil end
       end
@@ -398,6 +441,22 @@ return function()
       call_after(delay, function()
         local current = publish_schedule_by_realm[schedule.socket]
         if current ~= schedule or current.token ~= token or not current.unpublished then return end
+        local live = gui_window_keys(opts)
+        for window_key, observation in pairs(current.window_observations) do
+          -- When inventory fails, only a new poll can renew this observation.
+          -- Retiring stale retry evidence does not declare the pane absent.
+          if (live and not live[window_key]) or (not live and not observation.fresh) then
+            current.window_observations[window_key] = nil
+            local domains = publish_domains_by_window[window_key]
+            if domains then
+              domains[current.domain] = nil
+              if next(domains) == nil then publish_domains_by_window[window_key] = nil end
+            end
+          else
+            observation.fresh = false
+          end
+        end
+        if not retain_publish_schedule(current) then return end
         spawn_republish(current.domain, current.socket, current.root)
         current.retry_index = current.retry_index + 1
         schedule_publish_retry(current, opts)
@@ -419,7 +478,7 @@ return function()
           root = root,
           window_observations = {
             [window_key] = {
-              pane_count = pane_count, stable_polls = 1, unpublished = true,
+              pane_count = pane_count, stable_polls = 1, unpublished = true, fresh = true,
             },
           },
           retry_index = 1,
@@ -435,11 +494,12 @@ return function()
       local observation = schedule.window_observations[window_key]
       if not observation then
         schedule.window_observations[window_key] = {
-          pane_count = pane_count, stable_polls = 1, unpublished = unpublished,
+          pane_count = pane_count, stable_polls = 1, unpublished = unpublished, fresh = true,
         }
         return false
       end
       local was_unpublished = observation.unpublished
+      observation.fresh = true
       observation.unpublished = unpublished
       if not unpublished then
         retain_publish_schedule(schedule)
@@ -462,6 +522,7 @@ return function()
       observation.stable_polls = observation.stable_polls + 1
       if observation.stable_polls < 2 then return false end
       schedule.started = true
+      for _, item in pairs(schedule.window_observations) do item.fresh = false end
       spawn_republish(domain, socket, root)
       schedule_publish_retry(schedule, opts)
       return true
@@ -518,6 +579,8 @@ return function()
     ---
     --- A pane with live subagents and no marker returns (nil, nil, nil, false, n):
     --- the count is real even though there is no marker type to report.
+    --- Without an explicit legacy dir, a scalar observed in multiple full
+    --- addresses returns nil. Use get_attention_view(pane) to disambiguate.
     function M.get_attention(marker_id, opts)
       local id = tostring(marker_id)
       if opts and opts.dir then
@@ -530,6 +593,7 @@ return function()
         return atype, frame, source, puppet, count_live_subagents(opts.dir, id, now), flagged
       end
       local mapped = legacy_cache_key_by_marker_id[id]
+      if mapped == false then return nil end -- More than one observed full address.
       local cached = mapped and attention_cache[mapped] or nil
       if not cached then cached = attention_cache[id] end
       if cached then
@@ -640,6 +704,7 @@ return function()
       local before = {}
       local before_titles = {}
       local seen = {}             -- cache key → identity and domain observed in this window
+      local live_local_ids = {}   -- GUI pane lifetime is independent of its storage key.
       local domains_present = {}  -- domain names this window still holds a pane of
       local pane_count_by_domain = {}
       local unpublished_by_domain = {}
@@ -680,6 +745,7 @@ return function()
           domains_present[domain] = true
           pane_count_by_domain[domain] = (pane_count_by_domain[domain] or 0) + 1
           local local_id = tostring(pane_method(p, "pane_id"))
+          live_local_ids[local_id] = true
           local read = resolve_pane_read(p)
           local key = read.cache_key
           marker_id_by_local[local_id] = key or false
@@ -699,7 +765,7 @@ return function()
               report_error_once("v2-clock:" .. local_id,
                 utc_error .. ": WezTerm UTC is unavailable; TTL-bearing v2 state is omitted")
             end
-            seen[key] = { domain = domain, kind = "v2", marker_id = read.marker_id }
+            seen[key] = { domain = domain, kind = "v2", marker_id = read.marker_id, local_id = local_id }
             pane_ids[#pane_ids + 1] = key
             before[key] = attention_cache[key]
             local view = read_attention_view(read, now_unix_ns, {
@@ -708,7 +774,6 @@ return function()
               previous_view = before[key],
             })
             attention_cache[key] = view
-            legacy_cache_key_by_marker_id[read.marker_id] = key
             for _, item in ipairs(view.diagnostics or {}) do
               report_error_once("v2:" .. key .. ":" .. item.code .. ":" .. item.message,
                 item.code .. ": " .. item.message)
@@ -719,8 +784,7 @@ return function()
             end
           elseif read.kind == "v1" then
             local id = read.marker_id
-            legacy_cache_key_by_marker_id[id] = nil
-            seen[id] = { domain = domain, kind = "v1", marker_id = id }
+            seen[id] = { domain = domain, kind = "v1", marker_id = id, local_id = local_id }
             pane_ids[#pane_ids + 1] = id
             before[id] = attention_cache[id]
             local atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source, puppet =
@@ -800,18 +864,20 @@ return function()
           local gone = type(gone_value) == "table" and gone_value
             or { domain = gone_value, kind = "v1", marker_id = gone_key }
           if not seen[gone_key] and domains_present[gone.domain] then
+            local shared = observed_in_other_window(gone_key, window_key)
             pane_ids[#pane_ids + 1] = gone_key
             before[gone_key] = attention_cache[gone_key]
-            if gone.kind == "v1" then
+            if not shared and gone.kind == "v1" and not (gone.local_id and live_local_ids[gone.local_id]) then
               remove_marker(dir, gone.marker_id)
-            elseif legacy_cache_key_by_marker_id[gone.marker_id] == gone_key then
-              legacy_cache_key_by_marker_id[gone.marker_id] = nil
             end
-            attention_cache[gone_key] = nil
+            if not shared then attention_cache[gone_key] = nil end
           end
         end
       end
       seen_marker_ids_by_window[window_key] = seen
+      -- A scalar cannot select one of several realms. Build this projection
+      -- from all observed windows, rather than letting poll/overlay order win.
+      rebuild_scalar_projection()
 
       if saw_v2 then
         schedule_ttl_wakeup(window, earliest_wakeup_unix_ns, poll_now_unix_ns, opts)
@@ -863,6 +929,7 @@ return function()
 
     return {
       same_cached_attention = same_cached_attention,
+      observe_pane = observe_pane,
       tab_panes_containing = tab_panes_containing,
       tab_panes_containing_read = tab_panes_containing_read,
       review_outranks = review_outranks,

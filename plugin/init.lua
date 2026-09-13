@@ -277,7 +277,6 @@ local read_attention_view = reader_api.read_attention_view
 local runtime_factory = assert(load_plugin_module("runtime"))
 local runtime_state = runtime_factory()
 local attention_cache = runtime_state.attention_cache
-local legacy_cache_key_by_marker_id = runtime_state.legacy_cache_key_by_marker_id
 local marker_id_by_local = runtime_state.marker_id_by_local
 local seen_marker_ids_by_window = runtime_state.seen_marker_ids_by_window
 local v2_overlays = overlays_api.bind_v2({
@@ -292,7 +291,6 @@ local v2_overlays = overlays_api.bind_v2({
   identity_diagnostic = identity_diagnostic,
   read_attention_view = read_attention_view,
   attention_cache = attention_cache,
-  legacy_cache_key_by_marker_id = legacy_cache_key_by_marker_id,
   wezterm_now_unix_ns20 = wezterm_now_unix_ns20,
 })
 local selected_v2_records_root = v2_overlays.selected_v2_records_root
@@ -583,6 +581,9 @@ function M.apply_to_config(config, opts)
           panes = tab_panes_containing_read(mux_win:tabs(), target_read)
         end
         panes = panes or { pane }
+        for _, observed_pane in ipairs(panes) do
+          runtime_api.observe_pane(win, observed_pane, resolve_pane_read(observed_pane))
+        end
 
         -- Decide and act on disk truth, never the cache. poll() rebuilds the
         -- cache from files every tick, so the cache can lag a flag another

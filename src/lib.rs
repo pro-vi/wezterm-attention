@@ -329,6 +329,13 @@ pub fn publish_realm(
                     .then(|| record.get("launch_id").and_then(Value::as_str))
                     .flatten()
             });
+            let (current_realm, current_incarnation, _) = identity::socket_identity(socket_path)?;
+            if current_realm != realm_id || current_incarnation != incarnation_id {
+                return Err(AttentionError::new(
+                    "incarnation_changed",
+                    "mux socket changed before pane publication",
+                ));
+            }
             ports.tty.write(
                 tty_name,
                 &publication_bytes(&address, launch_id)?,
