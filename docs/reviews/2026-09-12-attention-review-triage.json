@@ -1,0 +1,957 @@
+{
+  "review_brief": "a629978bc0e144238ab809fd455dcd62c0815c200b922d8219fe583e0fa89110",
+  "review_base": "4d3d0a5",
+  "verified_head": "f1fe828a679ef2c713c312e28ecad71becb081c8",
+  "raw_findings": [
+    {
+      "candidate_id": "C1",
+      "text": "P1 — plugin/runtime.lua:532 maps a scalar marker ID to the last v2 pane seen. Two realms can share a pane ID, so get_attention(id) can return another pane’s state. Return unavailable when that scalar is ambiguous."
+    },
+    {
+      "candidate_id": "C2",
+      "text": "P1 — src/records.rs:599 parses an existing v1 plain-text marker as JSON before replacing it with the v2 compatibility projection. An in-place upgrade leaves the stale marker and blocks projection repair."
+    },
+    {
+      "candidate_id": "C3",
+      "text": "P2 — pi/index.ts:294 passes an absent launch ID as the literal undefined. Rust rejects it rather than using matching-claim recovery. Direct probe confirmed Node produces WEZTERM_ATTENTION_LAUNCH_ID=undefined."
+    },
+    {
+      "candidate_id": "C4",
+      "text": "P2 — plugin/runtime.lua:802 treats a live pane moving from v1 identity to v2 identity as closed, deleting its v1 marker, acknowledgement, agent, and review sidecars."
+    },
+    {
+      "candidate_id": "C5",
+      "text": "P2 — plugin/protocol.lua:721 bounds lifecycle.json reads but reads all other v2 records with *a before enforcing max_json_bytes."
+    },
+    {
+      "candidate_id": "C6",
+      "text": "P2 — src/compat.rs:201 treats unreadable agent directories or entries as empty, which can erase or undercount the v1 .agents sidecar."
+    },
+    {
+      "candidate_id": "C7",
+      "text": "P2 — pi/index.ts:541 retains every queued Pi event behind a permanently blocked state write, with no memory bound."
+    },
+    {
+      "candidate_id": "C8",
+      "text": "P2 — src/lib.rs:289 checks mux socket identity before realm publication, but not during its per-pane TTY loop. A socket rebirth can publish a stale realm/incarnation."
+    },
+    {
+      "candidate_id": "C9",
+      "text": "P2 — plugin/runtime.lua:366 can retain a closed window’s unpublished-realm retry forever when GUI-window inventory is unavailable."
+    },
+    {
+      "candidate_id": "C10",
+      "text": "P2 — docs/record-contract.md:39 says every accepted transition is lock-guarded, while Lua acknowledgement and review operations are only per-file atomic operations."
+    }
+  ],
+  "records": [
+    {
+      "candidate_id": "C1",
+      "anchor": "plugin/runtime.lua:532",
+      "observation": "P1 — plugin/runtime.lua:532 maps a scalar marker ID to the last v2 pane seen. Two realms can share a pane ID, so get_attention(id) can return another pane’s state. Return unavailable when that scalar is ambiguous.",
+      "claimed_consequence": "Cross-pane state displayed.",
+      "proposed_remedy": "Return unavailable when the scalar is ambiguous.",
+      "evidence": [
+        {
+          "kind": "runtime",
+          "locator": "/tmp/attention-ten-triage.YGt2iW/lua-before.log",
+          "observed": "C1 returned a realm's view instead of nil after observing two realms with pane 42."
+        },
+        {
+          "kind": "test",
+          "locator": "tests/auto_clear_spec.lua:C1 scalar lookup refuses two full pane addresses; C1 first observation through Alt+B participates in scalar ambiguity; C1 C4 Alt+B replaces the same pane identity without deleting sidecars",
+          "observed": "Scalar ambiguity, same-address sharing, overlay-first discovery and same-pane replacement all pass."
+        }
+      ],
+      "fact_status": "CONFIRMED",
+      "reachability": "common-path",
+      "reachability_basis": "Multi-realm panes can share 42 during ordinary use.",
+      "invariant": "Scalar ID lookup must not choose among distinct live full addresses.",
+      "invariant_status": "anchored",
+      "change_relationship": "INTRODUCED",
+      "smallest_complete_fix": "Track distinct observed cache-key owners for each scalar and return nil on ambiguity, including overlay refresh.",
+      "fix_class": "LOCAL",
+      "risk_if_deferred": "Cross-pane state displayed.",
+      "risk_if_fixed_now": "Over-broad ambiguity retention could hide state after a pane closes.",
+      "merge_impact": "NON-BLOCK",
+      "disposition": "ACCEPT",
+      "action": "Implemented and focused proof passed. Track distinct observed cache-key owners for each scalar and return nil on ambiguity, including overlay refresh.",
+      "disproof": null,
+      "draft_response": "Confirmed under the recorded conditions; the complete local correction and focused regressions pass. The full repository gate and isolated timing confirmation now pass."
+    },
+    {
+      "candidate_id": "C2",
+      "anchor": "src/records.rs:599",
+      "observation": "P1 — src/records.rs:599 parses an existing v1 plain-text marker as JSON before replacing it with the v2 compatibility projection. An in-place upgrade leaves the stale marker and blocks projection repair.",
+      "claimed_consequence": "In-place upgrades preserve stale badges and fail hooks.",
+      "proposed_remedy": "Not supplied separately in the pasted finding.",
+      "evidence": [
+        {
+          "kind": "runtime",
+          "locator": "/tmp/attention-ten-triage.YGt2iW/c2-before.log",
+          "observed": "Production Stop failed with record_invalid and left thinking text instead of repairing the projection."
+        },
+        {
+          "kind": "test",
+          "locator": "tests/rust/lifecycle_spec.rs:c2_plain_text_projection_is_repairable",
+          "observed": "A real provider Stop replaces the existing thinking text marker with the valid compatibility projection."
+        }
+      ],
+      "fact_status": "CONFIRMED",
+      "reachability": "common-path",
+      "reachability_basis": "A supported existing plain marker is enough; no race needed.",
+      "invariant": "A valid legacy text marker must remain replaceable by its validated compatibility projection.",
+      "invariant_status": "anchored",
+      "change_relationship": "INTRODUCED",
+      "smallest_complete_fix": "Keep strict replacement validation for v2 records; use the v1 projection replacement boundary for flat compatibility output.",
+      "fix_class": "LOCAL",
+      "risk_if_deferred": "In-place upgrades preserve stale badges and fail hooks.",
+      "risk_if_fixed_now": "Weakening v2 future-schema preservation by mistake.",
+      "merge_impact": "NON-BLOCK",
+      "disposition": "ACCEPT",
+      "action": "Implemented and focused proof passed. Keep strict replacement validation for v2 records; use the v1 projection replacement boundary for flat compatibility output.",
+      "disproof": null,
+      "draft_response": "Confirmed under the recorded conditions; the complete local correction and focused regressions pass. The full repository gate and isolated timing confirmation now pass."
+    },
+    {
+      "candidate_id": "C3",
+      "anchor": "pi/index.ts:294",
+      "observation": "P2 — pi/index.ts:294 passes an absent launch ID as the literal undefined. Rust rejects it rather than using matching-claim recovery. Direct probe confirmed Node produces WEZTERM_ATTENTION_LAUNCH_ID=undefined.",
+      "claimed_consequence": "Rust rejects the literal undefined rather than using matching-claim recovery.",
+      "proposed_remedy": "Not supplied separately in the pasted finding.",
+      "evidence": [
+        {
+          "kind": "runtime",
+          "locator": "node:child_process.spawnSync and Bun node:child_process probe",
+          "observed": "Both installed runtimes reported present=false,value=null for an explicitly undefined environment property."
+        },
+        {
+          "kind": "test",
+          "locator": "tests/pi_node_runtime.mjs:C3 absent launch identity assertion",
+          "observed": "All three actual production-extension Node writer dispatches omit the launch environment key; no Pi runtime edit was made."
+        }
+      ],
+      "fact_status": "REFUTED",
+      "reachability": "unreachable",
+      "reachability_basis": "The stated conversion does not occur for the env object passed to spawn.",
+      "invariant": "Missing launch identity must remain absent, not be fabricated.",
+      "invariant_status": "anchored",
+      "change_relationship": "UNKNOWN",
+      "smallest_complete_fix": "No runtime change; preserve a regression asserting the actual Node dispatch environment.",
+      "fix_class": null,
+      "risk_if_deferred": "No defect demonstrated on this path.",
+      "risk_if_fixed_now": "Changing missing-identity recovery could accidentally admit unproved rich facts.",
+      "merge_impact": "NON-BLOCK",
+      "disposition": "REJECT",
+      "action": "No runtime change; preserve a regression asserting the actual Node dispatch environment.",
+      "disproof": "Both installed runtimes reported present=false,value=null for an explicitly undefined environment property.",
+      "draft_response": "Refuted on the installed Node and Bun runtimes and the production Pi dispatch test. Missing launch identity stays absent; no runtime change."
+    },
+    {
+      "candidate_id": "C4",
+      "anchor": "plugin/runtime.lua:802",
+      "observation": "P2 — plugin/runtime.lua:802 treats a live pane moving from v1 identity to v2 identity as closed, deleting its v1 marker, acknowledgement, agent, and review sidecars.",
+      "claimed_consequence": "Upgrade/reconnect deletes sidecars for a still-live pane.",
+      "proposed_remedy": "Not supplied separately in the pasted finding.",
+      "evidence": [
+        {
+          "kind": "runtime",
+          "locator": "/tmp/attention-ten-triage.YGt2iW/lua-before.log",
+          "observed": "C4 deleted the marker when the same GUI pane acquired v2 identity."
+        },
+        {
+          "kind": "test",
+          "locator": "tests/auto_clear_spec.lua:C4 identity publication is not pane destruction; C1 C4 Alt+B replaces the same pane identity without deleting sidecars",
+          "observed": "Marker, matching acknowledgement, agents and review sidecars survive identity publication, including through Alt+B."
+        }
+      ],
+      "fact_status": "CONFIRMED",
+      "reachability": "common-path",
+      "reachability_basis": "Normal publication can change cache keys between two polls.",
+      "invariant": "A change in storage identity is not evidence that the GUI pane closed.",
+      "invariant_status": "anchored",
+      "change_relationship": "INTRODUCED",
+      "smallest_complete_fix": "Carry GUI-local pane identity through observations and require its absence before deleting legacy sidecars.",
+      "fix_class": "LOCAL",
+      "risk_if_deferred": "Upgrade/reconnect deletes sidecars for a still-live pane.",
+      "risk_if_fixed_now": "Over-broad preservation could leak markers for panes that actually closed.",
+      "merge_impact": "NON-BLOCK",
+      "disposition": "ACCEPT",
+      "action": "Implemented and focused proof passed. Carry GUI-local pane identity through observations and require its absence before deleting legacy sidecars.",
+      "disproof": null,
+      "draft_response": "Confirmed under the recorded conditions; the complete local correction and focused regressions pass. The full repository gate and isolated timing confirmation now pass."
+    },
+    {
+      "candidate_id": "C5",
+      "anchor": "plugin/protocol.lua:721",
+      "observation": "P2 — plugin/protocol.lua:721 bounds lifecycle.json reads but reads all other v2 records with *a before enforcing max_json_bytes.",
+      "claimed_consequence": "Unbounded allocation and polling delay on malformed state.",
+      "proposed_remedy": "Not supplied separately in the pasted finding.",
+      "evidence": [
+        {
+          "kind": "runtime",
+          "locator": "/tmp/attention-ten-triage.YGt2iW/lua-before.log",
+          "observed": "The claim read requested *a, not maximum plus one."
+        },
+        {
+          "kind": "test",
+          "locator": "tests/auto_clear_spec.lua:C5 every v2 record has a bounded file read",
+          "observed": "Core claim reads request max_json_bytes+1; lifecycle reads retain their separate bound and overflow behavior."
+        }
+      ],
+      "fact_status": "CONFIRMED",
+      "reachability": "common-path",
+      "reachability_basis": "Every core v2 read uses this boundary; a large file exposes the consequence.",
+      "invariant": "Known v2 records must be bounded before decoding.",
+      "invariant_status": "anchored",
+      "change_relationship": "INTRODUCED",
+      "smallest_complete_fix": "Select max_json_bytes for every non-lifecycle v2 record read, retaining the separate lifecycle bound and overflow classification.",
+      "fix_class": "LOCAL",
+      "risk_if_deferred": "Unbounded allocation and polling delay on malformed state.",
+      "risk_if_fixed_now": "Applying v2 limits accidentally to legacy format or manifest loading.",
+      "merge_impact": "NON-BLOCK",
+      "disposition": "ACCEPT",
+      "action": "Implemented and focused proof passed. Select max_json_bytes for every non-lifecycle v2 record read, retaining the separate lifecycle bound and overflow classification.",
+      "disproof": null,
+      "draft_response": "Confirmed under the recorded conditions; the complete local correction and focused regressions pass. The full repository gate and isolated timing confirmation now pass."
+    },
+    {
+      "candidate_id": "C6",
+      "anchor": "src/compat.rs:201",
+      "observation": "P2 — src/compat.rs:201 treats unreadable agent directories or entries as empty, which can erase or undercount the v1 .agents sidecar.",
+      "claimed_consequence": "False zero/undercount during an I/O failure.",
+      "proposed_remedy": "Not supplied separately in the pasted finding.",
+      "evidence": [
+        {
+          "kind": "runtime",
+          "locator": "/tmp/attention-ten-triage.YGt2iW/c6-before.log",
+          "observed": "An agents path that could not be enumerated produced Ok(true) and removed the prior sidecar. Individual read_record failures already propagate."
+        },
+        {
+          "kind": "test",
+          "locator": "tests/rust/lifecycle_spec.rs:c6_incomplete_agent_inventory_preserves_projection",
+          "observed": "Failure to enumerate the agents path returns a diagnostic and preserves the existing .agents bytes."
+        }
+      ],
+      "fact_status": "PARTIAL",
+      "reachability": "common-path",
+      "reachability_basis": "Directory enumeration failure alone suffices; no race required.",
+      "invariant": "An incomplete agent inventory must not replace a compatibility projection as though it were complete.",
+      "invariant_status": "anchored",
+      "change_relationship": "INTRODUCED",
+      "smallest_complete_fix": "Propagate read_dir and iterator failures before changing the sidecar; preserve missing-directory semantics and existing record-error propagation.",
+      "fix_class": "LOCAL",
+      "risk_if_deferred": "False zero/undercount during an I/O failure.",
+      "risk_if_fixed_now": "Confusing a genuinely missing empty directory with an unavailable inventory.",
+      "merge_impact": "NON-BLOCK",
+      "disposition": "ACCEPT",
+      "action": "Implemented and focused proof passed. Propagate read_dir and iterator failures before changing the sidecar; preserve missing-directory semantics and existing record-error propagation.",
+      "disproof": null,
+      "draft_response": "Confirmed under the recorded conditions; the complete local correction and focused regressions pass. The full repository gate and isolated timing confirmation now pass."
+    },
+    {
+      "candidate_id": "C7",
+      "anchor": "pi/index.ts:541",
+      "observation": "P2 — pi/index.ts:541 retains every queued Pi event behind a permanently blocked state write, with no memory bound.",
+      "claimed_consequence": "Memory can grow while the external write stays blocked. Existing comments disclose it; no ordinary healthy-write leak was demonstrated.",
+      "proposed_remedy": "Not supplied separately in the pasted finding.",
+      "evidence": [
+        {
+          "kind": "code",
+          "locator": "pi/index.ts:enqueue and session_shutdown; git show 4d3d0a5:pi/index.ts",
+          "observed": "The same mutationChain and documented permanently-blocked-write residual exist at the review base. New observation callbacks increase enqueue volume."
+        }
+      ],
+      "fact_status": "CONFIRMED",
+      "reachability": "specific-interleaving",
+      "reachability_basis": "A never-settling head plus continuing events is required; the base already has this failure family.",
+      "invariant": "Best-effort notification work must not retain unbounded queued work during a permanently blocked write.",
+      "invariant_status": "anchored",
+      "change_relationship": "WIDENED",
+      "smallest_complete_fix": "Design bounded admission/cancellation/reload ownership and recovery together; do not drop FIFO transitions or detach an uncancellable write through a timeout-only patch.",
+      "fix_class": "ARCHITECTURAL",
+      "risk_if_deferred": "Memory can grow while the external write stays blocked. Existing comments disclose it; no ordinary healthy-write leak was demonstrated.",
+      "risk_if_fixed_now": "A local cap or timeout can lose terminal/clear events or allow old-generation writes after recovery.",
+      "merge_impact": "NON-BLOCK",
+      "disposition": "DEFER",
+      "action": "Track complete work in docs/plans/BACKLOG.md#bounded-pi-mutation-queue; do not change queue semantics in this patch.",
+      "disproof": null,
+      "draft_response": "Confirmed for a never-settling write plus continued events. The mechanism existed at base; increased event volume widens it. A bounded controller needs explicit loss/cancellation/reload/recovery policy, tracked in docs/plans/BACKLOG.md#bounded-pi-mutation-queue. NON-BLOCK is a documented rare-path deferral, not a fix."
+    },
+    {
+      "candidate_id": "C8",
+      "anchor": "src/lib.rs:289",
+      "observation": "P2 — src/lib.rs:289 checks mux socket identity before realm publication, but not during its per-pane TTY loop. A socket rebirth can publish a stale realm/incarnation.",
+      "claimed_consequence": "Stale incarnation published to pane user variables.",
+      "proposed_remedy": "Not supplied separately in the pasted finding.",
+      "evidence": [
+        {
+          "kind": "runtime",
+          "locator": "/tmp/attention-ten-triage.YGt2iW/c8-before.log",
+          "observed": "Rebirth inside TTY fingerprint reached write(), which the fault port rejects as stale publication."
+        },
+        {
+          "kind": "test",
+          "locator": "tests/rust/claim_publish_spec.rs:c8_socket_rebirth_inside_realm_publication_is_rejected",
+          "observed": "A socket rebirth during per-row fingerprint work produces incarnation_changed and no TTY publication."
+        }
+      ],
+      "fact_status": "CONFIRMED",
+      "reachability": "specific-interleaving",
+      "reachability_basis": "Socket replacement after enumeration but before a row write.",
+      "invariant": "Realm identity must still match before each controllable pane publication.",
+      "invariant_status": "anchored",
+      "change_relationship": "INTRODUCED",
+      "smallest_complete_fix": "Recheck the socket incarnation after per-pane claim/fingerprint work and immediately before each TTY write; diagnose stale rows.",
+      "fix_class": "LOCAL",
+      "risk_if_deferred": "Stale incarnation published to pane user variables.",
+      "risk_if_fixed_now": "Claiming an impossible zero-race atomicity guarantee across socket stat and TTY write.",
+      "merge_impact": "NON-BLOCK",
+      "disposition": "ACCEPT",
+      "action": "Implemented and focused proof passed. Recheck the socket incarnation after per-pane claim/fingerprint work and immediately before each TTY write; diagnose stale rows.",
+      "disproof": null,
+      "draft_response": "Confirmed under the recorded conditions; the complete local correction and focused regressions pass. The full repository gate and isolated timing confirmation now pass."
+    },
+    {
+      "candidate_id": "C9",
+      "anchor": "plugin/runtime.lua:366",
+      "observation": "P2 — plugin/runtime.lua:366 can retain a closed window’s unpublished-realm retry forever when GUI-window inventory is unavailable.",
+      "claimed_consequence": "Unnecessary publisher subprocesses can continue indefinitely.",
+      "proposed_remedy": "Not supplied separately in the pasted finding.",
+      "evidence": [
+        {
+          "kind": "runtime",
+          "locator": "/tmp/attention-ten-triage.YGt2iW/lua-before.log",
+          "observed": "After two initial polls, five timer callbacks spawned five more publishers without another live observation."
+        },
+        {
+          "kind": "test",
+          "locator": "tests/auto_clear_spec.lua:C9 a retry needs a new live observation when inventory fails; unpublished mux panes retry on the bounded schedule and stop when resolved",
+          "observed": "Stale observations stop autonomous retries; fresh polls restart and renew them; healthy backoff remains 2/5/10/30."
+        }
+      ],
+      "fact_status": "CONFIRMED",
+      "reachability": "failure-and-race",
+      "reachability_basis": "Window closes while inventory is unavailable; retained timer has no subsequent poll from that window.",
+      "invariant": "A retry cannot use an indefinitely old observation as evidence of current unpublished panes.",
+      "invariant_status": "anchored",
+      "change_relationship": "INTRODUCED",
+      "smallest_complete_fix": "When global inventory is unavailable, require a new pane poll before another autonomous publication and retire the stale retry observation; fresh polls can restart.",
+      "fix_class": "LOCAL",
+      "risk_if_deferred": "Unnecessary publisher subprocesses can continue indefinitely.",
+      "risk_if_fixed_now": "Stopping progress for live panes if normal polls cannot rearm retry.",
+      "merge_impact": "NON-BLOCK",
+      "disposition": "ACCEPT",
+      "action": "Implemented and focused proof passed. When global inventory is unavailable, require a new pane poll before another autonomous publication and retire the stale retry observation; fresh polls can restart.",
+      "disproof": null,
+      "draft_response": "Confirmed under the recorded conditions; the complete local correction and focused regressions pass. The full repository gate and isolated timing confirmation now pass."
+    },
+    {
+      "candidate_id": "C10",
+      "anchor": "docs/record-contract.md:39",
+      "observation": "P2 — docs/record-contract.md:39 says every accepted transition is lock-guarded, while Lua acknowledgement and review operations are only per-file atomic operations.",
+      "claimed_consequence": "Downstream developers assume stronger cross-writer serialization than exists.",
+      "proposed_remedy": "Not supplied separately in the pasted finding.",
+      "evidence": [
+        {
+          "kind": "code",
+          "locator": "docs/record-contract.md:Identity and paths; plugin/overlays.lua:write_v2_user_review/clear_v2_reviews/acknowledge_focused_v2_pane",
+          "observed": "The document says every accepted transition is lock-guarded; Lua validates then atomically replaces or removes a file without a lock."
+        },
+        {
+          "kind": "contract",
+          "locator": "docs/record-contract.md:Identity and paths",
+          "observed": "The contract now distinguishes Rust lock scopes from Lua atomic per-file operations without Rust locks."
+        }
+      ],
+      "fact_status": "CONFIRMED",
+      "reachability": "common-path",
+      "reachability_basis": "Readers of the documented persistence contract see the overclaim.",
+      "invariant": "The record contract must distinguish Rust lock transactions from Lua atomic per-file operations.",
+      "invariant_status": "anchored",
+      "change_relationship": "INTRODUCED",
+      "smallest_complete_fix": "Correct the authoritative contract without claiming Lua acknowledgement/review operations take Rust locks.",
+      "fix_class": "LOCAL",
+      "risk_if_deferred": "Downstream developers assume stronger cross-writer serialization than exists.",
+      "risk_if_fixed_now": "Documentation-only change; avoid disguising a separate runtime race as an intentional guarantee.",
+      "merge_impact": "NON-BLOCK",
+      "disposition": "DOCUMENT",
+      "action": "Implemented and focused proof passed. Correct the authoritative contract without claiming Lua acknowledgement/review operations take Rust locks.",
+      "disproof": null,
+      "draft_response": "Confirmed documentation overclaim. The authoritative record contract now states per-file Lua atomicity without Rust transaction locks."
+    }
+  ],
+  "reduction": {
+    "seams": [],
+    "reason": "C1/C4 concern identity but need distinct preconditions (unique scalar ownership versus GUI-pane lifetime); storage, inventory, retry and publication failures have different owners. No single edit dissolves two mechanisms with less correlated risk.",
+    "irreducibles": [
+      {
+        "candidate_id": "C1",
+        "text": "P1 — plugin/runtime.lua:532 maps a scalar marker ID to the last v2 pane seen. Two realms can share a pane ID, so get_attention(id) can return another pane’s state. Return unavailable when that scalar is ambiguous."
+      },
+      {
+        "candidate_id": "C2",
+        "text": "P1 — src/records.rs:599 parses an existing v1 plain-text marker as JSON before replacing it with the v2 compatibility projection. An in-place upgrade leaves the stale marker and blocks projection repair."
+      },
+      {
+        "candidate_id": "C4",
+        "text": "P2 — plugin/runtime.lua:802 treats a live pane moving from v1 identity to v2 identity as closed, deleting its v1 marker, acknowledgement, agent, and review sidecars."
+      },
+      {
+        "candidate_id": "C5",
+        "text": "P2 — plugin/protocol.lua:721 bounds lifecycle.json reads but reads all other v2 records with *a before enforcing max_json_bytes."
+      },
+      {
+        "candidate_id": "C6",
+        "text": "P2 — src/compat.rs:201 treats unreadable agent directories or entries as empty, which can erase or undercount the v1 .agents sidecar."
+      },
+      {
+        "candidate_id": "C8",
+        "text": "P2 — src/lib.rs:289 checks mux socket identity before realm publication, but not during its per-pane TTY loop. A socket rebirth can publish a stale realm/incarnation."
+      },
+      {
+        "candidate_id": "C9",
+        "text": "P2 — plugin/runtime.lua:366 can retain a closed window’s unpublished-realm retry forever when GUI-window inventory is unavailable."
+      },
+      {
+        "candidate_id": "C10",
+        "text": "P2 — docs/record-contract.md:39 says every accepted transition is lock-guarded, while Lua acknowledgement and review operations are only per-file atomic operations."
+      }
+    ],
+    "coverage": "8 actionable findings -> 0 seams, 0 themes, 8 point items. Shared helpers/tests support independent preconditions without claiming one fix dissolves them. C3 rejected and C7 deferred remain visible; all 10 accounted for, 0 dropped."
+  },
+  "verification_state": "verified; C3 refuted; C7 remains explicitly deferred",
+  "probe_notes": [
+    "Initial external cargo filter c also selected unrelated integration tests whose source export lacked node_modules/Git metadata. Only the subsequent exact c2/c6/c8 runs are cited.",
+    "Initial C5 harness used an unexported helper. Corrected probe loads the production protocol factory directly and observed *a.",
+    "The corrected C4 acknowledgement setup was rerun against frozen f1fe828 Lua modules: the four before-fix cases still fail as expected; /tmp/attention-ten-triage.YGt2iW/lua-before-corrected.log."
+  ],
+  "fix_results": {
+    "fixed": [
+      "C1",
+      "C2",
+      "C4",
+      "C5",
+      "C6",
+      "C8",
+      "C9"
+    ],
+    "documented": [
+      "C10"
+    ],
+    "refuted": [
+      "C3"
+    ],
+    "deferred": [
+      "C7"
+    ],
+    "live_configuration_changes": false,
+    "transport_authorized": true,
+    "commit_reference": "The commit containing this report; resolve through Git history for this path."
+  },
+  "independent_review": {
+    "scope": "Shared state, cache/ownership, persistence, socket fencing and retry corrections",
+    "result": "No remaining findings in revised retirement/shared-owner logic. The reviewer first caught overlay-first ownership and same-pane identity-transition gaps; both were corrected and reprobed.",
+    "evidence": "Six focused permanent tests and an independent shared-owner overlay transition probe passed on the final C1 correction. Earlier scoped checks included future-v2-review preservation and per-row socket rebirth."
+  },
+  "repository_gate": {
+    "command": "sh tests/gate.sh",
+    "exit_code": 0,
+    "evidence": "/tmp/attention-key-profile.A9Xkwj/gate.log",
+    "functional_results": {
+      "rust_regular": 109,
+      "native_codex_terminal": 1,
+      "luajit": 123,
+      "bun": 30,
+      "node_dispatch": 3,
+      "typescript": "passed",
+      "protocol_parity": "passed",
+      "installed_wezterm": "passed",
+      "pi_baseline": "passed"
+    },
+    "performance": {
+      "mode": "rust-baseline",
+      "implementation_identities": {
+        "baseline": "45f64cec20eb6a43631e7746e0fbb5b4921ffc29cd83f7ecb01e14ae8c31b1e6",
+        "candidate": "f9680f479aa095487ab17db99f55afa2a8d9c5d9f65a41f23efe82df57587095"
+      },
+      "rounds": [
+        {
+          "baseline": {
+            "sequential": {
+              "count": 100,
+              "median_ms": 3.056,
+              "p95_ms": 3.533,
+              "max_ms": 3.721
+            },
+            "concurrent_child_burst": {
+              "count": 20,
+              "wall_ms": 63.351,
+              "p95_process_ms": 39.49,
+              "max_process_ms": 58.356
+            },
+            "state": {
+              "files": 28,
+              "bytes": 17748
+            }
+          },
+          "candidate": {
+            "sequential": {
+              "count": 100,
+              "median_ms": 4.707,
+              "p95_ms": 5.42,
+              "max_ms": 6.981
+            },
+            "concurrent_child_burst": {
+              "count": 20,
+              "wall_ms": 108.071,
+              "p95_process_ms": 75.92,
+              "max_process_ms": 107.176
+            },
+            "state": {
+              "files": 29,
+              "bytes": 62142
+            }
+          },
+          "order": [
+            "baseline",
+            "candidate"
+          ],
+          "checks": {
+            "sequential_p95_within_2x": true,
+            "child_burst_within_2x": true
+          }
+        },
+        {
+          "candidate": {
+            "sequential": {
+              "count": 100,
+              "median_ms": 4.801,
+              "p95_ms": 5.529,
+              "max_ms": 12.17
+            },
+            "concurrent_child_burst": {
+              "count": 20,
+              "wall_ms": 83.409,
+              "p95_process_ms": 69.335,
+              "max_process_ms": 82.87
+            },
+            "state": {
+              "files": 29,
+              "bytes": 62142
+            }
+          },
+          "baseline": {
+            "sequential": {
+              "count": 100,
+              "median_ms": 3.271,
+              "p95_ms": 3.877,
+              "max_ms": 4.405
+            },
+            "concurrent_child_burst": {
+              "count": 20,
+              "wall_ms": 56.477,
+              "p95_process_ms": 45.845,
+              "max_process_ms": 49.386
+            },
+            "state": {
+              "files": 28,
+              "bytes": 17748
+            }
+          },
+          "order": [
+            "candidate",
+            "baseline"
+          ],
+          "checks": {
+            "sequential_p95_within_2x": true,
+            "child_burst_within_2x": true
+          }
+        }
+      ],
+      "passed": true
+    },
+    "merge_impact": "NON-BLOCK",
+    "note": "Full gate passed after borrowed-key optimization; isolated timing confirmation also passed. Threshold, record format, validation and durability unchanged. Earlier failures retained in history."
+  },
+  "repository_gate_history": [
+    {
+      "command": "sh tests/gate.sh",
+      "exit_code": 1,
+      "evidence": "/tmp/attention-ten-triage.YGt2iW/gate-isolated.log",
+      "functional_results": {
+        "rust_regular": 108,
+        "native_codex_terminal": 1,
+        "luajit": 123,
+        "bun": 30,
+        "node_dispatch": 3,
+        "typescript": "passed",
+        "protocol_parity": "passed",
+        "installed_wezterm": "passed",
+        "pi_baseline": "passed"
+      },
+      "performance": {
+        "mode": "rust-baseline",
+        "implementation_identities": {
+          "baseline": "45f64cec20eb6a43631e7746e0fbb5b4921ffc29cd83f7ecb01e14ae8c31b1e6",
+          "candidate": "6843e1741ffa1b76b77b7f5f58ac48c897c69cf1331fa93db5e607fdb682ea7d"
+        },
+        "rounds": [
+          {
+            "baseline": {
+              "sequential": {
+                "count": 100,
+                "median_ms": 3.9,
+                "p95_ms": 4.484,
+                "max_ms": 4.814
+              },
+              "concurrent_child_burst": {
+                "count": 20,
+                "wall_ms": 80.23,
+                "p95_process_ms": 56.919,
+                "max_process_ms": 65.803
+              },
+              "state": {
+                "files": 28,
+                "bytes": 17748
+              }
+            },
+            "candidate": {
+              "sequential": {
+                "count": 100,
+                "median_ms": 6.232,
+                "p95_ms": 6.989,
+                "max_ms": 7.78
+              },
+              "concurrent_child_burst": {
+                "count": 20,
+                "wall_ms": 101.927,
+                "p95_process_ms": 82.216,
+                "max_process_ms": 100.377
+              },
+              "state": {
+                "files": 29,
+                "bytes": 62142
+              }
+            },
+            "order": [
+              "baseline",
+              "candidate"
+            ],
+            "checks": {
+              "sequential_p95_within_2x": true,
+              "child_burst_within_2x": true
+            }
+          },
+          {
+            "candidate": {
+              "sequential": {
+                "count": 100,
+                "median_ms": 6.193,
+                "p95_ms": 7.535,
+                "max_ms": 11.136
+              },
+              "concurrent_child_burst": {
+                "count": 20,
+                "wall_ms": 117.852,
+                "p95_process_ms": 95.403,
+                "max_process_ms": 106.781
+              },
+              "state": {
+                "files": 29,
+                "bytes": 62142
+              }
+            },
+            "baseline": {
+              "sequential": {
+                "count": 100,
+                "median_ms": 3.841,
+                "p95_ms": 4.475,
+                "max_ms": 4.783
+              },
+              "concurrent_child_burst": {
+                "count": 20,
+                "wall_ms": 54.467,
+                "p95_process_ms": 33.939,
+                "max_process_ms": 37.937
+              },
+              "state": {
+                "files": 28,
+                "bytes": 17748
+              }
+            },
+            "order": [
+              "candidate",
+              "baseline"
+            ],
+            "checks": {
+              "sequential_p95_within_2x": true,
+              "child_burst_within_2x": false
+            }
+          }
+        ],
+        "passed": false
+      },
+      "merge_impact": "BLOCK",
+      "note": "Same Rust binary passed an earlier gate; latest isolated run failed one burst ratio. No threshold changes or further retries. Performance causality remains unproved."
+    },
+    {
+      "command": "sh tests/gate.sh",
+      "exit_code": 1,
+      "evidence": "/tmp/attention-corrections-push.cbtFZE/gate.log",
+      "functional_results": {
+        "rust_regular": 109,
+        "native_codex_terminal": 1,
+        "luajit": 123,
+        "bun": 30,
+        "node_dispatch": 3,
+        "typescript": "passed",
+        "protocol_parity": "passed",
+        "installed_wezterm": "passed",
+        "pi_baseline": "passed"
+      },
+      "performance": {
+        "mode": "rust-baseline",
+        "implementation_identities": {
+          "baseline": "45f64cec20eb6a43631e7746e0fbb5b4921ffc29cd83f7ecb01e14ae8c31b1e6",
+          "candidate": "6843e1741ffa1b76b77b7f5f58ac48c897c69cf1331fa93db5e607fdb682ea7d"
+        },
+        "rounds": [
+          {
+            "baseline": {
+              "sequential": {
+                "count": 100,
+                "median_ms": 3.023,
+                "p95_ms": 3.519,
+                "max_ms": 3.769
+              },
+              "concurrent_child_burst": {
+                "count": 20,
+                "wall_ms": 53.438,
+                "p95_process_ms": 32.105,
+                "max_process_ms": 32.986
+              },
+              "state": {
+                "files": 28,
+                "bytes": 17748
+              }
+            },
+            "candidate": {
+              "sequential": {
+                "count": 100,
+                "median_ms": 5.204,
+                "p95_ms": 7.187,
+                "max_ms": 9.584
+              },
+              "concurrent_child_burst": {
+                "count": 20,
+                "wall_ms": 95.503,
+                "p95_process_ms": 65.056,
+                "max_process_ms": 78.799
+              },
+              "state": {
+                "files": 29,
+                "bytes": 62142
+              }
+            },
+            "order": [
+              "baseline",
+              "candidate"
+            ],
+            "checks": {
+              "sequential_p95_within_2x": false,
+              "child_burst_within_2x": true
+            }
+          },
+          {
+            "candidate": {
+              "sequential": {
+                "count": 100,
+                "median_ms": 4.769,
+                "p95_ms": 5.513,
+                "max_ms": 7.669
+              },
+              "concurrent_child_burst": {
+                "count": 20,
+                "wall_ms": 90.014,
+                "p95_process_ms": 59.394,
+                "max_process_ms": 71.344
+              },
+              "state": {
+                "files": 29,
+                "bytes": 62142
+              }
+            },
+            "baseline": {
+              "sequential": {
+                "count": 100,
+                "median_ms": 3.01,
+                "p95_ms": 3.866,
+                "max_ms": 4.227
+              },
+              "concurrent_child_burst": {
+                "count": 20,
+                "wall_ms": 57.153,
+                "p95_process_ms": 33.672,
+                "max_process_ms": 46.348
+              },
+              "state": {
+                "files": 28,
+                "bytes": 17748
+              }
+            },
+            "order": [
+              "candidate",
+              "baseline"
+            ],
+            "checks": {
+              "sequential_p95_within_2x": true,
+              "child_burst_within_2x": true
+            }
+          }
+        ],
+        "passed": false
+      },
+      "merge_impact": "BLOCK",
+      "note": "User-authorized gate-and-push retry failed the first sequential p95 check: 7.187 ms vs 3.519 ms (2.042x). Remaining performance checks passed. No commit or push; no limits changed."
+    }
+  ],
+  "gate_lenses": {
+    "scope": "16 correction and performance files against f1fe828",
+    "order": [
+      "legacy",
+      "invariance",
+      "failure-mode",
+      "perf"
+    ],
+    "results": {
+      "legacy": "Required v1 compatibility and six-value query preserved; no new finding.",
+      "invariance": "No new finding; exact ownership, overlay-first discovery, same-pane migration and independent inventory failure tests preserve their contracts. Borrowed-key equality, namespaces and public encoding also passed focused tests and an independent scoped review.",
+      "failure_mode": "No new finding in the corrections; C7 stays explicitly deferred, not fixed.",
+      "perf": "Acceptable with note: borrowed identities remove allocations without dropping validation. Full gate and isolated two-round comparison pass unchanged 2x limits. Historical variability remains recorded."
+    }
+  },
+  "performance_fix": {
+    "file": "src/observations.rs",
+    "mechanism": "Use borrowed seven-part identity arrays for duplicate detection and reduction scans; retain the public length-prefixed storage_key String encoding.",
+    "profile": {
+      "observations": 128,
+      "iterations": 2000,
+      "semantic_allocations_before": 1450,
+      "semantic_allocations_after": 41,
+      "semantic_microseconds_before": 84.744,
+      "semantic_microseconds_after": 66.325,
+      "record_microseconds_before": 186.659,
+      "record_microseconds_after": 166.75,
+      "source": "/tmp/attention-key-profile.A9Xkwj/snapshot_profile.rs",
+      "scope": "Focused release profile; not a cross-machine latency guarantee."
+    },
+    "test": "observations::tests::borrowed_keys_preserve_namespaces_and_public_encoding",
+    "independent_review": "No identity/equality or borrow/mutation regression found; three focused tests passed. Parent reran the timing comparison without concurrent task tests.",
+    "isolated_timing": {
+      "evidence": "/tmp/attention-key-profile.A9Xkwj/timing-isolated.json",
+      "report": {
+        "mode": "rust-baseline",
+        "implementation_identities": {
+          "baseline": "45f64cec20eb6a43631e7746e0fbb5b4921ffc29cd83f7ecb01e14ae8c31b1e6",
+          "candidate": "f9680f479aa095487ab17db99f55afa2a8d9c5d9f65a41f23efe82df57587095"
+        },
+        "rounds": [
+          {
+            "baseline": {
+              "sequential": {
+                "count": 100,
+                "median_ms": 2.906,
+                "p95_ms": 3.494,
+                "max_ms": 3.88
+              },
+              "concurrent_child_burst": {
+                "count": 20,
+                "wall_ms": 52.173,
+                "p95_process_ms": 33.06,
+                "max_process_ms": 34.538
+              },
+              "state": {
+                "files": 28,
+                "bytes": 17748
+              }
+            },
+            "candidate": {
+              "sequential": {
+                "count": 100,
+                "median_ms": 5.163,
+                "p95_ms": 5.8,
+                "max_ms": 6.183
+              },
+              "concurrent_child_burst": {
+                "count": 20,
+                "wall_ms": 96.637,
+                "p95_process_ms": 73.085,
+                "max_process_ms": 80.941
+              },
+              "state": {
+                "files": 29,
+                "bytes": 62142
+              }
+            },
+            "order": [
+              "baseline",
+              "candidate"
+            ],
+            "checks": {
+              "sequential_p95_within_2x": true,
+              "child_burst_within_2x": true
+            }
+          },
+          {
+            "candidate": {
+              "sequential": {
+                "count": 100,
+                "median_ms": 4.793,
+                "p95_ms": 5.455,
+                "max_ms": 9.57
+              },
+              "concurrent_child_burst": {
+                "count": 20,
+                "wall_ms": 71.905,
+                "p95_process_ms": 52.927,
+                "max_process_ms": 56.148
+              },
+              "state": {
+                "files": 29,
+                "bytes": 62142
+              }
+            },
+            "baseline": {
+              "sequential": {
+                "count": 100,
+                "median_ms": 3.012,
+                "p95_ms": 3.862,
+                "max_ms": 5.286
+              },
+              "concurrent_child_burst": {
+                "count": 20,
+                "wall_ms": 53.733,
+                "p95_process_ms": 21.754,
+                "max_process_ms": 40.206
+              },
+              "state": {
+                "files": 28,
+                "bytes": 17748
+              }
+            },
+            "order": [
+              "candidate",
+              "baseline"
+            ],
+            "checks": {
+              "sequential_p95_within_2x": true,
+              "child_burst_within_2x": true
+            }
+          }
+        ],
+        "passed": true
+      }
+    }
+  }
+}

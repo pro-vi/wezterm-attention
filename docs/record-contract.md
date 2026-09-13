@@ -36,8 +36,7 @@ v2/realms/<realm>/
           agents/<agent-key>.json
 ```
 
-The binding record is durable before its pointer. Every accepted transition is lock-guarded and
-atomically replaced. Raw child and review IDs never become filenames.
+The binding record is durable before its pointer. Rust provider/CLI transitions use the appropriate lock scopes and atomic per-file replacement. Lua acknowledgement and review operations validate their targets but use per-file atomic replacement or removal without those Rust locks; a read/check/write sequence is not a cross-writer transaction. Raw child and review IDs never become filenames.
 
 ## Ordering and wall age
 
@@ -66,7 +65,7 @@ The flat activity projection writes `updated_at` in seconds and `updated_at_ms` 
 
 A valid v2 claim selects v2. Invalid or future v2 is reported and never downgraded to plausible v1.
 V1 is read only when no v2 claim exists. The public Lua query remains six values:
-`type, frame, source, puppet, subagents, review`.
+`type, frame, source, puppet, subagents, review`. Without an explicit legacy directory, `get_attention(id)` returns unavailable (`nil`) when the scalar ID is observed at multiple full pane addresses. `get_attention_view(pane)` selects the exact pane instead.
 
 For a v2 pane, focusing the active pane writes an exact acknowledgement for the displayed activity
 event. `Alt+B` writes the `user` owner claim under that pane's full address. Its clear-all action

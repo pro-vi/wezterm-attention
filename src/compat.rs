@@ -198,8 +198,24 @@ pub fn reconcile_agents(
             .and_then(Value::as_str);
         let mut projected = BTreeMap::new();
         let agents = binding_dir.join("agents");
-        if let Ok(entries) = fs::read_dir(&agents) {
-            for entry in entries.flatten() {
+        let entries = match fs::read_dir(&agents) {
+            Ok(entries) => Some(entries),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => {
+                return Err(AttentionError::new(
+                    "probe_unavailable",
+                    "agent directory could not be enumerated",
+                ));
+            }
+        };
+        if let Some(entries) = entries {
+            for entry in entries {
+                let entry = entry.map_err(|_| {
+                    AttentionError::new(
+                        "probe_unavailable",
+                        "agent directory enumeration was incomplete",
+                    )
+                })?;
                 let path = entry.path();
                 if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
                     continue;

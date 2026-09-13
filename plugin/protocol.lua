@@ -13,7 +13,7 @@ return function(context)
     local closed, close_err = file:close()
     if not content then return nil, read_err end
     if not closed then return nil, close_err end
-    if maximum and #content > maximum then return nil, "lifecycle record exceeds its bound", "invalid" end
+    if maximum and #content > maximum then return nil, "record exceeds its bound", "invalid" end
     return content
   end
 
@@ -719,9 +719,12 @@ return function(context)
   end
 
   local function read_record_file(path, expected_kind)
-    local content, read_err, read_status = read_all(path, expected_kind == "lifecycle_snapshot" and protocol.limits.lifecycle_max_json_bytes or nil)
+    local limits = protocol and protocol.limits
+    if not limits then return nil, diagnostic("probe_unavailable", "protocol limits unavailable"), "unavailable" end
+    local maximum = expected_kind == "lifecycle_snapshot" and limits.lifecycle_max_json_bytes or limits.max_json_bytes
+    local content, read_err, read_status = read_all(path, maximum)
     if not content then
-      if read_status == "invalid" then return nil, invalid("lifecycle record exceeds its bound"), "invalid" end
+      if read_status == "invalid" then return nil, invalid("record exceeds its bound"), "invalid" end
       local message = tostring(read_err or "")
       if message:find("No such file", 1, true) or message:find("no such file", 1, true) then
         return nil, nil, "missing"

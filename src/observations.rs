@@ -233,6 +233,18 @@ impl ObservationBody {
 impl LifecycleObservation {
     /// Kind is part of storage identity, not of cross-phase relation identity.
     pub fn storage_key(&self) -> String {
+        let mut key = String::new();
+        for text in self.storage_key_parts() {
+            key.push_str(&text.len().to_string());
+            key.push(':');
+            key.push_str(text);
+        }
+        key
+    }
+
+    // Equality of these borrowed parts is identical to equality of the
+    // length-prefixed public key, without allocating a string on each scan.
+    fn storage_key_parts(&self) -> [&str; 7] {
         let c = self.correlation.as_ref();
         let native = c.and_then(|c| match self.body {
             ObservationBody::ToolPreflight { .. }
@@ -256,8 +268,7 @@ impl LifecycleObservation {
             Actor::Child { agent_id, .. } => ("child", agent_id.as_str()),
         };
         let (namespace, id) = native.unwrap_or(("observation_id", &self.observation_id));
-        let mut key = String::new();
-        for text in [
+        [
             self.body.kind(),
             actor,
             actor_id,
@@ -265,12 +276,7 @@ impl LifecycleObservation {
             id,
             c.and_then(|c| c.turn_id.as_deref()).unwrap_or(""),
             c.and_then(|c| c.mcp_server_name.as_deref()).unwrap_or(""),
-        ] {
-            key.push_str(&text.len().to_string());
-            key.push(':');
-            key.push_str(text);
-        }
-        key
+        ]
     }
 
     fn semantic(&self) -> Value {
@@ -357,7 +363,7 @@ impl LifecycleSnapshot {
                 {
                     return Err(invalid());
                 }
-                let key = item.storage_key();
+                let key = item.storage_key_parts();
                 if !keys.insert(key) {
                     return Err(invalid());
                 }
@@ -411,7 +417,7 @@ impl LifecycleSnapshot {
         if compact_size(&candidate)? > limits.lifecycle_observation_max_bytes {
             return Err(invalid());
         }
-        let key = candidate.storage_key();
+        let key = candidate.storage_key_parts();
         let requests = candidate.body.pool() == "requests";
         let pool = if requests {
             &self.pools.requests
@@ -431,7 +437,7 @@ impl LifecycleSnapshot {
             .observations
             .iter()
             .chain(&self.pools.general.observations)
-            .find(|item| item.storage_key() == key);
+            .find(|item| item.storage_key_parts() == key);
         if let Some(existing) = existing {
             if existing.body.tool() != candidate.body.tool() {
                 return Err(invalid());
@@ -452,7 +458,8 @@ impl LifecycleSnapshot {
         } else {
             &mut next.pools.general
         };
-        pool.observations.retain(|item| item.storage_key() != key);
+        pool.observations
+            .retain(|item| item.storage_key_parts() != key);
         next.written_at_unix_ns = candidate.written_at_unix_ns.clone();
         pool.observations.push(candidate);
         pool.observations.sort_by(|a, b| {
@@ -492,4 +499,82 @@ fn compact_size(value: &impl Serialize) -> Result<usize> {
     let mut count = ByteCount(0);
     serde_json::to_writer(&mut count, value).map_err(|_| invalid())?;
     Ok(count.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_keys_preserve_namespaces_and_public_encoding() {
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/lifecycle/observations.json"
+        ))
+        .unwrap();
+        let snapshot: LifecycleSnapshot =
+            serde_json::from_value(fixtures["cases"][1]["value"].clone()).unwrap();
+        let original = snapshot.pools.general.observations[0].clone();
+        assert_eq!(
+            original.storage_key(),
+            "14:tool_preflight4:lead0:14:observation_id36:00000000-0000-4000-8000-0000000000110:0:"
+        );
+        let mut native = original.clone();
+        native.correlation = Some(NativeCorrelation {
+            tool_call_id: Some(original.observation_id.clone()),
+            turn_id: Some("turn:一".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            native.storage_key_parts(),
+            [
+                "tool_preflight",
+                "lead",
+                "",
+                "tool_call_id",
+                original.observation_id.as_str(),
+                "turn:一",
+                ""
+            ]
+        );
+        assert_ne!(original.storage_key_parts(), native.storage_key_parts());
+        let mut retry = native.clone();
+        retry.observation_id = Uuid::new_v4().to_string();
+        retry.observed_mono_ns = "00000000000000000999".into();
+        assert_eq!(native.storage_key_parts(), retry.storage_key_parts());
+        retry.actor = Actor::Child {
+            agent_id: "child:一".into(),
+            agent_key: crate::protocol::sha256_hex("child:一".as_bytes()),
+        };
+        assert_ne!(native.storage_key_parts(), retry.storage_key_parts());
+        let mut server_a = native.clone();
+        server_a.body = ObservationBody::ElicitationRequested {
+            mode: ElicitationMode::Form,
+        };
+        server_a.correlation = Some(NativeCorrelation {
+            elicitation_id: Some("request:1".into()),
+            mcp_server_name: Some("server:a".into()),
+            ..Default::default()
+        });
+        let mut server_b = server_a.clone();
+        server_b.correlation.as_mut().unwrap().mcp_server_name = Some("server:b".into());
+        assert_ne!(server_a.storage_key_parts(), server_b.storage_key_parts());
+
+        let mut corpus = vec![original, native, retry, server_a, server_b];
+        for case in fixtures["cases"].as_array().unwrap() {
+            if case["expected"] == "valid" {
+                let snapshot: LifecycleSnapshot =
+                    serde_json::from_value(case["value"].clone()).unwrap();
+                corpus.extend(snapshot.pools.requests.observations);
+                corpus.extend(snapshot.pools.general.observations);
+            }
+        }
+        for a in &corpus {
+            for b in &corpus {
+                assert_eq!(
+                    a.storage_key_parts() == b.storage_key_parts(),
+                    a.storage_key() == b.storage_key()
+                );
+            }
+        }
+    }
 }

@@ -31,6 +31,28 @@ struct Scratch {
     path: PathBuf,
 }
 
+#[test]
+fn c8_socket_rebirth_inside_realm_publication_is_rejected() {
+    let (scratch, _listener, environment) = setup();
+    let tty = RebirthTty {
+        socket_path: scratch.path.join("mux.sock"),
+        replacement: Mutex::new(None),
+    };
+    let clock = FixedClock("00000000000000000100");
+    let panes = FakePanes(vec![PaneRow {
+        pane_id: "42".into(),
+        tty_name: Some("/dev/ttys999".into()),
+    }]);
+    let report = wezterm_attention::publish_realm(
+        &environment["WEZTERM_UNIX_SOCKET"],
+        &environment,
+        &ports(&clock, &tty, &panes),
+    )
+    .unwrap();
+    assert_eq!(report.published, 0);
+    assert_eq!(report.diagnostics[0].code, "incarnation_changed");
+}
+
 impl Scratch {
     fn new() -> Self {
         let path = PathBuf::from("/tmp").join(format!("wa-{}", Uuid::new_v4().simple()));

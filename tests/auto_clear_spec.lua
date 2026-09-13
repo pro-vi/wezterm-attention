@@ -2499,9 +2499,14 @@ test("matching forged child filenames cannot duplicate one raw agent id", functi
 end)
 
 test("v1 identity clears a stale scalar-to-v2 cache projection", function()
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, {auto_poll=false,dir=test_dir,review_key=false})
+  local wire = materialize_v2_fixture(42, string.rep("d",64))
+  instance.poll(window_double({window_id=9010,tabs={{{id=42,attention=wire}}},focused=false}),
+    {now_unix_ns=protocol_fixture.state_case.now_unix_ns,call_after=function()end})
   write_marker(42, "thinking")
-  attention.poll(window_double({ tabs = { { 42 } }, focused = false }))
-  assert(attention.get_attention(42) == "thinking",
+  instance.poll(window_double({window_id=9010,tabs={{42}},focused=false}))
+  assert(instance.get_attention(42) == "thinking",
     "the public scalar query must return the pane's current v1 cache")
 end)
 
@@ -2846,10 +2851,13 @@ test("unpublished mux panes retry on the bounded schedule and stop when resolved
   reloaded.poll(unpublished, { call_after = call_after })
   assert(#spawned == 1 and scheduled[1].delay == 2,
     "the second stable poll must publish and arm the 2-second retry")
+  reloaded.poll(unpublished, { call_after = call_after })
   scheduled[1].callback()
   assert(#spawned == 2 and scheduled[2].delay == 5, "the first retry must use 5 seconds next")
+  reloaded.poll(unpublished, { call_after = call_after })
   scheduled[2].callback()
   assert(#spawned == 3 and scheduled[3].delay == 10, "the second retry must use 10 seconds next")
+  reloaded.poll(unpublished, { call_after = call_after })
   scheduled[3].callback()
   assert(#spawned == 4 and scheduled[4].delay == 30, "later retries must reach 30 seconds")
 
@@ -3056,6 +3064,7 @@ test("a failed publish logs once and keeps its retry schedule", function()
   reloaded.poll(window, { call_after = call_after })
   assert(attempted == 1 and scheduled[1].delay == 2,
     "a failed first spawn must still arm the retry")
+  reloaded.poll(window, { call_after = call_after })
   scheduled[1].callback()
   assert(attempted == 2 and scheduled[2].delay == 5,
     "a failed retry must keep the schedule")
@@ -3368,6 +3377,127 @@ test("lifecycle snapshot grammar agrees with the shared fixture", function()
   assert(ok and not result and problem.code == "record_invalid" and status == "invalid")
   local parsed = api.parse_v2_record_json(string.rep("[", 9) .. string.rep("]", 9), "lifecycle_snapshot")
   assert(not parsed, "deep lifecycle containers must reject")
+end)
+
+test("C1 scalar lookup refuses two full pane addresses", function()
+  local a = materialize_v2_fixture(42, string.rep("a",64))
+  local b = materialize_v2_fixture(42, string.rep("b",64))
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, {auto_poll=false,dir=test_dir,review_key=false})
+  local w = window_double({tabs={{{id=12001,domain="a",attention=a},{id=12002,domain="b",attention=b}}},focused=false})
+  instance.poll(w,{now_unix_ns=protocol_fixture.state_case.now_unix_ns,call_after=function()end})
+  assert(instance.get_attention_view(mux_pane(12001,{domain="a",attention=a})))
+  assert(instance.get_attention_view(mux_pane(12002,{domain="b",attention=b})))
+  assert(instance.get_attention(42)==nil,"scalar lookup selected a realm")
+end)
+
+test("C1 shared full address survives one window dropping it", function()
+  local a = materialize_v2_fixture(42, string.rep("e",64))
+  local b = materialize_v2_fixture(43, string.rep("e",64))
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, {auto_poll=false,dir=test_dir,review_key=false})
+  local options={now_unix_ns=protocol_fixture.state_case.now_unix_ns,call_after=function()end}
+  local function window(id,wire) return window_double({window_id=id,tabs={{{id=id,domain="shared",attention=wire}}},focused=false}) end
+  instance.poll(window(9020,a),options); instance.poll(window(9021,a),options)
+  assert(instance.get_attention(42)=="notify","the same full address is not ambiguous")
+  instance.poll(window(9020,b),options)
+  assert(instance.get_attention(42)=="notify","another window still owns the cache entry")
+  instance.poll(window(9021,b),options)
+  assert(instance.get_attention(42)==nil,"no window still observes the old address")
+  assert(instance.get_attention(43)=="notify")
+end)
+
+test("C1 first observation through Alt+B participates in scalar ambiguity", function()
+  local a=materialize_v2_fixture(42,string.rep("a",64))
+  local b=materialize_v2_fixture(42,string.rep("b",64))
+  local instance=dofile(repo_root .. "/plugin/init.lua")
+  local config={}
+  instance.apply_to_config(config,{auto_poll=false,dir=test_dir})
+  local pa={id=12011,domain="a",attention=a}
+  local pb={id=12012,domain="b",attention=b}
+  local wa=window_double({window_id=9022,tabs={{pa}},focused=false})
+  local wb=window_double({window_id=9023,tabs={{pb}},focused=false})
+  instance.poll(wa,{now_unix_ns=protocol_fixture.state_case.now_unix_ns,call_after=function()end})
+  assert(instance.get_attention(42)=="notify")
+  config.keys[#config.keys].action(wb,pane_from_entry(pb))
+  assert(instance.get_attention_view(pane_from_entry(pb)))
+  assert(instance.get_attention(42)==nil,"overlay observation must not select either realm")
+  instance.poll(wa,{now_unix_ns=protocol_fixture.state_case.now_unix_ns,call_after=function()end})
+  assert(instance.get_attention(42)==nil,"a sibling poll must retain the overlay observation")
+end)
+
+test("C4 identity publication is not pane destruction", function()
+  local id=12003
+  write_marker(id,"thinking","upgrade-marker")
+  write_acknowledgement_file(id,"publication\nupgrade-marker")
+  write_subagents(id,{{id="child",last_ms=1000}})
+  write_review_flag_file(id,"upgrade-review")
+  local instance=dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, {auto_poll=false,dir=test_dir,review_key=false})
+  local before=window_double({window_id=9001,tabs={{{id=id,domain="local"}}},focused=false})
+  instance.poll(before,{now_ms=1000,call_after=function()end})
+  assert(path_exists(test_dir .. "/" .. id .. ".ack"),"ack fixture must survive the first poll")
+  local wire=materialize_v2_fixture(id)
+  local after=window_double({window_id=9001,tabs={{{id=id,domain="local",attention=wire}}},focused=false})
+  instance.poll(after,{now_ms=1000,now_unix_ns=protocol_fixture.state_case.now_unix_ns,call_after=function()end})
+  for _,suffix in ipairs({"",".ack",".agents",".review"}) do
+    assert(path_exists(test_dir .. "/" .. id .. suffix),"identity upgrade deleted " .. suffix)
+  end
+end)
+
+test("C1 C4 Alt+B replaces the same pane identity without deleting sidecars", function()
+  local id=12013
+  write_marker(id,"thinking","overlay-upgrade")
+  write_acknowledgement_file(id,"publication\noverlay-upgrade")
+  write_subagents(id,{{id="child",last_ms=1000}})
+  write_review_flag_file(id,"overlay-review")
+  local instance=dofile(repo_root .. "/plugin/init.lua")
+  local config={}
+  instance.apply_to_config(config,{auto_poll=false,dir=test_dir})
+  instance.poll(window_double({window_id=9024,tabs={{id}},focused=false}),{now_ms=1000,call_after=function()end})
+  local wire=materialize_v2_fixture(id,string.rep("f",64))
+  local entry={id=id,domain="local",attention=wire}
+  local window=window_double({window_id=9024,tabs={{entry}},focused=false})
+  config.keys[#config.keys].action(window,pane_from_entry(entry))
+  local view=assert(instance.get_attention_view(pane_from_entry(entry)))
+  assert(view.type and instance.get_attention(id)==view.type,"one pane must not count as two scalar owners")
+  for _,suffix in ipairs({"",".ack",".agents",".review"}) do
+    assert(path_exists(test_dir .. "/" .. id .. suffix),"overlay identity change deleted " .. suffix)
+  end
+end)
+
+test("C5 every v2 record has a bounded file read", function()
+  local api=dofile(repo_root .. "/plugin/protocol.lua")({wezterm=wezterm,protocol_path=repo_root .. "/protocol/v2.json"})
+  local original=io.open
+  local requested
+  io.open=function(path,mode)
+    if path~="/synthetic/claim.json" then return original(path,mode) end
+    return {read=function(_,count) requested=count; return "{}" end,close=function()return true end}
+  end
+  local ok=pcall(api.read_record_file,"/synthetic/claim.json","claim")
+  io.open=original
+  assert(ok)
+  assert(requested==api.protocol.limits.max_json_bytes+1,"unbounded read: " .. tostring(requested))
+end)
+
+test("C9 a retry needs a new live observation when inventory fails", function()
+  local spawned,scheduled={},{}
+  local old=wezterm.background_child_process
+  wezterm.background_child_process=function(argv) spawned[#spawned+1]=argv; return true end
+  local instance=dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({unix_domains={{name="lost-window",socket_path="/tmp/attention-lost-window.sock"}}},{auto_poll=false,dir=test_dir,review_key=false})
+  local window=window_double({window_id=9002,tabs={{{id=12004,domain="lost-window"}}},focused=false})
+  local opts={gui_windows=function()error("inventory unavailable")end,call_after=function(_,f)scheduled[#scheduled+1]=f end}
+  instance.poll(window,opts); instance.poll(window,opts)
+  assert(#spawned==1)
+  for i=1,5 do if scheduled[i] then scheduled[i]() end end
+  assert(#spawned==1,"republication continued without another live observation: " .. #spawned)
+  instance.poll(window,opts); instance.poll(window,opts)
+  assert(#spawned==2,"fresh polls must restart publication")
+  instance.poll(window,opts)
+  scheduled[#scheduled]()
+  assert(#spawned==3,"a fresh observation permits the retry")
+  wezterm.background_child_process=old
 end)
 
 test("a missing protocol module logs once and keeps the v1 reader available", function()

@@ -320,7 +320,6 @@ return function(context)
     local identity_diagnostic = context.identity_diagnostic
     local read_attention_view = context.read_attention_view
     local attention_cache = context.attention_cache
-    local legacy_cache_key_by_marker_id = context.legacy_cache_key_by_marker_id
     local wezterm_now_unix_ns20 = context.wezterm_now_unix_ns20
 
     local function selected_v2_records_root(dir, read, binding_id)
@@ -390,7 +389,6 @@ return function(context)
         dir = dir, previous_view = attention_cache[read.cache_key],
       })
       attention_cache[read.cache_key] = view
-      legacy_cache_key_by_marker_id[read.marker_id] = read.cache_key
       return view
     end
 
