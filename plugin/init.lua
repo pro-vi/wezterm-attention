@@ -430,6 +430,11 @@ function M.apply_to_config(config, opts)
   applied = true
 
   opts = opts or {}
+  if opts.on_view_change ~= nil and type(opts.on_view_change) ~= "function" then
+    report_error_once("on-view-change-option", "on_view_change must be a function")
+  else
+    M._on_view_change = opts.on_view_change
+  end
 
   -- Merge options with defaults
   local dir = opts.dir or defaults.dir
@@ -467,6 +472,9 @@ function M.apply_to_config(config, opts)
   local settled_fallback = opts.settled_title_fallback
   if settled_fallback == nil then settled_fallback = defaults.settled_title_fallback end
   M._active_settled_title_fallback = settled_fallback ~= false
+  if not M._active_settled_title_fallback then
+    for key in pairs(settled_title_state) do settled_title_state[key] = nil end
+  end
 
   -- Once, at config load. The Alt+B handler used to do this on the GUI thread
   -- on every press; the directory does not change between presses.
@@ -660,6 +668,7 @@ end
 
 -- Internal seams, exposed for the LuaJIT specs only. Not public API.
 M._internal = {
+  lifecycle_facet = reader_api.lifecycle_facet,
   acknowledge_focused_pane = acknowledge_focused_pane,
   resolve_visible_attention = resolve_visible_attention,
   build_formatter_context = build_formatter_context,

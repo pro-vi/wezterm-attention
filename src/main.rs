@@ -32,6 +32,8 @@ enum Command {
     },
     /// List validated binding facts.
     Bindings(BindingsArgs),
+    /// Read one exact canonical scope from JSON stdin without changing state.
+    Inspect(InspectArgs),
     /// Set current activity or a source-owned review.
     Mark(MarkArgs),
     /// Inspect CLI integration health.
@@ -42,6 +44,8 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum HookCommand {
+    /// Describe package-owned native callback registrations; does not configure a machine.
+    Describe(DescribeArgs),
     /// Persist and publish the current launch claim.
     Claim(OutputArgs),
     /// Republish one pane or one mux realm.
@@ -51,9 +55,7 @@ enum HookCommand {
 }
 
 #[derive(Clone, Debug, Args)]
-#[command(
-    after_help = "Events: SessionStart, PreToolUse, PermissionRequest, Notification, Stop, SubagentStop, SessionEnd, session_start, agent_start, tool_execution_start, agent_settled, bus, session_shutdown"
-)]
+#[command(after_help = provider_event_help())]
 struct EventArgs {
     provider: String,
     event: String,
@@ -61,10 +63,53 @@ struct EventArgs {
     strict: bool,
     #[arg(long)]
     debug: bool,
+    /// Absolute executable receiving one transient envelope on stdin; repeatable.
+    #[arg(long)]
+    consumer: Vec<String>,
+    #[arg(long)]
+    consumer_timeout_ms: Option<u64>,
+    #[arg(long)]
+    include_reply: bool,
+}
+
+fn provider_event_help() -> String {
+    let mut help =
+        "Registration details: attention hooks describe --provider <provider> --json".to_owned();
+    if let Ok(manifest) = wezterm_attention::protocol::manifest() {
+        for (provider, hooks) in &manifest.native_hooks {
+            let events = hooks
+                .iter()
+                .filter(|(_, declaration)| {
+                    declaration.registration
+                        == wezterm_attention::providers::HookRegistration::Register
+                })
+                .map(|(event, _)| event.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            help.push_str(&format!("\n{provider}: {events}"));
+        }
+    }
+    help
 }
 
 #[derive(Clone, Debug, Args)]
 struct OutputArgs {
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Clone, Debug, Args)]
+struct DescribeArgs {
+    #[arg(long)]
+    provider: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Clone, Debug, Args)]
+struct InspectArgs {
+    #[arg(long, value_parser=["-"])]
+    scope: String,
     #[arg(long)]
     json: bool,
 }
@@ -255,6 +300,25 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             "claim".to_owned(),
         )),
         Some(Command::Hooks {
+            command: Some(HookCommand::Describe(args)),
+        }) => {
+            let result = wezterm_attention::providers::describe_hooks(&args.provider)
+                .map_err(|error| (Box::new(error), args.json, "hooks describe".into()))?;
+            emit(
+                &Response {
+                    schema: 1,
+                    command: "hooks describe".into(),
+                    status: "ok".into(),
+                    complete: true,
+                    result,
+                    diagnostics: vec![],
+                },
+                args.json,
+                false,
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Some(Command::Hooks {
             command: Some(HookCommand::Claim(args)),
         }) => {
             let result = wezterm_attention::claim_launch(&environment, &ports)
@@ -365,6 +429,13 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             command: Some(HookCommand::Event(args)),
         }) => {
             let command = "hooks event".to_owned();
+            let consumer_timeout = match wezterm_attention::consumer::validate_consumers(
+                &args.consumer,
+                args.consumer_timeout_ms,
+            ) {
+                Ok(timeout) => timeout,
+                Err(error) => return Ok(emit_hook_error(&error, args.debug, true, &command)),
+            };
             let observation = match clock.monotonic_ns20() {
                 Ok(observation) => observation,
                 Err(error) => {
@@ -410,6 +481,66 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 &payload,
                 &environment,
             );
+            if !args.consumer.is_empty() {
+                use wezterm_attention::consumer::{
+                    DeliveryStage, delivery_bytes, dispatch, not_dispatched,
+                };
+                let outcome = wezterm_attention::lifecycle::apply_provider_event_with_outcome(
+                    &event,
+                    &environment,
+                    &observation,
+                    &ports,
+                );
+                let reply = wezterm_attention::providers::reply_content(
+                    &event,
+                    &payload,
+                    args.include_reply,
+                );
+                let delivery = delivery_bytes(&outcome, reply);
+                let consumers = args
+                    .consumer
+                    .iter()
+                    .map(|executable| match &delivery {
+                        Ok(bytes) => dispatch(
+                            executable,
+                            bytes,
+                            consumer_timeout.expect("validated consumer timeout"),
+                        ),
+                        Err(reason) => not_dispatched(executable, *reason),
+                    })
+                    .collect::<Vec<_>>();
+                let failed = outcome.result.as_ref().map_or(true, |result| {
+                    matches!(
+                        result.disposition.as_str(),
+                        "ignored" | "conflict" | "partial"
+                    )
+                }) || consumers
+                    .iter()
+                    .any(|result| result.stage != DeliveryStage::Completed);
+                let diagnostics = match &outcome.result {
+                    Ok(result) => result.diagnostic.iter().cloned().collect(),
+                    Err(error) => vec![error.diagnostic.clone()],
+                };
+                let result = serde_json::json!({"native": outcome.result.as_ref().ok(), "admission": outcome.admission, "persistence": outcome.persistence, "consumers": consumers});
+                // Reply bodies and child output never enter this diagnostic projection.
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&Response {
+                        schema: 1,
+                        command,
+                        status: if failed { "findings" } else { "ok" }.into(),
+                        complete: true,
+                        result,
+                        diagnostics
+                    })
+                    .expect("diagnostic serializes")
+                );
+                return Ok(if args.strict && failed {
+                    ExitCode::from(1)
+                } else {
+                    ExitCode::SUCCESS
+                });
+            }
             let result = match wezterm_attention::lifecycle::apply_provider_event(
                 &event,
                 &environment,
@@ -569,6 +700,67 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 })
             {
                 ExitCode::from(3)
+            } else {
+                ExitCode::from(1)
+            })
+        }
+        Some(Command::Inspect(args)) => {
+            let maximum = wezterm_attention::protocol::manifest()
+                .map_err(|e| (Box::new(e), args.json, "inspect".into()))?
+                .limits
+                .max_json_bytes;
+            let mut bytes = Vec::new();
+            std::io::stdin()
+                .take((maximum + 1) as u64)
+                .read_to_end(&mut bytes)
+                .map_err(|_| {
+                    (
+                        Box::new(AttentionError::usage("inspect could not read scope stdin")),
+                        args.json,
+                        "inspect".into(),
+                    )
+                })?;
+            if bytes.len() > maximum {
+                return Err((
+                    Box::new(AttentionError::usage("scope exceeds its byte bound")),
+                    args.json,
+                    "inspect".into(),
+                ));
+            }
+            let scope: wezterm_attention::query::PaneScope = serde_json::from_slice(&bytes)
+                .map_err(|_| {
+                    (
+                        Box::new(AttentionError::usage("scope JSON is invalid")),
+                        args.json,
+                        "inspect".into(),
+                    )
+                })?;
+            let read = wezterm_attention::records::state_root(&environment)
+                .and_then(|root| wezterm_attention::query::read_pane_facts(&root, &scope));
+            let facts = match read {
+                Ok(facts) => facts,
+                Err(mut error) => {
+                    error.exit_code = 1;
+                    return Ok(emit_error_with_complete(
+                        &error, args.json, "inspect", false,
+                    ));
+                }
+            };
+            let complete = facts.complete();
+            emit(
+                &Response {
+                    schema: 1,
+                    command: "inspect".into(),
+                    status: if complete { "ok" } else { "findings" }.into(),
+                    complete,
+                    diagnostics: facts.diagnostics.clone(),
+                    result: facts,
+                },
+                args.json,
+                false,
+            );
+            Ok(if complete {
+                ExitCode::SUCCESS
             } else {
                 ExitCode::from(1)
             })

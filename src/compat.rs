@@ -77,6 +77,26 @@ fn projection_value(activity: &Value) -> Result<Value> {
     Ok(Value::Object(projection))
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ProjectionOutcome {
+    pub changed: bool,
+    pub confirmed: bool,
+}
+impl ProjectionOutcome {
+    pub(crate) fn confirmed(changed: bool) -> Self {
+        Self {
+            changed,
+            confirmed: true,
+        }
+    }
+    fn fenced() -> Self {
+        Self {
+            changed: false,
+            confirmed: false,
+        }
+    }
+}
+
 pub fn reconcile_activity(
     root: &Path,
     address: &PaneAddress,
@@ -84,24 +104,8 @@ pub fn reconcile_activity(
     binding_id: &str,
     activity: Option<&Value>,
 ) -> Result<bool> {
-    let pane = pane_path(root, address);
-    with_lock(&pane.join(".claim.lock"), Duration::from_secs(2), || {
-        if !current_claim(root, address, launch_id)?
-            || !current_binding(root, address, launch_id, binding_id)?
-        {
-            return Ok(false);
-        }
-        let marker = root.join(&address.pane_id);
-        match activity {
-            Some(activity) => atomic_replace_if_different(&marker, &projection_value(activity)?),
-            None => {
-                let marker_removed = remove_file_durable(&marker)?;
-                let acknowledgement_removed =
-                    remove_file_durable(&root.join(format!("{}.ack", address.pane_id)))?;
-                Ok(marker_removed || acknowledgement_removed)
-            }
-        }
-    })
+    reconcile_activity_outcome(root, address, launch_id, binding_id, activity)
+        .map(|outcome| outcome.changed)
 }
 
 pub fn reconcile_activity_clear(
@@ -111,10 +115,8 @@ pub fn reconcile_activity_clear(
     binding_id: &str,
     clear_order: &str,
 ) -> Result<bool> {
-    let pane = pane_path(root, address);
-    with_lock(&pane.join(".claim.lock"), Duration::from_secs(2), || {
-        reconcile_activity_clear_locked(root, address, launch_id, binding_id, clear_order)
-    })
+    reconcile_activity_clear_outcome(root, address, launch_id, binding_id, clear_order)
+        .map(|outcome| outcome.changed)
 }
 
 pub fn reconcile_activity_clear_locked(
@@ -124,10 +126,85 @@ pub fn reconcile_activity_clear_locked(
     binding_id: &str,
     clear_order: &str,
 ) -> Result<bool> {
+    reconcile_activity_clear_locked_outcome(root, address, launch_id, binding_id, clear_order)
+        .map(|outcome| outcome.changed)
+}
+
+pub fn reconcile_launch_activity(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    activity: &Value,
+) -> Result<bool> {
+    reconcile_launch_activity_outcome(root, address, launch_id, activity)
+        .map(|outcome| outcome.changed)
+}
+
+pub fn reconcile_agents(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+    binding_dir: &Path,
+) -> Result<bool> {
+    reconcile_agents_outcome(root, address, launch_id, binding_id, binding_dir)
+        .map(|outcome| outcome.changed)
+}
+
+pub(crate) fn reconcile_activity_outcome(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+    activity: Option<&Value>,
+) -> Result<ProjectionOutcome> {
+    let pane = pane_path(root, address);
+    with_lock(&pane.join(".claim.lock"), Duration::from_secs(2), || {
+        if !current_claim(root, address, launch_id)?
+            || !current_binding(root, address, launch_id, binding_id)?
+        {
+            return Ok(ProjectionOutcome::fenced());
+        }
+        let marker = root.join(&address.pane_id);
+        match activity {
+            Some(activity) => atomic_replace_if_different(&marker, &projection_value(activity)?)
+                .map(ProjectionOutcome::confirmed),
+            None => {
+                let marker_removed = remove_file_durable(&marker)?;
+                let acknowledgement_removed =
+                    remove_file_durable(&root.join(format!("{}.ack", address.pane_id)))?;
+                Ok(ProjectionOutcome::confirmed(
+                    marker_removed || acknowledgement_removed,
+                ))
+            }
+        }
+    })
+}
+
+pub(crate) fn reconcile_activity_clear_outcome(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+    clear_order: &str,
+) -> Result<ProjectionOutcome> {
+    let pane = pane_path(root, address);
+    with_lock(&pane.join(".claim.lock"), Duration::from_secs(2), || {
+        reconcile_activity_clear_locked_outcome(root, address, launch_id, binding_id, clear_order)
+    })
+}
+
+pub(crate) fn reconcile_activity_clear_locked_outcome(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+    clear_order: &str,
+) -> Result<ProjectionOutcome> {
     if !current_claim(root, address, launch_id)?
         || !current_binding(root, address, launch_id, binding_id)?
     {
-        return Ok(false);
+        return Ok(ProjectionOutcome::fenced());
     }
     let binding_dir = launch_path(root, address, launch_id)
         .join("bindings")
@@ -141,42 +218,45 @@ pub fn reconcile_activity_clear_locked(
         .as_ref()
         .is_some_and(|activity| activity["observed_mono_ns"].as_str().unwrap_or("") > clear_order)
     {
-        return Ok(false);
+        return Ok(ProjectionOutcome::fenced());
     }
     let marker_removed = remove_file_durable(&root.join(&address.pane_id))?;
     let acknowledgement_removed =
         remove_file_durable(&root.join(format!("{}.ack", address.pane_id)))?;
-    Ok(marker_removed || acknowledgement_removed)
+    Ok(ProjectionOutcome::confirmed(
+        marker_removed || acknowledgement_removed,
+    ))
 }
 
-pub fn reconcile_launch_activity(
+pub(crate) fn reconcile_launch_activity_outcome(
     root: &Path,
     address: &PaneAddress,
     launch_id: &str,
     activity: &Value,
-) -> Result<bool> {
+) -> Result<ProjectionOutcome> {
     let pane = pane_path(root, address);
     with_lock(&pane.join(".claim.lock"), Duration::from_secs(2), || {
         if !current_claim(root, address, launch_id)? {
-            return Ok(false);
+            return Ok(ProjectionOutcome::fenced());
         }
         atomic_replace_if_different(&root.join(&address.pane_id), &projection_value(activity)?)
+            .map(ProjectionOutcome::confirmed)
     })
 }
 
-pub fn reconcile_agents(
+pub(crate) fn reconcile_agents_outcome(
     root: &Path,
     address: &PaneAddress,
     launch_id: &str,
     binding_id: &str,
     binding_dir: &Path,
-) -> Result<bool> {
+) -> Result<ProjectionOutcome> {
     let pane = pane_path(root, address);
     with_lock(&pane.join(".claim.lock"), Duration::from_secs(2), || {
         if !current_claim(root, address, launch_id)?
             || !current_binding(root, address, launch_id, binding_id)?
         {
-            return Ok(false);
+            return Ok(ProjectionOutcome::fenced());
         }
         let clear = read_record(
             &binding_dir.join("agents-clear.json"),
@@ -269,9 +349,10 @@ pub fn reconcile_agents(
         }
         let sidecar = root.join(format!("{}.agents", address.pane_id));
         if projected.is_empty() {
-            remove_file_durable(&sidecar)
+            remove_file_durable(&sidecar).map(ProjectionOutcome::confirmed)
         } else {
             atomic_replace_if_different(&sidecar, &json!({"agents": projected}))
+                .map(ProjectionOutcome::confirmed)
         }
     })
 }

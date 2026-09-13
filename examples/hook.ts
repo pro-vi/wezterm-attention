@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
 // Direct custom marker example. Provider hooks should instead forward their
 // original stdin to `attention hooks event <provider> <event>`.
+// The executable consumer example is reply-sink.mjs. Select it with --consumer,
+// --consumer-timeout-ms and optional --include-reply; it owns its output file.
 
 import { isAbsolute, join } from "node:path";
 

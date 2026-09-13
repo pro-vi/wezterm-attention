@@ -112,3 +112,104 @@ Complete stable reads exit 0. Selected-record or directory failures and detected
 The socket query creates no state directories, takes no writer locks, and performs no publication, acknowledgement or maintenance. Its WezTerm pane query explicitly supplies `--no-auto-start`. Queries without `--socket` retain the existing response shape.
 
 For publication, `hooks publish --socket <PATH>` is preferred. The path-valued `hooks publish --realm <PATH>` alias remains supported; using both is rejected. Publication without either selector retains pane publication and prompt-return behavior. `bindings --realm <ID>` and `sweep --realm <ID>` still take realm identifiers.
+
+## Public consumer contracts
+
+CLI envelopes and `HookDelivery` use consumer schema **1**. Package metadata uses manifest schema **2**; record schema **2** and wire version **2** are unchanged. Ship the manifest with its matching Rust/Lua readers. The following interfaces are source capabilities, not evidence that a machine has registered or activated them.
+
+### Registration description
+
+```sh
+attention hooks describe --provider claude --json
+attention hooks describe --provider codex --json
+attention hooks describe --provider pi --json
+```
+
+`result` contains `manifest_schema`, `wire_version`, `record_schema`, `writer_version`, `provider` and `native_hooks`. Each hook has `native_event`, `arguments`, `requires_launch_identity`, `registration` (`register` or `ignored`) and `evidence` references. Prepend the resolved executable to `arguments`; a Stop row supplies `["hooks","event","claude","Stop"]`, for example. Forward original callback JSON unchanged.
+
+`requires_launch_identity=true` qualifies **rich facts and executable consumer delivery**. It does not say every legacy callback requires inherited identity. Ignored rows are not installation registrations. Pi additionally supplies `extension_entrypoint="pi/index.ts"`; its custom native bus name is `wezterm-attention:mark`, forwarded as the `bus` writer argument. Non-Pi results omit `extension_entrypoint`. Parser coverage, synthetic fixtures, native contact and activation remain separate; the evidence references do not assert activation.
+
+### Transient hook delivery
+
+```sh
+export ATTENTION_REPLY_FILE=/absolute/application-data/reply.json
+attention hooks event claude Stop \
+  --consumer /absolute/checkout/examples/reply-sink.mjs \
+  --consumer-timeout-ms 1000 --include-reply
+```
+
+Repeat `--consumer` for multiple executables. Each gets the explicit positive, representable deadline, covering stdin writing and process completion. Total hook time includes each consumer's budget. Paths are absolute executable paths, with no shell command syntax or executable arguments. Normal process environment inheritance remains available to application-owned executables; the delivery JSON contains no environment dump. The sample sink uses Node through its shebang, so Node must be on the configured PATH.
+
+`HookDelivery` contains `schema`, a fresh `delivery_id`, `scope`, `action`, `provider`, `provider_session_id`, `source_event`, `actor`, optional `correlation` and `observation_id`, `persistence`, and `reply`. Scope contains the admitted `address`, `launch_id`, and a binding `target` (`kind="binding"`, `binding_id`). `action` uses the existing provider-action vocabulary and distinguishes binding, activity, parent Stop, child presence, end, review, clear and observation-only operations. It is not a controller command or permission.
+
+Identity is captured inside the same native application path. Delivery requires inherited launch identity and a matching provider binding. Tty-only recovery does not qualify. The label remains that admitted source even if a newer occupant appears before a consumer acts. No executable runs inside an Attention writer lock.
+
+Persistence reports four independent fields:
+
+| Field | What is covered |
+|---|---|
+| `native_state` | All native record effects selected by `action`, excluding lifecycle and flat compatibility output: binding/current pointer, activity, parent child-clear, child presence, binding end, review or clear/removal as applicable |
+| `activity` | The lead activity or activity-clear subset, when selected |
+| `compatibility` | Selected V1 flat projection reconciliation, including a valid already-satisfied state; a fenced reconciliation is rejected |
+| `lifecycle` | This callback's requested lifecycle observation |
+
+Each field is `not_requested`, `confirmed`, `rejected` or `unconfirmed`. Confirmed does not require new bytes when the required state already matches. Unconfirmed does not establish that no writes happened. A rejected or unconfirmed requested effect suppresses delivery. Lifecycle preparation/write failure can coexist with confirmed native and compatibility effects. `observation_id` appears only when the native application confirms writing that observation; it is never a provider request ID or controller token. Optional correlation is omitted when absent.
+
+`reply.availability` is `not_requested`, `available`, `absent`, `unsupported`, `invalid` or `too_large`. **Only available has `text`.** Exact decoded text, including an empty string, Unicode and newlines, is available only for admitted lead Claude/Codex Stop callbacks with a string `last_assistant_message`. Missing field means absent; null or another JSON type means invalid. Other events/actors and Pi are unsupported. The whole delivery must fit Attention's hook JSON byte limit; oversized text is omitted with `too_large`, never truncated. Reply bodies enter no Attention record, diagnostic or GUI cache. The existing hook-input size limit still applies: an oversized native payload is rejected before application. Delivery `too_large` covers admitted content whose serialized delivery exceeds the bound.
+
+| Consumer stage | Precise meaning |
+|---|---|
+| `not_dispatched` | No child attempted; `reason` names missing admission, rejected/unconfirmed requested persistence, or an oversized envelope |
+| `not_started` | Kernel startup failed; no consumer program executed and no child exit code is invented |
+| `completed` | All stdin bytes were written and the direct child exited zero; application effects are still not known |
+| `failed` | Started child failed or its wait failed; an exit code is included only when actually observed |
+| `stdin_failed` | Input delivery failed or the child exited before input completed; effects can have occurred |
+| `timed_out` | The stdin/completion deadline expired; Attention terminated/reaped its direct child |
+
+`effect` is `none` for not-dispatched/not-started and `possible` for every started child, including completed. `reason` is omitted outside not-dispatched; `exit_code` is omitted when unavailable. Descendants are not supervised. Delivery is attempted once per configured executable, in order; later consumers still run after failure. Repeated invocations can produce distinct delivery IDs. There is no durable queue, automatic retry or exactly-once promise.
+
+Consumer outcomes and native persistence are reported on structured stderr; child stdout/stderr are discarded. Hook stdout stays reserved for the provider. Strict mode fails on consumer failure; non-strict mode remains provider-friendly. Malformed consumer arguments fail before native application. Without consumers, existing stdout/exit/debug behavior remains unchanged.
+
+### Scoped headless inspection
+
+```sh
+printf '%s\n' "$SCOPE_JSON" | attention inspect --scope - --json
+```
+
+Obtain `$SCOPE_JSON` from a selected public bindings row: `{ "address": row.address, "launch_id": row.launch_id, "binding_id": row.binding_id }`. All identity components are canonical. Unknown fields are rejected. `binding_id` can be omitted or null to leave that expectation unspecified; canonical serialization omits it. Address and launch remain required. A changed launch/binding is reported, never automatically followed.
+
+`result` is `PaneFacts`: requested `scope`, `scope_relation` (`matched`, `launch_changed`, `binding_changed`, `unavailable`), `binding`, `pane_presence`, `reader_confidence`, `binding_health`, `activity`, `binding_end`, `children`, `review`, `lifecycle` and facet-owned diagnostics. `binding` is a validated existing `BindingRow`, or null when no matched metadata is available. Null alone does not establish an unbound pane. Binding health is local evidence, not a global uniqueness or permission claim. Presence and provider binding phase remain independent: an ended provider can be in a present pane. Lifecycle validity does not by itself change the base identity/read-confidence axes; inspect its own availability and the envelope completeness.
+
+Activity and binding-end facets contain `availability`, optional `record`, and `diagnostics`. Activity is present, absent, cleared, expired, unavailable, invalid or unsupported. Present/expired retain the validated activity record with native type/source/target, event ID, timestamps and supplied TTL/frame/label. Cleared retains the applicable clear record, whose stored fields need not include a write timestamp. Absent or failed reads omit `record`. Badge acknowledgement cannot hide this raw activity facet. Effective binding-end records retain reason, event/timestamps and optional Attention maintenance `operation_id`; older inapplicable ends are absent. That operation ID is not a controller dispatch token.
+
+Children and review collections contain availability, eligible `count`, `evidence`, `coverage="eligible_records"` and diagnostics. A successful empty collection can have availability present and count zero. Degraded reads may retain independently validated evidence. Child eligibility follows existing clear/floor/TTL rules; zero eligible records never proves every child process exited. Children with known selection fences additionally expose `eligibility`: the protocol `ttl_ms` and optional `clear_mono_ns`/`floor_mono_ns`. Review and unbound/unresolved child collections omit eligibility. Missing fence fields are not absence evidence when collection availability is degraded.
+
+Lifecycle uses the existing GUI observation/request/relation/floor names and `coverage="bounded_window"`. Headless availability is available, absent, unavailable, invalid or unsupported; there is no cached fallback. Missing snapshot IDs, correlations, optional native fields and floors are omitted. Arrays remain arrays when empty. Both pool floors are preserved when present. Optional badge acknowledgement is separate from raw activity and native relations.
+
+The reader checks claim/current pointer before and after assembly and rechecks socket identity. Rotation discards the assembled facts. A stable binding does not make independently written files one atomic snapshot. Inspection does not create directories, write acknowledgements, prune records or start WezTerm. Complete valid reads, including explicit absence, exit 0; changed/degraded evidence exits 1; invalid scope/arguments exit 2. Complete means this requested response was represented, not complete history or task success.
+
+### GUI view callback
+
+```lua
+attention.apply_to_config(config, {
+  settled_title_fallback = false,
+  on_view_change = function(change)
+    -- Update application-owned presentation. Return promptly.
+  end,
+})
+```
+
+Initial/updated messages contain `kind`, GUI-local `window_id`, full `scope` and detached `view`. Scope has address, launch and a launch or binding target. Scope-lost messages contain only `kind`, `window_id` and `previous_scope`. Window context is not source identity or control permission. Unpublished/V1 input never fabricates V2 scope.
+
+Each window has its own baseline. A confirmed source replacement emits loss before initial; ending the same binding is an update. Fresh target selection can establish a degraded new binding view. Unavailable target selection retains the last established scope only as degraded context; it does not restore old facts. Lifecycle-only, confidence and floor changes count; spinner animation alone does not. Delivery follows cache refresh and configured acknowledgement, including in unfocused windows.
+
+Registration is once per module. Repeated apply does not replace the callback. A successful normal configuration reload starts a fresh module baseline; a window override event alone does not. Callbacks are cooperative: exceptions and reentrant delivery are contained, but an infinite callback cannot be preempted. Schedule expensive work outside the poll. With title fallback disabled, polls do no process-title sampling, title-state comparison or title-only redraw/advice. Default rendering and review/acknowledgement remain supported.
+
+### Executable application recipes
+
+- `examples/reply-sink.mjs` stores exact supplied content and its full source scope in an application-owned file. It does not prove the last received delivery is the newest/current reply; a resolver must check identity and own its ordering/idempotency policy.
+- `examples/follow-up.lua` consumes normalized publication facts and per-window callbacks. Local dismissal updates presentation immediately and does not answer a provider question. Copy it beside `examples/wezterm.lua` when using that configuration.
+- `node examples/checkpoint.mjs /absolute/attention /absolute/socket /absolute/wezterm /absolute/checkpoint.json [LIMIT]` brackets topology with two complete socket binding queries. Failure, incomplete evidence, duplicate current associations or socket rotation preserves the old checkpoint. Missing association stays null/unknown. Topology uses explicit `--no-auto-start`; no identity hashing or private record paths are copied. The two query durations are reported in milliseconds.
+- `node examples/inspect.mjs /absolute/attention /absolute/socket [LIMIT]` performs bounded discovery followed by exact-scope inspections. Incomplete discovery stops before inspection; degraded or changed scope fails rather than following another occupant.
+
+The Node process recipes use 10-second subprocess deadlines and an 8 MiB output budget. These are example I/O budgets, not agent-state thresholds. They retain failure instead of inferring absence. Checkpoint replacement uses a private temporary file plus rename; no cross-file atomicity or disk-durability guarantee is added. Tests supply synthetic topology/content and production CLI responses. None of these examples installs hooks, chooses a live profile, accesses the clipboard or grants controller permission.

@@ -3,6 +3,8 @@ return function()
   local legacy_cache_key_by_marker_id = {}
   local marker_id_by_local = {}
   local seen_marker_ids_by_window = {}
+  local callback_views_by_window = {}
+  local delivering_views = false
 
   local function bind(context)
     local M = context.M
@@ -605,11 +607,7 @@ return function()
 
     --- Return a copy of the cached full-pane v2 view for a pane, or nil when the
     --- pane has no cache entry. This performs no filesystem or process work.
-    function M.get_attention_view(pane)
-      local read = resolve_pane_read(pane)
-      local cached = read.cache_key and attention_cache[read.cache_key] or nil
-      if not cached then return nil end
-      if read.kind == "v2" and cached.launch_id ~= read.launch_id then return nil end
+    local function copy_public_view(cached)
       return {
         provider = cached.provider,
         binding_id = cached.binding_id,
@@ -629,6 +627,72 @@ return function()
         binding_health = cached.binding_health,
         lifecycle = cached.lifecycle and context.deep_copy(cached.lifecycle) or nil,
       }
+    end
+
+    function M.get_attention_view(pane)
+      local read = resolve_pane_read(pane)
+      local cached = read.cache_key and attention_cache[read.cache_key] or nil
+      if not cached then return nil end
+      if read.kind == "v2" and cached.launch_id ~= read.launch_id then return nil end
+      return copy_public_view(cached)
+    end
+
+    local function same_public_value(a, b)
+      if type(a) ~= type(b) then return false end
+      if type(a) ~= "table" then return a == b end
+      for key, value in pairs(a) do if not same_public_value(value, b[key]) then return false end end
+      for key in pairs(b) do if a[key] == nil then return false end end
+      return true
+    end
+
+    local function deliver_window_views(window, entries, opts)
+      local callback = M._on_view_change
+      if not callback then return end
+      local window_key = redraw_window_key(window)
+      local previous = callback_views_by_window[window_key] or {}
+      local next_views, messages, losses = {}, {}, {}
+      local function lost(state, id)
+        losses[#losses + 1] = { kind = "scope_lost", window_id = id, previous_scope = context.deep_copy(state.scope) }
+      end
+      for key, read in pairs(entries) do
+        local cached = attention_cache[key]
+        local old = previous[key]
+        if cached and cached.launch_id == read.launch_id then
+          local target = cached._records and cached._records.selection_target
+          local scope = target and { address = context.deep_copy(read.address), launch_id = read.launch_id, target = context.deep_copy(target) }
+          if not scope and old and old.scope.launch_id == read.launch_id then scope = old.scope end
+          if scope then
+            local view = copy_public_view(cached)
+            local replaced = old and not same_public_value(old.scope, scope)
+            if replaced then lost(old, window:window_id()) end
+            if not old or replaced or not same_public_value(old.view, view) then
+              messages[#messages + 1] = { kind = (not old or replaced) and "initial" or "updated",
+                window_id = window:window_id(), scope = context.deep_copy(scope), view = context.deep_copy(view) }
+            end
+            next_views[key] = { scope = context.deep_copy(scope), view = view }
+          end
+        end
+      end
+      for key, state in pairs(previous) do if not next_views[key] then lost(state, window:window_id()) end end
+      callback_views_by_window[window_key] = next_views
+      local live = gui_window_keys(opts)
+      if live then
+        live[window_key] = true
+        for other, states in pairs(callback_views_by_window) do
+          if not live[other] then
+            for _, state in pairs(states) do lost(state, tonumber(other) or other) end
+            callback_views_by_window[other] = nil
+          end
+        end
+      end
+      delivering_views = true
+      for _, batch in ipairs({ losses, messages }) do
+        for _, message in ipairs(batch) do
+          local ok = pcall(callback, message)
+          if not ok then report_error_once("on-view-change-error", "on_view_change failed; future polls remain enabled") end
+        end
+      end
+      delivering_views = false
     end
 
     --- Remove the attention marker for a marker id (see M.pane_marker_id).
@@ -693,6 +757,7 @@ return function()
     --- happened to switch tabs — which is exactly when they no longer needed to be
     --- told.
     function M.poll(window, opts)
+      if delivering_views then return end
       local dir = (opts and opts.dir) or M._active_dir or defaults.dir
       local mux_win = window:mux_window()
       if not mux_win then return end
@@ -702,7 +767,9 @@ return function()
       local mux_tabs = mux_win:tabs()
       local pane_ids = {}
       local before = {}
-      local before_titles = {}
+      local title_enabled = M._active_settled_title_fallback ~= false
+      local before_titles = title_enabled and {} or nil
+      local callback_entries = {}
       local seen = {}             -- cache key → identity and domain observed in this window
       local live_local_ids = {}   -- GUI pane lifetime is independent of its storage key.
       local domains_present = {}  -- domain names this window still holds a pane of
@@ -749,7 +816,7 @@ return function()
           local read = resolve_pane_read(p)
           local key = read.cache_key
           marker_id_by_local[local_id] = key or false
-          if key then
+          if key and title_enabled then
             local prior_title = settled_title_state[key]
             before_titles[key] = prior_title and prior_title.settled or nil
           end
@@ -759,6 +826,7 @@ return function()
             report_error_once("v2-identity:" .. local_id .. ":" .. item.code,
               item.code .. ": " .. item.message)
           elseif read.kind == "v2" then
+            callback_entries[key] = read
             saw_v2 = true
             local now_unix_ns, utc_error = sample_utc_once()
             if utc_error then
@@ -823,7 +891,7 @@ return function()
           elseif read.kind == "unpublished" then
             unpublished_by_domain[read.domain] = true
           end
-          if key then
+          if key and title_enabled then
             local cached = attention_cache[key]
             sample_settled_title(
               key, read.launch_id, pane_method(p, "get_title"), cached and cached.provider or nil)
@@ -888,7 +956,10 @@ return function()
       -- Everything below is about the focused window only. An unfocused window
       -- must neither acknowledge a marker its user has not seen nor be sent a key
       -- action, so an unfocused poll ends here with the cache correct.
-      if not window:is_focused() then return end
+      if not window:is_focused() then
+        deliver_window_views(window, callback_entries, opts)
+        return
+      end
 
       local current_active_pane = window:active_pane()
       if current_active_pane then
@@ -904,16 +975,18 @@ return function()
         end
       end
 
+      deliver_window_views(window, callback_entries, opts)
+
       -- The event pane can transport a redraw when no current pane is available,
       -- but it never authorizes acknowledgement.
       local action_pane = current_active_pane or (opts and opts.active_pane)
 
       local changed = false
       for _, id in ipairs(pane_ids) do
-        local title_state = settled_title_state[id]
+        local title_state = title_enabled and settled_title_state[id]
         local settled_title = title_state and title_state.settled or nil
         if not same_cached_attention(before[id], attention_cache[id])
-            or before_titles[id] ~= settled_title then
+            or (title_enabled and before_titles[id] ~= settled_title) then
           changed = true
           break
         end

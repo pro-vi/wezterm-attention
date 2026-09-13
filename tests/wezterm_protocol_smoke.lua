@@ -34,6 +34,20 @@ end
     assert((parsed and "valid" or problem.code) == case.expected, "lifecycle " .. case.id)
   end
   local lifecycle_dir = os.getenv("WEZTERM_ATTENTION_LIFECYCLE_FIXTURE_DIR")
+  local parity_path = os.getenv("WEZTERM_ATTENTION_FACTS_PARITY")
+  if parity_path then
+    local function equal(a,b)
+      if type(a)~=type(b) then return false end
+      if type(a)~="table" then return a==b end
+      for key,value in pairs(a) do if not equal(value,b[key]) then return false end end
+      for key in pairs(b) do if a[key]==nil then return false end end
+      return true
+    end
+    for _,case in ipairs(read_json(parity_path)) do
+      local actual=internal.lifecycle_facet(case.snapshot,"valid",nil,case.now)
+      assert(equal(actual,case.expected),"Rust/Lua lifecycle projection differs: "..case.id)
+    end
+  end
   if lifecycle_dir then
     local wire = assert(internal.parse_wire_json(os.getenv("WEZTERM_ATTENTION_LIFECYCLE_FIXTURE_WIRE")))
     local view = internal.read_attention_view({ address = wire.address, launch_id = wire.launch_id, marker_id = wire.address.pane_id, cache_key = internal.address_cache_key(wire.address) }, "99999999999999999999", { dir = lifecycle_dir })
@@ -46,6 +60,23 @@ end
     internal.attention_cache[internal.address_cache_key(wire.address)] = view
     local pane = { get_user_vars = function() return { WEZTERM_ATTENTION = os.getenv("WEZTERM_ATTENTION_LIFECYCLE_FIXTURE_WIRE") } end }
     local copy = assert(attention.get_attention_view(pane))
+    package.loaded.plugin = nil
+    local callback_instance = require("plugin")
+    local deliveries = {}
+    callback_instance.apply_to_config({}, { dir = lifecycle_dir, renderer = "manual", auto_poll = false,
+      review_key = false, auto_clear = {}, settled_title_fallback = false,
+      on_view_change = function(message) deliveries[#deliveries + 1] = message end })
+    pane.pane_id = function() return 91001 end
+    pane.get_domain_name = function() return "fixture" end
+    pane.get_title = function() error("disabled title fallback sampled a title") end
+    local window = { window_id = function() return 91002 end, is_focused = function() return false end,
+      mux_window = function() return { tabs = function() return {{panes = function() return {pane} end}} end } end }
+    local poll_options = { now_unix_ns = "99999999999999999999", call_after = function() end, gui_windows = {window} }
+    callback_instance.poll(window, poll_options)
+    callback_instance.poll(window, poll_options)
+    assert(#deliveries == 1 and deliveries[1].kind == "initial" and deliveries[1].window_id == 91002,
+      "installed Lua callback did not preserve initial/unchanged semantics")
+    assert(deliveries[1].scope.launch_id == wire.launch_id and deliveries[1].view.lifecycle.availability == "available")
     if publication then
       local module = dofile(root .. "/tests/fixtures/lifecycle/consumer.lua")
       local consumer, second = module.new(), module.new()

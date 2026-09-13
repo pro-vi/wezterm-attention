@@ -1,4 +1,5 @@
 pub mod compat;
+pub mod consumer;
 pub mod identity;
 pub mod lifecycle;
 pub mod maintenance;

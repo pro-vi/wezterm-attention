@@ -3,6 +3,178 @@
   "wire_version": 2,
   "record_schema": 2,
   "writer_version": "2.0.0",
+  "native_hooks": {
+    "claude": {
+      "SessionStart": {
+        "registration": "register",
+        "native_event": "SessionStart"
+      },
+      "UserPromptSubmit": {
+        "registration": "register",
+        "native_event": "UserPromptSubmit"
+      },
+      "PreCompact": {
+        "registration": "register",
+        "native_event": "PreCompact"
+      },
+      "PostCompact": {
+        "registration": "register",
+        "native_event": "PostCompact"
+      },
+      "StopFailure": {
+        "registration": "register",
+        "native_event": "StopFailure"
+      },
+      "SessionEnd": {
+        "registration": "register",
+        "native_event": "SessionEnd"
+      },
+      "PreToolUse": {
+        "registration": "register",
+        "native_event": "PreToolUse"
+      },
+      "PermissionRequest": {
+        "registration": "register",
+        "native_event": "PermissionRequest"
+      },
+      "Notification": {
+        "registration": "register",
+        "native_event": "Notification"
+      },
+      "Stop": {
+        "registration": "register",
+        "native_event": "Stop"
+      },
+      "SubagentStop": {
+        "registration": "register",
+        "native_event": "SubagentStop"
+      },
+      "SubagentStart": {
+        "registration": "ignored",
+        "native_event": "SubagentStart"
+      },
+      "PostToolUse": {
+        "registration": "register",
+        "native_event": "PostToolUse"
+      },
+      "PostToolUseFailure": {
+        "registration": "register",
+        "native_event": "PostToolUseFailure"
+      },
+      "PermissionDenied": {
+        "registration": "register",
+        "native_event": "PermissionDenied"
+      },
+      "Elicitation": {
+        "registration": "register",
+        "native_event": "Elicitation"
+      },
+      "ElicitationResult": {
+        "registration": "register",
+        "native_event": "ElicitationResult"
+      }
+    },
+    "codex": {
+      "SessionStart": {
+        "registration": "register",
+        "native_event": "SessionStart"
+      },
+      "UserPromptSubmit": {
+        "registration": "register",
+        "native_event": "UserPromptSubmit"
+      },
+      "PreCompact": {
+        "registration": "register",
+        "native_event": "PreCompact"
+      },
+      "PostCompact": {
+        "registration": "register",
+        "native_event": "PostCompact"
+      },
+      "Interrupt": {
+        "registration": "register",
+        "native_event": "Interrupt"
+      },
+      "SessionEnd": {
+        "registration": "register",
+        "native_event": "SessionEnd"
+      },
+      "PreToolUse": {
+        "registration": "register",
+        "native_event": "PreToolUse"
+      },
+      "PermissionRequest": {
+        "registration": "register",
+        "native_event": "PermissionRequest"
+      },
+      "Stop": {
+        "registration": "register",
+        "native_event": "Stop"
+      },
+      "SubagentStop": {
+        "registration": "register",
+        "native_event": "SubagentStop"
+      },
+      "SubagentStart": {
+        "registration": "ignored",
+        "native_event": "SubagentStart"
+      },
+      "PostToolUse": {
+        "registration": "register",
+        "native_event": "PostToolUse"
+      }
+    },
+    "pi": {
+      "session_start": {
+        "registration": "register",
+        "native_event": "session_start"
+      },
+      "session_shutdown": {
+        "registration": "register",
+        "native_event": "session_shutdown"
+      },
+      "agent_start": {
+        "registration": "register",
+        "native_event": "agent_start"
+      },
+      "tool_execution_start": {
+        "registration": "register",
+        "native_event": "tool_execution_start"
+      },
+      "tool_execution_end": {
+        "registration": "register",
+        "native_event": "tool_execution_end"
+      },
+      "agent_settled": {
+        "registration": "register",
+        "native_event": "agent_settled"
+      },
+      "agent_end": {
+        "registration": "ignored",
+        "native_event": "agent_end"
+      },
+      "bus": {
+        "registration": "register",
+        "native_event": "wezterm-attention:mark"
+      },
+      "input": {
+        "registration": "register",
+        "native_event": "input"
+      },
+      "message_end": {
+        "registration": "register",
+        "native_event": "message_end"
+      },
+      "session_before_compact": {
+        "registration": "register",
+        "native_event": "session_before_compact"
+      },
+      "session_compact": {
+        "registration": "register",
+        "native_event": "session_compact"
+      }
+    }
+  },
   "tool_classification": {
     "claude": {"AskUserQuestion": {"tool_class": "question", "question_mode": "blocking"}},
     "codex": {

@@ -392,45 +392,20 @@ Other extensions may emit `thinking`, `stop`, `notify`, `review`, or `clear`. Re
 
 ## Claude Code hooks
 
-Claude hook registration remains user-owned. Pass original hook stdin to:
+Claude hook registration remains user-owned. Read the package-owned registration description: For each `registration=register` row, prepend the resolved Attention executable to `arguments` and forward the original callback JSON to that invocation. Ignored rows are not registrations. `requires_launch_identity` qualifies rich facts and executable delivery; it does not remove legacy support. Evidence references describe parser, fixture and native-contact coverage, not live activation. For Pi, install the reported `extension_entrypoint`; its bus event is `wezterm-attention:mark`.
 
-```text
-attention hooks event claude SessionStart
-attention hooks event claude PreToolUse
-attention hooks event claude PostToolUse
-attention hooks event claude PostToolUseFailure
-attention hooks event claude UserPromptSubmit
-attention hooks event claude PermissionRequest
-attention hooks event claude PermissionDenied
-attention hooks event claude Elicitation
-attention hooks event claude ElicitationResult
-attention hooks event claude Notification
-attention hooks event claude Stop
-attention hooks event claude StopFailure
-attention hooks event claude PreCompact
-attention hooks event claude PostCompact
-attention hooks event claude SubagentStop
-attention hooks event claude SessionEnd
+```sh
+attention hooks describe --provider claude --json
 ```
 
 Use `$WEZTERM_ATTENTION_ROOT/bin/attention`. Do not register `SubagentStart`: presence begins only after child tool work. `SubagentStop` writes stopped evidence for the same child ID. Claude root Stop does not clear all children because background children may outlive it. See [Mux setup](docs/mux-setup.md).
 
 ## Codex hooks
 
-Codex hook registration remains user-owned. Pass original hook stdin to:
+Codex hook registration remains user-owned. Read the package-owned registration description: For each `registration=register` row, prepend the resolved Attention executable to `arguments` and forward the original callback JSON to that invocation. Ignored rows are not registrations. `requires_launch_identity` qualifies rich facts and executable delivery; it does not remove legacy support. Evidence references describe parser, fixture and native-contact coverage, not live activation. For Pi, install the reported `extension_entrypoint`; its bus event is `wezterm-attention:mark`.
 
-```text
-attention hooks event codex SessionStart
-attention hooks event codex PreToolUse
-attention hooks event codex PostToolUse
-attention hooks event codex UserPromptSubmit
-attention hooks event codex PermissionRequest
-attention hooks event codex Stop
-attention hooks event codex Interrupt
-attention hooks event codex PreCompact
-attention hooks event codex PostCompact
-attention hooks event codex SubagentStop
-attention hooks event codex SessionEnd
+```sh
+attention hooks describe --provider codex --json
 ```
 
 Use `$WEZTERM_ATTENTION_ROOT/bin/attention`. Child attribution requires matching native `agent_id` values; see [contact evidence](docs/reviews/lifecycle-contact-results.md) for exercised paths. Root Stop writes lead Stop, then one child-clear watermark. `stop_hook_active` is retained as response-completion context, not a badge-policy change. Do not register `SubagentStart`. See [Mux setup](docs/mux-setup.md).

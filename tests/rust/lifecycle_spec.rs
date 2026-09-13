@@ -21,6 +21,15 @@ use wezterm_attention::query::read_bindings;
 use wezterm_attention::records::{atomic_replace, launch_path, pane_path, state_root, with_lock};
 use wezterm_attention::wezterm::{Clock, PaneLister, PaneRow, RuntimePorts, TtyWriter};
 
+#[path = "hook_consumer_spec.rs"]
+mod hook_consumer_spec;
+
+#[path = "pane_facts_spec.rs"]
+mod pane_facts_spec;
+
+#[path = "consumer_recipes_spec.rs"]
+mod consumer_recipes_spec;
+
 struct Scratch(PathBuf);
 
 #[test]
@@ -1447,6 +1456,119 @@ fn provider_fixtures_equal_the_closed_action_vocabulary() {
         .map(|action| action.as_str())
         .collect();
     assert_eq!(seen, declared);
+}
+
+#[test]
+fn hook_description_is_exhaustive_read_only_and_pins_public_fields() {
+    use wezterm_attention::providers::{HookRegistration, describe_hooks};
+    let contact: Value =
+        serde_json::from_str(include_str!("../fixtures/lifecycle/contact-cases.json")).unwrap();
+    for provider in ["claude", "codex", "pi"] {
+        let fixture = load_fixture(provider);
+        let description = describe_hooks(provider).unwrap();
+        for hook in &description.native_hooks {
+            let callback = &hook.arguments[3];
+            let mut cases = Vec::new();
+            for case in fixture["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|case| case["event"] == *callback)
+            {
+                let mut payload = fixture["base"].clone();
+                if provider != "pi" {
+                    payload["hook_event_name"] = json!(callback);
+                }
+                if let Some(patch) = case["patch"].as_object() {
+                    for (k, v) in patch {
+                        payload[k] = v.clone();
+                    }
+                }
+                cases.push(parse_provider_event(
+                    provider,
+                    callback,
+                    &payload,
+                    &BTreeMap::new(),
+                ));
+            }
+            for case in contact["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|row| row["cases"].as_array().unwrap())
+            {
+                if case["provider"] == provider && case["event"] == *callback {
+                    cases.push(event(
+                        provider,
+                        callback,
+                        "description-fixture",
+                        case["patch"].clone(),
+                    ));
+                }
+            }
+            assert!(!cases.is_empty(), "missing {provider}/{callback} fixture");
+            assert_eq!(
+                cases
+                    .iter()
+                    .any(|case| case.action != ProviderAction::Ignored),
+                hook.registration == HookRegistration::Register,
+                "{provider}/{callback}"
+            );
+            assert!(hook.requires_launch_identity);
+            assert_eq!(&hook.arguments[..3], &["hooks", "event", provider]);
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+            .env_clear()
+            .env("WEZTERM_ATTENTION_DIR", "invalid-relative-root")
+            .args(["hooks", "describe", "--provider", provider, "--json"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["schema"], 1);
+        assert_eq!(response["complete"], true);
+        assert_eq!(
+            response["result"],
+            serde_json::to_value(&description).unwrap()
+        );
+        assert_eq!(
+            response["result"].get("extension_entrypoint").is_some(),
+            provider == "pi"
+        );
+        for row in response["result"]["native_hooks"].as_array().unwrap() {
+            assert_eq!(
+                row.as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                vec![
+                    "arguments",
+                    "evidence",
+                    "native_event",
+                    "registration",
+                    "requires_launch_identity"
+                ]
+            );
+        }
+    }
+    assert!(describe_hooks("unknown").is_err());
+    let pi = describe_hooks("pi").unwrap();
+    assert!(
+        pi.native_hooks
+            .iter()
+            .any(|row| row.native_event == "wezterm-attention:mark" && row.arguments[3] == "bus")
+    );
+    for (provider, callback) in [
+        ("claude", "Interrupt"),
+        ("codex", "StopFailure"),
+        ("pi", "Stop"),
+    ] {
+        assert_eq!(
+            event(provider, callback, "unsupported", json!({})).action,
+            ProviderAction::Ignored
+        );
+    }
 }
 
 #[test]

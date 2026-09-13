@@ -271,6 +271,9 @@ return function(context)
     local current_target = { kind = "launch" }
     local records_root = launch_root
     local previous_binding_records = {}
+    if not pointer_diagnostic then
+      records.selection_target = pointer and { kind = "binding", binding_id = pointer.binding_id } or { kind = "launch" }
+    end
     if pointer and previous_records.pointer
         and previous_records.pointer.binding_id == pointer.binding_id then
       previous_binding_records = previous_records
@@ -479,6 +482,7 @@ return function(context)
 
 
   return {
+    lifecycle_facet = lifecycle_facet,
     canonical_pane_id = canonical_pane_id,
     pane_call = pane_call,
     pane_method = pane_method,

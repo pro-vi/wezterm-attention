@@ -3207,6 +3207,14 @@ test("question publication, tool return, and badge dismissal stay independent", 
     return assert(reloaded.get_attention_view(pane))
   end
   local view = read(false)
+  local callback_consumer = dofile(repo_root .. "/examples/follow-up.lua").for_windows()
+  local callback_scope = {address=view.address,launch_id=view.launch_id,target={kind="binding",binding_id=view.binding_id}}
+  callback_consumer.on_view_change({kind="initial",window_id=90001,scope=callback_scope,view=view})
+  assert(callback_consumer.appearance(90001,callback_scope)=="follow_up")
+  callback_consumer.dismiss(90001,callback_scope)
+  assert(callback_consumer.appearance(90001,callback_scope)=="base","local dismissal needs no provider callback")
+  callback_consumer.on_view_change({kind="scope_lost",window_id=90001,previous_scope=callback_scope})
+  assert(callback_consumer.appearance(90001,callback_scope)=="unknown")
   local consumer = dofile(repo_root .. "/tests/fixtures/lifecycle/consumer.lua").new()
   local other_consumer = dofile(repo_root .. "/tests/fixtures/lifecycle/consumer.lua").new()
   assert(consumer.appearance(view) == "follow_up" and other_consumer.appearance(view) == "follow_up")
@@ -3410,6 +3418,114 @@ test("lifecycle snapshot grammar agrees with the shared fixture", function()
   assert(ok and not result and problem.code == "record_invalid" and status == "invalid")
   local parsed = api.parse_v2_record_json(string.rep("[", 9) .. string.rep("]", 9), "lifecycle_snapshot")
   assert(not parsed, "deep lifecycle containers must reject")
+end)
+
+test("GUI callback has per-window baselines and detached lifecycle updates", function()
+  local wire = materialize_v2_fixture(13001, string.rep("c",64))
+  local samples = protocol_fixture.record_samples
+  local dir = test_dir .. "/v2/realms/" .. wire.address.realm_id .. "/incarnations/" .. wire.address.incarnation_id
+    .. "/panes/13001/launches/" .. wire.launch_id .. "/bindings/" .. samples.binding.binding_id
+  local snapshot = read_json_fixture(repo_root .. "/tests/fixtures/lifecycle/observations.json").cases[2].value
+  snapshot.address, snapshot.launch_id, snapshot.binding_id, snapshot.provider = wire.address, wire.launch_id, samples.binding.binding_id, samples.binding.provider
+  local function write_snapshot()
+    local file=assert(io.open(dir.."/lifecycle.json","w"))
+    local raw=encode_json(snapshot):gsub('"observations":{}','"observations":[]')
+    assert(file:write(raw));assert(file:close())
+  end
+  write_snapshot()
+  local messages, instance = {}, dofile(repo_root .. "/plugin/init.lua")
+  local w1 = window_double({window_id=13011,tabs={{{id=13011,domain="mux",attention=wire}}},focused=false})
+  local w2 = window_double({window_id=13012,tabs={{{id=13012,domain="mux",attention=wire}}},focused=false})
+  local options = {now_unix_ns=protocol_fixture.state_case.now_unix_ns,call_after=function()end}
+  instance.apply_to_config({}, {auto_poll=false,dir=test_dir,review_key=false,settled_title_fallback=false,on_view_change=function(message)
+    messages[#messages+1] = decode_json(encode_json(message))
+    if message.view then message.view.provider="mutated"; message.scope.address.pane_id="mutated" end
+    instance.poll(w1,options) -- reentrant delivery cannot recurse or mutate the baseline
+  end})
+  instance.apply_to_config({}, {on_view_change=function() error("replacement must be ignored") end})
+  instance.poll(w1,options); instance.poll(w2,options)
+  assert(#messages==2 and messages[1].kind=="initial" and messages[2].kind=="initial")
+  assert(messages[1].window_id==13011 and messages[2].window_id==13012)
+  instance.poll(w1,options); assert(#messages==2,"unchanged views do not replay")
+  snapshot.snapshot_id="00000000-0000-4000-8000-000000000909"
+  snapshot.pools.general.retention_floor_mono_ns="00000000000000000001"
+  write_snapshot()
+  instance.poll(w1,options); instance.poll(w2,options)
+  assert(#messages==4 and messages[3].kind=="updated" and messages[4].kind=="updated",
+    "messages="..#messages.." last="..messages[#messages].kind.." lifecycle="..tostring(messages[#messages].view.lifecycle and messages[#messages].view.lifecycle.availability))
+  assert(messages[3].view.provider~="mutated" and messages[4].scope.address.pane_id=="13001")
+  local original_open=io.open
+  io.open=function(path,mode) if path==dir.."/lifecycle.json" then return nil,"Permission denied" end return original_open(path,mode) end
+  local ok,problem=pcall(instance.poll,w1,options); io.open=original_open; assert(ok,problem)
+  assert(messages[#messages].kind=="updated" and messages[#messages].view.lifecycle.availability=="cached")
+  assert(messages[#messages].view.lifecycle.diagnostics[1].code=="probe_unavailable")
+  instance.poll(w1,options); assert(messages[#messages].view.lifecycle.availability=="available")
+  local count=#messages
+  options.gui_windows={w2}; instance.poll(w2,options)
+  assert(#messages==count+1 and messages[#messages].kind=="scope_lost" and messages[#messages].window_id==13011)
+  instance.poll(w2,options); assert(#messages==count+1,"closing one window cannot reset another")
+  local fresh=dofile(repo_root.."/plugin/init.lua")
+  fresh.apply_to_config({}, {auto_poll=false,dir=test_dir,review_key=false,on_view_change=function(message) assert(message.kind=="initial") end})
+  fresh.poll(w2,options)
+  assert(#drain_errors()==0,"lifecycle read diagnostics belong to the lifecycle facet")
+end)
+
+test("GUI callback preserves binding targets through unavailable reads and replacements", function()
+  local wire=materialize_v2_fixture(13002,string.rep("d",64))
+  local samples=protocol_fixture.record_samples
+  local pane_dir=test_dir.."/v2/realms/"..wire.address.realm_id.."/incarnations/"..wire.address.incarnation_id.."/panes/13002"
+  local launch=pane_dir.."/launches/"..wire.launch_id
+  os.remove(launch.."/bindings/"..samples.binding.binding_id.."/end.json")
+  local messages={}
+  local instance=dofile(repo_root.."/plugin/init.lua")
+  instance.apply_to_config({}, {auto_poll=false,dir=test_dir,review_key=false,on_view_change=function(message) messages[#messages+1]=message end})
+  local window=window_double({window_id=13020,tabs={{{id=13020,domain="mux",attention=wire}}},focused=false})
+  local options={now_unix_ns=protocol_fixture.state_case.now_unix_ns,call_after=function()end}
+  instance.poll(window,options)
+  local original_open=io.open
+  io.open=function(path,mode) if path==launch.."/current-binding.json" then return nil,"Permission denied" end return original_open(path,mode) end
+  local ok,problem=pcall(instance.poll,window,options); io.open=original_open; assert(ok,problem)
+  assert(messages[#messages].kind=="updated" and messages[#messages].scope.target.binding_id==samples.binding.binding_id)
+  instance.poll(window,options); assert(messages[#messages].kind=="updated")
+  local pointer=decode_json(encode_json(samples.current_binding));pointer.address=wire.address;pointer.binding_id=string.rep("b",64)
+  local count=#messages;write_json_path(launch.."/current-binding.json",pointer);instance.poll(window,options)
+  assert(#messages==count+2 and messages[count+1].kind=="scope_lost" and messages[count+2].kind=="initial")
+  assert(messages[count+2].scope.target.binding_id==pointer.binding_id and messages[count+2].view.provider==nil,"new unreadable binding cannot inherit old facts")
+  os.remove(launch.."/current-binding.json");instance.poll(window,options)
+  assert(messages[#messages].kind=="initial" and messages[#messages].scope.target.kind=="launch")
+  pointer.binding_id=samples.binding.binding_id;write_json_path(launch.."/current-binding.json",pointer);instance.poll(window,options)
+  assert(messages[#messages].kind=="initial" and messages[#messages].scope.target.kind=="binding")
+  local ended=decode_json(encode_json(samples.binding_end));ended.address=wire.address;ended.observed_mono_ns="00000000009000000000"
+  write_json_path(launch.."/bindings/"..pointer.binding_id.."/end.json",ended);instance.poll(window,options)
+  assert(messages[#messages].kind=="updated" and messages[#messages].view.binding_phase=="ended")
+  local v1=window_double({window_id=13020,tabs={{13020}},focused=false})
+  instance.poll(v1,options);assert(messages[#messages].kind=="scope_lost")
+  count=#messages;instance.poll(v1,options);assert(#messages==count,"V1 cannot fabricate a scope")
+  local errors=drain_errors();assert(#errors==2,"only the injected pointer failure and missing new binding are expected")
+end)
+
+test("GUI callback exceptions do not corrupt future polls and title opt-out does no work", function()
+  local instance=dofile(repo_root.."/plugin/init.lua")
+  instance._internal.sample_settled_title("prior","launch","old",nil)
+  local calls=0
+  instance.apply_to_config({}, {auto_poll=false,dir=test_dir,review_key=false,auto_clear={},settled_title_fallback=false,on_view_change=function() calls=calls+1;error("synthetic callback error") end})
+  assert(next(instance._internal.settled_title_state)==nil)
+  local wire=materialize_v2_fixture(13003,string.rep("e",64))
+  local pane=mux_pane(13030,{domain="mux",attention=wire})
+  local titles=0;pane.get_title=function() titles=titles+1;return tostring(titles) end
+  local window=window_double({window_id=13030,focused=true})
+  window.mux_window=function() return {tabs=function()return {{panes=function()return {pane}end}}end}end
+  local options={now_unix_ns=protocol_fixture.state_case.now_unix_ns,call_after=function()end}
+  drain_errors();instance.poll(window,options);local redraws=window.action_calls
+  instance.poll(window,options);instance.poll(window,options)
+  assert(titles==0 and next(instance._internal.settled_title_state)==nil)
+  assert(window.action_calls==redraws,"title churn cannot redraw when disabled")
+  assert(calls==1,"exception does not replay unchanged facts")
+  local errors=drain_errors();assert(#errors>=1)
+  for _,message in ipairs(errors)do assert(not message:find("title is changing",1,true))end
+  local other=materialize_v2_fixture(13004,string.rep("e",64))
+  pane.get_user_vars=function()return {WEZTERM_ATTENTION=encode_json(other)}end
+  instance.poll(window,options);assert(calls==3,"scope loss and new initial still deliver after exceptions")
 end)
 
 test("C1 scalar lookup refuses two full pane addresses", function()

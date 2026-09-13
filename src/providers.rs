@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::observations::{
@@ -14,6 +15,86 @@ pub enum Provider {
     Claude,
     Codex,
     Pi,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum HookRegistration {
+    Register,
+    Ignored,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeHookDeclaration {
+    pub native_event: String,
+    pub registration: HookRegistration,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NativeHookSpec {
+    pub native_event: String,
+    pub arguments: Vec<String>,
+    /// Required for rich facts and executable delivery, not for legacy admission.
+    pub requires_launch_identity: bool,
+    pub registration: HookRegistration,
+    pub evidence: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HookDescription {
+    pub manifest_schema: u64,
+    pub wire_version: u64,
+    pub record_schema: u64,
+    pub writer_version: String,
+    pub provider: String,
+    pub native_hooks: Vec<NativeHookSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension_entrypoint: Option<String>,
+}
+
+pub fn describe_hooks(provider: &str) -> crate::protocol::Result<HookDescription> {
+    let protocol = manifest()?;
+    let hooks = protocol
+        .native_hooks
+        .get(provider)
+        .ok_or_else(|| AttentionError::usage("--provider is not supported"))?;
+    Ok(HookDescription {
+        manifest_schema: protocol.manifest_schema,
+        wire_version: protocol.wire_version,
+        record_schema: protocol.record_schema,
+        writer_version: protocol.writer_version.clone(),
+        provider: provider.into(),
+        extension_entrypoint: (provider == "pi").then(|| "pi/index.ts".into()),
+        native_hooks: hooks
+            .iter()
+            .map(|(event, declaration)| NativeHookSpec {
+                native_event: declaration.native_event.clone(),
+                arguments: vec![
+                    "hooks".into(),
+                    "event".into(),
+                    provider.into(),
+                    event.clone(),
+                ],
+                requires_launch_identity: true,
+                registration: declaration.registration,
+                evidence: vec![
+                    format!("tests/fixtures/providers/{provider}.json"),
+                    "tests/fixtures/lifecycle/contact-cases.json".into(),
+                    "docs/reviews/lifecycle-contact-results.md".into(),
+                ],
+            })
+            .collect(),
+    })
+}
+
+fn declared_hook(provider: Provider, event: &str) -> bool {
+    manifest().is_ok_and(|protocol| {
+        protocol
+            .native_hooks
+            .get(provider.as_str())
+            .is_some_and(|hooks| hooks.contains_key(event))
+    })
 }
 
 impl Provider {
@@ -35,7 +116,8 @@ impl Provider {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderAction {
     Binding,
     Activity,
@@ -81,6 +163,7 @@ impl ProviderAction {
 
 #[derive(Clone, Debug)]
 pub struct ProviderEvent {
+    pub source_event: String,
     pub observation: Option<LifecycleObservation>,
     pub observation_diagnostic: Option<Diagnostic>,
     pub action: ProviderAction,
@@ -103,6 +186,7 @@ pub struct ProviderEvent {
 impl ProviderEvent {
     fn ignored(provider: Option<Provider>, code: &str, message: &str) -> Self {
         Self {
+            source_event: String::new(),
             observation: None,
             observation_diagnostic: None,
             action: ProviderAction::Ignored,
@@ -248,6 +332,7 @@ fn parse_provider_common(
         None => None,
     };
     let event = ProviderEvent {
+        source_event: String::new(),
         observation: None,
         observation_diagnostic: None,
         action: ProviderAction::Ignored,
@@ -297,39 +382,7 @@ fn parse_claude_or_codex(
             "Cursor-owned Claude invocation is not pane authority",
         );
     }
-    let supported = [
-        "SessionStart",
-        "UserPromptSubmit",
-        "PreCompact",
-        "PostCompact",
-        "StopFailure",
-        "Interrupt",
-        "SessionEnd",
-        "PreToolUse",
-        "PermissionRequest",
-        "Notification",
-        "Stop",
-        "SubagentStop",
-        "SubagentStart",
-        "PostToolUse",
-        "PostToolUseFailure",
-        "PermissionDenied",
-        "Elicitation",
-        "ElicitationResult",
-    ];
-    if !supported.contains(&event_name)
-        || (provider == Provider::Claude && event_name == "Interrupt")
-        || (provider == Provider::Codex
-            && matches!(
-                event_name,
-                "Notification"
-                    | "StopFailure"
-                    | "PostToolUseFailure"
-                    | "PermissionDenied"
-                    | "Elicitation"
-                    | "ElicitationResult"
-            ))
-    {
+    if !declared_hook(provider, event_name) {
         return ProviderEvent::ignored(
             Some(provider),
             "integration_version_mismatch",
@@ -531,21 +584,7 @@ fn parse_claude_or_codex(
 }
 
 fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -> ProviderEvent {
-    let supported = [
-        "session_start",
-        "session_shutdown",
-        "agent_start",
-        "tool_execution_start",
-        "tool_execution_end",
-        "agent_settled",
-        "agent_end",
-        "bus",
-        "input",
-        "message_end",
-        "session_before_compact",
-        "session_compact",
-    ];
-    if !supported.contains(&event_name) {
+    if !declared_hook(Provider::Pi, event_name) {
         return ProviderEvent::ignored(
             Some(Provider::Pi),
             "integration_version_mismatch",
@@ -709,6 +748,7 @@ pub fn parse_provider_event(
             parse_claude_or_codex(provider, event_name, payload, env)
         }
     };
+    event.source_event = event_name.to_owned();
     if event.action != ProviderAction::Ignored {
         let parsed = match event_name {
             "PreToolUse"
@@ -735,6 +775,33 @@ pub fn parse_provider_event(
         }
     }
     event
+}
+
+pub fn reply_content(
+    event: &ProviderEvent,
+    payload: &Value,
+    requested: bool,
+) -> crate::consumer::ReplyContent {
+    use crate::consumer::ReplyContent;
+    if !requested {
+        return ReplyContent::NotRequested;
+    }
+    if !matches!(event.provider, Some(Provider::Claude | Provider::Codex))
+        || event.source_event != "Stop"
+        || event.agent_id.is_some()
+    {
+        return ReplyContent::Unsupported;
+    }
+    match payload.get("last_assistant_message") {
+        None => ReplyContent::Absent,
+        Some(Value::String(text))
+            if manifest().is_ok_and(|p| text.len() <= p.limits.max_json_bytes) =>
+        {
+            ReplyContent::Available { text: text.clone() }
+        }
+        Some(Value::String(_)) => ReplyContent::TooLarge,
+        Some(_) => ReplyContent::Invalid,
+    }
 }
 
 fn strict_optional_label(
