@@ -28,7 +28,6 @@ bun run typecheck
 node tests/pi_node_runtime.mjs
 sh tests/run_wezterm_smoke.sh
 node tests/fixtures/lifecycle/check-coverage.mjs
-python3 tests/fixtures/lifecycle/check-compatibility.py
 
 # Test-only runtimes are isolated from the checkout and live installations.
 gate_scratch=$(mktemp -d "${TMPDIR:-/tmp}/attention-lifecycle-gate.XXXXXX")
@@ -60,12 +59,13 @@ ATTENTION_XTERM_MODULE="$xterm_module" cargo test --test lifecycle_spec \
 baseline_binary=${ATTENTION_BASELINE_RUST:-}
 if [ -z "$baseline_binary" ]; then
   mkdir "$gate_scratch/baseline"
-  baseline_commit=$(node -p 'require("./tests/fixtures/lifecycle/compatibility.json").baseline_commit')
+  # Fixed measurement reference, not a supported reader/writer version.
+  baseline_commit=c9cc3e1d9906a3a3a4d70ac4bae9c9752a0c3b5e
   git archive --output="$gate_scratch/baseline.tar" "$baseline_commit" \
     Cargo.toml Cargo.lock src tests protocol bin shell plugin scripts
   tar -xf "$gate_scratch/baseline.tar" -C "$gate_scratch/baseline"
-  cargo build --release --manifest-path "$gate_scratch/baseline/Cargo.toml" --target-dir "$root/target/frozen-lifecycle"
-  baseline_binary="$root/target/frozen-lifecycle/release/attention"
+  cargo build --release --manifest-path "$gate_scratch/baseline/Cargo.toml" --target-dir "$root/target/performance-baseline"
+  baseline_binary="$root/target/performance-baseline/release/attention"
 fi
 cargo build --release
 python3 tests/rust/measure.py --baseline-rust "$baseline_binary" --rust-binary "$root/target/release/attention"

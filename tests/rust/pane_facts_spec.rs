@@ -62,28 +62,6 @@ fn bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 }
 
 #[test]
-fn previous_record_schema_is_rejected_without_rewriting_state() {
-    let setup = setup();
-    let file = setup.binding_dir("claude", "facts").join("activity.json");
-    setup.apply(
-        &event("claude", "Stop", "facts", json!({})),
-        "00000000000000000300",
-    );
-    let mut old: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
-    assert_eq!(old["schema"], 3);
-    old["schema"] = json!(2);
-    assert!(atomic_replace(&file, &old).is_err());
-    // Model an existing old record without asking the current writer to accept it.
-    fs::write(&file, serde_json::to_vec(&old).unwrap()).unwrap();
-    let before = bytes(&state_root(&setup.env).unwrap());
-    let facts = read(&setup);
-    assert!(!facts.complete());
-    assert_eq!(facts.activity.availability, A::Invalid);
-    assert!(facts.activity.record.is_none());
-    assert_eq!(before, bytes(&state_root(&setup.env).unwrap()));
-}
-
-#[test]
 fn inspect_is_scoped_read_only_and_keeps_raw_activity_after_acknowledgement() {
     let setup = setup();
     setup.apply(&event("claude","PreToolUse","facts",json!({"tool_name":"Read","agent_id":"child-a","agent_type":"Explore","tool_use_id":"child-tool"})),"00000000000000000300");

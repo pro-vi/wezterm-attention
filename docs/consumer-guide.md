@@ -88,7 +88,7 @@ Generic tool traffic cannot evict request evidence. Request traffic can still ev
 
 Activity and lifecycle are separate files, not a multi-file transaction. A crash may leave newer activity with older facts. Failures report incomplete work; retries re-read actual records. Do not join files by timestamp or assume a shared snapshot ID.
 
-Older readers can ignore the additive sidecar. Older maintenance preserves unfamiliar files and may refuse to prune those bindings. Do not delete evidence to make rollback appear transparent. See [compatibility provenance](../tests/fixtures/lifecycle/compatibility-provenance.md).
+Only the legacy flat-marker interface is retained for compatibility. Use matching current Attention writers and readers; intermediate development builds are not supported compatibility targets.
 
 ## Polling, rendering, and process queries
 
@@ -115,7 +115,7 @@ For publication, `hooks publish --socket <PATH>` is preferred. The path-valued `
 
 ## Public consumer contracts
 
-CLI envelopes and `HookDelivery` use consumer schema **1**. Package metadata uses manifest schema **2**; records now use schema **3**, while pane identity wire version **2** is unchanged. Schema-2 records are rejected without rewriting or deleting them. Activation requires a fresh Attention state root and fresh sessions started through supported launchers; do not mix old and new writers in one root. Legacy flat markers remain readable; unrelated extra marker fields are ignored. Ship the manifest with its matching Rust/Lua readers. The following interfaces are source capabilities, not evidence that a machine has registered or activated them.
+Attention records use schema **3**. CLI envelopes and `HookDelivery` use schema **1**, package metadata uses manifest schema **2**, and pane identity uses wire version **2**. These identify separate data formats, not supported product editions. Use a fresh Attention state root and fresh supported launches for activation; existing state is not automatically migrated or deleted. Legacy flat markers remain readable. Ship the manifest with its matching Rust/Lua readers. Source capabilities do not establish live registration or activation.
 
 ### Registration description
 
