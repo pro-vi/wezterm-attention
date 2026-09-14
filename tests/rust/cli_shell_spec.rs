@@ -283,6 +283,7 @@ fn query_defaults_errors_and_help_support_agent_composition() {
     let text = String::from_utf8(help.stdout).unwrap();
     assert!(text.contains("required with --consumer") && text.contains("Retrying"));
     assert!(text.contains("stdout stays empty") && text.contains("default hooks exit zero"));
+    assert!(text.contains("--include-prompt") && text.contains("transient consumer stdin"));
 }
 
 #[test]

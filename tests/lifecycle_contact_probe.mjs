@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
@@ -83,7 +83,23 @@ for (const [event, key] of [["SessionStart", "session_start"], ["PreToolUse", "p
 writeFileSync(join(canonicalHome, "hooks.json"), JSON.stringify({ hooks }));
 writeFileSync(join(canonicalHome, "config.toml"), `model = "gpt-5.2"\nmodel_provider = "fixture"\nmodel_catalog_json = ${quote(join(canonicalHome, "models.json"))}\ncli_auth_credentials_store = "ephemeral"\nmcp_oauth_credentials_store = "file"\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n[model_providers.fixture]\nname = "Local fixture"\nbase_url = "http://127.0.0.1:${address.port}/v1"\nwire_api = "responses"\nrequires_openai_auth = false\n[features]\nhooks = true\n[projects.${quote(cwd)}]\ntrust_level = "trusted"\n${trust}`);
 const log = join(canonicalHome, "hooks.jsonl");
-const environment = { PATH: "/usr/bin:/bin:/opt/homebrew/bin", HOME: canonicalHome, CODEX_HOME: canonicalHome, TERM: "xterm-256color", WEZTERM_ATTENTION_CONTACT_LOG: log };
+const consumer = join(canonicalHome, "prompt-consumer.mjs");
+const deliveries = join(canonicalHome, "prompt-results.jsonl");
+// Only fixed synthetic comparisons leave the consumer, never callback bodies.
+writeFileSync(consumer, `#!${process.execPath}
+import { appendFileSync } from "node:fs";
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
+const delivery = JSON.parse(input);
+const prompts = ["Synthetic local question probe", "separate queued input"];
+appendFileSync(${JSON.stringify(deliveries)}, JSON.stringify({
+  prompt_index: delivery.prompt?.availability === "available" ? prompts.indexOf(delivery.prompt.text) : -1,
+  scoped: typeof delivery.scope?.launch_id === "string" && delivery.scope?.target?.kind === "binding",
+  observed: typeof delivery.observation_id === "string",
+  reply_not_requested: delivery.reply?.availability === "not_requested"
+}) + "\\n");
+`, { mode: 0o700 });
+const environment = { PATH: "/usr/bin:/bin:/opt/homebrew/bin", HOME: canonicalHome, CODEX_HOME: canonicalHome, TERM: "xterm-256color", WEZTERM_ATTENTION_CONTACT_LOG: log, WEZTERM_ATTENTION_CONTACT_CONSUMER: consumer };
 for (const key of ["WEZTERM_ATTENTION_DIR", "WEZTERM_ATTENTION_ROOT", "WEZTERM_UNIX_SOCKET", "WEZTERM_PANE", "WEZTERM_ATTENTION_LAUNCH_ID"]) if (process.env[key]) environment[key] = process.env[key];
 let child;
 try {
@@ -119,10 +135,14 @@ try {
     assert(post?.accepted_publication_receipt);
     const submissions = records.filter((record) => record.event === "UserPromptSubmit");
     assert(submissions.length >= 2 && submissions.every((record) => record.tool_use_id === undefined));
+    await wait(() => existsSync(deliveries) && readFileSync(deliveries, "utf8").trim().split("\n").length >= 2, "scoped prompt deliveries");
+    const promptResults = readFileSync(deliveries, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(promptResults.map((result) => result.prompt_index), [0, 1]);
+    assert(promptResults.every((result) => result.scoped && result.observed && result.reply_not_requested));
     const firstStop = records.findIndex((record) => record.event === "Stop");
     assert(records.indexOf(submissions[0]) < firstStop && records.indexOf(submissions[1]) > firstStop);
     assert(screen().includes("? 1 question"), "the queued message must not be mistaken for a question answer");
-    console.log(JSON.stringify({ version, source_revision: revision, ui_question_and_queue: true, queue_drained: true, native_events: records.map((record) => record.event), session_id: post.session_id, metadata_identity_proof: "PID/parent/image/start do not distinguish exec", paid_model_calls: 0 }));
+    console.log(JSON.stringify({ version, source_revision: revision, ui_question_and_queue: true, queue_drained: true, exact_prompt_deliveries: true, native_events: records.map((record) => record.event), session_id: post.session_id, metadata_identity_proof: "PID/parent/image/start do not distinguish exec", paid_model_calls: 0 }));
     child.stdin.end();
     await new Promise((done) => child.once("close", done));
     terminal.dispose();

@@ -83,9 +83,13 @@ def main() -> int:
     root = os.environ.get("WEZTERM_ATTENTION_ROOT")
     if not root:
         return 0
+    command = [str(pathlib.Path(root) / "bin" / "attention"), "hooks", "event", provider, event_name]
+    consumer = os.environ.get("WEZTERM_ATTENTION_CONTACT_CONSUMER")
+    if event_name == "UserPromptSubmit" and consumer:
+        command.extend(["--consumer", consumer, "--consumer-timeout-ms", "2000", "--include-prompt"])
     try:
         subprocess.run(
-            [str(pathlib.Path(root) / "bin" / "attention"), "hooks", "event", provider, event_name],
+            command,
             input=payload_bytes,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
