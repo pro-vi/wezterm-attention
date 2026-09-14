@@ -1108,6 +1108,7 @@ fn native_codex_queued_input_is_not_blocked_by_a_pending_question() {
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["ui_question_and_queue"], true);
     assert_eq!(report["queue_drained"], true);
+    assert_eq!(report["exact_prompt_deliveries"], true);
 }
 
 #[test]

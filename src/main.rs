@@ -74,6 +74,9 @@ struct EventArgs {
     /// Include supported native reply text only in transient consumer stdin, never records.
     #[arg(long)]
     include_reply: bool,
+    /// Include supported submit text only in transient consumer stdin, never records.
+    #[arg(long)]
+    include_prompt: bool,
 }
 
 fn provider_event_help() -> String {
@@ -525,7 +528,12 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     &payload,
                     args.include_reply,
                 );
-                let delivery = delivery_bytes(&outcome, reply);
+                let prompt = wezterm_attention::providers::prompt_content(
+                    &event,
+                    &payload,
+                    args.include_prompt,
+                );
+                let delivery = delivery_bytes(&outcome, reply, prompt);
                 let consumers = args
                     .consumer
                     .iter()
@@ -551,7 +559,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     Err(error) => vec![error.diagnostic.clone()],
                 };
                 let result = serde_json::json!({"native": outcome.result.as_ref().ok(), "admission": outcome.admission, "persistence": outcome.persistence, "consumers": consumers});
-                // Reply bodies and child output never enter this diagnostic projection.
+                // Prompt/reply bodies and child output never enter this diagnostic projection.
                 eprintln!(
                     "{}",
                     serde_json::to_string(&Response {

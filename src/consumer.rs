@@ -55,10 +55,10 @@ pub struct AdmittedHook {
     pub correlation: Option<NativeCorrelation>,
 }
 
-// Deliberately no Debug: reply bodies must not enter diagnostics accidentally.
+// Deliberately no Debug: content must not enter diagnostics accidentally.
 #[derive(Serialize)]
 #[serde(tag = "availability", rename_all = "snake_case")]
-pub enum ReplyContent {
+pub enum HookContent {
     NotRequested,
     Available { text: String },
     Absent,
@@ -76,7 +76,8 @@ pub struct HookDelivery {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observation_id: Option<String>,
     pub persistence: HookPersistence,
-    pub reply: ReplyContent,
+    pub reply: HookContent,
+    pub prompt: HookContent,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Eq, PartialEq)]
@@ -155,7 +156,8 @@ pub fn validate_consumers(
 
 pub fn delivery_bytes(
     outcome: &crate::lifecycle::HookOutcome,
-    reply: ReplyContent,
+    reply: HookContent,
+    prompt: HookContent,
 ) -> std::result::Result<Vec<u8>, NotDispatchedReason> {
     let source = outcome
         .admission
@@ -189,6 +191,7 @@ pub fn delivery_bytes(
         observation_id: outcome.observation_id.clone(),
         persistence: outcome.persistence.clone(),
         reply,
+        prompt,
     };
     let maximum = manifest()
         .map_err(|_| NotDispatchedReason::EnvelopeTooLarge)?
@@ -197,7 +200,11 @@ pub fn delivery_bytes(
     let mut bytes =
         serde_json::to_vec(&delivery).map_err(|_| NotDispatchedReason::EnvelopeTooLarge)?;
     if bytes.len() > maximum {
-        delivery.reply = ReplyContent::TooLarge;
+        for content in [&mut delivery.reply, &mut delivery.prompt] {
+            if matches!(content, HookContent::Available { .. }) {
+                *content = HookContent::TooLarge;
+            }
+        }
         bytes = serde_json::to_vec(&delivery).map_err(|_| NotDispatchedReason::EnvelopeTooLarge)?;
     }
     if bytes.len() > maximum {

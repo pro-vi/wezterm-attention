@@ -789,26 +789,49 @@ pub fn reply_content(
     event: &ProviderEvent,
     payload: &Value,
     requested: bool,
-) -> crate::consumer::ReplyContent {
-    use crate::consumer::ReplyContent;
+) -> crate::consumer::HookContent {
+    use crate::consumer::HookContent;
     if !requested {
-        return ReplyContent::NotRequested;
+        return HookContent::NotRequested;
     }
     if !matches!(event.provider, Some(Provider::Claude | Provider::Codex))
         || event.source_event != "Stop"
         || event.agent_id.is_some()
     {
-        return ReplyContent::Unsupported;
+        return HookContent::Unsupported;
     }
-    match payload.get("last_assistant_message") {
-        None => ReplyContent::Absent,
+    text_content(payload, "last_assistant_message")
+}
+
+pub fn prompt_content(
+    event: &ProviderEvent,
+    payload: &Value,
+    requested: bool,
+) -> crate::consumer::HookContent {
+    use crate::consumer::HookContent;
+    if !requested {
+        return HookContent::NotRequested;
+    }
+    if !matches!(event.provider, Some(Provider::Claude | Provider::Codex))
+        || event.source_event != "UserPromptSubmit"
+        || event.agent_id.is_some()
+    {
+        return HookContent::Unsupported;
+    }
+    text_content(payload, "prompt")
+}
+
+fn text_content(payload: &Value, field: &str) -> crate::consumer::HookContent {
+    use crate::consumer::HookContent;
+    match payload.get(field) {
+        None => HookContent::Absent,
         Some(Value::String(text))
             if manifest().is_ok_and(|p| text.len() <= p.limits.max_json_bytes) =>
         {
-            ReplyContent::Available { text: text.clone() }
+            HookContent::Available { text: text.clone() }
         }
-        Some(Value::String(_)) => ReplyContent::TooLarge,
-        Some(_) => ReplyContent::Invalid,
+        Some(Value::String(_)) => HookContent::TooLarge,
+        Some(_) => HookContent::Invalid,
     }
 }
 

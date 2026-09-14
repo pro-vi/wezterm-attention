@@ -140,7 +140,7 @@ attention hooks event claude Stop \
 
 Repeat `--consumer` for multiple executables. Each gets the explicit positive, representable deadline, covering stdin writing and process completion. Total hook time includes each consumer's budget. Paths are absolute executable paths, with no shell command syntax or executable arguments. Normal process environment inheritance remains available to application-owned executables; the delivery JSON contains no environment dump. The sample sink uses Node through its shebang, so Node must be on the configured PATH.
 
-`HookDelivery` contains `schema`, a fresh `delivery_id`, `scope`, `action`, `provider`, `provider_session_id`, `source_event`, `actor`, optional `correlation` and `observation_id`, `persistence`, and `reply`. Scope contains the admitted `address`, `launch_id`, and a binding `target` (`kind="binding"`, `binding_id`). `action` uses the existing provider-action vocabulary and distinguishes binding, activity, parent Stop, child presence, end, review, clear and observation-only operations. It is not a controller command or permission.
+`HookDelivery` contains `schema`, a fresh `delivery_id`, `scope`, `action`, `provider`, `provider_session_id`, `source_event`, `actor`, optional `correlation` and `observation_id`, `persistence`, `reply`, and `prompt`. Scope contains the admitted `address`, `launch_id`, and a binding `target` (`kind="binding"`, `binding_id`). `action` uses the existing provider-action vocabulary and distinguishes binding, activity, parent Stop, child presence, end, review, clear and observation-only operations. It is not a controller command or permission.
 
 Identity is captured inside the same native application path. Delivery requires inherited launch identity and a matching provider binding. Tty-only recovery does not qualify. The label remains that admitted source even if a newer occupant appears before a consumer acts. No executable runs inside an Attention writer lock.
 
@@ -155,7 +155,29 @@ Persistence reports four independent fields:
 
 Each field is `not_requested`, `confirmed`, `rejected` or `unconfirmed`. Confirmed does not require new bytes when the required state already matches. Unconfirmed does not establish that no writes happened. A rejected or unconfirmed requested effect suppresses delivery. Lifecycle preparation/write failure can coexist with confirmed native and compatibility effects. `observation_id` appears only when the native application confirms writing that observation; it is never a provider request ID or controller token. Optional correlation is omitted when absent.
 
-`reply.availability` is `not_requested`, `available`, `absent`, `unsupported`, `invalid` or `too_large`. **Only available has `text`.** Exact decoded text, including an empty string, Unicode and newlines, is available only for admitted lead Claude/Codex Stop callbacks with a string `last_assistant_message`. Missing field means absent; null or another JSON type means invalid. Other events/actors and Pi are unsupported. The whole delivery must fit Attention's hook JSON byte limit; oversized text is omitted with `too_large`, never truncated. Reply bodies enter no Attention record, diagnostic or GUI cache. The existing hook-input size limit still applies: an oversized native payload is rejected before application. Delivery `too_large` covers admitted content whose serialized delivery exceeds the bound.
+`reply` and `prompt` always appear. Both use `HookContent`: `availability` is `not_requested`, `available`, `absent`, `unsupported`, `invalid` or `too_large`. **Only available has `text`.** Each flag is independent: omitting `--include-prompt` yields `prompt={"availability":"not_requested"}`, even when `--include-reply` is set. Missing native fields mean absent; null or another JSON type means invalid. An empty string is available, and Unicode/newlines are preserved exactly.
+
+- `--include-reply`: admitted lead Claude/Codex `Stop`, from `last_assistant_message`.
+- `--include-prompt`: admitted lead Claude/Codex `UserPromptSubmit`, from `prompt`.
+- Other events, child actors and Pi return unsupported for requested content. Pi's bundled extension does not register executable consumers or forward input text.
+
+For a submit callback carrying `"prompt":"Check 中文\n"`, these are the exact content fields when both flags are set:
+
+```json
+{"prompt":{"availability":"available","text":"Check 中文\n"},"reply":{"availability":"unsupported"}}
+```
+
+Register a consumer for submit callbacks using:
+
+```sh
+attention hooks event claude UserPromptSubmit \
+  --consumer /absolute/application/prompt-consumer \
+  --consumer-timeout-ms 1000 --include-prompt
+```
+
+The provider supplies callback JSON on stdin; the executable receives the full scoped delivery. Use `codex` for its equivalent callback. Submit is observation-only: `lifecycle` is confirmed while `native_state`, `activity` and `compatibility` are not_requested. Exact means the decoded provider callback string, not original keystrokes, complete multimodal input, or proof that the model processed it. Consumers own markers, correlation, receipts and acceptance decisions. A missed delivery leaves content unavailable for recovery from Attention records.
+
+The whole delivery must fit Attention's hook JSON byte limit. On overflow, available content becomes too_large with text omitted, never truncated; all other availability values stay intact. If metadata alone still exceeds the bound, delivery is not_dispatched. Prompt/reply bodies enter no Attention record, diagnostic or GUI cache. Oversized native stdin is rejected before application; delivery too_large describes admitted content whose serialized envelope exceeds the bound.
 
 | Consumer stage | Precise meaning |
 |---|---|
