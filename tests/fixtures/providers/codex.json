@@ -16,6 +16,8 @@
     { "id": "clear_binding", "event": "SessionStart", "patch": { "source": "clear" }, "expected": "binding" },
     { "id": "compact_confirmation", "event": "SessionStart", "patch": { "source": "compact" }, "expected": "binding" },
     { "id": "root_tool_activity", "event": "PreToolUse", "patch": { "tool_name": "shell" }, "expected": "activity", "activity_type": "thinking" },
+    { "id": "root_prompt_activity", "event": "UserPromptSubmit", "patch": {}, "expected": "activity", "activity_type": "thinking" },
+    { "id": "child_prompt_observation", "event": "UserPromptSubmit", "patch": { "agent_id": "child-a", "agent_type": "worker" }, "expected": "observation" },
     { "id": "no_launch_non_start_is_stale", "event": "PreToolUse", "patch": { "tool_name": "shell" }, "expected": "activity", "activity_type": "thinking", "lifecycle_diagnostic": "claim_stale" },
     { "id": "human_input_tool_notifies", "event": "PreToolUse", "patch": { "tool_name": "request_user_input" }, "expected": "activity", "activity_type": "notify" },
     { "id": "child_tool_activity", "event": "PreToolUse", "patch": { "tool_name": "shell", "agent_id": "child-a", "agent_type": "worker" }, "expected": "child_active" },

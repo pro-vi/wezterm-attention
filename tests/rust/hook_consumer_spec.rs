@@ -161,11 +161,7 @@ fn admitted_content_is_transient_scoped_and_runs_after_locks_release() {
         );
         assert_eq!(
             delivery["persistence"],
-            if name == "UserPromptSubmit" {
-                json!({"native_state":"not_requested", "activity":"not_requested", "compatibility":"not_requested", "lifecycle":"confirmed"})
-            } else {
-                json!({"native_state":"confirmed", "activity":"confirmed", "compatibility":"confirmed", "lifecycle":"confirmed"})
-            }
+            json!({"native_state":"confirmed", "activity":"confirmed", "compatibility":"confirmed", "lifecycle":"confirmed"})
         );
         assert!(delivery.get("observation_id").is_some());
         assert!(delivery.get("correlation").is_none());

@@ -48,6 +48,12 @@ Exact TTL equality remains eligible. The first ineligible instant is one nanosec
 malformed, unavailable, or negative wall age fails closed: TTL-bearing state is omitted, retention
 does not prune it, and diagnostics report `record_invalid`, `probe_unavailable`, or `clock_skew`.
 
+A lead `UserPromptSubmit` starts the turn's `thinking` activity for Claude and Codex, the way
+Pi's `agent_start` does, so the pane is tinted from the prompt rather than from the turn's first
+tool call and a turn that calls no tool still shows activity. The first `PreToolUse` of that turn
+repeats the same `thinking` and is skipped. A child actor's prompt cannot write lead state and
+stays observation-only.
+
 An activity-clear watermark hides activity at or below its monotonic observation. A strictly newer
 activity reappears. Child presence behaves the same way across active, stopped, parent-clear, and
 retention-floor records. A stopped snapshot is retained because deleting it would discard the
