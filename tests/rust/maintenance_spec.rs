@@ -903,3 +903,77 @@ fn retention_preserves_unknown_files_inside_an_old_binding() {
     assert!(unknown.exists());
     assert!(diagnostics.iter().any(|item| item.code == "record_invalid"));
 }
+
+#[test]
+fn a_session_resumed_in_a_new_pane_conflicts_only_while_both_panes_live() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let root = setup.root();
+    let (address, _) = pane_address(&setup.env).expect("address");
+    let mut resumed = address.clone();
+    resumed.pane_id = "99".to_owned();
+    let launch_id = "00000000-0000-4000-8000-000000000702";
+    let resumed_binding = binding_id("claude", "session-a", launch_id);
+    atomic_replace(
+        &launch_path(&root, &resumed, launch_id)
+            .join("bindings")
+            .join(&resumed_binding)
+            .join("binding.json"),
+        &json!({
+            "kind":"binding","schema":3,"address":resumed,"launch_id":launch_id,
+            "binding_id":resumed_binding,"event_id":Uuid::new_v4().to_string(),
+            "provider":"claude","provider_session_id":"session-a","start_source":"resume",
+            "observed_mono_ns":"00000000000000000300",
+            "written_at_unix_ns":"00000000001000000000","writer_version":"2.0.0"
+        }),
+    )
+    .expect("write resumed binding");
+
+    setup.panes.set(vec![
+        PaneRow {
+            pane_id: "42".to_owned(),
+            tty_name: Some("/dev/ttys888".to_owned()),
+        },
+        PaneRow {
+            pane_id: "99".to_owned(),
+            tty_name: Some("/dev/ttys889".to_owned()),
+        },
+    ]);
+    let (rows, diagnostics) =
+        read_bindings_with_ports(&root, Some(&setup.panes), Some(&setup.processes))
+            .expect("bindings with both panes live");
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.binding_health == "conflicted"));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|item| item.code == "binding_conflict")
+    );
+
+    // The old pane is gone. One live claim remains, so it is not a conflict.
+    setup.panes.set(vec![PaneRow {
+        pane_id: "42".to_owned(),
+        tty_name: Some("/dev/ttys888".to_owned()),
+    }]);
+    setup.processes.set(Presence::Absent);
+    let (rows, diagnostics) =
+        read_bindings_with_ports(&root, Some(&setup.panes), Some(&setup.processes))
+            .expect("bindings after the old pane is gone");
+    assert_eq!(rows.len(), 2);
+    let gone = rows
+        .iter()
+        .find(|row| row.address.pane_id == "99")
+        .expect("resumed pane row");
+    assert_eq!(gone.pane_presence, "verified_absent");
+    let live = rows
+        .iter()
+        .find(|row| row.address.pane_id == "42")
+        .expect("live pane row");
+    assert_eq!(live.pane_presence, "present");
+    assert_eq!(live.binding_health, "valid");
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|item| item.code == "binding_conflict")
+    );
+}

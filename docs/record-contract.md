@@ -102,6 +102,11 @@ Existing legacy mutations and projection run before lifecycle replacement. There
 presence, reader confidence, and binding health. It never returns a resume command. Consumers build
 their own argv from the closed provider and session ID fields.
 
+`conflicted` health and the `binding_conflict` diagnostic mean two live claims on one provider
+session at different pane addresses. A binding that has ended, or whose pane is verified absent, is
+history and is left out of that comparison: resuming a session in a new pane leaves one behind every
+time, and marking the live row conflicted would hide the pane the session now runs in.
+
 JSON responses contain `schema`, `command`, `status`, `complete`, `result`, and `diagnostics`.
 Default output is bounded. Use `--all` or `--all-details` only when complete detail is required.
 
