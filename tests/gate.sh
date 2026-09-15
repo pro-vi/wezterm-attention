@@ -59,8 +59,11 @@ ATTENTION_XTERM_MODULE="$xterm_module" cargo test --test lifecycle_spec \
 baseline_binary=${ATTENTION_BASELINE_RUST:-}
 if [ -z "$baseline_binary" ]; then
   mkdir "$gate_scratch/baseline"
-  # Fixed measurement reference, not a supported reader/writer version.
-  baseline_commit=c9cc3e1d9906a3a3a4d70ac4bae9c9752a0c3b5e
+  # Fixed measurement reference, not a supported reader/writer version. It is the
+  # first commit that writes lifecycle snapshots, so it produces the same record
+  # set as the candidate; an earlier one writes a third of the bytes and the
+  # ratio below would score that difference instead of a regression.
+  baseline_commit=01c4a43445ac4f583a5a8932cef22965aaa8f0cf
   git archive --output="$gate_scratch/baseline.tar" "$baseline_commit" \
     Cargo.toml Cargo.lock src tests protocol bin shell plugin scripts
   tar -xf "$gate_scratch/baseline.tar" -C "$gate_scratch/baseline"

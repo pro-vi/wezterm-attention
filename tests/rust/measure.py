@@ -217,13 +217,38 @@ def main() -> None:
                     measured[name] = measure(f"{name}-{index}", [str(executable)], scratch, full_lifecycle=True)
                     measured[name]["state"].pop("_file_bytes")
                 measured["order"] = list(order)
-                measured["checks"] = {
-                    "sequential_p95_within_2x": measured["candidate"]["sequential"]["p95_ms"] <= 2 * measured["baseline"]["sequential"]["p95_ms"],
-                    "child_burst_within_2x": measured["candidate"]["concurrent_child_burst"]["wall_ms"] <= 2 * measured["baseline"]["concurrent_child_burst"]["wall_ms"],
-                }
                 rounds.append(measured)
-        passed = all(all(item["checks"].values()) for item in rounds)
-        print(json.dumps({"mode": "rust-baseline", "implementation_identities": identities, "rounds": rounds, "passed": passed}, indent=2))
+        # Whichever binary runs second in a round is measurably slower, so a
+        # per-round ratio scores run position as much as the writer. Each binary
+        # runs first exactly once across the two rounds; comparing the means
+        # spends that cost equally on both sides.
+        def mean_of(name: str, *path: str) -> float:
+            values = []
+            for item in rounds:
+                measurement: Any = item[name]
+                for key in path:
+                    measurement = measurement[key]
+                values.append(measurement)
+            return statistics.mean(values)
+
+        aggregate = {
+            "sequential_p95_ms": {
+                "baseline": round(mean_of("baseline", "sequential", "p95_ms"), 3),
+                "candidate": round(mean_of("candidate", "sequential", "p95_ms"), 3),
+            },
+            "child_burst_wall_ms": {
+                "baseline": round(mean_of("baseline", "concurrent_child_burst", "wall_ms"), 3),
+                "candidate": round(mean_of("candidate", "concurrent_child_burst", "wall_ms"), 3),
+            },
+        }
+        aggregate["checks"] = {
+            "sequential_p95_within_2x": aggregate["sequential_p95_ms"]["candidate"]
+            <= 2 * aggregate["sequential_p95_ms"]["baseline"],
+            "child_burst_within_2x": aggregate["child_burst_wall_ms"]["candidate"]
+            <= 2 * aggregate["child_burst_wall_ms"]["baseline"],
+        }
+        passed = all(aggregate["checks"].values())
+        print(json.dumps({"mode": "rust-baseline", "implementation_identities": identities, "rounds": rounds, "aggregate": aggregate, "passed": passed}, indent=2))
         if not passed:
             raise SystemExit(1)
         return
