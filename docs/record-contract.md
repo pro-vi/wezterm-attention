@@ -74,6 +74,12 @@ activity records unchanged. V1 panes keep their shipped `.ack` and `.review` beh
 
 Acknowledgement records are Lua-owned. Rust validates and prunes them during reads and maintenance, but Rust never creates an acknowledgement.
 
+An acknowledged activity is no longer displayed, so it is not treated as visible when the next
+activity is committed: repeating the same semantic activity after its acknowledgement publishes a
+new `event_id` instead of reporting the acknowledged one unchanged. Without that, a turn whose only
+activity is a `stop` the human already dismissed would never light the tab again. An unreadable
+acknowledgement counts as none, so it can only leave the earlier behaviour in place.
+
 ## Consumer boundary
 
 `get_attention_view(pane)` exposes fifteen copied base fields plus an independent cached `lifecycle` facet. See the [consumer guide](consumer-guide.md) for exact availability, request/publication relations, acknowledgement meaning, and display ownership. No `answered`, `currently_waiting`, or complete pending-count claim is made.
