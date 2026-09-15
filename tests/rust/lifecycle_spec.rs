@@ -2688,3 +2688,49 @@ fn manual_mark_after_an_acknowledged_mark_publishes_a_fresh_event_id() {
     assert_eq!(second.disposition, "applied");
     assert_ne!(second.event_id.as_deref(), Some(acknowledged.as_str()));
 }
+
+// Characterization, not an endorsement. A duplicate activity leaves
+// `observed_mono_ns` at the older value, so an older event that commits later
+// still wins against a newer observation it should have lost to. The fence
+// cannot simply be advanced here: `observed_mono_ns` is also the subagent-clear
+// watermark a parent stop writes, so advancing it would clear children that
+// started after the stop. Tracked in
+// .inbox/2026-09-15-a-deduplicated-activity-does-not-advance-the-ordering-fence.md
+#[test]
+fn a_deduplicated_activity_does_not_advance_the_ordering_fence() {
+    let setup = Setup::new();
+    setup.claim();
+    setup.apply(
+        &event(
+            "claude",
+            "SessionStart",
+            "fence",
+            json!({"source":"startup"}),
+        ),
+        "00000000000000000200",
+    );
+    setup.apply(
+        &event("claude", "PreToolUse", "fence", json!({"tool_name":"Bash"})),
+        "00000000000000000300",
+    );
+    let repeat = setup.apply(
+        &event("claude", "UserPromptSubmit", "fence", json!({})),
+        "00000000000000000500",
+    );
+    assert_eq!(repeat.disposition, "skipped");
+    let binding_dir = setup.binding_dir("claude", "fence");
+    let fenced: Value =
+        serde_json::from_slice(&fs::read(binding_dir.join("activity.json")).expect("activity"))
+            .expect("activity JSON");
+    assert_eq!(fenced["observed_mono_ns"], json!("00000000000000000300"));
+    // Consequence: the older Stop still publishes over the newer prompt.
+    let stale = setup.apply(
+        &event("claude", "Stop", "fence", json!({})),
+        "00000000000000000400",
+    );
+    assert_eq!(stale.disposition, "applied");
+    let final_activity: Value =
+        serde_json::from_slice(&fs::read(binding_dir.join("activity.json")).expect("activity"))
+            .expect("activity JSON");
+    assert_eq!(final_activity["type"], "stop");
+}
