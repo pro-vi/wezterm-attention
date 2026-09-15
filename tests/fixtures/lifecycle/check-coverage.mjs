@@ -9,7 +9,7 @@ const load = (path) => JSON.parse(readFileSync(join(root, path), "utf8"));
 const registry = load("tests/fixtures/lifecycle/contact-cases.json");
 const manifest = load("protocol/v2.json");
 const fixtures = load("tests/fixtures/lifecycle/observations.json");
-const readSection = (file, headings) => JSON.parse(execFileSync("/Users/provi/.local/bin/md", ["read", join(root, file), "--address", JSON.stringify({kind:"section",path:headings.map((text)=>({text,occurrence:1}))})], {encoding:"utf8", maxBuffer:1024*1024})).markdown;
+const readSection = (file, headings) => JSON.parse(execFileSync("/Users/provi/.local/bin/md", ["read", join(root, file), "--json", "--address", JSON.stringify({kind:"section",path:headings.map((text)=>({text,occurrence:1}))})], {encoding:"utf8", maxBuffer:1024*1024})).markdown;
 const plan = readSection("docs/plans/2026-09-09-001-feat-lifecycle-observation-facts-plan.md", ["Lifecycle observations for Attention consumers", "Approved row coverage"]);
 const plannedIds = [...plan.matchAll(/^\| (H\d+) \|/gm)].map((match) => match[1]);
 assert.deepEqual(registry.rows.map((row) => row.id), plannedIds);
