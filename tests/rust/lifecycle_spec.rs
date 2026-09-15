@@ -770,7 +770,13 @@ fn attempt_failure_retry_and_settling_do_not_end_a_binding() {
                 &event(provider, name, "run", patch),
                 &format!("{:020}", 300 + index),
             );
-            assert_eq!(result.disposition, "applied", "{provider}:{name}");
+            // A prompt already tints the pane `thinking`, so the first tool call
+            // of the same turn repeats it and is skipped rather than republished.
+            assert!(
+                matches!(result.disposition.as_str(), "applied" | "skipped"),
+                "{provider}:{name} {}",
+                result.disposition
+            );
             assert!(!setup.binding_dir(provider, "run").join("end.json").exists());
         }
         let raw =

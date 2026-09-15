@@ -423,6 +423,15 @@ fn parse_claude_or_codex(
             "Codex hook identity differs from the inherited thread",
         );
     }
+    // A lead prompt starts the turn, so it tints the pane the way Pi's agent_start
+    // does. Without it a turn that answers without calling a tool shows nothing
+    // between the prompt and its Stop. A child actor cannot write lead state, so
+    // its prompt stays observation-only.
+    if event_name == "UserPromptSubmit" && event.agent_id.is_none() {
+        event.action = ProviderAction::Activity;
+        event.activity_type = Some("thinking".to_owned());
+        return event;
+    }
     if matches!(
         event_name,
         "PostToolUse"
