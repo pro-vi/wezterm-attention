@@ -21,8 +21,9 @@ use crate::observations::{LifecycleSnapshot, ObservationPools};
 use crate::protocol::{AttentionError, Diagnostic, Result, manifest};
 use crate::providers::{ProviderAction, ProviderEvent};
 use crate::records::{
-    CommitPlan, PreparedRecordWrite, RecordIdentity, Replacement, commit_nested_with,
-    commit_triple_with, commit_with, launch_path, pane_path, read_record, state_root,
+    CommitPlan, PreparedRecordWrite, RecordIdentity, RecordRead, Replacement, commit_nested_with,
+    commit_triple_with, commit_with, launch_path, pane_path, read_record, read_record_typed,
+    state_root,
 };
 use crate::wezterm::RuntimePorts;
 
@@ -634,6 +635,26 @@ fn semantic_activity(mut value: Value) -> Value {
     value
 }
 
+// The plugin acknowledges a publication by naming its `event_id` in `ack.json`
+// and shows nothing for that id again, so an acknowledged activity is no longer
+// on screen: repeating the same semantic activity has to publish a fresh
+// `event_id` rather than report the acknowledged one as still current. The
+// plugin owns this record, so an unreadable one counts as no acknowledgement
+// instead of failing the event.
+fn acknowledged(activity_path: &Path, identity: &RecordIdentity, existing: &Value) -> bool {
+    let RecordRead::Present(ack) = read_record_typed(
+        &activity_path.with_file_name("ack.json"),
+        Some("acknowledgement"),
+        identity,
+    ) else {
+        return false;
+    };
+    let Some(event_id) = existing["event_id"].as_str() else {
+        return false;
+    };
+    ack["target"] == existing["target"] && ack["activity_event_id"].as_str() == Some(event_id)
+}
+
 // Called inside the selected launch's lock. Rich rejection does not discard an
 // independently valid legacy mutation, and the sidecar is always written last.
 fn append_observation(
@@ -831,7 +852,9 @@ fn apply_activity(
                     activity["observed_mono_ns"].as_str().unwrap_or("")
                         > clear["observed_mono_ns"].as_str().unwrap_or("")
                 })
-            });
+            }) && existing
+                .as_ref()
+                .is_none_or(|activity| !acknowledged(&activity_path, &identity, activity));
             let mut replacements = Vec::new();
             let (result, activity) = if let Some(existing) = existing {
                 if visible && semantic_activity(existing.clone()) == base {
@@ -1240,7 +1263,9 @@ pub fn apply_mark_activity(
                     activity["observed_mono_ns"].as_str().unwrap_or("")
                         > clear["observed_mono_ns"].as_str().unwrap_or("")
                 })
-            });
+            }) && existing
+                .as_ref()
+                .is_none_or(|activity| !acknowledged(&path, &activity_identity, activity));
             let mut replacements = Vec::new();
             let (result, activity) = if let Some(existing) = existing {
                 if visible && semantic_activity(existing.clone()) == base {

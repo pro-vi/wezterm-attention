@@ -2571,3 +2571,105 @@ fn bindings_rejects_invalid_realm_and_provider_filters() {
         assert_eq!(envelope["diagnostics"][0]["code"], "bad_usage");
     }
 }
+
+#[test]
+fn stop_after_an_acknowledged_stop_publishes_a_fresh_event_id() {
+    let setup = Setup::new();
+    setup.claim();
+    setup.apply(
+        &event(
+            "claude",
+            "SessionStart",
+            "relight",
+            json!({"source":"startup"}),
+        ),
+        "00000000000000000200",
+    );
+    let first = setup.apply(
+        &event("claude", "Stop", "relight", json!({})),
+        "00000000000000000300",
+    );
+    assert_eq!(first.disposition, "applied");
+    let acknowledged = first
+        .event_id
+        .clone()
+        .expect("first stop publishes an event id");
+    let binding_dir = setup.binding_dir("claude", "relight");
+    let activity: Value = serde_json::from_slice(
+        &fs::read(binding_dir.join("activity.json")).expect("read activity"),
+    )
+    .expect("activity JSON");
+    // The plugin acknowledges a focused pane by naming the publication it showed;
+    // it never writes activity-clear.json.
+    atomic_replace(
+        &binding_dir.join("ack.json"),
+        &json!({
+            "kind": "acknowledgement",
+            "schema": activity["schema"],
+            "address": activity["address"],
+            "launch_id": activity["launch_id"],
+            "target": activity["target"],
+            "activity_event_id": acknowledged,
+            "event_id": "00000000-0000-4000-8000-000000000501",
+        }),
+    )
+    .expect("write acknowledgement");
+    let second = setup.apply(
+        &event("claude", "Stop", "relight", json!({})),
+        "00000000000000000400",
+    );
+    assert_eq!(second.disposition, "applied");
+    assert_ne!(second.event_id.as_deref(), Some(acknowledged.as_str()));
+    assert!(!binding_dir.join("activity-clear.json").exists());
+}
+
+#[test]
+fn manual_mark_after_an_acknowledged_mark_publishes_a_fresh_event_id() {
+    let setup = Setup::new();
+    setup.claim();
+    let first = apply_mark_activity(
+        &setup.env,
+        "notify",
+        "manual",
+        None,
+        None,
+        None,
+        "00000000000000000200",
+        "00000000012345678900",
+    )
+    .expect("manual mark");
+    assert_eq!(first.disposition, "applied");
+    let acknowledged = first.event_id.clone().expect("mark publishes an event id");
+    let root = state_root(&setup.env).expect("state root");
+    let (address, _) = pane_address(&setup.env).expect("address");
+    let launch = launch_path(&root, &address, &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]);
+    let activity: Value =
+        serde_json::from_slice(&fs::read(launch.join("activity.json")).expect("read activity"))
+            .expect("activity JSON");
+    atomic_replace(
+        &launch.join("ack.json"),
+        &json!({
+            "kind": "acknowledgement",
+            "schema": activity["schema"],
+            "address": activity["address"],
+            "launch_id": activity["launch_id"],
+            "target": activity["target"],
+            "activity_event_id": acknowledged,
+            "event_id": "00000000-0000-4000-8000-000000000502",
+        }),
+    )
+    .expect("write acknowledgement");
+    let second = apply_mark_activity(
+        &setup.env,
+        "notify",
+        "manual",
+        None,
+        None,
+        None,
+        "00000000000000000300",
+        "00000000012345678900",
+    )
+    .expect("repeat manual mark");
+    assert_eq!(second.disposition, "applied");
+    assert_ne!(second.event_id.as_deref(), Some(acknowledged.as_str()));
+}
