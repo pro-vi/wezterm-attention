@@ -1436,8 +1436,15 @@ fn assemble_bindings(
             start_source: string(&binding, "start_source"),
         });
     }
+    // Only live claims compete. A binding that has ended, or whose pane is
+    // verified absent, is history: a session resumed in a new pane leaves one
+    // behind every time, and calling that a conflict hides the pane the session
+    // actually runs in.
     let mut duplicates: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
     for (index, row) in rows.iter().enumerate() {
+        if row.binding_phase == "ended" || row.pane_presence == "verified_absent" {
+            continue;
+        }
         duplicates
             .entry((row.provider.clone(), row.provider_session_id.clone()))
             .or_default()
