@@ -2083,7 +2083,10 @@ fn real_macos_controlling_tty_path_is_rejected_in_a_pty_child() {
         return;
     }
     let executable = std::env::current_exe().expect("current test executable");
-    let status = Command::new("/usr/bin/script")
+    // The child needs the pty `script` allocates, never the harness's own stdin:
+    // inheriting it makes this test depend on whatever else is reading the
+    // terminal. `script` still allocates the pty with stdin closed.
+    let output = Command::new("/usr/bin/script")
         .args([
             "-q",
             "/dev/null",
@@ -2092,9 +2095,15 @@ fn real_macos_controlling_tty_path_is_rejected_in_a_pty_child() {
             "real_macos_controlling_tty_path_is_rejected_in_a_pty_child",
         ])
         .env(CHILD, "1")
-        .status()
+        .stdin(Stdio::null())
+        .output()
         .expect("run pty child");
-    assert!(status.success());
+    assert!(
+        output.status.success(),
+        "pty child failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

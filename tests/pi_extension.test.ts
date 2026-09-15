@@ -105,6 +105,18 @@ afterEach(() => {
 	clearAttentionEnvironment();
 });
 
+// session_shutdown's drain is capped at DRAIN_TIMEOUT_MS and abandons the wait
+// without cancelling the write, so on a loaded machine a spawned writer's report
+// can land just after it returns. Wait for the report; its arrival is the
+// property under test, not how fast the drain got there.
+async function reportedNotifications(expected: number) {
+	const deadline = Date.now() + 10_000;
+	while (notifications.length < expected && Date.now() < deadline) {
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	return notifications;
+}
+
 // A temp dir registered for automatic teardown.
 function tempDir(prefix: string): string {
 	const d = mkdtempSync(join(tmpdir(), prefix));
@@ -293,7 +305,7 @@ test("fallback: a configured checkout without a writer logs once and writes no v
 	await lifecycle["agent_start"]!();
 	await lifecycle["session_shutdown"]!();
 	expect(existsSync(join(dir, "42"))).toBe(false);
-	expect(notifications).toHaveLength(1);
+	expect(await reportedNotifications(1)).toHaveLength(1);
 	expect(notifications[0]?.message).toContain("no executable bin/attention");
 	expect(notifications[0]?.level).toBe("warning");
 });
@@ -311,7 +323,7 @@ test("fallback: an invoked writer exit never creates a v1 marker and logs once",
 	await lifecycle["agent_start"]!();
 	await lifecycle["session_shutdown"]!();
 	expect(existsSync(join(dir, "42"))).toBe(false);
-	expect(notifications).toHaveLength(1);
+	expect(await reportedNotifications(1)).toHaveLength(1);
 	expect(notifications[0]?.message).toContain("status 3");
 });
 
@@ -331,7 +343,7 @@ test("fallback: an exit-zero hook diagnostic is reported and never treated as su
 	await lifecycle["agent_start"]!();
 	await lifecycle["session_shutdown"]!();
 	expect(existsSync(join(dir, "42"))).toBe(false);
-	expect(notifications).toHaveLength(1);
+	expect(await reportedNotifications(1)).toHaveLength(1);
 	expect(notifications[0]?.message).toContain("rejected the event");
 });
 
