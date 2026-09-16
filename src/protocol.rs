@@ -81,6 +81,70 @@ impl std::error::Error for AttentionError {}
 
 pub type Result<T> = std::result::Result<T, AttentionError>;
 
+/// What a hook event did to the state it was given.
+///
+/// Closed vocabulary: consumers switch on these values, so adding one is a
+/// protocol change rather than a local choice. It is an enum because the writer
+/// names it at roughly eighty sites, and a misspelling there used to be a
+/// silently valid string that no consumer would ever match.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Disposition {
+    Applied,
+    Confirmed,
+    Replaced,
+    Skipped,
+    Ignored,
+    Conflict,
+    Partial,
+    RepairedProjection,
+}
+
+impl Disposition {
+    /// The published spelling. Serialization goes through this too, so the wire
+    /// vocabulary has one definition rather than one per derive attribute.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Confirmed => "confirmed",
+            Self::Replaced => "replaced",
+            Self::Skipped => "skipped",
+            Self::Ignored => "ignored",
+            Self::Conflict => "conflict",
+            Self::Partial => "partial",
+            Self::RepairedProjection => "repaired_projection",
+        }
+    }
+}
+
+impl fmt::Display for Disposition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for Disposition {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+/// Compare against the published spelling, so a test can assert the wire value
+/// it actually cares about without naming the Rust variant.
+impl PartialEq<&str> for Disposition {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<Disposition> for &str {
+    fn eq(&self, other: &Disposition) -> bool {
+        *self == other.as_str()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {

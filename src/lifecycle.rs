@@ -18,7 +18,7 @@ use crate::compat::{
 use crate::consumer::{AdmittedHook, BindingTarget, HookPersistence, HookScope, Persistence};
 use crate::identity::{PaneAddress, canonical_uuid, pane_address};
 use crate::observations::{LifecycleSnapshot, ObservationPools};
-use crate::protocol::{AttentionError, Diagnostic, Result, manifest};
+use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, manifest};
 use crate::providers::{ProviderAction, ProviderEvent};
 use crate::records::{
     CommitPlan, PreparedRecordWrite, RecordIdentity, RecordRead, Replacement, commit_nested_with,
@@ -48,8 +48,12 @@ struct HookEvidence {
 
 fn accepted(result: &LifecycleResult) -> bool {
     matches!(
-        result.disposition.as_str(),
-        "applied" | "confirmed" | "replaced" | "skipped" | "repaired_projection"
+        result.disposition,
+        Disposition::Applied
+            | Disposition::Confirmed
+            | Disposition::Replaced
+            | Disposition::Skipped
+            | Disposition::RepairedProjection
     )
 }
 
@@ -140,30 +144,30 @@ fn confirm_native(resolved: &ResolvedLaunch, binding_id: &str, mutation: &Mutati
 
 #[derive(Clone, Debug, Serialize)]
 pub struct LifecycleResult {
-    pub disposition: String,
+    pub disposition: Disposition,
     pub diagnostic: Option<Diagnostic>,
     pub event_id: Option<String>,
     pub repaired_projection: bool,
 }
 
 impl LifecycleResult {
-    fn new(disposition: &str) -> Self {
+    fn new(disposition: Disposition) -> Self {
         Self {
-            disposition: disposition.to_owned(),
+            disposition,
             diagnostic: None,
             event_id: None,
             repaired_projection: false,
         }
     }
 
-    fn diagnosed(disposition: &str, code: &str, message: &str) -> Self {
+    fn diagnosed(disposition: Disposition, code: &str, message: &str) -> Self {
         let mut result = Self::new(disposition);
         result.diagnostic = Some(AttentionError::new(code, message).diagnostic);
         result
     }
 
     fn ignored_error(error: AttentionError) -> Self {
-        let mut result = Self::new("ignored");
+        let mut result = Self::new(Disposition::Ignored);
         result.diagnostic = Some(error.diagnostic);
         result
     }
@@ -445,7 +449,7 @@ fn binding_mutation(
                 if observation < current_order {
                     return Ok(CommitPlan {
                         result: Mutation::plain(LifecycleResult::diagnosed(
-                            "ignored",
+                            Disposition::Ignored,
                             "binding_conflict",
                             "older binding selection was ignored",
                         )),
@@ -457,7 +461,7 @@ fn binding_mutation(
                 if observation == current_order {
                     return Ok(CommitPlan {
                         result: Mutation::plain(LifecycleResult::diagnosed(
-                            "conflict",
+                            Disposition::Conflict,
                             "binding_conflict",
                             "equal binding order names a different binding",
                         )),
@@ -483,7 +487,7 @@ fn binding_mutation(
                 if matches!(source, "compact" | "reload") || (!current_ended && !replace) {
                     return Ok(CommitPlan {
                         result: Mutation::plain(LifecycleResult::diagnosed(
-                            "conflict",
+                            Disposition::Conflict,
                             "binding_conflict",
                             "provider start cannot replace the active binding",
                         )),
@@ -506,7 +510,7 @@ fn binding_mutation(
                 let existing_order = existing["observed_mono_ns"].as_str().unwrap_or("");
                 if observation < existing_order {
                     LifecycleResult::diagnosed(
-                        "ignored",
+                        Disposition::Ignored,
                         "binding_conflict",
                         "older binding observation was ignored",
                     )
@@ -516,7 +520,7 @@ fn binding_mutation(
                     });
                     if conflicts {
                         LifecycleResult::diagnosed(
-                            "conflict",
+                            Disposition::Conflict,
                             "binding_conflict",
                             "equal binding order has different facts",
                         )
@@ -530,7 +534,7 @@ fn binding_mutation(
                             replacements
                                 .push(Replacement::always(pointer_path.clone(), pointer_record));
                         }
-                        let mut result = LifecycleResult::new("confirmed");
+                        let mut result = LifecycleResult::new(Disposition::Confirmed);
                         result.event_id = existing["event_id"].as_str().map(str::to_owned);
                         result
                     }
@@ -544,7 +548,7 @@ fn binding_mutation(
                         pointer_path.clone(),
                         pointer_record,
                     ));
-                    let mut result = LifecycleResult::new("confirmed");
+                    let mut result = LifecycleResult::new(Disposition::Confirmed);
                     result.event_id = Some(event_id);
                     result
                 }
@@ -570,9 +574,9 @@ fn binding_mutation(
                 replacements.push(Replacement::always(binding_path.clone(), record));
                 replacements.push(Replacement::always(pointer_path.clone(), pointer_record));
                 let mut result = LifecycleResult::new(if current.is_some() {
-                    "replaced"
+                    Disposition::Replaced
                 } else {
-                    "applied"
+                    Disposition::Applied
                 });
                 result.event_id = Some(event_id);
                 result
@@ -755,7 +759,7 @@ fn append_observation(
             if let Some(evidence) = &resolved.evidence {
                 evidence.borrow_mut().persistence.lifecycle = Persistence::Rejected;
             }
-            plan.result.result.disposition = "partial".to_owned();
+            plan.result.result.disposition = Disposition::Partial;
             plan.result.result.diagnostic = Some(error.diagnostic);
         }
     }
@@ -782,7 +786,7 @@ fn apply_observation(
                 observation,
                 written_at,
                 CommitPlan {
-                    result: Mutation::plain(LifecycleResult::new("applied")),
+                    result: Mutation::plain(LifecycleResult::new(Disposition::Applied)),
                     replacements: Vec::new(),
                     removals: Vec::new(),
                     private_dirs: Vec::new(),
@@ -830,7 +834,7 @@ fn apply_activity(
             {
                 return Ok(CommitPlan {
                     result: Mutation::plain(LifecycleResult::diagnosed(
-                        "ignored",
+                        Disposition::Ignored,
                         "claim_stale",
                         "activity event is not for the current binding",
                     )),
@@ -858,17 +862,17 @@ fn apply_activity(
             let mut replacements = Vec::new();
             let (result, activity) = if let Some(existing) = existing {
                 if visible && semantic_activity(existing.clone()) == base {
-                    let mut result = LifecycleResult::new("skipped");
+                    let mut result = LifecycleResult::new(Disposition::Skipped);
                     result.event_id = existing["event_id"].as_str().map(str::to_owned);
                     (result, Some(existing))
                 } else {
                     let order = existing["observed_mono_ns"].as_str().unwrap_or("");
                     if observation < order {
-                        (LifecycleResult::new("ignored"), Some(existing))
+                        (LifecycleResult::new(Disposition::Ignored), Some(existing))
                     } else if observation == order {
                         (
                             LifecycleResult::diagnosed(
-                                "conflict",
+                                Disposition::Conflict,
                                 "record_invalid",
                                 "equal activity order has different content",
                             ),
@@ -879,7 +883,7 @@ fn apply_activity(
                     }) {
                         (
                             LifecycleResult::diagnosed(
-                                "ignored",
+                                Disposition::Ignored,
                                 "binding_conflict",
                                 "activity observation is covered by activity clear",
                             ),
@@ -893,7 +897,7 @@ fn apply_activity(
                         record["written_at_unix_ns"] = json!(written_at);
                         replacements
                             .push(Replacement::always(activity_path.clone(), record.clone()));
-                        let mut result = LifecycleResult::new("applied");
+                        let mut result = LifecycleResult::new(Disposition::Applied);
                         result.event_id = Some(event_id);
                         (result, Some(record))
                     }
@@ -903,7 +907,7 @@ fn apply_activity(
             }) {
                 (
                     LifecycleResult::diagnosed(
-                        "ignored",
+                        Disposition::Ignored,
                         "binding_conflict",
                         "activity observation is covered by activity clear",
                     ),
@@ -916,7 +920,7 @@ fn apply_activity(
                 record["observed_mono_ns"] = json!(observation);
                 record["written_at_unix_ns"] = json!(written_at);
                 replacements.push(Replacement::always(activity_path.clone(), record.clone()));
-                let mut result = LifecycleResult::new("applied");
+                let mut result = LifecycleResult::new(Disposition::Applied);
                 result.event_id = Some(event_id);
                 (result, Some(record))
             };
@@ -956,7 +960,7 @@ fn apply_activity(
                 }) {
                     return Ok(CommitPlan {
                         result: Mutation::plain(LifecycleResult::diagnosed(
-                            "conflict",
+                            Disposition::Conflict,
                             "record_invalid",
                             "equal parent-clear order has different content",
                         )),
@@ -990,7 +994,7 @@ fn apply_activity(
     )?;
     let mut result = mutation.result;
     if projected && result.disposition == "skipped" {
-        result.disposition = "repaired_projection".to_owned();
+        result.disposition = Disposition::RepairedProjection;
         result.repaired_projection = true;
     }
     Ok(result)
@@ -1269,17 +1273,17 @@ pub fn apply_mark_activity(
             let mut replacements = Vec::new();
             let (result, activity) = if let Some(existing) = existing {
                 if visible && semantic_activity(existing.clone()) == base {
-                    let mut result = LifecycleResult::new("skipped");
+                    let mut result = LifecycleResult::new(Disposition::Skipped);
                     result.event_id = existing["event_id"].as_str().map(str::to_owned);
                     (result, existing)
                 } else {
                     let order = existing["observed_mono_ns"].as_str().unwrap_or("");
                     if observation < order {
-                        (LifecycleResult::new("ignored"), existing)
+                        (LifecycleResult::new(Disposition::Ignored), existing)
                     } else if observation == order {
                         (
                             LifecycleResult::diagnosed(
-                                "conflict",
+                                Disposition::Conflict,
                                 "record_invalid",
                                 "equal activity order has different content",
                             ),
@@ -1290,7 +1294,7 @@ pub fn apply_mark_activity(
                     }) {
                         (
                             LifecycleResult::diagnosed(
-                                "ignored",
+                                Disposition::Ignored,
                                 "binding_conflict",
                                 "activity observation is covered by activity clear",
                             ),
@@ -1303,7 +1307,7 @@ pub fn apply_mark_activity(
                         record["observed_mono_ns"] = json!(observation);
                         record["written_at_unix_ns"] = json!(written_at);
                         replacements.push(Replacement::always(path.clone(), record.clone()));
-                        let mut result = LifecycleResult::new("applied");
+                        let mut result = LifecycleResult::new(Disposition::Applied);
                         result.event_id = Some(event_id);
                         (result, record)
                     }
@@ -1313,7 +1317,7 @@ pub fn apply_mark_activity(
             }) {
                 (
                     LifecycleResult::diagnosed(
-                        "ignored",
+                        Disposition::Ignored,
                         "binding_conflict",
                         "activity observation is covered by activity clear",
                     ),
@@ -1326,7 +1330,7 @@ pub fn apply_mark_activity(
                 record["observed_mono_ns"] = json!(observation);
                 record["written_at_unix_ns"] = json!(written_at);
                 replacements.push(Replacement::always(path, record.clone()));
-                let mut result = LifecycleResult::new("applied");
+                let mut result = LifecycleResult::new(Disposition::Applied);
                 result.event_id = Some(event_id);
                 (result, record)
             };
@@ -1361,7 +1365,7 @@ pub fn apply_mark_activity(
     )?;
     let mut result = mutation.result;
     if projected && result.disposition == "skipped" {
-        result.disposition = "repaired_projection".to_owned();
+        result.disposition = Disposition::RepairedProjection;
         result.repaired_projection = true;
     }
     Ok(result)
@@ -1407,9 +1411,9 @@ pub fn apply_mark_review(
             if clear {
                 return Ok(CommitPlan {
                     result: Mutation::plain(LifecycleResult::new(if existing.is_some() {
-                        "applied"
+                        Disposition::Applied
                     } else {
-                        "skipped"
+                        Disposition::Skipped
                     })),
                     replacements: Vec::new(),
                     removals: vec![review_path.clone()],
@@ -1425,7 +1429,7 @@ pub fn apply_mark_review(
                 "owner_key": owner_key,
                 "event_id": event_id,
             });
-            let mut result = LifecycleResult::new("applied");
+            let mut result = LifecycleResult::new(Disposition::Applied);
             result.event_id = Some(event_id);
             Ok(CommitPlan {
                 result: Mutation::plain(result),
@@ -1477,7 +1481,7 @@ fn apply_child(
             }) {
                 return Ok(CommitPlan {
                     result: Mutation::plain(LifecycleResult::diagnosed(
-                        "ignored",
+                        Disposition::Ignored,
                         "claim_stale",
                         "child event has no matching binding",
                     )),
@@ -1512,19 +1516,19 @@ fn apply_child(
             let result = if let Some(existing) = existing {
                 let existing_order = existing["observed_mono_ns"].as_str().unwrap_or("");
                 if existing["status"] == "stopped" && status == "stopped" {
-                    let mut result = LifecycleResult::new("skipped");
+                    let mut result = LifecycleResult::new(Disposition::Skipped);
                     result.event_id = existing["event_id"].as_str().map(str::to_owned);
                     result
                 } else if observation < existing_order {
-                    LifecycleResult::new("ignored")
+                    LifecycleResult::new(Disposition::Ignored)
                 } else if observation == existing_order {
                     if existing["status"] == status && existing["source"] == source {
-                        let mut result = LifecycleResult::new("skipped");
+                        let mut result = LifecycleResult::new(Disposition::Skipped);
                         result.event_id = existing["event_id"].as_str().map(str::to_owned);
                         result
                     } else {
                         LifecycleResult::diagnosed(
-                            "conflict",
+                            Disposition::Conflict,
                             "record_invalid",
                             "equal child order has different content",
                         )
@@ -1584,7 +1588,7 @@ fn apply_child(
     )?;
     let mut result = mutation.result;
     if projected && result.disposition == "skipped" {
-        result.disposition = "repaired_projection".to_owned();
+        result.disposition = Disposition::RepairedProjection;
         result.repaired_projection = true;
     }
     Ok(result)
@@ -1608,7 +1612,7 @@ fn child_replacement(
 ) -> Result<LifecycleResult> {
     if floor.is_some_and(|floor| observation <= floor["floor_mono_ns"].as_str().unwrap_or("")) {
         return Ok(LifecycleResult::diagnosed(
-            "ignored",
+            Disposition::Ignored,
             "binding_conflict",
             "child observation is covered by retention floor",
         ));
@@ -1618,7 +1622,7 @@ fn child_replacement(
             .is_some_and(|clear| observation <= clear["observed_mono_ns"].as_str().unwrap_or(""))
     {
         return Ok(LifecycleResult::diagnosed(
-            "ignored",
+            Disposition::Ignored,
             "binding_conflict",
             "child observation is covered by parent clear",
         ));
@@ -1641,7 +1645,7 @@ fn child_replacement(
         "ttl_ms": manifest()?.limits.subagent_ttl_ms,
     });
     replacements.push(Replacement::always(presence_path.to_path_buf(), record));
-    let mut result = LifecycleResult::new("applied");
+    let mut result = LifecycleResult::new(Disposition::Applied);
     result.event_id = Some(event_id);
     Ok(result)
 }
@@ -1667,7 +1671,7 @@ fn apply_end(
             let Some(binding) = binding else {
                 return Ok(CommitPlan {
                     result: Mutation::plain(LifecycleResult::diagnosed(
-                        "ignored",
+                        Disposition::Ignored,
                         "claim_stale",
                         "end event has no matching binding",
                     )),
@@ -1679,7 +1683,7 @@ fn apply_end(
             if observation < binding["observed_mono_ns"].as_str().unwrap_or("") {
                 return Ok(CommitPlan {
                     result: Mutation::plain(LifecycleResult::diagnosed(
-                        "ignored",
+                        Disposition::Ignored,
                         "binding_conflict",
                         "end observation predates binding",
                     )),
@@ -1696,17 +1700,17 @@ fn apply_end(
             if let Some(existing) = existing {
                 let order = existing["observed_mono_ns"].as_str().unwrap_or("");
                 let disposition = if observation < order {
-                    "ignored"
+                    Disposition::Ignored
                 } else if existing["reason"] == "session_end"
                     && order >= binding["observed_mono_ns"].as_str().unwrap_or("")
                 {
-                    "skipped"
+                    Disposition::Skipped
                 } else if observation == order {
-                    "conflict"
+                    Disposition::Conflict
                 } else {
-                    "applied"
+                    Disposition::Applied
                 };
-                if disposition != "applied" {
+                if disposition != Disposition::Applied {
                     let mut result = LifecycleResult::new(disposition);
                     result.event_id = existing["event_id"].as_str().map(str::to_owned);
                     return Ok(CommitPlan {
@@ -1729,7 +1733,7 @@ fn apply_end(
                 "observed_mono_ns": observation,
                 "written_at_unix_ns": written_at,
             });
-            let mut result = LifecycleResult::new("applied");
+            let mut result = LifecycleResult::new(Disposition::Applied);
             result.event_id = Some(event_id);
             Ok(CommitPlan {
                 result: Mutation::plain(result),
@@ -1775,7 +1779,7 @@ fn apply_review_event(
             }) {
                 return Ok(CommitPlan {
                     result: Mutation::plain(LifecycleResult::diagnosed(
-                        "ignored",
+                        Disposition::Ignored,
                         "claim_stale",
                         "Pi review launch is no longer current",
                     )),
@@ -1799,7 +1803,7 @@ fn apply_review_event(
             {
                 return Ok(CommitPlan {
                     result: Mutation::plain(LifecycleResult::diagnosed(
-                        "ignored",
+                        Disposition::Ignored,
                         "claim_stale",
                         "Pi review is not for the current binding",
                     )),
@@ -1827,9 +1831,9 @@ fn apply_review_event(
             if clear {
                 return Ok(CommitPlan {
                     result: Mutation::plain(LifecycleResult::new(if existing.is_some() {
-                        "applied"
+                        Disposition::Applied
                     } else {
-                        "skipped"
+                        Disposition::Skipped
                     })),
                     replacements: Vec::new(),
                     removals: vec![review_path.clone()],
@@ -1845,7 +1849,7 @@ fn apply_review_event(
                 "owner_key": owner_key,
                 "event_id": event_id,
             });
-            let mut result = LifecycleResult::new("applied");
+            let mut result = LifecycleResult::new(Disposition::Applied);
             result.event_id = Some(event_id);
             Ok(CommitPlan {
                 result: Mutation::plain(result),
@@ -1898,7 +1902,7 @@ fn apply_clear_event(
             }) {
                 return Ok(CommitPlan {
                     result: Mutation::plain(LifecycleResult::diagnosed(
-                        "ignored",
+                        Disposition::Ignored,
                         "claim_stale",
                         "clear event is not for the current launch",
                     )),
@@ -1917,7 +1921,7 @@ fn apply_clear_event(
             {
                 return Ok(CommitPlan {
                     result: Mutation::plain(LifecycleResult::diagnosed(
-                        "ignored",
+                        Disposition::Ignored,
                         "claim_stale",
                         "clear event is not for the current binding",
                     )),
@@ -1935,7 +1939,7 @@ fn apply_clear_event(
             if let Some(existing) = &existing
                 && observation < existing["observed_mono_ns"].as_str().unwrap_or("")
             {
-                let mut result = LifecycleResult::new("ignored");
+                let mut result = LifecycleResult::new(Disposition::Ignored);
                 result.event_id = existing["event_id"].as_str().map(str::to_owned);
                 return Ok(CommitPlan {
                     result: Mutation::plain(result),
@@ -1947,7 +1951,7 @@ fn apply_clear_event(
             let (mut result, clear_order) = if existing.as_ref().is_some_and(|clear| {
                 observation == clear["observed_mono_ns"].as_str().unwrap_or("")
             }) {
-                let mut result = LifecycleResult::new("skipped");
+                let mut result = LifecycleResult::new(Disposition::Skipped);
                 result.event_id = existing
                     .as_ref()
                     .and_then(|clear| clear["event_id"].as_str())
@@ -1972,13 +1976,13 @@ fn apply_clear_event(
                     "observed_mono_ns": observation,
                 });
                 replacements.push(Replacement::always(clear_path.clone(), record));
-                let mut result = LifecycleResult::new("applied");
+                let mut result = LifecycleResult::new(Disposition::Applied);
                 result.event_id = Some(event_id);
                 (result, observation.to_owned())
             };
             let review_existed = review_path.exists();
             if review_existed && result.disposition == "skipped" {
-                result.disposition = "applied".to_owned();
+                result.disposition = Disposition::Applied;
             }
             Ok(CommitPlan {
                 result: Mutation {
@@ -1995,7 +1999,7 @@ fn apply_clear_event(
     )?;
     let mut result = mutation.result;
     if projected && result.disposition == "skipped" {
-        result.disposition = "repaired_projection".to_owned();
+        result.disposition = Disposition::RepairedProjection;
         result.repaired_projection = true;
     }
     Ok(result)
@@ -2014,7 +2018,7 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
         .is_none_or(|claim| !record_matches_launch(claim, &address, &launch_id))
     {
         return Ok(LifecycleResult::diagnosed(
-            "ignored",
+            Disposition::Ignored,
             "claim_stale",
             "prompt return has no matching claim",
         ));
@@ -2031,7 +2035,7 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
             let (_, current) = read_current(&launch, pointer, &address, &launch_id)?;
             let Some(current) = current else {
                 return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::new("applied")),
+                    result: Mutation::plain(LifecycleResult::new(Disposition::Applied)),
                     replacements: Vec::new(),
                     removals: Vec::new(),
                     private_dirs: Vec::new(),
@@ -2048,7 +2052,7 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
             if let Some(existing) = &existing
                 && observation < existing["observed_mono_ns"].as_str().unwrap_or("")
             {
-                let mut result = LifecycleResult::new("ignored");
+                let mut result = LifecycleResult::new(Disposition::Ignored);
                 result.event_id = existing["event_id"].as_str().map(str::to_owned);
                 return Ok(CommitPlan {
                     result: Mutation::plain(result),
@@ -2060,7 +2064,7 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
             if existing.as_ref().is_some_and(|clear| {
                 observation == clear["observed_mono_ns"].as_str().unwrap_or("")
             }) {
-                let mut result = LifecycleResult::new("skipped");
+                let mut result = LifecycleResult::new(Disposition::Skipped);
                 result.event_id = existing
                     .as_ref()
                     .and_then(|clear| clear["event_id"].as_str())
@@ -2086,7 +2090,7 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
                 "event_id": event_id,
                 "observed_mono_ns": observation,
             });
-            let mut result = LifecycleResult::new("applied");
+            let mut result = LifecycleResult::new(Disposition::Applied);
             result.event_id = Some(event_id);
             Ok(CommitPlan {
                 result: Mutation {
@@ -2127,7 +2131,7 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
     )?;
     let mut result = mutation.result;
     if projected && result.disposition == "skipped" {
-        result.disposition = "repaired_projection".to_owned();
+        result.disposition = Disposition::RepairedProjection;
         result.repaired_projection = true;
     }
     Ok(result)
@@ -2218,7 +2222,7 @@ fn apply_provider_event_inner(
     evidence: Option<Rc<RefCell<HookEvidence>>>,
 ) -> Result<LifecycleResult> {
     if event.action == ProviderAction::Ignored {
-        let mut result = LifecycleResult::new("ignored");
+        let mut result = LifecycleResult::new(Disposition::Ignored);
         result.diagnostic = event.diagnostic.clone();
         return Ok(result);
     }
@@ -2332,7 +2336,7 @@ mod lifecycle_write_tests {
         crate::records::atomic_replace(&path.with_file_name("binding.json"), &samples["binding"])
             .unwrap();
         let mutation = Mutation {
-            result: LifecycleResult::new("applied"),
+            result: LifecycleResult::new(Disposition::Applied),
             projection: Projection::Activity(Some(samples["activity"].clone())),
             lifecycle_replacement: Some(PreparedRecordWrite::new(path.clone(), &snapshot).unwrap()),
         };
