@@ -9,3 +9,12 @@ libexec/attention-rs
 .inbox/
 .prov/
 .research/
+
+# Planning and review write-ups are working notes, not shipped docs. Globs, not
+# directory patterns, so the few files the repo actually references stay tracked:
+# git cannot re-include a file whose parent directory is excluded.
+docs/plans/*
+docs/reviews/*
+!docs/plans/2026-09-09-001-feat-lifecycle-observation-facts-plan.md
+!docs/reviews/2026-09-08-attention-hook-map.md
+!docs/reviews/lifecycle-contact-results.md
