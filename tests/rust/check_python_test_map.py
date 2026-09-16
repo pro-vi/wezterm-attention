@@ -46,7 +46,7 @@ def load_expected_tests() -> set[str]:
 
 def rust_tests() -> set[str]:
     names: set[str] = set()
-    for path in (ROOT / "tests" / "rust").glob("*.rs"):
+    for path in (ROOT / "tests" / "rust").rglob("*.rs"):
         names.update(re.findall(r"(?m)^fn (test_[A-Za-z0-9_]+|[A-Za-z0-9_]+)\s*\(", path.read_text(encoding="utf-8")))
     return names
 

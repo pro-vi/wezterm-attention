@@ -21,14 +21,14 @@ use wezterm_attention::query::read_bindings;
 use wezterm_attention::records::{atomic_replace, launch_path, pane_path, state_root, with_lock};
 use wezterm_attention::wezterm::{Clock, PaneLister, PaneRow, RuntimePorts, TtyWriter};
 
-#[path = "hook_consumer_spec.rs"]
-mod hook_consumer_spec;
+#[path = "lifecycle_spec/hook_consumer.rs"]
+mod hook_consumer;
 
-#[path = "pane_facts_spec.rs"]
-mod pane_facts_spec;
+#[path = "lifecycle_spec/pane_facts.rs"]
+mod pane_facts;
 
-#[path = "consumer_recipes_spec.rs"]
-mod consumer_recipes_spec;
+#[path = "lifecycle_spec/consumer_recipes.rs"]
+mod consumer_recipes;
 
 struct Scratch(PathBuf);
 
