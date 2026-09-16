@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::identity::{PaneAddress, pane_address};
-use crate::protocol::{AttentionError, Diagnostic, Result, manifest};
+use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, manifest};
 use crate::records::{
     CommitPlan, RecordIdentity, Replacement, commit, mkdir_private, pane_path, read_record,
     state_root,
@@ -28,7 +28,7 @@ use crate::wezterm::{RuntimePorts, publication_bytes};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ApplyResult {
-    pub disposition: String,
+    pub disposition: Disposition,
     pub launch_id: String,
     pub publication: String,
     #[serde(skip)]
@@ -155,7 +155,7 @@ pub fn claim_launch_at_tty(
                     .iter()
                     .all(|field| current.get(*field) == proposed.get(*field));
                     if same_identity {
-                        ("confirmed", current, Vec::new())
+                        (Disposition::Confirmed, current, Vec::new())
                     } else {
                         let current_order = current
                             .get("observed_mono_ns")
@@ -164,7 +164,7 @@ pub fn claim_launch_at_tty(
                                 AttentionError::new("record_invalid", "claim order is invalid")
                             })?;
                         if observation.as_str() < current_order {
-                            ("ignored", current, Vec::new())
+                            (Disposition::Ignored, current, Vec::new())
                         } else if observation == current_order {
                             return Err(AttentionError::new(
                                 "record_invalid",
@@ -172,7 +172,7 @@ pub fn claim_launch_at_tty(
                             ));
                         } else {
                             (
-                                "applied",
+                                Disposition::Applied,
                                 proposed.clone(),
                                 vec![
                                     Replacement::if_different(
@@ -190,7 +190,7 @@ pub fn claim_launch_at_tty(
                     }
                 }
                 None => (
-                    "applied",
+                    Disposition::Applied,
                     proposed.clone(),
                     vec![
                         Replacement::if_different(realm_path.join("realm.json"), realm_record),
@@ -211,7 +211,7 @@ pub fn claim_launch_at_tty(
                 .to_owned();
             Ok(CommitPlan {
                 result: ApplyResult {
-                    disposition: disposition.to_owned(),
+                    disposition,
                     launch_id: selected_launch,
                     publication: "pending".to_owned(),
                     publication_diagnostic: None,
@@ -223,20 +223,47 @@ pub fn claim_launch_at_tty(
         },
     )?;
 
+    let mut selected = selected;
+    // The claim is committed by this point, so every later failure is a
+    // publication failure and belongs on the result the commit already selected.
+    // Returning it as an error instead throws away the launch id of a claim that
+    // exists on disk, and the diagnostic names only the publication, so a caller
+    // cannot tell a claim that never happened from one that did. The terminal
+    // write already reported this way; the incarnation re-check and the
+    // publication encoding did not.
+    match publish_claim(
+        env,
+        ports,
+        &address,
+        tty_path,
+        &fingerprint,
+        &selected.launch_id,
+    ) {
+        Ok(()) => selected.publication = "published".to_owned(),
+        Err(error) => selected.publication_diagnostic = Some(error.diagnostic),
+    }
+    Ok(selected)
+}
+
+/// Publish a committed claim to the terminal, leaving the caller to decide what
+/// a failure means for the claim it already wrote.
+fn publish_claim(
+    env: &BTreeMap<String, String>,
+    ports: &RuntimePorts<'_>,
+    address: &PaneAddress,
+    tty_path: &str,
+    fingerprint: &str,
+    launch_id: &str,
+) -> Result<()> {
     let (current_address, _) = pane_address(env)?;
-    if current_address != address {
+    if current_address != *address {
         return Err(AttentionError::new(
             "incarnation_changed",
             "mux socket changed before publication",
         ));
     }
-    let bytes = publication_bytes(&address, Some(&selected.launch_id))?;
-    let mut selected = selected;
-    match ports.tty.write(tty_path, &bytes, &fingerprint) {
-        Ok(()) => selected.publication = "published".to_owned(),
-        Err(error) => selected.publication_diagnostic = Some(error.diagnostic),
-    }
-    Ok(selected)
+    let bytes = publication_bytes(address, Some(launch_id))?;
+    ports.tty.write(tty_path, &bytes, fingerprint)
 }
 
 pub fn publish_current(
