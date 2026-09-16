@@ -96,6 +96,13 @@ function clearAttentionEnvironment(): void {
 	delete process.env.PI_WEZTERM_ATTENTION_TTL_MS;
 	delete process.env.WEZTERM_ATTENTION_ROOT;
 	delete process.env.WEZTERM_ATTENTION_TEST_LOG;
+	// Every writer in this file is a local fake, so the shipped 2s drain cap is
+	// only ever measuring how long this machine takes to spawn a shell. Under the
+	// gate's parallel load that exceeded 2s and two tests failed on a property
+	// they do not test: one read calls.log before the fake had written it, the
+	// other saw the abandoned writer report a signal. Raise the cap instead of
+	// retrying the assertion.
+	process.env.PI_WEZTERM_ATTENTION_DRAIN_TIMEOUT_MS = "30000";
 }
 
 beforeEach(clearAttentionEnvironment);
