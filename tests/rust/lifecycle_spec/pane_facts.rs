@@ -420,9 +420,9 @@ fn inspector_cli_validates_scope_before_io_and_uses_public_shapes() {
 fn rust_and_installed_lua_share_relation_cases_and_retention_floors() {
     let setup = Setup::new();
     let fixtures: Value =
-        serde_json::from_str(include_str!("../fixtures/lifecycle/observations.json")).unwrap();
+        serde_json::from_str(include_str!("../../fixtures/lifecycle/observations.json")).unwrap();
     let relations: Value =
-        serde_json::from_str(include_str!("../fixtures/lifecycle/relations.json")).unwrap();
+        serde_json::from_str(include_str!("../../fixtures/lifecycle/relations.json")).unwrap();
     let mut cases = Vec::new();
     for case in fixtures["cases"]
         .as_array()
