@@ -35,3 +35,18 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
+
+# Denied because the crate is already clean of them, so the table locks that in
+# rather than announcing an intention. `clippy::unwrap_used` and
+# `clippy::expect_used` are the two worth adding next and are deliberately absent:
+# they fire at 23 sites in the library today, and silencing them with an allow
+# would be worse than not declaring them. See
+# .inbox/2026-09-16-panic-paths-are-not-denied-by-lint.md.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
