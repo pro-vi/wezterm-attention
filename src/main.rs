@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde::Serialize;
 
-use wezterm_attention::protocol::{AttentionError, Diagnostic};
+use wezterm_attention::protocol::{AttentionError, Diagnostic, Disposition};
 use wezterm_attention::query::read_bindings_with_ports;
 use wezterm_attention::wezterm::{
     Clock, SystemClock, SystemProcessProbe, SystemTtyWriter, WeztermPaneLister, default_ports,
@@ -548,8 +548,8 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     .collect::<Vec<_>>();
                 let failed = outcome.result.as_ref().map_or(true, |result| {
                     matches!(
-                        result.disposition.as_str(),
-                        "ignored" | "conflict" | "partial"
+                        result.disposition,
+                        Disposition::Ignored | Disposition::Conflict | Disposition::Partial
                     )
                 }) || consumers
                     .iter()
@@ -590,8 +590,8 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 }
             };
             let failed = matches!(
-                result.disposition.as_str(),
-                "ignored" | "conflict" | "partial"
+                result.disposition,
+                Disposition::Ignored | Disposition::Conflict | Disposition::Partial
             );
             if args.debug {
                 let response = Response {
