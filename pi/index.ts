@@ -81,6 +81,18 @@ function paneId(): string | undefined {
 	return id;
 }
 
+// The drain cap is a wall clock, so a test that asserts the drain finished is
+// really asserting that a process spawn fits inside it. On a loaded machine it
+// does not, and the test fails for a reason that has nothing to do with the
+// extension. Same strict-digits parse as the TTL: a malformed value falls back
+// rather than collapsing the cap to something near zero.
+function drainTimeoutMs(): number {
+	const raw = process.env.PI_WEZTERM_ATTENTION_DRAIN_TIMEOUT_MS;
+	if (!raw || !/^\d+$/.test(raw.trim())) return DRAIN_TIMEOUT_MS;
+	const parsed = Number.parseInt(raw.trim(), 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : DRAIN_TIMEOUT_MS;
+}
+
 function ttlMs(): number {
 	const raw = process.env.PI_WEZTERM_ATTENTION_TTL_MS;
 	if (!raw) return DEFAULT_TTL_MS;
@@ -564,7 +576,7 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 		await Promise.race([
 			mutationChain,
 			new Promise<void>((resolve) => {
-				timer = setTimeout(resolve, DRAIN_TIMEOUT_MS);
+				timer = setTimeout(resolve, drainTimeoutMs());
 			}),
 		]);
 		if (timer) clearTimeout(timer);
