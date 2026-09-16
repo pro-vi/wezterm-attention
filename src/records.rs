@@ -539,7 +539,7 @@ pub fn read_record_typed(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return RecordRead::Missing,
         Err(_) => {
             return RecordRead::Unavailable(AttentionError::new(
-                "record_invalid",
+                "probe_unavailable",
                 "state record could not be read",
             ));
         }
@@ -560,7 +560,7 @@ pub fn read_record_typed(
         .is_err()
     {
         return RecordRead::Unavailable(AttentionError::new(
-            "record_invalid",
+            "probe_unavailable",
             "state record could not be read",
         ));
     }
