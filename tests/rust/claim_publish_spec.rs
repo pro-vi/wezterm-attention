@@ -20,7 +20,8 @@ use wezterm_attention::protocol::{
 };
 use wezterm_attention::query::{read_bindings, read_bindings_with_ports};
 use wezterm_attention::records::{
-    RecordIdentity, atomic_replace, launch_path, pane_path, state_root, with_lock,
+    RecordIdentity, RecordRead, atomic_replace, launch_path, pane_path, read_record_typed,
+    state_root, with_lock,
 };
 use wezterm_attention::wezterm::{
     Clock, PaneLister, PaneRow, RuntimePorts, SystemTtyWriter, TtyWriter, parse_pane_rows,
@@ -460,6 +461,25 @@ fn identity_digest_recipes_match_python_known_answers() {
         ),
         "db88df84885f12868b6bb1ee44b9886b085fd5d526a8ad7e4e99ba58903cf4c9"
     );
+}
+
+#[test]
+fn an_unreadable_record_is_diagnosed_as_a_failed_probe_not_as_invalid_bytes() {
+    // `record_invalid` is a claim about bytes that were read and did not parse.
+    // A record the process cannot open has had no bytes read at all, so telling a
+    // consumer it is invalid points the repair at the wrong thing: the file is
+    // fine and the permissions are not. `RecordRead` already keeps the two apart;
+    // the diagnostic travelling with it has to agree.
+    let scratch = Scratch::new();
+    let path = scratch.path.join("claim.json");
+    fs::write(&path, b"{}").expect("write record");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("make unreadable");
+    let read = read_record_typed(&path, Some("claim"), &RecordIdentity::unscoped());
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("restore permissions");
+    let RecordRead::Unavailable(error) = read else {
+        panic!("an unopenable record must read as unavailable");
+    };
+    assert_eq!(error.diagnostic.code, "probe_unavailable");
 }
 
 #[test]

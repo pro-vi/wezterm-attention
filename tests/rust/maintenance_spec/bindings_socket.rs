@@ -90,12 +90,16 @@ fn typed_reads_distinguish_missing_io_invalid_and_future_without_changing_wrappe
         read_record_typed(&file, Some("claim"), &identity),
         RecordRead::Unavailable(_)
     ));
+    // A directory in a record's place is never opened as bytes, so the failure is
+    // that the record could not be inspected, not that its contents were bad.
+    // This assertion used to read `record_invalid`, which contradicted the
+    // `Unavailable` variant asserted two lines above it.
     assert_eq!(
         read_record(&file, Some("claim"), &identity)
             .unwrap_err()
             .diagnostic
             .code,
-        "record_invalid"
+        "probe_unavailable"
     );
     fs::remove_dir(&file).unwrap();
     fs::write(&file, "invalid").unwrap();
