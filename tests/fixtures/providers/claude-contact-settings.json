@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$WEZTERM_ATTENTION_ROOT/tests/provider_contact_hook.py\" claude SessionStart",
+            "command": "python3 \"$WEZTERM_ATTENTION_ROOT/tests/python/provider_contact_hook.py\" claude SessionStart",
             "timeout": 5
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$WEZTERM_ATTENTION_ROOT/tests/provider_contact_hook.py\" claude PreToolUse",
+            "command": "python3 \"$WEZTERM_ATTENTION_ROOT/tests/python/provider_contact_hook.py\" claude PreToolUse",
             "timeout": 5
           }
         ]
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$WEZTERM_ATTENTION_ROOT/tests/provider_contact_hook.py\" claude PermissionRequest",
+            "command": "python3 \"$WEZTERM_ATTENTION_ROOT/tests/python/provider_contact_hook.py\" claude PermissionRequest",
             "timeout": 5
           }
         ]
@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$WEZTERM_ATTENTION_ROOT/tests/provider_contact_hook.py\" claude Stop",
+            "command": "python3 \"$WEZTERM_ATTENTION_ROOT/tests/python/provider_contact_hook.py\" claude Stop",
             "timeout": 5
           }
         ]
@@ -51,7 +51,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$WEZTERM_ATTENTION_ROOT/tests/provider_contact_hook.py\" claude SubagentStop",
+            "command": "python3 \"$WEZTERM_ATTENTION_ROOT/tests/python/provider_contact_hook.py\" claude SubagentStop",
             "timeout": 5
           }
         ]
@@ -62,7 +62,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$WEZTERM_ATTENTION_ROOT/tests/provider_contact_hook.py\" claude SessionEnd",
+            "command": "python3 \"$WEZTERM_ATTENTION_ROOT/tests/python/provider_contact_hook.py\" claude SessionEnd",
             "timeout": 5
           }
         ]

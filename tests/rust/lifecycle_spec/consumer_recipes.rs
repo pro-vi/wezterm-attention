@@ -74,7 +74,7 @@ fn public_checkpoint_inspector_and_reply_sink_recipes_execute() {
     let output = Command::new("/opt/homebrew/bin/node")
         .env_clear()
         .envs(&setup.env)
-        .arg(root.join("tests/consumer_recipes.mjs"))
+        .arg(root.join("tests/javascript/consumer_recipes.mjs"))
         .arg(&input)
         .output()
         .unwrap();

@@ -1,5 +1,5 @@
 local source = debug.getinfo(1, "S").source:sub(2)
-local repo_root = source:match("^(.*)/tests/auto_clear_spec.lua$") or "."
+local repo_root = source:match("^(.*)/tests/lua/auto_clear_spec.lua$") or "."
 
 local function shell_quote(value)
   return "'" .. value:gsub("'", "'\\''") .. "'"

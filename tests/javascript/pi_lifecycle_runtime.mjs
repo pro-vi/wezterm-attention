@@ -13,7 +13,7 @@ const { createExtensionRuntime, loadExtensionFromFactory } = await load("core/ex
 const { createEventBus } = await load("core/event-bus.js");
 const extensionModule = await createJiti(import.meta.url, {
   virtualModules: { "@earendil-works/pi-coding-agent": Object.freeze({}) },
-}).import("../pi/index.ts");
+}).import("../../pi/index.ts");
 const runtime = createExtensionRuntime();
 const eventBus = createEventBus();
 const cwd = process.env.WEZTERM_ATTENTION_DIR;

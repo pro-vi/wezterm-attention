@@ -510,7 +510,7 @@ fn rust_and_installed_lua_share_relation_cases_and_retention_floors() {
         .env("WEZTERM_ATTENTION_TEST_ROOT", &root)
         .env("WEZTERM_ATTENTION_FACTS_PARITY", &input)
         .arg("--config-file")
-        .arg(root.join("tests/wezterm_protocol_smoke.lua"))
+        .arg(root.join("tests/lua/wezterm_protocol_smoke.lua"))
         .args(["show-keys", "--lua"])
         .output()
         .unwrap();

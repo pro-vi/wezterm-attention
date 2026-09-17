@@ -5,8 +5,8 @@ import { join } from "node:path";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { captureCheckpoint, saveCheckpoint } from "../examples/checkpoint.mjs";
-import { inspectBindings } from "../examples/inspect.mjs";
+import { captureCheckpoint, saveCheckpoint } from "../../examples/checkpoint.mjs";
+import { inspectBindings } from "../../examples/inspect.mjs";
 
 // The Rust test supplies actual production CLI envelopes, not a second schema.
 const fixture = JSON.parse(readFileSync(process.argv[2], "utf8"));
