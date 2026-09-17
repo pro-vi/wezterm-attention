@@ -22,7 +22,7 @@ import { test, expect, beforeEach, afterEach } from "bun:test";
 import { chmodSync, mkdtempSync, mkdirSync, existsSync, readFileSync, readdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import ext from "../../pi/index.ts";
+import ext, { drainTimeoutMs } from "../../pi/index.ts";
 
 type Handler = (data: unknown) => void | Promise<void>;
 type TestEvent = Record<string, unknown>;
@@ -622,4 +622,24 @@ test("event: an unrecognized state is rejected, writing nothing", async () => {
 	const h = loadExt();
 	await h.emit("bogus");
 	expect(readdirSync(dir).length).toBe(0);
+});
+
+test("drain override: a delay the timer cannot hold falls back instead of wrapping to 1ms", () => {
+	// `setTimeout` keeps its delay in a signed 32-bit int, so 2147483648 fires
+	// almost immediately rather than in 24 days — measured at 2ms in Node and 3ms
+	// in Bun. Someone setting a huge value wants a longer drain, so accepting it
+	// would deliver the shortest one possible with no error. These assert the
+	// parser's boundary; none of them starts a timer.
+	const set = (value: string | undefined) => {
+		if (value === undefined) delete process.env.PI_WEZTERM_ATTENTION_DRAIN_TIMEOUT_MS;
+		else process.env.PI_WEZTERM_ATTENTION_DRAIN_TIMEOUT_MS = value;
+		return drainTimeoutMs();
+	};
+	expect(set("2147483647")).toBe(2147483647); // the largest the timer holds
+	expect(set("2147483648")).toBe(2000); // one past it: falls back, not 1ms
+	expect(set("999999999999999999999")).toBe(2000);
+	expect(set("0")).toBe(2000);
+	expect(set("30s")).toBe(2000);
+	expect(set(undefined)).toBe(2000);
+	expect(set("30000")).toBe(30000); // an ordinary override still works
 });

@@ -86,11 +86,19 @@ function paneId(): string | undefined {
 // does not, and the test fails for a reason that has nothing to do with the
 // extension. Same strict-digits parse as the TTL: a malformed value falls back
 // rather than collapsing the cap to something near zero.
-function drainTimeoutMs(): number {
+//
+// The upper bound is not defensive tidiness. `setTimeout` stores its delay in a
+// signed 32-bit int, so a larger one wraps to 1ms: measured at 2ms in Node and
+// 3ms in Bun for a requested 2147483648. Someone raising this to "effectively
+// unlimited" would get the shortest drain possible, which is the opposite of
+// what they asked for and fails silently. Exported so the boundary can be tested
+// without waiting on a timer.
+const MAX_TIMEOUT_MS = 2_147_483_647;
+export function drainTimeoutMs(): number {
 	const raw = process.env.PI_WEZTERM_ATTENTION_DRAIN_TIMEOUT_MS;
 	if (!raw || !/^\d+$/.test(raw.trim())) return DRAIN_TIMEOUT_MS;
 	const parsed = Number.parseInt(raw.trim(), 10);
-	return Number.isFinite(parsed) && parsed > 0 ? parsed : DRAIN_TIMEOUT_MS;
+	return parsed > 0 && parsed <= MAX_TIMEOUT_MS ? parsed : DRAIN_TIMEOUT_MS;
 }
 
 function ttlMs(): number {
