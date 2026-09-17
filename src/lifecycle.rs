@@ -997,7 +997,7 @@ fn apply_activity(
         |mutation| apply_locked_outputs(resolved, &binding_id, mutation),
     )?;
     let mut result = mutation.result;
-    if projected && result.disposition == "skipped" {
+    if projected && result.disposition == Disposition::Skipped {
         result.disposition = Disposition::RepairedProjection;
         result.repaired_projection = true;
     }
@@ -1368,7 +1368,7 @@ pub fn apply_mark_activity(
         },
     )?;
     let mut result = mutation.result;
-    if projected && result.disposition == "skipped" {
+    if projected && result.disposition == Disposition::Skipped {
         result.disposition = Disposition::RepairedProjection;
         result.repaired_projection = true;
     }
@@ -1591,7 +1591,7 @@ fn apply_child(
         |mutation| apply_locked_outputs(resolved, &binding_id, mutation),
     )?;
     let mut result = mutation.result;
-    if projected && result.disposition == "skipped" {
+    if projected && result.disposition == Disposition::Skipped {
         result.disposition = Disposition::RepairedProjection;
         result.repaired_projection = true;
     }
@@ -1985,7 +1985,7 @@ fn apply_clear_event(
                 (result, observation.to_owned())
             };
             let review_existed = review_path.exists();
-            if review_existed && result.disposition == "skipped" {
+            if review_existed && result.disposition == Disposition::Skipped {
                 result.disposition = Disposition::Applied;
             }
             Ok(CommitPlan {
@@ -2002,7 +2002,7 @@ fn apply_clear_event(
         |mutation| apply_locked_outputs(resolved, &binding_id, mutation),
     )?;
     let mut result = mutation.result;
-    if projected && result.disposition == "skipped" {
+    if projected && result.disposition == Disposition::Skipped {
         result.disposition = Disposition::RepairedProjection;
         result.repaired_projection = true;
     }
@@ -2134,7 +2134,7 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
         },
     )?;
     let mut result = mutation.result;
-    if projected && result.disposition == "skipped" {
+    if projected && result.disposition == Disposition::Skipped {
         result.disposition = Disposition::RepairedProjection;
         result.repaired_projection = true;
     }
