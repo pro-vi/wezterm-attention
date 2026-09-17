@@ -798,8 +798,8 @@ pub fn reply_content(
     event: &ProviderEvent,
     payload: &Value,
     requested: bool,
-) -> crate::consumer::HookContent {
-    use crate::consumer::HookContent;
+) -> crate::hook_content::HookContent {
+    use crate::hook_content::HookContent;
     if !requested {
         return HookContent::NotRequested;
     }
@@ -816,8 +816,8 @@ pub fn prompt_content(
     event: &ProviderEvent,
     payload: &Value,
     requested: bool,
-) -> crate::consumer::HookContent {
-    use crate::consumer::HookContent;
+) -> crate::hook_content::HookContent {
+    use crate::hook_content::HookContent;
     if !requested {
         return HookContent::NotRequested;
     }
@@ -830,8 +830,8 @@ pub fn prompt_content(
     text_content(payload, "prompt")
 }
 
-fn text_content(payload: &Value, field: &str) -> crate::consumer::HookContent {
-    use crate::consumer::HookContent;
+fn text_content(payload: &Value, field: &str) -> crate::hook_content::HookContent {
+    use crate::hook_content::HookContent;
     match payload.get(field) {
         None => HookContent::Absent,
         Some(Value::String(text))

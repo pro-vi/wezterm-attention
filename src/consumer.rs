@@ -55,17 +55,7 @@ pub struct AdmittedHook {
     pub correlation: Option<NativeCorrelation>,
 }
 
-// Deliberately no Debug: content must not enter diagnostics accidentally.
-#[derive(Serialize)]
-#[serde(tag = "availability", rename_all = "snake_case")]
-pub enum HookContent {
-    NotRequested,
-    Available { text: String },
-    Absent,
-    Unsupported,
-    Invalid,
-    TooLarge,
-}
+pub use crate::hook_content::HookContent;
 
 #[derive(Serialize)]
 pub struct HookDelivery {
