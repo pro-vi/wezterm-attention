@@ -1,5 +1,6 @@
 pub mod compat;
 pub mod consumer;
+pub mod hook_content;
 pub mod identity;
 mod launch;
 pub mod lifecycle;
