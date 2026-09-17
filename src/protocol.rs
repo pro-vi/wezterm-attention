@@ -80,6 +80,74 @@ impl fmt::Display for AttentionError {
 impl std::error::Error for AttentionError {}
 
 pub type Result<T> = std::result::Result<T, AttentionError>;
+/// A closed set of values the contract names, serialized in snake_case.
+///
+/// Lives here rather than beside the observation model because `parse_manifest`
+/// validates the manifest against some of these, and a validator that has to
+/// reach up into the model it validates is not a foundation.
+macro_rules! vocabulary {
+    ($name:ident { $($variant:ident),+ $(,)? }) => {
+        #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+        #[serde(rename_all = "snake_case")]
+        pub enum $name { $($variant),+ }
+    };
+}
+pub(crate) use vocabulary;
+
+vocabulary!(ToolClass {
+    Generic,
+    Question,
+    Permission
+});
+vocabulary!(QuestionMode {
+    Blocking,
+    Nonblocking
+});
+
+/// The agents Attention supports. `parse_manifest` checks this against the
+/// manifest's own `enums.providers`, so a manifest cannot declare a provider
+/// this binary does not implement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Provider {
+    Claude,
+    Codex,
+    Pi,
+}
+
+impl Provider {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            "pi" => Some(Self::Pi),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Pi => "pi",
+        }
+    }
+}
+
+/// Whether a provider's native hook is one Attention asks to be registered.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum HookRegistration {
+    Register,
+    Ignored,
+}
+
+/// One native hook the manifest declares for a provider.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeHookDeclaration {
+    pub native_event: String,
+    pub registration: HookRegistration,
+}
 
 /// What a hook event did to the state it was given.
 ///
@@ -153,7 +221,7 @@ pub struct Manifest {
     pub record_schema: u64,
     pub writer_version: String,
     pub tool_classification: BTreeMap<String, BTreeMap<String, ToolClassification>>,
-    pub native_hooks: BTreeMap<String, BTreeMap<String, crate::providers::NativeHookDeclaration>>,
+    pub native_hooks: BTreeMap<String, BTreeMap<String, NativeHookDeclaration>>,
     pub digests: DigestRecipes,
     pub limits: Limits,
     pub enums: Enums,
@@ -168,8 +236,8 @@ pub struct Manifest {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolClassification {
-    pub tool_class: crate::observations::ToolClass,
-    pub question_mode: Option<crate::observations::QuestionMode>,
+    pub tool_class: ToolClass,
+    pub question_mode: Option<QuestionMode>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -308,7 +376,7 @@ pub fn parse_manifest(source: &str) -> Result<Manifest> {
     }
     if parsed.native_hooks.keys().cloned().collect::<BTreeSet<_>>() != parsed.enums.providers
         || parsed.native_hooks.iter().any(|(provider, hooks)| {
-            crate::providers::Provider::parse(provider).is_none()
+            Provider::parse(provider).is_none()
                 || hooks.is_empty()
                 || hooks.iter().any(|(name, declaration)| {
                     name.is_empty()
@@ -339,8 +407,7 @@ pub fn parse_manifest(source: &str) -> Result<Manifest> {
                 name.is_empty()
                     || name.len() > parsed.limits.safe_label_max_bytes
                     || name.chars().any(|c| c < ' ' || c == '\u{7f}')
-                    || (class.tool_class == crate::observations::ToolClass::Question)
-                        != class.question_mode.is_some()
+                    || (class.tool_class == ToolClass::Question) != class.question_mode.is_some()
             })
         })
     {
@@ -741,7 +808,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod consumer_manifest_tests {
     use super::*;
-    use crate::observations::{QuestionMode, ToolClass, classify_tool};
+    use crate::observations::classify_tool;
 
     #[test]
     fn classifications_keep_exact_names_and_reject_mixed_manifests() {

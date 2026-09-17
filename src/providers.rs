@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::observations::{
@@ -10,26 +10,14 @@ use crate::observations::{
 };
 use crate::protocol::{AttentionError, Diagnostic, manifest};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Provider {
-    Claude,
-    Codex,
-    Pi,
-}
+// Which agents exist is a contract fact — the manifest declares the same set
+// as `enums.providers`, and `parse_manifest` checks the two agree.
+pub use crate::protocol::Provider;
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum HookRegistration {
-    Register,
-    Ignored,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NativeHookDeclaration {
-    pub native_event: String,
-    pub registration: HookRegistration,
-}
+// Both are manifest vocabulary; `protocol` owns them so `parse_manifest` need
+// not reach into the adapter layer that interprets them. Re-exported here
+// because a provider's own code is where a reader looks for them.
+pub use crate::protocol::{HookRegistration, NativeHookDeclaration};
 
 #[derive(Debug, Serialize)]
 pub struct NativeHookSpec {
@@ -103,25 +91,6 @@ fn declared_hook(provider: Provider, event: &str) -> bool {
             .get(provider.as_str())
             .is_some_and(|hooks| hooks.contains_key(event))
     })
-}
-
-impl Provider {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "claude" => Some(Self::Claude),
-            "codex" => Some(Self::Codex),
-            "pi" => Some(Self::Pi),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-            Self::Pi => "pi",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
