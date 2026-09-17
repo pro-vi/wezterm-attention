@@ -1,5 +1,7 @@
 //! Pure lifecycle decisions and their record-application boundary.
 
+pub mod outcome;
+
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -15,8 +17,10 @@ use crate::compat::{
     ProjectionOutcome, reconcile_activity_clear_locked_outcome, reconcile_activity_clear_outcome,
     reconcile_activity_outcome, reconcile_agents_outcome, reconcile_launch_activity_outcome,
 };
-use crate::consumer::{AdmittedHook, BindingTarget, HookPersistence, HookScope, Persistence};
 use crate::identity::{PaneAddress, canonical_uuid, pane_address};
+use crate::lifecycle::outcome::{
+    AdmittedHook, BindingTarget, HookPersistence, HookScope, Persistence,
+};
 use crate::observations::{LifecycleSnapshot, ObservationPools};
 use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, manifest};
 use crate::providers::{ProviderAction, ProviderEvent};

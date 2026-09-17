@@ -7,53 +7,16 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::identity::PaneAddress;
-use crate::observations::{Actor, NativeCorrelation};
 use crate::protocol::{AttentionError, Result, manifest};
 use serde::Serialize;
 use uuid::Uuid;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Persistence {
-    NotRequested,
-    Confirmed,
-    Rejected,
-    Unconfirmed,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct HookPersistence {
-    pub native_state: Persistence,
-    pub activity: Persistence,
-    pub compatibility: Persistence,
-    pub lifecycle: Persistence,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct HookScope {
-    pub address: PaneAddress,
-    pub launch_id: String,
-    pub target: BindingTarget,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum BindingTarget {
-    Binding { binding_id: String },
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct AdmittedHook {
-    pub action: crate::providers::ProviderAction,
-    pub scope: HookScope,
-    pub provider: String,
-    pub provider_session_id: String,
-    pub source_event: String,
-    pub actor: Actor,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub correlation: Option<NativeCorrelation>,
-}
+// Facts about what a hook did, produced by `lifecycle` and read here. They
+// used to be defined here, which made the engine import its own result
+// vocabulary from the module that delivers it.
+pub use crate::lifecycle::outcome::{
+    AdmittedHook, BindingTarget, HookPersistence, HookScope, Persistence,
+};
 
 pub use crate::hook_content::HookContent;
 
