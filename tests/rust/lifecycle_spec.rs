@@ -511,7 +511,7 @@ fn real_cli_tool_snapshot_reaches_installed_wezterm() {
         )
         .env("WEZTERM_ATTENTION_LIFECYCLE_FIXTURE_WIRE", wire.to_string())
         .args(["--config-file"])
-        .arg(root.join("tests/wezterm_protocol_smoke.lua"))
+        .arg(root.join("tests/lua/wezterm_protocol_smoke.lua"))
         .args(["show-keys", "--lua"])
         .output()
         .unwrap();
@@ -823,7 +823,7 @@ fn actual_pi_runner_dispatches_through_the_real_writer() {
         .envs(&setup.env)
         .env("PATH", "/usr/bin:/bin")
         .env("WEZTERM_ATTENTION_ROOT", &bridge_root)
-        .arg(root.join("tests/pi_lifecycle_runtime.mjs"));
+        .arg(root.join("tests/javascript/pi_lifecycle_runtime.mjs"));
     if let Ok(runtime) = std::env::var("ATTENTION_PI_RUNTIME_ROOT") {
         command.env("ATTENTION_PI_RUNTIME_ROOT", runtime);
     }
@@ -1030,7 +1030,10 @@ fn native_codex_async_tool_hooks_reach_the_snapshot() {
             std::env::var("ATTENTION_CODEX_SOURCE")
                 .unwrap_or_else(|_| "/Users/provi/Development/_sources/codex".into()),
         )
-        .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/lifecycle_contact_probe.mjs"))
+        .arg(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/javascript/lifecycle_contact_probe.mjs"),
+        )
         .output()
         .unwrap();
     assert!(
@@ -1068,7 +1071,7 @@ fn native_codex_async_tool_hooks_reach_the_snapshot() {
         .env("WEZTERM_ATTENTION_LIFECYCLE_FIXTURE_WIRE", wire.to_string())
         .env("WEZTERM_ATTENTION_LIFECYCLE_SCENARIO", "publication")
         .arg("--config-file")
-        .arg(root.join("tests/wezterm_protocol_smoke.lua"))
+        .arg(root.join("tests/lua/wezterm_protocol_smoke.lua"))
         .args(["show-keys", "--lua"])
         .output()
         .unwrap();
@@ -1103,7 +1106,10 @@ fn native_codex_queued_input_is_not_blocked_by_a_pending_question() {
                 .unwrap_or_else(|_| "/Users/provi/Development/_sources/codex".into()),
         )
         .env("ATTENTION_XTERM_MODULE", module)
-        .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/lifecycle_contact_probe.mjs"))
+        .arg(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/javascript/lifecycle_contact_probe.mjs"),
+        )
         .output()
         .unwrap();
     assert!(

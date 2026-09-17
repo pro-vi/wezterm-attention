@@ -8,7 +8,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const state = process.env.WEZTERM_ATTENTION_DIR;
 assert(state && state.includes("/wl-"), "Rust test must own the disposable state");
 const home = join(dirname(state), "codex-contact");
@@ -73,7 +73,7 @@ const hooks = {};
 let trust = "";
 const sorted = (value) => Array.isArray(value) ? value.map(sorted) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, sorted(value[key])])) : value;
 for (const [event, key] of [["SessionStart", "session_start"], ["PreToolUse", "pre_tool_use"], ["PostToolUse", "post_tool_use"], ["Stop", "stop"], ["UserPromptSubmit", "user_prompt_submit"]]) {
-  const command = `/usr/bin/python3 ${quote(join(root, "tests/provider_contact_hook.py"))} codex ${event}`;
+  const command = `/usr/bin/python3 ${quote(join(root, "tests/python/provider_contact_hook.py"))} codex ${event}`;
   const handler = { type: "command", command, timeout: 5, async: false };
   const group = { hooks: [handler], ...(event.includes("ToolUse") ? { matcher: "request_user_input_async" } : {}) };
   hooks[event] = [group];

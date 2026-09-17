@@ -925,7 +925,7 @@ fn tty_input_guard_records_zero_stdin_bytes_during_a_real_claim() {
     let guard_path = std::env::var_os("WEZTERM_ATTENTION_TTY_INPUT_GUARD")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/tty_input_guard.py")
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/python/tty_input_guard.py")
         });
     let guard_stdin = unsafe { fs::File::from_raw_fd(libc::dup(slave)) };
     let mut guard = Command::new("python3")
@@ -968,13 +968,23 @@ fn tty_input_guard_records_zero_stdin_bytes_during_a_real_claim() {
     )
     .expect("claim JSON");
     assert_eq!(claim_record["launch_id"], selected_launch);
-    let deadline = std::time::Instant::now() + Duration::from_secs(6);
-    while !guard_result.exists() && std::time::Instant::now() < deadline {
+    // The guard's `write_text` creates the file before it holds any bytes, so
+    // waiting for the path to exist hands back an empty file whenever the machine
+    // is loaded enough to interleave there. Wait for content that parses, which is
+    // what the assertion below actually needs.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let result: Value = loop {
+        if let Ok(bytes) = fs::read(&guard_result)
+            && let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+        {
+            break value;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "tty input guard wrote no parseable result before the deadline"
+        );
         thread::sleep(Duration::from_millis(50));
-    }
-    let result: Value =
-        serde_json::from_slice(&fs::read(&guard_result).expect("tty input guard result"))
-            .expect("tty input guard JSON");
+    };
     assert_eq!(result["bytes"], 0);
     let _ = guard.kill();
     let _ = guard.wait();

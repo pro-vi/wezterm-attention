@@ -37,7 +37,7 @@ try {
 	};
 
 	const jiti = createJiti(import.meta.url);
-	const extension = await jiti.import("../pi/index.ts");
+	const extension = await jiti.import("../../pi/index.ts");
 	assert.equal(typeof extension.default, "function");
 	extension.default(pi);
 	assert.equal(typeof globalThis.Bun, "undefined");

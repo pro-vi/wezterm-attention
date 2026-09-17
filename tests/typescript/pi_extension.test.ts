@@ -22,7 +22,7 @@ import { test, expect, beforeEach, afterEach } from "bun:test";
 import { chmodSync, mkdtempSync, mkdirSync, existsSync, readFileSync, readdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import ext from "../pi/index.ts";
+import ext from "../../pi/index.ts";
 
 type Handler = (data: unknown) => void | Promise<void>;
 type TestEvent = Record<string, unknown>;
@@ -442,7 +442,7 @@ test("reload (real module re-eval): retire-at-registration collapses N fresh gen
 	const makePi = () => ({ events: bus, on: () => {}, registerCommand: () => {} });
 	for (let gen = 0; gen < 4; gen++) {
 		currentGen = gen;
-		const mod = await import(`../pi/index.ts?realreload=${gen}`);
+		const mod = await import(`../../pi/index.ts?realreload=${gen}`);
 		mod.default(makePi() as Parameters<typeof mod.default>[0]);
 	}
 	expect(handlers.length).toBe(1); // all four generations collapsed to one live listener
