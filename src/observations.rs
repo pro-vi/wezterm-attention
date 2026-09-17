@@ -4,24 +4,13 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::identity::PaneAddress;
-use crate::protocol::{AttentionError, Result, manifest};
+use crate::protocol::{AttentionError, Result, manifest, vocabulary};
 
-macro_rules! vocabulary {
-    ($name:ident { $($variant:ident),+ $(,)? }) => {
-        #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
-        #[serde(rename_all = "snake_case")]
-        pub enum $name { $($variant),+ }
-    };
-}
-vocabulary!(ToolClass {
-    Generic,
-    Question,
-    Permission
-});
-vocabulary!(QuestionMode {
-    Blocking,
-    Nonblocking
-});
+// Defined in `protocol` because the manifest's tool classification is written in
+// them: a closed vocabulary the contract declares belongs with the contract.
+// Re-exported because the observation model is where callers expect to find them.
+pub use crate::protocol::{QuestionMode, ToolClass};
+
 vocabulary!(ResultSurface {
     SuccessHook,
     PostHook,
