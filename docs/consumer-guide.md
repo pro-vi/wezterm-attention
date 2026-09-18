@@ -192,6 +192,8 @@ The whole delivery must fit Attention's hook JSON byte limit. On overflow, avail
 
 Consumer outcomes and native persistence are reported on structured stderr; child stdout/stderr are discarded. Hook stdout stays reserved for the provider. Strict mode fails on consumer failure; non-strict mode remains provider-friendly. Malformed consumer arguments fail before native application. Without consumers, existing stdout/exit/debug behavior remains unchanged.
 
+A consumer that exits zero after deciding to do nothing has no channel to say why, and that is deliberate rather than an oversight. Its stderr is not passed through under `--debug`, because the hook's stderr there is a single JSON document a reader parses, and interleaved child output would stop it parsing. Its stderr is not captured into the `consumers[]` entry either, because the delivery envelope carries prompt and reply content, and a consumer that echoes any of it would return that content to a channel the provider may log. Write reasons to a log file the consumer owns, or to a path passed in its own configuration; do not assume anyone sees stderr.
+
 ### Scoped headless inspection
 
 ```sh

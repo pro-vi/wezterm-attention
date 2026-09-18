@@ -178,6 +178,12 @@ pub fn not_dispatched(executable: &str, reason: NotDispatchedReason) -> Delivery
 
 /// The deadline covers nonblocking stdin writes and child completion. Descendants
 /// are not supervised; only this invocation's direct child is killed and reaped.
+///
+/// The consumer's stdout and stderr are both discarded, and deliberately: the
+/// hook's own stderr under `--debug` is a single JSON document that a reader
+/// parses, and the delivery envelope carries prompt and reply content that must
+/// not return through a child's output. `docs/consumer-guide.md` says where a
+/// consumer puts its reasons instead.
 pub fn dispatch(executable: &str, bytes: &[u8], timeout: Duration) -> DeliveryOutcome {
     let mut outcome = DeliveryOutcome {
         executable: executable.into(),

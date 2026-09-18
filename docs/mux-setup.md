@@ -53,6 +53,31 @@ wezterm_attention_claim && pi
 Call `wezterm_attention_claim` once immediately before each supported agent launch. The zsh prompt
 hook still republishes the current claim automatically.
 
+### Where a redirect may go
+
+`attention hooks claim` requires a terminal on its standard input, and it never blocks a launch: when
+standard input is not a terminal it fails with `unsafe_tty: stdin is not a terminal`, the helper
+leaves `WEZTERM_ATTENTION_LAUNCH_ID` unset, and the agent runs with no identity. Every callback from
+that run is then discarded, and nothing in the agent's own output says so.
+
+`codex exec` and `claude -p` both commonly take a redirect, so put it on the agent and not on
+anything that contains the claim:
+
+```zsh
+wezterm_attention_claim && codex exec "…" < /dev/null    # claim holds; the redirect is the agent's
+```
+
+The trap is a wrapper. If you write your own helper that calls `wezterm_attention_claim` and then
+execs the agent, a redirect written on the wrapper applies to the claim inside it too:
+
+```sh
+with_attention_claim codex exec "…" < /dev/null          # claim fails, identity unset, callbacks lost
+with_attention_claim sh -c 'codex exec "…" </dev/null'   # claim holds
+```
+
+A wrapper that ignores the claim's exit status makes this silent. Check it, or keep the redirect
+inside the innermost command.
+
 ## Provider hooks
 
 Provider registration remains user-owned. This repository does not edit Claude or Codex settings.
