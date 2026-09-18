@@ -593,7 +593,13 @@ function M.apply_to_config(config, opts)
         end
         local panes
         if mux_win then
-          panes = tab_panes_containing_read(mux_win:tabs(), target_read)
+          -- The same race the poll walks carry: a tab can go between the listing
+          -- and the read. Falling back to this pane alone is better than a key
+          -- press that does nothing.
+          local tabs_ok, mux_tabs = pcall(mux_win.tabs, mux_win)
+          if tabs_ok and type(mux_tabs) == "table" then
+            panes = tab_panes_containing_read(mux_tabs, target_read)
+          end
         end
         panes = panes or { pane }
         for _, observed_pane in ipairs(panes) do
