@@ -254,6 +254,90 @@ fn socket_selector_conflicts_are_usage_errors_and_resolution_is_incomplete() {
 }
 
 #[test]
+fn publish_socket_writes_identity_to_selected_tty() {
+    // This is the only test that drives the real CLI all the way to a real pty
+    // and checks that bytes arrived. It used to be the body of an
+    // alias-equivalence test; when the alias went, the equivalence assertion
+    // went with it correctly and this proof went with it by accident.
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let setup = Setup::new();
+    let (mut master, mut slave) = (0, 0);
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    let mut master = unsafe { fs::File::from_raw_fd(master) };
+    let slave = unsafe { fs::File::from_raw_fd(slave) };
+    let tty = wezterm_attention::wezterm::tty_path_from_fd(slave.as_raw_fd()).unwrap();
+    assert_eq!(
+        unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
+        0
+    );
+    let executable = setup._scratch.0.join("wezterm");
+    fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+            json!([{"pane_id":"42", "tty_name":tty}])
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .env_clear()
+        .envs(&setup.env)
+        .env("WEZTERM_EXECUTABLE", &executable)
+        .args([
+            "hooks",
+            "publish",
+            "--socket",
+            &setup.env["WEZTERM_UNIX_SOCKET"],
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let mut bytes = Vec::new();
+    let error = master.read_to_end(&mut bytes).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    assert!(
+        !bytes.is_empty(),
+        "publication wrote nothing to the selected tty"
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["status"], "ok");
+}
+
+#[test]
+fn publish_rejects_the_removed_realm_selector() {
+    // `--realm` selects a realm id on `bindings` and `sweep`. It was also a
+    // path-valued alias for `--socket` on `publish`, which gave one flag two
+    // opposite meanings. The separation is asserted, not merely absent.
+    let setup = Setup::new();
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .env_clear()
+        .envs(&setup.env)
+        .args([
+            "hooks",
+            "publish",
+            "--realm",
+            &setup.env["WEZTERM_UNIX_SOCKET"],
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
 fn socket_truncation_is_explicit_and_legacy_shape_is_preserved() {
     let setup = Setup::new();
     setup.claim_and_bind();
