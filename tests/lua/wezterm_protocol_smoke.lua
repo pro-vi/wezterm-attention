@@ -10,6 +10,9 @@ local function run()
   package.loaded.plugin = nil
   local attention = require("plugin")
   local internal = assert(attention._internal, "plugin test seams are unavailable")
+  -- The fixture interpreter is test code and loads from tests/, not from the
+  -- plugin. It drives the production parsers, which still come from internal.
+  local fixtures = dofile(root .. "/tests/lua/support/protocol_fixtures.lua")(internal)
   assert(internal.protocol_path == root .. "/protocol/v2.json",
     "Lua module loader path did not resolve the checkout protocol manifest")
 
@@ -78,7 +81,7 @@ end
       "installed Lua callback did not preserve initial/unchanged semantics")
     assert(deliveries[1].scope.launch_id == wire.launch_id and deliveries[1].view.lifecycle.availability == "available")
     if publication then
-      local module = dofile(root .. "/tests/fixtures/lifecycle/consumer.lua")
+      local module = dofile(root .. "/examples/follow-up.lua")
       local consumer, second = module.new(), module.new()
       assert(copy.activity_type == "stop" and consumer.appearance(copy) == "follow_up", "publication remains usable after Stop")
       consumer.dismiss()
@@ -89,14 +92,14 @@ end
       assert(attention.get_attention_view(pane).lifecycle.observations[1].correlation.tool_call_id == "cli-call", "getter shared nested lifecycle state")
     end
   end
-  local parse_results = internal.parse_fixture_cases(fixture)
+  local parse_results = fixtures.parse_fixture_cases(fixture)
 assert(#parse_results == #fixture.parse_cases, "not every protocol parse row ran")
 for _, result in ipairs(parse_results) do
   assert(result.actual == result.expected,
     result.id .. " expected " .. tostring(result.expected) .. ", got " .. tostring(result.actual))
 end
 
-  local eligibility_results = internal.fixture_eligibility_cases(fixture)
+  local eligibility_results = fixtures.fixture_eligibility_cases(fixture)
 assert(#eligibility_results == #fixture.eligibility_cases,
   "not every protocol eligibility row ran")
 for _, result in ipairs(eligibility_results) do
