@@ -760,7 +760,15 @@ return function()
       local window_key = redraw_window_key(window)
       prune_closed_publish_windows(window_key, opts)
 
-      local mux_tabs = mux_win:tabs()
+      -- A tab that closes between this listing and its panes() call below is
+      -- still in the list and already out of the mux, so panes() raises. That is
+      -- a race with the user, not a fault: M.doctor already treats it that way.
+      local tabs_ok, mux_tabs = pcall(mux_win.tabs, mux_win)
+      if not tabs_ok or type(mux_tabs) ~= "table" then return end
+      -- Whether every pane of this window was accounted for on this tick. The
+      -- absence sweep below deletes records for panes it cannot see, so it must
+      -- not run on a partial inventory.
+      local inventory_complete = true
       local pane_ids = {}
       local before = {}
       local title_enabled = M._active_settled_title_fallback ~= false
@@ -803,7 +811,14 @@ return function()
       end
 
       for _, tab in ipairs(mux_tabs) do
-        for _, p in ipairs(tab:panes()) do
+        local panes_ok, tab_panes = pcall(tab.panes, tab)
+        if not panes_ok or type(tab_panes) ~= "table" then
+          -- The tab went away mid-poll. Keep the remaining tabs: aborting here
+          -- would cost every later tab its refresh for this tick.
+          inventory_complete = false
+          tab_panes = {}
+        end
+        for _, p in ipairs(tab_panes) do
           local domain = pane_method(p, "get_domain_name") or "?"
           domains_present[domain] = true
           pane_count_by_domain[domain] = (pane_count_by_domain[domain] or 0) + 1
@@ -922,7 +937,11 @@ return function()
       -- its panes from this window in a single tick while those panes, and the
       -- processes writing their markers, keep running on the server. So an id is
       -- only swept when this window still holds some pane of that id's domain.
-      local previously_seen = seen_marker_ids_by_window[window_key]
+      -- On a partial inventory this is skipped entirely, and the previous
+      -- complete inventory is kept for the next tick to compare against. A pane
+      -- absent only because its tab could not be read is not a closed pane, and
+      -- sweeping it would delete a live pane's record.
+      local previously_seen = inventory_complete and seen_marker_ids_by_window[window_key]
       if previously_seen then
         for gone_key, gone_value in pairs(previously_seen) do
           local gone = type(gone_value) == "table" and gone_value
@@ -938,7 +957,7 @@ return function()
           end
         end
       end
-      seen_marker_ids_by_window[window_key] = seen
+      if inventory_complete then seen_marker_ids_by_window[window_key] = seen end
       -- A scalar cannot select one of several realms. Build this projection
       -- from all observed windows, rather than letting poll/overlay order win.
       rebuild_scalar_projection()
