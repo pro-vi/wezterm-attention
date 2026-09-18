@@ -78,6 +78,35 @@ testing a single flag that any consumer which did not complete will raise -- and
 that a native outcome of ignored, conflict or partial raises just the same. One
 consumer cannot be marked as allowed to fail while another is not.
 
+## The three validators disagree on how a version may be spelled
+
+`schema` on an ordinary record and `wire` on a published identity carry the same
+number in all three implementations, but not the same rule about its encoding.
+`src/protocol.rs` requires an unsigned integer: `value.as_u64() == Some(...)`.
+`plugin/protocol.lua` compares the decoded number, and the Python checker in
+`tests/fixtures/v2/check.py` does the same. So `"schema": 3.0` is rejected by
+Rust and accepted by the other two, and the disagreement is lexical -- it exists
+only in the JSON text, and disappears once the value is decoded.
+
+The branch already draws this distinction where it decided it mattered: the Lua
+side scans lifecycle snapshots for canonical integers before decoding, and the
+Python checker asserts the lifecycle schema's integer type. Ordinary records and
+wire identity did not get the same treatment.
+
+No producer this project ships emits the disputed spelling. The Rust writer
+serialises through serde, which writes an integer. So this is a difference in
+what the validators will accept, not a disagreement about anything currently
+written.
+
+Tightening Lua to match Rust looks like a two-line change and is not safe as
+one. The plugin writes records of its own through `wezterm.json_encode`, and
+whether that encoder spells an integral number as `3` or `3.0` has not been
+checked here. Making the reader stricter before knowing what the writer emits
+could make the plugin reject its own acknowledgements. The fix is: establish
+the canonical encoding rule, confirm what each writer actually emits, then move
+all three readers together, with raw-JSON fixtures for the integral-float and
+exponent spellings -- a decoded fixture cannot express the difference.
+
 ## The acknowledgement write has no compare-and-swap
 
 `write_v2_record` in `plugin/overlays.lua` reads the existing record only to
