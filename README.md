@@ -1,6 +1,12 @@
 # wezterm-attention
 
-A WezTerm plugin that turns your tab bar into a notification system. Any CLI tool — AI agents, build scripts, test runners — can signal state changes via simple marker files, and WezTerm reflects them as colored tab indicators.
+A WezTerm plugin that turns your tab bar into a notification system. Any CLI tool — AI agents, build scripts, test runners — can signal state changes, and WezTerm reflects them as colored tab indicators.
+
+Two things write those signals. A small Rust command, `attention`, runs as a hook from Claude Code, Codex or Pi and records what a pane's agent is doing against a pane identity that survives detach, reattach and multiple mux sockets. A Lua reader in WezTerm polls those records and renders the tab. Programs other than WezTerm can read the same records: `attention bindings --json` and `attention inspect` return validated facts, so a script does not have to scrape a terminal to find out which pane an agent is in.
+
+Flat marker files still work. They were the whole protocol before, several tools write them, and the reader keeps accepting them — see [Compatibility](docs/record-contract.md). What is new is that they are no longer the only thing, and no longer the authority.
+
+Known compromises are listed in [docs/accepted-limitations.md](docs/accepted-limitations.md).
 
 ## What it looks like
 
