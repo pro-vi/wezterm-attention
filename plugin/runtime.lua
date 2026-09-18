@@ -3,6 +3,9 @@ return function()
   local legacy_cache_key_by_marker_id = {}
   local marker_id_by_local = {}
   local seen_marker_ids_by_window = {}
+  -- window key -> tab id -> the cache keys that tab held when it was last
+  -- read. A tab whose panes() raises is answered from here.
+  local keys_by_tab_by_window = {}
   local callback_views_by_window = {}
   local delivering_views = false
 
@@ -411,6 +414,9 @@ return function()
       for window_key in pairs(seen_marker_ids_by_window) do
         if not live[window_key] then seen_marker_ids_by_window[window_key] = nil end
       end
+      for window_key in pairs(keys_by_tab_by_window) do
+        if not live[window_key] then keys_by_tab_by_window[window_key] = nil end
+      end
       for window_key in pairs(publish_domains_by_window) do
         if not live[window_key] then publish_domains_by_window[window_key] = nil end
       end
@@ -765,10 +771,12 @@ return function()
       -- a race with the user, not a fault: M.doctor already treats it that way.
       local tabs_ok, mux_tabs = pcall(mux_win.tabs, mux_win)
       if not tabs_ok or type(mux_tabs) ~= "table" then return end
-      -- Whether every pane of this window was accounted for on this tick. The
-      -- absence sweep below deletes records for panes it cannot see, so it must
-      -- not run on a partial inventory.
-      local inventory_complete = true
+      -- The absence sweep below deletes records for panes it cannot see, so a
+      -- pane it merely failed to read must not look absent. These carry the
+      -- unreadable tabs' panes from the last tick that could read them.
+      local keys_by_tab = keys_by_tab_by_window[window_key] or {}
+      local keys_by_tab_now = {}
+      local unreadable = {}
       local pane_ids = {}
       local before = {}
       local title_enabled = M._active_settled_title_fallback ~= false
@@ -811,13 +819,27 @@ return function()
       end
 
       for _, tab in ipairs(mux_tabs) do
+        -- tab_id is the id this handle was built from, so it answers without
+        -- consulting the mux and cannot raise the way panes() can.
+        local id_ok, tab_id = pcall(tab.tab_id, tab)
+        tab_id = id_ok and tab_id or nil
         local panes_ok, tab_panes = pcall(tab.panes, tab)
         if not panes_ok or type(tab_panes) ~= "table" then
-          -- The tab went away mid-poll. Keep the remaining tabs: aborting here
-          -- would cost every later tab its refresh for this tick.
-          inventory_complete = false
+          -- The tab went away between the listing and here. Keep the remaining
+          -- tabs -- aborting would cost every later tab its refresh -- and treat
+          -- the panes it held as unknown rather than as closed. They stay
+          -- protected only while this tab is still listed, so once WezTerm drops
+          -- it they are swept normally.
           tab_panes = {}
+          local remembered = tab_id and keys_by_tab[tab_id]
+          if remembered then
+            keys_by_tab_now[tab_id] = remembered
+            for remembered_key in pairs(remembered) do unreadable[remembered_key] = true end
+          end
+        elseif tab_id then
+          keys_by_tab_now[tab_id] = {}
         end
+        local tab_keys = tab_id and keys_by_tab_now[tab_id]
         for _, p in ipairs(tab_panes) do
           local domain = pane_method(p, "get_domain_name") or "?"
           domains_present[domain] = true
@@ -845,6 +867,7 @@ return function()
                 utc_error .. ": WezTerm UTC is unavailable; TTL-bearing v2 state is omitted")
             end
             seen[key] = { domain = domain, kind = "v2", marker_id = read.marker_id, local_id = local_id }
+            if tab_keys then tab_keys[key] = true end
             pane_ids[#pane_ids + 1] = key
             before[key] = attention_cache[key]
             local view = read_attention_view(read, now_unix_ns, {
@@ -864,6 +887,7 @@ return function()
           elseif read.kind == "v1" then
             local id = read.marker_id
             seen[id] = { domain = domain, kind = "v1", marker_id = id, local_id = local_id }
+            if tab_keys then tab_keys[id] = true end
             pane_ids[#pane_ids + 1] = id
             before[id] = attention_cache[id]
             local atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source =
@@ -937,16 +961,20 @@ return function()
       -- its panes from this window in a single tick while those panes, and the
       -- processes writing their markers, keep running on the server. So an id is
       -- only swept when this window still holds some pane of that id's domain.
-      -- On a partial inventory this is skipped entirely, and the previous
-      -- complete inventory is kept for the next tick to compare against. A pane
-      -- absent only because its tab could not be read is not a closed pane, and
-      -- sweeping it would delete a live pane's record.
-      local previously_seen = inventory_complete and seen_marker_ids_by_window[window_key]
+      local previously_seen = seen_marker_ids_by_window[window_key]
+      -- A pane the sweep did not observe because its tab could not be read is
+      -- unknown, not closed. It is carried forward as still present, so it is
+      -- neither swept now nor treated as newly arrived next tick.
+      if previously_seen then
+        for carried_key in pairs(unreadable) do
+          if seen[carried_key] == nil then seen[carried_key] = previously_seen[carried_key] end
+        end
+      end
       if previously_seen then
         for gone_key, gone_value in pairs(previously_seen) do
           local gone = type(gone_value) == "table" and gone_value
             or { domain = gone_value, kind = "v1", marker_id = gone_key }
-          if not seen[gone_key] and domains_present[gone.domain] then
+          if not seen[gone_key] and not unreadable[gone_key] and domains_present[gone.domain] then
             local shared = observed_in_other_window(gone_key, window_key)
             pane_ids[#pane_ids + 1] = gone_key
             before[gone_key] = attention_cache[gone_key]
@@ -957,7 +985,8 @@ return function()
           end
         end
       end
-      if inventory_complete then seen_marker_ids_by_window[window_key] = seen end
+      seen_marker_ids_by_window[window_key] = seen
+      keys_by_tab_by_window[window_key] = keys_by_tab_now
       -- A scalar cannot select one of several realms. Build this projection
       -- from all observed windows, rather than letting poll/overlay order win.
       rebuild_scalar_projection()
