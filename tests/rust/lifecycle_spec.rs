@@ -1021,7 +1021,13 @@ fn native_codex_async_tool_hooks_reach_the_snapshot() {
     // developer's clone path, so it passed there and failed everywhere else.
     // Absent the variable it now says what it needs and stops, rather than
     // failing the gate on a machine that simply has no Codex source.
-    let Ok(codex_source) = std::env::var("ATTENTION_CODEX_SOURCE") else {
+    // An empty value is absent. `env::var` returns Ok("") for it while the gate's
+    // own `-n` test calls it unset, so without this the gate announces SKIPPED
+    // and then fails here.
+    let Some(codex_source) = std::env::var("ATTENTION_CODEX_SOURCE")
+        .ok()
+        .filter(|value| !value.is_empty())
+    else {
         eprintln!(
             "SKIPPED native_codex_async_tool_hooks_reach_the_snapshot: set ATTENTION_CODEX_SOURCE to a Codex checkout to run it"
         );
@@ -1044,6 +1050,11 @@ fn native_codex_async_tool_hooks_reach_the_snapshot() {
         .env_clear()
         .envs(&setup.env)
         .env("PATH", executables::child_path(&[], &[&node, &codex]))
+        // Hand the probe the executable that was selected here. A PATH cannot
+        // carry two independent selections: either directory on it may contain
+        // both program names, so letting the probe search again can hand it a
+        // different codex than this test chose.
+        .env("ATTENTION_TEST_CODEX", &codex)
         .env("WEZTERM_ATTENTION_ROOT", &bridge)
         .env("ATTENTION_CODEX_SOURCE", codex_source)
         .arg(
@@ -1105,7 +1116,13 @@ fn native_codex_queued_input_is_not_blocked_by_a_pending_question() {
     // developer's clone path, so it passed there and failed everywhere else.
     // Absent the variable it now says what it needs and stops, rather than
     // failing the gate on a machine that simply has no Codex source.
-    let Ok(codex_source) = std::env::var("ATTENTION_CODEX_SOURCE") else {
+    // An empty value is absent. `env::var` returns Ok("") for it while the gate's
+    // own `-n` test calls it unset, so without this the gate announces SKIPPED
+    // and then fails here.
+    let Some(codex_source) = std::env::var("ATTENTION_CODEX_SOURCE")
+        .ok()
+        .filter(|value| !value.is_empty())
+    else {
         eprintln!(
             "SKIPPED native_codex_queued_input_is_not_blocked_by_a_pending_question: set ATTENTION_CODEX_SOURCE to a Codex checkout to run it"
         );
@@ -1130,6 +1147,11 @@ fn native_codex_queued_input_is_not_blocked_by_a_pending_question() {
         .env_clear()
         .envs(&setup.env)
         .env("PATH", executables::child_path(&[], &[&node, &codex]))
+        // Hand the probe the executable that was selected here. A PATH cannot
+        // carry two independent selections: either directory on it may contain
+        // both program names, so letting the probe search again can hand it a
+        // different codex than this test chose.
+        .env("ATTENTION_TEST_CODEX", &codex)
         .env("WEZTERM_ATTENTION_ROOT", &bridge)
         .env("ATTENTION_NATIVE_UI", "1")
         .env("ATTENTION_CODEX_SOURCE", codex_source)

@@ -22,9 +22,11 @@ pub fn resolve(program: &str) -> PathBuf {
     let override_name = format!("ATTENTION_TEST_{}", program.to_uppercase());
     if let Some(value) = std::env::var_os(&override_name) {
         let path = PathBuf::from(value);
+        // The same predicate the PATH branch uses. An override that names a
+        // readable non-executable used to pass here and fail later at spawn.
         assert!(
-            path.is_absolute() && path.is_file(),
-            "{override_name} must name an existing absolute path, got {path:?}"
+            path.is_absolute() && is_executable_file(&path),
+            "{override_name} must name an existing absolute executable, got {path:?}"
         );
         return path;
     }
@@ -32,12 +34,28 @@ pub fn resolve(program: &str) -> PathBuf {
     std::env::split_paths(&path_var)
         .map(|directory| directory.join(program))
         .find(|candidate| is_executable_file(candidate))
+        // A PATH entry may be relative or empty, and `join` keeps it that way.
+        // Callers launch children in a disposable workspace, so a relative
+        // result would resolve against the wrong directory there.
+        .map(absolute)
         .unwrap_or_else(|| {
             panic!(
                 "{program} is required by this test and was not found on PATH; \
                  install it or set {override_name} to its absolute path"
             )
         })
+}
+
+/// Anchor a path to the current directory without resolving symlinks, so an
+/// installation reached through a symlinked executable keeps that identity.
+fn absolute(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        return path;
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(path),
+        Err(_) => path,
+    }
 }
 
 fn is_executable_file(path: &Path) -> bool {
