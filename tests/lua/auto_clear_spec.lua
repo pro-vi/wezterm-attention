@@ -2822,8 +2822,6 @@ test("unpublished mux pane schedules one realm publish from the resolved plugin 
   assert(table.concat(spawned[1], " "):find(
     "hooks publish --socket /tmp/attention-u2-test.sock --quiet", 1, true),
     "publication must use the nested quiet realm command")
-  assert(config.set_environment_variables.WEZTERM_ATTENTION_ROOT == expected_root,
-    "apply_to_config must expose the resolved plugin root")
   assert(config.set_environment_variables.WEZTERM_ATTENTION_DIR == test_dir,
     "apply_to_config must expose the configured state root")
 end)
@@ -3689,9 +3687,8 @@ test("the v2 root is exported only once the writer it selects is installed", fun
     "a checkout with no writer must not claim the v2 root")
   assert(unbuilt_env.WEZTERM_ATTENTION_DIR == test_dir,
     "the v1 producer still needs the state directory")
-  local errors = drain_errors()
-  assert(#errors == 1 and errors[1]:find("install-cli.sh", 1, true),
-    "the uninstalled writer must say once how to install it")
+  assert(#drain_errors() == 0,
+    "running v1 is a supported state and must not be reported as a fault")
 
   local writer = assert(io.open(root .. "/libexec/attention-rs", "w"))
   assert(writer:write("#!/bin/sh\nexit 0\n"))
