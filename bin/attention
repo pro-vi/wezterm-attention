@@ -2,8 +2,20 @@
 
 set -eu
 
-case $0 in
-  */*) script_dir=${0%/*} ;;
+# Resolve the invocation through any symlinks first. Without this, a link from
+# somewhere on PATH makes ROOT the link's grandparent rather than the checkout,
+# and the binary below it is never found.
+self=$0
+while [ -L "$self" ]; do
+  target=$(readlink "$self")
+  case $target in
+    /*) self=$target ;;
+    *) self=${self%/*}/$target ;;
+  esac
+done
+
+case $self in
+  */*) script_dir=${self%/*} ;;
   *) script_dir=. ;;
 esac
 ROOT=$(CDPATH= cd -- "$script_dir/.." && pwd)
