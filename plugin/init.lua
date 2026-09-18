@@ -361,7 +361,6 @@ local runtime_api = runtime_state.bind({
   resolve_visible_attention = resolve_visible_attention,
 })
 local same_cached_attention = runtime_api.same_cached_attention
-local tab_panes_containing = runtime_api.tab_panes_containing
 local tab_panes_containing_read = runtime_api.tab_panes_containing_read
 local review_outranks = runtime_api.review_outranks
 local cache_marker_values = runtime_api.cache_marker_values
