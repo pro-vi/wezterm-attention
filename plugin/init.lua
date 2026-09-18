@@ -445,17 +445,16 @@ function M.apply_to_config(config, opts)
     -- installation that never built the writer: every callback would fail at the
     -- shim's missing-binary guard, and the v1 path the producer still carries
     -- could not be reached. So export it only once the writer is there.
-    local writer = integration_root .. "/libexec/attention-rs"
-    local present = io.open(writer, "r")
-    if present then
-      present:close()
+    local writer = io.open(integration_root .. "/libexec/attention-rs", "r")
+    if writer then
+      writer:close()
       config.set_environment_variables.WEZTERM_ATTENTION_ROOT = integration_root
-    else
-      report_error_once("native-writer",
-        "v2 writer is not installed at " .. writer
-          .. "; producers keep the v1 marker path. Run scripts/install-cli.sh, then reload"
-          .. " this config, to enable v2.")
     end
+    -- Nothing is logged when it is absent. Running v1 is a supported state, not
+    -- a fault, and a line on every config evaluation about a configuration the
+    -- user may have chosen is how a log stops being read. Anything that then
+    -- genuinely fails -- a realm publication, a producer invoking the shim --
+    -- reports itself, and the README says what installing the writer changes.
   else
     M._active_integration_root = nil
     report_error_once("integration-root", "v2 integration root is unavailable")
