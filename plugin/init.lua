@@ -435,8 +435,26 @@ function M.apply_to_config(config, opts)
   if type(integration_root) == "string" and integration_root:sub(1, 1) == "/" then
     M._active_integration_root = integration_root
     config.set_environment_variables = config.set_environment_variables or {}
-    config.set_environment_variables.WEZTERM_ATTENTION_ROOT = integration_root
+    -- The state directory is where a v1 producer writes its marker, so it is
+    -- exported whether or not the v2 writer is installed.
     config.set_environment_variables.WEZTERM_ATTENTION_DIR = dir
+    -- The root is not a location, it is a choice. A producer that sees it spawns
+    -- bin/attention and reports a failure instead of writing a v1 marker, and it
+    -- takes the v1 path only when the root is unset. Exporting the root because
+    -- this checkout was found would make that choice on behalf of an
+    -- installation that never built the writer: every callback would fail at the
+    -- shim's missing-binary guard, and the v1 path the producer still carries
+    -- could not be reached. So export it only once the writer is there.
+    local writer = integration_root .. "/libexec/attention-rs"
+    local present = io.open(writer, "r")
+    if present then
+      present:close()
+      config.set_environment_variables.WEZTERM_ATTENTION_ROOT = integration_root
+    else
+      report_error_once("native-writer",
+        "v2 writer is not installed at " .. writer
+          .. "; producers keep the v1 marker path. Run scripts/install-cli.sh to enable v2.")
+    end
   else
     M._active_integration_root = nil
     report_error_once("integration-root", "v2 integration root is unavailable")
