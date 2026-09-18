@@ -61,17 +61,22 @@ the single envelope every consumer receives.
 Three things follow, and a consumer author should know all three before
 registering a second executable:
 
-- Consumers run in the order given, one after another, so a hook's worst case is
-  the number of consumers multiplied by the deadline. That time is spent inside a
-  synchronous hook, with the agent waiting.
+- Consumers run in the order given, one after another, so the deadline multiplied
+  by the number of consumers bounds the dispatch loop. It does not bound the hook:
+  before the first consumer starts, the hook has already read its payload, applied
+  the provider event and taken the record locks. That product is a floor for the
+  hook's worst case, not the whole of it. All of it is spent inside a synchronous
+  hook, with the agent waiting.
 - A fast consumer and a slow one cannot be given different deadlines.
 - Adding a consumer to a hook that already passes `--include-reply` or
   `--include-prompt` hands that text to the new executable as well. Content
   cannot be selected per consumer.
 
-A failing consumer never stops the ones after it, and `--strict` decides whether
-any consumer's failure fails the hook. Those parts behave per consumer; the
-options above do not.
+A failing consumer never stops the ones after it, and that part is genuinely per
+consumer. `--strict` is not. It is one decision about the hook's exit code,
+testing a single flag that any consumer which did not complete will raise -- and
+that a native outcome of ignored, conflict or partial raises just the same. One
+consumer cannot be marked as allowed to fail while another is not.
 
 ## The acknowledgement write has no compare-and-swap
 
