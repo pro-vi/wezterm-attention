@@ -205,6 +205,9 @@ assert(handlers["pane-destroyed"] == nil,
   "the plugin must not register a handler for an event WezTerm never emits")
 
 local internal = assert(attention._internal, "internal seams were not exposed")
+-- The fixture interpreter lives in tests/, not in the shipped plugin. It drives
+-- the production parsers, which still come from internal.
+local fixtures = dofile(repo_root .. "/tests/lua/support/protocol_fixtures.lua")(internal)
 
 local function read_json_fixture(path)
   local file = assert(io.open(path, "r"))
@@ -1916,7 +1919,7 @@ test("Lua accepts and rejects every shared protocol fixture row", function()
   assert(internal.sha256("abc") ==
       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
     "SHA-256 abc vector must match")
-  local results = internal.parse_fixture_cases(protocol_fixture)
+  local results = fixtures.parse_fixture_cases(protocol_fixture)
   assert(#results == #protocol_fixture.parse_cases, "every parse row must run")
   for _, result in ipairs(results) do
     assert(result.actual == result.expected,
@@ -1925,7 +1928,7 @@ test("Lua accepts and rejects every shared protocol fixture row", function()
 end)
 
 test("Lua and Python fixture semantics cover exact wall-age boundaries", function()
-  local results = internal.fixture_eligibility_cases(protocol_fixture)
+  local results = fixtures.fixture_eligibility_cases(protocol_fixture)
   assert(#results == #protocol_fixture.eligibility_cases, "every eligibility row must run")
   for _, result in ipairs(results) do
     assert(result.actual == result.expected,
@@ -3199,8 +3202,8 @@ test("question publication, tool return, and badge dismissal stay independent", 
   assert(callback_consumer.appearance(90001,callback_scope)=="base","local dismissal needs no provider callback")
   callback_consumer.on_view_change({kind="scope_lost",window_id=90001,previous_scope=callback_scope})
   assert(callback_consumer.appearance(90001,callback_scope)=="unknown")
-  local consumer = dofile(repo_root .. "/tests/fixtures/lifecycle/consumer.lua").new()
-  local other_consumer = dofile(repo_root .. "/tests/fixtures/lifecycle/consumer.lua").new()
+  local consumer = dofile(repo_root .. "/examples/follow-up.lua").new()
+  local other_consumer = dofile(repo_root .. "/examples/follow-up.lua").new()
   assert(consumer.appearance(view) == "follow_up" and other_consumer.appearance(view) == "follow_up")
   consumer.dismiss()
   assert(consumer.appearance(reloaded.get_attention_view(pane)) == "base")
@@ -3245,7 +3248,7 @@ test("question publication, tool return, and badge dismissal stay independent", 
 end)
 
 test("consumer dismissal is scoped to displayed publications and never implies an answer", function()
-  local module = dofile(repo_root .. "/tests/fixtures/lifecycle/consumer.lua")
+  local module = dofile(repo_root .. "/examples/follow-up.lua")
   local view = {
     address = { realm_id = string.rep("a", 64), incarnation_id = string.rep("b", 64), pane_id = "42" },
     launch_id = "00000000-0000-4000-8000-000000000001", binding_id = string.rep("c", 64),

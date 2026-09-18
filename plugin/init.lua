@@ -176,11 +176,6 @@ local health_from_diagnostics = protocol_api.health_from_diagnostics
 local diagnostics_have_unavailable_io = protocol_api.diagnostics_have_unavailable_io
 local eligible_subagent = protocol_api.eligible_subagent
 local deep_copy = protocol_api.deep_copy
-local fixture_set_path = protocol_api.fixture_set_path
-local fixture_remove_path = protocol_api.fixture_remove_path
-local fixture_case_value = protocol_api.fixture_case_value
-local parse_fixture_cases = protocol_api.parse_fixture_cases
-local fixture_eligibility_cases = protocol_api.fixture_eligibility_cases
 local now_ms = protocol_api.now_ms
 local frame_for_now = protocol_api.frame_for_now
 local normalize_epoch_ms = protocol_api.normalize_epoch_ms
@@ -676,8 +671,10 @@ M._internal = {
   parse_wire_json = parse_wire_json,
   parse_v2_record = parse_v2_record,
   parse_v2_record_json = parse_v2_record_json,
-  parse_fixture_cases = parse_fixture_cases,
-  fixture_eligibility_cases = fixture_eligibility_cases,
+  -- Read by the fixture interpreter in tests/lua/support, which drives these
+  -- production functions from outside rather than living beside them.
+  deep_copy = deep_copy,
+  eligible_subagent = eligible_subagent,
   compare_ns20 = compare_ns20,
   sha256 = sha256,
   format_unix_ns20 = format_unix_ns20,
