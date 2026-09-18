@@ -55,10 +55,15 @@ hook still republishes the current claim automatically.
 
 ### Where a redirect may go
 
-`attention hooks claim` requires a terminal on its standard input, and it never blocks a launch: when
-standard input is not a terminal it fails with `unsafe_tty: stdin is not a terminal`, the helper
-leaves `WEZTERM_ATTENTION_LAUNCH_ID` unset, and the agent runs with no identity. Every callback from
-that run is then discarded, and nothing in the agent's own output says so.
+`attention hooks claim` requires a terminal on its standard input: when standard input is not a
+terminal it fails with `unsafe_tty: stdin is not a terminal` and the helper leaves
+`WEZTERM_ATTENTION_LAUNCH_ID` unset. In the `wezterm_attention_claim && <agent>` form above, the
+helper returns that failure and the `&&` stops the agent from starting, which is what the `&&` is
+for.
+
+The danger is a wrapper that calls the helper and launches the agent regardless of its status. There
+the agent runs with no identity, every callback from that run is discarded, and nothing in the
+agent's own output says so.
 
 `codex exec` and `claude -p` both commonly take a redirect, so put it on the agent and not on
 anything that contains the claim:
