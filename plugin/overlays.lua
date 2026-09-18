@@ -400,6 +400,15 @@ return function(context)
         attention_cache[read.cache_key] = view
         return "absent"
       end
+      -- This read is the second one: the caller already read this pane to decide
+      -- the user is looking at it. If a different event has been published since,
+      -- the user has not seen that one, so take the new state and leave it
+      -- unacknowledged. The v1 path makes the same comparison on its identity.
+      local observed_event_id = opts and opts.observed_event_id
+      if observed_event_id and observed_event_id ~= view.event_id then
+        attention_cache[read.cache_key] = view
+        return "kept"
+      end
       local records_root, target = selected_v2_records_root(dir, read, view.binding_id)
       local path = records_root .. "/ack.json"
       local record = {
