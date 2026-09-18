@@ -3784,6 +3784,36 @@ test("a vanished tab does not stop the focused pane being acknowledged", functio
     "the focused pane must still be acknowledged when another tab has gone")
 end)
 
+-- A consumer is told a scope is lost so it can drop the state it kept for that
+-- scope -- a dismissal, a policy. A tab that could not be read this tick has not
+-- taken its panes away, and saying so would make the consumer throw that state
+-- out and rebuild it as new when the pane comes back, re-demanding attention the
+-- user already dismissed.
+test("a scope nobody could look at is not a scope that was lost", function()
+  local wire = materialize_v2_fixture(13101, string.rep("d", 64))
+  local messages, instance = {}, dofile(repo_root .. "/plugin/init.lua")
+  local options = { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end }
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    settled_title_fallback = false,
+    on_view_change = function(message) messages[#messages + 1] = message.kind end })
+
+  local pane = { id = 13101, domain = "mux", attention = wire }
+  local present = window_double({ window_id = 13111, focused = false,
+    tabs = { { tab_id = 131, panes = { pane } } } })
+  instance.poll(present, options)
+  assert(#messages == 1 and messages[1] == "initial", "the scope should arrive once")
+
+  local raced = window_double({ window_id = 13111, focused = false,
+    tabs = { { tab_id = 131, gone = true } } })
+  assert(pcall(instance.poll, raced, options), "an unreadable tab must not abort delivery")
+  assert(#messages == 1,
+    "an unreadable tab must report nothing: the scope is unknown, not lost")
+
+  instance.poll(present, options)
+  assert(#messages == 1,
+    "the scope survived, so its return is not a new one")
+end)
+
 os.execute("rm -rf " .. shell_quote(test_dir))
 
 io.write(string.format("%d passed, %d failed\n", passed, failed))
