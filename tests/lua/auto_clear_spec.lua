@@ -3769,6 +3769,24 @@ test("an unreadable tab holds back only its own panes, not the whole sweep", fun
     "a pane that genuinely closed must be swept even while another tab is unreadable")
 end)
 
+-- The tab list captured at the top of a poll is walked again further down, to
+-- find the tab holding the focused pane. Guarding the first walk and not the
+-- second leaves the same race, later: it would abort after the cache was
+-- rebuilt and before the view callbacks were delivered, so the acknowledgement
+-- and the consumers would both be lost for that tick.
+test("a vanished tab does not stop the focused pane being acknowledged", function()
+  write_marker(7901, "stop")
+
+  local ok = pcall(poll_focused, {
+    window_id = 7900,
+    active_pane_id = 7901,
+    tabs = { { tab_id = 91, gone = true }, { tab_id = 92, panes = { 7901 } } },
+  })
+  assert(ok, "a tab closing must not abort the acknowledgement walk")
+  assert(acknowledgement_exists(7901),
+    "the focused pane must still be acknowledged when another tab has gone")
+end)
+
 os.execute("rm -rf " .. shell_quote(test_dir))
 
 io.write(string.format("%d passed, %d failed\n", passed, failed))

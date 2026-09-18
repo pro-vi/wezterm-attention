@@ -111,7 +111,12 @@ return function()
     local function tab_panes_containing(tabs, marker_id)
       if not marker_id then return nil end
       for _, tab in ipairs(tabs) do
-        local panes = tab:panes()
+        -- A captured tab list outlives the tabs in it, so panes() can raise here
+        -- as it can anywhere else. A tab that cannot be read cannot be shown to
+        -- hold this marker, and if it did hold it that pane is already gone, so
+        -- skipping it answers the question correctly.
+        local panes_ok, panes = pcall(tab.panes, tab)
+        if not panes_ok or type(panes) ~= "table" then panes = {} end
         for _, p in ipairs(panes) do
           if M.pane_marker_id(p) == marker_id then
             return panes
@@ -124,7 +129,9 @@ return function()
     local function tab_panes_containing_read(tabs, target)
       if not target then return nil end
       for _, tab in ipairs(tabs) do
-        local panes = tab:panes()
+        -- Same race, same answer, as in tab_panes_containing above.
+        local panes_ok, panes = pcall(tab.panes, tab)
+        if not panes_ok or type(panes) ~= "table" then panes = {} end
         for _, pane in ipairs(panes) do
           local read = resolve_pane_read(pane)
           if read.kind == target.kind
