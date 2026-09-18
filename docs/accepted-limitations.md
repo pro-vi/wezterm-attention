@@ -96,23 +96,31 @@ wire identity did not get the same treatment.
 The Rust writer serialises through serde, which writes an integer, so it never
 emits the disputed spelling.
 
-The plugin also writes records, and what it emits is not established. It does not
-use `wezterm.json_encode`: `write_v2_record` builds the body with the local
-`json_value` in `plugin/overlays.lua`, which renders a number as
-`tostring(value)`, and the records it writes carry `schema`. What `tostring`
-produces for that value depends on the Lua the plugin is running under and on
-what `wezterm.json_parse` returned for the manifest's number. Under LuaJIT, which
-is what the test harness runs, an integral number renders as `3`. Under Lua 5.4
-a float renders as `3.0`. The harness therefore cannot answer the question, and
-only an assertion driven through an installed WezTerm can.
+The plugin also writes records, through the local `json_value` in
+`plugin/overlays.lua` rather than `wezterm.json_encode`, and that renders a
+number as `tostring(value)`. Those records carry `schema`, so what the plugin
+emits depends on whether it is holding an integer or a float.
 
-So tightening Lua to match Rust looks like a two-line change and is not safe as
-one: if the plugin does emit `3.0`, a stricter reader would make it reject its
-own acknowledgements, and today's looser reader is the only reason that has not
-surfaced. The order is: establish what the plugin emits under a real WezTerm,
-fix the writer if it is wrong, then move all three readers together, with
-raw-JSON fixtures for the integral-float and exponent spellings -- a decoded
-fixture cannot express the difference.
+It is holding an integer. WezTerm converts a JSON number in
+`lua-api-crates/serde-funcs/src/lib.rs`, trying `as_i64()` first and producing
+`LuaValue::Integer`, and reaching `as_f64()` and `LuaValue::Number` only when
+that fails. The manifest spells `record_schema` as `3`, so the plugin holds an
+integer and `tostring` gives `3` under any Lua version. The float rendering that
+would produce `3.0` does not arise here.
+
+That leaves the divergence real but close to harmless: two readers accept a
+spelling the third rejects, and nothing this project ships produces it. What is
+still unverified is the installed WezTerm on a given machine, since the check
+above was read from source rather than run, and there is no test that writes a
+record through a real WezTerm and validates the resulting bytes with the Rust
+validator. That round trip is the missing evidence, and the existing smoke does
+not cover it -- it exercises reading and formatting, not the writer boundary.
+
+Tightening the Lua and Python readers to match Rust is therefore a reasonable
+change rather than a risky one, and it is deferred for sequencing rather than
+danger: it wants the canonical rule stated, that write-and-validate round trip in
+place, and raw-JSON fixtures for the integral-float and exponent spellings, since
+a decoded fixture cannot express the difference.
 
 ## The acknowledgement write has no compare-and-swap
 
