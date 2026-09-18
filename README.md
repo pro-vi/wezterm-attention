@@ -32,6 +32,14 @@ attention.apply_to_config(config)
 
 The v1 reader and renderer require WezTerm `20221119-145034-49b9839f` or newer. Mux-native v2 requires POSIX and the Rust CLI built by running `scripts/install-cli.sh` in this checkout. `bin/attention` uses that installed Rust binary and names the install command if it is absent. The plugin exports its resolved checkout and state paths to new panes.
 
+To put the command on your PATH, link the shim:
+
+```sh
+ln -s "$(pwd)/bin/attention" ~/.local/bin/attention
+```
+
+The shim resolves the link before locating the checkout, so it keeps working from anywhere on PATH. Linking `libexec/attention-rs` directly works too. Moving the checkout afterwards breaks the link, as it would any symlink.
+
 Continue with [Mux setup](docs/mux-setup.md) for Bash or zsh launch claims and provider callbacks. Zsh uses the explicit `wezterm_attention_claim && <agent>` fallback; it does not claim automatic detection. See [Record contract](docs/record-contract.md) for precedence and [Mux pane moves](docs/mux-pane-moves.md) before moving the final pane out of a server tab.
 
 ## Render modes

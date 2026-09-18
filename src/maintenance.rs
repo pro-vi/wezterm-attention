@@ -167,6 +167,11 @@ fn runtime_manifest_bytes() -> Result<Option<Vec<u8>>> {
             "current executable path is unavailable",
         )
     })?;
+    // Resolve the link before walking ancestors. macOS returns the symlink from
+    // `current_exe()`, so a link on PATH would otherwise search the link's own
+    // parents -- finding nothing, or worse, an unrelated `protocol/v2.json` that
+    // merely sits beside it.
+    let executable = fs::canonicalize(&executable).unwrap_or(executable);
     let Some(path) = executable.ancestors().find_map(|ancestor| {
         let candidate = ancestor.join("protocol/v2.json");
         candidate.is_file().then_some(candidate)
