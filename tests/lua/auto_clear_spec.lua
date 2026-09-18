@@ -431,13 +431,21 @@ local function window_double(spec)
   local assigned_window_id = spec.window_id or next_window_id
   local mux_tabs = {}
   for _, pane_ids in ipairs(spec.tabs or {}) do
-    local panes = {}
-    for _, entry in ipairs(pane_ids) do
-      table.insert(panes, pane_from_entry(entry))
+    -- "gone" is a tab that WezTerm still lists and the mux has already dropped:
+    -- it is returned by tabs() and raises from panes().
+    if pane_ids == "gone" then
+      table.insert(mux_tabs, {
+        panes = function() error("tab id 22 not found in mux") end,
+      })
+    else
+      local panes = {}
+      for _, entry in ipairs(pane_ids) do
+        table.insert(panes, pane_from_entry(entry))
+      end
+      table.insert(mux_tabs, {
+        panes = function() return panes end,
+      })
     end
-    table.insert(mux_tabs, {
-      panes = function() return panes end,
-    })
   end
 
   local w = {
@@ -3692,6 +3700,38 @@ test("the v2 root is exported only once the writer it selects is installed", fun
   assert(built_env.WEZTERM_ATTENTION_ROOT == root,
     "an installed writer must be selected")
   assert(#drain_errors() == 0, "an installed writer must log nothing")
+end)
+
+-- A tab that closes between tabs() and panes() used to abort the whole poll, so
+-- every tab after it lost its refresh for that tick. Surviving the race is only
+-- half of it: the panes of the tab that vanished are then missing from this
+-- tick's inventory, and the absence sweep deletes records for panes it cannot
+-- see. A partial inventory must not be allowed to drive that deletion.
+test("a tab that vanishes mid-poll costs neither the later tabs nor the records", function()
+  write_marker(7701, "stop")
+  write_marker(7702, "notify")
+
+  -- One window across all three polls: the sweep compares this tick's panes with
+  -- what the same window reported last tick, so a fresh id would have nothing to
+  -- compare against and every assertion below would pass vacuously.
+  local window = 7700
+  attention.poll(window_double({ window_id = window, tabs = { { 7701 }, { 7702 } }, focused = false }))
+  assert(attention.get_attention(7701) == "stop" and attention.get_attention(7702) == "notify",
+    "both panes should be cached before the race")
+
+  write_marker(7701, "notify")
+  local raced = window_double({ window_id = window, tabs = { "gone", { 7701 } }, focused = false })
+  local ok = pcall(attention.poll, raced)
+  assert(ok, "a tab closing mid-poll must not abort the poll")
+  assert(attention.get_attention(7701) == "notify",
+    "a tab listed after the vanished one must still be refreshed")
+  assert(marker_exists(7702),
+    "a pane absent only because its tab could not be read is not a closed pane")
+
+  -- The sweep itself still works: the same pane, absent from a complete
+  -- inventory, is swept as it always was.
+  attention.poll(window_double({ window_id = window, tabs = { { 7701 } }, focused = false }))
+  assert(not marker_exists(7702), "a genuinely closed pane must still be swept")
 end)
 
 os.execute("rm -rf " .. shell_quote(test_dir))
