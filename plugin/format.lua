@@ -154,19 +154,14 @@ return function(context)
       hover = values.hover,
       max_width = values.max_width,
       default_title = titles.base_title,
-      base_title = titles.base_title,
       server_title = titles.server_title,
       directory = titles.directory,
       settled_title = titles.settled_title,
+      -- One home per fact. `attention` carries the v1 positional entries for
+      -- formatters written against the shipped API, and named fields for the
+      -- rest. There used to be flattened copies of all of them at this level
+      -- too, which gave every fact two spellings and no rule for choosing.
       attention = attention,
-      indicator = attention.indicator,
-      attention_type = attention.type,
-      attention_color = attention.color,
-      subagents = attention.subagents,
-      source = attention.source,
-      provider = attention.provider,
-      review = attention.review,
-      binding_health = attention.binding_health,
     }
   end
 

@@ -11,12 +11,10 @@ use crate::protocol::{AttentionError, Result, manifest};
 use serde::Serialize;
 use uuid::Uuid;
 
-// Facts about what a hook did, produced by `lifecycle` and read here. They
-// used to be defined here, which made the engine import its own result
-// vocabulary from the module that delivers it.
-pub use crate::lifecycle::outcome::{
-    AdmittedHook, BindingTarget, HookPersistence, HookScope, Persistence,
-};
+// Facts about what a hook did are produced by `lifecycle` and owned there;
+// this module reads them to build an envelope. `lifecycle::outcome` is their
+// one public home.
+use crate::lifecycle::outcome::{AdmittedHook, HookPersistence, Persistence};
 
 pub use crate::hook_content::HookContent;
 

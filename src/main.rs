@@ -132,12 +132,9 @@ struct InspectArgs {
 
 #[derive(Clone, Debug, Args)]
 struct PublishArgs {
-    /// Existing socket path (preferred spelling).
-    #[arg(long, conflicts_with = "realm")]
-    socket: Option<String>,
-    /// Compatibility alias for --socket; this value is a path, not a realm ID.
+    /// Existing socket path.
     #[arg(long)]
-    realm: Option<String>,
+    socket: Option<String>,
     #[arg(long)]
     json: bool,
     #[arg(long)]
@@ -397,7 +394,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     "hooks publish".to_owned(),
                 ));
             }
-            let selected_socket = args.socket.as_deref().or(args.realm.as_deref());
+            let selected_socket = args.socket.as_deref();
             let mut report = match selected_socket {
                 Some(socket) => wezterm_attention::publish_realm(socket, &environment, &ports),
                 None => wezterm_attention::publish_current(&environment, &ports),

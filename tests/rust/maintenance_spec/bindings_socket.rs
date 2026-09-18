@@ -230,9 +230,6 @@ fn socket_selector_conflicts_are_usage_errors_and_resolution_is_incomplete() {
     let setup = Setup::new();
     for args in [
         vec!["bindings", "--socket", "/missing", "--realm", "bad"],
-        vec![
-            "hooks", "publish", "--socket", "/missing", "--realm", "/missing",
-        ],
         vec!["bindings", "--socket", "relative"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_attention"))
@@ -254,69 +251,6 @@ fn socket_selector_conflicts_are_usage_errors_and_resolution_is_incomplete() {
     assert_eq!(response["complete"], false);
     assert!(response["result"].get("scope").is_none());
     assert!(!state_root(&setup.env).unwrap().exists());
-}
-
-#[test]
-fn publish_socket_alias_preserves_behavior() {
-    use std::io::Read;
-    use std::os::fd::{AsRawFd, FromRawFd};
-    let setup = Setup::new();
-    let (mut master, mut slave) = (0, 0);
-    assert_eq!(
-        unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        },
-        0
-    );
-    let mut master = unsafe { fs::File::from_raw_fd(master) };
-    let slave = unsafe { fs::File::from_raw_fd(slave) };
-    let tty = wezterm_attention::wezterm::tty_path_from_fd(slave.as_raw_fd()).unwrap();
-    assert_eq!(
-        unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
-        0
-    );
-    let executable = setup._scratch.0.join("wezterm");
-    fs::write(
-        &executable,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' '{}'\n",
-            json!([{"pane_id":"42", "tty_name":tty}])
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
-    let mut results = Vec::new();
-    for selector in ["--socket", "--realm"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_attention"))
-            .env_clear()
-            .envs(&setup.env)
-            .env("WEZTERM_EXECUTABLE", &executable)
-            .args([
-                "hooks",
-                "publish",
-                selector,
-                &setup.env["WEZTERM_UNIX_SOCKET"],
-                "--json",
-            ])
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        let mut bytes = Vec::new();
-        let error = master.read_to_end(&mut bytes).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
-        assert!(!bytes.is_empty());
-        results.push((
-            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-            bytes,
-        ));
-    }
-    assert_eq!(results[0], results[1]);
 }
 
 #[test]

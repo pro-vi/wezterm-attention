@@ -62,14 +62,14 @@ The verified Codex 0.154.0 hook receipt is a JSON string containing `{"accepted"
 
 ## Choose presentation independently
 
-The runnable [consumer example](../tests/fixtures/lifecycle/consumer.lua) chooses a symbolic appearance:
+The runnable [consumer example](../examples/follow-up.lua) chooses a symbolic appearance:
 
 - `follow_up`: an available nonblocking publication has not been dismissed by this consumer.
 - `base`: no retained publication calls for a new appearance under this policy; this is not a verified all-clear.
 - `unknown`: missing/uncertain data, an inactive binding, or lost evidence prevents that decision.
 
 ```lua
-local consumer = dofile("/your/checkout/tests/fixtures/lifecycle/consumer.lua").new()
+local consumer = dofile("/your/checkout/examples/follow-up.lua").new()
 local appearance = consumer.appearance(attention.get_attention_view(pane))
 -- Your UI maps appearance to its own color or notification.
 -- When the user dismisses what this consumer displayed:
