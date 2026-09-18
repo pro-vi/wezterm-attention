@@ -26,6 +26,7 @@ type Marker = {
 	source: "pi";
 	publication_id: string;
 	updated_at: number;
+	updated_at_ms: number;
 	label?: string;
 	ttl_ms?: number;
 };
@@ -183,11 +184,17 @@ async function writeMarkerNow(state: AttentionState, label?: string): Promise<vo
 	if (!dir) return;
 	const path = join(dir, id);
 	const publicationId = randomUUID();
+	// The flat activity projection carries seconds in `updated_at` and
+	// milliseconds in `updated_at_ms`, matching what the Rust writer emits in
+	// `compat.rs`. Writing milliseconds under `updated_at` reads as a date tens
+	// of thousands of years out to any consumer that follows the contract.
+	const observedMs = Date.now();
 	const marker: Marker = {
 		type: state,
 		source: "pi",
 		publication_id: publicationId,
-		updated_at: Date.now(),
+		updated_at: Math.floor(observedMs / 1000),
+		updated_at_ms: observedMs,
 	};
 	if (label) marker.label = label;
 	if (state === "thinking") marker.ttl_ms = ttlMs();
