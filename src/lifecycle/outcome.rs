@@ -2,8 +2,9 @@
 //!
 //! Owned by `lifecycle` because `lifecycle` decides these. They were defined in
 //! `consumer`, so the engine imported its own result vocabulary from the module
-//! that delivers it, and the dependency arrow pointed the wrong way. `consumer`
-//! re-exports them, so the old paths still resolve.
+//! that delivers it, and the dependency arrow pointed the wrong way. This module
+//! is now their only public home; `consumer` imports the ones it needs to build
+//! a delivery envelope.
 
 use serde::Serialize;
 
