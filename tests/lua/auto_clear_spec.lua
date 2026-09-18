@@ -3814,6 +3814,31 @@ test("a scope nobody could look at is not a scope that was lost", function()
     "the scope survived, so its return is not a new one")
 end)
 
+-- Acknowledging says the user was shown this marker, so it is refused for a pane
+-- this tick did not read: the cache entry the acknowledgement needs is built by
+-- that read. A pane in a tab that stopped answering is exactly that case, and it
+-- stays unacknowledged until a tick can see it again. Membership is answered
+-- from the inventory rather than by walking the tab list a second time, and this
+-- pins that the two agree.
+test("a pane this tick could not read is not acknowledged", function()
+  write_marker(7951, "stop")
+
+  local window, holding = 7950, 95
+  poll_focused({ window_id = window, active_pane_id = 7951,
+    tabs = { { tab_id = holding, panes = { 7951 } } } })
+  assert(acknowledgement_exists(7951), "a pane that was read and focused is acknowledged")
+
+  assert(os.remove(test_dir .. "/7951.ack"))
+  write_marker(7951, "notify")
+  poll_focused({ window_id = window, active_pane_id = 7951,
+    tabs = { { tab_id = holding, gone = true } } })
+  assert(not acknowledgement_exists(7951),
+    "a marker the poll never read must not be recorded as seen")
+
+  poll_focused({ window_id = window, active_pane_id = 7951,
+    tabs = { { tab_id = holding, panes = { 7951 } } } })
+  assert(acknowledgement_exists(7951), "the next tick that can read it acknowledges it")
+end)
 os.execute("rm -rf " .. shell_quote(test_dir))
 
 io.write(string.format("%d passed, %d failed\n", passed, failed))

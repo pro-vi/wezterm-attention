@@ -107,29 +107,16 @@ return function()
         and a.settled_title == b.settled_title
     end
 
-    --- Return the panes of the tab holding marker_id in a captured tab list.
-    local function tab_panes_containing(tabs, marker_id)
-      if not marker_id then return nil end
-      for _, tab in ipairs(tabs) do
-        -- A captured tab list outlives the tabs in it, so panes() can raise here
-        -- as it can anywhere else. A tab that cannot be read cannot be shown to
-        -- hold this marker, and if it did hold it that pane is already gone, so
-        -- skipping it answers the question correctly.
-        local panes_ok, panes = pcall(tab.panes, tab)
-        if not panes_ok or type(panes) ~= "table" then panes = {} end
-        for _, p in ipairs(panes) do
-          if M.pane_marker_id(p) == marker_id then
-            return panes
-          end
-        end
-      end
-      return nil
-    end
-
+    --- Return the panes of the tab holding `target` in a captured tab list. The
+    --- poll answers membership from its own inventory; this serves the review
+    --- key binding, which has no inventory of its own.
     local function tab_panes_containing_read(tabs, target)
       if not target then return nil end
       for _, tab in ipairs(tabs) do
-        -- Same race, same answer, as in tab_panes_containing above.
+        -- A captured tab list outlives the tabs in it, so panes() can raise. A
+        -- tab that cannot be read cannot be shown to hold this pane, and if it
+        -- did hold it that pane is gone, so skipping it answers the question
+        -- rather than merely surviving it.
         local panes_ok, panes = pcall(tab.panes, tab)
         if not panes_ok or type(panes) ~= "table" then panes = {} end
         for _, pane in ipairs(panes) do
@@ -1031,11 +1018,15 @@ return function()
       local current_active_pane = window:active_pane()
       if current_active_pane then
         local active_read = resolve_pane_read(current_active_pane)
-        if active_read.kind == "v1"
-            and tab_panes_containing(mux_tabs, active_read.marker_id) then
+        -- Membership comes from the inventory built above rather than from a
+        -- second walk of the same tab list. The outcome is the same either way,
+        -- because acknowledging also requires a cache entry this tick's read
+        -- built; the reason to prefer the inventory is that one enumeration
+        -- cannot disagree with itself.
+        local member = active_read.cache_key and seen[active_read.cache_key]
+        if active_read.kind == "v1" and member and member.kind == "v1" then
           acknowledge_focused_pane(active_read.marker_id, { dir = dir, now_ms = now })
-        elseif active_read.kind == "v2"
-            and tab_panes_containing_read(mux_tabs, active_read) then
+        elseif active_read.kind == "v2" and member and member.kind == "v2" then
           acknowledge_focused_v2_pane(active_read, {
             dir = dir, now_unix_ns = poll_now_unix_ns,
           })
@@ -1070,7 +1061,6 @@ return function()
     return {
       same_cached_attention = same_cached_attention,
       observe_pane = observe_pane,
-      tab_panes_containing = tab_panes_containing,
       tab_panes_containing_read = tab_panes_containing_read,
       review_outranks = review_outranks,
       cache_marker_values = cache_marker_values,
