@@ -10,8 +10,10 @@
 //! envelopes, which `docs/consumer-guide.md` specifies. A Rust caller that links
 //! the library instead depends on these, and only these:
 //!
-//! - [`query`] for reading facts: `read_bindings`, `read_bindings_for_socket`,
-//!   `read_pane_facts`, and the row and facet types they return.
+//! - [`query`] for reading facts: [`query::read_bindings`],
+//!   [`query::read_pane_facts`], and the row and facet types they return. A
+//!   socket-scoped listing is supported as a CLI query; no suffix-free Rust
+//!   wrapper for it exists, so none is promised here.
 //! - [`lifecycle`] for applying a provider event, and [`lifecycle::outcome`] for
 //!   what that event was admitted as and what it persisted.
 //! - [`consumer`] for building and delivering a hook envelope.
