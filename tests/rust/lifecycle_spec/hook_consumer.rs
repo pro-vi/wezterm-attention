@@ -2,8 +2,9 @@ use super::*;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Instant;
-use wezterm_attention::consumer::{self, DeliveryEffect, DeliveryStage, HookContent, Persistence};
+use wezterm_attention::consumer::{self, DeliveryEffect, DeliveryStage, HookContent};
 use wezterm_attention::lifecycle::apply_provider_event_with_outcome;
+use wezterm_attention::lifecycle::outcome::Persistence;
 
 fn bind(setup: &Setup, provider: &str) {
     setup.claim();

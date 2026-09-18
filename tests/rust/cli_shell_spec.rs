@@ -423,7 +423,7 @@ fn json_publication_and_binding_output_report_bounded_completeness() {
         .args([
             "hooks",
             "publish",
-            "--realm",
+            "--socket",
             socket_path.to_str().expect("socket path"),
             "--json",
         ])
