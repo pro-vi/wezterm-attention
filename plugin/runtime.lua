@@ -464,14 +464,20 @@ return function()
       return true
     end
 
+    --- `partial` means part of this domain was not enumerated this tick. The
+    --- observation is still renewed, because the retry above drops one that goes
+    --- a round without being seen, but nothing is concluded from numbers drawn
+    --- from the tabs that happened to answer.
     local function update_publish_schedule(
-        domain, window_key, pane_count, unpublished, opts)
+        domain, window_key, pane_count, unpublished, opts, partial)
       local socket = M._active_unix_domains and M._active_unix_domains[domain]
       local root = M._active_integration_root
       if not socket or not root then return false end
       local schedule = publish_schedule_by_realm[socket]
       if not schedule then
-        if not unpublished then return false end
+        -- A partial look cannot start one either: its count is the count of the
+        -- panes that answered, and stabilisation is measured on that count.
+        if partial or not unpublished then return false end
         publish_schedule_by_realm[socket] = {
           socket = socket,
           domain = domain,
@@ -492,6 +498,10 @@ return function()
       schedule.domain = domain
       schedule.root = root
       local observation = schedule.window_observations[window_key]
+      if partial then
+        if observation then observation.fresh = true end
+        return false
+      end
       if not observation then
         schedule.window_observations[window_key] = {
           pane_count = pane_count, stable_polls = 1, unpublished = unpublished, fresh = true,
@@ -803,6 +813,18 @@ return function()
       local observed_domains = {}  -- domains a pane was enumerated on this tick
       local pane_count_by_domain = {}
       local unpublished_by_domain = {}
+      -- Domains holding a pane that was enumerated but whose identity has not
+      -- resolved. A reattached mux pane arrives with a fresh GUI-local id and no
+      -- identity user var yet, so it cannot be told apart from a replacement for
+      -- a storage identity this window remembers. Concluding that identity is
+      -- absent while one of these is on its domain would delete the records of a
+      -- pane that is about to say it is still here.
+      local unresolved_domains = {}
+      -- The publication each v2 pane was carrying when this tick read it. Taken
+      -- here rather than from attention_cache at acknowledgement time: that cache
+      -- is shared with other windows, the overlay writes and later polls, so by
+      -- then it is not necessarily this poll's observation any more.
+      local observed_events = {}
 
       local now = (opts and opts.now_ms) or now_ms()
       local cfg_indicators = M._active_indicators or defaults.indicators
@@ -899,6 +921,7 @@ return function()
               previous_view = before[key],
             })
             attention_cache[key] = view
+            observed_events[key] = view.event_id
             for _, item in ipairs(view.diagnostics or {}) do
               report_error_once("v2:" .. key .. ":" .. item.code .. ":" .. item.message,
                 item.code .. ": " .. item.message)
@@ -949,7 +972,12 @@ return function()
             end
           elseif read.kind == "unpublished" then
             unpublished_by_domain[read.domain] = true
+            unresolved_domains[domain] = true
           end
+          -- An identity that failed to parse is no more resolved than one that
+          -- has not arrived, and is equally capable of being the pane whose
+          -- records are about to be swept.
+          if read.kind == "invalid" then unresolved_domains[domain] = true end
           if key and title_enabled then
             local cached = attention_cache[key]
             sample_settled_title(
@@ -971,17 +999,19 @@ return function()
         end
       end
       publish_domains_by_window[window_key] = possible_domains
-      -- Only a domain a pane was actually counted on gets its schedule updated. A
-      -- remembered domain has no count and no publication status this tick, and
-      -- passing the zero and the false would report an empty, fully published
-      -- domain -- which retires the retry the schedule exists for.
+      -- "None of the panes I could read is unpublished" is not "the domain is
+      -- published", and a count of the panes I could read is not the count
+      -- stabilisation measures. A domain some unreadable tab also held is passed
+      -- as partial: seen, so its retry is not dropped for staleness, but not
+      -- concluded from.
       for domain in pairs(observed_domains) do
         update_publish_schedule(
           domain,
           window_key,
           pane_count_by_domain[domain] or 0,
           unpublished_by_domain[domain] == true,
-          opts)
+          opts,
+          remembered_domains[domain] == true)
       end
 
       -- WezTerm emits no pane-destroyed event, so a closed pane is detected by
@@ -1011,7 +1041,7 @@ return function()
           -- that the domain is still attached. Requiring a pane counted on it now
           -- keeps the detach guard doing what it was written for.
           if not seen[gone_key] and not unreadable[gone_key]
-              and not observed_domains[gone.domain] then
+              and (not observed_domains[gone.domain] or unresolved_domains[gone.domain]) then
             -- Undecidable this tick: a closed pane and a detached domain look the
             -- same from here. Keep remembering it, or the next tick -- which may
             -- be able to tell -- will have nothing to compare against and the
@@ -1059,13 +1089,13 @@ return function()
         if active_read.kind == "v1" and member and member.kind == "v1" then
           acknowledge_focused_pane(active_read.marker_id, { dir = dir, now_ms = now })
         elseif active_read.kind == "v2" and member and member.kind == "v2" then
-          local observed = attention_cache[active_read.cache_key]
           acknowledge_focused_v2_pane(active_read, {
             dir = dir, now_unix_ns = poll_now_unix_ns,
-            -- The event this tick actually read. The helper reads the record
-            -- again, and without this it would dismiss whatever it finds there --
-            -- including one published in between, which the user has not seen.
-            observed_event_id = observed and observed.event_id,
+            -- The event this tick's own read saw, which may be nil. The helper
+            -- reads the record again, and without this it would dismiss whatever
+            -- it finds there -- including one published in between, which the
+            -- user has not seen.
+            observed_event_id = observed_events[active_read.cache_key],
           })
         end
       end
