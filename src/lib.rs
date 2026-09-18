@@ -21,14 +21,25 @@
 //!   [`publish_realm`], [`environment`] and [`state_root_from_environment`] here
 //!   at the root.
 //!
+//! A supported operation's signature is supported with it. [`claim_launch`] and
+//! [`publish_current`] take [`wezterm::RuntimePorts`], so that type, the
+//! [`wezterm::Clock`], [`wezterm::TtyWriter`] and [`wezterm::PaneLister`] traits
+//! it holds, and [`wezterm::PaneRow`] in the last of those are supported too.
+//! [`lifecycle::outcome::AdmittedHook`] likewise carries
+//! [`providers::ProviderAction`], [`observations::Actor`] and
+//! [`observations::NativeCorrelation`] in its public fields. A declaration
+//! whose operations need types it disowns is not usable, so those are named
+//! here rather than left to inference.
+//!
 //! ## What is not
 //!
 //! Everything else reachable from this crate is implementation. [`records`] in
 //! particular exposes storage mechanics -- locking, atomic replacement, path
 //! construction, durable deletion -- because this crate's own tests drive them,
-//! not because a consumer should. [`compat`], [`maintenance`], [`observations`],
-//! [`providers`], [`wezterm`] and [`hook_content`] are the same: public because
-//! nothing has yet made them private, not because their shapes are promised.
+//! not because a consumer should. [`compat`], [`maintenance`] and
+//! [`hook_content`] are the same, as are the members of [`wezterm`],
+//! [`providers`] and [`observations`] not named above: public because nothing
+//! has yet made them private, not because their shapes are promised.
 //!
 //! The `_with_ports` variants take injectable readers, clocks and pane listers.
 //! They exist so tests can substitute them and are unstable for that reason; the
