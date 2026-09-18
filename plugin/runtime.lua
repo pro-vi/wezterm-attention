@@ -3,8 +3,8 @@ return function()
   local legacy_cache_key_by_marker_id = {}
   local marker_id_by_local = {}
   local seen_marker_ids_by_window = {}
-  -- window key -> tab id -> the cache keys that tab held when it was last
-  -- read. A tab whose panes() raises is answered from here.
+  -- window key -> tab id -> cache key -> the domain that pane was on, when the
+  -- tab was last read. A tab whose panes() raises is answered from here.
   local keys_by_tab_by_window = {}
   local callback_views_by_window = {}
   local delivering_views = false
@@ -654,7 +654,12 @@ return function()
       return true
     end
 
-    local function deliver_window_views(window, entries, opts)
+    --- `unknown` names scopes whose pane could not be enumerated this tick. They
+    --- are carried forward untouched: a scope nobody could look at has not been
+    --- lost, and reporting it so would have a consumer discard state it still
+    --- needs -- a dismissal, a policy -- and rebuild it as new when the pane
+    --- comes back.
+    local function deliver_window_views(window, entries, opts, unknown)
       local callback = M._on_view_change
       if not callback then return end
       local window_key = redraw_window_key(window)
@@ -682,7 +687,12 @@ return function()
           end
         end
       end
-      for key, state in pairs(previous) do if not next_views[key] then lost(state, window:window_id()) end end
+      for key, state in pairs(previous) do
+        if not next_views[key] then
+          if unknown and unknown[key] then next_views[key] = state
+          else lost(state, window:window_id()) end
+        end
+      end
       callback_views_by_window[window_key] = next_views
       local live = gui_window_keys(opts)
       if live then
@@ -841,7 +851,13 @@ return function()
           local remembered = tab_id and keys_by_tab[tab_id]
           if remembered then
             keys_by_tab_now[tab_id] = remembered
-            for remembered_key in pairs(remembered) do unreadable[remembered_key] = true end
+            for remembered_key, remembered_domain in pairs(remembered) do
+              unreadable[remembered_key] = true
+              -- Its domain is unknown too, and both readers of domains_present
+              -- -- the sweep's detach guard and the publication retirement below
+              -- -- want unknown treated as present rather than as departed.
+              if remembered_domain then domains_present[remembered_domain] = true end
+            end
           end
         elseif tab_id then
           keys_by_tab_now[tab_id] = {}
@@ -874,7 +890,7 @@ return function()
                 utc_error .. ": WezTerm UTC is unavailable; TTL-bearing v2 state is omitted")
             end
             seen[key] = { domain = domain, kind = "v2", marker_id = read.marker_id, local_id = local_id }
-            if tab_keys then tab_keys[key] = true end
+            if tab_keys then tab_keys[key] = domain end
             pane_ids[#pane_ids + 1] = key
             before[key] = attention_cache[key]
             local view = read_attention_view(read, now_unix_ns, {
@@ -894,7 +910,7 @@ return function()
           elseif read.kind == "v1" then
             local id = read.marker_id
             seen[id] = { domain = domain, kind = "v1", marker_id = id, local_id = local_id }
-            if tab_keys then tab_keys[id] = true end
+            if tab_keys then tab_keys[id] = domain end
             pane_ids[#pane_ids + 1] = id
             before[id] = attention_cache[id]
             local atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source =
@@ -1008,7 +1024,7 @@ return function()
       -- must neither acknowledge a marker its user has not seen nor be sent a key
       -- action, so an unfocused poll ends here with the cache correct.
       if not window:is_focused() then
-        deliver_window_views(window, callback_entries, opts)
+        deliver_window_views(window, callback_entries, opts, unreadable)
         return
       end
 
@@ -1026,7 +1042,7 @@ return function()
         end
       end
 
-      deliver_window_views(window, callback_entries, opts)
+      deliver_window_views(window, callback_entries, opts, unreadable)
 
       -- The event pane can transport a redraw when no current pane is available,
       -- but it never authorizes acknowledgement.
