@@ -3839,6 +3839,103 @@ test("a pane this tick could not read is not acknowledged", function()
     tabs = { { tab_id = holding, panes = { 7951 } } } })
   assert(acknowledgement_exists(7951), "the next tick that can read it acknowledges it")
 end)
+-- Deleting a pane's files needs proof the domain is still attached, because
+-- detaching a domain drops all of its panes at once and looks exactly like them
+-- closing. A domain remembered from a tab that did not answer is not that proof:
+-- it says only that the domain was there once. Keeping the two apart is the
+-- whole point -- remembering must prevent a premature deletion without ever
+-- authorising one.
+test("a remembered domain preserves records but cannot authorise deleting them", function()
+  write_marker(7601, "stop")
+  write_marker(7602, "notify")
+  local sidecar = assert(io.open(test_dir .. "/7602.agents", "w"))
+  assert(sidecar:write('{"agents":{}}'))
+  assert(sidecar:close())
+
+  local window, racing, sibling = 7600, 61, 62
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { { tab_id = racing, panes = { 7601 } }, { tab_id = sibling, panes = { 7602 } } } }))
+  assert(marker_exists(7602) and subagents_exists(7602), "both panes start observed")
+
+  -- One tab will not answer; the other answers and holds nothing. No pane is
+  -- counted on the domain, so nothing establishes that it is still attached.
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { { tab_id = racing, gone = true }, { tab_id = sibling, panes = {} } } }))
+  assert(marker_exists(7602),
+    "no pane was counted on the domain, so nothing may be deleted for absence")
+  assert(subagents_exists(7602), "the sidecars go with the marker and must survive with it")
+
+  -- A pane counted on the domain now. That is the evidence the guard wants, and
+  -- the absent pane is swept as it always was -- remembering did not freeze it.
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { { tab_id = racing, gone = true }, { tab_id = sibling, panes = { 7601 } } } }))
+  assert(not marker_exists(7602), "an observed domain still authorises the sweep")
+  assert(not subagents_exists(7602), "the sidecars go with the marker")
+end)
+
+-- Acknowledging records that the user was shown a publication, so it needs a
+-- pane this tick actually looked at. The inventory also carries panes nobody
+-- could look at, to keep their records from being swept; using that same set for
+-- membership would dismiss a notification that was never displayed. An unfocused
+-- poll leaves exactly the dangerous state: the marker is cached and eligible,
+-- and no acknowledgement has been written yet.
+test("a carried pane is not evidence the user saw it", function()
+  write_marker(7851, "notify")
+
+  local window, holding = 7850, 85
+  local readable = { { tab_id = holding, panes = { 7851 } } }
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = readable, active_pane_id = 7851 }))
+  assert(attention.get_attention(7851) == "notify", "the notification is cached and eligible")
+  assert(not acknowledgement_exists(7851), "an unfocused poll acknowledges nothing")
+
+  poll_focused({ window_id = window, active_pane_id = 7851,
+    tabs = { { tab_id = holding, gone = true } } })
+  assert(not acknowledgement_exists(7851),
+    "a pane carried across a tab that would not answer was not shown to anyone")
+
+  poll_focused({ window_id = window, active_pane_id = 7851, tabs = readable })
+  assert(acknowledgement_exists(7851),
+    "a tick that can see the pane acknowledges it, so this is not simply disabled")
+end)
+
+-- Deciding to acknowledge and acknowledging are two separate reads of the same
+-- record. Anything published in between is something the user has not seen, and
+-- dismissing it would retire a notification that was never shown. The v1 path
+-- has always compared identities across that gap; this pins the same for v2.
+test("an event published between the two reads is not the one dismissed", function()
+  local wire = materialize_v2_fixture(73)
+  local samples = protocol_fixture.record_samples
+  local binding_root_path = test_dir .. "/v2/realms/" .. wire.address.realm_id
+    .. "/incarnations/" .. wire.address.incarnation_id .. "/panes/73"
+    .. "/launches/" .. wire.launch_id .. "/bindings/" .. samples.binding.binding_id
+  local activity_path = binding_root_path .. "/activity.json"
+  local ack_path = binding_root_path .. "/ack.json"
+
+  local ack_before = assert(read_path(ack_path))
+  local pane_spec = { id = 9073, domain = "unix", attention = wire }
+  local republished = false
+  attention.poll(window_double({
+    tabs = { { pane_spec } }, focused = true, active_pane_id = pane_spec,
+    -- is_focused() is asked after the inventory is built and before the
+    -- acknowledgement, which is exactly the gap a producer can publish into.
+    on_focus_check = function()
+      if republished then return end
+      republished = true
+      local activity = decode_json(assert(read_path(activity_path)))
+      activity.event_id = "00000000-0000-4000-8000-000000000073"
+      write_json_path(activity_path, activity)
+    end,
+  }), { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+
+  assert(republished, "the test must have published into the gap")
+  assert(read_path(ack_path) == ack_before,
+    "the event the poll read is gone, so there is nothing this user has seen to dismiss")
+  assert(internal.attention_cache[internal.address_cache_key(wire.address)].event_id
+      == "00000000-0000-4000-8000-000000000073",
+    "the newly published event is taken into the cache, so the next tick can show it")
+end)
+
 os.execute("rm -rf " .. shell_quote(test_dir))
 
 io.write(string.format("%d passed, %d failed\n", passed, failed))

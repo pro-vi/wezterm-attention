@@ -3,9 +3,10 @@ return function()
   local legacy_cache_key_by_marker_id = {}
   local marker_id_by_local = {}
   local seen_marker_ids_by_window = {}
-  -- window key -> tab id -> cache key -> the domain that pane was on, when the
-  -- tab was last read. A tab whose panes() raises is answered from here.
-  local keys_by_tab_by_window = {}
+  -- window key -> tab id -> { keys, domains } as that tab last read. A tab whose
+  -- panes() raises is answered from here. Domains are kept separately from keys
+  -- because a pane that has not published an identity has a domain and no key.
+  local tab_memory_by_window = {}
   local callback_views_by_window = {}
   local delivering_views = false
 
@@ -408,8 +409,8 @@ return function()
       for window_key in pairs(seen_marker_ids_by_window) do
         if not live[window_key] then seen_marker_ids_by_window[window_key] = nil end
       end
-      for window_key in pairs(keys_by_tab_by_window) do
-        if not live[window_key] then keys_by_tab_by_window[window_key] = nil end
+      for window_key in pairs(tab_memory_by_window) do
+        if not live[window_key] then tab_memory_by_window[window_key] = nil end
       end
       for window_key in pairs(publish_domains_by_window) do
         if not live[window_key] then publish_domains_by_window[window_key] = nil end
@@ -778,9 +779,20 @@ return function()
       -- The absence sweep below deletes records for panes it cannot see, so a
       -- pane it merely failed to read must not look absent. These carry the
       -- unreadable tabs' panes from the last tick that could read them.
-      local keys_by_tab = keys_by_tab_by_window[window_key] or {}
-      local keys_by_tab_now = {}
+      local tab_memory = tab_memory_by_window[window_key] or {}
+      local tab_memory_now = {}
       local unreadable = {}
+      -- Domains a tab held when it was last read. This is enough to keep a domain
+      -- from being declared departed. It is deliberately NOT enough to authorise
+      -- deleting anything: that needs a pane observed on the domain now, which is
+      -- what the separate observed set below carries. Detaching a domain drops
+      -- every one of its panes at once, and a remembered association cannot tell
+      -- that apart from a tab that merely did not answer.
+      local remembered_domains = {}
+      -- Panes actually enumerated this tick, as opposed to carried. Acknowledging
+      -- says the user was shown this, so it is the only membership that may
+      -- authorise one; `seen` deliberately includes panes nobody could look at.
+      local freshly_seen = {}
       local pane_ids = {}
       local before = {}
       local title_enabled = M._active_settled_title_fallback ~= false
@@ -788,7 +800,7 @@ return function()
       local callback_entries = {}
       local seen = {}             -- cache key → identity and domain observed in this window
       local live_local_ids = {}   -- GUI pane lifetime is independent of its storage key.
-      local domains_present = {}  -- domain names this window still holds a pane of
+      local observed_domains = {}  -- domains a pane was enumerated on this tick
       local pane_count_by_domain = {}
       local unpublished_by_domain = {}
 
@@ -835,24 +847,24 @@ return function()
           -- protected only while this tab is still listed, so once WezTerm drops
           -- it they are swept normally.
           tab_panes = {}
-          local remembered = tab_id and keys_by_tab[tab_id]
+          local remembered = tab_id and tab_memory[tab_id]
           if remembered then
-            keys_by_tab_now[tab_id] = remembered
-            for remembered_key, remembered_domain in pairs(remembered) do
-              unreadable[remembered_key] = true
-              -- Its domain is unknown too, and both readers of domains_present
-              -- -- the sweep's detach guard and the publication retirement below
-              -- -- want unknown treated as present rather than as departed.
-              if remembered_domain then domains_present[remembered_domain] = true end
+            tab_memory_now[tab_id] = remembered
+            for remembered_key in pairs(remembered.keys) do unreadable[remembered_key] = true end
+            for remembered_domain in pairs(remembered.domains) do
+              remembered_domains[remembered_domain] = true
             end
           end
         elseif tab_id then
-          keys_by_tab_now[tab_id] = {}
+          tab_memory_now[tab_id] = { keys = {}, domains = {} }
         end
-        local tab_keys = tab_id and keys_by_tab_now[tab_id]
+        local tab_seen = tab_id and tab_memory_now[tab_id]
         for _, p in ipairs(tab_panes) do
           local domain = pane_method(p, "get_domain_name") or "?"
-          domains_present[domain] = true
+          observed_domains[domain] = true
+          -- Recorded here rather than beside the cache key below, so a pane with
+          -- no identity to key still tells its tab which domain it was on.
+          if tab_seen then tab_seen.domains[domain] = true end
           pane_count_by_domain[domain] = (pane_count_by_domain[domain] or 0) + 1
           local local_id = tostring(pane_method(p, "pane_id"))
           live_local_ids[local_id] = true
@@ -877,7 +889,8 @@ return function()
                 utc_error .. ": WezTerm UTC is unavailable; TTL-bearing v2 state is omitted")
             end
             seen[key] = { domain = domain, kind = "v2", marker_id = read.marker_id, local_id = local_id }
-            if tab_keys then tab_keys[key] = domain end
+            freshly_seen[key] = seen[key]
+            if tab_seen then tab_seen.keys[key] = true end
             pane_ids[#pane_ids + 1] = key
             before[key] = attention_cache[key]
             local view = read_attention_view(read, now_unix_ns, {
@@ -897,7 +910,8 @@ return function()
           elseif read.kind == "v1" then
             local id = read.marker_id
             seen[id] = { domain = domain, kind = "v1", marker_id = id, local_id = local_id }
-            if tab_keys then tab_keys[id] = domain end
+            freshly_seen[id] = seen[id]
+            if tab_seen then tab_seen.keys[id] = true end
             pane_ids[#pane_ids + 1] = id
             before[id] = attention_cache[id]
             local atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source =
@@ -945,15 +959,23 @@ return function()
       end
 
 
+      -- Retiring says this window left the domain. An unreadable tab has not said
+      -- that, so a domain it remembers counts as still here.
+      local possible_domains = {}
+      for domain in pairs(observed_domains) do possible_domains[domain] = true end
+      for domain in pairs(remembered_domains) do possible_domains[domain] = true end
       local previous_domains = publish_domains_by_window[window_key]
       if previous_domains then
         for domain in pairs(previous_domains) do
-          if not domains_present[domain] then retire_publish_observation(domain, window_key) end
+          if not possible_domains[domain] then retire_publish_observation(domain, window_key) end
         end
       end
-      publish_domains_by_window[window_key] = {}
-      for domain in pairs(domains_present) do
-        publish_domains_by_window[window_key][domain] = true
+      publish_domains_by_window[window_key] = possible_domains
+      -- Only a domain a pane was actually counted on gets its schedule updated. A
+      -- remembered domain has no count and no publication status this tick, and
+      -- passing the zero and the false would report an empty, fully published
+      -- domain -- which retires the retry the schedule exists for.
+      for domain in pairs(observed_domains) do
         update_publish_schedule(
           domain,
           window_key,
@@ -984,7 +1006,18 @@ return function()
         for gone_key, gone_value in pairs(previously_seen) do
           local gone = type(gone_value) == "table" and gone_value
             or { domain = gone_value, kind = "v1", marker_id = gone_key }
-          if not seen[gone_key] and not unreadable[gone_key] and domains_present[gone.domain] then
+          -- observed_domains, not possible_domains: this branch deletes files, and
+          -- a domain remembered from a tab that did not answer is not evidence
+          -- that the domain is still attached. Requiring a pane counted on it now
+          -- keeps the detach guard doing what it was written for.
+          if not seen[gone_key] and not unreadable[gone_key]
+              and not observed_domains[gone.domain] then
+            -- Undecidable this tick: a closed pane and a detached domain look the
+            -- same from here. Keep remembering it, or the next tick -- which may
+            -- be able to tell -- will have nothing to compare against and the
+            -- record outlives the pane for good.
+            seen[gone_key] = gone_value
+          elseif not seen[gone_key] and not unreadable[gone_key] then
             local shared = observed_in_other_window(gone_key, window_key)
             pane_ids[#pane_ids + 1] = gone_key
             before[gone_key] = attention_cache[gone_key]
@@ -996,7 +1029,7 @@ return function()
         end
       end
       seen_marker_ids_by_window[window_key] = seen
-      keys_by_tab_by_window[window_key] = keys_by_tab_now
+      tab_memory_by_window[window_key] = tab_memory_now
       -- A scalar cannot select one of several realms. Build this projection
       -- from all observed windows, rather than letting poll/overlay order win.
       rebuild_scalar_projection()
@@ -1018,17 +1051,21 @@ return function()
       local current_active_pane = window:active_pane()
       if current_active_pane then
         local active_read = resolve_pane_read(current_active_pane)
-        -- Membership comes from the inventory built above rather than from a
-        -- second walk of the same tab list. The outcome is the same either way,
-        -- because acknowledging also requires a cache entry this tick's read
-        -- built; the reason to prefer the inventory is that one enumeration
-        -- cannot disagree with itself.
-        local member = active_read.cache_key and seen[active_read.cache_key]
+        -- Membership comes from this tick's own enumeration, not from `seen`,
+        -- which also holds panes carried across a tab that would not answer. A
+        -- carried pane is one nobody looked at, and acknowledging it would record
+        -- as seen a publication that was never displayed.
+        local member = active_read.cache_key and freshly_seen[active_read.cache_key]
         if active_read.kind == "v1" and member and member.kind == "v1" then
           acknowledge_focused_pane(active_read.marker_id, { dir = dir, now_ms = now })
         elseif active_read.kind == "v2" and member and member.kind == "v2" then
+          local observed = attention_cache[active_read.cache_key]
           acknowledge_focused_v2_pane(active_read, {
             dir = dir, now_unix_ns = poll_now_unix_ns,
+            -- The event this tick actually read. The helper reads the record
+            -- again, and without this it would dismiss whatever it finds there --
+            -- including one published in between, which the user has not seen.
+            observed_event_id = observed and observed.event_id,
           })
         end
       end
