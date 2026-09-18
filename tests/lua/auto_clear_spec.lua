@@ -430,22 +430,28 @@ local function window_double(spec)
   next_window_id = next_window_id + 1
   local assigned_window_id = spec.window_id or next_window_id
   local mux_tabs = {}
-  for _, pane_ids in ipairs(spec.tabs or {}) do
-    -- "gone" is a tab that WezTerm still lists and the mux has already dropped:
-    -- it is returned by tabs() and raises from panes().
-    if pane_ids == "gone" then
-      table.insert(mux_tabs, {
-        panes = function() error("tab id 22 not found in mux") end,
-      })
-    else
-      local panes = {}
-      for _, entry in ipairs(pane_ids) do
-        table.insert(panes, pane_from_entry(entry))
-      end
-      table.insert(mux_tabs, {
-        panes = function() return panes end,
-      })
+  -- A tab is a list of pane entries, or { tab_id = N, panes = {...} } when the
+  -- test needs the id to stay the same across polls. { tab_id = N, gone = true }
+  -- is a tab WezTerm still lists and the mux has already dropped: tabs() returns
+  -- it, tab_id answers, and panes() raises.
+  for index, entry in ipairs(spec.tabs or {}) do
+    local tab_id, pane_ids, gone = index, entry, false
+    if type(entry) == "table" and entry.tab_id then
+      tab_id, pane_ids, gone = entry.tab_id, entry.panes or {}, entry.gone or false
     end
+    local panes = {}
+    if not gone then
+      for _, pane_entry in ipairs(pane_ids) do
+        table.insert(panes, pane_from_entry(pane_entry))
+      end
+    end
+    table.insert(mux_tabs, {
+      tab_id = function() return tab_id end,
+      panes = function()
+        if gone then error("tab id " .. tab_id .. " not found in mux") end
+        return panes
+      end,
+    })
   end
 
   local w = {
@@ -3715,12 +3721,15 @@ test("a tab that vanishes mid-poll costs neither the later tabs nor the records"
   -- what the same window reported last tick, so a fresh id would have nothing to
   -- compare against and every assertion below would pass vacuously.
   local window = 7700
-  attention.poll(window_double({ window_id = window, tabs = { { 7701 }, { 7702 } }, focused = false }))
+  local kept, racing = 61, 62
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { { tab_id = kept, panes = { 7701 } }, { tab_id = racing, panes = { 7702 } } } }))
   assert(attention.get_attention(7701) == "stop" and attention.get_attention(7702) == "notify",
     "both panes should be cached before the race")
 
   write_marker(7701, "notify")
-  local raced = window_double({ window_id = window, tabs = { "gone", { 7701 } }, focused = false })
+  local raced = window_double({ window_id = window, focused = false,
+    tabs = { { tab_id = racing, gone = true }, { tab_id = kept, panes = { 7701 } } } })
   local ok = pcall(attention.poll, raced)
   assert(ok, "a tab closing mid-poll must not abort the poll")
   assert(attention.get_attention(7701) == "notify",
@@ -3728,10 +3737,36 @@ test("a tab that vanishes mid-poll costs neither the later tabs nor the records"
   assert(marker_exists(7702),
     "a pane absent only because its tab could not be read is not a closed pane")
 
-  -- The sweep itself still works: the same pane, absent from a complete
-  -- inventory, is swept as it always was.
-  attention.poll(window_double({ window_id = window, tabs = { { 7701 } }, focused = false }))
-  assert(not marker_exists(7702), "a genuinely closed pane must still be swept")
+  -- Protection lasts only while the tab is still listed. Once WezTerm drops it,
+  -- the panes it held are absent like any other closed pane, so the sweep takes
+  -- them -- a tab that keeps failing cannot hold the sweep off forever.
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { { tab_id = kept, panes = { 7701 } } } }))
+  assert(not marker_exists(7702), "a dropped tab's panes must be swept like any other")
+end)
+
+-- WezTerm keeps a window's tabs as objects and drops them from the mux
+-- separately, and the pruning that reconciles the two returns early while any
+-- background activity is in flight. So a tab can stay listed and unreadable for
+-- more than one tick. If that held the whole sweep off, every pane that closed
+-- meanwhile would keep its record for as long as the bad tab is listed.
+test("an unreadable tab holds back only its own panes, not the whole sweep", function()
+  write_marker(7801, "stop")
+  write_marker(7802, "notify")
+  write_marker(7803, "stop")
+
+  local window = 7800
+  local kept, racing = 81, 82
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { { tab_id = kept, panes = { 7801, 7803 } }, { tab_id = racing, panes = { 7802 } } } }))
+  assert(marker_exists(7803), "the third pane starts present")
+
+  -- 7803 closes for real while the racing tab is still listed and unreadable.
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { { tab_id = racing, gone = true }, { tab_id = kept, panes = { 7801 } } } }))
+  assert(marker_exists(7802), "the unreadable tab's own pane is still protected")
+  assert(not marker_exists(7803),
+    "a pane that genuinely closed must be swept even while another tab is unreadable")
 end)
 
 os.execute("rm -rf " .. shell_quote(test_dir))
