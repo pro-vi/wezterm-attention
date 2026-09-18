@@ -3936,6 +3936,106 @@ test("an event published between the two reads is not the one dismissed", functi
     "the newly published event is taken into the cache, so the next tick can show it")
 end)
 
+-- A mux pane that reattaches comes back as a new GUI pane with a fresh local id
+-- and no identity variable yet; it publishes one a moment later. Until it does,
+-- it cannot be told apart from a replacement for a stored identity this window
+-- remembers. Counting it as proof the domain is back, and therefore that the
+-- remembered identity is gone, deletes the records of a pane that is about to
+-- say it is still here -- and a review flag the user set is not rebuilt by the
+-- identity arriving.
+test("an unresolved pane on a domain is not proof an identity there is gone", function()
+  write_marker(42, "stop")
+  local sidecar = assert(io.open(test_dir .. "/42.agents", "w"))
+  assert(sidecar:write('{"agents":{}}'))
+  assert(sidecar:close())
+
+  local window = 4200
+  local anchor_tab = { tab_id = 421, panes = { { id = 900, domain = "local" } } }
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { anchor_tab, { tab_id = 422, panes = { { id = 700, published = 42, domain = "mux" } } } } }))
+  assert(marker_exists(42), "the remote pane is observed through its published identity")
+
+  -- Detached: nothing on that domain is enumerated, so absence cannot be decided.
+  attention.poll(window_double({ window_id = window, focused = false, tabs = { anchor_tab } }))
+  assert(marker_exists(42), "an unobserved domain decides nothing")
+
+  -- Reattached, identity not yet published. The domain is back; the question of
+  -- which stored identity this pane carries is not yet answerable.
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { anchor_tab, { tab_id = 422, panes = { { id = 701, domain = "mux" } } } } }))
+  assert(marker_exists(42), "a pane that has not said who it is cannot say who it is not")
+  assert(subagents_exists(42), "the sidecars go with the marker")
+
+  -- Every pane on the domain identified, and none of them is 42.
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { anchor_tab, { tab_id = 422, panes = { { id = 702, published = 43, domain = "mux" } } } } }))
+  assert(not marker_exists(42), "a fully identified domain that excludes it may sweep it")
+end)
+
+-- The acknowledgement compares the event the poll saw with the one it is about
+-- to dismiss. Seeing no event is an answer -- there was nothing to dismiss --
+-- and must refuse, not waive the comparison. Otherwise a pane whose activity was
+-- already cleared acknowledges whatever gets published a moment later.
+test("seeing no event is a reason to refuse, not a reason to skip the check", function()
+  local wire = materialize_v2_fixture(74)
+  local samples = protocol_fixture.record_samples
+  local binding_root_path = test_dir .. "/v2/realms/" .. wire.address.realm_id
+    .. "/incarnations/" .. wire.address.incarnation_id .. "/panes/74"
+    .. "/launches/" .. wire.launch_id .. "/bindings/" .. samples.binding.binding_id
+  local activity_path = binding_root_path .. "/activity.json"
+  local ack_path = binding_root_path .. "/ack.json"
+
+  local activity = decode_json(assert(read_path(activity_path)))
+  assert(os.remove(activity_path))
+  local ack_before = assert(read_path(ack_path))
+
+  local published = false
+  attention.poll(window_double({
+    tabs = { { { id = 9074, domain = "unix", attention = wire } } }, focused = true,
+    active_pane_id = { id = 9074, domain = "unix", attention = wire },
+    on_focus_check = function()
+      if published then return end
+      published = true
+      activity.event_id = "00000000-0000-4000-8000-000000000074"
+      write_json_path(activity_path, activity)
+    end,
+  }), { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+
+  assert(published, "the test must have published into the gap")
+  assert(read_path(ack_path) == ack_before,
+    "the poll saw no publication here, so it has no standing to dismiss one")
+end)
+
+-- Publication retries are retired when the domain is done. "None of the panes I
+-- could read is unpublished" is not that: the tab that could not be read is
+-- where the unpublished pane was. Reporting the readable subset as the whole
+-- domain cancels the retry the unpublished pane is still waiting for.
+test("a domain seen through one readable tab is not a domain reported as published", function()
+  local spawned, scheduled = {}, {}
+  local original_background = wezterm.background_child_process
+  wezterm.background_child_process = function(argv) spawned[#spawned + 1] = argv; return true end
+  local reloaded = dofile(repo_root .. "/plugin/init.lua")
+  reloaded.apply_to_config({
+    unix_domains = { { name = "partial-realm", socket_path = "/tmp/attention-partial.sock" } },
+  }, { auto_poll = false, dir = test_dir, review_key = false })
+  local options = { call_after = function(delay, callback)
+    scheduled[#scheduled + 1] = { delay = delay, callback = callback }
+  end }
+
+  local waiting = { tab_id = 1, panes = { { id = 9940, domain = "partial-realm" } } }
+  local resolved = { tab_id = 2, panes = { { id = 9941, published = 9941, domain = "partial-realm" } } }
+  local both = { window_id = 8160, focused = false, tabs = { waiting, resolved } }
+  reloaded.poll(window_double(both), options)
+  reloaded.poll(window_double(both), options)
+  assert(#spawned == 1 and #scheduled == 1, "the unpublished pane starts one schedule")
+
+  reloaded.poll(window_double({ window_id = 8160, focused = false,
+    tabs = { { tab_id = 1, gone = true }, resolved } }), options)
+  scheduled[1].callback()
+  assert(#spawned == 2, "a partial look at the domain must not retire its retry")
+  wezterm.background_child_process = original_background
+end)
+
 os.execute("rm -rf " .. shell_quote(test_dir))
 
 io.write(string.format("%d passed, %d failed\n", passed, failed))

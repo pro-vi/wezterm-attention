@@ -404,8 +404,12 @@ return function(context)
       -- the user is looking at it. If a different event has been published since,
       -- the user has not seen that one, so take the new state and leave it
       -- unacknowledged. The v1 path makes the same comparison on its identity.
+      -- Not `if observed_event_id and ...`: a nil observation means the caller saw
+      -- no publication here, which is a reason to refuse rather than a reason to
+      -- skip the check. The read above has already returned when this view has no
+      -- event, so reaching here with nil observed means one appeared in between.
       local observed_event_id = opts and opts.observed_event_id
-      if observed_event_id and observed_event_id ~= view.event_id then
+      if observed_event_id ~= view.event_id then
         attention_cache[read.cache_key] = view
         return "kept"
       end
