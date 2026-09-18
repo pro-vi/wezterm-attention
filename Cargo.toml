@@ -40,8 +40,7 @@ uuid = { version = "1", features = ["v4"] }
 # rather than announcing an intention. `clippy::unwrap_used` and
 # `clippy::expect_used` are the two worth adding next and are deliberately absent:
 # they fire at 23 sites in the library today, and silencing them with an allow
-# would be worse than not declaring them. See
-# .inbox/2026-09-16-panic-paths-are-not-denied-by-lint.md.
+# would be worse than not declaring them. See docs/accepted-limitations.md.
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 unused_must_use = "deny"
