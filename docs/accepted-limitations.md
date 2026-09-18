@@ -4,9 +4,11 @@ What this project knows is imperfect and has decided to ship anyway, with the
 reason in each case. It is short on purpose: something leaves this file by being
 fixed or by being reclassified as intended behaviour, not by being forgotten.
 
-Planning documents and review write-ups are not tracked in this repository. That
-is why this file exists — a reader of a fresh clone should be able to find the
-known compromises without access to the author's machine.
+Most working notes — plans, review write-ups, triage records — stay on the
+author's machine and are not in this repository. A few are tracked because
+something still points at them: `hooks describe` names
+`docs/reviews/lifecycle-contact-results.md` in its evidence output, for one. This
+file is the maintained public account, and it is the one to read first.
 
 ## Panic paths are not denied by lint
 
@@ -20,8 +22,11 @@ genuinely infallible and want a comment, some want an error path. Until that pas
 happens, the table locks in the lints the crate already satisfies and says
 nothing about the ones it does not.
 
-A hook binary that panics writes no record and the tab stays wrong, so this is a
-real gap, not a stylistic preference.
+A panic in a hook is not a clean abort. It interrupts processing wherever it
+lands, so the state a consumer then reads can be missing, stale, or updated in
+one file and not another. The record contract already declines to promise that
+independently written files form one atomic snapshot; nothing rolls back on
+failure. That is why this is a real gap rather than a stylistic preference.
 
 ## One timestamp field carries three roles
 
@@ -55,9 +60,20 @@ work and is not widened by it.
 
 ## The library's public surface is wider than its supported surface
 
-`src/lib.rs` keeps `launch` private and re-exports its entry points, which is the
-shape the rest of the crate should follow. Most other modules are public,
-including storage machinery that exists to implement the supported operations
-rather than to be called directly. Narrowing this after downstream Rust code
-adopts it becomes a migration; it is listed here so the choice is visible rather
-than accidental.
+`src/lib.rs` now names the supported entry points in its crate documentation and
+classifies everything else as implementation. Read that first: it is the
+declaration, and this section only explains why it is a declaration rather than
+an enforced boundary.
+
+`launch` is private and re-exported, which is the shape the rest of the crate
+should follow. Most other modules are still public, `records` most consequentially
+— it exposes locking, atomic replacement, path construction and durable deletion
+because this crate's own tests drive them.
+
+Documenting the boundary does not prevent an external program from compiling
+against internals; only privacy does that. Making `records` private is not a
+one-line change either, because the supported `read_pane_facts_with_ports` needs
+publicly nameable reader types, and several test files mix white-box storage
+tests with CLI subprocess tests in one module, so they cannot simply move inward.
+The declaration turns an accidental commitment into an explicit unstable one; the
+enforcement is separate work.

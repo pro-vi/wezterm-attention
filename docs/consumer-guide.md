@@ -111,7 +111,7 @@ Complete stable reads exit 0. Selected-record or directory failures and detected
 
 The socket query creates no state directories, takes no writer locks, and performs no publication, acknowledgement or maintenance. Its WezTerm pane query explicitly supplies `--no-auto-start`. Queries without `--socket` retain the existing response shape.
 
-For publication, `hooks publish --socket <PATH>` is preferred. The path-valued `hooks publish --realm <PATH>` alias remains supported; using both is rejected. Publication without either selector retains pane publication and prompt-return behavior. `bindings --realm <ID>` and `sweep --realm <ID>` still take realm identifiers.
+For publication, `hooks publish --socket <PATH>` takes an existing socket path and is the only selector. Publication without it retains pane publication and prompt-return behavior. `bindings --realm <ID>` and `sweep --realm <ID>` are a different option that takes a 64-character realm identifier, not a path.
 
 ## Public consumer contracts
 
