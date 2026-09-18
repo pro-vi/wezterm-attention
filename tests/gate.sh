@@ -36,6 +36,27 @@ python3 -m unittest tests/python/measure_spec.py
 python3 tests/fixtures/v2/check.py
 python3 tests/fixtures/consumer-migration/check.py
 luajit tests/lua/auto_clear_spec.lua
+# And again with the built writer hidden. libexec/attention-rs is a build
+# artifact this repository does not track, so a machine that has built it can
+# pass a suite that a fresh clone fails on its first run. Observed 2026-09-18:
+# 31 of 130 Lua tests passed here and failed without it, across three green
+# gate runs that had no way to notice. Remembering to check by hand is not a
+# check.
+gate_writer="$root/libexec/attention-rs"
+gate_writer_aside="$root/libexec/.attention-rs.gate-aside"
+if [ -e "$gate_writer" ]; then
+  # Restores on any exit, including a failing suite, before the scratch trap
+  # below replaces this one.
+  trap 'if [ -e "$gate_writer_aside" ]; then mv -- "$gate_writer_aside" "$gate_writer"; fi' \
+    EXIT HUP INT TERM
+  mv -- "$gate_writer" "$gate_writer_aside"
+  printf 'gate: repeating the Lua suite with the built writer hidden\n'
+  luajit tests/lua/auto_clear_spec.lua
+  mv -- "$gate_writer_aside" "$gate_writer"
+  trap - EXIT HUP INT TERM
+else
+  printf 'gate: no built writer present, so the Lua suite above already ran without one\n'
+fi
 env -u WEZTERM_ATTENTION_DIR -u WEZTERM_ATTENTION_ROOT -u WEZTERM_PANE \
   -u WEZTERM_UNIX_SOCKET bun test tests/typescript/pi_extension.test.ts
 bun run typecheck
