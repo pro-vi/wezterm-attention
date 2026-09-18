@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1240,6 +1241,44 @@ pub fn read_bindings_with_ports(
     assemble_bindings(root, files, panes, processes, false)
 }
 
+/// One pane listing per socket, rather than one per bound pane.
+///
+/// Resolving a binding's presence asks whether its pane id appears in the
+/// socket's pane list. Every bound pane on one socket asks that of the same
+/// list, and each miss used to spawn a fresh `wezterm cli list` subprocess --
+/// about 20 ms per bound pane on top of a 5 ms floor, paid on every call.
+/// The answers are memoised for the lifetime of one assembly and no longer, so
+/// a later call still observes panes that opened or closed in between.
+struct ListOncePerSocket<'a> {
+    inner: &'a dyn PaneLister,
+    listed: Mutex<BTreeMap<String, Result<Vec<crate::wezterm::PaneRow>>>>,
+}
+
+impl<'a> ListOncePerSocket<'a> {
+    fn new(inner: &'a dyn PaneLister) -> Self {
+        Self {
+            inner,
+            listed: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl PaneLister for ListOncePerSocket<'_> {
+    fn list(&self, socket_path: &str) -> Result<Vec<crate::wezterm::PaneRow>> {
+        // A poisoned lock would mean a panic inside `list`; fall back to the
+        // uncached path rather than propagating a panic through a read command.
+        let Ok(mut listed) = self.listed.lock() else {
+            return self.inner.list(socket_path);
+        };
+        if let Some(cached) = listed.get(socket_path) {
+            return cached.clone();
+        }
+        let answer = self.inner.list(socket_path);
+        listed.insert(socket_path.to_owned(), answer.clone());
+        answer
+    }
+}
+
 fn assemble_bindings(
     root: &Path,
     mut files: Vec<PathBuf>,
@@ -1247,6 +1286,8 @@ fn assemble_bindings(
     processes: Option<&dyn ProcessProbe>,
     typed: bool,
 ) -> Result<(Vec<BindingRow>, Vec<Diagnostic>)> {
+    let listed_once = panes.map(ListOncePerSocket::new);
+    let panes = listed_once.as_ref().map(|lister| lister as &dyn PaneLister);
     let read_record = |path: &Path, kind: Option<&str>, identity: &RecordIdentity| {
         if !typed {
             return read_record(path, kind, identity);
@@ -1485,4 +1526,69 @@ fn assemble_bindings(
             ))
     });
     Ok((rows, diagnostics))
+}
+
+#[cfg(test)]
+mod pane_listing_tests {
+    use super::*;
+    use crate::wezterm::PaneRow;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingLister {
+        calls: AtomicUsize,
+    }
+
+    impl PaneLister for CountingLister {
+        fn list(&self, socket_path: &str) -> Result<Vec<PaneRow>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![PaneRow {
+                pane_id: socket_path.to_owned(),
+                tty_name: None,
+            }])
+        }
+    }
+
+    #[test]
+    fn one_socket_is_listed_once_however_many_panes_ask() {
+        let counting = CountingLister {
+            calls: AtomicUsize::new(0),
+        };
+        let once = ListOncePerSocket::new(&counting);
+        // Three bound panes on one socket ask the same question of the same
+        // list. Before this wrapper each ask spawned its own `wezterm cli list`.
+        for _ in 0..3 {
+            assert_eq!(once.list("/s/one").unwrap()[0].pane_id, "/s/one");
+        }
+        assert_eq!(counting.calls.load(Ordering::SeqCst), 1);
+
+        // A second socket is a different question and is asked once more.
+        assert_eq!(once.list("/s/two").unwrap()[0].pane_id, "/s/two");
+        assert_eq!(counting.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_failed_listing_is_remembered_rather_than_retried_per_pane() {
+        struct AlwaysFails {
+            calls: AtomicUsize,
+        }
+        impl PaneLister for AlwaysFails {
+            fn list(&self, _socket_path: &str) -> Result<Vec<PaneRow>> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(AttentionError::new("probe_unavailable", "socket is gone"))
+            }
+        }
+        let failing = AlwaysFails {
+            calls: AtomicUsize::new(0),
+        };
+        let once = ListOncePerSocket::new(&failing);
+        for _ in 0..3 {
+            assert_eq!(
+                once.list("/s/one").unwrap_err().diagnostic.code,
+                "probe_unavailable"
+            );
+        }
+        // Every pane on an unreachable socket reports the same failure, and one
+        // failed subprocess is enough to establish it.
+        assert_eq!(failing.calls.load(Ordering::SeqCst), 1);
+    }
 }
