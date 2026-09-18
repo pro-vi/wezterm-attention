@@ -453,7 +453,8 @@ function M.apply_to_config(config, opts)
     else
       report_error_once("native-writer",
         "v2 writer is not installed at " .. writer
-          .. "; producers keep the v1 marker path. Run scripts/install-cli.sh to enable v2.")
+          .. "; producers keep the v1 marker path. Run scripts/install-cli.sh, then reload"
+          .. " this config, to enable v2.")
     end
   else
     M._active_integration_root = nil
