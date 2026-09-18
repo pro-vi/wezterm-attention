@@ -376,7 +376,9 @@ local state, frame, source, reserved, subagents, review = attention.get_attentio
 -- I/O. Nested returned values do not share mutable state with the plugin cache.
 local view = attention.get_attention_view(pane)
 
--- Clear a marker programmatically
+-- Clear a v1 marker programmatically. This removes the flat marker file and the
+-- sidecars beside it; it does not clear a v2 activity record or acknowledge a
+-- v2 event, even when the id resolves to a pane the v2 reader knows.
 attention.remove_marker(marker_id)
 
 -- Poll markers manually (for auto_poll = false)
