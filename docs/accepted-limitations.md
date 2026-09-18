@@ -93,19 +93,26 @@ side scans lifecycle snapshots for canonical integers before decoding, and the
 Python checker asserts the lifecycle schema's integer type. Ordinary records and
 wire identity did not get the same treatment.
 
-No producer this project ships emits the disputed spelling. The Rust writer
-serialises through serde, which writes an integer. So this is a difference in
-what the validators will accept, not a disagreement about anything currently
-written.
+The Rust writer serialises through serde, which writes an integer, so it never
+emits the disputed spelling.
 
-Tightening Lua to match Rust looks like a two-line change and is not safe as
-one. The plugin writes records of its own through `wezterm.json_encode`, and
-whether that encoder spells an integral number as `3` or `3.0` has not been
-checked here. Making the reader stricter before knowing what the writer emits
-could make the plugin reject its own acknowledgements. The fix is: establish
-the canonical encoding rule, confirm what each writer actually emits, then move
-all three readers together, with raw-JSON fixtures for the integral-float and
-exponent spellings -- a decoded fixture cannot express the difference.
+The plugin also writes records, and what it emits is not established. It does not
+use `wezterm.json_encode`: `write_v2_record` builds the body with the local
+`json_value` in `plugin/overlays.lua`, which renders a number as
+`tostring(value)`, and the records it writes carry `schema`. What `tostring`
+produces for that value depends on the Lua the plugin is running under and on
+what `wezterm.json_parse` returned for the manifest's number. Under LuaJIT, which
+is what the test harness runs, an integral number renders as `3`. Under Lua 5.4
+a float renders as `3.0`. The harness therefore cannot answer the question, and
+only an assertion driven through an installed WezTerm can.
+
+So tightening Lua to match Rust looks like a two-line change and is not safe as
+one: if the plugin does emit `3.0`, a stricter reader would make it reject its
+own acknowledgements, and today's looser reader is the only reason that has not
+surfaced. The order is: establish what the plugin emits under a real WezTerm,
+fix the writer if it is wrong, then move all three readers together, with
+raw-JSON fixtures for the integral-float and exponent spellings -- a decoded
+fixture cannot express the difference.
 
 ## The acknowledgement write has no compare-and-swap
 
