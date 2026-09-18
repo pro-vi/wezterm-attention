@@ -4,6 +4,14 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
+# External programs are found on PATH. Override any of them with
+# ATTENTION_TEST_NODE, ATTENTION_TEST_WEZTERM, ATTENTION_TEST_PYTHON3 or
+# ATTENTION_TEST_CODEX when the one you want is not the first on PATH.
+#
+# Two integration tests drive a real Codex checkout, which this repository
+# cannot supply. Set ATTENTION_CODEX_SOURCE to one to run them; without it they
+# print SKIPPED and the rest of the gate is unaffected.
+
 sh -n bin/attention examples/hook.sh tests/shell/run_wezterm_smoke.sh tests/gate.sh \
   tests/fixtures/consumer-migration/claude-stop.sh \
   tests/fixtures/consumer-migration/codex-stop.sh
@@ -12,6 +20,13 @@ zsh -n shell/wezterm-attention.zsh
 ! rg -n 'python3' bin src shell pi plugin examples scripts
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
+# Cargo captures a passing test's output, so a test that skips itself does so
+# silently. Say which way this run went before it happens.
+if [ -n "${ATTENTION_CODEX_SOURCE:-}" ]; then
+  printf 'gate: Codex contact tests ENABLED (ATTENTION_CODEX_SOURCE=%s)\n' "$ATTENTION_CODEX_SOURCE"
+else
+  printf 'gate: Codex contact tests SKIPPED (set ATTENTION_CODEX_SOURCE to a Codex checkout)\n'
+fi
 WEZTERM_ATTENTION_TTY_INPUT_GUARD="$root/tests/python/tty_input_guard.py" cargo test -- --test-threads=1
 python3 -m py_compile tests/fixtures/v2/check.py \
   tests/fixtures/consumer-migration/bridge_reader.py \

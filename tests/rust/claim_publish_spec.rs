@@ -1,3 +1,6 @@
+#[path = "support/executables.rs"]
+mod executables;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
@@ -928,11 +931,12 @@ fn tty_input_guard_records_zero_stdin_bytes_during_a_real_claim() {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/python/tty_input_guard.py")
         });
     let guard_stdin = unsafe { fs::File::from_raw_fd(libc::dup(slave)) };
-    let mut guard = Command::new("python3")
+    let python = executables::resolve("python3");
+    let mut guard = Command::new(&python)
         .arg(guard_path)
         .arg(&guard_result)
         .env_clear()
-        .env("PATH", "/opt/homebrew/bin:/usr/bin:/bin")
+        .env("PATH", executables::child_path(&[], &[&python]))
         .stdin(Stdio::from(guard_stdin))
         .stdout(Stdio::null())
         .stderr(Stdio::null())

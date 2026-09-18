@@ -503,7 +503,8 @@ fn rust_and_installed_lua_share_relation_cases_and_retention_floors() {
     fs::write(&input, serde_json::to_vec(&cases).unwrap()).unwrap();
     let result = setup._scratch.0.join("parity-result");
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let output = Command::new("/opt/homebrew/bin/wezterm")
+    let wezterm = crate::executables::resolve("wezterm");
+    let output = Command::new(&wezterm)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("WEZTERM_ATTENTION_SMOKE_RESULT", &result)
