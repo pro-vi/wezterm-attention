@@ -3652,6 +3652,48 @@ test("a missing protocol module logs once and keeps the v1 reader available", fu
     "the missing module must produce one named log line")
 end)
 
+-- A producer reads WEZTERM_ATTENTION_ROOT as "write through the v2 writer", and
+-- falls back to the v1 marker only when it is unset. Exporting it for a checkout
+-- whose writer was never built would take the v1 path away from an installation
+-- that still depends on it, and every callback would die at the shim instead.
+test("the v2 root is exported only once the writer it selects is installed", function()
+  local root = test_dir .. "/integration-root"
+  assert(os.execute("mkdir -p " .. shell_quote(root .. "/bin")) == 0)
+  assert(os.execute("mkdir -p " .. shell_quote(root .. "/libexec")) == 0)
+  local shim = assert(io.open(root .. "/bin/attention", "w"))
+  assert(shim:write("#!/bin/sh\nexit 3\n"))
+  assert(shim:close())
+
+  drain_errors()
+  local unbuilt = dofile(repo_root .. "/plugin/init.lua")
+  local unbuilt_config = {}
+  unbuilt.apply_to_config(unbuilt_config, {
+    auto_poll = false, dir = test_dir, review_key = false, integration_root = root,
+  })
+  local unbuilt_env = unbuilt_config.set_environment_variables or {}
+  assert(unbuilt_env.WEZTERM_ATTENTION_ROOT == nil,
+    "a checkout with no writer must not claim the v2 root")
+  assert(unbuilt_env.WEZTERM_ATTENTION_DIR == test_dir,
+    "the v1 producer still needs the state directory")
+  local errors = drain_errors()
+  assert(#errors == 1 and errors[1]:find("install-cli.sh", 1, true),
+    "the uninstalled writer must say once how to install it")
+
+  local writer = assert(io.open(root .. "/libexec/attention-rs", "w"))
+  assert(writer:write("#!/bin/sh\nexit 0\n"))
+  assert(writer:close())
+
+  local built = dofile(repo_root .. "/plugin/init.lua")
+  local built_config = {}
+  built.apply_to_config(built_config, {
+    auto_poll = false, dir = test_dir, review_key = false, integration_root = root,
+  })
+  local built_env = built_config.set_environment_variables or {}
+  assert(built_env.WEZTERM_ATTENTION_ROOT == root,
+    "an installed writer must be selected")
+  assert(#drain_errors() == 0, "an installed writer must log nothing")
+end)
+
 os.execute("rm -rf " .. shell_quote(test_dir))
 
 io.write(string.format("%d passed, %d failed\n", passed, failed))
