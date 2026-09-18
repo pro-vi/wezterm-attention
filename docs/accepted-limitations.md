@@ -51,6 +51,28 @@ tolerate on records written before and after, schema validation, pruning in
 meanings the subagent-clear watermark actually wants. That is not a change to
 make on the way out of the door.
 
+## Consumer options belong to the hook invocation, not to each consumer
+
+`--consumer` repeats, so one hook can deliver to several executables. The options
+beside it do not repeat. `--consumer-timeout-ms` is one value applied to each
+consumer in turn, and `--include-reply` and `--include-prompt` select content for
+the single envelope every consumer receives.
+
+Three things follow, and a consumer author should know all three before
+registering a second executable:
+
+- Consumers run in the order given, one after another, so a hook's worst case is
+  the number of consumers multiplied by the deadline. That time is spent inside a
+  synchronous hook, with the agent waiting.
+- A fast consumer and a slow one cannot be given different deadlines.
+- Adding a consumer to a hook that already passes `--include-reply` or
+  `--include-prompt` hands that text to the new executable as well. Content
+  cannot be selected per consumer.
+
+A failing consumer never stops the ones after it, and `--strict` decides whether
+any consumer's failure fails the hook. Those parts behave per consumer; the
+options above do not.
+
 ## The acknowledgement write has no compare-and-swap
 
 `write_v2_record` in `plugin/overlays.lua` reads the existing record only to
