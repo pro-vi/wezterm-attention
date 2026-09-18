@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { accessSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
@@ -16,10 +16,25 @@ mkdirSync(home, { recursive: true, mode: 0o700 });
 const canonicalHome = realpathSync(home);
 const cwd = join(canonicalHome, "workspace");
 mkdirSync(cwd);
-const codex = "/opt/homebrew/bin/codex";
-const source = process.env.ATTENTION_CODEX_SOURCE || "/Users/provi/Development/_sources/codex";
+// Found, not addressed. These used to be one machine's absolute paths, so the
+// probe passed there and failed on every other host.
+const which = (program) => {
+	const override = process.env[`ATTENTION_TEST_${program.toUpperCase()}`];
+	if (override) return override;
+	for (const directory of (process.env.PATH ?? "").split(":")) {
+		const candidate = join(directory, program);
+		try {
+			accessSync(candidate, fsConstants.X_OK);
+			return candidate;
+		} catch {}
+	}
+	throw new Error(`${program} is required by this probe; install it or set ATTENTION_TEST_${program.toUpperCase()}`);
+};
+const codex = which("codex");
+const source = process.env.ATTENTION_CODEX_SOURCE;
+if (!source) throw new Error("ATTENTION_CODEX_SOURCE must name a Codex checkout");
 const revision = "6b9826e3aa83b1a5947db50f4332cb9c65f1b340";
-const version = execFileSync(codex, ["--version"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: canonicalHome, CODEX_HOME: canonicalHome } }).trim();
+const version = execFileSync(codex, ["--version"], { encoding: "utf8", env: { PATH: `/usr/bin:/bin:${dirname(codex)}`, HOME: canonicalHome, CODEX_HOME: canonicalHome } }).trim();
 assert.equal(version, "codex-cli 0.154.0", "native fixture is pinned to the inspected release");
 const identityScript = `const fs=require("fs"), cp=require("child_process");
 const phase=process.argv[1] || "before";
@@ -99,7 +114,7 @@ appendFileSync(${JSON.stringify(deliveries)}, JSON.stringify({
   reply_not_requested: delivery.reply?.availability === "not_requested"
 }) + "\\n");
 `, { mode: 0o700 });
-const environment = { PATH: "/usr/bin:/bin:/opt/homebrew/bin", HOME: canonicalHome, CODEX_HOME: canonicalHome, TERM: "xterm-256color", WEZTERM_ATTENTION_CONTACT_LOG: log, WEZTERM_ATTENTION_CONTACT_CONSUMER: consumer };
+const environment = { PATH: `/usr/bin:/bin:${dirname(codex)}`, HOME: canonicalHome, CODEX_HOME: canonicalHome, TERM: "xterm-256color", WEZTERM_ATTENTION_CONTACT_LOG: log, WEZTERM_ATTENTION_CONTACT_CONSUMER: consumer };
 for (const key of ["WEZTERM_ATTENTION_DIR", "WEZTERM_ATTENTION_ROOT", "WEZTERM_UNIX_SOCKET", "WEZTERM_PANE", "WEZTERM_ATTENTION_LAUNCH_ID"]) if (process.env[key]) environment[key] = process.env[key];
 let child;
 try {

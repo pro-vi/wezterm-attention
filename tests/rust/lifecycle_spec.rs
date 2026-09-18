@@ -21,6 +21,9 @@ use wezterm_attention::query::read_bindings;
 use wezterm_attention::records::{atomic_replace, launch_path, pane_path, state_root, with_lock};
 use wezterm_attention::wezterm::{Clock, PaneLister, PaneRow, RuntimePorts, TtyWriter};
 
+#[path = "support/executables.rs"]
+mod executables;
+
 #[path = "lifecycle_spec/hook_consumer.rs"]
 mod hook_consumer;
 
@@ -500,9 +503,10 @@ fn real_cli_tool_snapshot_reaches_installed_wezterm() {
         json!({"wire":2,"address":address,"launch_id":setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]});
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let result = setup._scratch.0.join("wezterm-result");
-    let output = Command::new("/opt/homebrew/bin/wezterm")
+    let wezterm = executables::resolve("wezterm");
+    let output = Command::new(&wezterm)
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", executables::child_path(&[], &[&wezterm]))
         .env("WEZTERM_ATTENTION_SMOKE_RESULT", &result)
         .env("WEZTERM_ATTENTION_TEST_ROOT", &root)
         .env(
@@ -817,11 +821,12 @@ fn actual_pi_runner_dispatches_through_the_real_writer() {
     )
     .unwrap();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let mut command = Command::new("/opt/homebrew/bin/node");
+    let node = executables::resolve("node");
+    let mut command = Command::new(&node);
     command
         .env_clear()
         .envs(&setup.env)
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", executables::child_path(&[], &[&node]))
         .env("WEZTERM_ATTENTION_ROOT", &bridge_root)
         .arg(root.join("tests/javascript/pi_lifecycle_runtime.mjs"));
     if let Ok(runtime) = std::env::var("ATTENTION_PI_RUNTIME_ROOT") {
@@ -1011,6 +1016,17 @@ fn byte_pressure_is_pool_local_with_maximal_valid_metadata() {
 
 #[test]
 fn native_codex_async_tool_hooks_reach_the_snapshot() {
+    // This drives a real Codex checkout, which is an external source tree rather
+    // than something the repository can provide. It used to fall back to one
+    // developer's clone path, so it passed there and failed everywhere else.
+    // Absent the variable it now says what it needs and stops, rather than
+    // failing the gate on a machine that simply has no Codex source.
+    let Ok(codex_source) = std::env::var("ATTENTION_CODEX_SOURCE") else {
+        eprintln!(
+            "SKIPPED native_codex_async_tool_hooks_reach_the_snapshot: set ATTENTION_CODEX_SOURCE to a Codex checkout to run it"
+        );
+        return;
+    };
     let setup = Setup::new();
     setup.claim();
     let bridge = setup._scratch.0.join("native-bridge");
@@ -1020,16 +1036,16 @@ fn native_codex_async_tool_hooks_reach_the_snapshot() {
         bridge.join("bin/attention"),
     )
     .unwrap();
-    let output = Command::new("/opt/homebrew/bin/node")
+    let node = executables::resolve("node");
+    // The probe this runs spawns codex itself, so it has to be reachable on the
+    // PATH handed to the child, not only on the PATH that started cargo.
+    let codex = executables::resolve("codex");
+    let output = Command::new(&node)
         .env_clear()
         .envs(&setup.env)
-        .env("PATH", "/usr/bin:/bin:/opt/homebrew/bin")
+        .env("PATH", executables::child_path(&[], &[&node, &codex]))
         .env("WEZTERM_ATTENTION_ROOT", &bridge)
-        .env(
-            "ATTENTION_CODEX_SOURCE",
-            std::env::var("ATTENTION_CODEX_SOURCE")
-                .unwrap_or_else(|_| "/Users/provi/Development/_sources/codex".into()),
-        )
+        .env("ATTENTION_CODEX_SOURCE", codex_source)
         .arg(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/javascript/lifecycle_contact_probe.mjs"),
@@ -1059,9 +1075,10 @@ fn native_codex_async_tool_hooks_reach_the_snapshot() {
     let (address, _) = pane_address(&setup.env).unwrap();
     let wire =
         json!({"wire":2,"address":address,"launch_id":setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]});
-    let output = Command::new("/opt/homebrew/bin/wezterm")
+    let wezterm = executables::resolve("wezterm");
+    let output = Command::new(&wezterm)
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", executables::child_path(&[], &[&wezterm]))
         .env("WEZTERM_ATTENTION_TEST_ROOT", &root)
         .env("WEZTERM_ATTENTION_SMOKE_RESULT", &result_path)
         .env(
@@ -1083,6 +1100,17 @@ fn native_codex_async_tool_hooks_reach_the_snapshot() {
 #[test]
 #[ignore = "requires test-only xterm/headless; the full gate supplies its module path"]
 fn native_codex_queued_input_is_not_blocked_by_a_pending_question() {
+    // This drives a real Codex checkout, which is an external source tree rather
+    // than something the repository can provide. It used to fall back to one
+    // developer's clone path, so it passed there and failed everywhere else.
+    // Absent the variable it now says what it needs and stops, rather than
+    // failing the gate on a machine that simply has no Codex source.
+    let Ok(codex_source) = std::env::var("ATTENTION_CODEX_SOURCE") else {
+        eprintln!(
+            "SKIPPED native_codex_queued_input_is_not_blocked_by_a_pending_question: set ATTENTION_CODEX_SOURCE to a Codex checkout to run it"
+        );
+        return;
+    };
     let setup = Setup::new();
     setup.claim();
     let bridge = setup._scratch.0.join("native-ui-bridge");
@@ -1094,17 +1122,17 @@ fn native_codex_queued_input_is_not_blocked_by_a_pending_question() {
     .unwrap();
     let module = std::env::var("ATTENTION_XTERM_MODULE")
         .expect("set the disposable xterm/headless module path");
-    let output = Command::new("/opt/homebrew/bin/node")
+    let node = executables::resolve("node");
+    // The probe this runs spawns codex itself, so it has to be reachable on the
+    // PATH handed to the child, not only on the PATH that started cargo.
+    let codex = executables::resolve("codex");
+    let output = Command::new(&node)
         .env_clear()
         .envs(&setup.env)
-        .env("PATH", "/usr/bin:/bin:/opt/homebrew/bin")
+        .env("PATH", executables::child_path(&[], &[&node, &codex]))
         .env("WEZTERM_ATTENTION_ROOT", &bridge)
         .env("ATTENTION_NATIVE_UI", "1")
-        .env(
-            "ATTENTION_CODEX_SOURCE",
-            std::env::var("ATTENTION_CODEX_SOURCE")
-                .unwrap_or_else(|_| "/Users/provi/Development/_sources/codex".into()),
-        )
+        .env("ATTENTION_CODEX_SOURCE", codex_source)
         .env("ATTENTION_XTERM_MODULE", module)
         .arg(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))

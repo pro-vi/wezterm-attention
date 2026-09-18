@@ -24,17 +24,13 @@ fn public_checkpoint_inspector_and_reply_sink_recipes_execute() {
     setup
         .env
         .insert("WEZTERM_EXECUTABLE".into(), fake.to_str().unwrap().into());
-    setup
-        .env
-        .insert("PATH".into(), "/opt/homebrew/bin:/usr/bin:/bin".into());
-    // Put the synthetic executable first, so production resolution cannot reach
-    // a user server even if a PATH-installed wezterm exists.
+    // The synthetic executable goes first, so production resolution cannot reach
+    // a user server even if a PATH-installed wezterm exists. The example scripts
+    // this test runs have Node shebangs, so the real Node's directory follows.
+    let node = crate::executables::resolve("node");
     setup.env.insert(
         "PATH".into(),
-        format!(
-            "{}:/opt/homebrew/bin:/usr/bin:/bin",
-            setup._scratch.0.display()
-        ),
+        crate::executables::child_path(&[setup._scratch.0.as_path()], &[&node]),
     );
     let bindings = rust_command(&setup)
         .args(["bindings", "--socket", &setup.env["WEZTERM_UNIX_SOCKET"]])
@@ -71,7 +67,7 @@ fn public_checkpoint_inspector_and_reply_sink_recipes_execute() {
     )
     .unwrap();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let output = Command::new("/opt/homebrew/bin/node")
+    let output = Command::new(&node)
         .env_clear()
         .envs(&setup.env)
         .arg(root.join("tests/javascript/consumer_recipes.mjs"))
@@ -85,7 +81,7 @@ fn public_checkpoint_inspector_and_reply_sink_recipes_execute() {
     );
     println!("{}", String::from_utf8_lossy(&output.stdout));
     let checkpoint = setup._scratch.0.join("checkpoint.json");
-    let output = Command::new("/opt/homebrew/bin/node")
+    let output = Command::new(&node)
         .env_clear()
         .envs(&setup.env)
         .arg(root.join("examples/checkpoint.mjs"))
@@ -104,7 +100,7 @@ fn public_checkpoint_inspector_and_reply_sink_recipes_execute() {
         "Real CLI checkpoint recipe: {}",
         String::from_utf8_lossy(&output.stdout)
     );
-    let output = Command::new("/opt/homebrew/bin/node")
+    let output = Command::new(&node)
         .env_clear()
         .envs(&setup.env)
         .arg(root.join("examples/inspect.mjs"))
