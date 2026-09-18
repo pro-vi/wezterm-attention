@@ -52,10 +52,12 @@ fn absolute(path: PathBuf) -> PathBuf {
     if path.is_absolute() {
         return path;
     }
-    match std::env::current_dir() {
-        Ok(cwd) => cwd.join(path),
-        Err(_) => path,
-    }
+    // Returning the relative path here would hand back exactly what this
+    // function exists to reject, and the caller would learn of it only when a
+    // child launched in a disposable workspace failed to spawn.
+    std::env::current_dir()
+        .expect("a relative PATH entry can only be anchored against the current directory")
+        .join(path)
 }
 
 fn is_executable_file(path: &Path) -> bool {
