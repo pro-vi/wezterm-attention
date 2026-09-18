@@ -3727,8 +3727,8 @@ test("a tab that vanishes mid-poll costs neither the later tabs nor the records"
   write_marker(7701, "notify")
   local raced = window_double({ window_id = window, focused = false,
     tabs = { { tab_id = racing, gone = true }, { tab_id = kept, panes = { 7701 } } } })
-  local ok = pcall(attention.poll, raced)
-  assert(ok, "a tab closing mid-poll must not abort the poll")
+  local ok, poll_error = pcall(attention.poll, raced)
+  assert(ok, "a tab closing mid-poll must not abort the poll: " .. tostring(poll_error))
   assert(attention.get_attention(7701) == "notify",
     "a tab listed after the vanished one must still be refreshed")
   assert(marker_exists(7702),
@@ -4034,6 +4034,71 @@ test("a domain seen through one readable tab is not a domain reported as publish
   scheduled[1].callback()
   assert(#spawned == 2, "a partial look at the domain must not retire its retry")
   wezterm.background_child_process = original_background
+end)
+
+-- The uncertainty an unidentified pane creates has to survive its tab going
+-- quiet. If it lives only in what this tick enumerated, then the tick after --
+-- where that tab stops answering but a sibling on the same domain still does --
+-- has a present domain, no uncertainty, and deletes the very records the
+-- unidentified pane might have turned out to own.
+test("identity uncertainty survives the tab that raised it going quiet", function()
+  write_marker(44, "stop")
+
+  local window = 4400
+  local anchor_tab = { tab_id = 441, panes = { { id = 910, domain = "local" } } }
+  local sibling = { tab_id = 443, panes = { { id = 703, published = 45, domain = "mux" } } }
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { anchor_tab, { tab_id = 442, panes = { { id = 704, published = 44, domain = "mux" } } } } }))
+  assert(marker_exists(44), "observed through its published identity")
+
+  attention.poll(window_double({ window_id = window, focused = false, tabs = { anchor_tab } }))
+  assert(marker_exists(44), "an unobserved domain decides nothing")
+
+  -- Reattached: one tab holds a pane that has not said who it is, another holds
+  -- an identified pane on the same domain.
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { anchor_tab, { tab_id = 442, panes = { { id = 705, domain = "mux" } } }, sibling } }))
+  assert(marker_exists(44), "an unresolved pane blocks the conclusion while it is enumerated")
+
+  -- The tab holding it stops answering. The sibling still answers, so the domain
+  -- is present -- but nothing has become any more certain about identity 44.
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { anchor_tab, { tab_id = 442, gone = true }, sibling } }))
+  assert(marker_exists(44), "a tab going quiet cannot resolve what it had not resolved")
+  assert(subagents_exists(44) == false or subagents_exists(44), "sidecar state is unchanged either way")
+
+  -- Every pane on the domain identified, none of them 44.
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { anchor_tab, sibling } }))
+  assert(not marker_exists(44), "a fully identified domain that excludes it may sweep it")
+end)
+
+-- Two windows share one display cache. If the acknowledgement takes its expected
+-- publication from that cache rather than from the poll that is acknowledging,
+-- another window's poll can slide a newer publication in between this poll's
+-- read and its decision -- and the comparison then finds the cache and the disk
+-- agreeing about an event this poll never saw.
+test("another window's poll cannot decide what this one acknowledges", function()
+  write_marker(46, "notify", "publication-one")
+
+  local watcher = window_double({ window_id = 4602, focused = false,
+    tabs = { { tab_id = 461, panes = { 46 } } } })
+  local raced = false
+  poll_focused({ window_id = 4601, active_pane_id = 46,
+    tabs = { { tab_id = 461, panes = { 46 } } },
+    on_focus_check = function()
+      if raced then return end
+      raced = true
+      -- A newer publication, and another window reads it into the shared cache
+      -- without acknowledging it.
+      write_marker(46, "notify", "publication-two")
+      attention.poll(watcher)
+    end,
+  })
+
+  assert(raced, "the test must have raced the focus query")
+  assert(not acknowledgement_exists(46),
+    "this poll read publication one, so it has no standing to dismiss publication two")
 end)
 
 os.execute("rm -rf " .. shell_quote(test_dir))

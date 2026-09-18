@@ -225,6 +225,12 @@ return function()
       local id = tostring(pane_id)
       local cached = attention_cache[id]
       if not (cached and acknowledge_set[cached.type]) then return "absent" end
+      -- The caller's own observation, when it supplied one. Without it this
+      -- compares disk against the shared display cache, which another window's
+      -- poll can replace between this poll's enumeration and its focus query --
+      -- so equality would mean the two reads agree, not that this poll saw what
+      -- it is about to dismiss.
+      local observed_identity = opts and opts.observed_identity
 
       -- The count this tick's poll already read from disk. Acknowledgement is about
       -- the marker only, so it must hand the count back unchanged; recomputing zero
@@ -244,7 +250,7 @@ return function()
       end
 
       local current_identity = marker_identity(raw, publication_id)
-      if cached.identity ~= current_identity then
+      if (observed_identity or cached.identity) ~= current_identity then
         cache_marker_values(
           id, current_type, current_frame, raw, publication_id, observed_now, source,
           subagents, flagged)
@@ -372,6 +378,58 @@ return function()
       schedule.token = schedule.token + 1
       publish_schedule_by_realm[schedule.socket] = nil
       return false
+    end
+
+    --- May this window conclude that a storage identity it used to see is gone?
+    --- Deleting its records is irreversible, so every way of not knowing answers
+    --- no: the pane is still here, or nobody looked where it was, or the domain
+    --- it lived on went unwatched, or something on that domain has not yet said
+    --- which identity it carries.
+    local function decide_absence(evidence, gone_key, gone, live_local_ids)
+        local pane = evidence.panes[gone_key]
+        if pane then return "present" end
+        local domain = evidence.domains[gone.domain]
+        if not domain or not domain.observed then return "unknown" end
+        if domain.unresolved then return "unknown" end
+        if gone.local_id and live_local_ids[gone.local_id] then return "present" end
+        return "absent"
+    end
+
+    --- What may this poll dismiss for the pane the user is looking at? Only a
+    --- publication this poll read itself: acknowledging records that it was
+    --- shown, and neither a carried observation nor the shared display cache can
+    --- say that. No publication read is an answer, not a missing argument.
+    local function decide_acknowledgement(evidence, read)
+        if not read or not read.cache_key then return nil end
+        local pane = evidence.panes[read.cache_key]
+        if not pane or not pane.observed then return nil end
+        if pane.kind ~= read.kind then return nil end
+        return { kind = pane.kind, marker_id = pane.marker_id, event_id = pane.event_id,
+          identity = pane.identity }
+    end
+
+    --- What may be reported about a domain's publication work? A count and a
+    --- resolution belong to a domain every pane of which answered. Anything less
+    --- renews the observation -- so a retry is not dropped for going a round
+    --- unseen -- without letting the panes that did answer stand for the rest.
+    local function decide_publication(domain_item)
+        if not domain_item then return nil end
+        if not domain_item.observed and not domain_item.carried then return nil end
+        -- Coverage, not identity resolution: a domain every tab of which
+        -- answered can be concluded about even when one of its panes has yet to
+        -- publish, because that pane is the reason the schedule exists.
+        local complete = domain_item.observed and not domain_item.carried
+          and not domain_item.indeterminate
+        if complete then
+          return { action = "conclude", count = domain_item.count,
+            unpublished = domain_item.unpublished == true }
+        end
+        if domain_item.unpublished == true then
+          -- Positively unpublished is the one conclusion a partial look can
+          -- support: a pane that answered said so.
+          return { action = "renew", unpublished = true }
+        end
+        return { action = "renew" }
     end
 
     local function retire_publish_observation(domain, window_key)
@@ -791,18 +849,32 @@ return function()
       -- unreadable tabs' panes from the last tick that could read them.
       local tab_memory = tab_memory_by_window[window_key] or {}
       local tab_memory_now = {}
-      local unreadable = {}
-      -- Domains a tab held when it was last read. This is enough to keep a domain
-      -- from being declared departed. It is deliberately NOT enough to authorise
-      -- deleting anything: that needs a pane observed on the domain now, which is
-      -- what the separate observed set below carries. Detaching a domain drops
-      -- every one of its panes at once, and a remembered association cannot tell
-      -- that apart from a tab that merely did not answer.
-      local remembered_domains = {}
-      -- Panes actually enumerated this tick, as opposed to carried. Acknowledging
-      -- says the user was shown this, so it is the only membership that may
-      -- authorise one; `seen` deliberately includes panes nobody could look at.
-      local freshly_seen = {}
+      -- What this tick established, and how. The decisions below need different
+      -- strengths of the same fact -- a pane carried from a tab that would not
+      -- answer is enough to keep its records and not enough to dismiss its
+      -- notification -- so provenance travels with the fact instead of living in
+      -- a separate table each consumer combines for itself.
+      local evidence = { panes = {}, domains = {} }
+
+      --- Domain evidence, created on first mention. `observed` means a pane was
+      --- enumerated on it now. `carried` means a tab that would not answer held
+      --- it when it last did. `unresolved` means a pane on it has no usable
+      --- identity, so nothing can be concluded about which identities are gone.
+      --- `indeterminate` is narrower than `unresolved`: a pane's identity could
+      --- not be read at all, so its publication status is unknown too. A pane
+      --- that is merely unpublished is not indeterminate -- it is the work the
+      --- schedule exists for.
+      --- `count` and `unpublished` describe only the panes that answered.
+      local function domain_evidence(domain)
+        local item = evidence.domains[domain]
+        if not item then
+          item = { observed = false, carried = false, unresolved = false,
+            indeterminate = false, count = 0 }
+          evidence.domains[domain] = item
+        end
+        return item
+      end
+
       local pane_ids = {}
       local before = {}
       local title_enabled = M._active_settled_title_fallback ~= false
@@ -810,21 +882,6 @@ return function()
       local callback_entries = {}
       local seen = {}             -- cache key → identity and domain observed in this window
       local live_local_ids = {}   -- GUI pane lifetime is independent of its storage key.
-      local observed_domains = {}  -- domains a pane was enumerated on this tick
-      local pane_count_by_domain = {}
-      local unpublished_by_domain = {}
-      -- Domains holding a pane that was enumerated but whose identity has not
-      -- resolved. A reattached mux pane arrives with a fresh GUI-local id and no
-      -- identity user var yet, so it cannot be told apart from a replacement for
-      -- a storage identity this window remembers. Concluding that identity is
-      -- absent while one of these is on its domain would delete the records of a
-      -- pane that is about to say it is still here.
-      local unresolved_domains = {}
-      -- The publication each v2 pane was carrying when this tick read it. Taken
-      -- here rather than from attention_cache at acknowledgement time: that cache
-      -- is shared with other windows, the overlay writes and later polls, so by
-      -- then it is not necessarily this poll's observation any more.
-      local observed_events = {}
 
       local now = (opts and opts.now_ms) or now_ms()
       local cfg_indicators = M._active_indicators or defaults.indicators
@@ -872,9 +929,20 @@ return function()
           local remembered = tab_id and tab_memory[tab_id]
           if remembered then
             tab_memory_now[tab_id] = remembered
-            for remembered_key in pairs(remembered.keys) do unreadable[remembered_key] = true end
-            for remembered_domain in pairs(remembered.domains) do
-              remembered_domains[remembered_domain] = true
+            for key, item in pairs(remembered.keys) do
+              if not evidence.panes[key] then
+                evidence.panes[key] = { observed = false, kind = item.kind, domain = item.domain,
+                  marker_id = item.marker_id, local_id = item.local_id }
+              end
+            end
+            for remembered_domain, was_unresolved in pairs(remembered.domains) do
+              local item = domain_evidence(remembered_domain)
+              item.carried = true
+              -- The uncertainty travels with the tab. Without this, a tab holding
+              -- a pane whose identity had not resolved would lose that fact the
+              -- moment it stopped answering, and the next tick would delete the
+              -- records of the identity that pane might still turn out to be.
+              if was_unresolved then item.unresolved = true end
             end
           end
         elseif tab_id then
@@ -883,11 +951,14 @@ return function()
         local tab_seen = tab_id and tab_memory_now[tab_id]
         for _, p in ipairs(tab_panes) do
           local domain = pane_method(p, "get_domain_name") or "?"
-          observed_domains[domain] = true
+          local domain_item = domain_evidence(domain)
+          domain_item.observed = true
           -- Recorded here rather than beside the cache key below, so a pane with
           -- no identity to key still tells its tab which domain it was on.
-          if tab_seen then tab_seen.domains[domain] = true end
-          pane_count_by_domain[domain] = (pane_count_by_domain[domain] or 0) + 1
+          if tab_seen then
+            tab_seen.domains[domain] = tab_seen.domains[domain] or false
+          end
+          domain_item.count = domain_item.count + 1
           local local_id = tostring(pane_method(p, "pane_id"))
           live_local_ids[local_id] = true
           local read = resolve_pane_read(p)
@@ -911,8 +982,9 @@ return function()
                 utc_error .. ": WezTerm UTC is unavailable; TTL-bearing v2 state is omitted")
             end
             seen[key] = { domain = domain, kind = "v2", marker_id = read.marker_id, local_id = local_id }
-            freshly_seen[key] = seen[key]
-            if tab_seen then tab_seen.keys[key] = true end
+            evidence.panes[key] = { observed = true, kind = "v2", domain = domain,
+              marker_id = read.marker_id, local_id = local_id }
+            if tab_seen then tab_seen.keys[key] = evidence.panes[key] end
             pane_ids[#pane_ids + 1] = key
             before[key] = attention_cache[key]
             local view = read_attention_view(read, now_unix_ns, {
@@ -921,7 +993,7 @@ return function()
               previous_view = before[key],
             })
             attention_cache[key] = view
-            observed_events[key] = view.event_id
+            evidence.panes[key].event_id = view.event_id
             for _, item in ipairs(view.diagnostics or {}) do
               report_error_once("v2:" .. key .. ":" .. item.code .. ":" .. item.message,
                 item.code .. ": " .. item.message)
@@ -933,8 +1005,9 @@ return function()
           elseif read.kind == "v1" then
             local id = read.marker_id
             seen[id] = { domain = domain, kind = "v1", marker_id = id, local_id = local_id }
-            freshly_seen[id] = seen[id]
-            if tab_seen then tab_seen.keys[id] = true end
+            evidence.panes[id] = { observed = true, kind = "v1", domain = domain,
+              marker_id = id, local_id = local_id }
+            if tab_seen then tab_seen.keys[id] = evidence.panes[id] end
             pane_ids[#pane_ids + 1] = id
             before[id] = attention_cache[id]
             local atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source =
@@ -944,6 +1017,11 @@ return function()
             local subagents = count_live_subagents(dir, id, now)
             local flagged = review_flagged(dir, id)
             local acknowledged = acknowledgement_matches(dir, id, raw, publication_id)
+            -- The publication this poll read, kept with the pane's evidence. The
+            -- acknowledgement below must compare against this, not against the
+            -- display cache, which another window's poll can replace between the
+            -- enumeration and the focus query.
+            evidence.panes[id].identity = marker_identity(raw, publication_id)
             if atype then
               local cached = attention_cache[id]
               local observed_at = now
@@ -971,13 +1049,24 @@ return function()
               cache_marker_values(id, nil, nil, nil, nil, now, nil, subagents, flagged)
             end
           elseif read.kind == "unpublished" then
-            unpublished_by_domain[read.domain] = true
-            unresolved_domains[domain] = true
+            -- Positively unpublished: work to schedule, and a reason nothing on
+            -- this domain can be declared absent.
+            domain_item.unpublished = true
+            domain_item.unresolved = true
+            if tab_seen then tab_seen.domains[domain] = true end
           end
           -- An identity that failed to parse is no more resolved than one that
           -- has not arrived, and is equally capable of being the pane whose
-          -- records are about to be swept.
-          if read.kind == "invalid" then unresolved_domains[domain] = true end
+          -- records are about to be swept. It is not evidence of publication
+          -- work either way, so it sets no unpublished flag.
+          if read.kind == "invalid" then
+            domain_item.unresolved = true
+            -- Unlike an unpublished pane, this one says nothing about whether the
+            -- domain's publication work is done: the read failed, so "none of
+            -- these is unpublished" is not something this tick can claim.
+            domain_item.indeterminate = true
+            if tab_seen then tab_seen.domains[domain] = true end
+          end
           if key and title_enabled then
             local cached = attention_cache[key]
             sample_settled_title(
@@ -990,8 +1079,9 @@ return function()
       -- Retiring says this window left the domain. An unreadable tab has not said
       -- that, so a domain it remembers counts as still here.
       local possible_domains = {}
-      for domain in pairs(observed_domains) do possible_domains[domain] = true end
-      for domain in pairs(remembered_domains) do possible_domains[domain] = true end
+      for domain, item in pairs(evidence.domains) do
+        if item.observed or item.carried then possible_domains[domain] = true end
+      end
       local previous_domains = publish_domains_by_window[window_key]
       if previous_domains then
         for domain in pairs(previous_domains) do
@@ -999,19 +1089,19 @@ return function()
         end
       end
       publish_domains_by_window[window_key] = possible_domains
-      -- "None of the panes I could read is unpublished" is not "the domain is
-      -- published", and a count of the panes I could read is not the count
-      -- stabilisation measures. A domain some unreadable tab also held is passed
-      -- as partial: seen, so its retry is not dropped for staleness, but not
-      -- concluded from.
-      for domain in pairs(observed_domains) do
-        update_publish_schedule(
-          domain,
-          window_key,
-          pane_count_by_domain[domain] or 0,
-          unpublished_by_domain[domain] == true,
-          opts,
-          remembered_domains[domain] == true)
+      -- Every domain this window still has any evidence for, so a retry is never
+      -- dropped merely because the tab holding its pane went quiet. What each one
+      -- is allowed to say is decide_publication's answer, not this loop's.
+      for domain in pairs(possible_domains) do
+        local decision = decide_publication(evidence.domains[domain])
+        if decision then
+          update_publish_schedule(
+            domain, window_key,
+            decision.count or 0,
+            decision.unpublished == true,
+            opts,
+            decision.action ~= "conclude")
+        end
       end
 
       -- WezTerm emits no pane-destroyed event, so a closed pane is detected by
@@ -1027,8 +1117,16 @@ return function()
       -- A pane the sweep did not observe because its tab could not be read is
       -- unknown, not closed. It is carried forward as still present, so it is
       -- neither swept now nor treated as newly arrived next tick.
+      -- Panes this tick knows of only because a tab that would not answer held
+      -- them last time. They are carried into `seen`, so they are neither swept
+      -- now nor treated as newly arrived next tick, and named to the callbacks
+      -- so a scope nobody could look at is not reported lost.
+      local carried = {}
+      for key, pane in pairs(evidence.panes) do
+        if not pane.observed then carried[key] = true end
+      end
       if previously_seen then
-        for carried_key in pairs(unreadable) do
+        for carried_key in pairs(carried) do
           if seen[carried_key] == nil then seen[carried_key] = previously_seen[carried_key] end
         end
       end
@@ -1036,18 +1134,13 @@ return function()
         for gone_key, gone_value in pairs(previously_seen) do
           local gone = type(gone_value) == "table" and gone_value
             or { domain = gone_value, kind = "v1", marker_id = gone_key }
-          -- observed_domains, not possible_domains: this branch deletes files, and
-          -- a domain remembered from a tab that did not answer is not evidence
-          -- that the domain is still attached. Requiring a pane counted on it now
-          -- keeps the detach guard doing what it was written for.
-          if not seen[gone_key] and not unreadable[gone_key]
-              and (not observed_domains[gone.domain] or unresolved_domains[gone.domain]) then
-            -- Undecidable this tick: a closed pane and a detached domain look the
-            -- same from here. Keep remembering it, or the next tick -- which may
-            -- be able to tell -- will have nothing to compare against and the
-            -- record outlives the pane for good.
+          local verdict = decide_absence(evidence, gone_key, gone, live_local_ids)
+          if verdict == "unknown" and not seen[gone_key] then
+            -- Keep remembering it as well as keeping its files. Dropping it here
+            -- would leave the next tick -- which may be able to decide -- nothing
+            -- to compare against, and the record would outlive the pane for good.
             seen[gone_key] = gone_value
-          elseif not seen[gone_key] and not unreadable[gone_key] then
+          elseif verdict == "absent" and not seen[gone_key] then
             local shared = observed_in_other_window(gone_key, window_key)
             pane_ids[#pane_ids + 1] = gone_key
             before[gone_key] = attention_cache[gone_key]
@@ -1074,33 +1167,31 @@ return function()
       -- must neither acknowledge a marker its user has not seen nor be sent a key
       -- action, so an unfocused poll ends here with the cache correct.
       if not window:is_focused() then
-        deliver_window_views(window, callback_entries, opts, unreadable)
+        deliver_window_views(window, callback_entries, opts, carried)
         return
       end
 
       local current_active_pane = window:active_pane()
       if current_active_pane then
         local active_read = resolve_pane_read(current_active_pane)
-        -- Membership comes from this tick's own enumeration, not from `seen`,
-        -- which also holds panes carried across a tab that would not answer. A
-        -- carried pane is one nobody looked at, and acknowledging it would record
-        -- as seen a publication that was never displayed.
-        local member = active_read.cache_key and freshly_seen[active_read.cache_key]
-        if active_read.kind == "v1" and member and member.kind == "v1" then
-          acknowledge_focused_pane(active_read.marker_id, { dir = dir, now_ms = now })
-        elseif active_read.kind == "v2" and member and member.kind == "v2" then
+        local candidate = decide_acknowledgement(evidence, active_read)
+        if candidate and candidate.kind == "v1" then
+          acknowledge_focused_pane(active_read.marker_id, {
+            dir = dir, now_ms = now,
+            -- The publication this poll read, so the helper compares against its
+            -- caller's observation rather than against a display cache another
+            -- window's poll may have replaced in between.
+            observed_identity = candidate.identity,
+          })
+        elseif candidate and candidate.kind == "v2" then
           acknowledge_focused_v2_pane(active_read, {
             dir = dir, now_unix_ns = poll_now_unix_ns,
-            -- The event this tick's own read saw, which may be nil. The helper
-            -- reads the record again, and without this it would dismiss whatever
-            -- it finds there -- including one published in between, which the
-            -- user has not seen.
-            observed_event_id = observed_events[active_read.cache_key],
+            observed_event_id = candidate.event_id,
           })
         end
       end
 
-      deliver_window_views(window, callback_entries, opts, unreadable)
+      deliver_window_views(window, callback_entries, opts, carried)
 
       -- The event pane can transport a redraw when no current pane is available,
       -- but it never authorizes acknowledgement.
