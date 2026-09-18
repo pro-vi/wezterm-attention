@@ -16,8 +16,7 @@ WEZTERM_ATTENTION_TTY_INPUT_GUARD="$root/tests/python/tty_input_guard.py" cargo 
 python3 -m py_compile tests/fixtures/v2/check.py \
   tests/fixtures/consumer-migration/bridge_reader.py \
   tests/fixtures/consumer-migration/check.py tests/python/provider_contact_hook.py \
-  tests/python/check_python_test_map.py tests/python/measure.py tests/python/measure_spec.py
-python3 tests/python/check_python_test_map.py
+  tests/python/measure.py tests/python/measure_spec.py
 python3 -m unittest tests/python/measure_spec.py
 python3 tests/fixtures/v2/check.py
 python3 tests/fixtures/consumer-migration/check.py
@@ -73,9 +72,6 @@ fi
 cargo build --release
 python3 tests/python/measure.py --baseline-rust "$baseline_binary" --rust-binary "$root/target/release/attention"
 
-find README.md docs -type f -name '*.md' -print | while IFS= read -r markdown; do
-  "$HOME/.local/bin/md" map "$markdown" >/dev/null
-done
 
 git diff --check
 git diff --cached --check

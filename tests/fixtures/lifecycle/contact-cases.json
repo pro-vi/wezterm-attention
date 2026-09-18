@@ -2,7 +2,6 @@
   "rows": [
     {
       "id": "H01",
-      "historical_label": "User submits a prompt",
       "cases": [
         {
           "provider": "claude",
@@ -30,7 +29,6 @@
     },
     {
       "id": "H02",
-      "historical_label": "Tool preflight begins",
       "cases": [
         {
           "provider": "claude",
@@ -64,7 +62,6 @@
     },
     {
       "id": "H03",
-      "historical_label": "Tool produces an execution result",
       "cases": [
         {
           "provider": "claude",
@@ -99,7 +96,6 @@
     },
     {
       "id": "H04",
-      "historical_label": "Tool failure is observed",
       "cases": [
         {
           "provider": "claude",
@@ -124,7 +120,6 @@
     },
     {
       "id": "H05",
-      "historical_label": "Lead response finishes / agent settles",
       "cases": [
         {
           "provider": "claude",
@@ -153,7 +148,6 @@
     },
     {
       "id": "H06",
-      "historical_label": "Agent attempt fails",
       "cases": [
         {
           "provider": "claude",
@@ -176,7 +170,6 @@
     },
     {
       "id": "H07",
-      "historical_label": "Active attempt is interrupted or aborted",
       "cases": [
         {
           "provider": "codex",
@@ -199,7 +192,6 @@
     },
     {
       "id": "H08",
-      "historical_label": "Tool approval is requested",
       "cases": [
         {
           "provider": "claude",
@@ -222,7 +214,6 @@
     },
     {
       "id": "H09",
-      "historical_label": "Permission prompt remains outstanding long enough to notify",
       "cases": [
         {
           "provider": "claude",
@@ -236,7 +227,6 @@
     },
     {
       "id": "H10",
-      "historical_label": "Auto-mode policy denies a tool",
       "cases": [
         {
           "provider": "claude",
@@ -252,7 +242,6 @@
     },
     {
       "id": "H11",
-      "historical_label": "Agent asks a structured question",
       "cases": [
         {
           "provider": "claude",
@@ -285,7 +274,6 @@
     },
     {
       "id": "H12",
-      "historical_label": "A structured-question tool returns",
       "cases": [
         {
           "provider": "claude",
@@ -319,7 +307,6 @@
     },
     {
       "id": "H15",
-      "historical_label": "MCP server requests user input",
       "cases": [
         {
           "provider": "claude",
@@ -335,7 +322,6 @@
     },
     {
       "id": "H16",
-      "historical_label": "MCP elicitation response is selected",
       "cases": [
         {
           "provider": "claude",
@@ -351,7 +337,6 @@
     },
     {
       "id": "H17",
-      "historical_label": "MCP form or URL prompt produces a notice",
       "cases": [
         {
           "provider": "claude",
@@ -373,7 +358,6 @@
     },
     {
       "id": "H18",
-      "historical_label": "Child work is observed active",
       "cases": [
         {
           "provider": "claude",
@@ -398,7 +382,6 @@
     },
     {
       "id": "H19",
-      "historical_label": "Context compaction begins",
       "cases": [
         {
           "provider": "claude",
@@ -428,7 +411,6 @@
     },
     {
       "id": "H20",
-      "historical_label": "Context compaction succeeds",
       "cases": [
         {
           "provider": "claude",
@@ -459,16 +441,13 @@
   ],
   "deferred": [
     {
-      "id": "H13",
-      "historical_label": "Extension UI waiting span opens"
+      "id": "H13"
     },
     {
-      "id": "H14",
-      "historical_label": "Extension UI waiting span closes"
+      "id": "H14"
     },
     {
-      "id": "H21",
-      "historical_label": "Context compaction fails or aborts"
+      "id": "H21"
     }
   ],
   "native_codex_fixture": {
