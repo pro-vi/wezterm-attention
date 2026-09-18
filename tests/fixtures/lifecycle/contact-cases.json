@@ -441,13 +441,19 @@
   ],
   "deferred": [
     {
-      "id": "H13"
+      "id": "H13",
+      "description": "extension UI waiting span opens",
+      "reason": "Installed Pi supplies UI open/close callbacks with no request id or outcome, and an executed probe delivered close before open. They cannot reliably toggle waiting state."
     },
     {
-      "id": "H14"
+      "id": "H14",
+      "description": "extension UI waiting span closes",
+      "reason": "Same callbacks and the same ordering problem as the opening span."
     },
     {
-      "id": "H21"
+      "id": "H21",
+      "description": "compaction reports failure or abort",
+      "reason": "An explicit and useful signal, added in Pi 0.84.3. The retained API baseline is 0.80.5, so observing it would gate support on a newer provider."
     }
   ],
   "native_codex_fixture": {
