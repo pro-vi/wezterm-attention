@@ -94,7 +94,8 @@ because this crate's own tests drive them.
 
 Documenting the boundary does not prevent an external program from compiling
 against internals; only privacy does that. Making `records` private is not a
-one-line change either, because the supported `read_pane_facts_with_ports` needs
+one-line change either, because the currently public, unstable
+`read_pane_facts_with_ports` needs
 publicly nameable reader types, and several test files mix white-box storage
 tests with CLI subprocess tests in one module, so they cannot simply move inward.
 The declaration turns an accidental commitment into an explicit unstable one; the
