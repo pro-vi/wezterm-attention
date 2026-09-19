@@ -575,6 +575,13 @@ return function()
           -- partial look establishes, and dropping it lets another window's
           -- resolution retire a schedule this one still needs.
           if unpublished then observation.unpublished = true end
+        elseif unpublished then
+          -- This window has said nothing here before, and what it says now is
+          -- that work is outstanding. Record the requirement with no count: a
+          -- partial look cannot supply one, and stabilisation must wait for a
+          -- tick that can.
+          schedule.window_observations[window_key] =
+            { pane_count = nil, stable_polls = 0, unpublished = true, fresh = true }
         end
         return false
       end
@@ -876,7 +883,12 @@ return function()
       -- `identified_by_local` maps a GUI-local pane to the storage key it was
       -- read under this tick, so a key it used to answer to can be recognised as
       -- replaced rather than as missing.
-      local evidence = { panes = {}, domains = {}, gap = false, identified_by_local = {} }
+      -- `marker_ids_in_use` is which flat compatibility paths some pane observed
+      -- now still writes. A v2 pane keeps writing the flat marker, .ack and
+      -- .agents named by the pane id in its address, which is the same name a v1
+      -- pane uses, so a retired v1 key can name files a live v2 pane still owns.
+      local evidence = { panes = {}, domains = {}, gap = false, identified_by_local = {},
+        marker_ids_in_use = {} }
 
       --- Domain evidence, created on first mention. `observed` means a pane was
       --- enumerated on it now. `unresolved` means a pane on it has no usable
@@ -987,6 +999,7 @@ return function()
             evidence.panes[key] = { observed = true, kind = "v2", domain = domain,
               marker_id = read.marker_id, local_id = local_id }
             evidence.identified_by_local[local_id] = key
+            if read.marker_id then evidence.marker_ids_in_use[read.marker_id] = true end
             pane_ids[#pane_ids + 1] = key
             before[key] = attention_cache[key]
             local view = read_attention_view(read, now_unix_ns, {
@@ -1010,6 +1023,7 @@ return function()
             evidence.panes[id] = { observed = true, kind = "v1", domain = domain,
               marker_id = id, local_id = local_id }
             evidence.identified_by_local[local_id] = id
+            evidence.marker_ids_in_use[id] = true
             pane_ids[#pane_ids + 1] = id
             before[id] = attention_cache[id]
             local atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source =
@@ -1152,7 +1166,14 @@ return function()
             local shared = observed_in_other_window(gone_key, window_key)
             pane_ids[#pane_ids + 1] = gone_key
             before[gone_key] = attention_cache[gone_key]
-            if not shared and gone.kind == "v1" and not (gone.local_id and live_local_ids[gone.local_id]) then
+            -- The key is retired either way. Unlinking the files it names is a
+            -- separate question: some pane observed right now may still be
+            -- writing them under another key, because a v2 pane's flat
+            -- projections are named by the pane id in its address. No current
+            -- writer having been seen is what authorises the removal.
+            if not shared and gone.kind == "v1"
+                and not (gone.local_id and live_local_ids[gone.local_id])
+                and not evidence.marker_ids_in_use[gone.marker_id] then
               remove_marker(dir, gone.marker_id)
             end
             if not shared then attention_cache[gone_key] = nil end
