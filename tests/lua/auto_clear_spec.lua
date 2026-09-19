@@ -378,6 +378,16 @@ end
 --- case: a local pane whose local id is also its marker id.
 local function mux_pane(pane_id, spec)
   spec = spec or {}
+  -- A pane whose handle answers but whose mux resolution does not: pane_id is
+  -- held by the handle, while the other two go through the mux and fail together.
+  if spec.unresolvable then
+    return {
+      pane_id = function() return pane_id end,
+      get_domain_name = function() error("pane " .. pane_id .. " not found in mux") end,
+      get_user_vars = function() error("pane " .. pane_id .. " not found in mux") end,
+      get_title = function() error("pane " .. pane_id .. " not found in mux") end,
+    }
+  end
   local user_vars = {}
   if spec.published ~= nil then user_vars.WEZTERM_PANE = tostring(spec.published) end
   if spec.attention ~= nil then
@@ -397,6 +407,7 @@ end
 local function pane_from_entry(entry)
   if type(entry) == "table" then
     return mux_pane(entry.id, {
+      unresolvable = entry.unresolvable,
       domain = entry.domain,
       published = entry.published,
       attention = entry.attention,
@@ -3953,32 +3964,32 @@ end)
 -- say it is still here -- and a review flag the user set is not rebuilt by the
 -- identity arriving.
 test("an unresolved pane on a domain is not proof an identity there is gone", function()
-  write_marker(42, "stop")
-  local sidecar = assert(io.open(test_dir .. "/42.agents", "w"))
+  write_marker(8842, "stop")
+  local sidecar = assert(io.open(test_dir .. "/8842.agents", "w"))
   assert(sidecar:write('{"agents":{}}'))
   assert(sidecar:close())
 
   local window = 4200
   local anchor_tab = { tab_id = 421, panes = { { id = 900, domain = "local" } } }
   attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { anchor_tab, { tab_id = 422, panes = { { id = 700, published = 42, domain = "mux" } } } } }))
-  assert(marker_exists(42), "the remote pane is observed through its published identity")
+    tabs = { anchor_tab, { tab_id = 422, panes = { { id = 8700, published = 8842, domain = "mux" } } } } }))
+  assert(marker_exists(8842), "the remote pane is observed through its published identity")
 
   -- Detached: nothing on that domain is enumerated, so absence cannot be decided.
   attention.poll(window_double({ window_id = window, focused = false, tabs = { anchor_tab } }))
-  assert(marker_exists(42), "an unobserved domain decides nothing")
+  assert(marker_exists(8842), "an unobserved domain decides nothing")
 
   -- Reattached, identity not yet published. The domain is back; the question of
   -- which stored identity this pane carries is not yet answerable.
   attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { anchor_tab, { tab_id = 422, panes = { { id = 701, domain = "mux" } } } } }))
-  assert(marker_exists(42), "a pane that has not said who it is cannot say who it is not")
-  assert(subagents_exists(42), "the sidecars go with the marker")
+    tabs = { anchor_tab, { tab_id = 422, panes = { { id = 8701, domain = "mux" } } } } }))
+  assert(marker_exists(8842), "a pane that has not said who it is cannot say who it is not")
+  assert(subagents_exists(8842), "the sidecars go with the marker")
 
   -- Every pane on the domain identified, and none of them is 42.
   attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { anchor_tab, { tab_id = 422, panes = { { id = 702, published = 43, domain = "mux" } } } } }))
-  assert(not marker_exists(42), "a fully identified domain that excludes it may sweep it")
+    tabs = { anchor_tab, { tab_id = 422, panes = { { id = 8702, published = 8843, domain = "mux" } } } } }))
+  assert(not marker_exists(8842), "a fully identified domain that excludes it may sweep it")
 end)
 
 -- The acknowledgement compares the event the poll saw with the one it is about
@@ -4051,40 +4062,40 @@ end)
 -- has a present domain, no uncertainty, and deletes the very records the
 -- unidentified pane might have turned out to own.
 test("identity uncertainty survives the tab that raised it going quiet", function()
-  write_marker(44, "stop")
-  local sidecar = assert(io.open(test_dir .. "/44.agents", "w"))
+  write_marker(8844, "stop")
+  local sidecar = assert(io.open(test_dir .. "/8844.agents", "w"))
   assert(sidecar:write('{"agents":{}}'))
   assert(sidecar:close())
-  local sidecar_before = assert(read_path(test_dir .. "/44.agents"))
+  local sidecar_before = assert(read_path(test_dir .. "/8844.agents"))
 
   local window = 4400
   local anchor_tab = { tab_id = 441, panes = { { id = 910, domain = "local" } } }
-  local sibling = { tab_id = 443, panes = { { id = 703, published = 45, domain = "mux" } } }
+  local sibling = { tab_id = 443, panes = { { id = 703, published = 8845, domain = "mux" } } }
   attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { anchor_tab, { tab_id = 442, panes = { { id = 704, published = 44, domain = "mux" } } } } }))
-  assert(marker_exists(44), "observed through its published identity")
+    tabs = { anchor_tab, { tab_id = 442, panes = { { id = 8704, published = 8844, domain = "mux" } } } } }))
+  assert(marker_exists(8844), "observed through its published identity")
 
   attention.poll(window_double({ window_id = window, focused = false, tabs = { anchor_tab } }))
-  assert(marker_exists(44), "an unobserved domain decides nothing")
+  assert(marker_exists(8844), "an unobserved domain decides nothing")
 
   -- Reattached: one tab holds a pane that has not said who it is, another holds
   -- an identified pane on the same domain.
   attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { anchor_tab, { tab_id = 442, panes = { { id = 705, domain = "mux" } } }, sibling } }))
-  assert(marker_exists(44), "an unresolved pane blocks the conclusion while it is enumerated")
+    tabs = { anchor_tab, { tab_id = 442, panes = { { id = 8705, domain = "mux" } } }, sibling } }))
+  assert(marker_exists(8844), "an unresolved pane blocks the conclusion while it is enumerated")
 
   -- The tab holding it stops answering. The sibling still answers, so the domain
   -- is present -- but nothing has become any more certain about identity 44.
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { anchor_tab, { tab_id = 442, gone = true }, sibling } }))
-  assert(marker_exists(44), "a tab going quiet cannot resolve what it had not resolved")
-  assert(read_path(test_dir .. "/44.agents") == sidecar_before,
+  assert(marker_exists(8844), "a tab going quiet cannot resolve what it had not resolved")
+  assert(read_path(test_dir .. "/8844.agents") == sidecar_before,
     "the sidecars are removed with the marker, so they prove preservation too")
 
   -- Every pane on the domain identified, none of them 44.
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { anchor_tab, sibling } }))
-  assert(not marker_exists(44), "a fully identified domain that excludes it may sweep it")
+  assert(not marker_exists(8844), "a fully identified domain that excludes it may sweep it")
 end)
 
 -- Two windows share one display cache. If the acknowledgement takes its expected
@@ -4361,6 +4372,74 @@ test("a domain nobody could see this tick keeps its retry", function()
   scheduled[1].callback()
   assert(#spawned == 2, "the obligation survives a tick that could not see it")
   wezterm.background_child_process = original_background
+end)
+
+-- The flat compatibility files are shared across windows, so asking whether this
+-- window still writes them is the wrong scope. Another window may already hold
+-- the pane that owns them, under a full address whose pane id is the very name
+-- the retiring key had. Looking only for that exact key there misses it, because
+-- the owner answers to a different one.
+test("another window's pane keeps the files this window is retiring", function()
+  local shared_id = 8862
+  write_marker(shared_id, "stop")
+  local sidecar = assert(io.open(test_dir .. "/" .. shared_id .. ".agents", "w"))
+  assert(sidecar:write('{}'))
+  assert(sidecar:close())
+  local before = assert(read_path(test_dir .. "/" .. shared_id))
+  local options = { now_unix_ns = protocol_fixture.state_case.now_unix_ns,
+    call_after = function() end }
+
+  -- Window A knows it as a v1 identity.
+  attention.poll(window_double({ window_id = 8860, focused = false,
+    tabs = { { tab_id = 881, panes = { { id = 8820, published = shared_id, domain = "mux" } } },
+             { tab_id = 882, panes = { { id = 8821, published = 8863, domain = "mux" } } } } }),
+    options)
+  assert(marker_exists(shared_id), "observed by window A")
+
+  -- It moves to window B and is read there under a full address carrying the
+  -- same pane id, which is what names those flat files.
+  local wire = materialize_v2_fixture(shared_id)
+  attention.poll(window_double({ window_id = 8861, focused = false,
+    tabs = { { tab_id = 883, panes = { { id = 8820, domain = "mux", attention = wire } } } } }),
+    options)
+
+  -- Window A polls again without it, its sibling still identified on the domain.
+  attention.poll(window_double({ window_id = 8860, focused = false,
+    tabs = { { tab_id = 882, panes = { { id = 8821, published = 8863, domain = "mux" } } } } }),
+    options)
+  assert(read_path(test_dir .. "/" .. shared_id) == before,
+    "another window holds the pane that writes this file")
+  assert(subagents_exists(shared_id), "and its sidecars go with it")
+end)
+
+-- decide_absence refuses for a pane that is alive but identified nowhere, and
+-- this is the case that reaches it. A handle answers with its id while its mux
+-- resolution fails, so its domain reads as unknown and lands in a bucket of its
+-- own -- leaving the domain the retained entry was recorded on observed and
+-- resolved, with every earlier refusal bypassed.
+test("a pane that answers only with its id decides nothing about its old name", function()
+  local target = 8870
+  write_marker(target, "stop")
+
+  attention.poll(window_double({ window_id = 8871, focused = false,
+    tabs = { { tab_id = 887, panes = { { id = 8872, published = target, domain = "mux" } },  },
+             { tab_id = 888, panes = { { id = 8873, published = 8874, domain = "mux" } } } } }))
+  assert(marker_exists(target), "observed under its published name")
+
+  -- Same handle, now resolving to nothing, beside an identified sibling on the
+  -- domain the old entry was recorded on.
+  attention.poll(window_double({ window_id = 8871, focused = false,
+    tabs = { { tab_id = 887, panes = { { id = 8872, unresolvable = true } } },
+             { tab_id = 888, panes = { { id = 8873, published = 8874, domain = "mux" } } } } }))
+  assert(marker_exists(target),
+    "a pane that cannot say where it is cannot say the old name is unused")
+  -- The files survive whether this decides nothing or decides the name was
+  -- replaced, so they do not tell the two apart. The reading does: deciding
+  -- nothing keeps it, and calling it replaced would retire it on the word of a
+  -- pane that never said which name replaced it.
+  assert(attention.get_attention(target) == "stop",
+    "and the reading stands, because nothing has taken the name over")
+  drain_errors()
 end)
 
 os.execute("rm -rf " .. shell_quote(test_dir))
