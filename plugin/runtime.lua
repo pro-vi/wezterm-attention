@@ -3,10 +3,6 @@ return function()
   local legacy_cache_key_by_marker_id = {}
   local marker_id_by_local = {}
   local seen_marker_ids_by_window = {}
-  -- window key -> tab id -> { keys, domains } as that tab last read. A tab whose
-  -- panes() raises is answered from here. Domains are kept separately from keys
-  -- because a pane that has not published an identity has a domain and no key.
-  local tab_memory_by_window = {}
   local callback_views_by_window = {}
   local delivering_views = false
 
@@ -433,13 +429,12 @@ return function()
     --- unseen -- without letting the panes that did answer stand for the rest.
     local function decide_publication(domain_item, gap)
         if not domain_item then return nil end
-        if not domain_item.observed and not domain_item.carried then return nil end
+        if not domain_item.observed then return nil end
         if gap then return { action = "renew", unpublished = domain_item.unpublished == true } end
         -- Coverage, not identity resolution: a domain every tab of which
         -- answered can be concluded about even when one of its panes has yet to
         -- publish, because that pane is the reason the schedule exists.
-        local complete = domain_item.observed and not domain_item.carried
-          and not domain_item.indeterminate
+        local complete = domain_item.observed and not domain_item.indeterminate
         if complete then
           return { action = "conclude", count = domain_item.count,
             unpublished = domain_item.unpublished == true }
@@ -486,9 +481,6 @@ return function()
       live[current_window_key] = true
       for window_key in pairs(seen_marker_ids_by_window) do
         if not live[window_key] then seen_marker_ids_by_window[window_key] = nil end
-      end
-      for window_key in pairs(tab_memory_by_window) do
-        if not live[window_key] then tab_memory_by_window[window_key] = nil end
       end
       for window_key in pairs(publish_domains_by_window) do
         if not live[window_key] then publish_domains_by_window[window_key] = nil end
@@ -736,12 +728,11 @@ return function()
       return true
     end
 
-    --- `unknown` names scopes whose pane could not be enumerated this tick. They
-    --- are carried forward untouched: a scope nobody could look at has not been
-    --- lost, and reporting it so would have a consumer discard state it still
-    --- needs -- a dismissal, a policy -- and rebuild it as new when the pane
-    --- comes back.
-    local function deliver_window_views(window, entries, opts, unknown, unsettled)
+    --- `unsettled` says a tab in this window could not be read. A scope nobody
+    --- could look at has not been lost, and reporting it so would have a consumer
+    --- discard state it still needs -- a dismissal, a policy -- and rebuild it as
+    --- new when the pane comes back.
+    local function deliver_window_views(window, entries, opts, unsettled)
       local callback = M._on_view_change
       if not callback then return end
       local window_key = redraw_window_key(window)
@@ -771,9 +762,7 @@ return function()
       end
       for key, state in pairs(previous) do
         if not next_views[key] then
-          -- `unsettled` is the window-wide case: a tab nobody could bound might
-          -- still be holding this scope, so it is no more lost than a carried one.
-          if unsettled or (unknown and unknown[key]) then next_views[key] = state
+          if unsettled then next_views[key] = state
           else lost(state, window:window_id()) end
         end
       end
@@ -875,13 +864,11 @@ return function()
       -- The absence sweep below deletes records for panes it cannot see, so a
       -- pane it merely failed to read must not look absent. These carry the
       -- unreadable tabs' panes from the last tick that could read them.
-      local tab_memory = tab_memory_by_window[window_key] or {}
-      local tab_memory_now = {}
       -- What this tick established, and how. The decisions below need different
-      -- strengths of the same fact -- a pane carried from a tab that would not
-      -- answer is enough to keep its records and not enough to dismiss its
-      -- notification -- so provenance travels with the fact instead of living in
-      -- a separate table each consumer combines for itself.
+      -- strengths of the same fact -- a pane this tick read is enough to dismiss
+      -- its notification, where one it merely used to know of is not -- so
+      -- provenance travels with the fact instead of living in a separate table
+      -- each consumer combines for itself.
       -- `gap` means a listed tab could not be read and nothing is known about
       -- what it held -- it has never been read successfully, so there is no
       -- remembered membership to bound it with. Its scope is the whole window,
@@ -892,8 +879,7 @@ return function()
       local evidence = { panes = {}, domains = {}, gap = false, identified_by_local = {} }
 
       --- Domain evidence, created on first mention. `observed` means a pane was
-      --- enumerated on it now. `carried` means a tab that would not answer held
-      --- it when it last did. `unresolved` means a pane on it has no usable
+      --- enumerated on it now. `unresolved` means a pane on it has no usable
       --- identity, so nothing can be concluded about which identities are gone.
       --- `indeterminate` is narrower than `unresolved`: a pane's identity could
       --- not be read at all, so its publication status is unknown too. A pane
@@ -903,7 +889,7 @@ return function()
       local function domain_evidence(domain)
         local item = evidence.domains[domain]
         if not item then
-          item = { observed = false, carried = false, unresolved = false,
+          item = { observed = false, unresolved = false,
             indeterminate = false, count = 0 }
           evidence.domains[domain] = item
         end
@@ -961,44 +947,19 @@ return function()
           -- protected only while this tab is still listed, so once WezTerm drops
           -- it they are swept normally.
           tab_panes = {}
-          -- Unbounded either way. What a tab held when it last answered is a
-          -- lower bound on what it holds now, not an upper one: a pane can be
-          -- moved into a tab after its last successful read, and that pane would
-          -- be in no snapshot. So the remembered members are carried as positive
-          -- facts and the tab still counts as a gap.
-          local remembered = tab_id and tab_memory[tab_id]
+          -- What a tab held when it last answered is a lower bound on what it
+          -- holds now, not an upper one -- a pane can be moved into a tab after
+          -- its last successful read, and would appear in no memory of it. So
+          -- there is nothing to remember that would narrow this: the tab is a
+          -- gap, and the gap is what every decision consults.
           evidence.gap = true
-          if remembered then
-            tab_memory_now[tab_id] = remembered
-            for key, item in pairs(remembered.keys) do
-              if not evidence.panes[key] then
-                evidence.panes[key] = { observed = false, kind = item.kind, domain = item.domain,
-                  marker_id = item.marker_id, local_id = item.local_id }
-              end
-            end
-            for remembered_domain, was_unresolved in pairs(remembered.domains) do
-              local item = domain_evidence(remembered_domain)
-              item.carried = true
-              -- The uncertainty travels with the tab. Without this, a tab holding
-              -- a pane whose identity had not resolved would lose that fact the
-              -- moment it stopped answering, and the next tick would delete the
-              -- records of the identity that pane might still turn out to be.
-              if was_unresolved then item.unresolved = true end
-            end
-          end
-        elseif tab_id then
-          tab_memory_now[tab_id] = { keys = {}, domains = {} }
         end
-        local tab_seen = tab_id and tab_memory_now[tab_id]
         for _, p in ipairs(tab_panes) do
           local domain = pane_method(p, "get_domain_name") or "?"
           local domain_item = domain_evidence(domain)
           domain_item.observed = true
           -- Recorded here rather than beside the cache key below, so a pane with
           -- no identity to key still tells its tab which domain it was on.
-          if tab_seen then
-            tab_seen.domains[domain] = tab_seen.domains[domain] or false
-          end
           domain_item.count = domain_item.count + 1
           local local_id = tostring(pane_method(p, "pane_id"))
           live_local_ids[local_id] = true
@@ -1026,7 +987,6 @@ return function()
             evidence.panes[key] = { observed = true, kind = "v2", domain = domain,
               marker_id = read.marker_id, local_id = local_id }
             evidence.identified_by_local[local_id] = key
-            if tab_seen then tab_seen.keys[key] = evidence.panes[key] end
             pane_ids[#pane_ids + 1] = key
             before[key] = attention_cache[key]
             local view = read_attention_view(read, now_unix_ns, {
@@ -1050,7 +1010,6 @@ return function()
             evidence.panes[id] = { observed = true, kind = "v1", domain = domain,
               marker_id = id, local_id = local_id }
             evidence.identified_by_local[local_id] = id
-            if tab_seen then tab_seen.keys[id] = evidence.panes[id] end
             pane_ids[#pane_ids + 1] = id
             before[id] = attention_cache[id]
             local atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source =
@@ -1098,7 +1057,6 @@ return function()
             -- this domain can be declared absent.
             domain_item.unpublished = true
             domain_item.unresolved = true
-            if tab_seen then tab_seen.domains[domain] = true end
           end
           -- An identity that failed to parse is no more resolved than one that
           -- has not arrived, and is equally capable of being the pane whose
@@ -1110,7 +1068,6 @@ return function()
             -- domain's publication work is done: the read failed, so "none of
             -- these is unpublished" is not something this tick can claim.
             domain_item.indeterminate = true
-            if tab_seen then tab_seen.domains[domain] = true end
           end
           if key and title_enabled then
             local cached = attention_cache[key]
@@ -1125,7 +1082,7 @@ return function()
       -- that, so a domain it remembers counts as still here.
       local possible_domains = {}
       for domain, item in pairs(evidence.domains) do
-        if item.observed or item.carried then possible_domains[domain] = true end
+        if item.observed then possible_domains[domain] = true end
       end
       local previous_domains = publish_domains_by_window[window_key]
       if previous_domains then
@@ -1174,19 +1131,6 @@ return function()
       -- A pane the sweep did not observe because its tab could not be read is
       -- unknown, not closed. It is carried forward as still present, so it is
       -- neither swept now nor treated as newly arrived next tick.
-      -- Panes this tick knows of only because a tab that would not answer held
-      -- them last time. They are carried into `seen`, so they are neither swept
-      -- now nor treated as newly arrived next tick, and named to the callbacks
-      -- so a scope nobody could look at is not reported lost.
-      local carried = {}
-      for key, pane in pairs(evidence.panes) do
-        if not pane.observed then carried[key] = true end
-      end
-      if previously_seen then
-        for carried_key in pairs(carried) do
-          if seen[carried_key] == nil then seen[carried_key] = previously_seen[carried_key] end
-        end
-      end
       if previously_seen then
         for gone_key, gone_value in pairs(previously_seen) do
           local gone = type(gone_value) == "table" and gone_value
@@ -1216,7 +1160,6 @@ return function()
         end
       end
       seen_marker_ids_by_window[window_key] = seen
-      tab_memory_by_window[window_key] = tab_memory_now
       -- A scalar cannot select one of several realms. Build this projection
       -- from all observed windows, rather than letting poll/overlay order win.
       rebuild_scalar_projection()
@@ -1231,7 +1174,7 @@ return function()
       -- must neither acknowledge a marker its user has not seen nor be sent a key
       -- action, so an unfocused poll ends here with the cache correct.
       if not window:is_focused() then
-        deliver_window_views(window, callback_entries, opts, carried, evidence.gap)
+        deliver_window_views(window, callback_entries, opts, evidence.gap)
         return
       end
 
@@ -1255,7 +1198,7 @@ return function()
         end
       end
 
-      deliver_window_views(window, callback_entries, opts, carried, evidence.gap)
+      deliver_window_views(window, callback_entries, opts, evidence.gap)
 
       -- The event pane can transport a redraw when no current pane is available,
       -- but it never authorizes acknowledgement.
