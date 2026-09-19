@@ -4220,6 +4220,64 @@ test("a proven replacement survives uncertainty about something else", function(
     "and must survive equally when it does not: the replacement was observed either way")
 end)
 
+-- A v2 pane keeps writing the flat marker, .ack and .agents named by the pane id
+-- in its address -- the same name a v1 pane uses. So the scalar key retiring does
+-- not mean the files it named are unowned. When the upgrade itself is never
+-- observed, because the client was detached while it happened, no replacement
+-- relation exists and the old key looks plainly absent on reconnect. Deleting
+-- then takes the live pane's compatibility projection, and a review flag its
+-- user set, which no later writer event restores.
+test("a key retiring does not make the files it named unowned", function()
+  local shared_id = 56
+  write_marker(shared_id, "stop")
+  for _, suffix in ipairs({ ".agents", ".review" }) do
+    local file = assert(io.open(test_dir .. "/" .. shared_id .. suffix, "w"))
+    assert(file:write('{}'))
+    assert(file:close())
+  end
+  local before = {}
+  for _, name in ipairs({ "", ".agents", ".review" }) do
+    before[name] = assert(read_path(test_dir .. "/" .. shared_id .. name))
+  end
+
+  local window, options = 5600, { now_unix_ns = protocol_fixture.state_case.now_unix_ns,
+    call_after = function() end }
+  local anchor_tab = { tab_id = 561, panes = { { id = 940, domain = "local" } } }
+
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { anchor_tab,
+      { tab_id = 562, panes = { { id = 800, published = shared_id, domain = "mux" } } } } }),
+    options)
+  assert(marker_exists(shared_id), "observed as a v1 identity")
+
+  -- The upgrade happens unobserved: this window sees nothing on that domain.
+  attention.poll(window_double({ window_id = window, focused = false, tabs = { anchor_tab } }),
+    options)
+
+  -- Reconnected. The same server pane, a new GUI-local id, now carrying a full
+  -- address whose pane id is the one those flat files are named by.
+  local wire = materialize_v2_fixture(shared_id)
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { anchor_tab,
+      { tab_id = 562, panes = { { id = 801, domain = "mux", attention = wire } } } } }),
+    options)
+
+  for _, name in ipairs({ "", ".agents", ".review" }) do
+    assert(read_path(test_dir .. "/" .. shared_id .. name) == before[name],
+      "a pane observed right now still writes " .. shared_id .. name)
+  end
+
+  -- The progress half: the obsolete key does retire. Ownership of those paths has
+  -- moved to the pane's v2 identity, which removes them when it goes, so the
+  -- scalar key must stop answering for them rather than linger as a second
+  -- reading of the same pane.
+  -- The progress half: the stale v1 reading is gone. The scalar id still answers,
+  -- because it is the live pane's id now -- with that pane's state rather than
+  -- the "stop" the retired entry was holding.
+  assert(attention.get_attention(shared_id) == "notify",
+    "the id resolves to the pane that owns it now, not to the entry that retired")
+end)
+
 os.execute("rm -rf " .. shell_quote(test_dir))
 
 io.write(string.format("%d passed, %d failed\n", passed, failed))
