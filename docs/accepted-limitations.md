@@ -122,6 +122,34 @@ danger: it wants the canonical rule stated, that write-and-validate round trip i
 place, and raw-JSON fixtures for the integral-float and exponent spellings, since
 a decoded fixture cannot express the difference.
 
+## Cleaning up a pane's records asks the mux, and waits when it cannot answer
+
+A pane's flat compatibility files are named by its pane id, and a v2 pane writes
+the same names its v1 identity used. So deciding that nobody writes them any more
+is not a question about one window. Before unlinking, the plugin walks the mux --
+every window, every tab, every pane -- and collects the names in use.
+
+Two consequences are deliberate.
+
+The walk answers only when it finishes. A pane that will not say which identity
+it carries could be the owner, so it makes the search inconclusive, and an
+inconclusive search keeps the files and keeps the obligation to ask again. This
+is the direction the whole sweep errs in: not being able to tell is never a
+reason to delete.
+
+A pane that stays unidentifiable across many polls therefore keeps a pending
+deletion pending, and the walk is repeated on each of those polls. It is bounded
+-- once per poll, and only when something is otherwise eligible for removal, with
+one walk serving every candidate in that poll -- but it is work that a quieter
+implementation would not do. Bounding it further would be a performance policy,
+and any such policy has to keep the obligation rather than manufacture an answer
+by giving up.
+
+The cheaper shape, asking the mux for the pane's old local id first, helps only a
+pane that moved without reconnecting: a failed lookup cannot tell a closed pane
+from one that came back under a new local id, so it would still fall through to
+the walk. It is worth adding after measuring a real callback, not before.
+
 ## The acknowledgement write has no compare-and-swap
 
 `write_v2_record` in `plugin/overlays.lua` reads the existing record only to
