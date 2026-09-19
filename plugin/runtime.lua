@@ -1168,6 +1168,50 @@ return function()
       -- its panes from this window in a single tick while those panes, and the
       -- processes writing their markers, keep running on the server. So an id is
       -- only swept when this window still holds some pane of that id's domain.
+      -- Asked at most once a tick, and only when something is otherwise eligible
+      -- for unlinking. Every other source of ownership is a saved observation --
+      -- what some window saw when it last polled -- and a pane that has just been
+      -- moved into a window appears in no observation until that window polls.
+      -- Which window's status callback runs first would otherwise decide whether
+      -- a moved pane keeps its files. This asks the mux instead of the memories.
+      --
+      -- `complete` is false as soon as any part of the walk fails or any pane
+      -- declines to say who it is, because then some pane that was not read could
+      -- be the owner. Incomplete is not permission.
+      local mux_ownership
+      local function current_marker_owners()
+        if mux_ownership then return mux_ownership end
+        local markers, complete = {}, true
+        local mux = wezterm.mux
+        local windows_ok, windows = pcall(function() return mux and mux.all_windows() end)
+        if not windows_ok or type(windows) ~= "table" then
+          mux_ownership = { markers = markers, complete = false }
+          return mux_ownership
+        end
+        for _, mux_window in ipairs(windows) do
+          local tabs_ok, window_tabs = pcall(mux_window.tabs, mux_window)
+          if not tabs_ok or type(window_tabs) ~= "table" then complete = false
+          else
+            for _, window_tab in ipairs(window_tabs) do
+              local panes_ok, tab_panes = pcall(window_tab.panes, window_tab)
+              if not panes_ok or type(tab_panes) ~= "table" then complete = false
+              else
+                for _, owned in ipairs(tab_panes) do
+                  local owner = resolve_pane_read(owned)
+                  if (owner.kind == "v1" or owner.kind == "v2") and owner.marker_id then
+                    markers[owner.marker_id] = true
+                  else
+                    complete = false
+                  end
+                end
+              end
+            end
+          end
+        end
+        mux_ownership = { markers = markers, complete = complete }
+        return mux_ownership
+      end
+
       local previously_seen = seen_marker_ids_by_window[window_key]
       -- A pane the sweep did not observe because its tab could not be read is
       -- unknown, not closed. It is carried forward as still present, so it is
@@ -1191,20 +1235,28 @@ return function()
             if not shared then attention_cache[gone_key] = nil end
           elseif verdict == "absent" and not seen[gone_key] then
             local shared = observed_in_other_window(gone_key, window_key)
-            pane_ids[#pane_ids + 1] = gone_key
-            before[gone_key] = attention_cache[gone_key]
             -- The key is retired either way. Unlinking the files it names is a
-            -- separate question: some pane observed right now may still be
-            -- writing them under another key, because a v2 pane's flat
-            -- projections are named by the pane id in its address. No current
-            -- writer having been seen is what authorises the removal.
-            if not shared and gone.kind == "v1"
-                and not (gone.local_id and live_local_ids[gone.local_id])
-                and not evidence.marker_ids_in_use[gone.marker_id]
-                and not marker_in_use_in_other_window(gone.marker_id, window_key) then
-              remove_marker(dir, gone.marker_id)
+            -- separate question: some pane may still be writing them under
+            -- another key, because a v2 pane's flat projections are named by the
+            -- pane id in its address. These are the cheap vetoes; each one is a
+            -- positive sighting, and any of them is enough to keep the files.
+            local may_unlink = not shared and gone.kind == "v1"
+              and not (gone.local_id and live_local_ids[gone.local_id])
+              and not evidence.marker_ids_in_use[gone.marker_id]
+              and not marker_in_use_in_other_window(gone.marker_id, window_key)
+            local owners = may_unlink and current_marker_owners() or nil
+            if owners and not owners.markers[gone.marker_id] and not owners.complete then
+              -- Nothing sighted, and the search could not finish. Keep the files
+              -- and keep the obligation, so a tick that can finish still decides.
+              seen[gone_key] = gone_value
+            else
+              pane_ids[#pane_ids + 1] = gone_key
+              before[gone_key] = attention_cache[gone_key]
+              if owners and not owners.markers[gone.marker_id] then
+                remove_marker(dir, gone.marker_id)
+              end
+              if not shared then attention_cache[gone_key] = nil end
             end
-            if not shared then attention_cache[gone_key] = nil end
           end
         end
       end
