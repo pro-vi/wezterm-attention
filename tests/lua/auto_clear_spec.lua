@@ -3745,9 +3745,11 @@ end)
 -- WezTerm keeps a window's tabs as objects and drops them from the mux
 -- separately, and the pruning that reconciles the two returns early while any
 -- background activity is in flight. So a tab can stay listed and unreadable for
--- more than one tick. If that held the whole sweep off, every pane that closed
--- meanwhile would keep its record for as long as the bad tab is listed.
-test("an unreadable tab holds back only its own panes, not the whole sweep", function()
+-- more than one tick, and a pane can be moved into a tab after its last
+-- successful read -- which is why what that tab held before does not bound what
+-- it holds now, and why nothing in the window can be called absent until it
+-- answers. Progress comes from keeping the question, not from answering it early.
+test("an unreadable tab defers the sweep, and answering releases it", function()
   write_marker(7801, "stop")
   write_marker(7802, "notify")
   write_marker(7803, "stop")
@@ -3761,9 +3763,16 @@ test("an unreadable tab holds back only its own panes, not the whole sweep", fun
   -- 7803 closes for real while the racing tab is still listed and unreadable.
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { { tab_id = racing, gone = true }, { tab_id = kept, panes = { 7801 } } } }))
-  assert(marker_exists(7802), "the unreadable tab's own pane is still protected")
-  assert(not marker_exists(7803),
-    "a pane that genuinely closed must be swept even while another tab is unreadable")
+  assert(marker_exists(7802), "the unreadable tab's own pane is protected")
+  assert(marker_exists(7803),
+    "and so is the closed one: a tab that cannot be read might have gained it")
+
+  -- The obligation is what carries progress, not sweeping during the gap. Once
+  -- every listed tab answers, the pane that really closed is swept -- including
+  -- one that closed while nothing could be concluded.
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { { tab_id = kept, panes = { 7801 } } } }))
+  assert(not marker_exists(7803), "a closed pane is swept once the window can be read")
 end)
 
 -- The tab list captured at the top of a poll is walked again further down, to
@@ -3865,11 +3874,11 @@ test("a remembered domain preserves records but cannot authorise deleting them",
     "no pane was counted on the domain, so nothing may be deleted for absence")
   assert(subagents_exists(7602), "the sidecars go with the marker and must survive with it")
 
-  -- A pane counted on the domain now. That is the evidence the guard wants, and
-  -- the absent pane is swept as it always was -- remembering did not freeze it.
+  -- Every listed tab answers, and the domain is observed. Now the absent pane is
+  -- swept as it always was -- remembering did not freeze it, it deferred it.
   attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { { tab_id = racing, gone = true }, { tab_id = sibling, panes = { 7601 } } } }))
-  assert(not marker_exists(7602), "an observed domain still authorises the sweep")
+    tabs = { { tab_id = sibling, panes = { 7601 } } } }))
+  assert(not marker_exists(7602), "an observed domain in a readable window authorises the sweep")
   assert(not subagents_exists(7602), "the sidecars go with the marker")
 end)
 
@@ -4164,6 +4173,51 @@ test("a pane that changes storage key keeps its files and gives up the old key",
   assert(marker_exists(50), "the pane is alive, so its files stay")
   assert(attention.get_attention(50) == nil,
     "the old key is not what this pane goes by any more")
+end)
+
+-- Uncertainty elsewhere must not erase something this poll established. When the
+-- same physical pane is read under a new storage key, that is a fact, and the old
+-- key is retired by it. Letting an unrelated unreadable tab downgrade that to
+-- "undecided" keeps the old key alive, and the tick after -- once the pane has
+-- taken a fresh local id, as a reconnected client pane does -- nothing connects
+-- the two any more and its files are deleted while the pane is still running.
+-- The two histories below differ only in whether an unrelated tab answers.
+test("a proven replacement survives uncertainty about something else", function()
+  local function upgrade_then_reconnect(pane_id, unrelated_answers)
+    write_marker(pane_id, "stop")
+    local window = 5200 + pane_id
+    local anchor_tab = { tab_id = 521, panes = { { id = 930, domain = "local" } } }
+    local unrelated = unrelated_answers
+      and { tab_id = 522, panes = { { id = 931, domain = "local" } } }
+      or { tab_id = 522, gone = true }
+    local options = { now_unix_ns = protocol_fixture.state_case.now_unix_ns,
+      call_after = function() end }
+
+    attention.poll(window_double({ window_id = window, focused = false,
+      tabs = { anchor_tab, { tab_id = 523, panes = { { id = pane_id, domain = "local" } } } } }),
+      options)
+    assert(marker_exists(pane_id), "the pane starts under its scalar key")
+
+    -- The same GUI pane publishes a full address, while the unrelated tab either
+    -- answers or does not.
+    local wire = materialize_v2_fixture(pane_id + 400)
+    attention.poll(window_double({ window_id = window, focused = false,
+      tabs = { anchor_tab, unrelated,
+        { tab_id = 523, panes = { { id = pane_id, domain = "local", attention = wire } } } } }),
+      options)
+    assert(marker_exists(pane_id), "the pane is alive, so its files stay")
+
+    -- Reconnected: same pane, new GUI-local id, everything readable.
+    attention.poll(window_double({ window_id = window, focused = false,
+      tabs = { anchor_tab,
+        { tab_id = 523, panes = { { id = pane_id + 1, domain = "local", attention = wire } } } } }),
+      options)
+    return marker_exists(pane_id)
+  end
+
+  assert(upgrade_then_reconnect(52, true), "files survive when the unrelated tab answers")
+  assert(upgrade_then_reconnect(54, false),
+    "and must survive equally when it does not: the replacement was observed either way")
 end)
 
 os.execute("rm -rf " .. shell_quote(test_dir))
