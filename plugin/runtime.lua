@@ -65,6 +65,23 @@ return function()
       return false
     end
 
+    --- Whether another window still holds a pane writing the flat compatibility
+    --- files this marker id names. Deliberately not the same question as
+    --- observed_in_other_window, which asks after one exact key: a v2 pane owns
+    --- the flat paths named by the pane id in its address, so it keeps a v1 key's
+    --- files alive while answering to a name that key never had.
+    local function marker_in_use_in_other_window(marker_id, window_key)
+      if not marker_id then return false end
+      for other_window, observations in pairs(seen_marker_ids_by_window) do
+        if other_window ~= window_key then
+          for _, item in pairs(observations) do
+            if type(item) == "table" and item.marker_id == marker_id then return true end
+          end
+        end
+      end
+      return false
+    end
+
     local function observe_pane(window, pane, read)
       if not read.cache_key or (read.kind ~= "v1" and read.kind ~= "v2") then return end
       local window_key = tostring(window:window_id())
@@ -402,12 +419,12 @@ return function()
         -- Alive but not identified anywhere: its presence is not proof of which
         -- key replaced this one, so this stays undecided rather than retiring.
         --
-        -- Kept although no test reaches it. Mutating it to "superseded" fails
-        -- nothing, and the reason looks to be that every route here is already
-        -- taken: a pane read under some name registers in identified_by_local and
-        -- is caught above, and one that is not read leaves its domain unresolved,
-        -- which returns earlier. That is an argument, not a proof, and the branch
-        -- errs toward deciding nothing, so it stays.
+        -- Reached when a pane answers with its id and nothing else. pane_id is
+        -- held by the handle, while get_domain_name and get_user_vars resolve
+        -- through the mux and can fail together, and a pane whose domain could
+        -- not be read is filed under "?" -- so it marks that bucket unresolved
+        -- and says nothing about the domain the retained entry was recorded on.
+        -- Every earlier return is bypassed and this one is what refuses.
         if gone.local_id and live_local_ids[gone.local_id] then return "unknown" end
         return "absent"
     end
@@ -1183,7 +1200,8 @@ return function()
             -- writer having been seen is what authorises the removal.
             if not shared and gone.kind == "v1"
                 and not (gone.local_id and live_local_ids[gone.local_id])
-                and not evidence.marker_ids_in_use[gone.marker_id] then
+                and not evidence.marker_ids_in_use[gone.marker_id]
+                and not marker_in_use_in_other_window(gone.marker_id, window_key) then
               remove_marker(dir, gone.marker_id)
             end
             if not shared then attention_cache[gone_key] = nil end
