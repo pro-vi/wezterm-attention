@@ -4278,6 +4278,91 @@ test("a key retiring does not make the files it named unowned", function()
     "the id resolves to the pane that owns it now, not to the entry that retired")
 end)
 
+-- A pane being alive says nothing about which name it answers to now. Only a
+-- pane read under a different name retires the old one; a pane that has not said
+-- who it is leaves the question open, because retiring the key on liveness alone
+-- would drop a reading that is still the right one.
+test("a live pane that has not identified itself retires no name", function()
+  write_marker(58, "stop")
+  local window = 5800
+  local anchor_tab = { tab_id = 581, panes = { { id = 950, domain = "local" } } }
+
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { anchor_tab,
+      { tab_id = 582, panes = { { id = 810, published = 58, domain = "mux" } } } } }))
+  assert(attention.get_attention(58) == "stop", "observed under its published name")
+
+  -- Same GUI pane, still listed, no longer saying who it is.
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { anchor_tab, { tab_id = 582, panes = { { id = 810, domain = "mux" } } } } }))
+  assert(marker_exists(58), "an unidentified pane cannot disown a name")
+  assert(attention.get_attention(58) == "stop",
+    "and the reading stands until something says otherwise")
+end)
+
+-- An identity that could not be read leaves the domain's publication status
+-- unknown: "none of the panes I could read is unpublished" is not a claim this
+-- tick can make when one of them could not be read at all.
+test("an unreadable identity leaves a domain's publication unconcluded", function()
+  local spawned, scheduled = {}, {}
+  local original_background = wezterm.background_child_process
+  wezterm.background_child_process = function(argv) spawned[#spawned + 1] = argv; return true end
+  local reloaded = dofile(repo_root .. "/plugin/init.lua")
+  reloaded.apply_to_config({
+    unix_domains = { { name = "invalid-realm", socket_path = "/tmp/attention-invalid.sock" } },
+  }, { auto_poll = false, dir = test_dir, review_key = false })
+  local options = { call_after = function(delay, callback)
+    scheduled[#scheduled + 1] = { delay = delay, callback = callback }
+  end }
+
+  local waiting = { tab_id = 1, panes = { { id = 9950, domain = "invalid-realm" } } }
+  local both = { window_id = 8170, focused = false, tabs = { waiting,
+    { tab_id = 2, panes = { { id = 9951, published = 9951, domain = "invalid-realm" } } } } }
+  reloaded.poll(window_double(both), options)
+  reloaded.poll(window_double(both), options)
+  assert(#spawned == 1 and #scheduled == 1, "the unpublished pane starts one schedule")
+
+  -- The unpublished pane is replaced by one whose identity will not parse. The
+  -- domain is fully enumerated, and still nothing can be said about it.
+  reloaded.poll(window_double({ window_id = 8170, focused = false, tabs = {
+    { tab_id = 1, panes = { { id = 9952, domain = "invalid-realm", attention = "{ not json" } } },
+    { tab_id = 2, panes = { { id = 9951, published = 9951, domain = "invalid-realm" } } },
+  } }), options)
+  scheduled[1].callback()
+  assert(#spawned == 2, "an unreadable identity must not report the domain resolved")
+  wezterm.background_child_process = original_background
+  drain_errors()
+end)
+
+-- A domain whose every tab went quiet still has whatever obligation it had.
+-- Dropping it from the window's domains during the gap loses the retry: the tick
+-- that could finally settle it has nothing left to settle.
+test("a domain nobody could see this tick keeps its retry", function()
+  local spawned, scheduled = {}, {}
+  local original_background = wezterm.background_child_process
+  wezterm.background_child_process = function(argv) spawned[#spawned + 1] = argv; return true end
+  local reloaded = dofile(repo_root .. "/plugin/init.lua")
+  reloaded.apply_to_config({
+    unix_domains = { { name = "quiet-realm", socket_path = "/tmp/attention-quiet.sock" } },
+  }, { auto_poll = false, dir = test_dir, review_key = false })
+  local options = { call_after = function(delay, callback)
+    scheduled[#scheduled + 1] = { delay = delay, callback = callback }
+  end }
+
+  local holding = { tab_id = 1, panes = { { id = 9960, domain = "quiet-realm" } } }
+  local both = { window_id = 8180, focused = false, tabs = { holding } }
+  reloaded.poll(window_double(both), options)
+  reloaded.poll(window_double(both), options)
+  assert(#spawned == 1 and #scheduled == 1, "the unpublished pane starts one schedule")
+
+  -- Its only tab stops answering. The domain is now in no evidence at all.
+  reloaded.poll(window_double({ window_id = 8180, focused = false,
+    tabs = { { tab_id = 1, gone = true } } }), options)
+  scheduled[1].callback()
+  assert(#spawned == 2, "the obligation survives a tick that could not see it")
+  wezterm.background_child_process = original_background
+end)
+
 os.execute("rm -rf " .. shell_quote(test_dir))
 
 io.write(string.format("%d passed, %d failed\n", passed, failed))

@@ -401,6 +401,13 @@ return function()
         -- it goes by, so the key retires without them.
         -- Alive but not identified anywhere: its presence is not proof of which
         -- key replaced this one, so this stays undecided rather than retiring.
+        --
+        -- Kept although no test reaches it. Mutating it to "superseded" fails
+        -- nothing, and the reason looks to be that every route here is already
+        -- taken: a pane read under some name registers in identified_by_local and
+        -- is caught above, and one that is not read leaves its domain unresolved,
+        -- which returns earlier. That is an argument, not a proof, and the branch
+        -- errs toward deciding nothing, so it stays.
         if gone.local_id and live_local_ids[gone.local_id] then return "unknown" end
         return "absent"
     end
@@ -412,7 +419,10 @@ return function()
     local function decide_acknowledgement(evidence, read)
         if not read or not read.cache_key then return nil end
         local pane = evidence.panes[read.cache_key]
-        if not pane or not pane.observed then return nil end
+        -- No `observed` test: only panes this poll enumerated are ever put in
+        -- here, so membership is the freshness check. A flag that cannot be false
+        -- reads like a guard and guards nothing.
+        if not pane then return nil end
         if pane.kind ~= read.kind then return nil end
         -- No publication read is an answer: there was nothing to dismiss. Saying
         -- so here keeps the contract in the decision rather than leaving the
@@ -996,7 +1006,7 @@ return function()
                 utc_error .. ": WezTerm UTC is unavailable; TTL-bearing v2 state is omitted")
             end
             seen[key] = { domain = domain, kind = "v2", marker_id = read.marker_id, local_id = local_id }
-            evidence.panes[key] = { observed = true, kind = "v2", domain = domain,
+            evidence.panes[key] = { kind = "v2", domain = domain,
               marker_id = read.marker_id, local_id = local_id }
             evidence.identified_by_local[local_id] = key
             if read.marker_id then evidence.marker_ids_in_use[read.marker_id] = true end
@@ -1020,7 +1030,7 @@ return function()
           elseif read.kind == "v1" then
             local id = read.marker_id
             seen[id] = { domain = domain, kind = "v1", marker_id = id, local_id = local_id }
-            evidence.panes[id] = { observed = true, kind = "v1", domain = domain,
+            evidence.panes[id] = { kind = "v1", domain = domain,
               marker_id = id, local_id = local_id }
             evidence.identified_by_local[local_id] = id
             evidence.marker_ids_in_use[id] = true
