@@ -388,8 +388,14 @@ return function()
     local function decide_absence(evidence, gone_key, gone, live_local_ids)
         local pane = evidence.panes[gone_key]
         if pane then return "present" end
-        -- A tab nobody has ever read could be holding this. Nothing bounds what
-        -- it contains, so nothing about absence can be settled anywhere.
+        -- Checked before the gap, because this is something established rather
+        -- than something failed to establish: this poll read that same physical
+        -- pane answering to a different key. Uncertainty elsewhere is no reason
+        -- to forget it, and forgetting it leaves the old key looking absent on
+        -- some later tick, after the pane has taken a new local id.
+        local replacement = gone.local_id and evidence.identified_by_local[gone.local_id]
+        if replacement and replacement ~= gone_key then return "superseded" end
+        -- A tab whose contents nobody could bound could be holding this.
         if evidence.gap then return "unknown" end
         local domain = evidence.domains[gone.domain]
         if not domain or not domain.observed then return "unknown" end
@@ -397,7 +403,9 @@ return function()
         -- The pane is alive and answering to a different storage key now. Its
         -- files belong to it and must stay; this key is simply no longer the one
         -- it goes by, so the key retires without them.
-        if gone.local_id and live_local_ids[gone.local_id] then return "superseded" end
+        -- Alive but not identified anywhere: its presence is not proof of which
+        -- key replaced this one, so this stays undecided rather than retiring.
+        if gone.local_id and live_local_ids[gone.local_id] then return "unknown" end
         return "absent"
     end
 
@@ -733,7 +741,7 @@ return function()
     --- lost, and reporting it so would have a consumer discard state it still
     --- needs -- a dismissal, a policy -- and rebuild it as new when the pane
     --- comes back.
-    local function deliver_window_views(window, entries, opts, unknown)
+    local function deliver_window_views(window, entries, opts, unknown, unsettled)
       local callback = M._on_view_change
       if not callback then return end
       local window_key = redraw_window_key(window)
@@ -763,7 +771,9 @@ return function()
       end
       for key, state in pairs(previous) do
         if not next_views[key] then
-          if unknown and unknown[key] then next_views[key] = state
+          -- `unsettled` is the window-wide case: a tab nobody could bound might
+          -- still be holding this scope, so it is no more lost than a carried one.
+          if unsettled or (unknown and unknown[key]) then next_views[key] = state
           else lost(state, window:window_id()) end
         end
       end
@@ -876,7 +886,10 @@ return function()
       -- what it held -- it has never been read successfully, so there is no
       -- remembered membership to bound it with. Its scope is the whole window,
       -- which is why it blocks every negative conclusion rather than one domain's.
-      local evidence = { panes = {}, domains = {}, gap = false }
+      -- `identified_by_local` maps a GUI-local pane to the storage key it was
+      -- read under this tick, so a key it used to answer to can be recognised as
+      -- replaced rather than as missing.
+      local evidence = { panes = {}, domains = {}, gap = false, identified_by_local = {} }
 
       --- Domain evidence, created on first mention. `observed` means a pane was
       --- enumerated on it now. `carried` means a tab that would not answer held
@@ -948,8 +961,13 @@ return function()
           -- protected only while this tab is still listed, so once WezTerm drops
           -- it they are swept normally.
           tab_panes = {}
+          -- Unbounded either way. What a tab held when it last answered is a
+          -- lower bound on what it holds now, not an upper one: a pane can be
+          -- moved into a tab after its last successful read, and that pane would
+          -- be in no snapshot. So the remembered members are carried as positive
+          -- facts and the tab still counts as a gap.
           local remembered = tab_id and tab_memory[tab_id]
-          if not remembered then evidence.gap = true end
+          evidence.gap = true
           if remembered then
             tab_memory_now[tab_id] = remembered
             for key, item in pairs(remembered.keys) do
@@ -1007,6 +1025,7 @@ return function()
             seen[key] = { domain = domain, kind = "v2", marker_id = read.marker_id, local_id = local_id }
             evidence.panes[key] = { observed = true, kind = "v2", domain = domain,
               marker_id = read.marker_id, local_id = local_id }
+            evidence.identified_by_local[local_id] = key
             if tab_seen then tab_seen.keys[key] = evidence.panes[key] end
             pane_ids[#pane_ids + 1] = key
             before[key] = attention_cache[key]
@@ -1030,6 +1049,7 @@ return function()
             seen[id] = { domain = domain, kind = "v1", marker_id = id, local_id = local_id }
             evidence.panes[id] = { observed = true, kind = "v1", domain = domain,
               marker_id = id, local_id = local_id }
+            evidence.identified_by_local[local_id] = id
             if tab_seen then tab_seen.keys[id] = evidence.panes[id] end
             pane_ids[#pane_ids + 1] = id
             before[id] = attention_cache[id]
@@ -1116,12 +1136,21 @@ return function()
           end
         end
       end
+      -- A domain with no evidence this tick is normally gone. During a gap it is
+      -- merely unsettled, and dropping it here would lose the obligation: the
+      -- tick that can finally exclude it would have nothing left to retire.
+      if evidence.gap and previous_domains then
+        for domain in pairs(previous_domains) do possible_domains[domain] = true end
+      end
       publish_domains_by_window[window_key] = possible_domains
       -- Every domain this window still has any evidence for, so a retry is never
       -- dropped merely because the tab holding its pane went quiet. What each one
       -- is allowed to say is decide_publication's answer, not this loop's.
       for domain in pairs(possible_domains) do
         local decision = decide_publication(evidence.domains[domain], evidence.gap)
+        -- Carried over only because the window is unsettled: renew it so the
+        -- retry is not dropped for staleness, and conclude nothing.
+        if not decision and evidence.gap then decision = { action = "renew" } end
         if decision then
           update_publish_schedule(
             domain, window_key,
@@ -1202,7 +1231,7 @@ return function()
       -- must neither acknowledge a marker its user has not seen nor be sent a key
       -- action, so an unfocused poll ends here with the cache correct.
       if not window:is_focused() then
-        deliver_window_views(window, callback_entries, opts, carried)
+        deliver_window_views(window, callback_entries, opts, carried, evidence.gap)
         return
       end
 
@@ -1226,7 +1255,7 @@ return function()
         end
       end
 
-      deliver_window_views(window, callback_entries, opts, carried)
+      deliver_window_views(window, callback_entries, opts, carried, evidence.gap)
 
       -- The event pane can transport a redraw when no current pane is available,
       -- but it never authorizes acknowledgement.
