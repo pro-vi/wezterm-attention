@@ -1240,8 +1240,10 @@ return function()
             -- another key, because a v2 pane's flat projections are named by the
             -- pane id in its address. These are the cheap vetoes; each one is a
             -- positive sighting, and any of them is enough to keep the files.
+            -- No live-local-id term: reaching this verdict already means that
+            -- check passed, since decide_absence answers "unknown" for a pane
+            -- whose handle is still enumerated.
             local may_unlink = not shared and gone.kind == "v1"
-              and not (gone.local_id and live_local_ids[gone.local_id])
               and not evidence.marker_ids_in_use[gone.marker_id]
               and not marker_in_use_in_other_window(gone.marker_id, window_key)
             local owners = may_unlink and current_marker_owners() or nil
