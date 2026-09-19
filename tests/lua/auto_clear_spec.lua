@@ -153,8 +153,21 @@ local function decode_json(content)
 end
 
 local handlers = {}
+-- The mux windows this test has built. The plugin asks the mux who owns a flat
+-- path before unlinking it, because a saved observation cannot see a pane that
+-- moved a moment ago. Cleared per test, so one test's windows cannot vouch for
+-- another's panes.
+-- Keyed by window id, because a test builds a fresh double for each poll and a
+-- mux window has one current content, not one per time it was looked at.
+local mux_windows_by_id = {}
+
 local wezterm = {
   home_dir = test_dir,
+  mux = { all_windows = function()
+    local all = {}
+    for _, mux_window in pairs(mux_windows_by_id) do all[#all + 1] = mux_window end
+    return all
+  end },
   action_callback = function(callback) return callback end,
   action = {
     -- Recorded, not executed. What the real action does to a live WezTerm is
@@ -473,8 +486,11 @@ local function window_double(spec)
     action_calls      = 0,
   }
 
+  local mux_window = { tabs = function() return mux_tabs end }
+  mux_windows_by_id[assigned_window_id] = mux_window
+
   function w.mux_window()
-    return { tabs = function() return mux_tabs end }
+    return mux_window
   end
 
   function w.window_id()
@@ -544,6 +560,7 @@ local failed = 0
 
 local function test(name, callback)
   drain_errors()
+  for key in pairs(mux_windows_by_id) do mux_windows_by_id[key] = nil end
   local ok, err = pcall(callback)
   if ok and #logged_errors > 0 then
     ok, err = false, "unexpected wezterm.log_error: " .. tostring(logged_errors[1])
@@ -4440,6 +4457,65 @@ test("a pane that answers only with its id decides nothing about its old name", 
   assert(attention.get_attention(target) == "stop",
     "and the reading stands, because nothing has taken the name over")
   drain_errors()
+end)
+
+-- Moving a pane from one window into another is a supported thing to do. Every
+-- source of ownership the sweep had was a saved observation -- what some window
+-- saw when it last polled -- so if the source window polls first, the
+-- destination has not recorded the pane yet and nothing says it exists. The
+-- files would then survive or not depending on whose status callback ran first,
+-- which is not a property of the pane.
+test("a pane moving between windows keeps its files whichever window polls first", function()
+  local function move_then_poll(pane_id, source_first)
+    write_marker(pane_id, "stop")
+    local flag = assert(io.open(test_dir .. "/" .. pane_id .. ".review", "w"))
+    assert(flag:write('{}'))
+    assert(flag:close())
+    local source, destination = 9100 + pane_id, 9200 + pane_id
+
+    -- Both windows exist and have been seen before the move.
+    attention.poll(window_double({ window_id = source, focused = false,
+      tabs = { { tab_id = 911, panes = { { id = pane_id, published = pane_id, domain = "mux" },
+                                          { id = 9301, published = 9301, domain = "mux" } } } } }))
+    attention.poll(window_double({ window_id = destination, focused = false,
+      tabs = { { tab_id = 912, panes = { { id = 9302, published = 9302, domain = "mux" } } } } }))
+    assert(marker_exists(pane_id), "observed in the source window")
+
+    -- The pane is now in the destination. Both windows will report that; the
+    -- question is only which of them says so first.
+    local after_source = window_double({ window_id = source, focused = false,
+      tabs = { { tab_id = 911, panes = { { id = 9301, published = 9301, domain = "mux" } } } } })
+    local after_destination = window_double({ window_id = destination, focused = false,
+      tabs = { { tab_id = 912, panes = { { id = 9302, published = 9302, domain = "mux" },
+                                          { id = pane_id, published = pane_id, domain = "mux" } } } } })
+    if source_first then
+      attention.poll(after_source); attention.poll(after_destination)
+    else
+      attention.poll(after_destination); attention.poll(after_source)
+    end
+    return marker_exists(pane_id) and path_exists(test_dir .. "/" .. pane_id .. ".review")
+  end
+
+  assert(move_then_poll(9401, false), "destination first: the pane is recorded before the sweep")
+  assert(move_then_poll(9402, true),
+    "source first: the pane is in no record yet, and the mux is what knows it exists")
+end)
+
+-- The complement: with the pane genuinely gone from every window, the same walk
+-- says so and the files are collected. Refusing to delete anything would pass
+-- the test above on its own.
+test("a pane in no window at all still has its files collected", function()
+  local pane_id = 9403
+  write_marker(pane_id, "stop")
+  local window = 9500
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { { tab_id = 951, panes = { { id = pane_id, published = pane_id, domain = "mux" },
+                                        { id = 9501, published = 9501, domain = "mux" } } } } }))
+  assert(marker_exists(pane_id), "observed first")
+
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { { tab_id = 951, panes = { { id = 9501, published = 9501, domain = "mux" } } } } }))
+  assert(not marker_exists(pane_id), "nothing anywhere holds it, so it is collected")
 end)
 
 os.execute("rm -rf " .. shell_quote(test_dir))
