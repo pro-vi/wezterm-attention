@@ -4518,6 +4518,41 @@ test("a pane in no window at all still has its files collected", function()
   assert(not marker_exists(pane_id), "nothing anywhere holds it, so it is collected")
 end)
 
+-- Asking the mux who holds a name only answers when the asking finishes. A pane
+-- that will not say who it is could be the one holding it, so the search has not
+-- excluded anything -- and a search that could not exclude anything is not a
+-- reason to delete. The files and the obligation both stay, for a tick that can
+-- finish.
+test("a search that could not finish is not a search that found nothing", function()
+  local pane_id = 9601
+  write_marker(pane_id, "stop")
+  local window = 9600
+
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { { tab_id = 961, panes = { { id = pane_id, published = pane_id, domain = "mux" },
+                                        { id = 9602, published = 9602, domain = "mux" } } } } }))
+  assert(marker_exists(pane_id), "observed first")
+
+  -- Another window exists holding a pane that cannot be identified. It is not
+  -- polled; it only has to be there for the ownership walk to reach it.
+  window_double({ window_id = 9610, focused = false,
+    tabs = { { tab_id = 962, panes = { { id = 9603, unresolvable = true } } } } })
+
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { { tab_id = 961, panes = { { id = 9602, published = 9602, domain = "mux" } } } } }))
+  assert(marker_exists(pane_id),
+    "one pane that would not answer leaves the question open everywhere")
+
+  -- That pane now says who it is, and it is not the one in question. The search
+  -- finishes, excludes the name, and the files are collected.
+  window_double({ window_id = 9610, focused = false,
+    tabs = { { tab_id = 962, panes = { { id = 9603, published = 9603, domain = "mux" } } } } })
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { { tab_id = 961, panes = { { id = 9602, published = 9602, domain = "mux" } } } } }))
+  assert(not marker_exists(pane_id), "a finished search that excludes it does authorise it")
+  drain_errors()
+end)
+
 os.execute("rm -rf " .. shell_quote(test_dir))
 
 io.write(string.format("%d passed, %d failed\n", passed, failed))
