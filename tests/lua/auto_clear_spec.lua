@@ -4043,6 +4043,10 @@ end)
 -- unidentified pane might have turned out to own.
 test("identity uncertainty survives the tab that raised it going quiet", function()
   write_marker(44, "stop")
+  local sidecar = assert(io.open(test_dir .. "/44.agents", "w"))
+  assert(sidecar:write('{"agents":{}}'))
+  assert(sidecar:close())
+  local sidecar_before = assert(read_path(test_dir .. "/44.agents"))
 
   local window = 4400
   local anchor_tab = { tab_id = 441, panes = { { id = 910, domain = "local" } } }
@@ -4065,7 +4069,8 @@ test("identity uncertainty survives the tab that raised it going quiet", functio
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { anchor_tab, { tab_id = 442, gone = true }, sibling } }))
   assert(marker_exists(44), "a tab going quiet cannot resolve what it had not resolved")
-  assert(subagents_exists(44) == false or subagents_exists(44), "sidecar state is unchanged either way")
+  assert(read_path(test_dir .. "/44.agents") == sidecar_before,
+    "the sidecars are removed with the marker, so they prove preservation too")
 
   -- Every pane on the domain identified, none of them 44.
   attention.poll(window_double({ window_id = window, focused = false,
@@ -4099,6 +4104,66 @@ test("another window's poll cannot decide what this one acknowledges", function(
   assert(raced, "the test must have raced the focus query")
   assert(not acknowledgement_exists(46),
     "this poll read publication one, so it has no standing to dismiss publication two")
+end)
+
+-- A tab that fails the first time it is ever read leaves nothing behind to bound
+-- it: there is no remembered membership saying which panes or domains it held.
+-- Its scope is the whole window, so while it is listed and unread, nothing in
+-- this window can be concluded absent -- otherwise weakening one read, from
+-- "enumerated with an unidentified pane" to "could not be read at all", would
+-- turn a refusal to delete into permission.
+test("a tab nobody has ever read bounds nothing, so it settles nothing", function()
+  write_marker(48, "stop")
+
+  local window = 4800
+  local anchor_tab = { tab_id = 481, panes = { { id = 920, domain = "local" } } }
+  local sibling = { tab_id = 483, panes = { { id = 706, published = 49, domain = "mux" } } }
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { anchor_tab, { tab_id = 482, panes = { { id = 707, published = 48, domain = "mux" } } } } }))
+  assert(marker_exists(48), "observed through its published identity")
+
+  attention.poll(window_double({ window_id = window, focused = false, tabs = { anchor_tab } }))
+  assert(marker_exists(48), "an unobserved domain decides nothing")
+
+  -- A tab id this window has never read successfully, failing on its first read,
+  -- alongside an identified sibling on the domain.
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { anchor_tab, { tab_id = 484, gone = true }, sibling } }))
+  assert(marker_exists(48),
+    "an unread tab could be holding it, and nothing says otherwise")
+
+  -- Still unread on the next tick: the answer does not drift with repetition.
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { anchor_tab, { tab_id = 484, gone = true }, sibling } }))
+  assert(marker_exists(48), "repeating an unanswered question does not answer it")
+
+  -- Every listed tab read, none of them holding it.
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { anchor_tab, sibling } }))
+  assert(not marker_exists(48), "a fully read window that excludes it may sweep it")
+end)
+
+-- A pane that upgrades from a v1 marker id to a full v2 address is the same
+-- physical pane under a new storage key. Its files belong to it and must stay.
+-- The old key is not thereby still current, though: leaving it in the cache
+-- leaves a reading that nothing will ever sweep, because it is no longer in the
+-- inventory that the sweep compares against.
+test("a pane that changes storage key keeps its files and gives up the old key", function()
+  write_marker(50, "stop")
+
+  local window = 5000
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { { tab_id = 501, panes = { { id = 50, domain = "local" } } } } }))
+  assert(attention.get_attention(50) == "stop", "the v1 identity is cached under its scalar key")
+
+  -- The same GUI pane, now publishing a full address.
+  local wire = materialize_v2_fixture(5051)
+  attention.poll(window_double({ window_id = window, focused = false,
+    tabs = { { tab_id = 501, panes = { { id = 50, domain = "local", attention = wire } } } } }),
+    { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+  assert(marker_exists(50), "the pane is alive, so its files stay")
+  assert(attention.get_attention(50) == nil,
+    "the old key is not what this pane goes by any more")
 end)
 
 os.execute("rm -rf " .. shell_quote(test_dir))

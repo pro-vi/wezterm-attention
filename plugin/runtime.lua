@@ -388,10 +388,16 @@ return function()
     local function decide_absence(evidence, gone_key, gone, live_local_ids)
         local pane = evidence.panes[gone_key]
         if pane then return "present" end
+        -- A tab nobody has ever read could be holding this. Nothing bounds what
+        -- it contains, so nothing about absence can be settled anywhere.
+        if evidence.gap then return "unknown" end
         local domain = evidence.domains[gone.domain]
         if not domain or not domain.observed then return "unknown" end
         if domain.unresolved then return "unknown" end
-        if gone.local_id and live_local_ids[gone.local_id] then return "present" end
+        -- The pane is alive and answering to a different storage key now. Its
+        -- files belong to it and must stay; this key is simply no longer the one
+        -- it goes by, so the key retires without them.
+        if gone.local_id and live_local_ids[gone.local_id] then return "superseded" end
         return "absent"
     end
 
@@ -404,6 +410,11 @@ return function()
         local pane = evidence.panes[read.cache_key]
         if not pane or not pane.observed then return nil end
         if pane.kind ~= read.kind then return nil end
+        -- No publication read is an answer: there was nothing to dismiss. Saying
+        -- so here keeps the contract in the decision rather than leaving the
+        -- executor to notice that its expected value is missing.
+        if pane.kind == "v2" and not pane.event_id then return nil end
+        if pane.kind == "v1" and not pane.identity then return nil end
         return { kind = pane.kind, marker_id = pane.marker_id, event_id = pane.event_id,
           identity = pane.identity }
     end
@@ -412,9 +423,10 @@ return function()
     --- resolution belong to a domain every pane of which answered. Anything less
     --- renews the observation -- so a retry is not dropped for going a round
     --- unseen -- without letting the panes that did answer stand for the rest.
-    local function decide_publication(domain_item)
+    local function decide_publication(domain_item, gap)
         if not domain_item then return nil end
         if not domain_item.observed and not domain_item.carried then return nil end
+        if gap then return { action = "renew", unpublished = domain_item.unpublished == true } end
         -- Coverage, not identity resolution: a domain every tab of which
         -- answered can be concluded about even when one of its panes has yet to
         -- publish, because that pane is the reason the schedule exists.
@@ -557,7 +569,13 @@ return function()
       schedule.root = root
       local observation = schedule.window_observations[window_key]
       if partial then
-        if observation then observation.fresh = true end
+        if observation then
+          observation.fresh = true
+          -- A pane that answered said it is unpublished. That is the one thing a
+          -- partial look establishes, and dropping it lets another window's
+          -- resolution retire a schedule this one still needs.
+          if unpublished then observation.unpublished = true end
+        end
         return false
       end
       if not observation then
@@ -854,7 +872,11 @@ return function()
       -- answer is enough to keep its records and not enough to dismiss its
       -- notification -- so provenance travels with the fact instead of living in
       -- a separate table each consumer combines for itself.
-      local evidence = { panes = {}, domains = {} }
+      -- `gap` means a listed tab could not be read and nothing is known about
+      -- what it held -- it has never been read successfully, so there is no
+      -- remembered membership to bound it with. Its scope is the whole window,
+      -- which is why it blocks every negative conclusion rather than one domain's.
+      local evidence = { panes = {}, domains = {}, gap = false }
 
       --- Domain evidence, created on first mention. `observed` means a pane was
       --- enumerated on it now. `carried` means a tab that would not answer held
@@ -927,6 +949,7 @@ return function()
           -- it they are swept normally.
           tab_panes = {}
           local remembered = tab_id and tab_memory[tab_id]
+          if not remembered then evidence.gap = true end
           if remembered then
             tab_memory_now[tab_id] = remembered
             for key, item in pairs(remembered.keys) do
@@ -1017,12 +1040,14 @@ return function()
             local subagents = count_live_subagents(dir, id, now)
             local flagged = review_flagged(dir, id)
             local acknowledged = acknowledgement_matches(dir, id, raw, publication_id)
-            -- The publication this poll read, kept with the pane's evidence. The
-            -- acknowledgement below must compare against this, not against the
-            -- display cache, which another window's poll can replace between the
-            -- enumeration and the focus query.
-            evidence.panes[id].identity = marker_identity(raw, publication_id)
             if atype then
+              -- The publication this poll read, kept with the pane's evidence, and
+              -- only when there was one: marker_identity of nothing still returns
+              -- a string, which would look like a publication to compare against.
+              -- The acknowledgement below compares against this rather than the
+              -- display cache, which another window's poll can replace between
+              -- the enumeration and the focus query.
+              evidence.panes[id].identity = marker_identity(raw, publication_id)
               local cached = attention_cache[id]
               local observed_at = now
               if cached and cached.raw == raw and cached.observed_at then
@@ -1085,7 +1110,10 @@ return function()
       local previous_domains = publish_domains_by_window[window_key]
       if previous_domains then
         for domain in pairs(previous_domains) do
-          if not possible_domains[domain] then retire_publish_observation(domain, window_key) end
+          -- A tab nobody could read might be the one holding this domain.
+          if not possible_domains[domain] and not evidence.gap then
+            retire_publish_observation(domain, window_key)
+          end
         end
       end
       publish_domains_by_window[window_key] = possible_domains
@@ -1093,7 +1121,7 @@ return function()
       -- dropped merely because the tab holding its pane went quiet. What each one
       -- is allowed to say is decide_publication's answer, not this loop's.
       for domain in pairs(possible_domains) do
-        local decision = decide_publication(evidence.domains[domain])
+        local decision = decide_publication(evidence.domains[domain], evidence.gap)
         if decision then
           update_publish_schedule(
             domain, window_key,
@@ -1140,6 +1168,13 @@ return function()
             -- would leave the next tick -- which may be able to decide -- nothing
             -- to compare against, and the record would outlive the pane for good.
             seen[gone_key] = gone_value
+          elseif verdict == "superseded" and not seen[gone_key] then
+            -- The pane lives on under another key. Retire this one from the cache
+            -- and the inventory, and leave every file alone: they are that pane's.
+            local shared = observed_in_other_window(gone_key, window_key)
+            pane_ids[#pane_ids + 1] = gone_key
+            before[gone_key] = attention_cache[gone_key]
+            if not shared then attention_cache[gone_key] = nil end
           elseif verdict == "absent" and not seen[gone_key] then
             local shared = observed_in_other_window(gone_key, window_key)
             pane_ids[#pane_ids + 1] = gone_key
