@@ -203,10 +203,15 @@ return function(context)
     }
     local order, present = {}, {}
     for index, entry in ipairs(tabs) do
-      local recorded = type(entry) == "table" and drawn[entry.tab_id]
+      -- WezTerm fills this array with TabInformation userdata, not tables.
+      -- `type(entry) == "table"` is true in the luajit harness and false in
+      -- the GUI, so a type test here publishes in tests and never in WezTerm.
+      local kind = type(entry)
+      local entry_id = (kind == "table" or kind == "userdata") and entry.tab_id or nil
+      local recorded = type(entry_id) == "number" and drawn[entry_id]
       if not recorded then return nil end
       order[index] = recorded
-      present[entry.tab_id] = true
+      present[entry_id] = true
     end
     -- A closed tab's entry would otherwise be held for the life of the process.
     for id in pairs(drawn) do

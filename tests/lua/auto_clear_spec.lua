@@ -689,19 +689,32 @@ end)
 
 -- ── U2: publishing the drawn tab order ─────────────────────────────────────
 
+--- WezTerm's format-tab-title argument is TabInformation userdata, not a table.
+--- `newproxy` is the luajit stand-in: `type()` is `"userdata"` and field reads
+--- go through `__index`.
+local function as_userdata(fields)
+  assert(newproxy, "the harness needs newproxy to stand in for TabInformation")
+  local proxy = newproxy(true)
+  getmetatable(proxy).__index = fields
+  return proxy
+end
+
 --- A GUI tab double the renderer can publish from: it carries the window and
 --- tab ids WezTerm supplies on TabInformation alongside the drawn index.
 local function gui_tab(spec)
   local panes = {}
   for index, pane_id in ipairs(spec.panes) do panes[index] = gui_pane(pane_id) end
-  return {
+  local tab = as_userdata({
     tab_id = spec.tab_id,
     window_id = spec.window_id,
     tab_index = spec.tab_index,
     is_active = spec.is_active == true,
     active_pane = panes[1],
     panes = panes,
-  }
+  })
+  assert(type(tab) == "userdata",
+    "the double must be userdata, the way WezTerm's TabInformation is")
+  return tab
 end
 
 local function tab_publication_path(window_id)
@@ -825,6 +838,25 @@ test("two windows publish their own orders into their own files", function()
     "each file holds only the tabs of its own window")
   assert(one.tabs[1].marker_ids[1] == "9824" and two.tabs[1].marker_ids[1] == "9825",
     "each file holds its own window's panes")
+end)
+
+test("a v2 pane publishes its cache key, not the local pane id", function()
+  materialize_state_case(protocol_fixture.state_case)
+  attention.poll(window_double({ tabs = { { {
+    id = 9850, domain = "unix", attention = protocol_fixture.wire_sample,
+  } } }, focused = false }), {
+    now_unix_ns = protocol_fixture.state_case.now_unix_ns,
+    call_after = function() end,
+  })
+
+  local only = gui_tab({ window_id = 9805, tab_id = 9818, tab_index = 0, panes = { 9850 } })
+  format_tab_title(only, { only })
+
+  local published = assert(read_tab_publication(9805), "the window should be published")
+  local key = internal.address_cache_key(protocol_fixture.wire_sample.address)
+  assert(published.tabs[1].marker_ids[1] == key,
+    "a v2 pane publishes the cache key the plugin indexes it by, got "
+      .. tostring(published.tabs[1].marker_ids[1]))
 end)
 
 -- ── U2: focus-aware acknowledgement ─────────────────────────────────────────

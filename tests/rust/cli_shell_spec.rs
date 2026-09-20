@@ -488,10 +488,20 @@ fn published_tab_orders_are_read_and_one_refused_file_does_not_withhold_the_othe
     let tabs = state.join("tabs");
     fs::create_dir_all(&tabs).expect("create tab publication directory");
     // Drawn order, not sorted order: the bar drew 11 before 4, and that is the
-    // fact the file exists to carry.
+    // fact the file exists to carry. The first tab is a v2 cache key, the
+    // second a pair of v1 marker ids — the mix `gui_tab_pane_ids` writes.
+    let v2_id = concat!(
+        "v2:",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ":",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ":16"
+    );
     fs::write(
         tabs.join("0.json"),
-        r#"{"published_at_ms":1789884000123,"schema":1,"tabs":[{"marker_ids":["16"],"number":11,"text":" 11: braid "},{"marker_ids":["4","9"],"number":4,"text":" 4: construal "}],"window_id":0}"#,
+        format!(
+            r#"{{"published_at_ms":1789884000123,"schema":1,"tabs":[{{"marker_ids":["{v2_id}"],"number":11,"text":" 11: braid "}},{{"marker_ids":["4","9"],"number":4,"text":" 4: construal "}}],"window_id":0}}"#
+        ),
     )
     .expect("write window 0");
     fs::write(
@@ -521,6 +531,11 @@ fn published_tab_orders_are_read_and_one_refused_file_does_not_withhold_the_othe
         r#"{"published_at_ms":1789884000789,"schema":1,"tabs":[],"window_id":8}"#,
     )
     .expect("write non-canonical name");
+    fs::write(
+        tabs.join("5.json"),
+        r#"{"published_at_ms":1789884000789,"schema":1,"tabs":[{"marker_ids":["not-an-id"],"number":1,"text":" 1: x "}],"window_id":5}"#,
+    )
+    .expect("write window with an unusable marker id");
     fs::write(tabs.join("notes.txt"), "not a publication").expect("write unrelated file");
 
     let output = Command::new(env!("CARGO_BIN_EXE_attention"))
@@ -548,7 +563,7 @@ fn published_tab_orders_are_read_and_one_refused_file_does_not_withhold_the_othe
     assert_eq!(drawn.len(), 2);
     assert_eq!(drawn[0]["number"], 11);
     assert_eq!(drawn[0]["text"], " 11: braid ");
-    assert_eq!(drawn[0]["marker_ids"], json!(["16"]));
+    assert_eq!(drawn[0]["marker_ids"], json!([v2_id]));
     assert_eq!(drawn[1]["number"], 4);
     assert_eq!(drawn[1]["marker_ids"], json!(["4", "9"]));
 
@@ -570,9 +585,59 @@ fn published_tab_orders_are_read_and_one_refused_file_does_not_withhold_the_othe
             .iter()
             .filter(|code| **code == "record_invalid")
             .count(),
-        3
+        4
     );
-    assert_eq!(codes.len(), 4, "{codes:?}");
+    assert_eq!(codes.len(), 5, "{codes:?}");
+}
+
+#[test]
+fn attention_tabs_reads_a_file_the_plugin_encoder_wrote() {
+    let scratch = Scratch::new();
+    let state = scratch.0.join("state");
+    fs::create_dir_all(&state).expect("create state root");
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let encoded = Command::new("luajit")
+        .arg(repo.join("tests/lua/support/write_tab_publication.lua"))
+        .env_clear()
+        .env("WEZTERM_ATTENTION_DIR", &state)
+        .env("ATTENTION_REPO", repo)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .output()
+        .expect("run plugin encoder");
+    assert!(
+        encoded.status.success(),
+        "plugin encoder failed: {}",
+        String::from_utf8_lossy(&encoded.stderr)
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .arg("tabs")
+        .env_clear()
+        .env("WEZTERM_ATTENTION_DIR", &state)
+        .output()
+        .expect("run tabs");
+    assert_eq!(output.status.code(), Some(0), "{:?}", output);
+    assert!(output.stderr.is_empty());
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("tabs JSON");
+    assert_eq!(envelope["status"], "ok");
+    assert_eq!(envelope["complete"], true);
+    let v2_id = concat!(
+        "v2:",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ":",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ":16"
+    );
+    let windows = envelope["result"]["windows"]
+        .as_array()
+        .expect("windows array");
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0]["window_id"], 0);
+    assert_eq!(
+        windows[0]["tabs"][0]["marker_ids"],
+        json!([v2_id])
+    );
+    assert_eq!(windows[0]["tabs"][1]["marker_ids"], json!(["4", "9"]));
 }
 
 #[test]

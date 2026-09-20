@@ -448,7 +448,7 @@ $WEZTERM_ATTENTION_DIR/tabs/<window id>.json
   "tabs": [ { "number": 11, "text": " 11: ✓ braid ", "marker_ids": ["16"] } ] }
 ```
 
-`number` is the number the bar printed, `text` is the whole string it drew, and `marker_ids` are the IDs that tab's panes' marker files are named by — already translated out of the window's local numbering, because only the window could translate them. The file is written when a window's composed list changes and at no other time, so `published_at_ms` says when the bar last drew something different.
+`number` is the number the bar printed, `text` is the whole string it drew, and `marker_ids` are the IDs the plugin already uses for those panes — already translated out of the window's local numbering, because only the window could translate them. A v1 pane is a canonical decimal marker id; a v2 pane is `v2:<realm_id>:<incarnation_id>:<pane_id>` once a poll has identified it. The file is written when a window's composed list changes and at no other time, so `published_at_ms` says when the bar last drew something different.
 
 Read it with `attention tabs`, which returns every window in the same JSON envelope as `bindings`. **It is honest about when it was written, not guaranteed current**: nothing refreshes it while the bar is idle, and no consumer should act on a number it has not checked. Use it to describe tabs and to resolve "the second `bootstrap` tab"; to act on one, ask the GUI, where `mux_window:tabs_with_info()` returns the drawn order live.
 

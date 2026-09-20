@@ -1542,8 +1542,9 @@ pub struct TabPublication {
 }
 
 /// One drawn tab: the number the bar printed, the text it drew, and the ids the
-/// markers of its panes are named by. The ids are already translated out of the
-/// window's local numbering, because only the window could translate them.
+/// plugin already uses for those panes. A v1 pane is a canonical decimal marker
+/// id; a v2 pane is `v2:<realm_id>:<incarnation_id>:<pane_id>`. Both are already
+/// translated out of the window's local numbering.
 #[derive(Clone, Debug, Serialize)]
 pub struct PublishedTab {
     pub number: u64,
@@ -1638,6 +1639,35 @@ fn canonical_decimal(text: &str, max_digits: usize) -> bool {
         && (text.len() == 1 || !text.starts_with('0'))
 }
 
+fn hex64(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// What `gui_tab_pane_ids` publishes: a v1 marker id, or the v2 cache key
+/// `address_cache_key` builds after a poll has identified the pane.
+fn published_marker_id(text: &str, pane_id_max_digits: usize) -> bool {
+    if canonical_decimal(text, pane_id_max_digits) {
+        return true;
+    }
+    const HEX: usize = 64;
+    let Some(rest) = text.strip_prefix("v2:") else {
+        return false;
+    };
+    let realm_end = HEX;
+    let incarnation_start = HEX + 1;
+    let incarnation_end = incarnation_start + HEX;
+    let pane_start = incarnation_end + 1;
+    rest.len() >= pane_start
+        && rest.as_bytes()[realm_end] == b':'
+        && rest.as_bytes()[incarnation_end] == b':'
+        && hex64(&rest[..realm_end])
+        && hex64(&rest[incarnation_start..incarnation_end])
+        && canonical_decimal(&rest[pane_start..], pane_id_max_digits)
+}
+
 fn tab_publication(
     value: &Value,
     window_id: u64,
@@ -1709,7 +1739,7 @@ fn tab_publication(
         {
             let id = id
                 .as_str()
-                .filter(|id| canonical_decimal(id, limits.pane_id_max_digits))
+                .filter(|id| published_marker_id(id, limits.pane_id_max_digits))
                 .ok_or_else(invalid)?;
             marker_ids.push(id.to_owned());
         }
@@ -1788,5 +1818,46 @@ mod pane_listing_tests {
         // Every pane on an unreachable socket reports the same failure, and one
         // failed subprocess is enough to establish it.
         assert_eq!(failing.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod published_marker_id_tests {
+    use super::published_marker_id;
+
+    const V2: &str = concat!(
+        "v2:",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ":",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ":16"
+    );
+
+    #[test]
+    fn accepts_the_two_forms_the_plugin_writes() {
+        assert!(published_marker_id("0", 20));
+        assert!(published_marker_id("16", 20));
+        assert!(published_marker_id(V2, 20));
+    }
+
+    #[test]
+    fn refuses_a_key_the_plugin_would_not_write() {
+        assert!(!published_marker_id("", 20));
+        assert!(!published_marker_id("016", 20));
+        assert!(!published_marker_id("not-an-id", 20));
+        assert!(!published_marker_id("v2:short:short:16", 20));
+        assert!(!published_marker_id(
+            "V2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:16",
+            20
+        ));
+        assert!(!published_marker_id(
+            "v2:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:16",
+            20
+        ));
+        assert!(!published_marker_id(&format!("{V2}x"), 20));
+        assert!(!published_marker_id(
+            "v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:016",
+            20
+        ));
     }
 }

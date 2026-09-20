@@ -147,8 +147,9 @@ return function(context)
   --- Publish the tab order one window's bar drew, at `<dir>/tabs/<window>.json`.
   --- It is not a v2 record: it names no pane address, carries no fence, and
   --- nothing acts on it, so it carries its own schema and is read on its own
-  --- terms. `marker_ids` are the ids the markers are named by, already
-  --- translated, so a reader never repeats that translation.
+  --- terms. `marker_ids` are what `gui_tab_pane_ids` returned: a v1 marker id
+  --- or the v2 cache key, already translated, so a reader never repeats that
+  --- translation.
   ---
   --- Honest about when it was written, not guaranteed current: nothing
   --- refreshes `published_at_ms` while the bar draws the same thing. The write
