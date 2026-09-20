@@ -13,7 +13,10 @@
 //! - [`query`] for reading facts: [`query::read_bindings`],
 //!   [`query::read_pane_facts`], and the row and facet types they return. A
 //!   socket-scoped listing is supported as a CLI query; no suffix-free Rust
-//!   wrapper for it exists, so none is promised here.
+//!   wrapper for it exists, so none is promised here. The published tab order
+//!   is the same: `attention tabs` is the supported way to read it, and
+//!   [`query::read_tab_publications`] is how that command does it, not a
+//!   promise to a linking caller.
 //! - [`lifecycle`] for applying a provider event, and [`lifecycle::outcome`] for
 //!   what that event was admitted as and what it persisted.
 //! - [`consumer`] for building and delivering a hook envelope.

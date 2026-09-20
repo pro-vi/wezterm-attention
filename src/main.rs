@@ -32,6 +32,8 @@ enum Command {
     },
     /// List validated binding facts.
     Bindings(BindingsArgs),
+    /// List the tab order each GUI window's tab bar published.
+    Tabs(TabsArgs),
     /// Read one exact canonical scope from JSON stdin without changing state.
     Inspect(InspectArgs),
     /// Set current activity or a source-owned review.
@@ -169,6 +171,16 @@ struct BindingsArgs {
 }
 
 #[derive(Clone, Debug, Args)]
+#[command(
+    after_help = "Example: attention tabs\nReturns the number and text each window's tab bar drew, with the pane IDs behind each tab.\nThe order is honest about when it was written, not guaranteed current: read published_at_ms.\nEvery tab is listed, agent or not. For bound panes only: attention bindings"
+)]
+struct TabsArgs {
+    /// Return the JSON envelope (also the default).
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Clone, Debug, Args)]
 struct MarkArgs {
     #[arg(value_parser = ["thinking", "stop", "notify", "review", "clear"])]
     state: String,
@@ -209,7 +221,7 @@ struct Response<T: Serialize> {
 }
 
 fn query_json(command: &str) -> bool {
-    matches!(command, "bindings" | "inspect" | "hooks describe")
+    matches!(command, "bindings" | "tabs" | "inspect" | "hooks describe")
 }
 
 fn emit<T: Serialize>(response: &Response<T>, as_json: bool, quiet: bool) {
@@ -744,6 +756,36 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 })
             {
                 ExitCode::from(3)
+            } else {
+                ExitCode::from(1)
+            })
+        }
+        Some(Command::Tabs(args)) => {
+            let root = wezterm_attention::records::state_root(&environment)
+                .map_err(|error| (Box::new(error), args.json, "tabs".to_owned()))?;
+            let (windows, diagnostics) = wezterm_attention::query::read_tab_publications(&root)
+                .map_err(|error| (Box::new(error), args.json, "tabs".to_owned()))?;
+            emit(
+                &Response {
+                    schema: 1,
+                    command: "tabs".to_owned(),
+                    status: if diagnostics.is_empty() {
+                        "ok"
+                    } else {
+                        "findings"
+                    }
+                    .to_owned(),
+                    // A window that could not be read is a window missing from
+                    // the answer, so the answer is not the whole tab bar.
+                    complete: diagnostics.is_empty(),
+                    result: serde_json::json!({ "windows": windows }),
+                    diagnostics: diagnostics.iter().take(50).cloned().collect(),
+                },
+                args.json,
+                false,
+            );
+            Ok(if diagnostics.is_empty() {
+                ExitCode::SUCCESS
             } else {
                 ExitCode::from(1)
             })

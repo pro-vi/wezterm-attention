@@ -480,3 +480,124 @@ fn json_publication_and_binding_output_report_bounded_completeness() {
     assert_eq!(envelope["result"]["truncated"], true);
     assert_eq!(envelope["complete"], false);
 }
+
+#[test]
+fn published_tab_orders_are_read_and_one_refused_file_does_not_withhold_the_others() {
+    let scratch = Scratch::new();
+    let state = scratch.0.join("state");
+    let tabs = state.join("tabs");
+    fs::create_dir_all(&tabs).expect("create tab publication directory");
+    // Drawn order, not sorted order: the bar drew 11 before 4, and that is the
+    // fact the file exists to carry.
+    fs::write(
+        tabs.join("0.json"),
+        r#"{"published_at_ms":1789884000123,"schema":1,"tabs":[{"marker_ids":["16"],"number":11,"text":" 11: braid "},{"marker_ids":["4","9"],"number":4,"text":" 4: construal "}],"window_id":0}"#,
+    )
+    .expect("write window 0");
+    fs::write(
+        tabs.join("12.json"),
+        r#"{"published_at_ms":1789884000456,"schema":1,"tabs":[],"window_id":12}"#,
+    )
+    .expect("write window 12");
+    // A later publisher's shape, a file filed under a window it does not name,
+    // a field this schema does not have, and a name that is not a window ID.
+    fs::write(
+        tabs.join("3.json"),
+        r#"{"published_at_ms":1789884000789,"schema":2,"tabs":[],"window_id":3}"#,
+    )
+    .expect("write future window");
+    fs::write(
+        tabs.join("7.json"),
+        r#"{"published_at_ms":1789884000789,"schema":1,"tabs":[],"window_id":8}"#,
+    )
+    .expect("write misfiled window");
+    fs::write(
+        tabs.join("9.json"),
+        r#"{"published_at_ms":1789884000789,"schema":1,"tabs":[],"window_id":9,"focused":true}"#,
+    )
+    .expect("write window with an unknown field");
+    fs::write(
+        tabs.join("08.json"),
+        r#"{"published_at_ms":1789884000789,"schema":1,"tabs":[],"window_id":8}"#,
+    )
+    .expect("write non-canonical name");
+    fs::write(tabs.join("notes.txt"), "not a publication").expect("write unrelated file");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .arg("tabs")
+        .env_clear()
+        .env("WEZTERM_ATTENTION_DIR", &state)
+        .output()
+        .expect("run tabs");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("tabs JSON");
+    assert_eq!(envelope["schema"], 1);
+    assert_eq!(envelope["command"], "tabs");
+    assert_eq!(envelope["status"], "findings");
+    assert_eq!(envelope["complete"], false);
+
+    let windows = envelope["result"]["windows"]
+        .as_array()
+        .expect("windows array");
+    assert_eq!(windows.len(), 2, "{windows:?}");
+    assert_eq!(windows[0]["window_id"], 0);
+    assert_eq!(windows[1]["window_id"], 12);
+    assert_eq!(windows[0]["published_at_ms"], 1789884000123u64);
+    let drawn = windows[0]["tabs"].as_array().expect("tabs array");
+    assert_eq!(drawn.len(), 2);
+    assert_eq!(drawn[0]["number"], 11);
+    assert_eq!(drawn[0]["text"], " 11: braid ");
+    assert_eq!(drawn[0]["marker_ids"], json!(["16"]));
+    assert_eq!(drawn[1]["number"], 4);
+    assert_eq!(drawn[1]["marker_ids"], json!(["4", "9"]));
+
+    let codes: Vec<&str> = envelope["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .map(|item| item["code"].as_str().expect("diagnostic code"))
+        .collect();
+    assert_eq!(
+        codes
+            .iter()
+            .filter(|code| **code == "future_schema")
+            .count(),
+        1
+    );
+    assert_eq!(
+        codes
+            .iter()
+            .filter(|code| **code == "record_invalid")
+            .count(),
+        3
+    );
+    assert_eq!(codes.len(), 4, "{codes:?}");
+}
+
+#[test]
+fn a_state_root_that_has_published_no_tab_order_answers_completely() {
+    let scratch = Scratch::new();
+    let state = scratch.0.join("state");
+    fs::create_dir_all(&state).expect("create state root");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_attention"))
+            .args(args)
+            .env_clear()
+            .env("WEZTERM_ATTENTION_DIR", &state)
+            .output()
+            .expect("run tabs")
+    };
+    let default = run(&["tabs"]);
+    let explicit = run(&["tabs", "--json"]);
+    assert_eq!(default.status.code(), Some(0));
+    assert_eq!(default.stdout, explicit.stdout, "tabs is a read command");
+    let envelope: Value = serde_json::from_slice(&default.stdout).expect("tabs JSON");
+    assert_eq!(envelope["status"], "ok");
+    assert_eq!(envelope["complete"], true);
+    assert_eq!(envelope["result"]["windows"], json!([]));
+    assert!(
+        !state.join("tabs").exists(),
+        "a read command creates no state directory"
+    );
+}

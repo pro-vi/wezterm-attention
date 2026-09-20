@@ -1528,6 +1528,204 @@ fn assemble_bindings(
     Ok((rows, diagnostics))
 }
 
+/// The tab order one GUI window's tab bar drew, as the bar published it.
+///
+/// This is not a v2 record. It names no pane address, carries no fence and no
+/// TTL, and nothing acts on it, so it carries its own `schema` rather than the
+/// manifest's record schema. `published_at_ms` says when the bar last drew
+/// something different; nothing refreshes it while the bar is idle.
+#[derive(Clone, Debug, Serialize)]
+pub struct TabPublication {
+    pub window_id: u64,
+    pub published_at_ms: u64,
+    pub tabs: Vec<PublishedTab>,
+}
+
+/// One drawn tab: the number the bar printed, the text it drew, and the ids the
+/// markers of its panes are named by. The ids are already translated out of the
+/// window's local numbering, because only the window could translate them.
+#[derive(Clone, Debug, Serialize)]
+pub struct PublishedTab {
+    pub number: u64,
+    pub text: String,
+    pub marker_ids: Vec<String>,
+}
+
+const TAB_PUBLICATION_SCHEMA: u64 = 1;
+
+/// Read every tab order published under `<root>/tabs`.
+///
+/// A file that cannot be read or does not hold a tab publication is diagnosed
+/// and skipped. The other windows drew independently of it, and withholding
+/// them would answer a different question than the one asked.
+pub fn read_tab_publications(root: &Path) -> Result<(Vec<TabPublication>, Vec<Diagnostic>)> {
+    let limits = &crate::protocol::manifest()?.limits;
+    let mut windows: Vec<TabPublication> = Vec::new();
+    let mut diagnostics = Vec::new();
+    let entries = match fs::read_dir(root.join("tabs")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((windows, diagnostics));
+        }
+        Err(_) => {
+            return Err(AttentionError::new(
+                "probe_unavailable",
+                "tab publication directory could not be enumerated",
+            ));
+        }
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            diagnostics.push(diagnostic(
+                "probe_unavailable",
+                "tab publication entry is unavailable",
+            ));
+            continue;
+        };
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        match entry.file_type() {
+            Ok(kind) if kind.is_symlink() => {
+                diagnostics.push(diagnostic("record_invalid", "tab publication is a symlink"));
+                continue;
+            }
+            Ok(kind) if !kind.is_file() => continue,
+            Ok(_) => {}
+            Err(_) => {
+                diagnostics.push(diagnostic(
+                    "probe_unavailable",
+                    "tab publication entry type is unavailable",
+                ));
+                continue;
+            }
+        }
+        let window_id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| canonical_decimal(stem, limits.canonical_decimal_max_digits))
+            .and_then(|stem| stem.parse::<u64>().ok());
+        let Some(window_id) = window_id else {
+            diagnostics.push(diagnostic(
+                "record_invalid",
+                "tab publication is not named by a window ID",
+            ));
+            continue;
+        };
+        match read_record_typed(&path, None, &RecordIdentity::unscoped()) {
+            RecordRead::Present(value) => match tab_publication(&value, window_id, limits) {
+                Ok(window) => windows.push(window),
+                Err(error) => diagnostics.push(error.diagnostic),
+            },
+            // Published and removed between the listing and the read. The window
+            // it described is gone or is about to publish again.
+            RecordRead::Missing => {}
+            RecordRead::Unavailable(error)
+            | RecordRead::Invalid(error)
+            | RecordRead::Unsupported(error) => diagnostics.push(error.diagnostic),
+        }
+    }
+    windows.sort_by_key(|window| window.window_id);
+    Ok((windows, diagnostics))
+}
+
+/// Digits with no leading zero, the way every ID this project writes is spelled.
+fn canonical_decimal(text: &str, max_digits: usize) -> bool {
+    !text.is_empty()
+        && text.len() <= max_digits
+        && text.bytes().all(|byte| byte.is_ascii_digit())
+        && (text.len() == 1 || !text.starts_with('0'))
+}
+
+fn tab_publication(
+    value: &Value,
+    window_id: u64,
+    limits: &crate::protocol::Limits,
+) -> Result<TabPublication> {
+    let invalid = || AttentionError::new("record_invalid", "tab publication is invalid");
+    let object = value.as_object().ok_or_else(invalid)?;
+    let schema = object
+        .get("schema")
+        .and_then(Value::as_u64)
+        .ok_or_else(invalid)?;
+    if schema > TAB_PUBLICATION_SCHEMA {
+        return Err(AttentionError::new(
+            "future_schema",
+            "tab publication schema is unsupported",
+        ));
+    }
+    if schema != TAB_PUBLICATION_SCHEMA
+        || !object.keys().all(|field| {
+            matches!(
+                field.as_str(),
+                "schema" | "window_id" | "published_at_ms" | "tabs"
+            )
+        })
+        // A file that names a window other than the one it is filed under
+        // describes neither of them.
+        || object.get("window_id").and_then(Value::as_u64) != Some(window_id)
+    {
+        return Err(invalid());
+    }
+    let published_at_ms = object
+        .get("published_at_ms")
+        .and_then(Value::as_u64)
+        .ok_or_else(invalid)?;
+    let mut tabs = Vec::new();
+    for item in object
+        .get("tabs")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid)?
+    {
+        let entry = item.as_object().ok_or_else(invalid)?;
+        if !entry
+            .keys()
+            .all(|field| matches!(field.as_str(), "number" | "text" | "marker_ids"))
+        {
+            return Err(invalid());
+        }
+        let number = entry
+            .get("number")
+            .and_then(Value::as_u64)
+            .filter(|number| *number > 0)
+            .ok_or_else(invalid)?;
+        let text = entry
+            .get("text")
+            .and_then(Value::as_str)
+            .filter(|text| {
+                text.len() <= limits.safe_label_max_bytes
+                    && !text
+                        .chars()
+                        .any(|character| character < ' ' || character == '\u{7f}')
+            })
+            .ok_or_else(invalid)?
+            .to_owned();
+        let mut marker_ids = Vec::new();
+        for id in entry
+            .get("marker_ids")
+            .and_then(Value::as_array)
+            .ok_or_else(invalid)?
+        {
+            let id = id
+                .as_str()
+                .filter(|id| canonical_decimal(id, limits.pane_id_max_digits))
+                .ok_or_else(invalid)?;
+            marker_ids.push(id.to_owned());
+        }
+        tabs.push(PublishedTab {
+            number,
+            text,
+            marker_ids,
+        });
+    }
+    Ok(TabPublication {
+        window_id,
+        published_at_ms,
+        tabs,
+    })
+}
+
 #[cfg(test)]
 mod pane_listing_tests {
     use super::*;
