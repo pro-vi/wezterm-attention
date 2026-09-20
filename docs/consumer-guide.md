@@ -135,6 +135,8 @@ The window entries are sorted by window ID; the tabs inside one are in the order
 
 **There is no freshness contract.** The file is written when a window's composed list changes and at no other time, so `published_at_ms` is when the bar last drew something different, not when anything checked. Nothing refreshes it while the bar is idle, and a window whose WezTerm has exited leaves its last file behind. Use this to describe tabs and to resolve an ordinal — "the second `bootstrap` tab" — where a wrong answer is visible to the person who asked. To act on a tab, ask the GUI: inside WezTerm, `mux_window:tabs_with_info()` returns the same order live.
 
+What publishes is the `format-tab-title` handler the plugin registers, which exists in the default `renderer="tab"` mode and not in `renderer="manual"`. A manual renderer draws its own tabs and publishes none of them, so a consumer of a manually rendered window sees the same absence as one whose publisher is not running.
+
 Every setup publishes, including a plain local WezTerm where the drawn number equals the derived one. A consumer cannot tell a simple setup from a publisher that is not running, because the file is absent in both, and deriving the number is right in one case and wrong in the other.
 
 A file that cannot be read, declares a later schema, is filed under a window it does not name, or carries a field this schema does not have is reported as a diagnostic and left out; the windows that did read are still returned, and `complete` is false. Exit 0 with no diagnostics, 1 with them.
