@@ -435,7 +435,7 @@ Use `$WEZTERM_ATTENTION_ROOT/bin/attention`. Child attribution requires matching
 
 ## The drawn tab order
 
-A WezTerm window attached to a mux server mirrors the server's tabs under numbers of its own, and those are the numbers the tab bar prints. They are not the order of `wezterm cli list`: measured on one 29-tab window, 22 of the 29 differed. Nothing outside the GUI process can see the drawn order, so the tab bar publishes it — one file per window, under the state directory:
+A WezTerm window attached to a mux server mirrors the server's tabs under numbers of its own, and those are the numbers the tab bar prints. They are not the order of `wezterm cli list`: a consumer of this project measured one 29-tab window on 2026-09-19 and found 22 of the 29 numbers differing. Nothing outside the GUI process can see the drawn order, so the tab bar publishes it — one file per window, under the state directory:
 
 ```text
 $WEZTERM_ATTENTION_DIR/tabs/<window id>.json
