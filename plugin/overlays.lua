@@ -59,6 +59,38 @@ return function(context)
     }, "-")
   end
 
+  --- Place `body` at `path` through a temporary file this process owns, so a
+  --- reader sees either the previous content or the whole new one. The name
+  --- carries this process's session token: two WezTerm processes writing the
+  --- same file never delete each other's in-flight copy. `key` prefixes the
+  --- reported failures, so one caller's persistent failure is logged once.
+  local function replace_file(path, body, key)
+    local tmp = path .. "." .. publication_session .. ".tmp"
+    os.remove(tmp)
+    local file, open_err = io.open(tmp, "w")
+    if not file then
+      report_error_once(key .. "-open:" .. path,
+        "failed to write " .. tmp .. ": " .. tostring(open_err))
+      return false
+    end
+    local wrote, write_err = file:write(body .. "\n")
+    local closed, close_err = file:close()
+    if not wrote or not closed then
+      os.remove(tmp)
+      report_error_once(key .. "-finish:" .. path,
+        "failed to finish " .. tmp .. ": " .. tostring(write_err or close_err))
+      return false
+    end
+    local renamed, rename_err = os.rename(tmp, path)
+    if not renamed then
+      os.remove(tmp)
+      report_error_once(key .. "-rename:" .. path,
+        "failed to place " .. path .. ": " .. tostring(rename_err))
+      return false
+    end
+    return true
+  end
+
   local function write_v2_record(path, record, kind, expected)
     local parsed, parse_diagnostic = parse_v2_record(record, kind)
     if not parsed or (expected and not record_matches(parsed, expected)) then
@@ -75,29 +107,67 @@ return function(context)
     end
     local body = json_value(record)
     if not body then return false end
-    local tmp = path .. "." .. publication_session .. ".tmp"
-    os.remove(tmp)
-    local file, open_err = io.open(tmp, "w")
-    if not file then
-      report_error_once("write-v2-open:" .. path,
-        "failed to write " .. tmp .. ": " .. tostring(open_err))
-      return false
+    return replace_file(path, body, "write-v2")
+  end
+
+  --- Spell an integral number the way JSON wants it read back. `json_value`
+  --- renders a number with `tostring`, and what that gives for an integral
+  --- value depends on the Lua the plugin runs under; the reader of the file
+  --- below wants an integer in every one of them.
+  local function integer(value)
+    return string.format("%d", math.floor(value))
+  end
+
+  --- The composed list last written for each window, so an unchanged bar costs
+  --- no file work. Keyed by path, because that is what a write would replace.
+  local published_tab_lists = {}
+
+  --- One encoding per drawn tab. The formatter is called once per tab, so
+  --- without this every tab's text would be escaped again on every one of those
+  --- calls. A drawn tab is a fresh table each time it is drawn, and the entries
+  --- of tabs that closed go with them, so the keys are weak.
+  local encoded_tabs = setmetatable({}, { __mode = "k" })
+
+  local function encode_tab(entry)
+    local encoded = encoded_tabs[entry]
+    if encoded then return encoded end
+    local ids = {}
+    for position, marker_id in ipairs(entry.marker_ids) do
+      ids[position] = json_string(marker_id)
     end
-    local wrote, write_err = file:write(body .. "\n")
-    local closed, close_err = file:close()
-    if not wrote or not closed then
-      os.remove(tmp)
-      report_error_once("write-v2-finish:" .. path,
-        "failed to finish " .. tmp .. ": " .. tostring(write_err or close_err))
-      return false
-    end
-    local renamed, rename_err = os.rename(tmp, path)
-    if not renamed then
-      os.remove(tmp)
-      report_error_once("write-v2-rename:" .. path,
-        "failed to place " .. path .. ": " .. tostring(rename_err))
-      return false
-    end
+    encoded = table.concat({
+      '{"marker_ids":[', table.concat(ids, ","),
+      '],"number":', integer(entry.number),
+      ',"text":', json_string(entry.text), "}",
+    })
+    encoded_tabs[entry] = encoded
+    return encoded
+  end
+
+  --- Publish the tab order one window's bar drew, at `<dir>/tabs/<window>.json`.
+  --- It is not a v2 record: it names no pane address, carries no fence, and
+  --- nothing acts on it, so it carries its own schema and is read on its own
+  --- terms. `marker_ids` are the ids the markers are named by, already
+  --- translated, so a reader never repeats that translation.
+  ---
+  --- Honest about when it was written, not guaranteed current: nothing
+  --- refreshes `published_at_ms` while the bar draws the same thing. The write
+  --- happens only when the composed list changes, because the caller is the
+  --- GUI thread's tab formatter.
+  local function publish_tab_order(dir, window_id, tabs)
+    local rows = {}
+    for index, entry in ipairs(tabs) do rows[index] = encode_tab(entry) end
+    local list = "[" .. table.concat(rows, ",") .. "]"
+    local path = dir .. "/tabs/" .. integer(window_id) .. ".json"
+    if published_tab_lists[path] == list then return false end
+    -- Keys in sorted order, as json_value writes them.
+    local body = table.concat({
+      '{"published_at_ms":', integer(now_ms()),
+      ',"schema":1,"tabs":', list,
+      ',"window_id":', integer(window_id), "}",
+    })
+    if not replace_file(path, body, "publish-tabs") then return false end
+    published_tab_lists[path] = list
     return true
   end
 
@@ -455,6 +525,7 @@ return function(context)
     json_value = json_value,
     next_v2_event_id = next_v2_event_id,
     write_v2_record = write_v2_record,
+    publish_tab_order = publish_tab_order,
     acknowledgement_path = acknowledgement_path,
     acknowledgement_tmp_path = acknowledgement_tmp_path,
     marker_identity = marker_identity,

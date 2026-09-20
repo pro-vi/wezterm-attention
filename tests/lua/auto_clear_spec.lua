@@ -687,6 +687,146 @@ test("both renderers project the same attention for the same tab", function()
     "ctx.attention should still be indicator, type, color")
 end)
 
+-- ── U2: publishing the drawn tab order ─────────────────────────────────────
+
+--- A GUI tab double the renderer can publish from: it carries the window and
+--- tab ids WezTerm supplies on TabInformation alongside the drawn index.
+local function gui_tab(spec)
+  local panes = {}
+  for index, pane_id in ipairs(spec.panes) do panes[index] = gui_pane(pane_id) end
+  return {
+    tab_id = spec.tab_id,
+    window_id = spec.window_id,
+    tab_index = spec.tab_index,
+    is_active = spec.is_active == true,
+    active_pane = panes[1],
+    panes = panes,
+  }
+end
+
+local function tab_publication_path(window_id)
+  return test_dir .. "/tabs/" .. window_id .. ".json"
+end
+
+local function read_tab_publication(window_id)
+  local content = read_path(tab_publication_path(window_id))
+  if not content then return nil end
+  return decode_json(content)
+end
+
+--- The text a format-tab-title return carries, tinted or not, so a test can
+--- compare what was published against what that same call drew.
+local function rendered_text(rendered)
+  if type(rendered) == "string" then return rendered end
+  for _, item in ipairs(rendered) do
+    if type(item) == "table" and type(item.Text) == "string" then return item.Text end
+  end
+  return nil
+end
+
+test("a window publishes its drawn order once every one of its tabs is drawn", function()
+  write_marker(9820, "stop")
+  poll({ 9820 })
+
+  local first = gui_tab({ window_id = 9800, tab_id = 9810, tab_index = 0, panes = { 9820 } })
+  local second = gui_tab({ window_id = 9800, tab_id = 9811, tab_index = 1, panes = { 9821 } })
+  local bar = { first, second }
+
+  local first_drawn = format_tab_title(first, bar)
+  assert(not path_exists(tab_publication_path(9800)),
+    "a window with a tab still undrawn publishes nothing")
+
+  local second_drawn = format_tab_title(second, bar)
+  local published = assert(read_tab_publication(9800), "the drawn window should be published")
+
+  assert(published.schema == 1, "the file carries its own schema")
+  assert(published.window_id == 9800, "the file names the window it describes")
+  assert(type(published.published_at_ms) == "number",
+    "the file says when it was written")
+  assert(#published.tabs == 2, "both tabs should be there, got " .. tostring(#published.tabs))
+  assert(published.tabs[1].number == 1 and published.tabs[2].number == 2,
+    "the numbers are the ones the bar draws")
+  assert(published.tabs[1].text == rendered_text(first_drawn)
+      and published.tabs[2].text == rendered_text(second_drawn),
+    "the text is what those calls drew")
+  assert(published.tabs[1].marker_ids[1] == "9820"
+      and published.tabs[2].marker_ids[1] == "9821",
+    "each tab carries the ids its markers are named by")
+
+  -- Byte for byte, because the reader on the other side wants integers and
+  -- this is where the plugin's own encoding is decided.
+  assert(read_path(tab_publication_path(9800)) == string.format(
+    '{"published_at_ms":%d,"schema":1,"tabs":['
+      .. '{"marker_ids":["9820"],"number":1,"text":%s},'
+      .. '{"marker_ids":["9821"],"number":2,"text":%s}],"window_id":9800}\n',
+    published.published_at_ms,
+    encode_json_string(published.tabs[1].text),
+    encode_json_string(published.tabs[2].text)),
+    "the published bytes are sorted keys and unquoted integers")
+end)
+
+test("a redraw that draws the same thing writes no file", function()
+  write_marker(9822, "stop")
+  poll({ 9822 })
+
+  local first = gui_tab({ window_id = 9801, tab_id = 9812, tab_index = 0, panes = { 9822 } })
+  local second = gui_tab({ window_id = 9801, tab_id = 9813, tab_index = 1, panes = { 9823 } })
+  local bar = { first, second }
+  format_tab_title(first, bar)
+  format_tab_title(second, bar)
+  assert(path_exists(tab_publication_path(9801)), "the first draw publishes")
+
+  assert(os.remove(tab_publication_path(9801)), "the published file should be removable")
+  format_tab_title(first, bar)
+  format_tab_title(second, bar)
+  assert(not path_exists(tab_publication_path(9801)),
+    "an unchanged bar must not write on the GUI thread")
+
+  write_marker(9823, "notify")
+  poll({ 9822, 9823 })
+  format_tab_title(first, bar)
+  local changed_drawn = format_tab_title(second, bar)
+  local published = assert(read_tab_publication(9801),
+    "a changed bar publishes the whole window again")
+  assert(published.tabs[2].text == rendered_text(changed_drawn),
+    "the republished text is the changed one")
+  assert(published.tabs[2].text:find("! ", 1, true),
+    "the changed tab draws the notify glyph")
+end)
+
+test("the published ids are the translated ones, not the window's local ids", function()
+  write_marker(9840, "stop")
+  attention.poll(window_double({
+    tabs = { { { id = 9830, published = 9840, domain = "mux" } } }, focused = false }))
+
+  local only = gui_tab({ window_id = 9802, tab_id = 9814, tab_index = 0, panes = { 9830 } })
+  format_tab_title(only, { only })
+
+  local published = assert(read_tab_publication(9802), "the window should be published")
+  assert(published.tabs[1].marker_ids[1] == "9840",
+    "a mux client's tab carries the published pane id, got "
+      .. tostring(published.tabs[1].marker_ids[1]))
+end)
+
+test("two windows publish their own orders into their own files", function()
+  local left = gui_tab({ window_id = 9803, tab_id = 9815, tab_index = 0, panes = { 9824 } })
+  local right_first = gui_tab({ window_id = 9804, tab_id = 9816, tab_index = 0, panes = { 9825 } })
+  local right_second = gui_tab({ window_id = 9804, tab_id = 9817, tab_index = 1, panes = { 9826 } })
+
+  format_tab_title(left, { left })
+  format_tab_title(right_first, { right_first, right_second })
+  assert(not path_exists(tab_publication_path(9804)),
+    "one window's complete bar does not complete another's")
+  format_tab_title(right_second, { right_first, right_second })
+
+  local one = assert(read_tab_publication(9803), "the one-tab window should be published")
+  local two = assert(read_tab_publication(9804), "the two-tab window should be published")
+  assert(#one.tabs == 1 and #two.tabs == 2,
+    "each file holds only the tabs of its own window")
+  assert(one.tabs[1].marker_ids[1] == "9824" and two.tabs[1].marker_ids[1] == "9825",
+    "each file holds its own window's panes")
+end)
+
 -- ── U2: focus-aware acknowledgement ─────────────────────────────────────────
 
 test("a focused poll acknowledges only the active pane", function()

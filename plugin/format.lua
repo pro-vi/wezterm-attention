@@ -167,11 +167,60 @@ return function(context)
 
   local last_base_title_by_tab = {}
 
+  -- What the bar last drew for each tab, keyed by window id then tab id. The
+  -- renderer is called once per tab, so a window's list is only complete once
+  -- every tab in the callback's own array has been through it.
+  local drawn_by_window = {}
+
+  --- The text a formatter return carries, whether it was tinted or not. A tinted
+  --- return is a list of format items and the text is the one that has it; an
+  --- untinted return is the string itself.
+  local function drawn_text(rendered)
+    if type(rendered) == "string" then return rendered end
+    if type(rendered) ~= "table" then return nil end
+    for _, item in ipairs(rendered) do
+      if type(item) == "table" and type(item.Text) == "string" then return item.Text end
+    end
+    return nil
+  end
+
+  --- Record what this call drew for one tab, and return the whole window's tabs
+  --- in the order the bar draws them once every one of them has been drawn.
+  --- Returns nil while the window is still incomplete, so a caller publishes a
+  --- whole bar or nothing. No file work happens here: this is the GUI thread.
+  local function drawn_tab_order(tab, tabs, marker_ids, rendered)
+    local window_id, tab_id = tab.window_id, tab.tab_id
+    local text = drawn_text(rendered)
+    if type(window_id) ~= "number" or type(tab_id) ~= "number" then return nil end
+    if type(tabs) ~= "table" or text == nil then return nil end
+    local drawn = drawn_by_window[window_id]
+    if not drawn then
+      drawn = {}
+      drawn_by_window[window_id] = drawn
+    end
+    drawn[tab_id] = {
+      number = tab.tab_index + 1, text = text, marker_ids = marker_ids,
+    }
+    local order, present = {}, {}
+    for index, entry in ipairs(tabs) do
+      local recorded = type(entry) == "table" and drawn[entry.tab_id]
+      if not recorded then return nil end
+      order[index] = recorded
+      present[entry.tab_id] = true
+    end
+    -- A closed tab's entry would otherwise be held for the life of the process.
+    for id in pairs(drawn) do
+      if not present[id] then drawn[id] = nil end
+    end
+    return order, window_id
+  end
+
 
   return {
     gui_tab_pane_ids = gui_tab_pane_ids,
     resolve_visible_attention = resolve_visible_attention,
     decorate_tab_title = decorate_tab_title,
+    drawn_tab_order = drawn_tab_order,
     build_formatter_context = build_formatter_context,
     last_base_title_by_tab = last_base_title_by_tab,
   }

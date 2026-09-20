@@ -219,6 +219,7 @@ local json_string = overlays_api.json_string
 local json_value = overlays_api.json_value
 local next_v2_event_id = overlays_api.next_v2_event_id
 local write_v2_record = overlays_api.write_v2_record
+local publish_tab_order = overlays_api.publish_tab_order
 local acknowledgement_path = overlays_api.acknowledgement_path
 local acknowledgement_tmp_path = overlays_api.acknowledgement_tmp_path
 local marker_identity = overlays_api.marker_identity
@@ -317,6 +318,7 @@ local format_api = format_factory({
 local gui_tab_pane_ids = format_api.gui_tab_pane_ids
 local resolve_visible_attention = format_api.resolve_visible_attention
 local decorate_tab_title = format_api.decorate_tab_title
+local drawn_tab_order = format_api.drawn_tab_order
 local build_formatter_context = format_api.build_formatter_context
 local last_base_title_by_tab = format_api.last_base_title_by_tab
 local runtime_api = runtime_state.bind({
@@ -484,7 +486,9 @@ function M.apply_to_config(config, opts)
   -- Once, at config load. The Alt+B handler used to do this on the GUI thread
   -- on every press; the directory does not change between presses.
   local quoted_dir = dir:gsub("'", [['\'']])
-  os.execute("mkdir -p '" .. quoted_dir .. "'")
+  -- `tabs/` holds one file per GUI window, so it is made with the state
+  -- directory rather than on the tab formatter's own thread.
+  os.execute("mkdir -p '" .. quoted_dir .. "' '" .. quoted_dir .. "/tabs'")
 
   -- Resolve renderer: support both new "renderer" and legacy "format_tab_title"
   local renderer = opts.renderer or defaults.renderer
@@ -543,7 +547,8 @@ function M.apply_to_config(config, opts)
       --
       -- Resolve what this tab shows, including an unfocused sibling marker
       -- on the active tab.
-      local visible = resolve_visible_attention(gui_tab_pane_ids(tab))
+      local marker_ids = gui_tab_pane_ids(tab)
+      local visible = resolve_visible_attention(marker_ids)
       local show_index = not (cfg and cfg.show_tab_index_in_tab_bar == false)
 
       -- Build base title (user callback or default)
@@ -557,7 +562,16 @@ function M.apply_to_config(config, opts)
         base = ctx.default_title
       end
 
-      return decorate_tab_title(tab, visible, base, show_index)
+      local rendered = decorate_tab_title(tab, visible, base, show_index)
+
+      -- Nothing outside this process can see the order the bar draws, so the
+      -- bar publishes it. Only a window whose every tab has been drawn, and
+      -- only when what they draw has changed: an ordinary redraw composes a
+      -- list and compares it, and touches no file.
+      local order, window_id = drawn_tab_order(tab, tabs, marker_ids, rendered)
+      if order then publish_tab_order(dir, window_id, order) end
+
+      return rendered
     end)
   end
   -- renderer == "manual": no format-tab-title registered
