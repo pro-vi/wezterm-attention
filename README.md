@@ -2,7 +2,7 @@
 
 A WezTerm plugin that turns your tab bar into a notification system. Any CLI tool — AI agents, build scripts, test runners — can signal state changes, and WezTerm reflects them as colored tab indicators.
 
-Two things write those signals. A small Rust command, `attention`, runs as a hook from Claude Code, Codex or Pi and records what a pane's agent is doing against a pane identity that survives detach, reattach and multiple mux sockets. A Lua reader in WezTerm polls those records and renders the tab. Programs other than WezTerm can read the same records: `attention bindings --json` and `attention inspect` return validated facts, so a script does not have to scrape a terminal to find out which pane an agent is in.
+Two things write those signals. A small Rust command, `attention`, runs as a hook from Claude Code, Codex or Pi and records what a pane's agent is doing against a pane identity that survives detach, reattach and multiple mux sockets. A Lua reader in WezTerm polls those records and renders the tab. Programs other than WezTerm can read the same records: `attention bindings --json`, `attention tabs` and `attention inspect` return validated facts, so a script does not have to scrape a terminal to find out which pane an agent is in.
 
 Flat marker files still work. They were the whole protocol before, several tools write them, and the reader keeps accepting them — see [Compatibility](docs/record-contract.md). What is new is that they are no longer the only thing, and no longer the authority.
 
@@ -433,12 +433,33 @@ Use `$WEZTERM_ATTENTION_ROOT/bin/attention`. Child attribution requires matching
 - **Long-running scripts** — any background job that wants your attention when done
 - **Manual triage** — `Alt+B` to flag tabs for review during code review sessions
 
+## The drawn tab order
+
+A WezTerm window attached to a mux server mirrors the server's tabs under numbers of its own, and those are the numbers the tab bar prints. They are not the order of `wezterm cli list`: measured on one 29-tab window, 22 of the 29 differed. Nothing outside the GUI process can see the drawn order, so the tab bar publishes it — one file per window, under the state directory:
+
+```text
+$WEZTERM_ATTENTION_DIR/tabs/<window id>.json
+```
+
+```json
+{ "schema": 1,
+  "window_id": 0,
+  "published_at_ms": 1789884000123,
+  "tabs": [ { "number": 11, "text": " 11: ✓ braid ", "marker_ids": ["16"] } ] }
+```
+
+`number` is the number the bar printed, `text` is the whole string it drew, and `marker_ids` are the IDs that tab's panes' marker files are named by — already translated out of the window's local numbering, because only the window could translate them. The file is written when a window's composed list changes and at no other time, so `published_at_ms` says when the bar last drew something different.
+
+Read it with `attention tabs`, which returns every window in the same JSON envelope as `bindings`. **It is honest about when it was written, not guaranteed current**: nothing refreshes it while the bar is idle, and no consumer should act on a number it has not checked. Use it to describe tabs and to resolve "the second `bootstrap` tab"; to act on one, ask the GUI, where `mux_window:tabs_with_info()` returns the drawn order live.
+
+Every setup publishes, including a plain local WezTerm where the drawn number equals the derived one. A consumer cannot tell a simple setup from a publisher that is not running — the file is absent in both — and deriving is right in one case and wrong in the other.
+
 ## How it works
 
 The plugin uses a **poller/renderer split** to avoid blocking WezTerm's GUI thread:
 
 1. **Poller** (`update-status` event) — runs on WezTerm's `config.status_update_interval` (default 1000ms). Reads marker files and acknowledgement sidecars, then updates an in-memory cache. It acknowledges the focused window's current active pane and asks WezTerm to rebuild the tab bar when a pane's effective attention changes. It also removes the marker of any pane that was in the window on the previous tick and is gone now — unless every pane of that pane's domain went at once, which is a domain detach rather than a close, and those panes are still alive on the server.
-2. **Renderer** (`format-tab-title` event) — fires on every tab repaint (mouse hover, key press, redraws). Reads only from the cache — zero I/O, instant returns, and no writes of any kind.
+2. **Renderer** (`format-tab-title` event) — fires on every tab repaint (mouse hover, key press, redraws). Reads only from the cache — no file reads, instant returns. It writes one file, and only when a window's whole bar draws something different from the last time it drew: the [drawn tab order](#the-drawn-tab-order), which no other process can see. A repaint that draws the same thing composes the list, compares it, and touches nothing.
 
 WezTerm rebuilds tab titles when something it knows about changes, and a marker file appearing on disk is not one of those things. When the poller sees a pane's effective attention change, it performs `ActivateTabRelative(0)` on the focused window. That re-activates the already-selected tab and makes WezTerm recompute every tab title. The plugin does not write either status string, the window title, or any user title.
 

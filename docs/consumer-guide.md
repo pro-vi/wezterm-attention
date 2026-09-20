@@ -113,9 +113,25 @@ The socket query creates no state directories, takes no writer locks, and perfor
 
 For publication, `hooks publish --socket <PATH>` takes an existing socket path and is the only selector. Publication without it retains pane publication and prompt-return behavior. `bindings --realm <ID>` and `sweep --realm <ID>` are a different option that takes a 64-character realm identifier, not a path.
 
+## Read the drawn tab order
+
+```sh
+attention tabs
+```
+
+A GUI window attached to a mux server mirrors the server's tabs under its own numbers, and those are the numbers the tab bar prints. They are not the order of `wezterm cli list`, and no derivation from it recovers them. The tab bar therefore publishes what it drew, one file per window at `<state root>/tabs/<window id>.json`, and `attention tabs` returns them in the ordinary envelope: `result.windows` holds one entry per window with `window_id`, `published_at_ms` and `tabs`, and each tab carries `number`, the whole `text` the bar drew, and `marker_ids` — the IDs that tab's panes' marker files are named by, already translated out of the window's local numbering.
+
+The window entries are sorted by window ID; the tabs inside one are in the order the bar draws them, which is the point of the file. Every tab is listed, including tabs holding no agent, which is why this is a separate command from `bindings`.
+
+**There is no freshness contract.** The file is written when a window's composed list changes and at no other time, so `published_at_ms` is when the bar last drew something different, not when anything checked. Nothing refreshes it while the bar is idle, and a window whose WezTerm has exited leaves its last file behind. Use this to describe tabs and to resolve an ordinal — "the second `bootstrap` tab" — where a wrong answer is visible to the person who asked. To act on a tab, ask the GUI: inside WezTerm, `mux_window:tabs_with_info()` returns the same order live.
+
+Every setup publishes, including a plain local WezTerm where the drawn number equals the derived one. A consumer cannot tell a simple setup from a publisher that is not running, because the file is absent in both, and deriving the number is right in one case and wrong in the other.
+
+A file that cannot be read, declares a later schema, is filed under a window it does not name, or carries a field this schema does not have is reported as a diagnostic and left out; the windows that did read are still returned, and `complete` is false. Exit 0 with no diagnostics, 1 with them.
+
 ## Public consumer contracts
 
-Attention records use schema **3**. CLI envelopes and `HookDelivery` use schema **1**, package metadata uses manifest schema **2**, and pane identity uses wire version **2**. These identify separate data formats, not supported product editions. Use a fresh Attention state root and fresh supported launches for activation; existing state is not automatically migrated or deleted. Legacy flat markers remain readable. Ship the manifest with its matching Rust/Lua readers. Source capabilities do not establish live registration or activation.
+Attention records use schema **3**. CLI envelopes, `HookDelivery` and the published tab order use schema **1**, package metadata uses manifest schema **2**, and pane identity uses wire version **2**. These identify separate data formats, not supported product editions. A published fact that is not a v2 record — one with no pane address to be validated against and no ordering fence — carries its own schema field and is versioned on its own, rather than entering `protocol/v2.json`: the manifest's `record_schema` governs the addressed record tree, and coupling anything else to it would make an unrelated record change refuse a valid file. Use a fresh Attention state root and fresh supported launches for activation; existing state is not automatically migrated or deleted. Legacy flat markers remain readable. Ship the manifest with its matching Rust/Lua readers. Source capabilities do not establish live registration or activation.
 
 ### Registration description
 
