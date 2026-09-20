@@ -80,6 +80,16 @@ Dismissal uses only the last displayed publication IDs in the full address/launc
 
 You can choose a different policy for approval, review, or outcome facts. Keep activity, review and child count independent; do not reuse `type` as if it were all three. Rank panes using your own purpose, but retain read confidence and full identity with the selected result.
 
+## A marker records an event, not a session
+
+Attention writes a pane's activity when a provider callback arrives: a prompt submitted, a tool about to run, a turn stopped, a notification raised. Nothing writes one because an agent is running. `SessionStart` for Claude and Codex, and `session_start` for Pi, write a binding record and no activity at all.
+
+So a pane can run an agent and have no activity record: its turn ended and prompt return cleared the watermark, the human looked at the tab and acknowledged it, the record aged past its TTL, or the agent has produced nothing since it started. The absence of a marker means "no standing event here". It never means "no agent here", and a consumer that reads it as an inventory will undercount.
+
+Bindings answer a different question and are the closest thing here to a session list, but they are not a process list either. A session whose provider hooks were registered after it started never sent `SessionStart`, so it has no binding and Attention holds no record of it whatsoever. One consumer measured this on 2026-09-19 across 42 live panes: process inspection found 27 panes running an agent, marker files 17, bindings 14. No pane had a marker that process inspection missed, and the provider never disagreed where both could see it.
+
+A consumer that needs to know which panes are running an agent must inspect processes itself, and can use Attention to say what those agents are doing. Attention reports what was announced to it; it cannot report what was not.
+
 ## Storage and retention
 
 One binding-scoped `lifecycle.json` contains separate request/general pools. Each has at most 64 observations, 122,880 compact UTF-8 bytes, and its own monotonic retention floor. One observation is at most 2,048 bytes; the raw file is capped at 262,144 bytes and eight container levels.
