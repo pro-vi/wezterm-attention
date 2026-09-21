@@ -1279,6 +1279,48 @@ impl PaneLister for ListOncePerSocket<'_> {
     }
 }
 
+/// One process listing per assembly, rather than one per absent pane.
+///
+/// A bound pane missing from the mux listing is looked for among live
+/// processes, and each look used to spawn its own `ps` over every process on
+/// the machine -- about 70 ms each, so a store holding forty ended panes cost
+/// three seconds on every call. The listing is taken on the first miss and
+/// kept for the lifetime of one assembly and no longer. Maintenance does not
+/// use this: it deletes on the answer, so it keeps a fresh look per decision.
+struct ProbeOncePerAssembly<'a> {
+    inner: &'a dyn ProcessProbe,
+    listed: Mutex<Option<Option<crate::wezterm::PaneProcessSet>>>,
+}
+
+impl<'a> ProbeOncePerAssembly<'a> {
+    fn new(inner: &'a dyn ProcessProbe) -> Self {
+        Self {
+            inner,
+            listed: Mutex::new(None),
+        }
+    }
+}
+
+impl ProcessProbe for ProbeOncePerAssembly<'_> {
+    fn available(&self) -> bool {
+        self.inner.available()
+    }
+
+    fn presence(&self, socket_path: &str, pane_id: &str) -> Presence {
+        // A poisoned lock would mean a panic inside the listing; fall back to
+        // the uncached path rather than propagating it through a read command.
+        let Ok(mut listed) = self.listed.lock() else {
+            return self.inner.presence(socket_path, pane_id);
+        };
+        // A probe that offers no listing is remembered too, and asked one pane
+        // at a time as before.
+        match listed.get_or_insert_with(|| self.inner.pane_processes()) {
+            Some(processes) => processes.presence(socket_path, pane_id),
+            None => self.inner.presence(socket_path, pane_id),
+        }
+    }
+}
+
 fn assemble_bindings(
     root: &Path,
     mut files: Vec<PathBuf>,
@@ -1288,6 +1330,8 @@ fn assemble_bindings(
 ) -> Result<(Vec<BindingRow>, Vec<Diagnostic>)> {
     let listed_once = panes.map(ListOncePerSocket::new);
     let panes = listed_once.as_ref().map(|lister| lister as &dyn PaneLister);
+    let probed_once = processes.map(ProbeOncePerAssembly::new);
+    let processes = probed_once.as_ref().map(|probe| probe as &dyn ProcessProbe);
     let read_record = |path: &Path, kind: Option<&str>, identity: &RecordIdentity| {
         if !typed {
             return read_record(path, kind, identity);
@@ -1754,6 +1798,68 @@ fn tab_publication(
         published_at_ms,
         tabs,
     })
+}
+
+#[cfg(test)]
+mod process_probe_tests {
+    use super::*;
+    use crate::wezterm::PaneProcessSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingProbe {
+        listing: Option<&'static str>,
+        listings: AtomicUsize,
+        single_looks: AtomicUsize,
+    }
+
+    impl CountingProbe {
+        fn new(listing: Option<&'static str>) -> Self {
+            Self {
+                listing,
+                listings: AtomicUsize::new(0),
+                single_looks: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl ProcessProbe for CountingProbe {
+        fn available(&self) -> bool {
+            true
+        }
+
+        fn presence(&self, _socket_path: &str, _pane_id: &str) -> Presence {
+            self.single_looks.fetch_add(1, Ordering::SeqCst);
+            Presence::Absent
+        }
+
+        fn pane_processes(&self) -> Option<PaneProcessSet> {
+            self.listings.fetch_add(1, Ordering::SeqCst);
+            self.listing.map(PaneProcessSet::from_process_listing)
+        }
+    }
+
+    #[test]
+    fn many_absent_panes_cost_one_process_listing() {
+        let probe = CountingProbe::new(Some("zsh WEZTERM_UNIX_SOCKET=/mux.sock WEZTERM_PANE=9"));
+        let once = ProbeOncePerAssembly::new(&probe);
+        for pane in ["1", "2", "3"] {
+            assert_eq!(once.presence("/mux.sock", pane), Presence::Absent);
+        }
+        assert_eq!(once.presence("/mux.sock", "9"), Presence::Present);
+        assert_eq!(probe.listings.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.single_looks.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_probe_with_no_listing_is_asked_once_for_one_and_then_pane_by_pane() {
+        let probe = CountingProbe::new(None);
+        let once = ProbeOncePerAssembly::new(&probe);
+        for pane in ["1", "2", "3"] {
+            assert_eq!(once.presence("/mux.sock", pane), Presence::Absent);
+        }
+        assert_eq!(probe.listings.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.single_looks.load(Ordering::SeqCst), 3);
+    }
 }
 
 #[cfg(test)]

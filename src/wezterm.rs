@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
@@ -37,6 +38,12 @@ pub trait PaneLister: Send + Sync {
 pub trait ProcessProbe: Send + Sync {
     fn available(&self) -> bool;
     fn presence(&self, socket_path: &str, pane_id: &str) -> Presence;
+    /// Every socket and pane pair one process listing shows, so a caller with
+    /// many panes to ask about can take the listing once. `None` means this
+    /// probe cannot offer that, or the listing failed; ask `presence` instead.
+    fn pane_processes(&self) -> Option<PaneProcessSet> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,6 +51,47 @@ pub enum Presence {
     Present,
     Absent,
     Unavailable,
+}
+
+/// The socket and pane pairs that live processes carry in their environment.
+///
+/// It is built from a process listing that holds every process's whole
+/// environment, which is where API keys live. Only the two values this crate
+/// looks for are kept, and the listing is dropped when parsing returns.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PaneProcessSet {
+    pairs: BTreeSet<(String, String)>,
+}
+
+impl PaneProcessSet {
+    /// One line per process: its command followed by its environment.
+    pub fn from_process_listing(listing: &str) -> Self {
+        let mut pairs = BTreeSet::new();
+        for line in listing.lines() {
+            let panes = environment_values(line, "WEZTERM_PANE=");
+            if panes.is_empty() {
+                continue;
+            }
+            for socket in environment_values(line, "WEZTERM_UNIX_SOCKET=") {
+                for pane in &panes {
+                    pairs.insert((socket.to_owned(), (*pane).to_owned()));
+                }
+            }
+        }
+        Self { pairs }
+    }
+
+    /// Never `Unavailable`: a set that exists came from a listing that was read.
+    pub fn presence(&self, socket_path: &str, pane_id: &str) -> Presence {
+        if self
+            .pairs
+            .contains(&(socket_path.to_owned(), pane_id.to_owned()))
+        {
+            Presence::Present
+        } else {
+            Presence::Absent
+        }
+    }
 }
 
 pub struct RuntimePorts<'a> {
@@ -405,19 +453,24 @@ impl ProcessProbe for SystemProcessProbe {
     }
 
     fn presence(&self, socket_path: &str, pane_id: &str) -> Presence {
-        let child = Command::new("/bin/ps")
+        match self.pane_processes() {
+            Some(processes) => processes.presence(socket_path, pane_id),
+            None => Presence::Unavailable,
+        }
+    }
+
+    fn pane_processes(&self) -> Option<PaneProcessSet> {
+        let mut child = Command::new("/bin/ps")
             .args(["eww", "-axo", "command="])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .spawn();
-        let Ok(mut child) = child else {
-            return Presence::Unavailable;
-        };
+            .spawn()
+            .ok()?;
         let Some(stdout) = child.stdout.take() else {
             let _ = child.kill();
             let _ = child.wait();
-            return Presence::Unavailable;
+            return None;
         };
         let reader = thread::spawn(move || {
             let mut bytes = Vec::new();
@@ -440,37 +493,52 @@ impl ProcessProbe for SystemProcessProbe {
         };
         let output = reader.join().ok().and_then(std::result::Result::ok);
         let (Some(status), Some(output)) = (status, output) else {
-            return Presence::Unavailable;
+            return None;
         };
         if !status.success() || output.len() > 8 * 1024 * 1024 {
-            return Presence::Unavailable;
+            return None;
         }
-        let socket_token = format!("WEZTERM_UNIX_SOCKET={socket_path}");
-        let pane_token = format!("WEZTERM_PANE={pane_id}");
-        let present = String::from_utf8_lossy(&output).lines().any(|line| {
-            has_environment_token(line, &socket_token) && has_environment_token(line, &pane_token)
-        });
-        if present {
-            Presence::Present
-        } else {
-            Presence::Absent
-        }
+        Some(PaneProcessSet::from_process_listing(
+            &String::from_utf8_lossy(&output),
+        ))
     }
 }
 
-fn has_environment_token(line: &str, token: &str) -> bool {
+/// The values `name` takes on one process line, where `name` ends in `=`.
+///
+/// A value may contain spaces -- a socket path can -- so it runs to the next
+/// ` NAME=` that starts another variable, or to the end of the line.
+fn environment_values<'a>(line: &'a str, name: &str) -> Vec<&'a str> {
+    let mut values = Vec::new();
     let mut offset = 0;
-    while let Some(relative) = line[offset..].find(token) {
+    while let Some(relative) = line[offset..].find(name) {
         let start = offset + relative;
-        let end = start + token.len();
-        let before_ok = start == 0 || line.as_bytes()[start - 1] == b' ';
-        let after_ok = end == line.len() || line.as_bytes()[end] == b' ';
-        if before_ok && after_ok {
-            return true;
+        let value_start = start + name.len();
+        if start == 0 || line.as_bytes()[start - 1] == b' ' {
+            let rest = &line[value_start..];
+            values.push(&rest[..next_variable_boundary(rest)]);
         }
-        offset = start + 1;
+        offset = value_start;
     }
-    false
+    values
+}
+
+fn next_variable_boundary(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while let Some(relative) = text[index..].find(' ') {
+        let space = index + relative;
+        let name = &bytes[space + 1..];
+        let length = name
+            .iter()
+            .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'_')
+            .count();
+        if length > 0 && !name[0].is_ascii_digit() && name.get(length) == Some(&b'=') {
+            return space;
+        }
+        index = space + 1;
+    }
+    text.len()
 }
 
 pub fn default_ports<'a>(
@@ -563,19 +631,61 @@ pub fn tty_path_from_fd(fd: libc::c_int) -> Result<String> {
 mod tests {
     use std::fs::OpenOptions;
 
-    use super::{SystemTtyWriter, has_environment_token, tty_path_from_fd};
+    use super::{PaneProcessSet, Presence, SystemTtyWriter, tty_path_from_fd};
     use crate::identity::tty_fingerprint;
 
     #[test]
-    fn process_environment_token_accepts_an_interior_space() {
-        let line =
-            "cmd WEZTERM_UNIX_SOCKET=/tmp/domain with space/mux.sock WEZTERM_PANE=42 other=1";
-        assert!(has_environment_token(
-            line,
-            "WEZTERM_UNIX_SOCKET=/tmp/domain with space/mux.sock"
-        ));
-        assert!(has_environment_token(line, "WEZTERM_PANE=42"));
-        assert!(!has_environment_token(line, "WEZTERM_PANE=4"));
+    fn a_socket_path_with_an_interior_space_is_read_whole() {
+        let processes = PaneProcessSet::from_process_listing(
+            "cmd WEZTERM_UNIX_SOCKET=/tmp/domain with space/mux.sock WEZTERM_PANE=42 other=1",
+        );
+        assert_eq!(
+            processes.presence("/tmp/domain with space/mux.sock", "42"),
+            Presence::Present
+        );
+        assert_eq!(
+            processes.presence("/tmp/domain with space/mux.sock", "4"),
+            Presence::Absent
+        );
+        assert_eq!(processes.presence("/tmp/domain", "42"), Presence::Absent);
+    }
+
+    #[test]
+    fn a_pane_is_present_only_on_the_socket_its_own_process_names() {
+        let processes = PaneProcessSet::from_process_listing(
+            "zsh WEZTERM_PANE=7 WEZTERM_UNIX_SOCKET=/a.sock\nzsh WEZTERM_UNIX_SOCKET=/b.sock WEZTERM_PANE=8\n",
+        );
+        assert_eq!(processes.presence("/a.sock", "7"), Presence::Present);
+        assert_eq!(processes.presence("/b.sock", "8"), Presence::Present);
+        assert_eq!(processes.presence("/a.sock", "8"), Presence::Absent);
+        assert_eq!(processes.presence("/b.sock", "7"), Presence::Absent);
+    }
+
+    #[test]
+    fn a_name_that_only_ends_like_the_variable_is_not_the_variable() {
+        let processes = PaneProcessSet::from_process_listing(
+            "zsh NOT_WEZTERM_PANE=7 WEZTERM_UNIX_SOCKET=/a.sock",
+        );
+        assert_eq!(processes.presence("/a.sock", "7"), Presence::Absent);
+    }
+
+    #[test]
+    fn nothing_else_in_a_process_environment_is_kept() {
+        let processes = PaneProcessSet::from_process_listing(
+            "zsh API_KEY=hunter2 WEZTERM_UNIX_SOCKET=/a.sock TOKEN=swordfish WEZTERM_PANE=7 LAST=opensesame",
+        );
+        assert_eq!(processes.presence("/a.sock", "7"), Presence::Present);
+        let kept = format!("{processes:?}");
+        for leaked in [
+            "API_KEY",
+            "hunter2",
+            "TOKEN",
+            "swordfish",
+            "LAST",
+            "opensesame",
+        ] {
+            assert!(!kept.contains(leaked), "{leaked} survived parsing: {kept}");
+        }
     }
 
     #[test]

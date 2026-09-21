@@ -1,8 +1,10 @@
 use super::*;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::process::Command;
+use std::sync::atomic::AtomicUsize;
 use wezterm_attention::query::read_bindings_for_socket_with_ports;
 use wezterm_attention::records::{RecordIdentity, RecordRead, read_record, read_record_typed};
+use wezterm_attention::wezterm::PaneProcessSet;
 
 fn query(
     setup: &Setup,
@@ -462,4 +464,88 @@ fn a_record_failure_cannot_hide_another_rows_unavailable_probe() {
     assert_eq!(rows.len(), 1);
     assert!(diagnostics.iter().any(|d| d.code == "record_invalid"));
     assert!(diagnostics.iter().any(|d| d.code == "probe_unavailable"));
+}
+
+/// Offers one listing of every process, and counts how it is asked.
+struct ListingProcesses {
+    listing: String,
+    listings: AtomicUsize,
+    single_looks: AtomicUsize,
+}
+
+impl ListingProcesses {
+    fn new(listing: String) -> Self {
+        Self {
+            listing,
+            listings: AtomicUsize::new(0),
+            single_looks: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl ProcessProbe for ListingProcesses {
+    fn available(&self) -> bool {
+        true
+    }
+
+    fn presence(&self, _socket_path: &str, _pane_id: &str) -> Presence {
+        self.single_looks.fetch_add(1, Ordering::SeqCst);
+        Presence::Unavailable
+    }
+
+    fn pane_processes(&self) -> Option<PaneProcessSet> {
+        self.listings.fetch_add(1, Ordering::SeqCst);
+        Some(PaneProcessSet::from_process_listing(&self.listing))
+    }
+}
+
+fn query_with(
+    setup: &Setup,
+    processes: &ListingProcesses,
+) -> Vec<wezterm_attention::query::BindingRow> {
+    read_bindings_for_socket_with_ports(
+        &state_root(&setup.env).unwrap(),
+        &setup.env["WEZTERM_UNIX_SOCKET"],
+        Some(&setup.panes),
+        Some(processes),
+    )
+    .unwrap()
+    .1
+}
+
+#[test]
+fn a_pane_the_mux_no_longer_lists_is_answered_from_the_process_listing() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    setup.panes.set(Vec::new());
+
+    let nobody = ListingProcesses::new("zsh HOME=/nowhere".to_owned());
+    let rows = query_with(&setup, &nobody);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].pane_presence, "verified_absent");
+    assert_eq!(nobody.listings.load(Ordering::SeqCst), 1);
+    assert_eq!(nobody.single_looks.load(Ordering::SeqCst), 0);
+
+    let address = pane_address(&setup.env).unwrap().0;
+    // Presence is asked at the socket path the realm record holds, which is the
+    // canonical one.
+    let realm: Value = serde_json::from_slice(
+        &fs::read(
+            state_root(&setup.env)
+                .unwrap()
+                .join("v2/realms")
+                .join(&address.realm_id)
+                .join("realm.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let still_running = ListingProcesses::new(format!(
+        "zsh WEZTERM_UNIX_SOCKET={} WEZTERM_PANE={}",
+        realm["socket_path"].as_str().unwrap(),
+        address.pane_id
+    ));
+    let rows = query_with(&setup, &still_running);
+    assert_eq!(rows[0].pane_presence, "present");
+    assert_eq!(still_running.single_looks.load(Ordering::SeqCst), 0);
 }
