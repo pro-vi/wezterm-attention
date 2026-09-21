@@ -17,6 +17,7 @@ return function(context)
   local identity_diagnostic = context.identity_diagnostic
   local same_target
   local age_exceeds_ms = context.age_exceeds_ms
+  local note_incarnation_socket_ctime = context.note_incarnation_socket_ctime
   local eligible_subagent = context.eligible_subagent
   local deep_copy = context.deep_copy
 
@@ -239,6 +240,13 @@ return function(context)
       }, true, previous_records.incarnation)
     records.incarnation = incarnation
     collect_diagnostic(diagnostics, incarnation_diagnostic)
+    -- This pane is alive and answers to this incarnation, so its socket dates the
+    -- mux that issues pane ids now. The flat path needs that instant to tell a
+    -- reissued id apart from the id a dead mux wrote under; it has no other way
+    -- to learn it, because a bare-id filename records no incarnation.
+    if incarnation and note_incarnation_socket_ctime then
+      note_incarnation_socket_ctime(incarnation.socket_ctime_ns)
+    end
     local claim, claim_diagnostic = read_expected_record_cached(claim_path, "claim", {
       address = address, launch_id = read.launch_id,
     }, true, previous_records.claim)

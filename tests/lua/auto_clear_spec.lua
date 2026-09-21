@@ -561,6 +561,12 @@ local failed = 0
 local function test(name, callback)
   drain_errors()
   for key in pairs(mux_windows_by_id) do mux_windows_by_id[key] = nil end
+  -- Which mux issued the pane ids in play is ambient, per-machine state, and each
+  -- case below is its own machine. It has to be reset for the same reason the mux
+  -- windows are: the v1 fixtures here date themselves on a different clock than
+  -- the v2 fixtures' sockets, so a socket one case observed must not decide what
+  -- the next case believes about a marker.
+  attention._observed_socket_ctime_ns = nil
   local ok, err = pcall(callback)
   if ok and #logged_errors > 0 then
     ok, err = false, "unexpected wezterm.log_error: " .. tostring(logged_errors[1])
@@ -4722,6 +4728,194 @@ test("a search that could not finish is not a search that found nothing", functi
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { { tab_id = 961, panes = { { id = 9602, published = 9602, domain = "mux" } } } } }))
   assert(not marker_exists(pane_id), "a finished search that excludes it does authorise it")
+  drain_errors()
+end)
+
+-- ── A mux's pane ids do not outlive the mux, but its files keep their names ──
+-- Flat v1 files are named by bare pane id, and WezTerm issues those from a
+-- counter the mux owns, restarting at zero with every mux. So the file `194` left
+-- by a mux that exited and the pane `194` the current mux just handed out are the
+-- same filename for two unrelated panes. A v2 record names the mux it belongs to;
+-- a bare-id file has nowhere to put that, so its own timestamp is the only
+-- evidence available, and the mux socket is what it gets measured against.
+
+local function ns20_of_ms(value)
+  return string.format("%011d%09d", math.floor(value / 1000), (value % 1000) * 1000000)
+end
+
+--- A marker that dates itself, which `write_marker` deliberately does not.
+local function write_dated_marker(pane_id, marker_type, updated_at_ms, extra)
+  local parts = {
+    string.format('"type":"%s"', marker_type),
+    string.format('"publication_id":"pub-%s"', pane_id),
+    string.format('"updated_at_ms":%d', updated_at_ms),
+  }
+  if extra then parts[#parts + 1] = extra end
+  local file = assert(io.open(test_dir .. "/" .. pane_id, "w"))
+  file:write("{" .. table.concat(parts, ",") .. "}")
+  file:close()
+end
+
+local this_mux_started_ms = 1789000000000
+local before_this_mux_ms = 1788000000000
+local since_this_mux_ms = 1789500000000
+
+test("a marker older than the mux that issued this pane id is neither shown nor kept", function()
+  attention._observed_socket_ctime_ns = ns20_of_ms(this_mux_started_ms)
+  write_dated_marker(8101, "stop", before_this_mux_ms)
+
+  poll({ 8101 })
+
+  assert(attention.get_attention(8101) == nil,
+    "a dead mux's completion must not land on the pane that inherited its id, got "
+      .. tostring(attention.get_attention(8101)))
+  assert(not marker_exists(8101),
+    "and it must be collected: its timestamp can never become current, and stop has no TTL")
+end)
+
+test("a marker written since this mux started is left alone", function()
+  attention._observed_socket_ctime_ns = ns20_of_ms(this_mux_started_ms)
+  write_dated_marker(8102, "stop", since_this_mux_ms)
+
+  poll({ 8102 })
+
+  assert(attention.get_attention(8102) == "stop",
+    "this mux's own marker is the one case that must survive the test, got "
+      .. tostring(attention.get_attention(8102)))
+  assert(marker_exists(8102), "and nothing may collect it")
+end)
+
+test("the boundary is the socket itself, not the moment after it", function()
+  attention._observed_socket_ctime_ns = ns20_of_ms(this_mux_started_ms)
+  write_dated_marker(8103, "notify", this_mux_started_ms)
+
+  poll({ 8103 })
+
+  assert(attention.get_attention(8103) == "notify",
+    "a marker written in the socket's own millisecond belongs to this mux, got "
+      .. tostring(attention.get_attention(8103)))
+  assert(marker_exists(8103), "so it is kept")
+end)
+
+test("an undated marker is believed, because inventing a date could discard live state", function()
+  attention._observed_socket_ctime_ns = ns20_of_ms(this_mux_started_ms)
+  write_marker(8104, "notify", "pub-8104")
+
+  poll({ 8104 })
+
+  assert(attention.get_attention(8104) == "notify",
+    "a marker with no timestamp is one a writer may still mean, got "
+      .. tostring(attention.get_attention(8104)))
+  assert(marker_exists(8104), "and it is not this test's business to collect it")
+end)
+
+test("with no mux socket observed, the flat path believes what it reads", function()
+  attention._observed_socket_ctime_ns = nil
+  write_dated_marker(8105, "stop", before_this_mux_ms)
+
+  poll({ 8105 })
+
+  assert(attention.get_attention(8105) == "stop",
+    "on a machine with no v2 pane there is nothing to measure against, got "
+      .. tostring(attention.get_attention(8105)))
+  assert(marker_exists(8105), "so nothing is collected either")
+end)
+
+test("the earliest socket observed decides, so a later mux cannot strengthen the test", function()
+  attention._observed_socket_ctime_ns = nil
+  internal.note_incarnation_socket_ctime(ns20_of_ms(since_this_mux_ms))
+  internal.note_incarnation_socket_ctime(ns20_of_ms(this_mux_started_ms))
+  assert(attention._observed_socket_ctime_ns == ns20_of_ms(this_mux_started_ms),
+    "the older socket wins, got " .. tostring(attention._observed_socket_ctime_ns))
+
+  -- A marker between the two sockets. Against the earlier one it is current, and
+  -- suppressing it would be this test disbelieving a live pane -- the one failure
+  -- direction that costs the user a completion they never saw.
+  write_dated_marker(8106, "stop", this_mux_started_ms + 1000)
+  poll({ 8106 })
+
+  assert(attention.get_attention(8106) == "stop",
+    "a marker after the earliest observed socket must survive, got "
+      .. tostring(attention.get_attention(8106)))
+  assert(marker_exists(8106), "and must not be collected")
+end)
+
+test("a nonsense socket teaches the flat path nothing", function()
+  attention._observed_socket_ctime_ns = nil
+  internal.note_incarnation_socket_ctime("not-a-timestamp")
+  internal.note_incarnation_socket_ctime(nil)
+  assert(attention._observed_socket_ctime_ns == nil,
+    "only a well-formed instant may bound anything, got "
+      .. tostring(attention._observed_socket_ctime_ns))
+end)
+
+test("the user's flag and the subagents outlive a marker from a dead mux", function()
+  attention._observed_socket_ctime_ns = ns20_of_ms(this_mux_started_ms)
+  write_dated_marker(8107, "stop", before_this_mux_ms)
+  write_review_flag_file(8107)
+  write_subagents(8107, { { id = "agent-a", last_ms = os.time() * 1000 } })
+
+  poll({ 8107 })
+
+  assert(not marker_exists(8107), "the dead mux's marker goes")
+  assert(review_flag_exists(8107),
+    "the user's flag is their own and was never the dead mux's to lose")
+  assert(subagents_exists(8107), "and the subagent sidecar has its own lifetime")
+  local atype, _, _, _, subagents, flagged = attention.get_attention(8107)
+  assert(atype == "review", "so the pane falls back to the flag, got " .. tostring(atype))
+  assert(flagged == true and subagents == 1,
+    "with both still recorded, got " .. tostring(flagged) .. " and " .. tostring(subagents))
+end)
+
+test("a stale acknowledgement goes with the marker it referred to", function()
+  attention._observed_socket_ctime_ns = ns20_of_ms(this_mux_started_ms)
+  write_dated_marker(8108, "notify", before_this_mux_ms)
+  local ack = assert(io.open(test_dir .. "/8108.ack", "w"))
+  ack:write("publication\npub-8108")
+  ack:close()
+
+  poll({ 8108 })
+
+  assert(not marker_exists(8108), "the marker goes")
+  assert(not acknowledgement_exists(8108),
+    "and so does the sidecar that only meant anything beside it")
+end)
+
+test("a spinner from a dead mux is collected before its TTL has run out", function()
+  attention._observed_socket_ctime_ns = ns20_of_ms(this_mux_started_ms)
+  -- Inside its own TTL as of the poll clock below, so only the socket can condemn
+  -- it. The two conditions are independent: this one is not a shorter TTL.
+  write_dated_marker(8109, "thinking", before_this_mux_ms, '"ttl_ms":600000')
+
+  attention.poll(
+    window_double({ tabs = { { 8109 } }, focused = false }),
+    { now_ms = before_this_mux_ms + 1000 })
+
+  assert(attention.get_attention(8109) == nil,
+    "a spinner whose mux is gone is not spinning, got "
+      .. tostring(attention.get_attention(8109)))
+  assert(not marker_exists(8109), "and it is collected on the socket's authority alone")
+end)
+
+test("a v2 pane teaches the flat path which mux issues pane ids now", function()
+  attention._observed_socket_ctime_ns = nil
+  local wire = materialize_v2_fixture(8110)
+  local incarnation = decode_json(assert(read_path(test_dir .. "/v2/realms/"
+    .. wire.address.realm_id .. "/incarnations/" .. wire.address.incarnation_id
+    .. "/incarnation.json")))
+  assert(incarnation.socket_ctime_ns, "precondition: the fixture dates its socket")
+
+  attention.poll(window_double({
+    tabs = { { { id = 8110, domain = "unix", attention = wire } } },
+    focused = false,
+  }), {
+    now_unix_ns = protocol_fixture.state_case.now_unix_ns,
+    call_after = function() end,
+  })
+
+  assert(attention._observed_socket_ctime_ns == incarnation.socket_ctime_ns,
+    "the incarnation a live pane answers to is where the flat path learns the socket, got "
+      .. tostring(attention._observed_socket_ctime_ns))
   drain_errors()
 end)
 
