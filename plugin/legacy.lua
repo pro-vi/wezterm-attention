@@ -3,8 +3,32 @@ return function(context)
   local valid_types = context.valid_types
   local normalize_epoch_ms = context.normalize_epoch_ms
   local protocol = context.protocol
+  local incarnation_socket_ctime_ns = context.incarnation_socket_ctime_ns
+  local unix_ns20_from_epoch_ms = context.unix_ns20_from_epoch_ms
+  local compare_ns20 = context.compare_ns20
 
   -- ── Marker I/O ──────────────────────────────────────────────────────────────
+
+  --- Was this marker written before the mux that issues pane ids now existed?
+  --- Then it describes a pane that is already gone, and the only reason it is
+  --- being read at all is that some later pane inherited the id its filename is
+  --- made of. A v2 record would have said which mux it belonged to; a bare-id
+  --- flat file has nowhere to put that, so its own timestamp is the only evidence
+  --- available, and the socket is the boundary it is measured against.
+  ---
+  --- Undated markers are exempt. A marker with no timestamp is one a writer may
+  --- still mean, and inventing a date for it is the single way this test could
+  --- discard live state rather than stale state.
+  local function predates_this_mux(updated_at_ms)
+    if not updated_at_ms or not incarnation_socket_ctime_ns then return false end
+    if not unix_ns20_from_epoch_ms or not compare_ns20 then return false end
+    local socket_ctime_ns = incarnation_socket_ctime_ns()
+    if not socket_ctime_ns then return false end
+    local written_at = unix_ns20_from_epoch_ms(updated_at_ms)
+    if not written_at then return false end
+    local order = compare_ns20(written_at, socket_ctime_ns)
+    return order ~= nil and order < 0
+  end
 
   local function read_marker(dir, pane_id)
     local f = io.open(dir .. "/" .. pane_id, "r")
@@ -17,10 +41,11 @@ return function(context)
       return wezterm.json_parse(content)
     end)
     if ok and data and valid_types[data.type] then
+      local updated_at = normalize_epoch_ms(data.updated_at or data.updated_at_ms)
       local publication_id = type(data.publication_id) == "string"
         and data.publication_id ~= "" and data.publication_id or nil
       local source = type(data.source) == "string" and data.source ~= "" and data.source or nil
-      return data.type, data.frame, normalize_epoch_ms(data.updated_at or data.updated_at_ms),
+      return data.type, data.frame, updated_at,
         data.ttl_ms, content, publication_id, source
     end
 
@@ -77,6 +102,7 @@ return function(context)
 
   return {
     read_marker = read_marker,
+    predates_this_mux = predates_this_mux,
     subagent_live_ms = subagent_live_ms,
     subagents_path = subagents_path,
     count_live_subagents = count_live_subagents,

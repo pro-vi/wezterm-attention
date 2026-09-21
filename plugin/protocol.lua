@@ -720,6 +720,19 @@ return function(context)
     return string.format("%011d%09d", seconds, nanos)
   end
 
+  --- The ns20 instant an epoch-millisecond timestamp names. Flat v1 markers date
+  --- themselves in milliseconds while every instant this protocol compares is
+  --- ns20, so comparing the two raises the marker's precision rather than
+  --- lowering the record's: at these magnitudes a number cannot hold nanoseconds
+  --- exactly, and a string can.
+  local function unix_ns20_from_epoch_ms(value)
+    if type(value) ~= "number" or value ~= value or value < 0 then return nil end
+    local total = math.floor(value)
+    local seconds = math.floor(total / 1000)
+    if seconds > 99999999999 then return nil end
+    return string.format("%011d%09d", seconds, (total % 1000) * 1000000)
+  end
+
   local function seconds_until_after(now_value, boundary)
     local now_seconds, now_nanos = unix_ns_parts(now_value)
     local boundary_seconds, boundary_nanos = unix_ns_parts(boundary)
@@ -994,6 +1007,7 @@ return function(context)
     format_unix_ns20 = format_unix_ns20,
     wezterm_now_unix_ns20 = wezterm_now_unix_ns20,
     add_ms_to_unix_ns = add_ms_to_unix_ns,
+    unix_ns20_from_epoch_ms = unix_ns20_from_epoch_ms,
     seconds_until_after = seconds_until_after,
     age_exceeds_ms = age_exceeds_ms,
     address_cache_key = address_cache_key,

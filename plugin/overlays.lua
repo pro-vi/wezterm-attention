@@ -7,6 +7,7 @@ return function(context)
   local identity_diagnostic = context.identity_diagnostic
   local read_expected_record = context.read_expected_record
   local read_marker = context.read_marker
+  local predates_this_mux = context.predates_this_mux
   local subagents_path = context.subagents_path
 
   local reported_errors = {}
@@ -273,6 +274,11 @@ return function(context)
     os.remove(acknowledgement_tmp_path(dir, pane_id))
     local atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source =
       read_marker(dir, pane_id)
+    -- A marker older than the mux that issued this pane id belongs to a pane that
+    -- is already gone; this one merely inherited the bare id its filename is made
+    -- of. Effectively there is no marker here, which is the same answer an
+    -- acknowledged one gets. Collecting the file is the poll's job, not a reader's.
+    if predates_this_mux and predates_this_mux(updated_at) then return nil end
     if acknowledgement_matches(dir, pane_id, raw, publication_id) then return nil end
     return atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source
   end

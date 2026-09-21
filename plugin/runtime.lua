@@ -25,6 +25,7 @@ return function()
     local acknowledge_focused_v2_pane = context.acknowledge_focused_v2_pane
     local read_effective_marker = context.read_effective_marker
     local read_marker = context.read_marker
+    local predates_this_mux = context.predates_this_mux
     local marker_identity = context.marker_identity
     local clear_acknowledgement = context.clear_acknowledgement
     local write_acknowledgement = context.write_acknowledgement
@@ -1076,7 +1077,19 @@ return function()
 
               local effective_updated_at = updated_at or observed_at
               local ttl = stale_ttl_ms(atype, marker_ttl_ms)
-              if ttl and now - effective_updated_at > ttl then
+              -- Two ways a marker stops describing the pane in front of us. Its
+              -- own TTL is one. The other is that it was written before the mux
+              -- that issued this pane id existed: flat files are named by bare
+              -- pane id and that counter restarts with every mux, so the file is
+              -- some dead pane's and the only reason it is being read is that
+              -- this pane inherited the name. Both take the same cleanup, which
+              -- is the marker and the acknowledgement that referred to it and
+              -- neither the user's flag nor the subagent sidecar. Collecting it
+              -- here rather than only disbelieving it matters because a marker
+              -- this old can never become current again -- its timestamp is
+              -- fixed and sockets only get newer -- and `stop` carries no TTL,
+              -- so nothing else would ever take it.
+              if predates_this_mux(updated_at) or (ttl and now - effective_updated_at > ttl) then
                 remove_expired_marker(dir, id)
                 cache_marker_values(id, nil, nil, nil, nil, now, nil, subagents, flagged)
               elseif acknowledged then

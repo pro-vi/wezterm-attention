@@ -177,3 +177,34 @@ publicly nameable reader types, and several test files mix white-box storage
 tests with CLI subprocess tests in one module, so they cannot simply move inward.
 The declaration turns an accidental commitment into an explicit unstable one; the
 enforcement is separate work.
+
+## A review flag left by a mux that has exited still shows
+
+Flat v1 files are named by bare pane id, and WezTerm issues those from a counter
+the mux owns, restarting at zero with every mux. A file left behind by a mux that
+exited therefore shares its name with whatever pane the current mux later hands
+that id to. The marker file itself is guarded: `predates_this_mux` in
+`plugin/legacy.lua` disbelieves a marker dated before the current incarnation's
+`socket_ctime_ns`, and the poll collects it.
+
+The `.review` sidecar is not guarded, because its presence *is* the flag.
+`review_flagged` in `plugin/overlays.lua` opens the file and reads nothing out of
+it, deliberately: a truncated write must never silently drop a flag the user set
+by hand. There is no timestamp to measure against, and giving it one would mean a
+body the reader has to trust, which is the property that was given up on purpose.
+
+So a `◆` can appear on a pane that never asked for review, when an exited mux left
+a flag at that pane's id. Focusing does not clear it, because `review` is not in
+`acknowledge_types`. Alt+B on the pane removes the file, and `attention sweep`
+collects these along with the rest of the flat backlog.
+
+## Two muxes running at once can read each other's flat files
+
+The socket test above separates an exited mux's files from the current one's. It
+cannot separate two muxes that are both alive: a second WezTerm sharing the state
+root issues pane ids from its own counter starting at zero, and both sets of
+markers are current by any timestamp they carry. Only the v2 address distinguishes
+them, which is what the realm and incarnation digests are for. A pane that has
+bound an agent is addressed and unaffected, so the exposure is limited to flat
+reads of plain panes on a machine deliberately running two GUIs against one state
+root.

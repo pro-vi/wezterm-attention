@@ -187,6 +187,26 @@ local is_ns20 = protocol_api.is_ns20
 local is_canonical_decimal = protocol_api.is_canonical_decimal
 local is_safe_text = protocol_api.is_safe_text
 local same_address = protocol_api.same_address
+--- When the mux that issues pane ids right now came into being, read off its
+--- socket. Flat v1 files are named by bare pane id, and that counter restarts at
+--- zero with every mux, so once a mux has exited its filenames name unrelated
+--- panes. This is the one instant that separates the two: a marker written
+--- before this socket existed cannot describe a pane this mux issued.
+---
+--- Kept as the earliest socket seen across the incarnations of panes read so
+--- far, never the latest. A pane from a remote domain must be able to weaken the
+--- test, and nothing may strengthen it past a live local pane's own marker:
+--- disbelieving a real completion is a worse failure than showing a phantom one.
+local function note_incarnation_socket_ctime(value)
+  if not is_ns20(value) then return end
+  local seen = M._observed_socket_ctime_ns
+  if not seen or value < seen then M._observed_socket_ctime_ns = value end
+end
+
+local function incarnation_socket_ctime_ns()
+  return M._observed_socket_ctime_ns
+end
+
 local legacy_factory = assert(load_plugin_module("legacy"))
 local legacy_api = legacy_factory({
   wezterm = wezterm,
@@ -194,8 +214,12 @@ local legacy_api = legacy_factory({
   normalize_epoch_ms = normalize_epoch_ms,
   protocol = protocol,
   diagnostic = diagnostic,
+  incarnation_socket_ctime_ns = incarnation_socket_ctime_ns,
+  unix_ns20_from_epoch_ms = protocol_api.unix_ns20_from_epoch_ms,
+  compare_ns20 = compare_ns20,
 })
 local read_marker = legacy_api.read_marker
+local predates_this_mux = legacy_api.predates_this_mux
 local subagent_live_ms = legacy_api.subagent_live_ms
 local subagents_path = legacy_api.subagents_path
 local count_live_subagents = legacy_api.count_live_subagents
@@ -209,6 +233,7 @@ local overlays_api = overlays_factory({
   identity_diagnostic = identity_diagnostic,
   read_expected_record = read_expected_record,
   read_marker = read_marker,
+  predates_this_mux = predates_this_mux,
   subagents_path = subagents_path,
 })
 local reported_errors = overlays_api.reported_errors
@@ -257,6 +282,7 @@ local reader_api = reader_factory({
   identity_diagnostic = identity_diagnostic,
   age_exceeds_ms = age_exceeds_ms,
   eligible_subagent = eligible_subagent,
+  note_incarnation_socket_ctime = note_incarnation_socket_ctime,
 })
 local canonical_pane_id = reader_api.canonical_pane_id
 local pane_call = reader_api.pane_call
@@ -341,6 +367,7 @@ local runtime_api = runtime_state.bind({
   acknowledge_focused_v2_pane = acknowledge_focused_v2_pane,
   read_effective_marker = read_effective_marker,
   read_marker = read_marker,
+  predates_this_mux = predates_this_mux,
   marker_identity = marker_identity,
   clear_acknowledgement = clear_acknowledgement,
   write_acknowledgement = write_acknowledgement,
@@ -713,6 +740,7 @@ M._internal = {
   deep_copy = deep_copy,
   eligible_subagent = eligible_subagent,
   compare_ns20 = compare_ns20,
+  note_incarnation_socket_ctime = note_incarnation_socket_ctime,
   sha256 = sha256,
   format_unix_ns20 = format_unix_ns20,
   unix_ns_parts = unix_ns_parts,
