@@ -35,6 +35,9 @@ enum Command {
     Bindings(BindingsArgs),
     /// List the tab order each GUI window's tab bar published.
     Tabs(TabsArgs),
+    /// Describe a GUI socket for the tab publisher without querying or changing it.
+    #[command(hide = true)]
+    TabSource(TabSourceArgs),
     /// Read one exact canonical scope from JSON stdin without changing state.
     Inspect(InspectArgs),
     /// Set current activity or a source-owned review.
@@ -245,6 +248,12 @@ struct TabsArgs {
 }
 
 #[derive(Clone, Debug, Args)]
+struct TabSourceArgs {
+    #[arg(long)]
+    socket: String,
+}
+
+#[derive(Clone, Debug, Args)]
 struct MarkArgs {
     #[arg(value_parser = ["thinking", "stop", "notify", "review", "clear"])]
     state: String,
@@ -288,7 +297,10 @@ struct Response<T: Serialize> {
 }
 
 fn query_json(command: &str) -> bool {
-    matches!(command, "bindings" | "tabs" | "inspect" | "hooks describe")
+    matches!(
+        command,
+        "bindings" | "tabs" | "tab-source" | "inspect" | "hooks describe"
+    )
 }
 
 fn emit<T: Serialize>(response: &Response<T>, as_json: bool, quiet: bool) {
@@ -851,6 +863,23 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             } else {
                 ExitCode::from(1)
             })
+        }
+        Some(Command::TabSource(args)) => {
+            let source = wezterm_attention::query::read_tab_source(&args.socket)
+                .map_err(|error| (Box::new(error), true, "tab-source".to_owned()))?;
+            emit(
+                &Response {
+                    schema: 1,
+                    command: "tab-source".to_owned(),
+                    status: "ok".to_owned(),
+                    complete: true,
+                    result: source,
+                    diagnostics: Vec::new(),
+                },
+                true,
+                false,
+            );
+            Ok(ExitCode::SUCCESS)
         }
         Some(Command::Tabs(args)) => {
             let root = wezterm_attention::records::state_root(&environment)

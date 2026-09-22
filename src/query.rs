@@ -1572,6 +1572,25 @@ fn assemble_bindings(
     Ok((rows, diagnostics))
 }
 
+/// The exact GUI socket incarnation that supplies a publication's window IDs.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TabSource {
+    socket_path: String,
+    realm_id: String,
+    incarnation_id: String,
+}
+
+pub fn read_tab_source(socket: &str) -> Result<TabSource> {
+    validate_socket_selector(socket)?;
+    let (realm_id, incarnation_id, metadata) = socket_identity(socket)?;
+    Ok(TabSource {
+        socket_path: metadata.socket_path,
+        realm_id,
+        incarnation_id,
+    })
+}
+
 /// The tab order one GUI window's tab bar drew, as the bar published it.
 ///
 /// This is not a v2 record. It names no pane address, carries no fence and no

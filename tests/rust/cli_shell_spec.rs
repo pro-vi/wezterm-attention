@@ -59,6 +59,55 @@ fn count_named_files(root: &Path, name: &str) -> usize {
 }
 
 #[test]
+fn tab_source_matches_socket_identity_without_reading_or_writing_state() {
+    use std::os::unix::fs::symlink;
+    let scratch = Scratch::new();
+    let socket = scratch.0.join("gui.sock");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    let alias = scratch.0.join("alias.sock");
+    symlink(&socket, &alias).unwrap();
+    let state = scratch.0.join("absent-state");
+    let (realm, incarnation, metadata) =
+        wezterm_attention::identity::socket_identity(socket.to_str().unwrap()).unwrap();
+    let run = |socket: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_attention"))
+            .env_clear()
+            .env("WEZTERM_ATTENTION_DIR", &state)
+            .args(["tab-source", "--socket", socket.to_str().unwrap()])
+            .output()
+            .unwrap()
+    };
+    for path in [&socket, &alias] {
+        let output = run(path);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            value["result"],
+            json!({"socket_path":metadata.socket_path,"realm_id":realm,"incarnation_id":incarnation})
+        );
+        assert_eq!(value["command"], "tab-source");
+        assert_eq!(value["complete"], true);
+    }
+    fs::remove_file(&socket).unwrap();
+    let _replacement = UnixListener::bind(&socket).unwrap();
+    let replacement: Value = serde_json::from_slice(&run(&socket).stdout).unwrap();
+    assert_eq!(replacement["result"]["realm_id"], realm);
+    assert_ne!(replacement["result"]["incarnation_id"], incarnation);
+    for path in [Path::new("relative.sock"), &scratch.0, &state] {
+        let output = run(path);
+        assert!(!output.status.success());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_ne!(value["status"], "ok");
+        assert_eq!(value["result"], json!({}));
+    }
+    assert!(!state.exists());
+}
+
+#[test]
 fn zsh_explicit_claim_uses_selected_ids_and_clears_inherited_id_on_failure() {
     let scratch = Scratch::new();
     let log = scratch.0.join("calls");
