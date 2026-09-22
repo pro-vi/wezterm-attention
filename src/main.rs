@@ -1,7 +1,7 @@
 use std::io::{IsTerminal, Read};
 use std::process::ExitCode;
 
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use wezterm_attention::protocol::{AttentionError, Diagnostic, Disposition};
@@ -146,10 +146,70 @@ struct PublishArgs {
     all_details: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+enum BindingField {
+    Address,
+    LaunchId,
+    BindingId,
+    Provider,
+    ProviderSessionId,
+    BindingPhase,
+    PanePresence,
+    ReaderConfidence,
+    BindingHealth,
+    Current,
+    ExpectedSessionMatch,
+    ExpectedSessionId,
+    TranscriptPath,
+    Cwd,
+    ConfigDir,
+    Model,
+    StartSource,
+}
+
+impl BindingField {
+    fn name(self) -> String {
+        self.to_possible_value()
+            .expect("field has a name")
+            .get_name()
+            .to_owned()
+    }
+}
+
+fn bindings_help() -> String {
+    format!(
+        "Example: attention bindings --all --fields address,provider,current\nFields: {}\ncomplete is false when rows were dropped (any mode) or a probe did not answer (--socket).\nDropped diagnostics are counted: result.diagnostic_count of result.total_diagnostic_count.\nIf truncated, narrow with --provider, raise --limit (maximum 1000), or explicitly use --all.\n--socket queries prevent WezTerm auto-start; --realm selects a recorded realm ID.",
+        BindingField::value_variants()
+            .iter()
+            .map(|field| field.name())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn parse_binding_fields(value: &str) -> Result<Vec<String>, AttentionError> {
+    let mut fields = Vec::new();
+    for name in value
+        .split(',')
+        .map(|name| name.trim_matches(|c: char| c.is_ascii_whitespace()))
+    {
+        let field = BindingField::from_str(name, false)
+            .map_err(|_| {
+                AttentionError::usage(format!(
+                    "--fields contains an invalid field: {name:?}; see bindings --help"
+                ))
+            })?
+            .name();
+        if !fields.contains(&field) {
+            fields.push(field);
+        }
+    }
+    Ok(fields)
+}
+
 #[derive(Clone, Debug, Args)]
-#[command(
-    after_help = "Example: attention bindings --socket /absolute/mux.sock --limit 25\ncomplete is false when rows were dropped (any mode) or a probe did not answer (--socket).\nDropped diagnostics are counted: result.diagnostic_count of result.total_diagnostic_count.\nIf truncated, narrow with --provider, raise --limit (maximum 1000), or explicitly use --all.\n--socket queries prevent WezTerm auto-start; --realm selects a recorded realm ID."
-)]
+#[command(after_help = bindings_help())]
 struct BindingsArgs {
     /// Return the JSON envelope (also the default).
     #[arg(long)]
@@ -169,6 +229,9 @@ struct BindingsArgs {
     /// Return every matching row instead of limiting output.
     #[arg(long)]
     all: bool,
+    /// Comma-separated top-level row fields; omitted fields retain their usual absence.
+    #[arg(long)]
+    fields: Option<String>,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -629,6 +692,12 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             })
         }
         Some(Command::Bindings(args)) => {
+            let fields = args
+                .fields
+                .as_deref()
+                .map(parse_binding_fields)
+                .transpose()
+                .map_err(|error| (Box::new(error), args.json, "bindings".to_owned()))?;
             if let Some(socket) = &args.socket {
                 wezterm_attention::query::validate_socket_selector(socket)
                     .map_err(|error| (Box::new(error), args.json, "bindings".to_owned()))?;
@@ -731,6 +800,16 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 "diagnostic_count": shown_diagnostics.len(),
                 "total_diagnostic_count": diagnostics.len(),
             });
+            if let Some(fields) = fields {
+                for row in result["rows"]
+                    .as_array_mut()
+                    .expect("rows serialize as an array")
+                {
+                    row.as_object_mut()
+                        .expect("binding serializes as an object")
+                        .retain(|key, _| fields.contains(key));
+                }
+            }
             let socket_mode = scope.is_some();
             if let Some(scope) = scope {
                 result["scope"] = serde_json::to_value(scope).expect("scope serializes");
@@ -1048,5 +1127,52 @@ fn main() -> ExitCode {
     match run(cli) {
         Ok(code) => code,
         Err((error, as_json, command)) => emit_error(&error, as_json, &command),
+    }
+}
+
+#[cfg(test)]
+mod binding_field_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use wezterm_attention::identity::PaneAddress;
+    use wezterm_attention::query::BindingRow;
+
+    #[test]
+    fn binding_fields_match_serialized_row_keys() {
+        let row = BindingRow {
+            address: PaneAddress {
+                realm_id: "a".repeat(64),
+                incarnation_id: "b".repeat(64),
+                pane_id: "1".into(),
+            },
+            launch_id: "00000000-0000-4000-8000-000000000001".into(),
+            binding_id: "c".repeat(64),
+            provider: "claude".into(),
+            provider_session_id: "session".into(),
+            binding_phase: "running".into(),
+            pane_presence: "present".into(),
+            reader_confidence: "current".into(),
+            binding_health: "healthy".into(),
+            current: true,
+            expected_session_match: None,
+            expected_session_id: Some("session".into()),
+            transcript_path: Some("/test/transcript".into()),
+            cwd: Some("/test".into()),
+            config_dir: Some("/test/config".into()),
+            model: Some("model".into()),
+            start_source: Some("startup".into()),
+        };
+        let value = serde_json::to_value(row).unwrap();
+        let keys: BTreeSet<_> = value.as_object().unwrap().keys().cloned().collect();
+        let selectable: BTreeSet<_> = BindingField::value_variants()
+            .iter()
+            .map(|field| field.name())
+            .collect();
+        assert_eq!(keys, selectable);
+        assert!(value["expected_session_match"].is_null());
+        let help = bindings_help();
+        for name in keys {
+            assert!(help.contains(&name));
+        }
     }
 }

@@ -123,6 +123,14 @@ The socket query creates no state directories, takes no writer locks, and perfor
 
 For publication, `hooks publish --socket <PATH>` takes an existing socket path and is the only selector. Publication without it retains pane publication and prompt-return behavior. `bindings --realm <ID>` and `sweep --realm <ID>` are a different option that takes a 64-character realm identifier, not a path.
 
+Use `attention bindings --all --fields address,provider,current` to select top-level
+row fields while keeping every matching row. Field selection does not change query
+work, row limits, scope, diagnostics, completeness or exit codes. `address` stays a
+whole object. Optional fields that were absent stay absent, and explicit nulls stay
+null; a selected row can therefore be `{}`. Without `--fields`, rows are unchanged.
+See `bindings --help` for accepted names. Unknown names, empty comma components,
+nested paths and wildcards are usage errors.
+
 ## Read the drawn tab order
 
 ```sh

@@ -23,6 +23,116 @@ fn query(
 }
 
 #[test]
+fn binding_projection_preserves_query_metadata() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    setup.provider_event(
+        "SessionStart",
+        "session-b",
+        json!({"source":"clear"}),
+        "00000000000000000300",
+    );
+    let executable = setup._scratch.0.join("wezterm");
+    fs::write(
+        &executable,
+        "#!/bin/sh\nprintf '%s\\n' '[{\"pane_id\":\"42\"}]'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+    for socket_mode in [false, true] {
+        for selection in [
+            vec!["--all"],
+            vec!["--limit", "1"],
+            vec!["--provider", "codex"],
+        ] {
+            let run = |fields: Option<&str>| {
+                let mut command = Command::new(env!("CARGO_BIN_EXE_attention"));
+                command
+                    .env_clear()
+                    .envs(&setup.env)
+                    .env("WEZTERM_EXECUTABLE", &executable)
+                    .arg("bindings")
+                    .args(&selection);
+                if socket_mode {
+                    command.args(["--socket", &setup.env["WEZTERM_UNIX_SOCKET"]]);
+                }
+                if let Some(fields) = fields {
+                    command.args(["--fields", fields]);
+                }
+                command.output().unwrap()
+            };
+            let full = run(None);
+            for (fields, keys) in [
+                (
+                    " address, provider,address,expected_session_match ",
+                    vec!["address", "provider", "expected_session_match"],
+                ),
+                ("transcript_path", vec!["transcript_path"]),
+            ] {
+                let selected = run(Some(fields));
+                assert_eq!(selected.status, full.status);
+                assert_eq!(selected.stderr, full.stderr);
+                let mut expected: Value = serde_json::from_slice(&full.stdout).unwrap();
+                for row in expected["result"]["rows"].as_array_mut().unwrap() {
+                    row.as_object_mut()
+                        .unwrap()
+                        .retain(|key, _| keys.contains(&key.as_str()));
+                }
+                let actual: Value = serde_json::from_slice(&selected.stdout).unwrap();
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn binding_fields_validate_before_discovery() {
+    let setup = Setup::new();
+    let nonexistent = setup._scratch.0.join("no-socket");
+    for fields in [
+        "",
+        "address,",
+        ",provider",
+        "address,,provider",
+        "*",
+        "address.pane_id",
+        "missing",
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+            .env_clear()
+            .args([
+                "bindings",
+                "--socket",
+                nonexistent.to_str().unwrap(),
+                "--fields",
+                fields,
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{fields}");
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["status"], "usage_error");
+        assert!(
+            response["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("--fields")
+        );
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .env_clear()
+        .envs(&setup.env)
+        .args(["bindings", "--fields", "transcript_path"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["result"]["rows"],
+        json!([])
+    );
+}
+
+#[test]
 fn bindings_socket_empty_keeps_scope_and_creates_no_state() {
     let setup = Setup::new();
     let (scope, rows, diagnostics) = query(&setup);
