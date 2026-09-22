@@ -36,7 +36,7 @@ local attention = wezterm.plugin.require("https://github.com/pro-vi/wezterm-atte
 attention.apply_to_config(config)
 ```
 
-The v1 reader and renderer require WezTerm `20221119-145034-49b9839f` or newer. Mux-native v2 requires POSIX and the Rust CLI built by running `scripts/install-cli.sh` in this checkout. `bin/attention` uses that installed Rust binary and names the install command if it is absent. The plugin exports its resolved state path to new panes, and its checkout path only once that binary is installed: a producer reads the checkout path as the instruction to write through the Rust CLI, so announcing it without the binary would take away the v1 fallback. Installing the binary while WezTerm is running takes effect on the next config reload.
+The v1 reader and renderer require WezTerm `20221119-145034-49b9839f` or newer. Mux-native v2 requires POSIX and the Rust CLI built by running `scripts/install-cli.sh` in this checkout. `attention --version` names the commit the installed binary was built from, with `-dirty` when the tree had uncommitted changes, so a stale install is visible: compare it with `git rev-parse HEAD`. `bin/attention` uses that installed Rust binary and names the install command if it is absent. The plugin exports its resolved state path to new panes, and its checkout path only once that binary is installed: a producer reads the checkout path as the instruction to write through the Rust CLI, so announcing it without the binary would take away the v1 fallback. Installing the binary while WezTerm is running takes effect on the next config reload.
 
 To put the command on your PATH, link the shim:
 

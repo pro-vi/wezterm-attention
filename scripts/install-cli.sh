@@ -12,8 +12,12 @@ trap cleanup EXIT HUP INT TERM
 
 mkdir -p -- "$root/libexec"
 cd "$root"
+# The build script records the commit; touching it makes cargo run it again
+# even when no source file changed since the last build.
+touch -- "$root/build.rs"
 cargo build --release
 cp -- "$root/target/release/attention" "$temporary"
 chmod 755 "$temporary"
 mv -f -- "$temporary" "$destination"
 trap - EXIT HUP INT TERM
+printf 'installed %s\n' "$("$destination" --version)"

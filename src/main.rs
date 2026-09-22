@@ -13,6 +13,7 @@ use wezterm_attention::wezterm::{
 #[derive(Debug, Parser)]
 #[command(
     name = "attention",
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("ATTENTION_BUILD_COMMIT"), ")"),
     about = "Publish and maintain mux-native WezTerm attention state.",
     after_help = "Example: attention bindings --socket /absolute/mux.sock\nRead commands (bindings, inspect, hooks describe) return JSON by default.\nCheck status and complete before using query results.\nRegistration requirements: attention hooks describe --provider claude"
 )]

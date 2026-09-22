@@ -146,6 +146,28 @@ fn bash_automatic_claim_preserves_debug_trap_and_keeps_pending_publication_id() 
 }
 
 #[test]
+fn the_binary_names_the_commit_it_was_built_from() {
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .arg("--version")
+        .env_clear()
+        .output()
+        .expect("run --version");
+    assert!(output.status.success());
+    let version = String::from_utf8_lossy(&output.stdout);
+    let (name, rest) = version.trim().split_once(' ').expect("name then version");
+    assert_eq!(name, "attention");
+    let (crate_version, build) = rest.split_once(" (").expect("version then build");
+    assert_eq!(crate_version, env!("CARGO_PKG_VERSION"));
+    let build = build.strip_suffix(')').expect("closing paren");
+    let commit = build.strip_suffix("-dirty").unwrap_or(build);
+    assert!(
+        commit == "unknown"
+            || (commit.len() == 12 && commit.bytes().all(|b| b.is_ascii_hexdigit())),
+        "build is a 12-hex commit or unknown, got {build:?}"
+    );
+}
+
+#[test]
 fn rust_cli_help_errors_and_empty_hook_input_keep_the_documented_shape() {
     let binary = env!("CARGO_BIN_EXE_attention");
     let home = Command::new(binary).output().expect("run help");
