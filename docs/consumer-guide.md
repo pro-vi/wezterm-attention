@@ -152,6 +152,26 @@ A file that cannot be read, declares a later schema, is filed under a window it 
 
 The plugin captures its own GUI socket identity outside the renderer. Schema 2 records that `source` as a canonical socket path plus realm and incarnation IDs. Schema-1 decimal filenames remain readable with `source: null`; the plugin keeps publishing that legacy form if its identity helper is unavailable. Existing legacy files are not guessed into the new namespace or removed on upgrade. Source incarnation plus window ID identifies a new publication; the window number alone does not. Install the updated reader/helper before loading the updated plugin.
 
+Every `attention tabs` invocation also returns `window_check` on each window. It
+checks the recorded GUI socket incarnation before and after one no-auto-start
+inventory query per source. It never substitutes the caller's socket or a remote
+pane's mux, and it never changes publication files.
+
+| `window_check.status` | Meaning |
+|---|---|
+| `present` | At least one pane was listed for this window in the publishing GUI's mux. |
+| `not_listed` | That inventory listed no panes for this window. An empty or transitional window is not ruled out. |
+| `unavailable` | The source is unrecorded, changed, unavailable, or returned an invalid inventory; `reason` distinguishes these cases. |
+
+`checked_at_ms` is the completion time of that check, not a freshness promise.
+The saved `published_at_ms`, text and order are unchanged. A successful check
+proves neither current tab order nor visibility in the current workspace; validate
+any action against the GUI when acting. Legacy files return
+`unavailable/source_unrecorded`. Failed checks stay on their individual windows:
+`complete` and the top-level diagnostics still describe publication-read coverage.
+Check `window_check.status` on the window you intend to use. All parsed windows
+remain in the response, including not-listed and unavailable ones.
+
 ## Public consumer contracts
 
 Attention records use schema **3**. CLI envelopes, `HookDelivery` and the published tab order use schema **1**, package metadata uses manifest schema **2**, and pane identity uses wire version **2**. These identify separate data formats, not supported product editions. A published fact that is not a v2 record — one with no pane address to be validated against and no ordering fence — carries its own schema field and is versioned on its own, rather than entering `protocol/v2.json`: the manifest's `record_schema` governs the addressed record tree, and coupling anything else to it would make an unrelated record change refuse a valid file. Use a fresh Attention state root and fresh supported launches for activation; existing state is not automatically migrated or deleted. Writer-owned flat leftovers from the projection era are previewed with `attention sweep --json` and collected with `attention sweep --apply --operation-id 00000000-0000-4000-8000-000000000001`. The operation id must be a canonical lowercase UUID (`uuidgen` on macOS is uppercase; lowercase it). Collection attributes those names by a unique v2 claim, not by live v1 occupancy — preview the stems before applying. Legacy flat markers remain readable. Ship the manifest with its matching Rust/Lua readers. Source capabilities do not establish live registration or activation.

@@ -239,7 +239,7 @@ struct BindingsArgs {
 
 #[derive(Clone, Debug, Args)]
 #[command(
-    after_help = "Example: attention tabs\nReturns the number and text each window's tab bar drew, with the pane IDs behind each tab.\nThe order is honest about when it was written, not guaranteed current: read published_at_ms.\nEvery tab is listed, agent or not. For bound panes only: attention bindings"
+    after_help = "Example: attention tabs\nReturns each saved tab order and a check against its publishing GUI socket.\nwindow_check.status: present, not_listed, or unavailable (with a reason).\nnot_listed means no panes were listed for that window, not proven closure.\nA window check does not refresh or verify saved tab order: read published_at_ms.\ncomplete describes publication coverage; check window_check on the window you use.\nEvery saved window is returned, including legacy files with no known source. For bound panes only: attention bindings"
 )]
 struct TabsArgs {
     /// Return the JSON envelope (also the default).
@@ -884,8 +884,12 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
         Some(Command::Tabs(args)) => {
             let root = wezterm_attention::records::state_root(&environment)
                 .map_err(|error| (Box::new(error), args.json, "tabs".to_owned()))?;
-            let (windows, diagnostics) = wezterm_attention::query::read_tab_publications(&root)
-                .map_err(|error| (Box::new(error), args.json, "tabs".to_owned()))?;
+            let (windows, diagnostics) = wezterm_attention::query::read_checked_tab_publications(
+                &root,
+                &wezterm_attention::wezterm::ExistingWeztermWindowLister,
+                &clock,
+            )
+            .map_err(|error| (Box::new(error), args.json, "tabs".to_owned()))?;
             emit(
                 &Response {
                     schema: 1,

@@ -13,7 +13,7 @@ use crate::protocol::{AttentionError, Diagnostic, Result};
 use crate::records::{FileRecords, RecordReader, launch_path, pane_path};
 use crate::records::{RecordIdentity, RecordRead, read_record, read_record_typed};
 use crate::wezterm::Clock;
-use crate::wezterm::{PaneLister, Presence, ProcessProbe};
+use crate::wezterm::{GuiWindowLister, PaneLister, Presence, ProcessProbe};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PaneScope {
@@ -1593,7 +1593,7 @@ pub fn read_tab_source(socket: &str) -> Result<TabSource> {
 
 /// The tab order one GUI window's tab bar drew, as the bar published it.
 ///
-/// This is not a v2 record. It names no pane address, carries no fence and no
+/// This is not a v2 record. It names no pane address, carries no launch fence and no
 /// TTL, and nothing acts on it, so it carries its own `schema` rather than the
 /// manifest's record schema. `published_at_ms` says when the bar last drew
 /// something different; nothing refreshes it while the bar is idle.
@@ -1605,6 +1605,104 @@ pub struct TabPublication {
     pub source: Option<TabSource>,
     #[serde(skip)]
     pub(crate) relative_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CheckedTabPublication {
+    #[serde(flatten)]
+    pub publication: TabPublication,
+    pub window_check: WindowCheck,
+}
+
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum WindowCheck {
+    Present {
+        checked_at_ms: u64,
+    },
+    NotListed {
+        checked_at_ms: u64,
+    },
+    Unavailable {
+        checked_at_ms: u64,
+        reason: WindowCheckReason,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowCheckReason {
+    SourceUnrecorded,
+    SourceChanged,
+    ProbeUnavailable,
+    InventoryInvalid,
+}
+
+fn observe_tab_source(
+    source: &TabSource,
+    lister: &dyn GuiWindowLister,
+) -> std::result::Result<BTreeSet<u64>, WindowCheckReason> {
+    let matches = || match read_tab_source(&source.socket_path) {
+        Ok(current) if current == *source => Ok(()),
+        Ok(_) => Err(WindowCheckReason::SourceChanged),
+        Err(_) => Err(WindowCheckReason::ProbeUnavailable),
+    };
+    matches()?;
+    let inventory = lister.list_windows(&source.socket_path);
+    matches()?;
+    inventory.map_err(|error| {
+        if error.diagnostic.code == "record_invalid" {
+            WindowCheckReason::InventoryInvalid
+        } else {
+            WindowCheckReason::ProbeUnavailable
+        }
+    })
+}
+
+/// Check each publication in the namespace that produced its window ID.
+/// A complete read can include unavailable checks; those are facts about one source.
+pub fn read_checked_tab_publications(
+    root: &Path,
+    lister: &dyn GuiWindowLister,
+    clock: &dyn Clock,
+) -> Result<(Vec<CheckedTabPublication>, Vec<Diagnostic>)> {
+    let (publications, diagnostics) = read_tab_publications(root)?;
+    let mut inventories = BTreeMap::new();
+    let mut checked = Vec::new();
+    for publication in publications {
+        let key = publication.source.clone();
+        if !inventories.contains_key(&key) {
+            let inventory = key
+                .as_ref()
+                .map_or(Err(WindowCheckReason::SourceUnrecorded), |source| {
+                    observe_tab_source(source, lister)
+                });
+            let checked_at_ms = clock
+                .unix_ns20()?
+                .parse::<u128>()
+                .ok()
+                .and_then(|ns| u64::try_from(ns / 1_000_000).ok())
+                .ok_or_else(|| AttentionError::new("clock_skew", "window check time is invalid"))?;
+            inventories.insert(key.clone(), (inventory, checked_at_ms));
+        }
+        let (inventory, checked_at_ms) = &inventories[&key];
+        let checked_at_ms = *checked_at_ms;
+        let window_check = match inventory {
+            Ok(windows) if windows.contains(&publication.window_id) => {
+                WindowCheck::Present { checked_at_ms }
+            }
+            Ok(_) => WindowCheck::NotListed { checked_at_ms },
+            Err(reason) => WindowCheck::Unavailable {
+                checked_at_ms,
+                reason: *reason,
+            },
+        };
+        checked.push(CheckedTabPublication {
+            publication,
+            window_check,
+        });
+    }
+    Ok((checked, diagnostics))
 }
 
 /// One drawn tab: the number the bar printed, the text it drew, and the ids the

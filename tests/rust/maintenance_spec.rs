@@ -1231,6 +1231,190 @@ fn write_tab_order(root: &Path, window_id: u64, marker_ids: &[&str]) -> PathBuf 
     path
 }
 
+fn write_sourced_tab_order(root: &Path, socket: &str, window_id: u64) -> PathBuf {
+    let source =
+        serde_json::to_value(wezterm_attention::query::read_tab_source(socket).unwrap()).unwrap();
+    fs::create_dir_all(root.join("tabs")).unwrap();
+    let file = root.join("tabs").join(format!(
+        "{}-{window_id}.json",
+        source["incarnation_id"].as_str().unwrap()
+    ));
+    fs::write(&file, serde_json::to_vec(&json!({"schema":2,"window_id":window_id,"published_at_ms":7,"source":source,"tabs":[{"number":11,"text":"drawn order","marker_ids":["42"]}]})).unwrap()).unwrap();
+    file
+}
+
+struct WindowLister<F>(F);
+impl<F> wezterm_attention::wezterm::GuiWindowLister for WindowLister<F>
+where
+    F: Fn(&str) -> wezterm_attention::protocol::Result<std::collections::BTreeSet<u64>>
+        + Send
+        + Sync,
+{
+    fn list_windows(
+        &self,
+        socket: &str,
+    ) -> wezterm_attention::protocol::Result<std::collections::BTreeSet<u64>> {
+        (self.0)(socket)
+    }
+}
+
+#[test]
+fn window_checks_share_exact_source_inventory_and_keep_legacy_unknown() {
+    use wezterm_attention::query::{WindowCheck, WindowCheckReason, read_checked_tab_publications};
+    let setup = Setup::new();
+    let root = state_root(&setup.env).unwrap();
+    let socket = &setup.env["WEZTERM_UNIX_SOCKET"];
+    let first = write_sourced_tab_order(&root, socket, 0);
+    let before = fs::read(&first).unwrap();
+    write_sourced_tab_order(&root, socket, 1);
+    write_tab_order(&root, 0, &["42"]);
+    let calls = AtomicU64::new(0);
+    let lister = WindowLister(|selected: &str| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(
+            selected,
+            fs::canonicalize(socket).unwrap().to_str().unwrap()
+        );
+        Ok(std::collections::BTreeSet::from([0]))
+    });
+    let (windows, diagnostics) =
+        read_checked_tab_publications(&root, &lister, &setup.clock).unwrap();
+    assert!(diagnostics.is_empty());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(windows.len(), 3);
+    assert!(matches!(
+        windows[0].window_check,
+        WindowCheck::Unavailable {
+            reason: WindowCheckReason::SourceUnrecorded,
+            ..
+        }
+    ));
+    assert!(matches!(
+        windows[1].window_check,
+        WindowCheck::Present { .. }
+    ));
+    assert!(matches!(
+        windows[2].window_check,
+        WindowCheck::NotListed { .. }
+    ));
+    assert_eq!(windows[1].publication.published_at_ms, 7);
+    assert_eq!(fs::read(&first).unwrap(), before);
+    read_checked_tab_publications(&root, &lister, &setup.clock).unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the next invocation takes new evidence"
+    );
+}
+
+#[test]
+fn failed_window_inventory_never_means_absence_or_hides_another_source() {
+    use wezterm_attention::query::{WindowCheck, WindowCheckReason, read_checked_tab_publications};
+    let setup = Setup::new();
+    let root = state_root(&setup.env).unwrap();
+    let socket = &setup.env["WEZTERM_UNIX_SOCKET"];
+    let other = setup._scratch.0.join("other.sock");
+    let _other_listener = UnixListener::bind(&other).unwrap();
+    write_sourced_tab_order(&root, socket, 0);
+    write_sourced_tab_order(&root, socket, 1);
+    write_sourced_tab_order(&root, other.to_str().unwrap(), 0);
+    for (code, reason) in [
+        ("realm_unavailable", WindowCheckReason::ProbeUnavailable),
+        ("record_invalid", WindowCheckReason::InventoryInvalid),
+    ] {
+        let calls = AtomicU64::new(0);
+        let failing_socket = fs::canonicalize(socket).unwrap();
+        let lister = WindowLister(|selected: &str| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            if Path::new(selected) == failing_socket {
+                Err(wezterm_attention::protocol::AttentionError::new(
+                    code,
+                    "synthetic inventory failure",
+                ))
+            } else {
+                Ok(std::collections::BTreeSet::from([0]))
+            }
+        });
+        let (windows, diagnostics) =
+            read_checked_tab_publications(&root, &lister, &setup.clock).unwrap();
+        assert!(diagnostics.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "failure is cached too");
+        assert_eq!(
+            windows
+                .iter()
+                .filter(|w| matches!(w.window_check, WindowCheck::Present { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(windows.iter().filter(|w| matches!(w.window_check, WindowCheck::Unavailable { reason:r, .. } if r == reason)).count(),2);
+    }
+}
+
+#[test]
+fn window_check_rejects_source_replacement_before_and_during_listing() {
+    use wezterm_attention::query::{WindowCheck, WindowCheckReason, read_checked_tab_publications};
+    for replace_during in [false, true] {
+        let setup = Setup::new();
+        let root = state_root(&setup.env).unwrap();
+        let socket = &setup.env["WEZTERM_UNIX_SOCKET"];
+        write_sourced_tab_order(&root, socket, 0);
+        let replacement = Mutex::new(None);
+        if !replace_during {
+            fs::remove_file(socket).unwrap();
+            *replacement.lock().unwrap() = Some(UnixListener::bind(socket).unwrap());
+        }
+        let calls = AtomicU64::new(0);
+        let lister = WindowLister(|selected: &str| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            fs::remove_file(selected).unwrap();
+            *replacement.lock().unwrap() = Some(UnixListener::bind(selected).unwrap());
+            Ok(std::collections::BTreeSet::from([0]))
+        });
+        let (windows, diagnostics) =
+            read_checked_tab_publications(&root, &lister, &setup.clock).unwrap();
+        assert!(diagnostics.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), u64::from(replace_during));
+        assert!(matches!(
+            windows[0].window_check,
+            WindowCheck::Unavailable {
+                reason: WindowCheckReason::SourceChanged,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn window_inventory_parser_rejects_any_invalid_identity_instead_of_partial_success() {
+    use wezterm_attention::wezterm::parse_gui_window_ids;
+    assert!(parse_gui_window_ids(b"[]").unwrap().is_empty());
+    assert_eq!(parse_gui_window_ids(br#"[{"pane_id":1,"window_id":0,"ignored":true},{"pane_id":"2","window_id":0},{"pane_id":3,"window_id":7}]"#).unwrap(),std::collections::BTreeSet::from([0,7]));
+    for row in [
+        json!({"pane_id":"01","window_id":0}),
+        json!({"pane_id":"bad","window_id":0}),
+        json!({"pane_id":2}),
+        json!({"window_id":0}),
+        json!({"pane_id":2,"window_id":-1}),
+        json!({"pane_id":2,"window_id":"0"}),
+        json!({"pane_id":1,"window_id":7}),
+    ] {
+        let input = serde_json::to_vec(&json!([{"pane_id":1,"window_id":0},row])).unwrap();
+        assert!(parse_gui_window_ids(&input).is_err(), "{row}");
+    }
+    for bytes in [b"{}".as_slice(), b"[", b"null"] {
+        assert!(parse_gui_window_ids(bytes).is_err());
+    }
+    let oversized = vec![
+        b' ';
+        wezterm_attention::protocol::manifest()
+            .unwrap()
+            .limits
+            .max_json_bytes
+            + 1
+    ];
+    assert!(parse_gui_window_ids(&oversized).is_err());
+}
+
 #[test]
 fn sweep_uses_validated_tab_publication_path() {
     let setup = Setup::new();

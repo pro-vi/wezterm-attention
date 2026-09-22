@@ -1051,8 +1051,8 @@ fn apply_projection_collection(
 /// names is verified absent, or once it names no tab at all: WezTerm closes a
 /// window whose last tab closes, so an empty order is the bar's final draw. A
 /// file naming a v1 marker id is kept, because a bare pane id has no realm to
-/// ask; so is one whose panes could not be probed. A file is not addressed by
-/// a realm, so a realm-filtered sweep leaves them all alone.
+/// ask; so is one whose panes could not be probed. A GUI source is not the pane
+/// realm a sweep selects, so a realm-filtered sweep leaves these files alone.
 fn collect_tab_orders(
     root: &Path,
     apply: bool,

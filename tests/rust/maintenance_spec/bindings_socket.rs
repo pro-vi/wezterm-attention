@@ -32,6 +32,13 @@ fn binding_projection_preserves_query_metadata() {
         json!({"source":"clear"}),
         "00000000000000000300",
     );
+    let root = state_root(&setup.env).unwrap();
+    let address = pane_address(&setup.env).unwrap().0;
+    let broken = launch_path(&root, &address, &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"])
+        .join("bindings")
+        .join("f".repeat(64));
+    fs::create_dir_all(&broken).unwrap();
+    fs::write(broken.join("binding.json"), "invalid").unwrap();
     let executable = setup._scratch.0.join("wezterm");
     fs::write(
         &executable,
@@ -62,6 +69,11 @@ fn binding_projection_preserves_query_metadata() {
                 command.output().unwrap()
             };
             let full = run(None);
+            let full_response: Value = serde_json::from_slice(&full.stdout).unwrap();
+            assert!(
+                !full_response["diagnostics"].as_array().unwrap().is_empty(),
+                "fixture must exercise diagnostics retention"
+            );
             for (fields, keys) in [
                 (
                     " address, provider,address,expected_session_match ",

@@ -36,12 +36,15 @@ v2/realms/<realm>/
           agents/<agent-key>.json
 ```
 
-State that is not addressed by a pane lives outside that tree and outside this manifest. The tab bar publishes the order it draws at `tabs/<incarnation id>-<window id>.json`, one file per identified GUI source and window; it names no pane address, carries no fence and no TTL, so it carries its own `schema` (currently 2) and is versioned separately from `record_schema`. That is the rule for any published fact with no address to validate against: a local schema field, not a manifest entry, because a record-tree change must not refuse a file that has nothing to do with it. `attention tabs` reads them. The process that wrote a file withdraws it when its window closes, and only its own files; a file whose writer has exited is collected by `attention sweep` when every pane it names is verified absent, or when it names no tab at all. See the [consumer guide](consumer-guide.md) for what the order does and does not promise.
+State that is not addressed by a pane lives outside that tree and outside this manifest. The tab bar publishes the order it draws at `tabs/<incarnation id>-<window id>.json`, one file per identified GUI source and window; it names no pane address, carries no pane execution fence and no TTL, so it carries its own `schema` (currently 2) and is versioned separately from `record_schema`. That is the rule for any published fact with no address to validate against: a local schema field, not a manifest entry, because a record-tree change must not refuse a file that has nothing to do with it. `attention tabs` reads them. The process that wrote a file withdraws it when its window closes, and only its own files; a file whose writer has exited is collected by `attention sweep` when every pane it names is verified absent, or when it names no tab at all. See the [consumer guide](consumer-guide.md) for what the order does and does not promise.
 
 The binding record is durable before its pointer. Rust provider/CLI transitions use the appropriate lock scopes and atomic per-file replacement. Lua acknowledgement and review operations validate their targets but use per-file atomic replacement or removal without those Rust locks; a read/check/write sequence is not a cross-writer transaction. Raw child and review IDs never become filenames.
 
 
 Schema 2 carries `source` with canonical `socket_path`, `realm_id` and `incarnation_id`, derived from the publishing GUI socket. The filename must match its incarnation and window ID. Schema-1 files at `tabs/<window id>.json` remain readable with no known source. Equal window numbers do not associate legacy files with new sources. Cleanup uses the validated file path rather than reconstructing one from a window number.
+
+
+Window checks are derived per query and never stored in publication files. Their statuses are `present`, `not_listed` and `unavailable`; source identity failure cannot produce `not_listed`. The recorded source namespace is separate from a pane realm, so realm-filtered sweep still leaves tab publications alone.
 
 ## Ordering and wall age
 

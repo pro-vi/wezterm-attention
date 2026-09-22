@@ -35,6 +35,47 @@ pub trait PaneLister: Send + Sync {
     fn list(&self, socket_path: &str) -> Result<Vec<PaneRow>>;
 }
 
+pub trait GuiWindowLister: Send + Sync {
+    fn list_windows(&self, socket_path: &str) -> Result<BTreeSet<u64>>;
+}
+
+pub struct ExistingWeztermWindowLister;
+
+impl GuiWindowLister for ExistingWeztermWindowLister {
+    fn list_windows(&self, socket_path: &str) -> Result<BTreeSet<u64>> {
+        parse_gui_window_ids(&list_wezterm_inventory(socket_path, true)?)
+    }
+}
+
+pub fn parse_gui_window_ids(bytes: &[u8]) -> Result<BTreeSet<u64>> {
+    #[derive(Deserialize)]
+    struct Row {
+        #[serde(deserialize_with = "deserialize_pane_id")]
+        pane_id: String,
+        window_id: u64,
+    }
+    let invalid = || {
+        AttentionError::new(
+            "record_invalid",
+            "GUI inventory contains invalid pane or window identities",
+        )
+    };
+    if bytes.len() > manifest()?.limits.max_json_bytes {
+        return Err(invalid());
+    }
+    let rows: Vec<Row> = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let mut panes = BTreeSet::new();
+    let mut windows = BTreeSet::new();
+    for row in rows {
+        crate::identity::canonical_pane_id(&row.pane_id).map_err(|_| invalid())?;
+        if !panes.insert(row.pane_id) {
+            return Err(invalid());
+        }
+        windows.insert(row.window_id);
+    }
+    Ok(windows)
+}
+
 pub trait ProcessProbe: Send + Sync {
     fn available(&self) -> bool;
     fn presence(&self, socket_path: &str, pane_id: &str) -> Presence;
@@ -358,6 +399,10 @@ impl PaneLister for ExistingWeztermPaneLister {
 }
 
 fn list_wezterm_panes(socket_path: &str, no_auto_start: bool) -> Result<Vec<PaneRow>> {
+    parse_pane_rows(&list_wezterm_inventory(socket_path, no_auto_start)?)
+}
+
+fn list_wezterm_inventory(socket_path: &str, no_auto_start: bool) -> Result<Vec<u8>> {
     let executable = wezterm_executable()?;
     let mut command = Command::new(executable);
     command.args(["--skip-config", "cli", "--prefer-mux"]);
@@ -418,13 +463,19 @@ fn list_wezterm_panes(socket_path: &str, no_auto_start: bool) -> Result<Vec<Pane
         .map_err(|_| {
             AttentionError::new("realm_unavailable", "wezterm cli list could not be read")
         })?;
+    if bytes.len() > maximum {
+        return Err(AttentionError::new(
+            "record_invalid",
+            "wezterm cli list exceeded its JSON bound",
+        ));
+    }
     if !status.success() {
         return Err(AttentionError::new(
             "realm_unavailable",
             "wezterm cli list failed",
         ));
     }
-    parse_pane_rows(&bytes)
+    Ok(bytes)
 }
 
 impl ProcessProbe for SystemProcessProbe {

@@ -797,6 +797,111 @@ fn lua_tab_publication_round_trips_identity() {
 }
 
 #[test]
+fn tabs_cli_checks_exact_source_without_autostart_or_global_failure() {
+    let scratch = Scratch::new();
+    let socket = scratch.0.join("gui.sock");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    let source = serde_json::to_value(
+        wezterm_attention::query::read_tab_source(socket.to_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let state = scratch.0.join("state");
+    fs::create_dir_all(state.join("tabs")).unwrap();
+    for id in [0, 1] {
+        fs::write(
+            state.join("tabs").join(format!(
+                "{}-{id}.json",
+                source["incarnation_id"].as_str().unwrap()
+            )),
+            serde_json::to_vec(
+                &json!({"schema":2,"source":source,"window_id":id,"published_at_ms":7,"tabs":[]}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let executable = scratch.0.join("wezterm");
+    let calls = scratch.0.join("calls");
+    let header = format!(
+        "#!/bin/sh\n[ \"$*\" = '--skip-config cli --prefer-mux --no-auto-start list --format json' ] || exit 8\n[ \"$WEZTERM_UNIX_SOCKET\" = '{}' ] || exit 9\n[ -z \"$UNRELATED_TEST_VALUE\" ] || exit 10\nprintf x >> '{}'\n",
+        source["socket_path"].as_str().unwrap(),
+        calls.display()
+    );
+    for (body, status, reason) in [
+        (
+            "printf '%s' '[{\"pane_id\":1,\"window_id\":0}]'",
+            "present",
+            None,
+        ),
+        (
+            "printf '%s' '[{\"pane_id\":1}]'",
+            "unavailable",
+            Some("inventory_invalid"),
+        ),
+        (
+            "printf '%s' 'bad json'",
+            "unavailable",
+            Some("inventory_invalid"),
+        ),
+        ("exit 7", "unavailable", Some("probe_unavailable")),
+        (
+            "exec /bin/sleep 30",
+            "unavailable",
+            Some("probe_unavailable"),
+        ),
+    ] {
+        fs::write(&executable, format!("{header}{body}\n")).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(&calls, "").unwrap();
+        let started = Instant::now();
+        let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+            .env_clear()
+            .env("WEZTERM_ATTENTION_DIR", &state)
+            .env("WEZTERM_EXECUTABLE", &executable)
+            .env("WEZTERM_UNIX_SOCKET", "/wrong/caller.sock")
+            .env("UNRELATED_TEST_VALUE", "must-not-cross")
+            .arg("tabs")
+            .output()
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "inventory deadline did not bound the query"
+        );
+        assert!(output.status.success());
+        assert_eq!(
+            fs::read_to_string(&calls).unwrap(),
+            "x",
+            "one lookup for both windows"
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["complete"], true);
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["diagnostics"], json!([]));
+        let windows = value["result"]["windows"].as_array().unwrap();
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0]["window_check"]["status"], status);
+        assert_eq!(
+            windows[1]["window_check"]["status"],
+            if reason.is_some() {
+                "unavailable"
+            } else {
+                "not_listed"
+            }
+        );
+        assert_eq!(
+            windows[0]["window_check"]["checked_at_ms"],
+            windows[1]["window_check"]["checked_at_ms"]
+        );
+        if let Some(reason) = reason {
+            assert_eq!(windows[0]["window_check"]["reason"], reason);
+        } else {
+            assert!(windows[0]["window_check"].get("reason").is_none());
+        }
+        assert_eq!(windows[0]["published_at_ms"], 7);
+    }
+}
+
+#[test]
 #[ignore = "opens a disposable GUI with isolated configuration and state"]
 fn disposable_gui_publishes_its_own_source() {
     let wezterm = executables::resolve("wezterm");
@@ -946,6 +1051,89 @@ return config
     println!("GUI source acquisition, real formatter publication and exact-socket window ID agree");
     assert_eq!(observation["probe"]["spawned"], 1);
     assert_eq!(observation["probe"]["success"], true);
+    let cli = |args: &[&str]| {
+        Command::new(&wezterm)
+            .env_clear()
+            .env(
+                "WEZTERM_UNIX_SOCKET",
+                source["socket_path"].as_str().unwrap(),
+            )
+            .args(["--skip-config", "cli", "--no-auto-start"])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let spawned = cli(&["spawn", "--new-window", "--", "/bin/sleep", "120"]);
+    assert!(spawned.status.success());
+    let pane = String::from_utf8(spawned.stdout).unwrap().trim().to_owned();
+    let rows: Vec<Value> =
+        serde_json::from_slice(&cli(&["list", "--format", "json"]).stdout).unwrap();
+    let second_window = rows
+        .iter()
+        .find(|row| row["pane_id"].as_u64().map(|id| id.to_string()).as_deref() == Some(&pane))
+        .unwrap()["window_id"]
+        .as_u64()
+        .unwrap();
+    let second_file = state.join("tabs").join(format!(
+        "{}-{second_window}.json",
+        source["incarnation_id"].as_str().unwrap()
+    ));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !second_file.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "second GUI window did not publish"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let snapshots = scratch.0.join("snapshots");
+    fs::create_dir_all(snapshots.join("tabs")).unwrap();
+    for entry in fs::read_dir(state.join("tabs")).unwrap() {
+        let entry = entry.unwrap();
+        if entry.path().extension().is_some_and(|ext| ext == "json") {
+            fs::copy(entry.path(), snapshots.join("tabs").join(entry.file_name())).unwrap();
+        }
+    }
+    assert!(cli(&["kill-pane", "--pane-id", &pane]).status.success());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let rows: Vec<Value> =
+            serde_json::from_slice(&cli(&["list", "--format", "json"]).stdout).unwrap();
+        if rows
+            .iter()
+            .all(|row| row["window_id"].as_u64() != Some(second_window))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "closed test window remains listed"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let checked = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .env_clear()
+        .env("WEZTERM_ATTENTION_DIR", &snapshots)
+        .env("WEZTERM_EXECUTABLE", &wezterm)
+        .arg("tabs")
+        .output()
+        .unwrap();
+    assert!(checked.status.success());
+    let value: Value = serde_json::from_slice(&checked.stdout).unwrap();
+    let windows = value["result"]["windows"].as_array().unwrap();
+    assert!(windows.iter().any(|w| w["window_id"] == second_window
+        && w["source"] == *source
+        && w["window_check"]["status"] == "not_listed"));
+    assert!(
+        windows
+            .iter()
+            .any(|w| w["window_id"] == observation["window_id"]
+                && w["source"] == *source
+                && w["window_check"]["status"] == "present")
+    );
+    println!(
+        "Saved publications distinguish the closed window from the surviving window in the same GUI"
+    );
 }
 
 #[test]
