@@ -21,7 +21,7 @@ No visible GUI reattach rehearsal was repeated in this change. Recovery evidence
 
 ## Coverage by row
 
-Every supported cell below has a production-writer case in `tests/fixtures/lifecycle/contact-cases.json`. Its exact 18-row set is checked against the plan and the historical Next set minus H13/H14/H21.
+Every supported cell below has a production-writer case in `tests/fixtures/lifecycle/contact-cases.json`. Its exact 18-row set is the historical Next set minus H13/H14/H21.
 
 | Row | Claude | Codex | Pi |
 |---|---|---|---|

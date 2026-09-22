@@ -121,7 +121,7 @@ struct DescribeArgs {
 
 #[derive(Clone, Debug, Args)]
 #[command(
-    after_help = "Example: attention inspect --scope - < scope.json\nScope: {\"address\":{\"realm_id\":\"<64 lowercase hex>\",\"incarnation_id\":\"<64 lowercase hex>\",\"pane_id\":\"42\"},\"launch_id\":\"<UUID>\",\"binding_id\":\"<optional 64 lowercase hex>\"}\nObtain address, launch_id and binding_id from a current row in:\n  attention bindings --socket /absolute/mux.sock\nCheck status=ok and complete=true before selecting a row. Omit binding_id for launch selection.\nExit 0: complete response; 1: changed/degraded evidence; 2: invalid input. No GUI cache fallback."
+    after_help = "Example: attention inspect --scope - < scope.json\nScope: {\"address\":{\"realm_id\":\"<64 lowercase hex>\",\"incarnation_id\":\"<64 lowercase hex>\",\"pane_id\":\"42\"},\"launch_id\":\"<UUID>\",\"binding_id\":\"<optional 64 lowercase hex>\"}\nObtain address, launch_id and binding_id from a current row in:\n  attention bindings --socket /absolute/mux.sock\ncomplete describes the answer as a set. Read pane_presence, binding_health, reader_confidence and current on the row itself. Omit binding_id for launch selection.\nExit 0: complete response; 1: changed/degraded evidence; 2: invalid input. No GUI cache fallback."
 )]
 struct InspectArgs {
     /// Read the exact expected scope from JSON stdin; '-' is the only accepted value.
@@ -197,6 +197,9 @@ struct MarkArgs {
 }
 
 #[derive(Clone, Debug, Args)]
+#[command(
+    after_help = "Preview is the default and removes nothing. Example: attention sweep --json\nLeftover <pane_id>, <pane_id>.agents, and <pane_id>.ack stems are always listed in projection_collection; --all-details includes the rest when complete is false.\nApply: attention sweep --apply --operation-id 00000000-0000-4000-8000-000000000001 --json\noperation-id must be a canonical lowercase UUID. macOS uuidgen is uppercase; lowercase it."
+)]
 struct SweepArgs {
     #[arg(long)]
     realm: Option<String>,
@@ -953,11 +956,13 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 Some(&processes),
             )
             .map_err(|error| (Box::new(error), args.json, "sweep".to_owned()))?;
-            let total_details = result.details.len();
-            if !args.all_details {
-                result.details.truncate(50);
-                result.detail_count = result.details.len();
-            }
+            let (shown, total_details) = wezterm_attention::maintenance::limit_sweep_preview(
+                result.details,
+                args.all_details,
+            );
+            result.details = shown;
+            result.detail_count = result.details.len();
+            result.total_detail_count = total_details;
             let unavailable = diagnostics
                 .iter()
                 .any(|item| item.code == "probe_unavailable");

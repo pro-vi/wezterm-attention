@@ -36,7 +36,7 @@ mod consumer_recipes;
 struct Scratch(PathBuf);
 
 #[test]
-fn c2_plain_text_projection_is_repairable() {
+fn c2_plain_text_marker_is_left_alone() {
     let setup = Setup::new();
     setup.claim();
     setup.apply(
@@ -58,49 +58,9 @@ fn c2_plain_text_projection_is_repairable() {
     );
     assert!(
         result.is_ok(),
-        "legacy marker blocked projection: {result:?}"
+        "third-party marker blocked the v2 write: {result:?}"
     );
-    let projected: Value = serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
-    assert_eq!(projected["type"], "stop");
-}
-
-#[test]
-fn c6_incomplete_agent_inventory_preserves_projection() {
-    let setup = Setup::new();
-    setup.claim();
-    setup.apply(
-        &event(
-            "claude",
-            "SessionStart",
-            "inventory",
-            json!({"source":"startup"}),
-        ),
-        "00000000000000000200",
-    );
-    let root = state_root(&setup.env).unwrap();
-    let dir = setup.binding_dir("claude", "inventory");
-    let agents = dir.join("agents");
-    if agents.exists() {
-        fs::remove_dir(&agents).unwrap();
-    }
-    fs::write(&agents, "not a directory").unwrap();
-    let sidecar = root.join("42.agents");
-    let prior = br#"{"agents":{"known":{"type":"claude","last_ms":123}}}"#;
-    fs::write(&sidecar, prior).unwrap();
-    let (address, _) = pane_address(&setup.env).unwrap();
-    let launch = &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"];
-    let result = wezterm_attention::compat::reconcile_agents(
-        &root,
-        &address,
-        launch,
-        &binding_id("claude", "inventory", launch),
-        &dir,
-    );
-    assert!(
-        result.is_err(),
-        "inventory failure became empty: {result:?}"
-    );
-    assert_eq!(fs::read(sidecar).unwrap(), prior);
+    assert_eq!(fs::read(&marker).unwrap(), b"thinking\n");
 }
 
 impl Scratch {
@@ -1621,19 +1581,25 @@ fn prompt_return_clears_lead_only_and_newer_hook_reactivates() {
     setup.apply(&child, "00000000000000000350");
     let root = state_root(&setup.env).expect("state root");
     let marker = root.join("42");
-    let projected: Value =
-        serde_json::from_slice(&fs::read(&marker).expect("v1 marker")).expect("marker JSON");
-    assert_eq!(projected["updated_at"], 12);
-    assert_eq!(projected["updated_at_ms"], 12345);
-    let sidecar: Value =
-        serde_json::from_slice(&fs::read(root.join("42.agents")).expect("agents sidecar"))
-            .expect("sidecar JSON");
-    assert_eq!(sidecar["agents"]["child-a"]["type"], "Explore");
-    assert_eq!(sidecar["agents"]["child-a"]["last_ms"], 12345);
+    assert!(!marker.exists());
+    assert!(!root.join("42.agents").exists());
+    let binding_dir = setup.binding_dir("claude", "session-a");
+    let activity: Value =
+        serde_json::from_slice(&fs::read(binding_dir.join("activity.json")).expect("activity"))
+            .expect("activity JSON");
+    assert_eq!(activity["type"], "thinking");
+    assert!(
+        binding_dir
+            .join("agents")
+            .join(format!(
+                "{}.json",
+                wezterm_attention::protocol::sha256_hex(b"child-a")
+            ))
+            .exists()
+    );
 
     let cleared = prompt_return(&setup.env, "00000000000000000400").expect("prompt return");
     assert_eq!(cleared.disposition, "applied");
-    let binding_dir = setup.binding_dir("claude", "session-a");
     assert!(binding_dir.join("activity-clear.json").exists());
     assert!(
         binding_dir
@@ -1646,13 +1612,13 @@ fn prompt_return_clears_lead_only_and_newer_hook_reactivates() {
     assert!(!binding_dir.join("end.json").exists());
     assert!(!binding_dir.join("agents-clear.json").exists());
     assert!(!marker.exists());
-    assert!(root.join("42.agents").exists());
+    assert!(!root.join("42.agents").exists());
 
     assert_eq!(
         setup.apply(&thinking, "00000000000000000500").disposition,
         "applied"
     );
-    assert!(marker.exists());
+    assert!(!marker.exists());
     let activity: Value =
         serde_json::from_slice(&fs::read(binding_dir.join("activity.json")).expect("activity"))
             .expect("activity JSON");
@@ -1801,7 +1767,17 @@ fn duplicate_codex_stop_keeps_a_child_newer_than_the_surviving_activity() {
     .expect("agents clear JSON");
     assert_eq!(clear["observed_mono_ns"], "00000000000000000300");
     assert!(
-        state_root(&setup.env)
+        setup
+            .binding_dir("codex", "thread-a")
+            .join("agents")
+            .join(format!(
+                "{}.json",
+                wezterm_attention::protocol::sha256_hex(b"child-a")
+            ))
+            .exists()
+    );
+    assert!(
+        !state_root(&setup.env)
             .expect("state root")
             .join("42.agents")
             .exists()
@@ -1877,7 +1853,7 @@ fn stale_pi_clear_preserves_newer_activity_and_review() {
     let result = setup.apply(&clear, "00000000000000000250");
     assert_eq!(result.disposition, "ignored");
     let root = state_root(&setup.env).expect("state root");
-    assert!(root.join("42").exists());
+    assert!(!root.join("42").exists());
     let (address, _) = pane_address(&setup.env).expect("address");
     let review = pane_path(&root, &address).join("reviews").join(format!(
         "{}.json",
@@ -1887,7 +1863,7 @@ fn stale_pi_clear_preserves_newer_activity_and_review() {
 }
 
 #[test]
-fn covered_activity_never_recreates_the_flat_projection() {
+fn covered_activity_never_creates_the_flat_projection() {
     let setup = Setup::new();
     setup.claim();
     setup.apply(
@@ -2361,7 +2337,7 @@ fn pi_review_and_clear_share_the_current_binding_without_ending_it() {
 }
 
 #[test]
-fn manual_mark_targets_the_launch_and_duplicate_repairs_legacy_projection() {
+fn manual_mark_targets_the_launch_and_a_duplicate_is_skipped() {
     let setup = Setup::new();
     setup.claim();
     let first = apply_mark_activity(
@@ -2378,7 +2354,7 @@ fn manual_mark_targets_the_launch_and_duplicate_repairs_legacy_projection() {
     assert_eq!(first.disposition, "applied");
     let root = state_root(&setup.env).expect("state root");
     let marker = root.join("42");
-    assert!(marker.exists());
+    assert!(!marker.exists());
     let unchanged = apply_mark_activity(
         &setup.env,
         "notify",
@@ -2391,7 +2367,6 @@ fn manual_mark_targets_the_launch_and_duplicate_repairs_legacy_projection() {
     )
     .expect("unchanged duplicate manual mark");
     assert_eq!(unchanged.disposition, "skipped");
-    fs::remove_file(&marker).expect("remove projection to test repair");
     let duplicate = apply_mark_activity(
         &setup.env,
         "notify",
@@ -2403,8 +2378,8 @@ fn manual_mark_targets_the_launch_and_duplicate_repairs_legacy_projection() {
         "00000000012345678900",
     )
     .expect("duplicate manual mark");
-    assert_eq!(duplicate.disposition, "repaired_projection");
-    assert!(marker.exists());
+    assert_eq!(duplicate.disposition, "skipped");
+    assert!(!marker.exists());
     assert_eq!(
         apply_mark_activity(
             &setup.env,
@@ -2750,8 +2725,8 @@ fn manual_mark_after_an_acknowledged_mark_publishes_a_fresh_event_id() {
 // still wins against a newer observation it should have lost to. The fence
 // cannot simply be advanced here: `observed_mono_ns` is also the subagent-clear
 // watermark a parent stop writes, so advancing it would clear children that
-// started after the stop. Tracked in
-// .inbox/2026-09-15-a-deduplicated-activity-does-not-advance-the-ordering-fence.md
+// started after the stop. See "One timestamp field carries three roles" in
+// docs/accepted-limitations.md.
 #[test]
 fn a_deduplicated_activity_does_not_advance_the_ordering_fence() {
     let setup = Setup::new();

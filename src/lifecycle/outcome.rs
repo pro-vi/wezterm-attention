@@ -25,6 +25,8 @@ pub enum Persistence {
 pub struct HookPersistence {
     pub native_state: Persistence,
     pub activity: Persistence,
+    /// Declared hook axis. Writers no longer project flat v1 files, so this is
+    /// always `not_requested`.
     pub compatibility: Persistence,
     pub lifecycle: Persistence,
 }

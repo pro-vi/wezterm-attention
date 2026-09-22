@@ -1,20 +1,26 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 
 use serde_json::{Value, json};
 use uuid::Uuid;
-use wezterm_attention::identity::pane_address;
+use wezterm_attention::identity::{PaneAddress, pane_address};
 use wezterm_attention::lifecycle::{apply_provider_event, binding_id};
 use wezterm_attention::maintenance::{
-    ABSENCE_INTERVAL_NS, RETENTION_AGE_NS, binding_cap_paths_by_realm, doctor, sweep,
+    ABSENCE_INTERVAL_NS, RETENTION_AGE_NS, binding_cap_paths_by_realm, doctor, limit_sweep_preview,
+    sweep,
 };
 use wezterm_attention::providers::parse_provider_event;
 use wezterm_attention::query::read_bindings_with_ports;
-use wezterm_attention::records::{atomic_replace, launch_path, pane_path, state_root};
+use wezterm_attention::query::{PaneScope, read_pane_facts_with_ports};
+use wezterm_attention::records::{
+    FileRecords, atomic_replace, launch_path, pane_path, state_root, with_lock,
+};
 use wezterm_attention::wezterm::{
     Clock, PaneLister, PaneRow, Presence, ProcessProbe, RuntimePorts, TtyWriter,
 };
@@ -975,5 +981,338 @@ fn a_session_resumed_in_a_new_pane_conflicts_only_while_both_panes_live() {
         !diagnostics
             .iter()
             .any(|item| item.code == "binding_conflict")
+    );
+}
+
+fn collection_details(details: &[Value]) -> Vec<&Value> {
+    details
+        .iter()
+        .filter(|detail| detail["kind"] == "projection_collection")
+        .collect()
+}
+
+fn plant_flat_files(root: &std::path::Path, pane_id: &str) {
+    fs::write(root.join(pane_id), "stop\n").expect("write marker");
+    fs::write(root.join(format!("{pane_id}.agents")), "{}\n").expect("write agents");
+    fs::write(root.join(format!("{pane_id}.ack")), "{}\n").expect("write ack");
+    fs::write(root.join(format!("{pane_id}.review")), "{}\n").expect("write review");
+}
+
+#[test]
+fn flat_orphan_preview_lists_without_removing() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let root = setup.root();
+    plant_flat_files(&root, "42");
+    let preview = setup.run_sweep(false, None).0;
+    let collections = collection_details(&preview.details);
+    assert_eq!(collections.len(), 1);
+    assert_eq!(collections[0]["pane_id"], "42");
+    assert!(root.join("42").exists());
+    assert!(root.join("42.agents").exists());
+    assert!(root.join("42.ack").exists());
+}
+
+#[test]
+fn flat_orphan_apply_removes_marker_agents_and_ack() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let root = setup.root();
+    plant_flat_files(&root, "42");
+    let operation = "00000000-0000-4000-8000-000000000801";
+    let applied = setup.run_sweep(true, Some(operation)).0;
+    let collections = collection_details(&applied.details);
+    assert_eq!(collections.len(), 1);
+    assert!(!root.join("42").exists());
+    assert!(!root.join("42.agents").exists());
+    assert!(!root.join("42.ack").exists());
+    assert!(root.join("42.review").exists());
+    let again = setup.run_sweep(true, Some(operation)).0;
+    assert!(collection_details(&again.details).is_empty());
+}
+
+#[test]
+fn a_review_flag_survives_collection() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let root = setup.root();
+    plant_flat_files(&root, "42");
+    setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000802"));
+    assert!(root.join("42.review").exists());
+}
+
+#[test]
+fn third_party_marker_without_a_claim_is_never_collected() {
+    let setup = Setup::new();
+    let root = setup.root();
+    fs::create_dir_all(&root).expect("create state root");
+    fs::write(root.join("99"), "stop\n").expect("write third-party marker");
+    let (preview, diagnostics) = setup.run_sweep(false, None);
+    assert!(collection_details(&preview.details).is_empty());
+    assert!(diagnostics.is_empty());
+    assert!(root.join("99").exists());
+}
+
+#[test]
+fn an_ambiguous_scalar_id_is_refused_not_collected() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let root = setup.root();
+    let (address, _) = pane_address(&setup.env).expect("address");
+    let claim_path = pane_path(&root, &address).join("claim.json");
+    let mut claim: Value =
+        serde_json::from_slice(&fs::read(&claim_path).expect("claim")).expect("claim JSON");
+    let other = PaneAddress {
+        realm_id: "e".repeat(64),
+        incarnation_id: address.incarnation_id.clone(),
+        pane_id: address.pane_id.clone(),
+    };
+    claim["address"] = json!(other);
+    atomic_replace(&pane_path(&root, &other).join("claim.json"), &claim).expect("second claim");
+    plant_flat_files(&root, "42");
+    let (_, diagnostics) = setup.run_sweep(false, None);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|item| item.code == "binding_conflict" && item.context["pane_id"] == "42")
+    );
+    assert!(root.join("42").exists());
+}
+
+#[test]
+fn an_undecidable_claim_leaves_the_file_alone() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let root = setup.root();
+    let (address, _) = pane_address(&setup.env).expect("address");
+    let claim_path = pane_path(&root, &address).join("claim.json");
+    let mut claim: Value =
+        serde_json::from_slice(&fs::read(&claim_path).expect("claim")).expect("claim JSON");
+    claim["schema"] = json!(999);
+    fs::write(
+        &claim_path,
+        serde_json::to_vec(&claim).expect("future claim JSON"),
+    )
+    .expect("write future claim");
+    plant_flat_files(&root, "42");
+    let (_, diagnostics) = setup.run_sweep(false, None);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|item| item.code == "record_invalid" && item.context["pane_id"] == "42")
+    );
+    assert!(root.join("42").exists());
+}
+
+#[test]
+fn a_symlinked_marker_is_refused() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let root = setup.root();
+    let target = root.join("elsewhere");
+    fs::write(&target, "stop\n").expect("write symlink target");
+    symlink(&target, root.join("42")).expect("symlink marker");
+    let (_, diagnostics) = setup.run_sweep(false, None);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|item| item.code == "record_invalid" && item.context["pane_id"] == "42")
+    );
+    assert!(
+        root.join("42")
+            .symlink_metadata()
+            .expect("symlink")
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn an_incomplete_claim_walk_does_not_grant_collection() {
+    for start_is_symlink in [false, true] {
+        let setup = Setup::new();
+        setup.claim_and_bind();
+        let root = setup.root();
+        plant_flat_files(&root, "42");
+        if start_is_symlink {
+            let realms = root.join("v2/realms");
+            let outside = root.join("realms-target");
+            fs::rename(&realms, &outside).expect("move realms");
+            symlink(&outside, &realms).expect("symlink realms");
+        } else {
+            let hidden = root.join("hidden-realm");
+            fs::create_dir_all(&hidden).expect("hidden realm");
+            symlink(&hidden, root.join("v2/realms").join("link")).expect("symlink realm");
+        }
+        let (preview, diagnostics) = setup.run_sweep(false, None);
+        assert!(
+            collection_details(&preview.details).is_empty(),
+            "start_is_symlink={start_is_symlink}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|item| { item.code == "record_invalid" || item.code == "probe_unavailable" }),
+            "start_is_symlink={start_is_symlink} {diagnostics:?}"
+        );
+        assert!(root.join("42").exists());
+        let applied = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000804"));
+        assert!(collection_details(&applied.0.details).is_empty());
+        assert!(root.join("42").exists());
+    }
+}
+
+#[test]
+fn a_replaced_marker_is_refused_not_collected() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let root = setup.root();
+    plant_flat_files(&root, "42");
+    let (address, _) = pane_address(&setup.env).expect("address");
+    let lock = pane_path(&root, &address).join(".claim.lock");
+    let locked = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let (details, diagnostics) = std::thread::scope(|scope| {
+        let holder = scope.spawn(|| {
+            with_lock(&lock, std::time::Duration::from_secs(5), || {
+                locked.wait();
+                release.wait();
+                Ok(())
+            })
+            .expect("hold claim lock")
+        });
+        locked.wait();
+        let sweep =
+            scope.spawn(|| setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000805")));
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let next = root.join("42.agents.next");
+        fs::write(&next, "thinking\n").expect("write replacement");
+        fs::rename(&next, root.join("42.agents")).expect("replace agents");
+        release.wait();
+        holder.join().expect("holder");
+        sweep.join().expect("sweep")
+    });
+    assert!(collection_details(&details.details).is_empty());
+    assert!(
+        diagnostics
+            .iter()
+            .any(|item| item.code == "record_invalid" && item.message.contains("changed")),
+        "{diagnostics:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("42")).expect("marker"),
+        "stop\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("42.agents")).expect("agents"),
+        "thinking\n"
+    );
+    assert!(root.join("42.ack").exists());
+}
+
+#[test]
+fn leftover_preview_keeps_every_collection_row() {
+    let mut details = Vec::new();
+    for pane in 0..51 {
+        details.push(json!({
+            "kind": "projection_collection",
+            "pane_id": pane.to_string(),
+            "paths": [pane.to_string()],
+        }));
+    }
+    for index in 0..51 {
+        details.push(json!({
+            "kind": "absence",
+            "binding_id": index.to_string(),
+            "action": "replay_end",
+        }));
+    }
+    let (shown, total) = limit_sweep_preview(details.clone(), false);
+    assert_eq!(total, 102);
+    assert_eq!(
+        shown
+            .iter()
+            .filter(|detail| detail["kind"] == "projection_collection")
+            .count(),
+        51
+    );
+    assert_eq!(
+        shown
+            .iter()
+            .filter(|detail| detail["kind"] == "absence")
+            .count(),
+        50
+    );
+    let (all, all_total) = limit_sweep_preview(details, true);
+    assert_eq!(all_total, 102);
+    assert_eq!(all.len(), 102);
+}
+
+#[test]
+fn an_empty_state_root_answers_completely() {
+    let setup = Setup::new();
+    fs::create_dir_all(setup.root()).expect("create state root");
+    let (result, diagnostics) = setup.run_sweep(false, None);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert!(result.details.is_empty());
+}
+
+#[test]
+fn a_present_row_from_an_incomplete_bindings_answer_inspects_completely() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let root = setup.root();
+    let (address, _) = pane_address(&setup.env).expect("address");
+    let launch_id = setup.env["WEZTERM_ATTENTION_LAUNCH_ID"].clone();
+    let other_id = "d".repeat(64);
+    let other_dir = launch_path(&root, &address, &launch_id)
+        .join("bindings")
+        .join(&other_id);
+    fs::create_dir_all(&other_dir).expect("create extra binding");
+    atomic_replace(
+        &other_dir.join("binding.json"),
+        &json!({
+            "kind":"binding","schema":3,"address":address,"launch_id":launch_id,
+            "binding_id":other_id,"event_id":"00000000-0000-4000-8000-000000000702",
+            "provider":"claude","provider_session_id":"session-b",
+            "start_source":"startup","observed_mono_ns":"00000000000000000702",
+            "written_at_unix_ns":"00000000001000000000","writer_version":"2.0.0"
+        }),
+    )
+    .expect("write extra binding");
+    let bindings = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .env_clear()
+        .envs(&setup.env)
+        .args(["bindings", "--json", "--limit", "1"])
+        .output()
+        .expect("run bindings");
+    let envelope: Value = serde_json::from_slice(&bindings.stdout).expect("bindings JSON");
+    assert_eq!(envelope["complete"], false);
+    assert_eq!(envelope["result"]["truncated"], true);
+    let (rows, _) =
+        read_bindings_with_ports(&root, Some(&setup.panes), Some(&setup.processes)).expect("rows");
+    let present = rows
+        .iter()
+        .find(|row| row.current && row.pane_presence == "present")
+        .expect("present current row");
+    let scope = PaneScope::new(
+        present.address.clone(),
+        present.launch_id.clone(),
+        Some(present.binding_id.clone()),
+    )
+    .expect("inspect scope");
+    let facts = read_pane_facts_with_ports(
+        &root,
+        &scope,
+        &FileRecords,
+        &setup.clock,
+        Some(&setup.panes),
+        Some(&setup.processes),
+    )
+    .expect("inspect");
+    assert!(facts.complete());
+    assert_eq!(
+        facts.pane_presence,
+        wezterm_attention::query::PanePresence::Present
     );
 }

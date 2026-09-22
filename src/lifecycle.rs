@@ -13,10 +13,6 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::compat::{
-    ProjectionOutcome, reconcile_activity_clear_locked_outcome, reconcile_activity_clear_outcome,
-    reconcile_activity_outcome, reconcile_agents_outcome, reconcile_launch_activity_outcome,
-};
 use crate::identity::{PaneAddress, canonical_uuid, pane_address};
 use crate::lifecycle::outcome::{
     AdmittedHook, BindingTarget, HookPersistence, HookScope, Persistence,
@@ -186,19 +182,8 @@ struct ResolvedLaunch {
 }
 
 #[derive(Clone, Debug)]
-enum Projection {
-    None,
-    LaunchActivity(Value),
-    Activity(Option<Value>),
-    ActivityClear(String),
-    Agents(PathBuf),
-    ActivityAndAgents(Option<Value>, PathBuf),
-}
-
-#[derive(Clone, Debug)]
 struct Mutation {
     result: LifecycleResult,
-    projection: Projection,
     lifecycle_replacement: Option<PreparedRecordWrite>,
 }
 
@@ -206,7 +191,6 @@ impl Mutation {
     fn plain(result: LifecycleResult) -> Self {
         Self {
             result,
-            projection: Projection::None,
             lifecycle_replacement: None,
         }
     }
@@ -821,7 +805,7 @@ fn apply_activity(
     let activity_path = binding_dir.join("activity.json");
     let pointer_path = launch.join("current-binding.json");
     let base = activity_base(resolved, event, &binding_id)?;
-    let (mutation, projected) = commit_with(
+    let (mutation, ()) = commit_with(
         &launch.join(".lock"),
         &pointer_path,
         Some("current_binding"),
@@ -928,15 +912,7 @@ fn apply_activity(
                 result.event_id = Some(event_id);
                 (result, Some(record))
             };
-            let projection_activity = activity.clone().filter(|activity| {
-                clear.as_ref().is_none_or(|clear| {
-                    activity["observed_mono_ns"].as_str().unwrap_or("")
-                        > clear["observed_mono_ns"].as_str().unwrap_or("")
-                })
-            });
-            let projection = if parent_stop
-                && !matches!(result.disposition.as_str(), "ignored" | "conflict")
-            {
+            if parent_stop && !matches!(result.disposition.as_str(), "ignored" | "conflict") {
                 let surviving_activity = activity.as_ref().ok_or_else(|| {
                     AttentionError::new("record_invalid", "parent stop has no surviving activity")
                 })?;
@@ -973,10 +949,7 @@ fn apply_activity(
                         private_dirs: Vec::new(),
                     });
                 }
-                Projection::ActivityAndAgents(projection_activity, binding_dir.clone())
-            } else {
-                Projection::Activity(projection_activity)
-            };
+            }
             Ok(append_observation(
                 resolved,
                 event,
@@ -985,7 +958,6 @@ fn apply_activity(
                 CommitPlan {
                     result: Mutation {
                         result,
-                        projection,
                         lifecycle_replacement: None,
                     },
                     replacements,
@@ -994,51 +966,17 @@ fn apply_activity(
                 },
             ))
         },
-        |mutation| apply_locked_outputs(resolved, &binding_id, mutation),
+        |mutation| apply_observed_outputs(resolved, &binding_id, mutation),
     )?;
-    let mut result = mutation.result;
-    if projected && result.disposition == Disposition::Skipped {
-        result.disposition = Disposition::RepairedProjection;
-        result.repaired_projection = true;
-    }
-    Ok(result)
+    Ok(mutation.result)
 }
 
 fn apply_observed_outputs(
     resolved: &ResolvedLaunch,
     binding_id: &str,
     mutation: &Mutation,
-) -> Result<bool> {
+) -> Result<()> {
     apply_observed_outputs_with(resolved, binding_id, mutation, PreparedRecordWrite::apply)
-}
-
-fn apply_locked_outputs(
-    resolved: &ResolvedLaunch,
-    binding_id: &str,
-    mutation: &Mutation,
-) -> Result<bool> {
-    if let Projection::ActivityClear(order) = &mutation.projection {
-        confirm_native(resolved, binding_id, mutation);
-        let result = reconcile_activity_clear_locked_outcome(
-            &resolved.root,
-            &resolved.address,
-            &resolved.launch_id,
-            binding_id,
-            order,
-        );
-        if let Ok(outcome) = &result
-            && let Some(cell) = &resolved.evidence
-        {
-            cell.borrow_mut().persistence.compatibility = if outcome.confirmed {
-                Persistence::Confirmed
-            } else {
-                Persistence::Rejected
-            };
-        }
-        result.map(|outcome| outcome.changed)
-    } else {
-        apply_observed_outputs(resolved, binding_id, mutation)
-    }
 }
 
 fn apply_observed_outputs_with(
@@ -1046,14 +984,10 @@ fn apply_observed_outputs_with(
     binding_id: &str,
     mutation: &Mutation,
     replace: impl FnOnce(&PreparedRecordWrite) -> Result<()>,
-) -> Result<bool> {
-    let projected = apply_projection(resolved, binding_id, mutation)?;
+) -> Result<()> {
+    confirm_native(resolved, binding_id, mutation);
     if let Some(replacement) = &mutation.lifecycle_replacement {
         replace(replacement).map_err(|mut error| {
-            error
-                .diagnostic
-                .context
-                .insert("legacy_applied".into(), json!(true));
             error
                 .diagnostic
                 .context
@@ -1066,84 +1000,7 @@ fn apply_observed_outputs_with(
             evidence.observation_id = evidence.pending_observation_id.clone();
         }
     }
-    Ok(projected)
-}
-
-fn apply_projection(
-    resolved: &ResolvedLaunch,
-    binding_id: &str,
-    mutation: &Mutation,
-) -> Result<bool> {
-    confirm_native(resolved, binding_id, mutation);
-    let result = apply_projection_inner(resolved, binding_id, mutation);
-    if let Ok(outcome) = &result
-        && !matches!(mutation.projection, Projection::None)
-        && let Some(cell) = &resolved.evidence
-    {
-        cell.borrow_mut().persistence.compatibility = if outcome.confirmed {
-            Persistence::Confirmed
-        } else {
-            Persistence::Rejected
-        };
-    }
-    result.map(|outcome| outcome.changed)
-}
-
-fn apply_projection_inner(
-    resolved: &ResolvedLaunch,
-    binding_id: &str,
-    mutation: &Mutation,
-) -> Result<ProjectionOutcome> {
-    match &mutation.projection {
-        Projection::None => Ok(ProjectionOutcome::confirmed(false)),
-        Projection::LaunchActivity(activity) => reconcile_launch_activity_outcome(
-            &resolved.root,
-            &resolved.address,
-            &resolved.launch_id,
-            activity,
-        ),
-        Projection::Activity(activity) => reconcile_activity_outcome(
-            &resolved.root,
-            &resolved.address,
-            &resolved.launch_id,
-            binding_id,
-            activity.as_ref(),
-        ),
-        Projection::ActivityClear(clear_order) => reconcile_activity_clear_outcome(
-            &resolved.root,
-            &resolved.address,
-            &resolved.launch_id,
-            binding_id,
-            clear_order,
-        ),
-        Projection::Agents(binding_dir) => reconcile_agents_outcome(
-            &resolved.root,
-            &resolved.address,
-            &resolved.launch_id,
-            binding_id,
-            binding_dir,
-        ),
-        Projection::ActivityAndAgents(activity, binding_dir) => {
-            let activity_changed = reconcile_activity_outcome(
-                &resolved.root,
-                &resolved.address,
-                &resolved.launch_id,
-                binding_id,
-                activity.as_ref(),
-            )?;
-            let agents_changed = reconcile_agents_outcome(
-                &resolved.root,
-                &resolved.address,
-                &resolved.launch_id,
-                binding_id,
-                binding_dir,
-            )?;
-            Ok(ProjectionOutcome {
-                changed: activity_changed.changed || agents_changed.changed,
-                confirmed: activity_changed.confirmed && agents_changed.confirmed,
-            })
-        }
-    }
+    Ok(())
 }
 
 fn safe_mark_text(value: &str, field: &str, maximum: usize) -> Result<()> {
@@ -1208,7 +1065,7 @@ pub fn apply_mark_activity(
     };
     let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
     let pointer_path = launch.join("current-binding.json");
-    let (mutation, projected) = commit_with(
+    let (mutation, ()) = commit_with(
         &launch.join(".lock"),
         &pointer_path,
         Some("current_binding"),
@@ -1275,34 +1132,28 @@ pub fn apply_mark_activity(
                 .as_ref()
                 .is_none_or(|activity| !acknowledged(&path, &activity_identity, activity));
             let mut replacements = Vec::new();
-            let (result, activity) = if let Some(existing) = existing {
+            let result = if let Some(existing) = existing {
                 if visible && semantic_activity(existing.clone()) == base {
                     let mut result = LifecycleResult::new(Disposition::Skipped);
                     result.event_id = existing["event_id"].as_str().map(str::to_owned);
-                    (result, existing)
+                    result
                 } else {
                     let order = existing["observed_mono_ns"].as_str().unwrap_or("");
                     if observation < order {
-                        (LifecycleResult::new(Disposition::Ignored), existing)
+                        LifecycleResult::new(Disposition::Ignored)
                     } else if observation == order {
-                        (
-                            LifecycleResult::diagnosed(
-                                Disposition::Conflict,
-                                "record_invalid",
-                                "equal activity order has different content",
-                            ),
-                            existing,
+                        LifecycleResult::diagnosed(
+                            Disposition::Conflict,
+                            "record_invalid",
+                            "equal activity order has different content",
                         )
                     } else if clear.as_ref().is_some_and(|clear| {
                         observation <= clear["observed_mono_ns"].as_str().unwrap_or("")
                     }) {
-                        (
-                            LifecycleResult::diagnosed(
-                                Disposition::Ignored,
-                                "binding_conflict",
-                                "activity observation is covered by activity clear",
-                            ),
-                            existing,
+                        LifecycleResult::diagnosed(
+                            Disposition::Ignored,
+                            "binding_conflict",
+                            "activity observation is covered by activity clear",
                         )
                     } else {
                         let event_id = Uuid::new_v4().to_string();
@@ -1310,22 +1161,19 @@ pub fn apply_mark_activity(
                         record["event_id"] = json!(event_id);
                         record["observed_mono_ns"] = json!(observation);
                         record["written_at_unix_ns"] = json!(written_at);
-                        replacements.push(Replacement::always(path.clone(), record.clone()));
+                        replacements.push(Replacement::always(path.clone(), record));
                         let mut result = LifecycleResult::new(Disposition::Applied);
                         result.event_id = Some(event_id);
-                        (result, record)
+                        result
                     }
                 }
             } else if clear.as_ref().is_some_and(|clear| {
                 observation <= clear["observed_mono_ns"].as_str().unwrap_or("")
             }) {
-                (
-                    LifecycleResult::diagnosed(
-                        Disposition::Ignored,
-                        "binding_conflict",
-                        "activity observation is covered by activity clear",
-                    ),
-                    base,
+                LifecycleResult::diagnosed(
+                    Disposition::Ignored,
+                    "binding_conflict",
+                    "activity observation is covered by activity clear",
                 )
             } else {
                 let event_id = Uuid::new_v4().to_string();
@@ -1333,23 +1181,14 @@ pub fn apply_mark_activity(
                 record["event_id"] = json!(event_id);
                 record["observed_mono_ns"] = json!(observation);
                 record["written_at_unix_ns"] = json!(written_at);
-                replacements.push(Replacement::always(path, record.clone()));
+                replacements.push(Replacement::always(path, record));
                 let mut result = LifecycleResult::new(Disposition::Applied);
                 result.event_id = Some(event_id);
-                (result, record)
-            };
-            let projection = if matches!(result.disposition.as_str(), "ignored" | "conflict") {
-                Projection::None
-            } else {
-                match binding_id {
-                    Some(_) => Projection::Activity(Some(activity)),
-                    None => Projection::LaunchActivity(activity),
-                }
+                result
             };
             Ok(CommitPlan {
                 result: Mutation {
                     result,
-                    projection,
                     lifecycle_replacement: None,
                 },
                 replacements,
@@ -1364,15 +1203,10 @@ pub fn apply_mark_activity(
                 &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
             )?
             .and_then(|pointer| pointer["binding_id"].as_str().map(str::to_owned));
-            apply_projection(&resolved, binding_id.as_deref().unwrap_or(""), mutation)
+            apply_observed_outputs(&resolved, binding_id.as_deref().unwrap_or(""), mutation)
         },
     )?;
-    let mut result = mutation.result;
-    if projected && result.disposition == Disposition::Skipped {
-        result.disposition = Disposition::RepairedProjection;
-        result.repaired_projection = true;
-    }
-    Ok(result)
+    Ok(mutation.result)
 }
 
 pub fn apply_mark_review(
@@ -1473,7 +1307,7 @@ fn apply_child(
     } else {
         "stopped"
     };
-    let (mutation, projected) = commit_with(
+    let (mutation, ()) = commit_with(
         &launch.join(".lock"),
         &binding_path,
         Some("binding"),
@@ -1580,7 +1414,6 @@ fn apply_child(
                     result: Mutation {
                         lifecycle_replacement: None,
                         result,
-                        projection: Projection::Agents(binding_dir.clone()),
                     },
                     replacements,
                     removals: Vec::new(),
@@ -1588,14 +1421,9 @@ fn apply_child(
                 },
             ))
         },
-        |mutation| apply_locked_outputs(resolved, &binding_id, mutation),
+        |mutation| apply_observed_outputs(resolved, &binding_id, mutation),
     )?;
-    let mut result = mutation.result;
-    if projected && result.disposition == Disposition::Skipped {
-        result.disposition = Disposition::RepairedProjection;
-        result.repaired_projection = true;
-    }
-    Ok(result)
+    Ok(mutation.result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1885,7 +1713,7 @@ fn apply_clear_event(
     let review_path = pane_path(&resolved.root, &resolved.address)
         .join("reviews")
         .join(format!("{owner_key}.json"));
-    let (mutation, projected) = commit_triple_with(
+    let (mutation, ()) = commit_triple_with(
         &launch.join(".lock"),
         &pane_path(&resolved.root, &resolved.address).join(".claim.lock"),
         &pane_path(&resolved.root, &resolved.address)
@@ -1952,7 +1780,7 @@ fn apply_clear_event(
                     private_dirs: Vec::new(),
                 });
             }
-            let (mut result, clear_order) = if existing.as_ref().is_some_and(|clear| {
+            let mut result = if existing.as_ref().is_some_and(|clear| {
                 observation == clear["observed_mono_ns"].as_str().unwrap_or("")
             }) {
                 let mut result = LifecycleResult::new(Disposition::Skipped);
@@ -1960,14 +1788,7 @@ fn apply_clear_event(
                     .as_ref()
                     .and_then(|clear| clear["event_id"].as_str())
                     .map(str::to_owned);
-                (
-                    result,
-                    existing
-                        .as_ref()
-                        .and_then(|clear| clear["observed_mono_ns"].as_str())
-                        .unwrap_or("")
-                        .to_owned(),
-                )
+                result
             } else {
                 let event_id = Uuid::new_v4().to_string();
                 let record = json!({
@@ -1982,7 +1803,7 @@ fn apply_clear_event(
                 replacements.push(Replacement::always(clear_path.clone(), record));
                 let mut result = LifecycleResult::new(Disposition::Applied);
                 result.event_id = Some(event_id);
-                (result, observation.to_owned())
+                result
             };
             let review_existed = review_path.exists();
             if review_existed && result.disposition == Disposition::Skipped {
@@ -1992,21 +1813,15 @@ fn apply_clear_event(
                 result: Mutation {
                     lifecycle_replacement: None,
                     result,
-                    projection: Projection::ActivityClear(clear_order),
                 },
                 replacements,
                 removals: vec![review_path.clone()],
                 private_dirs: Vec::new(),
             })
         },
-        |mutation| apply_locked_outputs(resolved, &binding_id, mutation),
+        |mutation| apply_observed_outputs(resolved, &binding_id, mutation),
     )?;
-    let mut result = mutation.result;
-    if projected && result.disposition == Disposition::Skipped {
-        result.disposition = Disposition::RepairedProjection;
-        result.repaired_projection = true;
-    }
-    Ok(result)
+    Ok(mutation.result)
 }
 
 pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Result<LifecycleResult> {
@@ -2029,7 +1844,7 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
     }
     let launch = launch_path(&root, &address, &launch_id);
     let pointer_path = launch.join("current-binding.json");
-    let (mutation, projected) = commit_with(
+    let (mutation, ()) = commit_with(
         &launch.join(".lock"),
         &pointer_path,
         Some("current_binding"),
@@ -2077,7 +1892,6 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
                     result: Mutation {
                         lifecycle_replacement: None,
                         result,
-                        projection: Projection::ActivityClear(observation.to_owned()),
                     },
                     replacements: Vec::new(),
                     removals: Vec::new(),
@@ -2100,7 +1914,6 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
                 result: Mutation {
                     lifecycle_replacement: None,
                     result,
-                    projection: Projection::ActivityClear(observation.to_owned()),
                 },
                 replacements: vec![Replacement::always(clear_path, record)],
                 removals: Vec::new(),
@@ -2108,7 +1921,6 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
             })
         },
         |mutation| {
-            let binding_id = mutation.result.event_id.as_deref();
             let pointer = read_record(
                 &pointer_path,
                 Some("current_binding"),
@@ -2118,10 +1930,7 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
                 .as_ref()
                 .and_then(|pointer| pointer["binding_id"].as_str())
                 .unwrap_or("");
-            if binding_id.is_none() && current_binding_id.is_empty() {
-                return Ok(false);
-            }
-            apply_projection(
+            apply_observed_outputs(
                 &ResolvedLaunch {
                     evidence: None,
                     root: root.clone(),
@@ -2133,12 +1942,7 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
             )
         },
     )?;
-    let mut result = mutation.result;
-    if projected && result.disposition == Disposition::Skipped {
-        result.disposition = Disposition::RepairedProjection;
-        result.repaired_projection = true;
-    }
-    Ok(result)
+    Ok(mutation.result)
 }
 
 pub fn apply_provider_event(
@@ -2179,14 +1983,7 @@ pub fn apply_provider_event_with_outcome(
                 event.action,
                 ProviderAction::Activity | ProviderAction::ParentStop | ProviderAction::Clear
             )),
-            compatibility: requested(matches!(
-                event.action,
-                ProviderAction::Activity
-                    | ProviderAction::ParentStop
-                    | ProviderAction::ChildActive
-                    | ProviderAction::ChildStopped
-                    | ProviderAction::Clear
-            )),
+            compatibility: Persistence::NotRequested,
             lifecycle: requested(
                 event.observation.is_some() || event.observation_diagnostic.is_some(),
             ),
@@ -2281,7 +2078,7 @@ fn apply_provider_event_inner(
 mod lifecycle_write_tests {
     use super::*;
     #[test]
-    fn failure_between_legacy_and_snapshot_reports_partial_state() {
+    fn failure_of_snapshot_write_reports_partial_state() {
         let fixture: Value =
             serde_json::from_str(include_str!("../tests/fixtures/v2/protocol-cases.json")).unwrap();
         let samples = &fixture["record_samples"];
@@ -2305,7 +2102,7 @@ mod lifecycle_write_tests {
             persistence: HookPersistence {
                 native_state: Persistence::Unconfirmed,
                 activity: Persistence::Unconfirmed,
-                compatibility: Persistence::Unconfirmed,
+                compatibility: Persistence::NotRequested,
                 lifecycle: Persistence::Unconfirmed,
             },
         }));
@@ -2341,15 +2138,14 @@ mod lifecycle_write_tests {
             .unwrap();
         let mutation = Mutation {
             result: LifecycleResult::new(Disposition::Applied),
-            projection: Projection::Activity(Some(samples["activity"].clone())),
             lifecycle_replacement: Some(PreparedRecordWrite::new(path.clone(), &snapshot).unwrap()),
         };
         let error =
             crate::records::with_lock(&launch.join(".lock"), Duration::from_secs(2), || {
                 apply_observed_outputs_with(&resolved, binding_id, &mutation, |_| {
                     assert!(
-                        root.join("42").exists(),
-                        "legacy projection precedes snapshot replacement"
+                        !root.join("42").exists(),
+                        "writers do not project before a snapshot write"
                     );
                     Err(AttentionError::new(
                         "state_permissions",
@@ -2358,47 +2154,19 @@ mod lifecycle_write_tests {
                 })
             })
             .unwrap_err();
-        assert_eq!(error.diagnostic.context["legacy_applied"], true);
+        assert!(!error.diagnostic.context.contains_key("legacy_applied"));
         assert_eq!(error.diagnostic.context["lifecycle_write"], "unconfirmed");
         assert!(!path.exists());
         let evidence = evidence.borrow();
         assert_eq!(evidence.persistence.native_state, Persistence::Confirmed);
         assert_eq!(evidence.persistence.activity, Persistence::Confirmed);
-        assert_eq!(evidence.persistence.compatibility, Persistence::Confirmed);
+        assert_eq!(
+            evidence.persistence.compatibility,
+            Persistence::NotRequested
+        );
         assert_eq!(evidence.persistence.lifecycle, Persistence::Unconfirmed);
         assert!(evidence.observation_id.is_none());
         drop(evidence);
-        assert!(!apply_projection(&resolved, binding_id, &mutation).unwrap());
-        assert_eq!(
-            resolved
-                .evidence
-                .as_ref()
-                .unwrap()
-                .borrow()
-                .persistence
-                .compatibility,
-            Persistence::Confirmed,
-            "unchanged desired bytes are confirmed"
-        );
-        let mut changed_claim = samples["claim"].clone();
-        changed_claim["launch_id"] = json!(Uuid::new_v4().to_string());
-        crate::records::atomic_replace(
-            &pane_path(&root, &address).join("claim.json"),
-            &changed_claim,
-        )
-        .unwrap();
-        assert!(!apply_projection(&resolved, binding_id, &mutation).unwrap());
-        assert_eq!(
-            resolved
-                .evidence
-                .as_ref()
-                .unwrap()
-                .borrow()
-                .persistence
-                .compatibility,
-            Persistence::Rejected,
-            "a fenced projection is not confirmed merely because its call returned Ok"
-        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

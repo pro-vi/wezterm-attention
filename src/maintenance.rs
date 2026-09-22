@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -9,15 +9,14 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::compat::reconcile_agents;
-use crate::identity::PaneAddress;
+use crate::identity::{PaneAddress, canonical_pane_id};
 use crate::protocol::{
     AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, manifest, sha256_hex,
 };
 use crate::query::{pane_presence, read_bindings_with_ports};
 use crate::records::{
     CommitPlan, RecordIdentity, Replacement, commit_nested_with, launch_path, pane_path,
-    read_record,
+    read_record, remove_file_durable, with_lock,
 };
 use crate::wezterm::{Clock, PaneLister, Presence, ProcessProbe};
 
@@ -33,6 +32,25 @@ pub struct SweepResult {
     pub detail_count: usize,
     pub total_detail_count: usize,
     pub details: Vec<Value>,
+}
+
+pub fn limit_sweep_preview(details: Vec<Value>, all_details: bool) -> (Vec<Value>, usize) {
+    let total = details.len();
+    if all_details {
+        return (details, total);
+    }
+    let mut leftover = Vec::new();
+    let mut rest = Vec::new();
+    for detail in details {
+        if detail.get("kind") == Some(&json!("projection_collection")) {
+            leftover.push(detail);
+        } else {
+            rest.push(detail);
+        }
+    }
+    rest.truncate(50);
+    leftover.extend(rest);
+    (leftover, total)
 }
 
 fn diagnostic(code: &str, message: &str) -> Diagnostic {
@@ -54,6 +72,83 @@ fn collect_json(path: &Path, output: &mut Vec<PathBuf>) {
             output.push(path);
         }
     }
+}
+
+fn collect_json_complete(path: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
+    collect_json_complete_at(path, output, true)
+}
+
+fn collect_json_complete_at(
+    path: &Path,
+    output: &mut Vec<PathBuf>,
+    absent_is_empty: bool,
+) -> Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if absent_is_empty {
+                return Ok(());
+            }
+            return Err(AttentionError::new(
+                "probe_unavailable",
+                "claim tree changed during walk",
+            ));
+        }
+        Err(_) => {
+            return Err(AttentionError::new(
+                "probe_unavailable",
+                "claim tree could not be enumerated",
+            ));
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(AttentionError::new(
+            "record_invalid",
+            "claim tree contains a symlink",
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(AttentionError::new(
+            "probe_unavailable",
+            "claim tree could not be enumerated",
+        ));
+    }
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AttentionError::new(
+                "probe_unavailable",
+                "claim tree changed during walk",
+            ));
+        }
+        Err(_) => {
+            return Err(AttentionError::new(
+                "probe_unavailable",
+                "claim tree could not be enumerated",
+            ));
+        }
+    };
+    for entry in entries {
+        let entry = entry.map_err(|_| {
+            AttentionError::new("probe_unavailable", "claim tree entry is unavailable")
+        })?;
+        let file_type = entry.file_type().map_err(|_| {
+            AttentionError::new("probe_unavailable", "claim tree entry type is unavailable")
+        })?;
+        if file_type.is_symlink() {
+            return Err(AttentionError::new(
+                "record_invalid",
+                "claim tree contains a symlink",
+            ));
+        }
+        let child = entry.path();
+        if file_type.is_dir() {
+            collect_json_complete_at(&child, output, false)?;
+        } else if child.extension().and_then(|extension| extension.to_str()) == Some("json") {
+            output.push(child);
+        }
+    }
+    Ok(())
 }
 
 fn binding_files(root: &Path) -> Vec<PathBuf> {
@@ -720,6 +815,317 @@ fn absence_action(
     }
 }
 
+fn claim_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    collect_json_complete(&root.join("v2/realms"), &mut files)?;
+    files.retain(|path| path.file_name().and_then(|name| name.to_str()) == Some("claim.json"));
+    files.sort();
+    Ok(files)
+}
+
+fn pane_address_from_claim_path(root: &Path, path: &Path) -> Result<PaneAddress> {
+    RecordIdentity::from_state_path(root, path, "claim")?;
+    let parts: Vec<_> = path
+        .strip_prefix(root)
+        .map_err(|_| AttentionError::new("record_invalid", "state path is outside its root"))?
+        .iter()
+        .filter_map(|part| part.to_str())
+        .collect();
+    if parts.len() != 8 {
+        return Err(AttentionError::new(
+            "record_invalid",
+            "state record path has the wrong shape",
+        ));
+    }
+    Ok(PaneAddress {
+        realm_id: parts[2].to_owned(),
+        incarnation_id: parts[4].to_owned(),
+        pane_id: parts[6].to_owned(),
+    })
+}
+
+fn flat_projection_stem(name: &str) -> Option<String> {
+    if name.ends_with(".review") {
+        return None;
+    }
+    let stem = name
+        .strip_suffix(".agents")
+        .or_else(|| name.strip_suffix(".ack"))
+        .unwrap_or(name);
+    canonical_pane_id(stem).ok()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
+    nlink: u64,
+    size: u64,
+    mtime: i128,
+}
+
+struct FlatFile {
+    path: PathBuf,
+    identity: FileIdentity,
+}
+
+fn regular_file_identity(path: &Path) -> Result<Option<FileIdentity>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
+            Ok(Some(FileIdentity {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+                nlink: metadata.nlink(),
+                size: metadata.size(),
+                mtime: i128::from(metadata.mtime()) * 1_000_000_000
+                    + i128::from(metadata.mtime_nsec()),
+            }))
+        }
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(AttentionError::new(
+            "state_permissions",
+            "flat marker could not be inspected",
+        )),
+    }
+}
+
+struct ClaimInventory {
+    owners: BTreeMap<String, Vec<PaneAddress>>,
+    undecidable: BTreeSet<String>,
+}
+
+fn inventory_claims(root: &Path) -> Result<ClaimInventory> {
+    let mut owners: BTreeMap<String, Vec<PaneAddress>> = BTreeMap::new();
+    let mut undecidable = BTreeSet::new();
+    for path in claim_files(root)? {
+        let address = pane_address_from_claim_path(root, &path)?;
+        match read_record(&path, Some("claim"), &RecordIdentity::pane(&address)) {
+            Ok(Some(claim)) => match record_address(&claim) {
+                Some(claimed) if claimed.pane_id == address.pane_id => {
+                    let entry = owners.entry(claimed.pane_id.clone()).or_default();
+                    if !entry.contains(&claimed) {
+                        entry.push(claimed);
+                    }
+                }
+                _ => {
+                    undecidable.insert(address.pane_id);
+                }
+            },
+            Ok(None) => {}
+            Err(_) => {
+                undecidable.insert(address.pane_id);
+            }
+        }
+    }
+    Ok(ClaimInventory {
+        owners,
+        undecidable,
+    })
+}
+
+type FlatCandidates = (BTreeMap<String, Vec<FlatFile>>, BTreeSet<String>);
+
+fn enumerate_flat_candidates(root: &Path) -> Result<FlatCandidates> {
+    let mut files: BTreeMap<String, Vec<FlatFile>> = BTreeMap::new();
+    let mut malformed = BTreeSet::new();
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((files, malformed));
+        }
+        Err(_) => {
+            return Err(AttentionError::new(
+                "probe_unavailable",
+                "state root could not be enumerated",
+            ));
+        }
+    };
+    for entry in entries {
+        let entry = entry.map_err(|_| {
+            AttentionError::new("probe_unavailable", "state root entry is unavailable")
+        })?;
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let Some(stem) = flat_projection_stem(&name) else {
+            continue;
+        };
+        let path = entry.path();
+        match regular_file_identity(&path)? {
+            Some(identity) => files
+                .entry(stem)
+                .or_default()
+                .push(FlatFile { path, identity }),
+            None => {
+                malformed.insert(stem);
+            }
+        }
+    }
+    for paths in files.values_mut() {
+        paths.sort_by(|left, right| left.path.cmp(&right.path));
+    }
+    Ok((files, malformed))
+}
+
+fn projection_collection_diagnostic(code: &str, message: &str, pane_id: &str) -> Diagnostic {
+    let mut item = diagnostic(code, message);
+    item.context.insert("pane_id".into(), json!(pane_id));
+    item
+}
+
+fn apply_projection_collection(
+    root: &Path,
+    address: &PaneAddress,
+    stem: &str,
+    files: &[FlatFile],
+) -> Result<bool> {
+    let pane = pane_path(root, address);
+    with_lock(&pane.join(".claim.lock"), Duration::from_secs(2), || {
+        let claim = read_record(
+            &pane.join("claim.json"),
+            Some("claim"),
+            &RecordIdentity::pane(address),
+        )?;
+        let Some(claim) = claim else {
+            return Err(AttentionError::new(
+                "claim_stale",
+                "claim disappeared before collection",
+            ));
+        };
+        let Some(locked) = record_address(&claim) else {
+            return Err(AttentionError::new(
+                "record_invalid",
+                "claim address is invalid",
+            ));
+        };
+        if locked.pane_id != stem {
+            return Err(AttentionError::new(
+                "claim_stale",
+                "claim no longer names this pane id",
+            ));
+        }
+        let inventory = inventory_claims(root)?;
+        if inventory.undecidable.contains(stem) {
+            return Err(AttentionError::new(
+                "record_invalid",
+                "flat marker cannot be attributed",
+            ));
+        }
+        let Some(owners) = inventory.owners.get(stem) else {
+            return Ok(false);
+        };
+        if owners.len() != 1 || !owners.iter().any(|owner| owner == address) {
+            return Err(AttentionError::new(
+                "binding_conflict",
+                "flat marker is claimed at more than one pane address",
+            ));
+        }
+        for file in files {
+            match regular_file_identity(&file.path)? {
+                Some(identity) if identity == file.identity => {}
+                _ => {
+                    return Err(AttentionError::new(
+                        "record_invalid",
+                        "flat marker changed before collection",
+                    ));
+                }
+            }
+        }
+        let mut removed = false;
+        for file in files {
+            if remove_file_durable(&file.path)? {
+                removed = true;
+            }
+        }
+        Ok(removed)
+    })
+}
+
+fn collect_projection_orphans(
+    root: &Path,
+    realm_filter: Option<&str>,
+    apply: bool,
+    details: &mut Vec<Value>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let inventory = match inventory_claims(root) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            diagnostics.push(error.diagnostic);
+            return;
+        }
+    };
+    let (files, malformed) = match enumerate_flat_candidates(root) {
+        Ok(value) => value,
+        Err(error) => {
+            diagnostics.push(error.diagnostic);
+            return;
+        }
+    };
+    let mut stems: BTreeSet<String> = files.keys().cloned().collect();
+    stems.extend(malformed.iter().cloned());
+    for stem in stems {
+        if malformed.contains(&stem) {
+            diagnostics.push(projection_collection_diagnostic(
+                "record_invalid",
+                "flat marker is not a regular file",
+                &stem,
+            ));
+            continue;
+        }
+        if inventory.undecidable.contains(&stem) {
+            diagnostics.push(projection_collection_diagnostic(
+                "record_invalid",
+                "flat marker cannot be attributed",
+                &stem,
+            ));
+            continue;
+        }
+        let Some(owners) = inventory.owners.get(&stem) else {
+            continue;
+        };
+        if owners.len() > 1 {
+            diagnostics.push(projection_collection_diagnostic(
+                "binding_conflict",
+                "flat marker is claimed at more than one pane address",
+                &stem,
+            ));
+            continue;
+        }
+        let Some(address) = owners.iter().next() else {
+            continue;
+        };
+        if realm_filter.is_some_and(|realm| realm != address.realm_id) {
+            continue;
+        }
+        let Some(candidates) = files.get(&stem) else {
+            continue;
+        };
+        let relative: Vec<String> = candidates
+            .iter()
+            .filter_map(|file| file.path.file_name()?.to_str().map(str::to_owned))
+            .collect();
+        if apply {
+            match apply_projection_collection(root, address, &stem, candidates) {
+                Ok(true) => details.push(json!({
+                    "kind": "projection_collection",
+                    "pane_id": stem,
+                    "paths": relative,
+                })),
+                Ok(false) => {}
+                Err(error) => diagnostics.push(error.diagnostic),
+            }
+        } else {
+            details.push(json!({
+                "kind": "projection_collection",
+                "pane_id": stem,
+                "paths": relative,
+            }));
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn sweep(
     root: &Path,
@@ -759,6 +1165,7 @@ pub fn sweep(
     let files = binding_files(root);
     let mut details = Vec::new();
     let mut diagnostics = Vec::new();
+    collect_projection_orphans(root, realm_filter, apply, &mut details, &mut diagnostics);
     let mut ended: BTreeMap<String, Vec<(String, PathBuf, bool)>> = BTreeMap::new();
     let mut presence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
     for binding_path in &files {
@@ -913,17 +1320,6 @@ pub fn sweep(
                         diagnostics.extend(outcome.diagnostics);
                         if outcome.action != "none" && outcome.action != "changed" {
                             details.push(json!({"kind":"subagent_compaction","binding_id":binding_id,"action":outcome.action,"floor_mono_ns":outcome.floor,"covered":outcome.covered,"deleted":outcome.deleted}));
-                            if matches!(outcome.action.as_str(), "advance_floor" | "replay_floor")
-                                && let Err(error) = reconcile_agents(
-                                    root,
-                                    &address,
-                                    launch_id,
-                                    binding_id,
-                                    binding_dir,
-                                )
-                            {
-                                diagnostics.push(error.diagnostic);
-                            }
                         }
                     }
                     Err(error) => diagnostics.push(error.diagnostic),

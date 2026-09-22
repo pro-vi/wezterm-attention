@@ -1,6 +1,6 @@
 # Attention v2: lifecycle hook map
 
-**Scope update:** the Next labels below preserve the September 8 proposal, not the current build scope. The [current 18-row lifecycle plan](../plans/2026-09-09-001-feat-lifecycle-observation-facts-plan.md) defers Pi UI open/close and compaction failure, keeps Pi input, and claims no native Pi question-tool outcome. Its active row table governs implementation; this page retains the broader native catalog and the original proposal for reference.
+**Scope update:** the Next labels below preserve the September 8 proposal, not the current build scope. Pi UI open/close and compaction failure are deferred; Pi input stays; H12 has no native Pi support. The active set is the 18-row table in `tests/fixtures/lifecycle/contact-cases.json`. This page retains the broader native catalog and the original proposal for reference.
 
 Rows are lifecycle observations. Provider columns show exact hook names and current handling. The last column preserves the original proposal to add, retain, or leave out.
 

@@ -65,11 +65,16 @@ Prompt return is `hooks publish` from a bound pane. It republishes the pane iden
 
 ## Compatibility and precedence
 
-Writers maintain flat v1 activity and `.agents` projections during the compatibility period.
-Duplicate v2 events repair missing or byte-different projections without refreshing event or wall
-timestamps.
-
-The flat activity projection writes `updated_at` in seconds and `updated_at_ms` in milliseconds. The `.agents` projection writes `last_ms` in milliseconds; its `type` is the provider `agent_type` when that contract is present, otherwise the event source.
+Attention's writers do not maintain flat v1 activity or `.agents` projections.
+The flat format remains permanently supported input: third-party writers and
+Pi's fallback may still create `<root>/<pane_id>` and `<pane_id>.agents`, and
+the Lua reader keeps accepting them. Writer-owned leftovers from when v2 also
+projected those names are collected with `attention sweep --json` to preview,
+then `attention sweep --apply --operation-id 00000000-0000-4000-8000-000000000001`.
+The operation id must be a canonical lowercase UUID. Collection follows a unique
+v2 claim for that scalar pane id; it does not ask whether a live v1 pane currently
+occupies the same number, so preview the stems before applying. `.review` is user
+state and is never collected that way.
 
 A valid v2 claim selects v2. Invalid or future v2 is reported and never downgraded to plausible v1.
 V1 is read only when no v2 claim exists. The public Lua query remains six values:
@@ -98,7 +103,7 @@ Lifecycle evidence stays outside `activity.json` because adding request IDs to a
 
 Unknown fields, nulls, object-shaped arrays, invalid nested child digests, wrong pool membership, duplicate identities, below-floor members, and incompatible provider/tool/question-mode tuples are rejected. Native elicitation correlation includes the MCP server namespace. A local receipt UUID cannot stand in for a native request identifier.
 
-Existing legacy mutations and projection run before lifecycle replacement. There is no multi-file atomicity promise. An independently valid legacy effect can survive rich-evidence rejection or a failed sidecar write; partial work is diagnostic and strict hook mode fails. A post-rename failure requires reading actual state before retry.
+Existing native mutations run before lifecycle replacement. There is no multi-file atomicity promise. An independently valid native effect can survive rich-evidence rejection or a failed sidecar write; partial work is diagnostic and strict hook mode fails. A post-rename failure requires reading actual state before retry.
 
 `attention bindings --json` returns validated facts and four independent axes: binding phase, pane
 presence, reader confidence, and binding health. It never returns a resume command. Consumers build
@@ -111,6 +116,7 @@ time, and marking the live row conflicted would hide the pane the session now ru
 
 JSON responses contain `schema`, `command`, `status`, `complete`, `result`, and `diagnostics`.
 Default output is bounded. Use `--all` or `--all-details` only when complete detail is required.
+Sweep leftover `projection_collection` rows are listed in full even when other sweep details are truncated.
 
 ## Trust boundary
 

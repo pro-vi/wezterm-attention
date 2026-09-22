@@ -65,23 +65,6 @@ return function()
       return false
     end
 
-    --- Whether another window still holds a pane writing the flat compatibility
-    --- files this marker id names. Deliberately not the same question as
-    --- observed_in_other_window, which asks after one exact key: a v2 pane owns
-    --- the flat paths named by the pane id in its address, so it keeps a v1 key's
-    --- files alive while answering to a name that key never had.
-    local function marker_in_use_in_other_window(marker_id, window_key)
-      if not marker_id then return false end
-      for other_window, observations in pairs(seen_marker_ids_by_window) do
-        if other_window ~= window_key then
-          for _, item in pairs(observations) do
-            if type(item) == "table" and item.marker_id == marker_id then return true end
-          end
-        end
-      end
-      return false
-    end
-
     local function observe_pane(window, pane, read)
       if not read.cache_key or (read.kind ~= "v1" and read.kind ~= "v2") then return end
       local window_key = tostring(window:window_id())
@@ -910,12 +893,7 @@ return function()
       -- `identified_by_local` maps a GUI-local pane to the storage key it was
       -- read under this tick, so a key it used to answer to can be recognised as
       -- replaced rather than as missing.
-      -- `marker_ids_in_use` is which flat compatibility paths some pane observed
-      -- now still writes. A v2 pane keeps writing the flat marker, .ack and
-      -- .agents named by the pane id in its address, which is the same name a v1
-      -- pane uses, so a retired v1 key can name files a live v2 pane still owns.
-      local evidence = { panes = {}, domains = {}, gap = false, identified_by_local = {},
-        marker_ids_in_use = {} }
+      local evidence = { panes = {}, domains = {}, gap = false, identified_by_local = {} }
 
       --- Domain evidence, created on first mention. `observed` means a pane was
       --- enumerated on it now. `unresolved` means a pane on it has no usable
@@ -1026,7 +1004,6 @@ return function()
             evidence.panes[key] = { kind = "v2", domain = domain,
               marker_id = read.marker_id, local_id = local_id }
             evidence.identified_by_local[local_id] = key
-            if read.marker_id then evidence.marker_ids_in_use[read.marker_id] = true end
             pane_ids[#pane_ids + 1] = key
             before[key] = attention_cache[key]
             local view = read_attention_view(read, now_unix_ns, {
@@ -1050,7 +1027,6 @@ return function()
             evidence.panes[id] = { kind = "v1", domain = domain,
               marker_id = id, local_id = local_id }
             evidence.identified_by_local[local_id] = id
-            evidence.marker_ids_in_use[id] = true
             pane_ids[#pane_ids + 1] = id
             before[id] = attention_cache[id]
             local atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source =
@@ -1236,16 +1212,13 @@ return function()
           elseif verdict == "absent" and not seen[gone_key] then
             local shared = observed_in_other_window(gone_key, window_key)
             -- The key is retired either way. Unlinking the files it names is a
-            -- separate question: some pane may still be writing them under
-            -- another key, because a v2 pane's flat projections are named by the
-            -- pane id in its address. These are the cheap vetoes; each one is a
+            -- separate question: another v1 pane in this window may still be
+            -- writing them. These are the cheap vetoes; each one is a
             -- positive sighting, and any of them is enough to keep the files.
             -- No live-local-id term: reaching this verdict already means that
             -- check passed, since decide_absence answers "unknown" for a pane
             -- whose handle is still enumerated.
             local may_unlink = not shared and gone.kind == "v1"
-              and not evidence.marker_ids_in_use[gone.marker_id]
-              and not marker_in_use_in_other_window(gone.marker_id, window_key)
             local owners = may_unlink and current_marker_owners() or nil
             if owners and not owners.markers[gone.marker_id] and not owners.complete then
               -- Nothing sighted, and the search could not finish. Keep the files

@@ -41,7 +41,7 @@
 //! Everything else reachable from this crate is implementation. [`records`] in
 //! particular exposes storage mechanics -- locking, atomic replacement, path
 //! construction, durable deletion -- because this crate's own tests drive them,
-//! not because a consumer should. [`compat`], [`maintenance`] and
+//! not because a consumer should. [`maintenance`] and
 //! [`hook_content`] are the same, as are the members of [`wezterm`],
 //! [`providers`] and [`observations`] not named above: public because nothing
 //! has yet made them private, not because their shapes are promised.
@@ -54,7 +54,6 @@
 //! records why the boundary is documented rather than enforced, and what it
 //! would take to enforce it.
 
-pub mod compat;
 pub mod consumer;
 pub mod hook_content;
 pub mod identity;

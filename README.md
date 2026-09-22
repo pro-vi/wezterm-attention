@@ -4,7 +4,7 @@ A WezTerm plugin that turns your tab bar into a notification system. Any CLI too
 
 Two things write those signals. A small Rust command, `attention`, runs as a hook from Claude Code, Codex or Pi and records what a pane's agent is doing against a pane identity that survives detach, reattach and multiple mux sockets. A Lua reader in WezTerm polls those records and renders the tab. Programs other than WezTerm can read the same records: `attention bindings --json`, `attention tabs` and `attention inspect` return validated facts, so a script does not have to scrape a terminal to find out which pane an agent is in.
 
-Flat marker files still work. They were the whole protocol before, several tools write them, and the reader keeps accepting them — see [Compatibility](docs/record-contract.md). What is new is that they are no longer the only thing, and no longer the authority.
+Flat marker files still work as input. They were the whole protocol before, several tools still write them, and the reader keeps accepting them — see [Compatibility](docs/record-contract.md). Attention's own writers no longer produce them. What is new is that they are no longer the only thing, and no longer the authority.
 
 Known compromises are listed in [docs/accepted-limitations.md](docs/accepted-limitations.md).
 
@@ -144,7 +144,7 @@ attention.apply_to_config(config, {
 
 V2 producers call the Rust writer through `bin/attention`; they do not construct V2 record JSON. Use `attention mark` for custom activity and `attention hooks event PROVIDER EVENT` for provider callbacks after the shell has established a launch claim. See [Mux setup](docs/mux-setup.md) for the supported commands and activation boundary.
 
-The flat-file format below remains supported for existing V1 producers. The inspected bootstrap Claude/Codex helpers still use it; selecting the Rust binary does not migrate those registrations automatically.
+The flat-file format below remains supported for existing V1 producers. Attention's writers do not emit it. The inspected bootstrap Claude/Codex helpers still use it; selecting the Rust binary does not migrate those registrations automatically.
 
 ### V1 flat-marker protocol
 
@@ -158,7 +158,7 @@ Any process running inside WezTerm can write a V1 marker. The compatibility cont
 6. **Optional:** `ttl_ms` overrides stale cleanup for that marker. By default, stale `thinking` markers clear after 30 minutes.
 7. **Optional:** a `<WEZTERM_PANE>.agents` sidecar reports how many subagents are working in the pane — see [Subagent activity](#subagent-activity-the-agents-sidecar) below.
 8. **Plugin-owned:** `<WEZTERM_PANE>.ack` records the marker publication you have already been shown, and `<WEZTERM_PANE>.review` is the `Alt+B` flag — see [The review flag](#the-review-flag-the-review-sidecar). Writers never touch either one.
-9. **Cleanup** is automatic. The poller removes a marker whose pane it saw on the previous tick and does not see now (WezTerm emits no pane-close event, so a vanished pane is how a closed pane is detected), and removes a marker whose stale TTL has expired. A closed pane loses everything — marker, `.ack`, `.agents` and `.review`. An expired marker loses only itself and its `.ack`: the subagent sidecar and your review flag keep their own lifetimes and neither of them aged out because a spinner did. Focusing a pane writes an acknowledgement sidecar instead of removing writer-owned state.
+9. **Cleanup** is automatic for v1 markers the poller still owns. The poller removes a marker whose pane it saw on the previous tick and does not see now (WezTerm emits no pane-close event, so a vanished pane is how a closed pane is detected), and removes a marker whose stale TTL has expired. A closed pane loses everything — marker, `.ack`, `.agents` and `.review`. An expired marker loses only itself and its `.ack`: the subagent sidecar and your review flag keep their own lifetimes and neither of them aged out because a spinner did. Focusing a pane writes an acknowledgement sidecar instead of removing writer-owned state. Flat files Attention itself used to project for a v2 pane are collected when exactly one valid v2 claim names that pane id: preview with `attention sweep --json`, then `attention sweep --apply --operation-id 00000000-0000-4000-8000-000000000001`. The operation id must be a canonical lowercase UUID. Unique claim is not a provenance check and does not ask whether a live writer occupies the number. That command never removes `.review`.
 
 The `WEZTERM_PANE` environment variable is injected by WezTerm into every shell it spawns. That's the pane's unique ID — always a non-negative integer. Validate it (`/^\d+$/`) before building a path from it: a stray `../…` value would otherwise write to, or delete, a file outside the marker directory. Every example and fragment below enforces this.
 

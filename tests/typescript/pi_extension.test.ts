@@ -163,9 +163,9 @@ test("lifecycle: agent_start writes a thinking marker with ttl_ms, updated_at, s
 	expect(typeof m.ttl_ms).toBe("number");
 	expect(typeof m.updated_at).toBe("number"); // locks the contract field bun won't typecheck
 	// Units, not just presence. `docs/record-contract.md` puts seconds in
-	// `updated_at` and milliseconds in `updated_at_ms`, and `compat.rs` writes
-	// them that way. Writing milliseconds under `updated_at` still satisfies a
-	// typeof check while reading as a date tens of thousands of years out.
+	// `updated_at` and milliseconds in `updated_at_ms`. Writing milliseconds
+	// under `updated_at` still satisfies a typeof check while reading as a date
+	// tens of thousands of years out.
 	const nowSeconds = Date.now() / 1000;
 	expect(m.updated_at).toBeGreaterThan(nowSeconds - 60);
 	expect(m.updated_at).toBeLessThanOrEqual(nowSeconds + 1);

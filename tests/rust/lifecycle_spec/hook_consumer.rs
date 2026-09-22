@@ -162,7 +162,7 @@ fn admitted_content_is_transient_scoped_and_runs_after_locks_release() {
         );
         assert_eq!(
             delivery["persistence"],
-            json!({"native_state":"confirmed", "activity":"confirmed", "compatibility":"confirmed", "lifecycle":"confirmed"})
+            json!({"native_state":"confirmed", "activity":"confirmed", "compatibility":"not_requested", "lifecycle":"confirmed"})
         );
         assert!(delivery.get("observation_id").is_some());
         assert!(delivery.get("correlation").is_none());

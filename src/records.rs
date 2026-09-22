@@ -692,8 +692,6 @@ pub fn atomic_replace_if_different(path: &Path, value: &Value) -> Result<bool> {
         }
         return Ok(false);
     }
-    // Flat compatibility projections also replace supported plain-text v1
-    // markers. Only v2 records have a schema/identity to preserve here.
     if path.exists() && value.get("kind").is_some() {
         let identity = RecordIdentity::from_record(value);
         let _ = read_record(path, value.get("kind").and_then(Value::as_str), &identity)?;

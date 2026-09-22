@@ -98,7 +98,7 @@ Generic tool traffic cannot evict request evidence. Request traffic can still ev
 
 Activity and lifecycle are separate files, not a multi-file transaction. A crash may leave newer activity with older facts. Failures report incomplete work; retries re-read actual records. Do not join files by timestamp or assume a shared snapshot ID.
 
-Only the legacy flat-marker interface is retained for compatibility. Use matching current Attention writers and readers; intermediate development builds are not supported compatibility targets.
+Only the legacy flat-marker interface is retained as readable input. Attention's Rust writers do not produce it. Pi's fallback and other third-party writers may still create `<pane_id>` and `<pane_id>.agents`. Use matching current Attention writers and readers; intermediate development builds are not supported compatibility targets.
 
 ## Polling, rendering, and process queries
 
@@ -143,7 +143,7 @@ A file that cannot be read, declares a later schema, is filed under a window it 
 
 ## Public consumer contracts
 
-Attention records use schema **3**. CLI envelopes, `HookDelivery` and the published tab order use schema **1**, package metadata uses manifest schema **2**, and pane identity uses wire version **2**. These identify separate data formats, not supported product editions. A published fact that is not a v2 record — one with no pane address to be validated against and no ordering fence — carries its own schema field and is versioned on its own, rather than entering `protocol/v2.json`: the manifest's `record_schema` governs the addressed record tree, and coupling anything else to it would make an unrelated record change refuse a valid file. Use a fresh Attention state root and fresh supported launches for activation; existing state is not automatically migrated or deleted. Legacy flat markers remain readable. Ship the manifest with its matching Rust/Lua readers. Source capabilities do not establish live registration or activation.
+Attention records use schema **3**. CLI envelopes, `HookDelivery` and the published tab order use schema **1**, package metadata uses manifest schema **2**, and pane identity uses wire version **2**. These identify separate data formats, not supported product editions. A published fact that is not a v2 record — one with no pane address to be validated against and no ordering fence — carries its own schema field and is versioned on its own, rather than entering `protocol/v2.json`: the manifest's `record_schema` governs the addressed record tree, and coupling anything else to it would make an unrelated record change refuse a valid file. Use a fresh Attention state root and fresh supported launches for activation; existing state is not automatically migrated or deleted. Writer-owned flat leftovers from the projection era are previewed with `attention sweep --json` and collected with `attention sweep --apply --operation-id 00000000-0000-4000-8000-000000000001`. The operation id must be a canonical lowercase UUID (`uuidgen` on macOS is uppercase; lowercase it). Collection attributes those names by a unique v2 claim, not by live v1 occupancy — preview the stems before applying. Legacy flat markers remain readable. Ship the manifest with its matching Rust/Lua readers. Source capabilities do not establish live registration or activation.
 
 ### Registration description
 
@@ -176,12 +176,12 @@ Persistence reports four independent fields:
 
 | Field | What is covered |
 |---|---|
-| `native_state` | All native record effects selected by `action`, excluding lifecycle and flat compatibility output: binding/current pointer, activity, parent child-clear, child presence, binding end, review or clear/removal as applicable |
+| `native_state` | All native record effects selected by `action`, excluding lifecycle output: binding/current pointer, activity, parent child-clear, child presence, binding end, review or clear/removal as applicable |
 | `activity` | The lead activity or activity-clear subset, when selected |
-| `compatibility` | Selected V1 flat projection reconciliation, including a valid already-satisfied state; a fenced reconciliation is rejected |
+| `compatibility` | Reserved. Always `not_requested`: writers no longer reconcile a V1 flat projection |
 | `lifecycle` | This callback's requested lifecycle observation |
 
-Each field is `not_requested`, `confirmed`, `rejected` or `unconfirmed`. Confirmed does not require new bytes when the required state already matches. Unconfirmed does not establish that no writes happened. A rejected or unconfirmed requested effect suppresses delivery. Lifecycle preparation/write failure can coexist with confirmed native and compatibility effects. `observation_id` appears only when the native application confirms writing that observation; it is never a provider request ID or controller token. Optional correlation is omitted when absent.
+Each field is `not_requested`, `confirmed`, `rejected` or `unconfirmed`. Confirmed does not require new bytes when the required state already matches. Unconfirmed does not establish that no writes happened. A rejected or unconfirmed requested effect suppresses delivery. Lifecycle preparation/write failure can coexist with confirmed native effects. `observation_id` appears only when the native application confirms writing that observation; it is never a provider request ID or controller token. Optional correlation is omitted when absent.
 
 `reply` and `prompt` always appear. Both use `HookContent`: `availability` is `not_requested`, `available`, `absent`, `unsupported`, `invalid` or `too_large`. **Only available has `text`.** Each flag is independent: omitting `--include-prompt` yields `prompt={"availability":"not_requested"}`, even when `--include-reply` is set. Missing native fields mean absent; null or another JSON type means invalid. An empty string is available, and Unicode/newlines are preserved exactly.
 
@@ -203,7 +203,7 @@ attention hooks event claude UserPromptSubmit \
   --consumer-timeout-ms 1000 --include-prompt
 ```
 
-The provider supplies callback JSON on stdin; the executable receives the full scoped delivery. Use `codex` for its equivalent callback. A lead submit starts the turn's `thinking` activity, so `native_state`, `activity`, `compatibility` and `lifecycle` are all confirmed. A child actor's submit stays observation-only: `lifecycle` is confirmed while the other three are not_requested. Exact means the decoded provider callback string, not original keystrokes, complete multimodal input, or proof that the model processed it. Consumers own markers, correlation, receipts and acceptance decisions. A missed delivery leaves content unavailable for recovery from Attention records.
+The provider supplies callback JSON on stdin; the executable receives the full scoped delivery. Use `codex` for its equivalent callback. A lead submit starts the turn's `thinking` activity, so `native_state`, `activity` and `lifecycle` are confirmed while `compatibility` stays `not_requested`. A child actor's submit stays observation-only: `lifecycle` is confirmed while the other three are not_requested. Exact means the decoded provider callback string, not original keystrokes, complete multimodal input, or proof that the model processed it. Consumers own markers, correlation, receipts and acceptance decisions. A missed delivery leaves content unavailable for recovery from Attention records.
 
 The whole delivery must fit Attention's hook JSON byte limit. On overflow, available content becomes too_large with text omitted, never truncated; all other availability values stay intact. If metadata alone still exceeds the bound, delivery is not_dispatched. Prompt/reply bodies enter no Attention record, diagnostic or GUI cache. Oversized native stdin is rejected before application; delivery too_large describes admitted content whose serialized envelope exceeds the bound.
 
@@ -228,7 +228,7 @@ A consumer that exits zero after deciding to do nothing has no channel to say wh
 printf '%s\n' "$SCOPE_JSON" | attention inspect --scope - --json
 ```
 
-Obtain `$SCOPE_JSON` from a selected public bindings row: `{ "address": row.address, "launch_id": row.launch_id, "binding_id": row.binding_id }`. All identity components are canonical. Unknown fields are rejected. `binding_id` can be omitted or null to leave that expectation unspecified; canonical serialization omits it. Address and launch remain required. A changed launch/binding is reported, never automatically followed.
+Obtain `$SCOPE_JSON` from a selected public bindings row: `{ "address": row.address, "launch_id": row.launch_id, "binding_id": row.binding_id }`. All identity components are canonical. Unknown fields are rejected. `binding_id` can be omitted or null to leave that expectation unspecified; canonical serialization omits it. Address and launch remain required. A changed launch/binding is reported, never automatically followed. `complete` on a bindings answer describes that set, not the row: read `pane_presence`, `binding_health`, `reader_confidence` and `current` on the row, then inspect it. An incomplete bindings listing does not make a present row unusable.
 
 `result` is `PaneFacts`: requested `scope`, `scope_relation` (`matched`, `launch_changed`, `binding_changed`, `unavailable`), `binding`, `pane_presence`, `reader_confidence`, `binding_health`, `activity`, `binding_end`, `children`, `review`, `lifecycle` and facet-owned diagnostics. `binding` is a validated existing `BindingRow`, or null when no matched metadata is available. Null alone does not establish an unbound pane. Binding health is local evidence, not a global uniqueness or permission claim. Presence and provider binding phase remain independent: an ended provider can be in a present pane. Lifecycle validity does not by itself change the base identity/read-confidence axes; inspect its own availability and the envelope completeness.
 

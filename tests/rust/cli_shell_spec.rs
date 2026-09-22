@@ -278,7 +278,17 @@ fn query_defaults_errors_and_help_support_agent_composition() {
     );
     let help = run(&["inspect", "--help"]);
     let text = String::from_utf8(help.stdout).unwrap();
-    assert!(text.contains("scope.json") && text.contains("complete=true"));
+    assert!(text.contains("scope.json"));
+    assert!(text.contains("pane_presence") && text.contains("binding_health"));
+    assert!(text.contains("reader_confidence") && text.contains("current"));
+    assert!(!text.contains("complete=true before selecting"));
+    let help = run(&["sweep", "--help"]);
+    let text = String::from_utf8(help.stdout).unwrap();
+    assert!(text.contains("00000000-0000-4000-8000-000000000001"));
+    assert!(text.contains("canonical lowercase UUID"));
+    assert!(text.contains("Preview is the default"));
+    assert!(text.contains("--all-details"));
+    assert!(text.contains("complete"));
     let help = run(&["hooks", "event", "--help"]);
     let text = String::from_utf8(help.stdout).unwrap();
     assert!(text.contains("required with --consumer") && text.contains("Retrying"));
@@ -633,10 +643,7 @@ fn attention_tabs_reads_a_file_the_plugin_encoder_wrote() {
         .expect("windows array");
     assert_eq!(windows.len(), 1);
     assert_eq!(windows[0]["window_id"], 0);
-    assert_eq!(
-        windows[0]["tabs"][0]["marker_ids"],
-        json!([v2_id])
-    );
+    assert_eq!(windows[0]["tabs"][0]["marker_ids"], json!([v2_id]));
     assert_eq!(windows[0]["tabs"][1]["marker_ids"], json!(["4", "9"]));
 }
 

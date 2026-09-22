@@ -4420,13 +4420,11 @@ test("a proven replacement survives uncertainty about something else", function(
     "and must survive equally when it does not: the replacement was observed either way")
 end)
 
--- A v2 pane keeps writing the flat marker, .ack and .agents named by the pane id
--- in its address -- the same name a v1 pane uses. So the scalar key retiring does
--- not mean the files it named are unowned. When the upgrade itself is never
--- observed, because the client was detached while it happened, no replacement
--- relation exists and the old key looks plainly absent on reconnect. Deleting
--- then takes the live pane's compatibility projection, and a review flag its
--- user set, which no later writer event restores.
+-- A live pane still occupies that scalar pane id, even after the v1 key
+-- retires. The mux walk is what knows it exists, so the files named by that
+-- id stay until no pane carries it. Attention no longer projects those names
+-- for v2 panes; leaving the files is the walk being conservative about a
+-- third-party v1 marker, not a v2 writer still owning them.
 test("a key retiring does not make the files it named unowned", function()
   local shared_id = 56
   write_marker(shared_id, "stop")
@@ -4464,13 +4462,9 @@ test("a key retiring does not make the files it named unowned", function()
 
   for _, name in ipairs({ "", ".agents", ".review" }) do
     assert(read_path(test_dir .. "/" .. shared_id .. name) == before[name],
-      "a pane observed right now still writes " .. shared_id .. name)
+      "a pane observed right now still occupies " .. shared_id .. name)
   end
 
-  -- The progress half: the obsolete key does retire. Ownership of those paths has
-  -- moved to the pane's v2 identity, which removes them when it goes, so the
-  -- scalar key must stop answering for them rather than linger as a second
-  -- reading of the same pane.
   -- The progress half: the stale v1 reading is gone. The scalar id still answers,
   -- because it is the live pane's id now -- with that pane's state rather than
   -- the "stop" the retired entry was holding.
@@ -4563,11 +4557,9 @@ test("a domain nobody could see this tick keeps its retry", function()
   wezterm.background_child_process = original_background
 end)
 
--- The flat compatibility files are shared across windows, so asking whether this
--- window still writes them is the wrong scope. Another window may already hold
--- the pane that owns them, under a full address whose pane id is the very name
--- the retiring key had. Looking only for that exact key there misses it, because
--- the owner answers to a different one.
+-- The mux walk, not this window's inventory, is what knows whether any pane
+-- still occupies a v1 marker id. Another window may already hold the pane,
+-- and looking only for this window's exact key misses it.
 test("another window's pane keeps the files this window is retiring", function()
   local shared_id = 8862
   write_marker(shared_id, "stop")
@@ -4597,7 +4589,7 @@ test("another window's pane keeps the files this window is retiring", function()
     tabs = { { tab_id = 882, panes = { { id = 8821, published = 8863, domain = "mux" } } } } }),
     options)
   assert(read_path(test_dir .. "/" .. shared_id) == before,
-    "another window holds the pane that writes this file")
+    "another window holds a pane that occupies this id")
   assert(subagents_exists(shared_id), "and its sidecars go with it")
 end)
 

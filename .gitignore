@@ -10,8 +10,8 @@ libexec/attention-rs
 .prov/
 .research/
 
-# Planning and review write-ups are working notes, not shipped docs. This only
-# stops new ones being added; the handful already tracked stay tracked, because
-# git ignores nothing it is already following.
-docs/plans/*
+# Planning write-ups are local working notes, not shipped docs.
+docs/plans/
+# Review write-ups are the same, except the handful already tracked stay
+# tracked: git ignores nothing it is already following.
 docs/reviews/*
