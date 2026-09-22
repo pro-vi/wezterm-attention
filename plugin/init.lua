@@ -576,8 +576,8 @@ function M.apply_to_config(config, opts)
 
       -- Nothing outside this process can see the order the bar draws, so the
       -- bar publishes it. Only a window whose every tab has been drawn, and
-      -- only when what they draw has changed: an ordinary redraw composes a
-      -- list and compares it, and touches no file.
+      -- only when the drawn list or its source identity changes: an ordinary
+      -- redraw with the same source touches no file.
       local order, window_id = drawn_tab_order(tab, tabs, marker_ids, rendered)
       if order then publish_tab_order(dir, window_id, order, runtime_api.tab_source()) end
 

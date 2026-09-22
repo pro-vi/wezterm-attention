@@ -334,7 +334,8 @@ return function()
     end
 
     local function parse_tab_source_response(stdout)
-      if type(stdout) ~= "string" or #stdout > protocol.limits.max_json_bytes then return nil end
+      if not protocol or type(stdout) ~= "string"
+          or #stdout > protocol.limits.max_json_bytes then return nil end
       local value = context.decode_json(stdout)
       if type(value) ~= "table" or value.schema ~= 1 or value.command ~= "tab-source"
           or value.status ~= "ok" or value.complete ~= true then return nil end

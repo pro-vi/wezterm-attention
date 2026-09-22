@@ -743,6 +743,11 @@ local function tab_source_response(socket, incarnation)
     .. '","incarnation_id":"' .. string.rep(incarnation or "a", 64) .. '"},"diagnostics":[]}'
 end
 
+test("tab source parsing refuses when the plugin manifest is unavailable", function()
+  local degraded = dofile(repo_root .. "/plugin/runtime.lua")().bind({ M = {} })
+  assert(degraded.parse_tab_source_response(tab_source_response("/test/gui.sock")) == nil)
+end)
+
 test("tab source acquisition is single flight and rejects stale completion", function()
   local previous = wezterm.run_child_process
   internal.reset_tab_source()

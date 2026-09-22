@@ -145,17 +145,16 @@ return function(context)
     return encoded
   end
 
-  --- Publish the tab order one window's bar drew, at `<dir>/tabs/<window>.json`.
-  --- It is not a v2 record: it names no pane address, carries no fence, and
-  --- nothing acts on it, so it carries its own schema and is read on its own
-  --- terms. `marker_ids` are what `gui_tab_pane_ids` returned: a v1 marker id
+  --- Publish the drawn order under its source incarnation and window ID, or
+  --- under the legacy window ID while the source is unknown. It is not a pane
+  --- record and carries its own schema. `marker_ids` are what `gui_tab_pane_ids` returned: a v1 marker id
   --- or the v2 cache key, already translated, so a reader never repeats that
   --- translation.
   ---
   --- Honest about when it was written, not guaranteed current: nothing
   --- refreshes `published_at_ms` while the bar draws the same thing. The write
-  --- happens only when the composed list changes, because the caller is the
-  --- GUI thread's tab formatter.
+  --- happens when the composed list or its source changes. Attaching a source
+  --- preserves the content timestamp because the caller is publishing the same draw.
   local function publish_tab_order(dir, window_id, tabs, source)
     local rows = {}
     for index, entry in ipairs(tabs) do rows[index] = encode_tab(entry) end
