@@ -373,7 +373,101 @@ fn socket_truncation_is_explicit_and_legacy_shape_is_preserved() {
         assert_eq!(response["result"]["scanned"], 2);
         assert_eq!(response["result"]["returned"], 1);
         assert_eq!(response["result"].get("scope").is_some(), socket_mode);
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr).trim(),
+            "attention bindings: returned 1 of 2; use --all"
+        );
     }
+}
+
+/// The stderr line fires only when rows were dropped: not for `--all`, not for
+/// a limit the matches fit under, and not for a filter that left few rows.
+#[test]
+fn only_a_query_that_dropped_rows_says_so_on_stderr() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    setup.provider_event(
+        "SessionStart",
+        "session-b",
+        json!({"source":"clear"}),
+        "00000000000000000300",
+    );
+    let executable = setup._scratch.0.join("wezterm");
+    fs::write(
+        &executable,
+        "#!/bin/sh\nprintf '%s\\n' '[{\"pane_id\":\"42\"}]'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+    for (args, complete) in [
+        (vec!["--all"], true),
+        (vec!["--limit", "2"], true),
+        (vec!["--limit", "1", "--provider", "codex"], true),
+        (vec!["--limit", "1"], false),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+            .env_clear()
+            .envs(&setup.env)
+            .env("WEZTERM_EXECUTABLE", &executable)
+            .args(["bindings", "--json"])
+            .args(&args)
+            .output()
+            .unwrap();
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["complete"], complete, "{args:?}");
+        assert_eq!(response["result"]["truncated"], !complete, "{args:?}");
+        assert_eq!(
+            output.stderr.is_empty(),
+            complete,
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// A realm-wide answer with more diagnostics than the envelope shows is still
+/// complete: the rows are all there, and the counts say what was dropped.
+#[test]
+fn realm_wide_diagnostics_are_counted_and_never_make_the_rows_incomplete() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let root = state_root(&setup.env).unwrap();
+    let address = pane_address(&setup.env).unwrap().0;
+    let launch = launch_path(&root, &address, &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]);
+    for index in 0..60 {
+        let bad = launch
+            .join("bindings")
+            .join(format!("{index:064x}"))
+            .join("binding.json");
+        fs::create_dir_all(bad.parent().unwrap()).unwrap();
+        fs::write(bad, "invalid").unwrap();
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .env_clear()
+        .envs(&setup.env)
+        .args(["bindings", "--json", "--all"])
+        .output()
+        .unwrap();
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["status"], "findings");
+    assert_eq!(response["complete"], true);
+    assert_eq!(response["result"]["truncated"], false);
+    assert_eq!(response["result"]["diagnostic_count"], 50);
+    // The sixty unreadable records plus whatever the unscoped probe reports.
+    assert!(response["result"]["total_diagnostic_count"].as_u64().unwrap() >= 60);
+    assert_eq!(response["diagnostics"].as_array().unwrap().len(), 50);
+    assert!(output.stderr.is_empty());
+
+    // Scoped to the socket, one unanswered probe is still incomplete.
+    fs::remove_file(
+        root.join("v2/realms")
+            .join(&address.realm_id)
+            .join("realm.json"),
+    )
+    .unwrap();
+    let (_, rows, diagnostics) = query(&setup);
+    assert_eq!(rows.len(), 1);
+    assert!(diagnostics.iter().any(|d| d.code == "probe_unavailable"));
 }
 
 #[test]

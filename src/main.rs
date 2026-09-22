@@ -148,7 +148,7 @@ struct PublishArgs {
 
 #[derive(Clone, Debug, Args)]
 #[command(
-    after_help = "Example: attention bindings --socket /absolute/mux.sock --limit 25\nCheck status and complete: exit zero can still carry truncated results.\nIf truncated, narrow with --provider, raise --limit (maximum 1000), or explicitly use --all.\n--socket queries prevent WezTerm auto-start; --realm selects a recorded realm ID."
+    after_help = "Example: attention bindings --socket /absolute/mux.sock --limit 25\ncomplete is false when rows were dropped (any mode) or a probe did not answer (--socket).\nDropped diagnostics are counted: result.diagnostic_count of result.total_diagnostic_count.\nIf truncated, narrow with --provider, raise --limit (maximum 1000), or explicitly use --all.\n--socket queries prevent WezTerm auto-start; --realm selects a recorded realm ID."
 )]
 struct BindingsArgs {
     /// Return the JSON envelope (also the default).
@@ -717,16 +717,30 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             }
             let returned = rows.len();
             let truncated = returned < scanned;
+            // Help is read once and output on every run, so the run says it.
+            // stdout stays JSON; the line goes where a consumer's log looks.
+            if truncated {
+                eprintln!("attention bindings: returned {returned} of {scanned}; use --all");
+            }
+            let shown_diagnostics: Vec<Diagnostic> = diagnostics.iter().take(50).cloned().collect();
             let mut result = serde_json::json!({
                 "rows": rows,
                 "scanned": scanned,
                 "returned": returned,
                 "truncated": truncated,
+                "diagnostic_count": shown_diagnostics.len(),
+                "total_diagnostic_count": diagnostics.len(),
             });
             let socket_mode = scope.is_some();
             if let Some(scope) = scope {
                 result["scope"] = serde_json::to_value(scope).expect("scope serializes");
             }
+            // `complete` describes the rows. A socket-scoped answer also needs
+            // every probe to have answered, since a degraded probe leaves a
+            // pane's presence unknown; a realm-wide answer reports its
+            // diagnostics through the two counts instead, because on a machine
+            // where panes outlive mux incarnations they never run out, and a
+            // flag that is always false says nothing about the rows.
             emit(
                 &Response {
                     schema: 1,
@@ -737,14 +751,9 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                         "findings"
                     }
                     .to_owned(),
-                    complete: !truncated
-                        && if socket_mode {
-                            diagnostics.is_empty()
-                        } else {
-                            diagnostics.len() <= 50
-                        },
+                    complete: !truncated && (!socket_mode || diagnostics.is_empty()),
                     result,
-                    diagnostics: diagnostics.iter().take(50).cloned().collect(),
+                    diagnostics: shown_diagnostics,
                 },
                 args.json,
                 false,
