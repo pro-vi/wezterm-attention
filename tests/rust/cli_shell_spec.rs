@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+#[path = "support/executables.rs"]
+mod executables;
+
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -594,7 +597,7 @@ fn published_tab_orders_are_read_and_one_refused_file_does_not_withhold_the_othe
     // a field this schema does not have, and a name that is not a window ID.
     fs::write(
         tabs.join("3.json"),
-        r#"{"published_at_ms":1789884000789,"schema":2,"tabs":[],"window_id":3}"#,
+        r#"{"published_at_ms":1789884000789,"schema":3,"tabs":[],"window_id":3}"#,
     )
     .expect("write future window");
     fs::write(
@@ -716,6 +719,233 @@ fn attention_tabs_reads_a_file_the_plugin_encoder_wrote() {
     assert_eq!(windows[0]["window_id"], 0);
     assert_eq!(windows[0]["tabs"][0]["marker_ids"], json!([v2_id]));
     assert_eq!(windows[0]["tabs"][1]["marker_ids"], json!(["4", "9"]));
+}
+
+#[test]
+fn lua_tab_publication_round_trips_identity() {
+    let scratch = Scratch::new();
+    let socket = scratch.0.join("gui.sock");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    let state = scratch.0.join("state");
+    fs::create_dir_all(&state).unwrap();
+    let descriptor = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .env_clear()
+        .args(["tab-source", "--socket", socket.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(descriptor.status.success());
+    let response: Value = serde_json::from_slice(&descriptor.stdout).unwrap();
+    let encoded = Command::new("wezterm")
+        .args([
+            "--config-file",
+            &repo_file("tests/lua/support/write_tab_publication.lua"),
+            "show-keys",
+            "--lua",
+        ])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("WEZTERM_ATTENTION_DIR", &state)
+        .env("ATTENTION_REPO", env!("CARGO_MANIFEST_DIR"))
+        .env(
+            "ATTENTION_TAB_SOURCE_RESPONSE",
+            String::from_utf8(descriptor.stdout).unwrap(),
+        )
+        .output()
+        .unwrap();
+    assert!(
+        encoded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&encoded.stderr)
+    );
+    let (windows, diagnostics) = wezterm_attention::query::read_tab_publications(&state).unwrap();
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        windows.len(),
+        1,
+        "encoder stderr: {}",
+        String::from_utf8_lossy(&encoded.stderr)
+    );
+    let window = serde_json::to_value(&windows[0]).unwrap();
+    assert_eq!(window["source"], response["result"]);
+    assert_eq!(window["tabs"][0]["number"], 11);
+    assert_eq!(window["tabs"][1]["number"], 4);
+    assert!(window.get("relative_path").is_none());
+    let file = state.join("tabs").join(format!(
+        "{}-0.json",
+        response["result"]["incarnation_id"].as_str().unwrap()
+    ));
+    assert!(file.exists());
+    // Same-number legacy data remains distinct, even when the new writer exists.
+    fs::write(
+        state.join("tabs/0.json"),
+        r#"{"schema":1,"window_id":0,"published_at_ms":1,"tabs":[]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        wezterm_attention::query::read_tab_publications(&state)
+            .unwrap()
+            .0
+            .len(),
+        2
+    );
+    let mut bad: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    bad["source"]["realm_id"] = json!("0".repeat(64));
+    fs::write(&file, serde_json::to_vec(&bad).unwrap()).unwrap();
+    let (valid, refused) = wezterm_attention::query::read_tab_publications(&state).unwrap();
+    assert_eq!(valid.len(), 1);
+    assert_eq!(refused.len(), 1);
+}
+
+#[test]
+#[ignore = "opens a disposable GUI with isolated configuration and state"]
+fn disposable_gui_publishes_its_own_source() {
+    let wezterm = executables::resolve("wezterm");
+    let child_path = executables::child_path(&[], &[&wezterm]);
+    struct Gui(std::process::Child);
+    impl Drop for Gui {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let scratch = Scratch::new();
+    let package = scratch.0.join("package");
+    for directory in ["plugin", "protocol", "bin", "libexec"] {
+        fs::create_dir_all(package.join(directory)).unwrap();
+    }
+    for entry in fs::read_dir(repo_file("plugin")).unwrap() {
+        let entry = entry.unwrap();
+        if entry
+            .path()
+            .extension()
+            .is_some_and(|extension| extension == "lua")
+        {
+            fs::copy(entry.path(), package.join("plugin").join(entry.file_name())).unwrap();
+        }
+    }
+    fs::copy(
+        repo_file("protocol/v2.json"),
+        package.join("protocol/v2.json"),
+    )
+    .unwrap();
+    fs::copy(repo_file("bin/attention"), package.join("bin/attention")).unwrap();
+    fs::copy(
+        env!("CARGO_BIN_EXE_attention"),
+        package.join("libexec/attention-rs"),
+    )
+    .unwrap();
+    let config = scratch.0.join("config.lua");
+    let report = scratch.0.join("report.json");
+    let gui_log = scratch.0.join("gui.log");
+    let state = scratch.0.join("state");
+    fs::write(
+        &config,
+        r#"
+local wezterm = require('wezterm')
+local probe = { spawned=0 }
+local spawn = wezterm.run_child_process
+wezterm.run_child_process = function(args)
+  probe.spawned = probe.spawned + 1
+  local ok, out, err = spawn(args)
+  probe.success = ok
+  return ok, out, err
+end
+wezterm.log_error = function(message) probe.log = message end
+package.path = os.getenv('ATTENTION_GUI_PACKAGE') .. '/?/init.lua;' .. package.path
+local attention = require('plugin')
+local config = {
+  check_for_updates=false, automatically_reload_config=false,
+  status_update_interval=100, initial_cols=60, initial_rows=12,
+  window_close_confirmation='NeverPrompt', default_prog={'/bin/sleep','120'},
+}
+attention.apply_to_config(config, {
+  dir=os.getenv('ATTENTION_GUI_STATE'), review_key=false, auto_clear={}, request_redraw=false,
+})
+wezterm.on('update-status', function(window)
+  local source = attention._internal.tab_source()
+  if source then window:set_right_status('source acquired') end
+    local file = assert(io.open(os.getenv('ATTENTION_GUI_REPORT'), 'w'))
+    file:write(wezterm.json_encode({source=source, probe=probe, socket=os.getenv('WEZTERM_UNIX_SOCKET'), window_id=window:window_id()}))
+    file:close()
+end)
+return config
+"#,
+    )
+    .unwrap();
+    let mut gui = Gui(Command::new(&wezterm)
+        .env_clear()
+        .env("PATH", &child_path)
+        .env("ATTENTION_GUI_PACKAGE", &package)
+        .env("ATTENTION_GUI_STATE", &state)
+        .env("ATTENTION_GUI_REPORT", &report)
+        .args([
+            "--config-file",
+            config.to_str().unwrap(),
+            "start",
+            "--always-new-process",
+            "--no-auto-connect",
+            "--class",
+        ])
+        .arg(format!("attention-test-{}", Uuid::new_v4()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(fs::File::create(&gui_log).unwrap())
+        .spawn()
+        .unwrap());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (observation, windows) = loop {
+        if let Ok(bytes) = fs::read(&report)
+            && let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+            && let Ok((windows, diagnostics)) =
+                wezterm_attention::query::read_tab_publications(&state)
+            && diagnostics.is_empty()
+            && windows.iter().any(|window| window.source.is_some())
+        {
+            break (value, windows);
+        }
+        assert!(
+            gui.0.try_wait().unwrap().is_none(),
+            "disposable GUI exited before publication"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "GUI did not publish a source: report={}, log={}",
+            fs::read_to_string(&report).unwrap_or_default(),
+            fs::read_to_string(&gui_log).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let source = &observation["source"];
+    let listing = Command::new(&wezterm)
+        .env_clear()
+        .env(
+            "WEZTERM_UNIX_SOCKET",
+            source["socket_path"].as_str().unwrap(),
+        )
+        .args([
+            "--skip-config",
+            "cli",
+            "--no-auto-start",
+            "list",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(listing.status.success());
+    let rows: Vec<Value> = serde_json::from_slice(&listing.stdout).unwrap();
+    assert!(
+        rows.iter()
+            .any(|row| row["window_id"] == observation["window_id"])
+    );
+    assert!(
+        windows
+            .iter()
+            .any(|window| serde_json::to_value(&window.source).unwrap() == *source)
+    );
+    println!("GUI source acquisition, real formatter publication and exact-socket window ID agree");
+    assert_eq!(observation["probe"]["spawned"], 1);
+    assert_eq!(observation["probe"]["success"], true);
 }
 
 #[test]

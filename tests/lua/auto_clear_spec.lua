@@ -737,6 +737,81 @@ local function rendered_text(rendered)
   return nil
 end
 
+local function tab_source_response(socket, incarnation)
+  return '{"schema":1,"command":"tab-source","status":"ok","complete":true,"result":{'
+    .. '"socket_path":' .. encode_json_string(socket) .. ',"realm_id":"' .. internal.sha256(socket)
+    .. '","incarnation_id":"' .. string.rep(incarnation or "a", 64) .. '"},"diagnostics":[]}'
+end
+
+test("tab source acquisition is single flight and rejects stale completion", function()
+  local previous = wezterm.run_child_process
+  internal.reset_tab_source()
+  local calls = 0
+  wezterm.run_child_process = function(args)
+    calls = calls + 1
+    internal.acquire_tab_source("/test/gui.sock")
+    assert(calls == 1, "another window must not start overlapping acquisition")
+    return true, tab_source_response(args[4]), ""
+  end
+  internal.acquire_tab_source("/test/gui.sock")
+  assert(calls == 1 and internal.tab_source().socket_path == "/test/gui.sock")
+  internal.acquire_tab_source("/test/gui.sock")
+  assert(calls == 1, "successful identity is reused")
+  internal.reset_tab_source()
+  wezterm.run_child_process = function(args)
+    internal.reset_tab_source()
+    return true, tab_source_response(args[4]), ""
+  end
+  internal.acquire_tab_source("/test/gui.sock")
+  assert(internal.tab_source() == nil, "a late completion cannot revive a previous generation")
+  wezterm.run_child_process = previous
+  internal.reset_tab_source()
+end)
+
+test("failed source acquisition preserves legacy publication and backs off", function()
+  local previous = wezterm.run_child_process
+  internal.reset_tab_source()
+  local calls = 0
+  wezterm.run_child_process = function() calls = calls + 1; return false, "", "unused failure text" end
+  internal.acquire_tab_source("/test/failed.sock")
+  internal.acquire_tab_source("/test/failed.sock")
+  assert(calls == 1 and internal.tab_source() == nil, "retry waits for its backoff")
+  local tab = gui_tab({window_id=9790,tab_id=9791,tab_index=0,panes={9792}})
+  format_tab_title(tab, {tab})
+  assert(read_tab_publication(9790).schema == 1)
+  assert(not internal.parse_tab_source_response(tab_source_response("/test/gui.sock"):gsub('"complete":true', '"complete":false')))
+  assert(not internal.parse_tab_source_response(tab_source_response("/test/gui.sock"):gsub('"realm_id":"[a-f0-9]+"', '"realm_id":"' .. string.rep("0",64) .. '"')))
+  assert(not internal.parse_tab_source_response('{}'))
+  wezterm.run_child_process = previous
+  internal.reset_tab_source()
+  drain_errors()
+end)
+
+test("a source change republishes unchanged order without changing content time", function()
+  local previous = wezterm.run_child_process
+  internal.reset_tab_source()
+  local tab = gui_tab({window_id=9793,tab_id=9794,tab_index=0,panes={9795}})
+  format_tab_title(tab, {tab})
+  local legacy = read_tab_publication(9793)
+  wezterm.run_child_process = function(args) return true, tab_source_response(args[4]), "" end
+  internal.acquire_tab_source("/test/gui.sock")
+  format_tab_title(tab, {tab})
+  local file = test_dir .. "/tabs/" .. string.rep("a",64) .. "-9793.json"
+  local publication = decode_json(assert(read_path(file)))
+  assert(publication.schema == 2 and publication.source.socket_path == "/test/gui.sock")
+  assert(publication.published_at_ms == legacy.published_at_ms)
+  assert(path_exists(tab_publication_path(9793)), "legacy publications are not guessed away")
+  local foreign = test_dir .. "/tabs/" .. string.rep("b",64) .. "-9793.json"
+  local out = assert(io.open(foreign,"w")); out:write("foreign"); out:close()
+  local polling = window_double({window_id=9799,tabs={},focused=false})
+  attention.poll(polling, {gui_windows={polling}})
+  assert(not path_exists(file), "owned source-specific file is withdrawn")
+  assert(read_path(foreign) == "foreign", "another source's equal window id is untouched")
+  os.remove(foreign)
+  wezterm.run_child_process = previous
+  internal.reset_tab_source()
+end)
+
 test("a window publishes its drawn order once every one of its tabs is drawn", function()
   write_marker(9820, "stop")
   poll({ 9820 })
@@ -1374,13 +1449,14 @@ test("the registered update-status handler resolves current pane before acknowle
   -- A second, independent copy of the plugin: apply_to_config only registers
   -- handlers once per module instance.
   local second = dofile(repo_root .. "/plugin/init.lua")
+  local first_new_handler = #(handlers["update-status"] or {}) + 1
   second.apply_to_config({}, { dir = test_dir, review_key = false })
-
-  local update_status = handlers["update-status"][#handlers["update-status"]]
   write_marker(921, "notify", "publication-a")
 
   local w = window_double({ tabs = { { 921 } }, focused = true, active_pane_id = 921 })
-  update_status(w, mux_pane(921))
+  for index = first_new_handler, #handlers["update-status"] do
+    handlers["update-status"][index](w, mux_pane(921))
+  end
 
   assert(w.active_pane_calls == 1, "the handler must not trust its captured event pane")
   assert(marker_exists(921), "the canonical marker should remain")

@@ -328,6 +328,9 @@ local runtime_api = runtime_state.bind({
   defaults = defaults,
   wezterm = wezterm,
   protocol = protocol,
+  decode_json = decode_json,
+  sha256 = sha256,
+  is_hex64 = is_hex64,
   plugin_root = plugin_root,
   diagnostic = diagnostic,
   report_error_once = report_error_once,
@@ -495,6 +498,7 @@ function M.apply_to_config(config, opts)
   -- Resolve renderer: support both new "renderer" and legacy "format_tab_title"
   local renderer = opts.renderer or defaults.renderer
   if opts.format_tab_title == false then renderer = "manual" end
+  runtime_api.reset_tab_source()
 
   local title_formatter = opts.title_formatter -- optional user callback
 
@@ -542,6 +546,10 @@ function M.apply_to_config(config, opts)
   -- ── Renderer: format-tab-title ────────────────────────────────────────
 
   if renderer == "tab" then
+    -- This callback may yield; pane-state polling has already finished in its own callback.
+    wezterm.on("update-status", function()
+      runtime_api.acquire_tab_source(os.getenv("WEZTERM_UNIX_SOCKET"))
+    end)
     wezterm.on("format-tab-title", function(tab, tabs, panes, cfg, hover, max_width)
       -- Read-only. WezTerm may call this at any moment, including for a window
       -- the user is not looking at, so acknowledgement belongs in poll() where
@@ -571,7 +579,7 @@ function M.apply_to_config(config, opts)
       -- only when what they draw has changed: an ordinary redraw composes a
       -- list and compares it, and touches no file.
       local order, window_id = drawn_tab_order(tab, tabs, marker_ids, rendered)
-      if order then publish_tab_order(dir, window_id, order) end
+      if order then publish_tab_order(dir, window_id, order, runtime_api.tab_source()) end
 
       return rendered
     end)
@@ -695,6 +703,10 @@ end
 
 -- Internal seams, exposed for the LuaJIT specs only. Not public API.
 M._internal = {
+  tab_source = runtime_api.tab_source,
+  reset_tab_source = runtime_api.reset_tab_source,
+  acquire_tab_source = runtime_api.acquire_tab_source,
+  parse_tab_source_response = runtime_api.parse_tab_source_response,
   lifecycle_facet = reader_api.lifecycle_facet,
   acknowledge_focused_pane = acknowledge_focused_pane,
   resolve_visible_attention = resolve_visible_attention,

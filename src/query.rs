@@ -1602,6 +1602,9 @@ pub struct TabPublication {
     pub window_id: u64,
     pub published_at_ms: u64,
     pub tabs: Vec<PublishedTab>,
+    pub source: Option<TabSource>,
+    #[serde(skip)]
+    pub(crate) relative_path: PathBuf,
 }
 
 /// One drawn tab: the number the bar printed, the text it drew, and the ids the
@@ -1615,7 +1618,7 @@ pub struct PublishedTab {
     pub marker_ids: Vec<String>,
 }
 
-const TAB_PUBLICATION_SCHEMA: u64 = 1;
+const TAB_PUBLICATION_SCHEMA: u64 = 2;
 
 /// Read every tab order published under `<root>/tabs`.
 ///
@@ -1665,11 +1668,18 @@ pub fn read_tab_publications(root: &Path) -> Result<(Vec<TabPublication>, Vec<Di
                 continue;
             }
         }
-        let window_id = path
+        let stem = path
             .file_stem()
             .and_then(|stem| stem.to_str())
-            .filter(|stem| canonical_decimal(stem, limits.canonical_decimal_max_digits))
-            .and_then(|stem| stem.parse::<u64>().ok());
+            .unwrap_or("");
+        let (incarnation, id) = match stem.split_once('-') {
+            Some((incarnation, id)) if hex64(incarnation) => (Some(incarnation), id),
+            None => (None, stem),
+            _ => (None, ""),
+        };
+        let window_id = canonical_decimal(id, limits.canonical_decimal_max_digits)
+            .then(|| id.parse::<u64>().ok())
+            .flatten();
         let Some(window_id) = window_id else {
             diagnostics.push(diagnostic(
                 "record_invalid",
@@ -1678,10 +1688,15 @@ pub fn read_tab_publications(root: &Path) -> Result<(Vec<TabPublication>, Vec<Di
             continue;
         };
         match read_record_typed(&path, None, &RecordIdentity::unscoped()) {
-            RecordRead::Present(value) => match tab_publication(&value, window_id, limits) {
-                Ok(window) => windows.push(window),
-                Err(error) => diagnostics.push(error.diagnostic),
-            },
+            RecordRead::Present(value) => {
+                match tab_publication(&value, window_id, incarnation, limits) {
+                    Ok(mut window) => {
+                        window.relative_path = Path::new("tabs").join(format!("{stem}.json"));
+                        windows.push(window);
+                    }
+                    Err(error) => diagnostics.push(error.diagnostic),
+                }
+            }
             // Published and removed between the listing and the read. The window
             // it described is gone or is about to publish again.
             RecordRead::Missing => {}
@@ -1690,7 +1705,11 @@ pub fn read_tab_publications(root: &Path) -> Result<(Vec<TabPublication>, Vec<Di
             | RecordRead::Unsupported(error) => diagnostics.push(error.diagnostic),
         }
     }
-    windows.sort_by_key(|window| window.window_id);
+    windows.sort_by(|a, b| {
+        a.window_id
+            .cmp(&b.window_id)
+            .then_with(|| a.source.cmp(&b.source))
+    });
     Ok((windows, diagnostics))
 }
 
@@ -1734,6 +1753,7 @@ fn published_marker_id(text: &str, pane_id_max_digits: usize) -> bool {
 fn tab_publication(
     value: &Value,
     window_id: u64,
+    incarnation: Option<&str>,
     limits: &crate::protocol::Limits,
 ) -> Result<TabPublication> {
     let invalid = || AttentionError::new("record_invalid", "tab publication is invalid");
@@ -1748,12 +1768,12 @@ fn tab_publication(
             "tab publication schema is unsupported",
         ));
     }
-    if schema != TAB_PUBLICATION_SCHEMA
+    if !matches!(schema, 1 | 2)
         || !object.keys().all(|field| {
             matches!(
                 field.as_str(),
                 "schema" | "window_id" | "published_at_ms" | "tabs"
-            )
+            ) || (schema == 2 && field == "source")
         })
         // A file that names a window other than the one it is filed under
         // describes neither of them.
@@ -1761,6 +1781,26 @@ fn tab_publication(
     {
         return Err(invalid());
     }
+    let source = if schema == 2 {
+        let source: TabSource =
+            serde_json::from_value(object.get("source").ok_or_else(invalid)?.clone())
+                .map_err(|_| invalid())?;
+        if !Path::new(&source.socket_path).is_absolute()
+            || source.socket_path.contains('\0')
+            || !hex64(&source.realm_id)
+            || !hex64(&source.incarnation_id)
+            || crate::protocol::sha256_hex(source.socket_path.as_bytes()) != source.realm_id
+            || incarnation != Some(source.incarnation_id.as_str())
+        {
+            return Err(invalid());
+        }
+        Some(source)
+    } else {
+        if incarnation.is_some() {
+            return Err(invalid());
+        }
+        None
+    };
     let published_at_ms = object
         .get("published_at_ms")
         .and_then(Value::as_u64)
@@ -1816,6 +1856,8 @@ fn tab_publication(
         window_id,
         published_at_ms,
         tabs,
+        source,
+        relative_path: PathBuf::new(),
     })
 }
 

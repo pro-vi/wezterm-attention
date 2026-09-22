@@ -1231,6 +1231,44 @@ fn write_tab_order(root: &Path, window_id: u64, marker_ids: &[&str]) -> PathBuf 
     path
 }
 
+#[test]
+fn sweep_uses_validated_tab_publication_path() {
+    let setup = Setup::new();
+    let root = state_root(&setup.env).unwrap();
+    fs::create_dir_all(root.join("tabs")).unwrap();
+    let source = serde_json::to_value(
+        wezterm_attention::query::read_tab_source(&setup.env["WEZTERM_UNIX_SOCKET"]).unwrap(),
+    )
+    .unwrap();
+    let relative = format!("tabs/{}-7.json", source["incarnation_id"].as_str().unwrap());
+    let file = root.join(&relative);
+    fs::write(
+        &file,
+        serde_json::to_vec(
+            &json!({"schema":2,"window_id":7,"published_at_ms":1,"source":source,"tabs":[]}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let legacy = write_tab_order(&root, 7, &["17"]);
+    let (preview, _) = setup.run_sweep(false, None);
+    assert!(
+        preview
+            .details
+            .iter()
+            .any(|row| row["path"] == relative && row["action"] == "collect")
+    );
+    assert!(file.exists() && legacy.exists());
+    let (applied, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000749"));
+    assert!(
+        applied
+            .details
+            .iter()
+            .any(|row| row["path"] == relative && row["action"] == "collected")
+    );
+    assert!(!file.exists() && legacy.exists());
+}
+
 fn tab_order_detail(details: &[Value], window_id: u64) -> &Value {
     details
         .iter()

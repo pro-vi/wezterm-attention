@@ -1071,7 +1071,7 @@ fn collect_tab_orders(
     };
     diagnostics.extend(read_diagnostics);
     for window in windows {
-        let relative = format!("tabs/{}.json", window.window_id);
+        let relative = window.relative_path.to_string_lossy().into_owned();
         let mut addresses: BTreeMap<(String, String, String), PaneAddress> = BTreeMap::new();
         let mut without_address = false;
         for marker_id in window.tabs.iter().flat_map(|tab| tab.marker_ids.iter()) {

@@ -121,6 +121,7 @@ return function(context)
   --- The composed list last written for each window, so an unchanged bar costs
   --- no file work. Keyed by path, because that is what a write would replace.
   local published_tab_lists = {}
+  local drawn_tab_lists = {}
 
   --- One encoding per drawn tab. The formatter is called once per tab, so
   --- without this every tab's text would be escaped again on every one of those
@@ -155,20 +156,27 @@ return function(context)
   --- refreshes `published_at_ms` while the bar draws the same thing. The write
   --- happens only when the composed list changes, because the caller is the
   --- GUI thread's tab formatter.
-  local function publish_tab_order(dir, window_id, tabs)
+  local function publish_tab_order(dir, window_id, tabs, source)
     local rows = {}
     for index, entry in ipairs(tabs) do rows[index] = encode_tab(entry) end
     local list = "[" .. table.concat(rows, ",") .. "]"
-    local path = dir .. "/tabs/" .. integer(window_id) .. ".json"
-    if published_tab_lists[path] == list then return false end
+    local window_key = dir .. "/tabs/" .. integer(window_id)
+    local path = dir .. "/tabs/"
+      .. (source and (source.incarnation_id .. "-") or "") .. integer(window_id) .. ".json"
+    if published_tab_lists[path] and published_tab_lists[path].list == list then return false end
+    local previous = drawn_tab_lists[window_key]
+    local written_at = previous and previous.list == list and previous.written_at or now_ms()
     -- Keys in sorted order, as json_value writes them.
     local body = table.concat({
-      '{"published_at_ms":', integer(now_ms()),
-      ',"schema":1,"tabs":', list,
+      '{"published_at_ms":', integer(written_at),
+      ',"schema":', source and "2" or "1",
+      source and (',"source":' .. json_value(source)) or "",
+      ',"tabs":', list,
       ',"window_id":', integer(window_id), "}",
     })
     if not replace_file(path, body, "publish-tabs") then return false end
-    published_tab_lists[path] = list
+    published_tab_lists[path] = { list = list, window_id = tostring(window_id), window_key = window_key }
+    drawn_tab_lists[window_key] = { list = list, written_at = written_at }
     return true
   end
 
@@ -181,11 +189,11 @@ return function(context)
   --- id publish again.
   local function withdraw_closed_tab_orders(dir, live)
     local prefix = dir .. "/tabs/"
-    for path in pairs(published_tab_lists) do
-      local window_id = path:sub(1, #prefix) == prefix
-        and path:sub(#prefix + 1):match("^(%d+)%.json$")
+    for path, publication in pairs(published_tab_lists) do
+      local window_id = path:sub(1, #prefix) == prefix and publication.window_id
       if window_id and not live[window_id] then
         published_tab_lists[path] = nil
+        drawn_tab_lists[publication.window_key] = nil
         local removed, err = os.remove(path)
         if not removed then
           -- A file already gone is the wanted state; only a file that stays is

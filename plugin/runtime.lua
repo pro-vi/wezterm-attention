@@ -327,6 +327,53 @@ return function()
     local publish_schedule_by_realm = {}
     local publish_domains_by_window = {}
     local publish_backoff_seconds = { 2, 5, 10, 30 }
+    local tab_source_state = { retry_index = 1, retry_at = 0 }
+
+    local function reset_tab_source()
+      tab_source_state = { retry_index = 1, retry_at = 0 }
+    end
+
+    local function parse_tab_source_response(stdout)
+      if type(stdout) ~= "string" or #stdout > protocol.limits.max_json_bytes then return nil end
+      local value = context.decode_json(stdout)
+      if type(value) ~= "table" or value.schema ~= 1 or value.command ~= "tab-source"
+          or value.status ~= "ok" or value.complete ~= true then return nil end
+      local source = value.result
+      if type(source) ~= "table" or type(source.socket_path) ~= "string"
+          or source.socket_path:sub(1, 1) ~= "/" or source.socket_path:find("%z")
+          or not context.is_hex64(source.realm_id) or not context.is_hex64(source.incarnation_id)
+          or context.sha256(source.socket_path) ~= source.realm_id then return nil end
+      for key in pairs(source) do
+        if key ~= "socket_path" and key ~= "realm_id" and key ~= "incarnation_id" then return nil end
+      end
+      return source
+    end
+
+    local function acquire_tab_source(socket)
+      if type(socket) ~= "string" or socket:sub(1, 1) ~= "/" or not plugin_root
+          or type(wezterm.run_child_process) ~= "function" then return end
+      if tab_source_state.socket ~= socket then
+        tab_source_state = { socket = socket, retry_index = 1, retry_at = 0 }
+      end
+      local state = tab_source_state
+      if state.source or state.pending or now_ms() < state.retry_at then return end
+      local token = {}
+      state.pending = token
+      local ok, success, stdout = pcall(wezterm.run_child_process,
+        { plugin_root .. "/bin/attention", "tab-source", "--socket", socket })
+      if tab_source_state ~= state or state.pending ~= token then return end
+      state.pending = nil
+      local source = ok and success and parse_tab_source_response(stdout) or nil
+      if source then
+        state.source = source
+      else
+        local delay = publish_backoff_seconds[math.min(state.retry_index, #publish_backoff_seconds)]
+        state.retry_at = now_ms() + delay * 1000
+        state.retry_index = state.retry_index + 1
+        report_error_once("tab-source:" .. socket,
+          "cannot identify the tab publisher's GUI socket; publishing without source identity")
+      end
+    end
 
     local function spawn_republish(domain, socket, root)
       if type(wezterm.background_child_process) ~= "function" then
@@ -1302,6 +1349,10 @@ return function()
     -- way `show_tab_index_in_tab_bar = false` does for the default renderer.
 
     return {
+      tab_source = function() return tab_source_state.source end,
+      reset_tab_source = reset_tab_source,
+      acquire_tab_source = acquire_tab_source,
+      parse_tab_source_response = parse_tab_source_response,
       same_cached_attention = same_cached_attention,
       observe_pane = observe_pane,
       tab_panes_containing_read = tab_panes_containing_read,
