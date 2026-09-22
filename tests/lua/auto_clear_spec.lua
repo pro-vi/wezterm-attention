@@ -840,6 +840,72 @@ test("two windows publish their own orders into their own files", function()
     "each file holds its own window's panes")
 end)
 
+--- Publish one window's order the way the bar does, then poll from another
+--- window with the given GUI-window inventory, which is how a closed window is
+--- noticed: its own bar never redraws.
+local function publish_window(window_id, tab_id, pane_id)
+  local tab = gui_tab({ window_id = window_id, tab_id = tab_id, tab_index = 0, panes = { pane_id } })
+  format_tab_title(tab, { tab })
+  assert(path_exists(tab_publication_path(window_id)), "the window should be published")
+end
+
+local function poll_with_inventory(polling_window_id, live_window_ids)
+  local live = {}
+  for index, id in ipairs(live_window_ids) do
+    live[index] = window_double({ window_id = id, tabs = {}, focused = false })
+  end
+  local polling = window_double({ window_id = polling_window_id, tabs = { { 9899 } }, focused = false })
+  attention.poll(polling, { gui_windows = function() return live end })
+end
+
+test("a window that has closed has its tab order withdrawn by a surviving window's poll", function()
+  publish_window(9805, 9818, 9827)
+  publish_window(9806, 9819, 9828)
+
+  poll_with_inventory(9806, { 9805, 9806 })
+  assert(path_exists(tab_publication_path(9805)) and path_exists(tab_publication_path(9806)),
+    "a live window keeps its tab order")
+
+  poll_with_inventory(9806, { 9806 })
+  assert(not path_exists(tab_publication_path(9805)), "the closed window's file is withdrawn")
+  assert(path_exists(tab_publication_path(9806)), "the polling window's own file stays")
+
+  poll_with_inventory(9806, { 9806 })
+  assert(not path_exists(tab_publication_path(9805)), "a second poll finds nothing to do")
+end)
+
+test("a tab order this process did not write is left for sweep", function()
+  local foreign = tab_publication_path(9807)
+  local file = assert(io.open(foreign, "w"))
+  file:write('{"published_at_ms":1,"schema":1,"tabs":[],"window_id":9807}\n')
+  file:close()
+
+  poll_with_inventory(9806, { 9806 })
+  assert(path_exists(foreign), "another process's file is not this process's to withdraw")
+  os.remove(foreign)
+end)
+
+test("an unreadable window inventory withdraws nothing", function()
+  publish_window(9808, 9820, 9829)
+  local polling = window_double({ window_id = 9806, tabs = { { 9899 } }, focused = false })
+  attention.poll(polling, { gui_windows = function() error("inventory unavailable") end })
+  assert(path_exists(tab_publication_path(9808)),
+    "no inventory means no window is known to be closed")
+  poll_with_inventory(9806, { 9806 })
+  assert(not path_exists(tab_publication_path(9808)), "the next readable inventory withdraws it")
+end)
+
+test("a window id reused after withdrawal publishes again", function()
+  publish_window(9809, 9821, 9830)
+  poll_with_inventory(9806, { 9806 })
+  assert(not path_exists(tab_publication_path(9809)), "withdrawn")
+
+  publish_window(9809, 9821, 9830)
+  assert(path_exists(tab_publication_path(9809)),
+    "the same composed list must be written again once its file was withdrawn")
+  poll_with_inventory(9806, { 9806 })
+end)
+
 test("a v2 pane publishes its cache key, not the local pane id", function()
   materialize_state_case(protocol_fixture.state_case)
   attention.poll(window_double({ tabs = { { {

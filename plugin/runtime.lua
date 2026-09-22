@@ -25,6 +25,7 @@ return function()
     local acknowledge_focused_v2_pane = context.acknowledge_focused_v2_pane
     local read_effective_marker = context.read_effective_marker
     local read_marker = context.read_marker
+    local withdraw_closed_tab_orders = context.withdraw_closed_tab_orders
     local marker_identity = context.marker_identity
     local clear_acknowledgement = context.clear_acknowledgement
     local write_acknowledgement = context.write_acknowledgement
@@ -483,12 +484,13 @@ return function()
       return keys
     end
 
-    local function prune_closed_publish_windows(current_window_key, opts)
+    local function prune_closed_publish_windows(current_window_key, opts, dir)
       local live = gui_window_keys(opts)
       if not live then return end
       -- The callback's window is authoritative even if WezTerm's inventory is
       -- between insertion and publication for a newly created GUI window.
       live[current_window_key] = true
+      withdraw_closed_tab_orders(dir, live)
       for window_key in pairs(seen_marker_ids_by_window) do
         if not live[window_key] then seen_marker_ids_by_window[window_key] = nil end
       end
@@ -871,7 +873,7 @@ return function()
       local mux_win = window:mux_window()
       if not mux_win then return end
       local window_key = redraw_window_key(window)
-      prune_closed_publish_windows(window_key, opts)
+      prune_closed_publish_windows(window_key, opts, dir)
 
       -- A tab that closes between this listing and its panes() call below is
       -- still in the list and already out of the mux, so panes() raises. That is

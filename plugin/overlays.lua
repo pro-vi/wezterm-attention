@@ -172,6 +172,35 @@ return function(context)
     return true
   end
 
+  --- Remove the tab orders this process published for windows no longer in
+  --- `live`, a set keyed by window id as a decimal string. A closed window's
+  --- bar never redraws, so nothing else would ever take its file back. Only a
+  --- file this process wrote is touched: another GUI process's file, or one
+  --- left behind by a process that has exited, is `attention sweep`'s to
+  --- collect. Forgetting the path is what lets a window that later reuses the
+  --- id publish again.
+  local function withdraw_closed_tab_orders(dir, live)
+    local prefix = dir .. "/tabs/"
+    for path in pairs(published_tab_lists) do
+      local window_id = path:sub(1, #prefix) == prefix
+        and path:sub(#prefix + 1):match("^(%d+)%.json$")
+      if window_id and not live[window_id] then
+        published_tab_lists[path] = nil
+        local removed, err = os.remove(path)
+        if not removed then
+          -- A file already gone is the wanted state; only a file that stays is
+          -- worth a line in the log.
+          local still_there = io.open(path, "r")
+          if still_there then
+            still_there:close()
+            report_error_once("withdraw-tabs:" .. path,
+              "cannot withdraw closed window's tab order " .. path .. ": " .. tostring(err))
+          end
+        end
+      end
+    end
+  end
+
   local function acknowledgement_path(dir, pane_id)
     return dir .. "/" .. pane_id .. ".ack"
   end
@@ -527,6 +556,7 @@ return function(context)
     next_v2_event_id = next_v2_event_id,
     write_v2_record = write_v2_record,
     publish_tab_order = publish_tab_order,
+    withdraw_closed_tab_orders = withdraw_closed_tab_orders,
     acknowledgement_path = acknowledgement_path,
     acknowledgement_tmp_path = acknowledgement_tmp_path,
     marker_identity = marker_identity,
