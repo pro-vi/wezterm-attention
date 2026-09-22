@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
@@ -1208,6 +1208,137 @@ fn a_replaced_marker_is_refused_not_collected() {
         "thinking\n"
     );
     assert!(root.join("42.ack").exists());
+}
+
+fn write_tab_order(root: &Path, window_id: u64, marker_ids: &[&str]) -> PathBuf {
+    let tabs = root.join("tabs");
+    fs::create_dir_all(&tabs).expect("create tabs directory");
+    let path = tabs.join(format!("{window_id}.json"));
+    let ids: Vec<Value> = marker_ids.iter().map(|id| json!(id)).collect();
+    let listed: Vec<Value> = if ids.is_empty() {
+        Vec::new()
+    } else {
+        vec![json!({"marker_ids": ids, "number": 1, "text": "tab"})]
+    };
+    fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "published_at_ms": 1, "schema": 1, "tabs": listed, "window_id": window_id
+        }))
+        .expect("tab order JSON"),
+    )
+    .expect("write tab order");
+    path
+}
+
+fn tab_order_detail(details: &[Value], window_id: u64) -> &Value {
+    details
+        .iter()
+        .find(|detail| detail["kind"] == "tab_order_collection" && detail["window_id"] == window_id)
+        .unwrap_or_else(|| panic!("no tab order detail for window {window_id}"))
+}
+
+#[test]
+fn sweep_collects_a_tab_order_only_when_every_pane_it_names_is_verified_absent() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    setup.processes.set(Presence::Absent);
+    let root = setup.root();
+    let (address, _) = pane_address(&setup.env).expect("address");
+    let v2 = |pane: &str| format!("v2:{}:{}:{pane}", address.realm_id, address.incarnation_id);
+
+    // Pane 42 is in the mux listing; 43 and 44 are not, and the process probe
+    // says they are gone.
+    let live = write_tab_order(&root, 7, &[&v2("42"), &v2("43")]);
+    let dead = write_tab_order(&root, 8, &[&v2("43"), &v2("44")]);
+    let v1 = write_tab_order(&root, 9, &["17"]);
+    let empty = write_tab_order(&root, 10, &[]);
+
+    let (preview, _) = setup.run_sweep(false, None);
+    assert_eq!(tab_order_detail(&preview.details, 7)["action"], "keep");
+    assert_eq!(tab_order_detail(&preview.details, 7)["reason"], "present");
+    assert_eq!(tab_order_detail(&preview.details, 8)["action"], "collect");
+    assert_eq!(tab_order_detail(&preview.details, 8)["path"], "tabs/8.json");
+    assert_eq!(
+        tab_order_detail(&preview.details, 9)["reason"],
+        "no_address"
+    );
+    // A window with no tabs has closed; an empty order is the bar's last draw.
+    assert_eq!(tab_order_detail(&preview.details, 10)["action"], "collect");
+    assert!(
+        live.exists() && dead.exists() && v1.exists() && empty.exists(),
+        "a preview writes nothing"
+    );
+
+    let (applied, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000721"));
+    assert_eq!(tab_order_detail(&applied.details, 8)["action"], "collected");
+    assert_eq!(
+        tab_order_detail(&applied.details, 10)["action"],
+        "collected"
+    );
+    assert!(
+        !dead.exists() && !empty.exists(),
+        "the dead windows' orders are collected"
+    );
+    assert!(live.exists() && v1.exists(), "everything else stays");
+}
+
+#[test]
+fn sweep_keeps_a_tab_order_whose_panes_could_not_be_probed() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    setup.processes.set(Presence::Unavailable);
+    let root = setup.root();
+    let (address, _) = pane_address(&setup.env).expect("address");
+    let unknown = write_tab_order(
+        &root,
+        11,
+        &[&format!(
+            "v2:{}:{}:43",
+            address.realm_id, address.incarnation_id
+        )],
+    );
+    let (applied, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000722"));
+    assert_eq!(tab_order_detail(&applied.details, 11)["action"], "keep");
+    assert_eq!(
+        tab_order_detail(&applied.details, 11)["reason"],
+        "unavailable"
+    );
+    assert!(unknown.exists());
+}
+
+#[test]
+fn a_realm_filtered_sweep_leaves_tab_orders_alone() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    setup.processes.set(Presence::Absent);
+    let root = setup.root();
+    let (address, _) = pane_address(&setup.env).expect("address");
+    let dead = write_tab_order(
+        &root,
+        12,
+        &[&format!(
+            "v2:{}:{}:43",
+            address.realm_id, address.incarnation_id
+        )],
+    );
+    let (result, _) = sweep(
+        &root,
+        Some(&address.realm_id),
+        true,
+        Some("00000000-0000-4000-8000-000000000723"),
+        &setup.clock,
+        &setup.panes,
+        Some(&setup.processes),
+    )
+    .expect("sweep");
+    assert!(
+        result
+            .details
+            .iter()
+            .all(|detail| detail["kind"] != "tab_order_collection")
+    );
+    assert!(dead.exists());
 }
 
 #[test]

@@ -13,7 +13,7 @@ use crate::identity::{PaneAddress, canonical_pane_id};
 use crate::protocol::{
     AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, manifest, sha256_hex,
 };
-use crate::query::{pane_presence, read_bindings_with_ports};
+use crate::query::{pane_presence, read_bindings_with_ports, read_tab_publications};
 use crate::records::{
     CommitPlan, RecordIdentity, Replacement, commit_nested_with, launch_path, pane_path,
     read_record, remove_file_durable, with_lock,
@@ -42,7 +42,10 @@ pub fn limit_sweep_preview(details: Vec<Value>, all_details: bool) -> (Vec<Value
     let mut leftover = Vec::new();
     let mut rest = Vec::new();
     for detail in details {
-        if detail.get("kind") == Some(&json!("projection_collection")) {
+        if matches!(
+            detail.get("kind").and_then(Value::as_str),
+            Some("projection_collection" | "tab_order_collection")
+        ) {
             leftover.push(detail);
         } else {
             rest.push(detail);
@@ -1042,6 +1045,115 @@ fn apply_projection_collection(
     })
 }
 
+/// A tab order whose writer has exited stays on disk for good: the writer
+/// withdraws its own files when a window closes, but nothing runs after the
+/// last window of a WezTerm process. It is collected here once every pane it
+/// names is verified absent, or once it names no tab at all: WezTerm closes a
+/// window whose last tab closes, so an empty order is the bar's final draw. A
+/// file naming a v1 marker id is kept, because a bare pane id has no realm to
+/// ask; so is one whose panes could not be probed. A file is not addressed by
+/// a realm, so a realm-filtered sweep leaves them all alone.
+fn collect_tab_orders(
+    root: &Path,
+    apply: bool,
+    panes: &dyn PaneLister,
+    processes: Option<&dyn ProcessProbe>,
+    presence_cache: &mut BTreeMap<(String, String, String), String>,
+    details: &mut Vec<Value>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let (windows, read_diagnostics) = match read_tab_publications(root) {
+        Ok(value) => value,
+        Err(error) => {
+            diagnostics.push(error.diagnostic);
+            return;
+        }
+    };
+    diagnostics.extend(read_diagnostics);
+    for window in windows {
+        let relative = format!("tabs/{}.json", window.window_id);
+        let mut addresses: BTreeMap<(String, String, String), PaneAddress> = BTreeMap::new();
+        let mut without_address = false;
+        for marker_id in window.tabs.iter().flat_map(|tab| tab.marker_ids.iter()) {
+            match v2_marker_address(marker_id) {
+                Some(address) => {
+                    let key = (
+                        address.realm_id.clone(),
+                        address.incarnation_id.clone(),
+                        address.pane_id.clone(),
+                    );
+                    addresses.insert(key, address);
+                }
+                None => without_address = true,
+            }
+        }
+        let mut keep = without_address.then_some("no_address");
+        if keep.is_none() {
+            for (key, address) in &addresses {
+                let presence = match presence_cache.get(key) {
+                    Some(cached) => cached.clone(),
+                    None => {
+                        let observed =
+                            pane_presence(root, address, Some(panes), processes, diagnostics);
+                        presence_cache.insert(key.clone(), observed.clone());
+                        observed
+                    }
+                };
+                match presence.as_str() {
+                    "verified_absent" => {}
+                    "present" => {
+                        keep = Some("present");
+                        break;
+                    }
+                    _ => keep = Some("unavailable"),
+                }
+            }
+        }
+        let detail = match keep {
+            Some(reason) => json!({
+                "kind": "tab_order_collection",
+                "window_id": window.window_id,
+                "path": relative,
+                "action": "keep",
+                "reason": reason,
+            }),
+            None if !apply => json!({
+                "kind": "tab_order_collection",
+                "window_id": window.window_id,
+                "path": relative,
+                "action": "collect",
+            }),
+            None => match remove_file_durable(&root.join(&relative)) {
+                Ok(_) => json!({
+                    "kind": "tab_order_collection",
+                    "window_id": window.window_id,
+                    "path": relative,
+                    "action": "collected",
+                }),
+                Err(error) => {
+                    diagnostics.push(error.diagnostic);
+                    continue;
+                }
+            },
+        };
+        details.push(detail);
+    }
+}
+
+/// The address a published `v2:<realm>:<incarnation>:<pane>` marker id names.
+/// The reader has already checked the shape; a v1 decimal id has no address.
+fn v2_marker_address(marker_id: &str) -> Option<PaneAddress> {
+    let mut parts = marker_id.strip_prefix("v2:")?.splitn(3, ':');
+    let realm_id = parts.next()?.to_owned();
+    let incarnation_id = parts.next()?.to_owned();
+    let pane_id = parts.next()?.to_owned();
+    Some(PaneAddress {
+        realm_id,
+        incarnation_id,
+        pane_id,
+    })
+}
+
 fn collect_projection_orphans(
     root: &Path,
     realm_filter: Option<&str>,
@@ -1168,6 +1280,17 @@ pub fn sweep(
     collect_projection_orphans(root, realm_filter, apply, &mut details, &mut diagnostics);
     let mut ended: BTreeMap<String, Vec<(String, PathBuf, bool)>> = BTreeMap::new();
     let mut presence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
+    if realm_filter.is_none() {
+        collect_tab_orders(
+            root,
+            apply,
+            panes,
+            processes,
+            &mut presence_cache,
+            &mut details,
+            &mut diagnostics,
+        );
+    }
     for binding_path in &files {
         let identity = match RecordIdentity::from_state_path(root, binding_path, "binding") {
             Ok(identity) => identity,

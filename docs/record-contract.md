@@ -36,7 +36,7 @@ v2/realms/<realm>/
           agents/<agent-key>.json
 ```
 
-State that is not addressed by a pane lives outside that tree and outside this manifest. The tab bar publishes the order it draws at `tabs/<window id>.json`, one file per GUI window; it names no pane address, carries no fence and no TTL, so it carries its own `schema` (currently 1) and is versioned separately from `record_schema`. That is the rule for any published fact with no address to validate against: a local schema field, not a manifest entry, because a record-tree change must not refuse a file that has nothing to do with it. `attention tabs` reads them. The process that wrote a file withdraws it when its window closes, and only its own files; a file whose writer has exited is collected by `attention sweep` when every pane it names is verified absent. See the [consumer guide](consumer-guide.md) for what the order does and does not promise.
+State that is not addressed by a pane lives outside that tree and outside this manifest. The tab bar publishes the order it draws at `tabs/<window id>.json`, one file per GUI window; it names no pane address, carries no fence and no TTL, so it carries its own `schema` (currently 1) and is versioned separately from `record_schema`. That is the rule for any published fact with no address to validate against: a local schema field, not a manifest entry, because a record-tree change must not refuse a file that has nothing to do with it. `attention tabs` reads them. The process that wrote a file withdraws it when its window closes, and only its own files; a file whose writer has exited is collected by `attention sweep` when every pane it names is verified absent, or when it names no tab at all. See the [consumer guide](consumer-guide.md) for what the order does and does not promise.
 
 The binding record is durable before its pointer. Rust provider/CLI transitions use the appropriate lock scopes and atomic per-file replacement. Lua acknowledgement and review operations validate their targets but use per-file atomic replacement or removal without those Rust locks; a read/check/write sequence is not a cross-writer transaction. Raw child and review IDs never become filenames.
 
@@ -116,7 +116,7 @@ time, and marking the live row conflicted would hide the pane the session now ru
 
 JSON responses contain `schema`, `command`, `status`, `complete`, `result`, and `diagnostics`.
 Default output is bounded. Use `--all` or `--all-details` only when complete detail is required.
-Sweep leftover `projection_collection` rows are listed in full even when other sweep details are truncated.
+Sweep leftover `projection_collection` and `tab_order_collection` rows are listed in full even when other sweep details are truncated.
 
 ## Trust boundary
 
