@@ -5,7 +5,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use wezterm_attention::protocol::{AttentionError, Diagnostic, Disposition};
-use wezterm_attention::query::read_bindings_with_ports;
+use wezterm_attention::query::read_bindings_timed;
 use wezterm_attention::wezterm::{
     Clock, SystemClock, SystemProcessProbe, SystemTtyWriter, WeztermPaneLister, default_ports,
 };
@@ -182,7 +182,7 @@ impl BindingField {
 
 fn bindings_help() -> String {
     format!(
-        "Example: attention bindings --all --fields address,provider,current\nFields: {}\ncomplete is false when rows were dropped (any mode) or a probe did not answer (--socket).\nDropped diagnostics are counted: result.diagnostic_count of result.total_diagnostic_count.\nIf truncated, narrow with --provider, raise --limit (maximum 1000), or explicitly use --all.\n--socket queries prevent WezTerm auto-start; --realm selects a recorded realm ID.",
+        "Example: attention bindings --all --fields address,provider,current\nFields: {}\ncomplete is false when rows were dropped (any mode) or a probe did not answer (--socket).\nDropped diagnostics are counted: result.diagnostic_count of result.total_diagnostic_count.\nresult.timing_ms says where the call's time went: pane_list (wezterm cli list), process_list (the process probe), records (the file walk).\nIf truncated, narrow with --provider, raise --limit (maximum 1000), or explicitly use --all.\n--socket queries prevent WezTerm auto-start; --realm selects a recorded realm ID.",
         BindingField::value_variants()
             .iter()
             .map(|field| field.name())
@@ -764,9 +764,9 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 }
                 Err(error) => return Err((Box::new(error), args.json, "bindings".to_owned())),
             };
-            let (scope, mut rows, diagnostics) = if let Some(socket) = &args.socket {
-                let (scope, rows, diagnostics) =
-                    match wezterm_attention::query::read_bindings_for_socket_with_ports(
+            let (scope, mut rows, diagnostics, timing) = if let Some(socket) = &args.socket {
+                let (scope, rows, diagnostics, timing) =
+                    match wezterm_attention::query::read_bindings_for_socket_timed(
                         &root,
                         socket,
                         Some(&wezterm_attention::wezterm::ExistingWeztermPaneLister),
@@ -779,12 +779,12 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                             ));
                         }
                     };
-                (Some(scope), rows, diagnostics)
+                (Some(scope), rows, diagnostics, timing)
             } else {
-                let (rows, diagnostics) =
-                    read_bindings_with_ports(&root, Some(&panes), Some(&processes))
+                let (rows, diagnostics, timing) =
+                    read_bindings_timed(&root, Some(&panes), Some(&processes))
                         .map_err(|error| (Box::new(error), args.json, "bindings".to_owned()))?;
-                (None, rows, diagnostics)
+                (None, rows, diagnostics, timing)
             };
             if let Some(realm) = args.realm {
                 rows.retain(|row| row.address.realm_id == realm);
@@ -811,6 +811,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 "truncated": truncated,
                 "diagnostic_count": shown_diagnostics.len(),
                 "total_diagnostic_count": diagnostics.len(),
+                "timing_ms": timing.as_millis(),
             });
             if let Some(fields) = fields {
                 for row in result["rows"]

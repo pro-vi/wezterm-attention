@@ -121,6 +121,7 @@ history and is left out of that comparison: resuming a session in a new pane lea
 time, and marking the live row conflicted would hide the pane the session now runs in.
 
 JSON responses contain `schema`, `command`, `status`, `complete`, `result`, and `diagnostics`.
+`bindings` also reports where its time went, in `result.timing_ms`: `pane_list` (inside `wezterm cli list`), `process_list` (inside the process probe) and `records` (the rest: finding and reading the records). It is on every answer, without a flag or threshold, so a slow call names its phase.
 Default output is bounded. Use `--all` or `--all-details` only when complete detail is required.
 Sweep leftover `projection_collection` and `tab_order_collection` rows are listed in full even when other sweep details are truncated.
 

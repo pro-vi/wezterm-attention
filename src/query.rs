@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -990,6 +991,24 @@ pub fn read_bindings_for_socket_with_ports(
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
 ) -> Result<(BindingQueryScope, Vec<BindingRow>, Vec<Diagnostic>)> {
+    let (scope, rows, diagnostics, _) =
+        read_bindings_for_socket_timed(root, socket, panes, processes)?;
+    Ok((scope, rows, diagnostics))
+}
+
+/// The socket-scoped query with where its time went. See [`read_bindings_timed`].
+pub fn read_bindings_for_socket_timed(
+    root: &Path,
+    socket: &str,
+    panes: Option<&dyn PaneLister>,
+    processes: Option<&dyn ProcessProbe>,
+) -> Result<(
+    BindingQueryScope,
+    Vec<BindingRow>,
+    Vec<Diagnostic>,
+    BindingTiming,
+)> {
+    let started = Instant::now();
     validate_socket_selector(socket)?;
     let (realm_id, incarnation_id, _) = socket_identity(socket)?;
     let scope = BindingQueryScope {
@@ -1004,7 +1023,8 @@ pub fn read_bindings_for_socket_with_ports(
     let mut files = Vec::new();
     let mut diagnostics = Vec::new();
     collect_selected_binding_files(&selected, &mut files, &mut diagnostics, true);
-    let (rows, mut read_diagnostics) = assemble_bindings(root, files, panes, processes, true)?;
+    let (rows, mut read_diagnostics, spawns) =
+        assemble_bindings(root, files, panes, processes, true)?;
     diagnostics.append(&mut read_diagnostics);
     let after = socket_identity(socket)?;
     if after.0 != scope.realm_id || after.1 != scope.incarnation_id {
@@ -1015,7 +1035,12 @@ pub fn read_bindings_for_socket_with_ports(
         error.exit_code = 1;
         return Err(error);
     }
-    Ok((scope, rows, diagnostics))
+    Ok((
+        scope,
+        rows,
+        diagnostics,
+        BindingTiming::from_wall(started, spawns),
+    ))
 }
 
 fn collect_selected_binding_files(
@@ -1129,6 +1154,61 @@ pub fn read_bindings(root: &Path) -> Result<(Vec<BindingRow>, Vec<Diagnostic>)> 
     read_bindings_with_ports(root, None, None)
 }
 
+/// Where a bindings query spent its wall time.
+///
+/// A query that took seconds either waited on a subprocess or read a lot of
+/// files, and a caller's own clock cannot tell those apart. `pane_list` is the
+/// time inside `wezterm cli list`, summed over the sockets asked. `process_list`
+/// is the time inside the process listing that answers for panes the mux no
+/// longer lists. `records` is everything else: finding and reading the binding
+/// records, measured as the query's wall time with the two spawns taken out.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BindingTiming {
+    pub pane_list: Duration,
+    pub process_list: Duration,
+    pub records: Duration,
+}
+
+impl BindingTiming {
+    fn from_wall(started: Instant, spawns: SpawnSpend) -> Self {
+        let total = started.elapsed();
+        Self {
+            pane_list: spawns.pane_list,
+            process_list: spawns.process_list,
+            records: total
+                .saturating_sub(spawns.pane_list)
+                .saturating_sub(spawns.process_list),
+        }
+    }
+
+    /// The three durations in whole milliseconds, the shape the CLI prints.
+    pub fn as_millis(&self) -> Value {
+        serde_json::json!({
+            "pane_list": u64::try_from(self.pane_list.as_millis()).unwrap_or(u64::MAX),
+            "process_list": u64::try_from(self.process_list.as_millis()).unwrap_or(u64::MAX),
+            "records": u64::try_from(self.records.as_millis()).unwrap_or(u64::MAX),
+        })
+    }
+}
+
+/// Time spent inside the subprocesses one assembly spawned.
+#[derive(Clone, Copy, Debug, Default)]
+struct SpawnSpend {
+    pane_list: Duration,
+    process_list: Duration,
+}
+
+/// Adds the time a call took to a shared total; a poisoned lock loses the
+/// number rather than the answer.
+fn record_spent<T>(spent: &Mutex<Duration>, call: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let answer = call();
+    if let Ok(mut total) = spent.lock() {
+        *total += started.elapsed();
+    }
+    answer
+}
+
 pub(crate) fn pane_presence(
     root: &Path,
     address: &PaneAddress,
@@ -1236,9 +1316,22 @@ pub fn read_bindings_with_ports(
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
 ) -> Result<(Vec<BindingRow>, Vec<Diagnostic>)> {
+    let (rows, diagnostics, _) = read_bindings_timed(root, panes, processes)?;
+    Ok((rows, diagnostics))
+}
+
+/// The realm-wide query with where its time went; the CLI prints the timing,
+/// maintenance and the other library callers do not want it.
+pub fn read_bindings_timed(
+    root: &Path,
+    panes: Option<&dyn PaneLister>,
+    processes: Option<&dyn ProcessProbe>,
+) -> Result<(Vec<BindingRow>, Vec<Diagnostic>, BindingTiming)> {
+    let started = Instant::now();
     let mut files = Vec::new();
     collect_binding_files(&root.join("v2/realms"), &mut files);
-    assemble_bindings(root, files, panes, processes, false)
+    let (rows, diagnostics, spawns) = assemble_bindings(root, files, panes, processes, false)?;
+    Ok((rows, diagnostics, BindingTiming::from_wall(started, spawns)))
 }
 
 /// One pane listing per socket, rather than one per bound pane.
@@ -1252,6 +1345,7 @@ pub fn read_bindings_with_ports(
 struct ListOncePerSocket<'a> {
     inner: &'a dyn PaneLister,
     listed: Mutex<BTreeMap<String, Result<Vec<crate::wezterm::PaneRow>>>>,
+    spent: Mutex<Duration>,
 }
 
 impl<'a> ListOncePerSocket<'a> {
@@ -1259,7 +1353,12 @@ impl<'a> ListOncePerSocket<'a> {
         Self {
             inner,
             listed: Mutex::new(BTreeMap::new()),
+            spent: Mutex::new(Duration::ZERO),
         }
+    }
+
+    fn spent(&self) -> Duration {
+        self.spent.lock().map(|spent| *spent).unwrap_or_default()
     }
 }
 
@@ -1268,12 +1367,12 @@ impl PaneLister for ListOncePerSocket<'_> {
         // A poisoned lock would mean a panic inside `list`; fall back to the
         // uncached path rather than propagating a panic through a read command.
         let Ok(mut listed) = self.listed.lock() else {
-            return self.inner.list(socket_path);
+            return record_spent(&self.spent, || self.inner.list(socket_path));
         };
         if let Some(cached) = listed.get(socket_path) {
             return cached.clone();
         }
-        let answer = self.inner.list(socket_path);
+        let answer = record_spent(&self.spent, || self.inner.list(socket_path));
         listed.insert(socket_path.to_owned(), answer.clone());
         answer
     }
@@ -1290,6 +1389,7 @@ impl PaneLister for ListOncePerSocket<'_> {
 struct ProbeOncePerAssembly<'a> {
     inner: &'a dyn ProcessProbe,
     listed: Mutex<Option<Option<crate::wezterm::PaneProcessSet>>>,
+    spent: Mutex<Duration>,
 }
 
 impl<'a> ProbeOncePerAssembly<'a> {
@@ -1297,7 +1397,12 @@ impl<'a> ProbeOncePerAssembly<'a> {
         Self {
             inner,
             listed: Mutex::new(None),
+            spent: Mutex::new(Duration::ZERO),
         }
+    }
+
+    fn spent(&self) -> Duration {
+        self.spent.lock().map(|spent| *spent).unwrap_or_default()
     }
 }
 
@@ -1310,13 +1415,15 @@ impl ProcessProbe for ProbeOncePerAssembly<'_> {
         // A poisoned lock would mean a panic inside the listing; fall back to
         // the uncached path rather than propagating it through a read command.
         let Ok(mut listed) = self.listed.lock() else {
-            return self.inner.presence(socket_path, pane_id);
+            return record_spent(&self.spent, || self.inner.presence(socket_path, pane_id));
         };
         // A probe that offers no listing is remembered too, and asked one pane
         // at a time as before.
-        match listed.get_or_insert_with(|| self.inner.pane_processes()) {
+        match listed
+            .get_or_insert_with(|| record_spent(&self.spent, || self.inner.pane_processes()))
+        {
             Some(processes) => processes.presence(socket_path, pane_id),
-            None => self.inner.presence(socket_path, pane_id),
+            None => record_spent(&self.spent, || self.inner.presence(socket_path, pane_id)),
         }
     }
 }
@@ -1327,7 +1434,7 @@ fn assemble_bindings(
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
     typed: bool,
-) -> Result<(Vec<BindingRow>, Vec<Diagnostic>)> {
+) -> Result<(Vec<BindingRow>, Vec<Diagnostic>, SpawnSpend)> {
     let listed_once = panes.map(ListOncePerSocket::new);
     let panes = listed_once.as_ref().map(|lister| lister as &dyn PaneLister);
     let probed_once = processes.map(ProbeOncePerAssembly::new);
@@ -1569,7 +1676,17 @@ fn assemble_bindings(
                 &right.binding_id,
             ))
     });
-    Ok((rows, diagnostics))
+    let spawns = SpawnSpend {
+        pane_list: listed_once
+            .as_ref()
+            .map(ListOncePerSocket::spent)
+            .unwrap_or_default(),
+        process_list: probed_once
+            .as_ref()
+            .map(ProbeOncePerAssembly::spent)
+            .unwrap_or_default(),
+    };
+    Ok((rows, diagnostics, spawns))
 }
 
 /// The exact GUI socket incarnation that supplies a publication's window IDs.

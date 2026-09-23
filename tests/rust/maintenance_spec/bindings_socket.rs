@@ -2,6 +2,7 @@ use super::*;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::process::Command;
 use std::sync::atomic::AtomicUsize;
+use wezterm_attention::query::read_bindings_for_socket_timed;
 use wezterm_attention::query::read_bindings_for_socket_with_ports;
 use wezterm_attention::records::{RecordIdentity, RecordRead, read_record, read_record_typed};
 use wezterm_attention::wezterm::PaneProcessSet;
@@ -90,7 +91,16 @@ fn binding_projection_preserves_query_metadata() {
                         .unwrap()
                         .retain(|key, _| keys.contains(&key.as_str()));
                 }
-                let actual: Value = serde_json::from_slice(&selected.stdout).unwrap();
+                let mut actual: Value = serde_json::from_slice(&selected.stdout).unwrap();
+                // Two runs take two different amounts of time; the timing is
+                // not part of what field selection must preserve.
+                for envelope in [&mut expected, &mut actual] {
+                    envelope["result"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("timing_ms")
+                        .expect("every answer carries its timing");
+                }
                 assert_eq!(actual, expected);
             }
         }
@@ -769,4 +779,86 @@ fn a_pane_the_mux_no_longer_lists_is_answered_from_the_process_listing() {
     let rows = query_with(&setup, &still_running);
     assert_eq!(rows[0].pane_presence, "present");
     assert_eq!(still_running.single_looks.load(Ordering::SeqCst), 0);
+}
+
+/// A slow query says which of its phases was slow. A caller's own clock sees
+/// one opaque call; the envelope splits it into the pane listing, the process
+/// probe and the record walk, on every answer, so a slow call names its phase.
+#[test]
+fn the_envelope_says_where_the_time_went() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let executable = setup._scratch.0.join("wezterm");
+    fs::write(
+        &executable,
+        "#!/bin/sh\nsleep 0.3\nprintf '%s\\n' '[{\"pane_id\":\"42\"}]'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+    for socket_mode in [true, false] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_attention"));
+        command
+            .env_clear()
+            .envs(&setup.env)
+            .env("WEZTERM_EXECUTABLE", &executable)
+            .args(["bindings", "--all", "--json"]);
+        if socket_mode {
+            command.args(["--socket", &setup.env["WEZTERM_UNIX_SOCKET"]]);
+        }
+        let output = command.output().unwrap();
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let timing = &response["result"]["timing_ms"];
+        for phase in ["pane_list", "process_list", "records"] {
+            assert!(
+                timing[phase].is_u64(),
+                "{phase} is a whole number of milliseconds in socket_mode={socket_mode}: {timing}"
+            );
+        }
+        // The fake listing sleeps 300 ms; that time is charged to the listing,
+        // not to the records.
+        assert!(timing["pane_list"].as_u64().unwrap() >= 300, "{timing}");
+        assert!(timing["records"].as_u64().unwrap() < 300, "{timing}");
+    }
+}
+
+/// The process probe's time is charged to `process_list`, and a probe that was
+/// never needed costs nothing: with the bound pane in the mux listing, the
+/// process listing is not taken.
+#[test]
+fn the_process_probe_is_timed_only_when_it_runs() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let root = state_root(&setup.env).unwrap();
+    let socket = &setup.env["WEZTERM_UNIX_SOCKET"];
+    let slow = SlowListingProcesses;
+    let (_, _, _, timing) =
+        read_bindings_for_socket_timed(&root, socket, Some(&setup.panes), Some(&slow)).unwrap();
+    assert_eq!(timing.process_list, std::time::Duration::ZERO, "{timing:?}");
+
+    setup.panes.0.lock().unwrap().clear();
+    let (_, rows, _, timing) =
+        read_bindings_for_socket_timed(&root, socket, Some(&setup.panes), Some(&slow)).unwrap();
+    assert_eq!(rows[0].pane_presence, "verified_absent");
+    assert!(
+        timing.process_list >= std::time::Duration::from_millis(50),
+        "{timing:?}"
+    );
+    assert!(timing.records < timing.process_list, "{timing:?}");
+}
+
+struct SlowListingProcesses;
+
+impl ProcessProbe for SlowListingProcesses {
+    fn available(&self) -> bool {
+        true
+    }
+
+    fn presence(&self, _socket_path: &str, _pane_id: &str) -> Presence {
+        Presence::Unavailable
+    }
+
+    fn pane_processes(&self) -> Option<PaneProcessSet> {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        Some(PaneProcessSet::from_process_listing(""))
+    }
 }
