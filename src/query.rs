@@ -14,7 +14,7 @@ use crate::protocol::{AttentionError, Diagnostic, Result};
 use crate::records::{FileRecords, RecordReader, launch_path, pane_path};
 use crate::records::{RecordIdentity, RecordRead, read_record, read_record_typed};
 use crate::wezterm::Clock;
-use crate::wezterm::{GuiWindowLister, PaneLister, Presence, ProcessProbe};
+use crate::wezterm::{GuiWindowLister, PaneLister, Presence, ProcessListing, ProcessProbe};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PaneScope {
@@ -1384,11 +1384,14 @@ impl PaneLister for ListOncePerSocket<'_> {
 /// processes, and each look used to spawn its own `ps` over every process on
 /// the machine -- about 70 ms each, so a store holding forty ended panes cost
 /// three seconds on every call. The listing is taken on the first miss and
-/// kept for the lifetime of one assembly and no longer. Maintenance does not
-/// use this: it deletes on the answer, so it keeps a fresh look per decision.
+/// kept for the lifetime of one assembly and no longer. A listing that failed
+/// is kept the same way, and answers every later miss as unavailable: asking
+/// the probe pane by pane would run the failed listing once per pane, under
+/// a fresh deadline each time. Maintenance does not use this: it deletes on
+/// the answer, so it keeps a fresh look per decision.
 struct ProbeOncePerAssembly<'a> {
     inner: &'a dyn ProcessProbe,
-    listed: Mutex<Option<Option<crate::wezterm::PaneProcessSet>>>,
+    listed: Mutex<Option<ProcessListing>>,
     spent: Mutex<Duration>,
 }
 
@@ -1417,13 +1420,14 @@ impl ProcessProbe for ProbeOncePerAssembly<'_> {
         let Ok(mut listed) = self.listed.lock() else {
             return record_spent(&self.spent, || self.inner.presence(socket_path, pane_id));
         };
-        // A probe that offers no listing is remembered too, and asked one pane
-        // at a time as before.
         match listed
             .get_or_insert_with(|| record_spent(&self.spent, || self.inner.pane_processes()))
         {
-            Some(processes) => processes.presence(socket_path, pane_id),
-            None => record_spent(&self.spent, || self.inner.presence(socket_path, pane_id)),
+            ProcessListing::Listed(processes) => processes.presence(socket_path, pane_id),
+            ProcessListing::Failed => Presence::Unavailable,
+            ProcessListing::NotOffered => {
+                record_spent(&self.spent, || self.inner.presence(socket_path, pane_id))
+            }
         }
     }
 }
@@ -2083,13 +2087,13 @@ mod process_probe_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct CountingProbe {
-        listing: Option<&'static str>,
+        listing: Listing,
         listings: AtomicUsize,
         single_looks: AtomicUsize,
     }
 
     impl CountingProbe {
-        fn new(listing: Option<&'static str>) -> Self {
+        fn new(listing: Listing) -> Self {
             Self {
                 listing,
                 listings: AtomicUsize::new(0),
@@ -2108,15 +2112,30 @@ mod process_probe_tests {
             Presence::Absent
         }
 
-        fn pane_processes(&self) -> Option<PaneProcessSet> {
+        fn pane_processes(&self) -> ProcessListing {
             self.listings.fetch_add(1, Ordering::SeqCst);
-            self.listing.map(PaneProcessSet::from_process_listing)
+            match self.listing {
+                Listing::Lists(listing) => {
+                    ProcessListing::Listed(PaneProcessSet::from_process_listing(listing))
+                }
+                Listing::Fails => ProcessListing::Failed,
+                Listing::Never => ProcessListing::NotOffered,
+            }
         }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Listing {
+        Lists(&'static str),
+        Fails,
+        Never,
     }
 
     #[test]
     fn many_absent_panes_cost_one_process_listing() {
-        let probe = CountingProbe::new(Some("zsh WEZTERM_UNIX_SOCKET=/mux.sock WEZTERM_PANE=9"));
+        let probe = CountingProbe::new(Listing::Lists(
+            "zsh WEZTERM_UNIX_SOCKET=/mux.sock WEZTERM_PANE=9",
+        ));
         let once = ProbeOncePerAssembly::new(&probe);
         for pane in ["1", "2", "3"] {
             assert_eq!(once.presence("/mux.sock", pane), Presence::Absent);
@@ -2128,13 +2147,29 @@ mod process_probe_tests {
 
     #[test]
     fn a_probe_with_no_listing_is_asked_once_for_one_and_then_pane_by_pane() {
-        let probe = CountingProbe::new(None);
+        let probe = CountingProbe::new(Listing::Never);
         let once = ProbeOncePerAssembly::new(&probe);
         for pane in ["1", "2", "3"] {
             assert_eq!(once.presence("/mux.sock", pane), Presence::Absent);
         }
         assert_eq!(probe.listings.load(Ordering::SeqCst), 1);
         assert_eq!(probe.single_looks.load(Ordering::SeqCst), 3);
+    }
+
+    /// A listing that failed is not retried pane by pane: the system probe
+    /// answers a per-pane question by taking the same listing again, so with
+    /// a hundred absent panes one stalled `ps` would become a hundred, each
+    /// under its own deadline. Every pane is unavailable instead, and the
+    /// call stays within one listing's deadline.
+    #[test]
+    fn a_failed_listing_answers_every_pane_as_unavailable_without_asking_again() {
+        let probe = CountingProbe::new(Listing::Fails);
+        let once = ProbeOncePerAssembly::new(&probe);
+        for pane in ["1", "2", "3"] {
+            assert_eq!(once.presence("/mux.sock", pane), Presence::Unavailable);
+        }
+        assert_eq!(probe.listings.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.single_looks.load(Ordering::SeqCst), 0);
     }
 }
 

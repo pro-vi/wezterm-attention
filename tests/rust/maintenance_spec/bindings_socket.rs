@@ -5,7 +5,7 @@ use std::sync::atomic::AtomicUsize;
 use wezterm_attention::query::read_bindings_for_socket_timed;
 use wezterm_attention::query::read_bindings_for_socket_with_ports;
 use wezterm_attention::records::{RecordIdentity, RecordRead, read_record, read_record_typed};
-use wezterm_attention::wezterm::PaneProcessSet;
+use wezterm_attention::wezterm::{PaneProcessSet, ProcessListing};
 
 fn query(
     setup: &Setup,
@@ -724,9 +724,9 @@ impl ProcessProbe for ListingProcesses {
         Presence::Unavailable
     }
 
-    fn pane_processes(&self) -> Option<PaneProcessSet> {
+    fn pane_processes(&self) -> ProcessListing {
         self.listings.fetch_add(1, Ordering::SeqCst);
-        Some(PaneProcessSet::from_process_listing(&self.listing))
+        ProcessListing::Listed(PaneProcessSet::from_process_listing(&self.listing))
     }
 }
 
@@ -857,8 +857,8 @@ impl ProcessProbe for SlowListingProcesses {
         Presence::Unavailable
     }
 
-    fn pane_processes(&self) -> Option<PaneProcessSet> {
+    fn pane_processes(&self) -> ProcessListing {
         std::thread::sleep(std::time::Duration::from_millis(50));
-        Some(PaneProcessSet::from_process_listing(""))
+        ProcessListing::Listed(PaneProcessSet::from_process_listing(""))
     }
 }

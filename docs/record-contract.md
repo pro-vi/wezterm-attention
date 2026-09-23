@@ -137,7 +137,7 @@ records in its file and version scope even when a pane has no binding.
 
 Destructive absence needs two pane-list negatives under different operation IDs at least 60
 monotonic seconds apart, plus an identity-scoped process negative for the full socket path and pane
-ID. Process-probe failure is unavailable evidence, not absence. Process environments are never
+ID. Process-probe failure is unavailable evidence, not absence. One failed process listing answers every pane of that query as unavailable; it is not retried pane by pane, so a query waits on at most one pane listing and one process listing. Process environments are never
 printed or persisted.
 
 A retention floor advances only across complete monotonic-timestamp groups that were already

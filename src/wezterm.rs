@@ -80,11 +80,26 @@ pub trait ProcessProbe: Send + Sync {
     fn available(&self) -> bool;
     fn presence(&self, socket_path: &str, pane_id: &str) -> Presence;
     /// Every socket and pane pair one process listing shows, so a caller with
-    /// many panes to ask about can take the listing once. `None` means this
-    /// probe cannot offer that, or the listing failed; ask `presence` instead.
-    fn pane_processes(&self) -> Option<PaneProcessSet> {
-        None
+    /// many panes to ask about can take the listing once.
+    fn pane_processes(&self) -> ProcessListing {
+        ProcessListing::NotOffered
     }
+}
+
+/// What a probe answers when asked for its whole listing.
+///
+/// The two empty-handed answers must stay apart: a probe that never lists is
+/// asked one pane at a time, which is the only way it can answer; a probe
+/// whose listing failed would answer a per-pane question by running the same
+/// listing again, once per pane, so the caller stops asking instead.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProcessListing {
+    /// This probe answers one pane at a time and offers no listing.
+    NotOffered,
+    /// This probe offers a listing and could not take one; asking it about a
+    /// pane now would repeat that failure.
+    Failed,
+    Listed(PaneProcessSet),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -505,23 +520,25 @@ impl ProcessProbe for SystemProcessProbe {
 
     fn presence(&self, socket_path: &str, pane_id: &str) -> Presence {
         match self.pane_processes() {
-            Some(processes) => processes.presence(socket_path, pane_id),
-            None => Presence::Unavailable,
+            ProcessListing::Listed(processes) => processes.presence(socket_path, pane_id),
+            ProcessListing::Failed | ProcessListing::NotOffered => Presence::Unavailable,
         }
     }
 
-    fn pane_processes(&self) -> Option<PaneProcessSet> {
-        let mut child = Command::new("/bin/ps")
+    fn pane_processes(&self) -> ProcessListing {
+        let Ok(mut child) = Command::new("/bin/ps")
             .args(["eww", "-axo", "command="])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .ok()?;
+        else {
+            return ProcessListing::Failed;
+        };
         let Some(stdout) = child.stdout.take() else {
             let _ = child.kill();
             let _ = child.wait();
-            return None;
+            return ProcessListing::Failed;
         };
         let reader = thread::spawn(move || {
             let mut bytes = Vec::new();
@@ -544,12 +561,12 @@ impl ProcessProbe for SystemProcessProbe {
         };
         let output = reader.join().ok().and_then(std::result::Result::ok);
         let (Some(status), Some(output)) = (status, output) else {
-            return None;
+            return ProcessListing::Failed;
         };
         if !status.success() || output.len() > 8 * 1024 * 1024 {
-            return None;
+            return ProcessListing::Failed;
         }
-        Some(PaneProcessSet::from_process_listing(
+        ProcessListing::Listed(PaneProcessSet::from_process_listing(
             &String::from_utf8_lossy(&output),
         ))
     }
