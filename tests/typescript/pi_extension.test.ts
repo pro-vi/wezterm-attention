@@ -90,9 +90,13 @@ function loadExt() {
 // are iterating on a red test, and leaving WEZTERM_PANE set to a traversal path
 // after the traversal tests.
 const tempDirs: string[] = [];
+const originalHome = process.env.HOME;
 function clearAttentionEnvironment(): void {
 	delete process.env.WEZTERM_PANE;
 	delete process.env.WEZTERM_ATTENTION_DIR;
+	delete process.env.XDG_STATE_HOME;
+	if (originalHome === undefined) delete process.env.HOME;
+	else process.env.HOME = originalHome;
 	delete process.env.PI_WEZTERM_ATTENTION_TTL_MS;
 	delete process.env.WEZTERM_ATTENTION_ROOT;
 	delete process.env.WEZTERM_ATTENTION_TEST_LOG;
@@ -339,7 +343,29 @@ test("fallback: an invoked writer exit never creates a v1 marker and logs once",
 	await lifecycle["session_shutdown"]!();
 	expect(existsSync(join(dir, "42"))).toBe(false);
 	expect(await reportedNotifications(1)).toHaveLength(1);
-	expect(notifications[0]?.message).toContain("status 3");
+	expect(notifications[0]?.message).toBe("wezterm-attention: writer exited with status 3");
+});
+
+test("fallback: the writer's first diagnostic line is reported without control characters", async () => {
+	freshDir("wez-fallback-line-");
+	process.env.WEZTERM_PANE = "42";
+	const root = tempDir("wez-root-line-");
+	mkdirSync(join(root, "bin"));
+	writeFileSync(
+		join(root, "bin", "attention"),
+		`#!/bin/sh\nIFS= read -r payload || :\nprintf 'attention: claim_stale: \\033]0;title\\007%s\\r\\nhelp: attention doctor\\n' '${"x".repeat(300)}' >&2\nexit 1\n`,
+	);
+	chmodSync(join(root, "bin", "attention"), 0o755);
+	process.env.WEZTERM_ATTENTION_ROOT = root;
+	const { lifecycle } = loadExt();
+	await lifecycle["session_start"]!();
+	await lifecycle["session_shutdown"]!();
+	expect(await reportedNotifications(1)).toHaveLength(1);
+	const message = notifications[0]?.message ?? "";
+	expect(message.startsWith("wezterm-attention: writer exited with status 1: attention: claim_stale: ]0;title")).toBe(true);
+	expect(message).not.toMatch(/\p{Cc}/u);
+	expect(message).not.toContain("help: attention doctor");
+	expect(message.length).toBeLessThan(300);
 });
 
 test("fallback: an exit-zero hook diagnostic is reported and never treated as success", async () => {
@@ -359,7 +385,9 @@ test("fallback: an exit-zero hook diagnostic is reported and never treated as su
 	await lifecycle["session_shutdown"]!();
 	expect(existsSync(join(dir, "42"))).toBe(false);
 	expect(await reportedNotifications(1)).toHaveLength(1);
-	expect(notifications[0]?.message).toContain("rejected the event");
+	expect(notifications[0]?.message).toBe(
+		"wezterm-attention: writer rejected the event: attention: identity_unpublished: test rejection",
+	);
 });
 
 test("event: emitting a notify object writes a labeled notify marker", async () => {
@@ -564,20 +592,47 @@ test('env: a unit-suffixed TTL ("30m") is rejected, not parsed as 30', async () 
 	expect(m.ttl_ms).toBe(30 * 60 * 1000); // default, NOT 30
 });
 
-test("env: a relative WEZTERM_ATTENTION_DIR is rejected (no cwd scatter, no cwd delete)", async () => {
-	// F2: markerDirectory requires an absolute result. A relative override would
-	// otherwise write markers under cwd (scatter) and let clear rm() a cwd file.
+test("env: a relative WEZTERM_ATTENTION_DIR is skipped with one warning, never used as a cwd path", async () => {
+	// A relative override would write markers under cwd (scatter) and let clear
+	// rm() a cwd file. It is skipped for the next rule, as the plugin skips it.
 	const relDir = join(process.cwd(), "wez-rel-marker-dir");
 	rmSync(relDir, { recursive: true, force: true });
+	const home = tempDir("wez-rel-home-");
+	process.env.HOME = home;
 	process.env.WEZTERM_ATTENTION_DIR = "wez-rel-marker-dir";
 	process.env.WEZTERM_PANE = "42";
 	const { lifecycle, emit } = loadExt();
-	await lifecycle["agent_start"]!(); // write path: guarded → no file created
+	await lifecycle["agent_start"]!();
 	await lifecycle["session_shutdown"]!(); // lifecycle no longer awaits I/O; drain it
-	await emit("clear"); // clear path shares the same guard → no rm of a cwd file
-	expect(existsSync(join(relDir, "42"))).toBe(false);
+	expect(readMarker(join(home, ".local", "state", "wezterm-attention")).type).toBe("thinking");
+	await emit("clear"); // clear path resolves the same way → no rm of a cwd file
+	expect(existsSync(join(home, ".local", "state", "wezterm-attention", "42"))).toBe(false);
 	expect(existsSync(relDir)).toBe(false); // dir never even created
+	expect(notifications).toHaveLength(1);
+	expect(notifications[0]?.message).toContain("WEZTERM_ATTENTION_DIR");
 	rmSync(relDir, { recursive: true, force: true });
+});
+
+test("env: the default root is $XDG_STATE_HOME/wezterm-attention when that is absolute, else ~/.local/state", async () => {
+	const home = tempDir("wez-xdg-home-");
+	const stateHome = tempDir("wez-xdg-state-");
+	process.env.HOME = home;
+	process.env.WEZTERM_PANE = "42";
+	process.env.XDG_STATE_HOME = stateHome;
+	let { lifecycle } = loadExt();
+	await lifecycle["agent_start"]!();
+	await lifecycle["session_shutdown"]!();
+	expect(readMarker(join(stateHome, "wezterm-attention")).type).toBe("thinking");
+	for (const ignored of ["", "relative/state"]) {
+		process.env.XDG_STATE_HOME = ignored;
+		({ lifecycle } = loadExt());
+		await lifecycle["agent_settled"]!();
+		await lifecycle["session_shutdown"]!();
+		expect(readMarker(join(home, ".local", "state", "wezterm-attention")).type).toBe("stop");
+		rmSync(join(home, ".local"), { recursive: true, force: true });
+	}
+	expect(existsSync(join(process.cwd(), "relative"))).toBe(false);
+	expect(notifications).toEqual([]);
 });
 
 test('env: TTL_MS="0" falls back to the default, not an instantly-stale marker', async () => {

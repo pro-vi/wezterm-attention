@@ -1,10 +1,20 @@
 # Source this file from bash after WEZTERM_ATTENTION_ROOT is set.
 
+# `source ~/.bashrc` after an edit sources this file again. A second copy of
+# the hooks would treat the first copy's DEBUG trap as someone else's and call
+# it from itself, which recurses until bash crashes, so a repeat is a no-op.
+[ -z "${_WEZTERM_ATTENTION_LOADED:-}" ] || return 0
+_WEZTERM_ATTENTION_LOADED=1
+
 : "${WEZTERM_ATTENTION_COMMANDS:=claude codex pi}"
 _WEZTERM_ATTENTION_IN_HOOK=0
 
-_wezterm_attention_split_words() {
-  _wezterm_attention_words=()
+# Sets _wezterm_attention_command_word to the first word of a simple command
+# that is not a NAME=value assignment, with shell quoting removed. It stops at
+# that word: the rest of the command can be kilobytes of literal text, and
+# every character read costs time before the command starts.
+_wezterm_attention_find_command_word() {
+  _wezterm_attention_command_word=
   local input=$1 token= quote= character index escaped=0
   for ((index = 0; index < ${#input}; index++)); do
     character=${input:index:1}
@@ -16,24 +26,22 @@ _wezterm_attention_split_words() {
     fi
     if [ "$character" = "\"" ] || [ "$character" = "'" ]; then quote=$character; continue; fi
     if [[ "$character" == [[:space:]] ]]; then
-      if [ -n "$token" ]; then _wezterm_attention_words+=("$token"); token=; fi
+      [ -n "$token" ] || continue
+      [[ "$token" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || break
+      token=
     else
       token+=$character
     fi
   done
-  [ -z "$token" ] || _wezterm_attention_words+=("$token")
+  [[ "$token" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || _wezterm_attention_command_word=$token
 }
 
 _wezterm_attention_supported_command() {
-  local first word
-  _wezterm_attention_split_words "$1"
-  for word in "${_wezterm_attention_words[@]}"; do
-    [[ "$word" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] && continue
-    first=${word##*/}
-    first=${first#\"}; first=${first%\"}
-    first=${first#\'}; first=${first%\'}
-    break
-  done
+  local first
+  _wezterm_attention_find_command_word "$1"
+  first=${_wezterm_attention_command_word##*/}
+  first=${first#\"}; first=${first%\"}
+  first=${first#\'}; first=${first%\'}
   [ -n "$first" ] || return 1
   local supported
   for supported in $WEZTERM_ATTENTION_COMMANDS; do
@@ -62,19 +70,74 @@ wezterm_attention_preexec() {
 
 wezterm_attention_precmd() {
   [ "$_WEZTERM_ATTENTION_IN_HOOK" -eq 0 ] || return 0
+  # Outside a WezTerm pane there is nothing to publish, and the writer would
+  # say so at every prompt.
+  [ -n "${WEZTERM_PANE:-}" ] || return 0
   [ -n "${WEZTERM_ATTENTION_ROOT:-}" ] && [ -x "$WEZTERM_ATTENTION_ROOT/bin/attention" ] || return 0
   _WEZTERM_ATTENTION_IN_HOOK=1
   "$WEZTERM_ATTENTION_ROOT/bin/attention" hooks publish --quiet || true
+  # That publication recorded the claimed agent's return to this prompt, which
+  # is the last use of its launch id here. Left exported, the id would pass to
+  # the next program this shell starts, and an agent the claim did not detect
+  # would read as a child of one that has already exited.
+  unset WEZTERM_ATTENTION_LAUNCH_ID
   _WEZTERM_ATTENTION_IN_HOOK=0
 }
 
-_WEZTERM_ATTENTION_DEBUG_INSTALLED=0
-_WEZTERM_ATTENTION_PREVIOUS_DEBUG_DEFINITION=
+# Sets $? to $1. Its last argument also becomes $_ for the next command.
+_wezterm_attention_set_status() {
+  return "$1"
+}
+
 _WEZTERM_ATTENTION_PREVIOUS_DEBUG=
 _wezterm_attention_debug_dispatch() {
-  local command_text=$1
+  local last_status=$? command_text=$1 last_argument=$2
   [ "${#FUNCNAME[@]}" -eq 1 ] && wezterm_attention_preexec "$command_text"
-  [ -z "$_WEZTERM_ATTENTION_PREVIOUS_DEBUG" ] || eval "$_WEZTERM_ATTENTION_PREVIOUS_DEBUG"
+  if [ -n "$_WEZTERM_ATTENTION_PREVIOUS_DEBUG" ]; then
+    # The trap this one replaced sees the $? and $_ it would have seen alone.
+    _wezterm_attention_set_status "$last_status" "$last_argument"
+    eval "$_WEZTERM_ATTENTION_PREVIOUS_DEBUG"
+  fi
 }
-_WEZTERM_ATTENTION_PROMPT_INSTALL='if [ "$_WEZTERM_ATTENTION_DEBUG_INSTALLED" -eq 0 ]; then _WEZTERM_ATTENTION_PREVIOUS_DEBUG_DEFINITION=$(trap -p DEBUG); trap - DEBUG; if [ -n "$_WEZTERM_ATTENTION_PREVIOUS_DEBUG_DEFINITION" ]; then _WEZTERM_ATTENTION_PREVIOUS_DEBUG_QUOTED=${_WEZTERM_ATTENTION_PREVIOUS_DEBUG_DEFINITION#trap -- }; _WEZTERM_ATTENTION_PREVIOUS_DEBUG_QUOTED=${_WEZTERM_ATTENTION_PREVIOUS_DEBUG_QUOTED% DEBUG}; eval "_WEZTERM_ATTENTION_PREVIOUS_DEBUG=$_WEZTERM_ATTENTION_PREVIOUS_DEBUG_QUOTED"; fi; trap "_wezterm_attention_debug_dispatch \"\$BASH_COMMAND\"" DEBUG; _WEZTERM_ATTENTION_DEBUG_INSTALLED=1; fi'
-PROMPT_COMMAND="$_WEZTERM_ATTENTION_PROMPT_INSTALL;wezterm_attention_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+
+# Takes the output of `trap -p DEBUG` and returns 0 when the caller should now
+# set the DEBUG trap. Both halves happen at the top level, in
+# _WEZTERM_ATTENTION_PROMPT_INSTALL below: inside a function bash hides the
+# DEBUG trap from `trap -p`, and bash 3.2 puts back the DEBUG trap a function
+# replaced when that function returns.
+_wezterm_attention_install_hooks() {
+  [ -n "$_WEZTERM_ATTENTION_PROMPT_INSTALL" ] || return 1
+  _WEZTERM_ATTENTION_PROMPT_INSTALL=
+  # bash-preexec owns the DEBUG trap and calls the trap it found from inside
+  # its own function, where the dispatcher's top-level check never passes.
+  # It calls preexec functions once per command line instead, with that line.
+  if [ -n "${bash_preexec_imported:-}${__bp_imported:-}" ]; then
+    preexec_functions+=(wezterm_attention_preexec)
+    return 1
+  fi
+  local definition=$1 quoted
+  case $definition in
+    *_wezterm_attention_debug_dispatch*) definition= ;;
+  esac
+  if [ -n "$definition" ]; then
+    quoted=${definition#trap -- }
+    quoted=${quoted% DEBUG}
+    eval "_WEZTERM_ATTENTION_PREVIOUS_DEBUG=$quoted"
+  fi
+  return 0
+}
+
+# Evaluating this at the top level installs the hooks without waiting for a
+# prompt. $_ is passed to the trap last so that it is also the trap command's
+# last argument, which is what bash leaves in $_ for the command it ran before.
+_WEZTERM_ATTENTION_PROMPT_INSTALL='_wezterm_attention_install_hooks "$(trap -p DEBUG)" &&
+  trap '"'"'_wezterm_attention_debug_dispatch "$BASH_COMMAND" "$_"'"'"' DEBUG'
+
+# Installing at the first prompt rather than here lets a DEBUG trap set later
+# in the startup files be kept and called. The status of the command before the
+# prompt is handed on, so prompt commands after these still see it.
+_wezterm_attention_prompt_command() {
+  wezterm_attention_precmd
+  return "$_WEZTERM_ATTENTION_LAST_STATUS"
+}
+PROMPT_COMMAND="_WEZTERM_ATTENTION_LAST_STATUS=\$?;eval \"\$_WEZTERM_ATTENTION_PROMPT_INSTALL\";_wezterm_attention_prompt_command${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
