@@ -5278,6 +5278,40 @@ test("a dir option the writer would refuse is named, and the default used", func
   end
 end)
 
+test("a wrong value inside an option table is named, and its default used", function()
+  write_marker(9760, "thinking")
+  local cases = {
+    { indicators = { thinking_frames = "* " }, name = "indicators.thinking_frames" },
+    { indicators = { thinking_frames = {} }, name = "indicators.thinking_frames" },
+    { indicators = { thinking_frames = { "a ", 2 } }, name = "indicators.thinking_frames" },
+    { indicators = { stop = 1 }, name = "indicators.stop" },
+    { colors = { thinking = { "#000000" } }, name = "colors.thinking" },
+    { review_key = { "b", "ALT" }, name = "review_key" },
+    { review_key = { key = "b", mods = 3 }, name = "review_key" },
+  }
+  for _, case in ipairs(cases) do
+    local config = {}
+    local instance = dofile(repo_root .. "/plugin/init.lua")
+    local handler = #(handlers["format-tab-title"] or {}) + 1
+    local ok, failure = pcall(instance.apply_to_config, config, { auto_poll = false, dir = test_dir,
+      integration_root = writer_root, indicators = case.indicators, colors = case.colors,
+      review_key = case.review_key })
+    assert(ok, "a wrong value must not break the config: " .. tostring(failure))
+    local warnings = table.concat(drain_warnings(), "\n")
+    assert(warnings:find("option " .. case.name, 1, true) and warnings:find("default", 1, true),
+      case.name .. " must be named: " .. warnings)
+    instance.poll(window_double({ tabs = { { 9760 } }, focused = false }))
+    local drawn, rendered = pcall(handlers["format-tab-title"][handler], tab(9760, 9761, false))
+    assert(drawn, case.name .. ": the tab must still draw: " .. tostring(rendered))
+    local text = rendered_text(rendered)
+    assert(text:find("[◌◔◑◕]") and rendered[1].Background.Color == "#1c1730",
+      case.name .. ": the default spinner and tint are drawn, got " .. text)
+    local key = config.keys[#config.keys]
+    assert(key.key == "b" and key.mods == "ALT", case.name .. ": the review key is Alt+B")
+  end
+  os.remove(test_dir .. "/9760")
+end)
+
 test("the state root and tabs directory are created private to the user", function()
   local root = test_dir .. "/private-root"
   local instance = dofile(repo_root .. "/plugin/init.lua")

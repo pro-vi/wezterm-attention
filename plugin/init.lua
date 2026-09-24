@@ -605,6 +605,45 @@ local function usable_options(opts)
       usable.dir = nil
     end
   end
+  -- Values inside the option tables, each checked where it is used: a wrong
+  -- one is named and left out, so the default for that one entry applies.
+  local function usable_entries(name, value, rules)
+    if value == nil then return nil end
+    local kept = {}
+    for key, entry in pairs(value) do
+      local rule = rules[key]
+      if rule and not rule.check(entry) then
+        report_warning_once("option:" .. name .. "." .. tostring(key), "option " .. name .. "."
+          .. tostring(key) .. " must be " .. rule.kind .. ", not " .. type(entry) .. "; the default is used")
+      else
+        kept[key] = entry
+      end
+    end
+    return kept
+  end
+  local function is_string(entry) return type(entry) == "string" end
+  local text = { kind = "a string", check = is_string }
+  usable.indicators = usable_entries("indicators", usable.indicators, {
+    thinking_frames = { kind = "a non-empty list of strings", check = function(entry)
+      if type(entry) ~= "table" or #entry == 0 then return false end
+      local count = 0
+      for _, frame in pairs(entry) do
+        count = count + 1
+        if type(frame) ~= "string" then return false end
+      end
+      return count == #entry
+    end },
+    stop = text, notify = text, review = text,
+  })
+  usable.colors = usable_entries("colors", usable.colors,
+    { thinking = text, stop = text, notify = text, review = text })
+  local review_key = usable.review_key
+  if review_key and (type(review_key.key) ~= "string"
+      or (review_key.mods ~= nil and type(review_key.mods) ~= "string")) then
+    report_warning_once("option:review_key", 'option review_key must be a table like '
+      .. '{ key = "b", mods = "ALT" }, with key a string and mods a string or absent; the default is used')
+    usable.review_key = nil
+  end
   return usable
 end
 
