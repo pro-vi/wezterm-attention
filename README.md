@@ -29,24 +29,62 @@ A pane can also report how many subagents are still working inside it. The tab a
 
 ## Install
 
-Add the plugin before any other `format-tab-title` handler:
+There are two parts. The Lua plugin draws the tab bar and reads what writers record. The `attention` command is a small Rust program that agent hooks and scripts call to record what a pane's agent is doing. The plugin works on its own with v1 flat markers; v2 records need the command.
+
+### 1. Load the plugin
+
+This needs WezTerm `20230320-124340-559cb7b0` or newer, the first release with `wezterm.plugin.require`. Add the plugin before any other `format-tab-title` handler:
 
 ```lua
 local attention = wezterm.plugin.require("https://github.com/pro-vi/wezterm-attention")
 attention.apply_to_config(config)
 ```
 
-The v1 reader and renderer require WezTerm `20221119-145034-49b9839f` or newer. Mux-native v2 requires POSIX and the Rust CLI built by running `scripts/install-cli.sh` in this checkout. `attention --version` names the commit the installed binary was built from, with `-dirty` when the tree had uncommitted changes, so a stale install is visible: compare it with `git rev-parse HEAD`. `bin/attention` uses that installed Rust binary and names the install command if it is absent. The plugin exports its resolved state path to new panes, and its checkout path only once that binary is installed: a producer reads the checkout path as the instruction to write through the Rust CLI, so announcing it without the binary would take away the v1 fallback. Installing the binary while WezTerm is running takes effect on the next config reload.
+`apply_to_config` adds its `Alt+B` key to `config.keys`. Assign your own `config.keys = { ... }` before this call: an assignment after it replaces the list and drops `Alt+B`.
 
-To put the command on your PATH, link the shim:
+### 2. Build the `attention` command
+
+`wezterm.plugin.require` clones this repository into WezTerm's own plugin directory, and by default the plugin looks for the command only in that copy. Build it there. This needs a POSIX system and a Rust toolchain with `cargo` (the minimum version is `rust-version` in `Cargo.toml`). WezTerm creates the directory the first time it loads a config that requires the plugin, so start WezTerm once first.
 
 ```sh
-ln -s "$(pwd)/bin/attention" ~/.local/bin/attention
+case "$(uname)" in
+  Darwin) plugins="$HOME/Library/Application Support/wezterm/plugins" ;;
+  *) plugins="${XDG_DATA_HOME:-$HOME/.local/share}/wezterm/plugins" ;;
+esac
+checkout="$plugins/httpssCssZssZsgithubsDscomsZspro-visZswezterm-attention"
+sh "$checkout/scripts/install-cli.sh"
 ```
 
-The shim resolves the link before locating the checkout, so it keeps working from anywhere on PATH. Linking `libexec/attention-rs` directly works too. Moving the checkout afterwards breaks the link, as it would any symlink.
+If the plugin cannot find the command, it logs once per config load, naming the path it checked: `.../libexec/attention-rs is missing, so panes get no WEZTERM_ATTENTION_ROOT ...`. Open the WezTerm debug overlay (`Ctrl+Shift+L`) to read it.
 
-Continue with [Mux setup](docs/mux-setup.md) for Bash or zsh launch claims and provider callbacks. Zsh uses the explicit `wezterm_attention_claim && <agent>` fallback; it does not claim automatic detection. See [Record contract](docs/record-contract.md) for precedence and [Mux pane moves](docs/mux-pane-moves.md) before moving the final pane out of a server tab.
+Reload the config afterwards. New panes then get `WEZTERM_ATTENTION_ROOT`, the checkout path. The plugin exports it only once the command is built, because a producer that sees it writes through the command instead of writing a v1 flat marker. It always exports `WEZTERM_ATTENTION_DIR`, the state directory.
+
+`"$checkout/bin/attention" --version` prints the commit the command was built from, with `-dirty` if the tree had uncommitted changes. Compare it with `git -C "$checkout" rev-parse --short=12 HEAD` to see whether the build is current.
+
+Put the command on your PATH by linking the launcher:
+
+```sh
+mkdir -p ~/.local/bin
+ln -s "$checkout/bin/attention" ~/.local/bin/attention
+```
+
+The launcher follows the link to find its checkout, so it works from anywhere on PATH.
+
+**After every `wezterm.plugin.update_all()`, run `install-cli.sh` again.** Updating replaces the Lua files with the newest commit on the repository's default branch, and leaves the previously built command in place, so the plugin can run ahead of the writer.
+
+#### Using your own clone instead
+
+To load the plugin from a clone you manage, run `scripts/install-cli.sh` in that clone and load it by path. `dofile` does not work: it passes no module path, and WezTerm's Lua has no `debug` library to find one.
+
+```lua
+local clone = "/absolute/path/to/wezterm-attention"
+local attention = loadfile(clone .. "/plugin/init.lua")("wezterm-attention", clone .. "/plugin/init.lua")
+attention.apply_to_config(config)
+```
+
+With this form, update with `git pull` and rerun `install-cli.sh` in the clone. If you keep `wezterm.plugin.require` and build the command in your own clone, pass `integration_root = "/absolute/path/to/wezterm-attention"` to `apply_to_config`; the Lua then updates through `update_all` and the command through your clone, separately.
+
+Continue with [Mux setup](docs/mux-setup.md) for Bash or zsh launch claims, then register the [Claude Code](#claude-code-hooks) and [Codex](#codex-hooks) hooks. See [Record contract](docs/record-contract.md) for precedence and [Mux pane moves](docs/mux-pane-moves.md) before moving the final pane out of a server tab.
 
 ## Render modes
 
@@ -394,37 +432,76 @@ end))
 
 ## Pi extension
 
-For cached lifecycle observations, question-publication evidence and consumer-owned presentation, see the [consumer guide](docs/consumer-guide.md). This does not imply live registration or a universal unanswered-question signal.
-
 Install this repository as a Pi package:
 
 ```bash
 pi install git:github.com/pro-vi/wezterm-attention
 ```
 
-The extension preserves print mode and registers no commands. It forwards `session_start`, `agent_start`, `tool_execution_start`, `agent_settled`, the `wezterm-attention:mark` bus, and `session_shutdown` through its serialized writer queue. `agent_end` is intentionally not terminal. Writer processes use Node's built-in child-process API, matching Pi's Node runtime.
+The extension registers no commands and leaves print mode alone. It forwards `session_start`, `input`, `agent_start`, `tool_execution_start`, `tool_execution_end`, `message_end`, `session_before_compact`, `session_compact`, `agent_settled`, `session_shutdown` and the `wezterm-attention:mark` bus through one serialized writer queue. `agent_end` is deliberately not treated as the end of a turn, because Pi can retry or continue after it. The writer processes use Node's built-in child-process API, as Pi's Node runtime does.
 
-Other extensions may emit `thinking`, `stop`, `notify`, `review`, or `clear`. Review uses the `pi-bus` owner. Clear writes an ordered activity-clear watermark, repairs v1 deletion, and clears that owner without suppressing newer activity. If the v2 checkout root is unavailable, shipped v1 marker behavior remains the fallback.
+Other extensions may emit `thinking`, `stop`, `notify`, `review`, or `clear` on the bus. Review uses the `pi-bus` owner. Clear writes an ordered activity-clear record and clears that owner without hiding newer activity.
+
+Which format Pi writes depends on the pane. Where `WEZTERM_ATTENTION_ROOT` is unset (the `attention` command is not built), it writes v1 flat markers. Where it is set, it writes v2 records through the command, and those need a launch claim: in a pane where `pi` was started without one, the writer refuses every event, Pi shows one warning, and the tab shows nothing for Pi. Start Pi from a shell that claims for it; see [Mux setup](docs/mux-setup.md).
+
+For cached lifecycle observations, question-publication evidence and consumer-owned presentation, see the [consumer guide](docs/consumer-guide.md).
 
 ## Claude Code hooks
 
-Claude hook registration remains user-owned. Read the package-owned registration description: For each `registration=register` row, prepend the resolved Attention executable to `arguments` and forward the original callback JSON to that invocation. Ignored rows are not registrations. `requires_launch_identity` qualifies rich facts and executable delivery; it does not remove legacy support. Evidence references describe parser, fixture and native-contact coverage, not live activation. For Pi, install the reported `extension_entrypoint`; its bus event is `wezterm-attention:mark`.
+This repository does not edit Claude Code's settings; registration is yours. `attention hooks describe --provider claude --json` lists every native event with `registration` set to `register` or `ignored`. For each `register` row, run `attention` with that row's `arguments`; Claude Code passes the callback JSON on stdin, and the command reads it unchanged.
 
-```sh
-attention hooks describe --provider claude --json
+Register the `attention` link on your PATH, not `$WEZTERM_ATTENTION_ROOT/bin/attention`. Hooks are global: they also run in editors, other terminals, ssh sessions and cron, where that variable is unset, and on macOS the plugin directory's path contains a space, which splits an unquoted command. A hook that has nothing to record there, such as one outside WezTerm or in a pane with no claim, exits 0 and does not interrupt the agent. If the agent's PATH does not include `~/.local/bin`, put the link's absolute path in each `command` instead.
+
+In `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart":       [{ "hooks": [{ "type": "command", "command": "attention hooks event claude SessionStart" }] }],
+    "UserPromptSubmit":   [{ "hooks": [{ "type": "command", "command": "attention hooks event claude UserPromptSubmit" }] }],
+    "PreToolUse":         [{ "hooks": [{ "type": "command", "command": "attention hooks event claude PreToolUse" }] }],
+    "PostToolUse":        [{ "hooks": [{ "type": "command", "command": "attention hooks event claude PostToolUse" }] }],
+    "PostToolUseFailure": [{ "hooks": [{ "type": "command", "command": "attention hooks event claude PostToolUseFailure" }] }],
+    "PermissionRequest":  [{ "hooks": [{ "type": "command", "command": "attention hooks event claude PermissionRequest" }] }],
+    "PermissionDenied":   [{ "hooks": [{ "type": "command", "command": "attention hooks event claude PermissionDenied" }] }],
+    "Notification":       [{ "hooks": [{ "type": "command", "command": "attention hooks event claude Notification" }] }],
+    "Elicitation":        [{ "hooks": [{ "type": "command", "command": "attention hooks event claude Elicitation" }] }],
+    "ElicitationResult":  [{ "hooks": [{ "type": "command", "command": "attention hooks event claude ElicitationResult" }] }],
+    "PreCompact":         [{ "hooks": [{ "type": "command", "command": "attention hooks event claude PreCompact" }] }],
+    "PostCompact":        [{ "hooks": [{ "type": "command", "command": "attention hooks event claude PostCompact" }] }],
+    "Stop":               [{ "hooks": [{ "type": "command", "command": "attention hooks event claude Stop" }] }],
+    "StopFailure":        [{ "hooks": [{ "type": "command", "command": "attention hooks event claude StopFailure" }] }],
+    "SubagentStop":       [{ "hooks": [{ "type": "command", "command": "attention hooks event claude SubagentStop" }] }],
+    "SessionEnd":         [{ "hooks": [{ "type": "command", "command": "attention hooks event claude SessionEnd" }] }]
+  }
+}
 ```
 
-Use `$WEZTERM_ATTENTION_ROOT/bin/attention`. Do not register `SubagentStart`: presence begins only after child tool work. `SubagentStop` writes stopped evidence for the same child ID. Claude root Stop does not clear all children because background children may outlive it. See [Mux setup](docs/mux-setup.md).
+Merge these into any hooks you already have. Do not register `SubagentStart`: a child becomes visible only after its first tool call. `SubagentStop` records that the same child stopped. A root `Stop` does not clear the children, because background children can outlive it. A `StopFailure` (the turn ended on an API error) shows `notify`.
 
 ## Codex hooks
 
-Codex hook registration remains user-owned. Read the package-owned registration description: For each `registration=register` row, prepend the resolved Attention executable to `arguments` and forward the original callback JSON to that invocation. Ignored rows are not registrations. `requires_launch_identity` qualifies rich facts and executable delivery; it does not remove legacy support. Evidence references describe parser, fixture and native-contact coverage, not live activation. For Pi, install the reported `extension_entrypoint`; its bus event is `wezterm-attention:mark`.
+Codex reads lifecycle hooks from `~/.codex/hooks.json`, and asks you to approve each new or edited hook once (`/hooks` in Codex). `attention hooks describe --provider codex --json` lists the rows; the same rule applies as for Claude Code, and so does the advice to register the link on your PATH.
 
-```sh
-attention hooks describe --provider codex --json
+```json
+{
+  "hooks": {
+    "SessionStart":      [{ "hooks": [{ "type": "command", "command": "attention hooks event codex SessionStart" }] }],
+    "UserPromptSubmit":  [{ "hooks": [{ "type": "command", "command": "attention hooks event codex UserPromptSubmit" }] }],
+    "PreToolUse":        [{ "hooks": [{ "type": "command", "command": "attention hooks event codex PreToolUse" }] }],
+    "PostToolUse":       [{ "hooks": [{ "type": "command", "command": "attention hooks event codex PostToolUse" }] }],
+    "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "attention hooks event codex PermissionRequest" }] }],
+    "PreCompact":        [{ "hooks": [{ "type": "command", "command": "attention hooks event codex PreCompact" }] }],
+    "PostCompact":       [{ "hooks": [{ "type": "command", "command": "attention hooks event codex PostCompact" }] }],
+    "Stop":              [{ "hooks": [{ "type": "command", "command": "attention hooks event codex Stop" }] }],
+    "Interrupt":         [{ "hooks": [{ "type": "command", "command": "attention hooks event codex Interrupt" }] }],
+    "SubagentStop":      [{ "hooks": [{ "type": "command", "command": "attention hooks event codex SubagentStop" }] }],
+    "SessionEnd":        [{ "hooks": [{ "type": "command", "command": "attention hooks event codex SessionEnd" }] }]
+  }
+}
 ```
 
-Use `$WEZTERM_ATTENTION_ROOT/bin/attention`. Child attribution requires matching native `agent_id` values; see [contact evidence](docs/reviews/lifecycle-contact-results.md) for exercised paths. Root Stop writes lead Stop, then one child-clear watermark. `stop_hook_active` is retained as response-completion context, not a badge-policy change. Do not register `SubagentStart`. See [Mux setup](docs/mux-setup.md).
+Do not register `SubagentStart`. Child attribution needs matching native `agent_id` values; see [contact evidence](docs/reviews/lifecycle-contact-results.md) for the paths that were exercised. A root `Stop` writes the lead stop, then one child-clear record. An `Interrupt` clears the tab's activity for that session, because Codex runs no `Stop` after one. A child's `PermissionRequest` shows `notify` on the tab, since Codex has no `Notification` hook.
 
 ## Other use cases
 
