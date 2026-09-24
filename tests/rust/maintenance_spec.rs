@@ -117,6 +117,7 @@ impl FakeProcesses {
                 Presence::Present => 1,
                 Presence::Absent => 2,
                 Presence::Unavailable => 3,
+                Presence::Unseen => 4,
             },
             Ordering::SeqCst,
         );
@@ -136,6 +137,7 @@ impl ProcessProbe for FakeProcesses {
         match self.state.load(Ordering::SeqCst) {
             1 => Presence::Present,
             2 => Presence::Absent,
+            4 => Presence::Unseen,
             _ => Presence::Unavailable,
         }
     }

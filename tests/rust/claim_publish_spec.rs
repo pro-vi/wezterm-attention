@@ -1431,13 +1431,20 @@ fn settled_presence(socket: &str, pane: &str, expected: Presence) -> Presence {
     }
 }
 
+/// Not seen by a listing that was read. On macOS that is `Unseen`, because
+/// some of this user's system processes always hide their environment;
+/// where every process can be read it is `Absent`.
+fn assert_not_seen(presence: Presence) {
+    assert!(
+        matches!(presence, Presence::Absent | Presence::Unseen),
+        "{presence:?}"
+    );
+}
+
 #[test]
 fn the_process_probe_finds_a_pane_in_a_live_process_environment() {
     let socket = format!("/tmp/wa-probe-{}.sock", Uuid::new_v4().simple());
-    assert_eq!(
-        SystemProcessProbe.presence(&socket, "4242"),
-        Presence::Absent
-    );
+    assert_not_seen(SystemProcessProbe.presence(&socket, "4242"));
     let waiting = Waiting::spawn(
         "claude",
         &[("WEZTERM_UNIX_SOCKET", &socket), ("WEZTERM_PANE", "4242")],
@@ -1446,15 +1453,9 @@ fn the_process_probe_finds_a_pane_in_a_live_process_environment() {
         settled_presence(&socket, "4242", Presence::Present),
         Presence::Present
     );
-    assert_eq!(
-        SystemProcessProbe.presence(&socket, "424"),
-        Presence::Absent
-    );
+    assert_not_seen(SystemProcessProbe.presence(&socket, "424"));
     drop(waiting);
-    assert_eq!(
-        SystemProcessProbe.presence(&socket, "4242"),
-        Presence::Absent
-    );
+    assert_not_seen(SystemProcessProbe.presence(&socket, "4242"));
 }
 
 #[test]
@@ -1470,10 +1471,35 @@ fn pane_variables_in_a_process_arguments_are_not_its_environment() {
         Presence::Present,
         "the listing read this process"
     );
-    assert_eq!(
-        SystemProcessProbe.presence(&socket, "4343"),
-        Presence::Absent
+    assert_not_seen(SystemProcessProbe.presence(&socket, "4343"));
+}
+
+/// A process carries its socket as WezTerm was configured to spell it, which
+/// may pass through a symlinked directory; a realm record carries it resolved.
+/// Both name the same socket, including once the socket file itself is gone.
+#[test]
+fn the_process_probe_matches_a_socket_spelled_through_a_symlinked_directory() {
+    let base = PathBuf::from("/tmp").join(format!("wa-probe-{}", Uuid::new_v4().simple()));
+    fs::create_dir_all(base.join("real")).expect("socket directory");
+    std::os::unix::fs::symlink(base.join("real"), base.join("link")).expect("link");
+    let spelled = base.join("link/mux.sock");
+    let spelled = spelled.to_str().expect("UTF-8 path");
+    let resolved = fs::canonicalize(base.join("real"))
+        .expect("resolve")
+        .join("mux.sock");
+    let _waiting = Waiting::spawn(
+        "claude",
+        &[("WEZTERM_UNIX_SOCKET", spelled), ("WEZTERM_PANE", "4646")],
     );
+    assert_eq!(
+        settled_presence(spelled, "4646", Presence::Present),
+        Presence::Present
+    );
+    assert_eq!(
+        SystemProcessProbe.presence(resolved.to_str().expect("UTF-8 path"), "4646"),
+        Presence::Present
+    );
+    let _ = fs::remove_dir_all(&base);
 }
 
 #[test]

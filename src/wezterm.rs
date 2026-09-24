@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
@@ -105,7 +105,13 @@ pub enum ProcessListing {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Presence {
     Present,
+    /// No process of this user carries the pair, and every one was read.
     Absent,
+    /// No process that could be read carries the pair, but some could not be
+    /// read -- macOS hides the environment of its own system binaries -- so
+    /// one that does may have been missed. This alone never shows a pane
+    /// gone.
+    Unseen,
     Unavailable,
 }
 
@@ -117,12 +123,32 @@ pub enum Presence {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PaneProcessSet {
     pairs: BTreeSet<(String, String)>,
+    /// Each socket spelling a process carries, as [`resolved_socket_path`]
+    /// resolves it; `None` when its directory could not be resolved.
+    resolved: BTreeMap<String, Option<PathBuf>>,
+    /// Some process of this user was listed and its environment could not be
+    /// read, so the pairs may be missing one.
+    missed: bool,
+}
+
+/// A socket path as two spellings of it can be compared: its directory with
+/// every symlink resolved, joined to its file name. The file itself is left
+/// as named, because it may be the part that is gone. A realm record keeps
+/// the path resolved, while a process keeps it as WezTerm was configured to
+/// spell it, through `/tmp` on macOS or a symlinked home.
+fn resolved_socket_path(path: &str) -> Option<PathBuf> {
+    let path = Path::new(path);
+    if !path.is_absolute() {
+        return None;
+    }
+    let name = path.file_name()?;
+    Some(fs::canonicalize(path.parent()?).ok()?.join(name))
 }
 
 impl PaneProcessSet {
     /// One line per process: its command followed by its environment.
     pub fn from_process_listing(listing: &str) -> Self {
-        let mut pairs = BTreeSet::new();
+        let mut processes = Self::default();
         for line in listing.lines() {
             let panes = environment_values(line, "WEZTERM_PANE=");
             if panes.is_empty() {
@@ -130,11 +156,25 @@ impl PaneProcessSet {
             }
             for socket in environment_values(line, "WEZTERM_UNIX_SOCKET=") {
                 for pane in &panes {
-                    pairs.insert((socket.to_owned(), (*pane).to_owned()));
+                    processes.insert(socket, pane);
                 }
             }
         }
-        Self { pairs }
+        processes
+    }
+
+    fn insert(&mut self, socket: &str, pane: &str) {
+        if !self.resolved.contains_key(socket) {
+            self.resolved
+                .insert(socket.to_owned(), resolved_socket_path(socket));
+        }
+        self.pairs.insert((socket.to_owned(), pane.to_owned()));
+    }
+
+    /// Note that a process was listed whose environment could not be read.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+    fn missed_one(&mut self) {
+        self.missed = true;
     }
 
     /// Add the pairs one process's environment holds, given as `NAME=value`
@@ -152,19 +192,33 @@ impl PaneProcessSet {
         }
         for socket in &sockets {
             for pane in &panes {
-                self.pairs
-                    .insert(((*socket).to_owned(), (*pane).to_owned()));
+                self.insert(socket, pane);
             }
         }
     }
 
     /// Never `Unavailable`: a set that exists came from a listing that was read.
+    ///
+    /// A pair is seen when a process carries the pane id and the same socket,
+    /// spelled the same or resolving to the same path. Not seeing it is
+    /// `Absent` only when every process was read and every socket carrying
+    /// that pane id could be compared; otherwise it is `Unseen`.
     pub fn presence(&self, socket_path: &str, pane_id: &str) -> Presence {
-        if self
-            .pairs
-            .contains(&(socket_path.to_owned(), pane_id.to_owned()))
-        {
-            Presence::Present
+        let wanted =
+            resolved_socket_path(socket_path).unwrap_or_else(|| PathBuf::from(socket_path));
+        let mut undecided = false;
+        for (socket, _) in self.pairs.iter().filter(|(_, pane)| pane == pane_id) {
+            if socket == socket_path {
+                return Presence::Present;
+            }
+            match self.resolved.get(socket) {
+                Some(Some(carried)) if *carried == wanted => return Presence::Present,
+                Some(Some(_)) => {}
+                _ => undecided = true,
+            }
+        }
+        if undecided || self.missed {
+            Presence::Unseen
         } else {
             Presence::Absent
         }
@@ -819,8 +873,8 @@ fn own_pane_processes() -> Option<PaneProcessSet> {
     for pid in pids.into_iter().filter(|pid| *pid > 0) {
         let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
         let mut size = buffer.len();
-        // A process that exited, or that the kernel will not describe to
-        // this user, is simply not listed.
+        // A process that exited is not listed. One the kernel will not
+        // describe is still running, and whatever it carries is missed.
         if unsafe {
             libc::sysctl(
                 name.as_mut_ptr(),
@@ -832,12 +886,31 @@ fn own_pane_processes() -> Option<PaneProcessSet> {
             )
         } != 0
         {
+            if still_running(pid) {
+                processes.missed_one();
+            }
             continue;
         }
         read_own |= pid == own;
-        processes.add_environment(procargs_environment(&buffer[..size.min(buffer.len())]));
+        let environment =
+            procargs_environment(&buffer[..size.min(buffer.len())]).collect::<Vec<_>>();
+        // macOS hands over the arguments of its own system binaries, /bin/zsh
+        // and /bin/sleep among them, with no environment at all. A process
+        // started with an empty environment looks the same, and is counted
+        // the same way: nothing can be read from it.
+        if environment.is_empty() {
+            processes.missed_one();
+        }
+        processes.add_environment(environment.into_iter());
     }
     read_own.then_some(processes)
+}
+
+/// Whether `pid` names a process that has not exited, whoever may signal it.
+#[cfg(target_os = "macos")]
+fn still_running(pid: libc::pid_t) -> bool {
+    let signalled = unsafe { libc::kill(pid, 0) };
+    signalled == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(target_os = "linux")]
@@ -859,8 +932,21 @@ fn own_pane_processes() -> Option<PaneProcessSet> {
         if entry.metadata().ok().map(|metadata| metadata.uid()) != Some(uid) {
             continue;
         }
-        let Ok(environment) = fs::read(entry.path().join("environ")) else {
-            continue;
+        let environment = match fs::read(entry.path().join("environ")) {
+            Ok(environment) => environment,
+            // The process exited after it was listed.
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ESRCH) =>
+            {
+                continue;
+            }
+            // Still running, and not readable by this user: a process that
+            // is not dumpable, for one.
+            Err(_) => {
+                processes.missed_one();
+                continue;
+            }
         };
         read_own |= pid == own;
         processes.add_environment(environment.split(|byte| *byte == 0));
@@ -1206,18 +1292,20 @@ mod tests {
 
     #[test]
     fn a_socket_path_with_an_interior_space_is_read_whole() {
+        // In the file name, so the directory is one that resolves and a
+        // value cut at the space compares as a different socket.
         let processes = PaneProcessSet::from_process_listing(
-            "cmd WEZTERM_UNIX_SOCKET=/tmp/domain with space/mux.sock WEZTERM_PANE=42 other=1",
+            "cmd WEZTERM_UNIX_SOCKET=/domain with space.sock WEZTERM_PANE=42 other=1",
         );
         assert_eq!(
-            processes.presence("/tmp/domain with space/mux.sock", "42"),
+            processes.presence("/domain with space.sock", "42"),
             Presence::Present
         );
         assert_eq!(
-            processes.presence("/tmp/domain with space/mux.sock", "4"),
+            processes.presence("/domain with space.sock", "4"),
             Presence::Absent
         );
-        assert_eq!(processes.presence("/tmp/domain", "42"), Presence::Absent);
+        assert_eq!(processes.presence("/domain", "42"), Presence::Absent);
     }
 
     #[test]
@@ -1229,6 +1317,62 @@ mod tests {
         assert_eq!(processes.presence("/b.sock", "8"), Presence::Present);
         assert_eq!(processes.presence("/a.sock", "8"), Presence::Absent);
         assert_eq!(processes.presence("/b.sock", "7"), Presence::Absent);
+    }
+
+    #[test]
+    fn a_listing_that_missed_a_process_never_shows_a_pane_absent() {
+        let mut processes =
+            PaneProcessSet::from_process_listing("zsh WEZTERM_PANE=7 WEZTERM_UNIX_SOCKET=/a.sock");
+        assert_eq!(processes.presence("/a.sock", "8"), Presence::Absent);
+        processes.missed_one();
+        assert_eq!(processes.presence("/a.sock", "7"), Presence::Present);
+        assert_eq!(processes.presence("/a.sock", "8"), Presence::Unseen);
+    }
+
+    #[test]
+    fn a_socket_is_compared_by_its_resolved_directory_and_file_name() {
+        let base = std::env::temp_dir().join(format!("wa-resolve-{}", std::process::id()));
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).expect("socket directory");
+        let link = base.join("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).expect("link");
+        let resolved = std::fs::canonicalize(&real)
+            .expect("resolve")
+            .join("gone.sock");
+        let processes = PaneProcessSet::from_process_listing(&format!(
+            "agent WEZTERM_PANE=7 WEZTERM_UNIX_SOCKET={}",
+            link.join("gone.sock").display()
+        ));
+        assert_eq!(
+            processes.presence(resolved.to_str().expect("UTF-8"), "7"),
+            Presence::Present,
+            "the socket file need not exist"
+        );
+        assert_eq!(
+            processes.presence(
+                resolved
+                    .with_file_name("other.sock")
+                    .to_str()
+                    .expect("UTF-8"),
+                "7"
+            ),
+            Presence::Absent
+        );
+        // A directory that cannot be resolved cannot be compared, so a
+        // process with the same pane id there might be the pane's.
+        let unresolved = PaneProcessSet::from_process_listing(
+            "agent WEZTERM_PANE=7 WEZTERM_UNIX_SOCKET=/does-not-exist-synthetic/mux.sock",
+        );
+        assert_eq!(
+            unresolved.presence(resolved.to_str().expect("UTF-8"), "7"),
+            Presence::Unseen
+        );
+        assert_eq!(
+            unresolved.presence(resolved.to_str().expect("UTF-8"), "8"),
+            Presence::Absent
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

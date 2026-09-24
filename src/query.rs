@@ -1402,10 +1402,12 @@ pub(crate) enum PaneEvidence {
     Observed(String),
     /// The server that held this incarnation's panes may be gone: the realm's
     /// socket path no longer exists (`vanished`), or a different server now
-    /// owns it. A reader reports this as unavailable, with the diagnostic.
+    /// owns it. A reader reports this as unavailable, with the diagnostic,
+    /// which says what became of the server: no probe failed to answer.
     /// Sweep counts a new owner as one sighting of absence, and a vanished
-    /// path only when the process probe finds no process carrying the pane;
-    /// only its two-observation rule turns sightings into an ended binding.
+    /// path only when the process probe read every process and none carries
+    /// the pane; only its two-observation rule turns sightings into an ended
+    /// binding.
     IncarnationEnded {
         diagnostic: Diagnostic,
         socket_path: String,
@@ -1509,12 +1511,12 @@ pub(crate) fn pane_evidence(
         }
         // Only a path that is not there at all. A socket that exists and
         // cannot be read, or is not a socket, says nothing about the server.
-        Err(error)
+        Err(_)
             if fs::symlink_metadata(socket_path)
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
         {
             return PaneEvidence::IncarnationEnded {
-                diagnostic: error.diagnostic,
+                diagnostic: diagnostic("realm_unavailable", "mux socket no longer exists"),
                 socket_path: socket_path.to_owned(),
                 vanished: true,
             };
@@ -1648,9 +1650,14 @@ fn presence_at_socket(
     };
     match panes.list(socket_path) {
         Ok(rows) if rows.iter().any(|row| row.pane_id == pane_id) => "present".to_owned(),
+        // The server answered and does not list the pane, which is what shows
+        // it gone; the process listing is asked only whether a process still
+        // carries it. One that could not read every process has still read
+        // all it could, so a pair it did not see counts here as it does not
+        // where the process listing is the only evidence.
         Ok(_) => match processes.map(|probe| probe.presence(socket_path, pane_id)) {
             Some(Presence::Present) => "present".to_owned(),
-            Some(Presence::Absent) => "verified_absent".to_owned(),
+            Some(Presence::Absent | Presence::Unseen) => "verified_absent".to_owned(),
             _ => {
                 diagnostics.push(diagnostic(
                     "probe_unavailable",

@@ -1004,13 +1004,20 @@ fn absence_action(
     }
 }
 
+/// What [`absence_presence`] says of a pane whose socket path vanished when the
+/// process probe answered and could not show it gone: a process still carries
+/// it, or one the probe could not read might. The absence rule reads it as
+/// unavailable, but no probe failed, so it is not reported as one.
+const SERVER_GONE: &str = "server_gone";
+
 /// A pane's presence as the absence rule reads it. Beyond what a reader
 /// reports, a pane whose server is gone is absent: one sighting, which the
 /// two-observation rule then weighs like any other. A new server owning the
 /// socket path shows that. A socket path that vanished shows it only with the
-/// process probe answering that no process carries the socket and pane id:
-/// the server may still run with its socket file removed, so a probe that
-/// failed, or no probe, leaves the pane unavailable.
+/// process probe answering that no process carries the socket and pane id,
+/// having read every process: the server may still run with its socket file
+/// removed, so a probe that failed, that could not read every process, or no
+/// probe, leaves the pane unavailable.
 fn absence_presence(
     root: &Path,
     address: &PaneAddress,
@@ -1026,7 +1033,11 @@ fn absence_presence(
             vanished: true,
         } => match processes.map(|probe| probe.presence(&socket_path, &address.pane_id)) {
             Some(Presence::Absent) => "verified_absent".to_owned(),
-            _ => {
+            Some(Presence::Present | Presence::Unseen) => {
+                diagnostics.push(diagnostic);
+                SERVER_GONE.to_owned()
+            }
+            Some(Presence::Unavailable) | None => {
                 diagnostics.push(diagnostic);
                 "unavailable".to_owned()
             }
@@ -1533,7 +1544,7 @@ fn pane_retention(
     let action = absence_action(&presence, probe.as_ref(), run.operation_id, run.observation)?;
     let detail =
         |action: &str| json!({"kind":"pane_retention","binding_id":binding_id,"action":action});
-    if action == "unavailable" {
+    if action == "unavailable" && presence != SERVER_GONE {
         diagnostics.push(diagnostic(
             "probe_unavailable",
             "pane absence cannot be established",
@@ -2065,7 +2076,7 @@ pub fn sweep(
         )?;
         if !apply {
             details.push(json!({"kind":"absence","binding_id":binding_id,"action":preview_action}));
-            if preview_action == "unavailable" {
+            if preview_action == "unavailable" && presence != SERVER_GONE {
                 diagnostics.push(diagnostic(
                     "probe_unavailable",
                     "binding absence cannot be established",
@@ -2168,7 +2179,7 @@ pub fn sweep(
                     details.push(
                         json!({"kind":"absence","binding_id":binding_id,"action":outcome.action}),
                     );
-                    if outcome.action == "unavailable" {
+                    if outcome.action == "unavailable" && fresh_presence != SERVER_GONE {
                         diagnostics.push(diagnostic(
                             "probe_unavailable",
                             "binding absence cannot be established",
