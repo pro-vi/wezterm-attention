@@ -76,6 +76,8 @@ local appearance = consumer.appearance(attention.get_attention_view(pane))
 consumer.dismiss()
 ```
 
+One consumer from `new()` follows one pane scope: a view from another address, launch or binding resets it. For more than one pane, use `for_windows()`, which keeps one consumer per window and scope; pass its `on_view_change` to `apply_to_config` and read `appearance(window_id, scope)`.
+
 Dismissal uses only the last displayed publication IDs in the full address/launch/binding scope. A Q2 that arrives later is not dismissed by a click rendered for Q1. No shared record, acknowledgement, or other consumer is changed. This is bounded private memory, not durable cross-GUI acknowledgement. Binding changes reset the scope; ended bindings do not retain a visible follow-up tint.
 
 You can choose a different policy for approval, review, or outcome facts. Keep activity, review and child count independent; do not reuse `type` as if it were all three. Rank panes using your own purpose, but retain read confidence and full identity with the selected result.
@@ -94,7 +96,7 @@ A consumer that needs to know which panes are running an agent must inspect proc
 
 One binding-scoped `lifecycle.json` contains separate request/general pools. Each has at most 64 observations, 122,880 compact UTF-8 bytes, and its own monotonic retention floor. One observation is at most 2,048 bytes; the raw file is capped at 262,144 bytes and eight container levels.
 
-Generic tool traffic cannot evict request evidence. Request traffic can still evict older requests or their outcomes. Whole equal-timestamp groups are removed with that pool's floor in one atomic snapshot replacement. There is no replay cursor, complete history promise, lifecycle TTL, or universal `pending_count`.
+An observation that its own insertion would evict is reported `rejected`, not `confirmed`, and a pool already holding 64 observations at one timestamp refuses another at that timestamp. Generic tool traffic cannot evict request evidence. Request traffic can still evict older requests or their outcomes. Whole equal-timestamp groups are removed with that pool's floor in one atomic snapshot replacement. There is no replay cursor, complete history promise, lifecycle TTL, or universal `pending_count`.
 
 Activity and lifecycle are separate files, not a multi-file transaction. A crash may leave newer activity with older facts. Failures report incomplete work; retries re-read actual records. Do not join files by timestamp or assume a shared snapshot ID.
 
@@ -104,7 +106,7 @@ Only the legacy flat-marker interface is retained as readable input. Attention's
 
 `renderer="manual"` gives your formatter ownership of rendering; it does not disable polling. Use `auto_poll=false` only when your integration calls `attention.poll(window, ...)` itself. Getters and formatters do not launch a CLI to refresh data.
 
-`attention bindings --json` is the CLI boundary for validated binding identity and liveness assessment. It is not a lifecycle replay or full-facts API, and it does not return a ready-made resume command. Build provider argv from its closed provider/session fields, and do not treat an uncertain record as proof of a live process. Read commands (`bindings`, `inspect`, `hooks describe`) now return the existing JSON envelope by default on both terminals and pipes; `--json` remains accepted. This replaces their former bare status output. Check both `status` and `complete`; a truncated binding query can exit zero with `complete=false`, and it also says so on stderr (`returned N of M; use --all`) while stdout stays JSON. On `bindings`, `complete` is about the rows: it is false when rows were dropped, and in `--socket` mode also when a probe did not answer. Diagnostics never make a realm-wide answer incomplete; the envelope shows at most 50 of them, and `result.diagnostic_count` against `result.total_diagnostic_count` says how many were dropped. `result.timing_ms` says where the call's wall time went, in whole milliseconds: `pane_list` inside `wezterm cli list`, `process_list` inside the process probe, `records` in finding and reading the records. It is on every answer that carries a `result`; log it next to a slow call and the phase is named. An envelope printed for an error before the query ran has no `result` and no timing. Hook stdout/exit behavior and mutating-command output defaults remain unchanged.
+`attention bindings --json` is the CLI boundary for validated binding identity and liveness assessment. It is not a lifecycle replay or full-facts API, and it does not return a ready-made resume command. Build provider argv from its closed provider/session fields, and do not treat an uncertain record as proof of a live process. Read commands (`bindings`, `tabs`, `inspect`, `hooks describe`) return the JSON envelope by default on both terminals and pipes; `--json` remains accepted. This replaces their former bare status output. Check both `status` and `complete`; a truncated binding query sets `complete=false` and also says so on stderr (`returned N of M; use --all`) while stdout stays JSON. Exit codes are listed under [Exit codes and envelopes](#exit-codes-and-envelopes). On `bindings`, `complete` is about the rows: it is false when rows were dropped, and in `--socket` mode also when a probe did not answer. Diagnostics never make a realm-wide answer incomplete; the envelope shows at most 50 of them, and `result.diagnostic_count` against `result.total_diagnostic_count` says how many were dropped. `result.timing_ms` says where the call's wall time went, in whole milliseconds: `pane_list` inside `wezterm cli list`, `process_list` inside the process probe, `records` in finding and reading the records. It is on every answer that carries a `result`; log it next to a slow call and the phase is named. An envelope printed for an error before the query ran has no `result` and no timing. Hook stdout/exit behavior and mutating-command output defaults remain unchanged.
 
 Live Claude/Codex registration, shell setup, activation of any application that consumes these facts, and provider-paid contact remain separate operator work. An inherited launch claim is required for rich admission; tty presence alone is not an execution-generation proof.
 
@@ -117,7 +119,7 @@ attention hooks publish --socket /absolute/path/to/mux.sock --json
 
 Socket-selected discovery resolves the socket before enumerating its exact realm and incarnation, then checks the original path again after reading. Stable responses add `result.scope` with exactly `realm_id` and `incarnation_id`, including when `rows` is empty. Existing `rows`, `scanned`, `returned`, `truncated`, `--provider`, `--limit` and `--all` retain their meanings. `--socket` conflicts with `--realm`.
 
-Complete stable reads exit 0. Selected-record or directory failures and detected identity rotation exit 1. Invalid arguments exit 2. Socket resolution or required mux/process probe failures exit 3. Degraded socket responses and truncation set `complete=false`; a realm-wide query's diagnostics do not, and are counted instead. Identity failure or rotation supplies no usable scope or rows. Empty bindings do not prove that no agents exist.
+Selected-record or directory failures, detected identity rotation, and socket resolution or required mux/process probe failures make the answer incomplete; see [Exit codes and envelopes](#exit-codes-and-envelopes). Degraded socket responses and truncation set `complete=false`; a realm-wide query's diagnostics do not, and are counted instead. Identity failure or rotation supplies no usable scope or rows. Empty bindings do not prove that no agents exist.
 
 The socket query creates no state directories, takes no writer locks, and performs no publication, acknowledgement or maintenance. Its WezTerm pane query explicitly supplies `--no-auto-start`. Queries without `--socket` retain the existing response shape.
 
@@ -147,10 +149,10 @@ What publishes is the `format-tab-title` handler the plugin registers, which exi
 
 Every setup publishes, including a plain local WezTerm where the drawn number equals the derived one. A consumer cannot tell a simple setup from a publisher that is not running, because the file is absent in both, and deriving the number is right in one case and wrong in the other.
 
-A file that cannot be read, declares a later schema, is filed under a window it does not name, or carries a field this schema does not have is reported as a diagnostic and left out; the windows that did read are still returned, and `complete` is false. Exit 0 with no diagnostics, 1 with them.
+A file that cannot be read, declares a later schema, is filed under a window it does not name, or carries a field this schema does not have is reported as a diagnostic and left out; the windows that did read are still returned, and `complete` is false.
 
 
-The plugin captures its own GUI socket identity outside the renderer. Schema 2 records that `source` as a canonical socket path plus realm and incarnation IDs. Schema-1 decimal filenames remain readable with `source: null`; the plugin keeps publishing that legacy form if its identity helper is unavailable. Existing legacy files are not guessed into the new namespace or removed on upgrade. Source incarnation plus window ID identifies a new publication; the window number alone does not. Install the updated reader/helper before loading the updated plugin.
+The plugin captures its own GUI socket identity outside the renderer. Schema 2 records that `source` as a canonical socket path plus realm and incarnation IDs. Schema-1 decimal filenames remain readable with `source: null`; the plugin keeps publishing that legacy form if its identity helper is unavailable. Existing legacy files are not guessed into the new namespace or removed on upgrade; a window's own legacy file is removed once the same process writes a sourced file for that window. Source incarnation plus window ID identifies a new publication; the window number alone does not. `wezterm.plugin.update_all()` updates the plugin before you can rebuild the command, so rerun `scripts/install-cli.sh` right after it; until then the plugin keeps publishing whatever its identity helper allows, which can be the legacy form.
 
 Every `attention tabs` invocation also returns `window_check` on each window. It
 checks the recorded GUI socket incarnation before and after one no-auto-start
@@ -175,6 +177,26 @@ remain in the response, including not-listed and unavailable ones.
 ## Public consumer contracts
 
 Attention records use schema **3**. CLI envelopes and `HookDelivery` use schema **1**; source-identified tab publications use their independent schema **2** (legacy schema **1** remains readable), package metadata uses manifest schema **2**, and pane identity uses wire version **2**. These identify separate data formats, not supported product editions. A published fact that is not a v2 record — one with no pane address to be validated against and no ordering fence — carries its own schema field and is versioned on its own, rather than entering `protocol/v2.json`: the manifest's `record_schema` governs the addressed record tree, and coupling anything else to it would make an unrelated record change refuse a valid file. Use a fresh Attention state root and fresh supported launches for activation; existing state is not automatically migrated or deleted. Writer-owned flat leftovers from the projection era are previewed with `attention sweep --json` and collected with `attention sweep --apply --operation-id "$(uuidgen | tr A-Z a-z)"`. The operation id must be a canonical lowercase UUID, new for every run (`uuidgen` on macOS prints uppercase, hence the `tr`); a reused id ends no binding and advances no retention floor. Collection attributes those names by a unique v2 claim, not by live v1 occupancy — preview the stems before applying. Legacy flat markers remain readable. Ship the manifest with its matching Rust/Lua readers. Source capabilities do not establish live registration or activation.
+
+<!-- pending: query lane -->
+### Exit codes and envelopes
+
+Every JSON envelope has `schema`, `command`, `status`, `complete`, `result` and `diagnostics`. An envelope printed for an error always has `complete=false`; one printed before the query ran has no `result`.
+
+The query commands `bindings`, `tabs`, `inspect`, `doctor` and `sweep` exit:
+
+| Exit | Meaning |
+|---|---|
+| 0 | `complete=true` |
+| 1 | The answer is incomplete (`complete=false`), or the command failed |
+| 2 | The command line is wrong: an unknown flag, a bad value, a conflicting option |
+
+Diagnostics alone never change the exit code: a complete answer that carries diagnostics exits 0, so `attention bindings --all && …` takes the success branch whenever the rows are complete. No query command exits 3. The launcher `bin/attention` is the one exception: when the Rust binary has not been built, it exits 3 for every command except `hooks`.
+
+`bindings` and `inspect` compute `binding_health` and `reader_confidence` with one rule, so a bindings row and an inspection of the same scope agree. A malformed file under a pane's `reviews/` is reported as a diagnostic and does not change binding health.
+
+<!-- pending: exec lane -->
+Hook commands never exit 2, because Claude Code and Codex read exit 2 as "block": a prompt is dropped, a tool is denied, or a Stop hook makes the agent loop on the error text. `attention hooks …`, and anything a provider registration runs, exits 0 with the reason on stderr, or 1 under `--strict`. That includes a misspelled or removed flag and a malformed `--consumer` or `--consumer-timeout-ms`. `bin/attention` without the binary and `examples/hook.sh` follow the same rule.
 
 ### Registration description
 
@@ -214,7 +236,7 @@ Persistence reports four independent fields:
 
 Each field is `not_requested`, `confirmed`, `rejected` or `unconfirmed`. Confirmed does not require new bytes when the required state already matches. Unconfirmed does not establish that no writes happened. A rejected or unconfirmed requested effect suppresses delivery. Lifecycle preparation/write failure can coexist with confirmed native effects. `observation_id` appears only when the native application confirms writing that observation; it is never a provider request ID or controller token. Optional correlation is omitted when absent.
 
-`reply` and `prompt` always appear. Both use `HookContent`: `availability` is `not_requested`, `available`, `absent`, `unsupported`, `invalid` or `too_large`. **Only available has `text`.** Each flag is independent: omitting `--include-prompt` yields `prompt={"availability":"not_requested"}`, even when `--include-reply` is set. Missing native fields mean absent; null or another JSON type means invalid. An empty string is available, and Unicode/newlines are preserved exactly.
+`reply` and `prompt` always appear. Both use `HookContent`: `availability` is `not_requested`, `available`, `absent`, `unsupported`, `invalid` or `too_large`. **Only available has `text`.** Each flag is independent: omitting `--include-prompt` yields `prompt={"availability":"not_requested"}`, even when `--include-reply` is set. A missing native field means absent. A Codex `last_assistant_message` of `null` also means absent: Codex sends null when a turn has no final text. Any other null, including a null `prompt`, or another JSON type means invalid. An empty string is available, and Unicode/newlines are preserved exactly.
 
 - `--include-reply`: admitted lead Claude/Codex `Stop`, from `last_assistant_message`.
 - `--include-prompt`: admitted lead Claude/Codex `UserPromptSubmit`, from `prompt`.
@@ -284,14 +306,14 @@ attention.apply_to_config(config, {
 
 Initial/updated messages contain `kind`, GUI-local `window_id`, full `scope` and detached `view`. Scope has address, launch and a launch or binding target. Scope-lost messages contain only `kind`, `window_id` and `previous_scope`. Window context is not source identity or control permission. An unpublished pane, or one on v1 flat markers, never gets a fabricated v2 scope.
 
-Each window has its own baseline. A confirmed source replacement emits loss before initial; ending the same binding is an update. Fresh target selection can establish a degraded new binding view. Unavailable target selection retains the last established scope only as degraded context; it does not restore old facts. Lifecycle-only, confidence and floor changes count; spinner animation alone does not. Delivery follows cache refresh and configured acknowledgement, including in unfocused windows.
+Each window has its own baseline, and messages are not ordered across windows: a pane moved from one window to another is `scope_lost` in one and `initial` in the other, in whichever order the two windows poll. A window counts as closed only when it is gone from both `wezterm.gui.gui_windows()` and `wezterm.mux.all_windows()`, so switching workspaces does not report the hidden panes as lost. A confirmed source replacement emits loss before initial; ending the same binding is an update. Fresh target selection can establish a degraded new binding view. Unavailable target selection retains the last established scope only as degraded context; it does not restore old facts. Lifecycle-only, confidence and floor changes count; spinner animation alone does not. Delivery follows cache refresh and configured acknowledgement, including in unfocused windows.
 
-Registration is once per module. Repeated apply does not replace the callback. A successful normal configuration reload starts a fresh module baseline; a window override event alone does not. Callbacks are cooperative: exceptions and reentrant delivery are contained, but an infinite callback cannot be preempted. Schedule expensive work outside the poll. With title fallback disabled, polls do no process-title sampling, title-state comparison or title-only redraw/advice. Default rendering and review/acknowledgement remain supported.
+Registration is once per module. Repeated apply does not replace the callback. A successful normal configuration reload starts a fresh module baseline; a window override event alone does not. Callbacks are cooperative: exceptions and reentrant delivery are contained, but an infinite callback cannot be preempted. An error is logged as `on_view_change failed: <error>; future polls remain enabled`, once per distinct error and for at most 16 distinct errors. Schedule expensive work outside the poll. With title fallback disabled, polls do no process-title sampling, title-state comparison or title-only redraw/advice. Default rendering and review/acknowledgement remain supported.
 
 ### Executable application recipes
 
 - `examples/reply-sink.mjs` stores exact supplied content and its full source scope in an application-owned file. It does not prove the last received delivery is the newest/current reply; a resolver must check identity and own its ordering/idempotency policy.
-- `examples/follow-up.lua` consumes normalized publication facts and per-window callbacks. Local dismissal updates presentation immediately and does not answer a provider question. Copy it beside `examples/wezterm.lua` when using that configuration.
+- `examples/follow-up.lua` consumes normalized publication facts and per-window callbacks. Local dismissal updates presentation immediately and does not answer a provider question. It is optional: `examples/wezterm.lua` loads it only when the file exists beside it.
 - `node examples/checkpoint.mjs /absolute/attention /absolute/socket /absolute/wezterm /absolute/checkpoint.json [LIMIT]` brackets topology with two complete socket binding queries. Failure, incomplete evidence, duplicate current associations or socket rotation preserves the old checkpoint. Missing association stays null/unknown. Topology uses explicit `--no-auto-start`; no identity hashing or private record paths are copied. The two query durations are reported in milliseconds.
 - `node examples/inspect.mjs /absolute/attention /absolute/socket [LIMIT]` performs bounded discovery followed by exact-scope inspections. Incomplete discovery stops before inspection; degraded or changed scope fails rather than following another occupant.
 
