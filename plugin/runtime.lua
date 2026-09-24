@@ -864,6 +864,11 @@ return function()
     --- could look at has not been lost, and reporting it so would have a consumer
     --- discard state it still needs -- a dismissal, a policy -- and rebuild it as
     --- new when the pane comes back.
+    ---
+    --- Baselines are per window, and each window delivers from its own poll. A
+    --- pane moved between windows is therefore scope_lost in one and initial in
+    --- the other, in whichever order the two windows happen to poll; nothing
+    --- orders messages across windows.
     local function deliver_window_views(window, entries, opts, unsettled)
       local callback = M._on_view_change
       if not callback then return end
