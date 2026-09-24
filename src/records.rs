@@ -1092,8 +1092,8 @@ mod tests {
         use std::sync::{Arc, Barrier};
         let root = std::env::temp_dir().join(format!("attention-mkdir-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
-        for round in 0..40 {
-            let target = root.join(format!("{round}/panes/42/launches"));
+        for attempt in 0..40 {
+            let target = root.join(format!("{attempt}/panes/42/launches"));
             let barrier = Arc::new(Barrier::new(8));
             let writers: Vec<_> = (0..8)
                 .map(|_| {
@@ -1110,7 +1110,7 @@ mod tests {
                     .unwrap()
                     .expect("a racing writer still succeeds");
             }
-            for directory in [root.join(round.to_string()), target] {
+            for directory in [root.join(attempt.to_string()), target] {
                 let mode = std::fs::metadata(directory).unwrap().permissions().mode();
                 assert_eq!(mode & 0o777, 0o700);
             }

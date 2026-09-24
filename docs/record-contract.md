@@ -206,8 +206,9 @@ of a file or the far end of an ssh session, can set that pane's `WEZTERM_PANE` a
 `WEZTERM_ATTENTION` user variables. In the GUI's own domains (local, exec, serial, WSL) the plugin
 therefore trusts the pane's own id over a published one, and a published identity naming another
 pane is invalid. `WEZTERM_ATTENTION` values over 4096 bytes, and pane ids wider than 20 digits,
-are refused. One gap remains: a printed identity with the right pane id but another mux's realm is
-still believed. On a mux-attached pane the published value is the only identity there is.
+are refused. Until the GUI's tab-source answer arrives, the realm is checked by socket path only;
+see [accepted limitations](accepted-limitations.md#before-the-gui-knows-its-own-mux-a-local-panes-realm-is-checked-by-socket-path-only).
+On a mux-attached pane the published value is the only identity there is.
 
 A current binding is selected by the pane's current claim and then that launch's pointer. A pointer
 inside a historical launch cannot make its binding current or confirmed. Doctor validates v2
@@ -269,7 +270,7 @@ mux. A pane listing that failed during an apply is not asked again: every later 
 socket in the same run reads the same failure, so a mux that never answers costs one listing
 deadline, not one per pane.
 
-The process probe reads environments, never command-line arguments. On macOS it reads each of
+On macOS and Linux the process probe reads environments, never command-line arguments. On macOS it reads each of
 this user's processes' environment with `KERN_PROCARGS2`; on Linux it reads `/proc/<pid>/environ`
 for processes this user owns; elsewhere it runs `ps axeww -o uid=,command=` from `/bin` or
 `/usr/bin` and keeps this user's lines. If it cannot read its own process's environment, the whole

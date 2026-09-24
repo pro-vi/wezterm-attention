@@ -13,7 +13,7 @@ use std::process::Command;
 
 /// The files and directories the binary is built from. `-dirty` means one of
 /// them differs from the commit, and cargo re-runs this script when one of
-/// them changes; the two lists must be the same, or the flag goes stale.
+/// them changes; one list feeds both, so the flag cannot go stale.
 const BINARY_INPUTS: [&str; 5] = ["src", "protocol", "build.rs", "Cargo.toml", "Cargo.lock"];
 
 struct BuildIdentity {

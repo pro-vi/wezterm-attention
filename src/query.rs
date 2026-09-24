@@ -1887,8 +1887,9 @@ pub fn read_bindings_timed(
 ///
 /// Resolving a binding's presence asks whether its pane id appears in the
 /// socket's pane list. Every bound pane on one socket asks that of the same
-/// list, and each miss used to spawn a fresh `wezterm cli list` subprocess --
-/// about 20 ms per bound pane on top of a 5 ms floor, paid on every call.
+/// list, and asking it afresh for each miss would spawn a `wezterm cli list`
+/// subprocess per bound pane -- about 20 ms each on top of a 5 ms floor, paid
+/// on every call.
 /// The answers are memoised for the lifetime of one assembly and no longer, so
 /// a later call still observes panes that opened or closed in between. A sweep
 /// preview shares one across its steps; an apply does not, for the reason
@@ -1964,8 +1965,8 @@ impl PaneLister for ListOncePerSocket<'_> {
 ///
 /// A bound pane missing from the mux listing is looked for among live
 /// processes, and one look reads the environment of every process this user
-/// runs, which takes tens of milliseconds; a look per pane made a store with
-/// many ended panes slow on every call. The listing is taken on the first
+/// runs, which takes tens of milliseconds; a look per pane would make a store
+/// with many ended panes slow on every call. The listing is taken on the first
 /// miss, or when asked whether the probe is available, and kept for the
 /// lifetime of one assembly and no longer. A listing that failed is kept the
 /// same way, and answers every later miss as unavailable: asking the probe

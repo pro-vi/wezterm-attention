@@ -1,12 +1,12 @@
 //! A scratch directory that the wezterm executable resolver will trust.
 //!
-//! The resolver runs a `wezterm` found outside PATH only when every directory
-//! above it is owned by root or this user and writable by nobody else. A test
-//! that puts a fake `wezterm` under the checkout therefore passes or fails by
-//! where the checkout sits: under `/tmp`, which is world-writable, every such
-//! candidate is rightly refused. So the directory is chosen, not assumed: the
-//! first base where a probe resolves is used, and a host with no such base
-//! fails loudly rather than reporting a refusal that proves nothing.
+//! The resolver runs a `wezterm` found outside PATH only when the directories
+//! above it pass its ownership rule (`is_trusted_fallback` in src/wezterm.rs).
+//! A test that puts a fake `wezterm` under the checkout therefore passes or
+//! fails by where the checkout sits: under `/tmp`, which is world-writable,
+//! every such candidate is rightly refused. So the directory is chosen, not
+//! assumed: the first base where a probe resolves is used, and a host with no
+//! such base fails loudly rather than reporting a refusal that proves nothing.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

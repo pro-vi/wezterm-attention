@@ -24,7 +24,9 @@ nothing about the ones it does not.
 
 To reproduce the count, run `cargo clippy --lib -- -W clippy::unwrap_used
 -W clippy::expect_used`. Nineteen of the 25 are `expect` and six are `unwrap`;
-`src/query.rs` holds eleven of them. Each site is one of three things, and they
+`src/query.rs` holds eleven of them. The command also lints `build.rs`, and
+reports its one `expect` (cargo sets `CARGO_MANIFEST_DIR`) as a 26th warning,
+which is not a library site. Each site is one of three things, and they
 need separating before the lint can go on:
 
 1. A genuine invariant. It keeps the call and gains an `#[allow]` with a
@@ -131,7 +133,7 @@ number in all three implementations, but not the same rule about its encoding.
 Rust and accepted by the other two, and the disagreement is lexical -- it exists
 only in the JSON text, and disappears once the value is decoded.
 
-The branch already draws this distinction where it decided it mattered: the Lua
+The project already draws this distinction where it decided it mattered: the Lua
 side scans lifecycle snapshots for canonical integers before decoding, and the
 Python checker asserts the lifecycle schema's integer type. Ordinary records and
 wire identity did not get the same treatment.
@@ -214,9 +216,10 @@ An in-place rewrite of equal size that restores mtime is not.
 
 ## What sweep leaves behind
 
-`attention sweep --apply` deletes nothing that an earlier version did not
-already delete, apart from pane trees under the retention rule in the
-[record contract](record-contract.md#trust-boundary). That rule keeps sweep from
+`attention sweep --apply` removes only ended bindings under the retention rules,
+subagent records below a retention floor, a closed pane's whole tree under the
+pane retention rule in the [record contract](record-contract.md#trust-boundary),
+and the leftover files listed there. That rule keeps sweep from
 removing state it cannot prove abandoned, and it means four kinds of leftover
 stay on disk:
 
@@ -403,7 +406,7 @@ suppresses B.
 
 ## The library's public surface is wider than its supported surface
 
-`src/lib.rs` now names the supported entry points in its crate documentation and
+`src/lib.rs` names the supported entry points in its crate documentation and
 classifies everything else as implementation. Read that first: it is the
 declaration, and this section only explains why it is a declaration rather than
 an enforced boundary.

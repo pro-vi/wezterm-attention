@@ -2,8 +2,9 @@
 //! an incarnation. A server shown to have exited -- its GUI process is gone,
 //! or no process carries the pane -- leaves its panes absent, and the
 //! two-observation rule reclaims them. A socket that is gone, replaced or
-//! refusing with nothing to show the server gone keeps every record, and doctor and sweep report that history once, however much
-//! of it there is. A mux that did not answer leaves them incomplete.
+//! refusing with nothing to show the server gone keeps every record, and
+//! doctor and sweep report that history once, however much of it there is. A
+//! mux that did not answer leaves them incomplete.
 
 use super::pane_retention::{OP_1, OP_2, actions, end_long_ago, end_reason, pane_dir, tree_bytes};
 use super::*;
