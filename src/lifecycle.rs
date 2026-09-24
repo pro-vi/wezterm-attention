@@ -792,6 +792,81 @@ fn apply_observation(
     Ok(mutation.result)
 }
 
+/// The presence source a child's permission request writes. The child's next
+/// tool call or its stop replaces that presence, so while it stands the child
+/// is waiting.
+const WAITING_FOR_PERMISSION: &str = "permission";
+
+/// Whether a child that asked for permission at or after `since` has not
+/// emitted anything since. Its presence must still be eligible: a parent clear,
+/// the retention floor or its TTL ends the wait. A fence or presence that
+/// cannot be read answers no, which leaves the activity to its usual order.
+fn child_still_waits(
+    resolved: &ResolvedLaunch,
+    binding_dir: &Path,
+    binding_id: &str,
+    since: &str,
+    now: &str,
+) -> bool {
+    let identity = RecordIdentity::binding(&resolved.address, &resolved.launch_id, binding_id);
+    let fence = |name: &str, kind: &str, field: &str| match read_record_typed(
+        &binding_dir.join(name),
+        Some(kind),
+        &identity,
+    ) {
+        RecordRead::Present(value) => Ok(value[field].as_str().map(str::to_owned)),
+        RecordRead::Missing => Ok(None),
+        _ => Err(()),
+    };
+    let (Ok(clear), Ok(floor), Ok(protocol)) = (
+        fence("agents-clear.json", "subagent_clear", "observed_mono_ns"),
+        fence(
+            "agents-floor.json",
+            "subagent_retention_floor",
+            "floor_mono_ns",
+        ),
+        manifest(),
+    ) else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(binding_dir.join("agents")) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        let Some(agent_key) = path.file_stem().and_then(|stem| stem.to_str()).filter(|_| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        }) else {
+            return false;
+        };
+        let RecordRead::Present(presence) = read_record_typed(
+            &path,
+            Some("subagent_presence"),
+            &RecordIdentity::agent(
+                &resolved.address,
+                &resolved.launch_id,
+                binding_id,
+                agent_key,
+            ),
+        ) else {
+            return false;
+        };
+        presence["source"] == WAITING_FOR_PERMISSION
+            && presence["observed_mono_ns"]
+                .as_str()
+                .is_some_and(|order| order >= since)
+            && crate::protocol::eligible_subagent_presence(
+                &presence,
+                clear.as_deref(),
+                floor.as_deref(),
+                Some(now),
+                protocol,
+            )
+            .0
+    })
+}
+
 fn apply_activity(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
@@ -847,12 +922,39 @@ fn apply_activity(
             }) && existing
                 .as_ref()
                 .is_none_or(|activity| !acknowledged(&activity_path, &identity, activity));
+            // A lead that waits on a sub-agent keeps calling tools, and each
+            // call is thinking. While a child that asked for permission is
+            // still waiting, its notify is what the user needs to see. A
+            // prompt, or anything but thinking, replaces it as usual.
+            let held = event.agent_id.is_none()
+                && base["type"] == "thinking"
+                && event.source_event != "UserPromptSubmit"
+                && visible
+                && existing.as_ref().is_some_and(|activity| {
+                    activity["type"] == "notify"
+                        && child_still_waits(
+                            resolved,
+                            &binding_dir,
+                            &binding_id,
+                            activity["observed_mono_ns"].as_str().unwrap_or(""),
+                            written_at,
+                        )
+                });
             let mut replacements = Vec::new();
             let (result, activity) = if let Some(existing) = existing {
                 if visible && semantic_activity(existing.clone()) == base {
                     let mut result = LifecycleResult::new(Disposition::Skipped);
                     result.event_id = existing["event_id"].as_str().map(str::to_owned);
                     (result, Some(existing))
+                } else if held {
+                    (
+                        LifecycleResult::diagnosed(
+                            Disposition::Ignored,
+                            "binding_conflict",
+                            "a sub-agent is still waiting for permission",
+                        ),
+                        Some(existing),
+                    )
                 } else {
                     let order = existing["observed_mono_ns"].as_str().unwrap_or("");
                     if observation < order {
@@ -912,6 +1014,22 @@ fn apply_activity(
                 result.event_id = Some(event_id);
                 (result, Some(record))
             };
+            // Only a child's permission request reaches here with an agent id.
+            // Its presence marks the child as waiting until its next tool call
+            // or its stop.
+            if let Some(agent_id) = event.agent_id.as_deref() {
+                plan_presence(
+                    resolved,
+                    event,
+                    observation,
+                    written_at,
+                    &binding_id,
+                    agent_id,
+                    WAITING_FOR_PERMISSION,
+                    "active",
+                    &mut replacements,
+                )?;
+            }
             if parent_stop && !matches!(result.disposition.as_str(), "ignored" | "conflict") {
                 let surviving_activity = activity.as_ref().ok_or_else(|| {
                     AttentionError::new("record_invalid", "parent stop has no surviving activity")
@@ -1291,10 +1409,12 @@ pub fn apply_mark_review(
 }
 
 /// Withdraws what `source` published in the current launch: its review, and
-/// its activity, the way Pi's bus clear withdraws Pi's. The activity slot is
-/// shared by every writer of the binding, so the watermark is written only
-/// when the activity in it is this source's. A launch with no binding has no
-/// activity-clear record to write, so there only the review is withdrawn.
+/// its activity, the way Pi's bus clear withdraws Pi's. Activity is withdrawn
+/// where `mark` writes it. With a binding, the slot is shared by every writer
+/// of the binding, so the activity-clear watermark is written only when the
+/// activity in it is this source's. Without one, `mark` writes the launch's
+/// own activity record, and that record is removed when it is this source's;
+/// both readers treat an absent launch activity as no activity.
 pub fn apply_mark_clear(
     env: &BTreeMap<String, String>,
     source: &str,
@@ -1341,7 +1461,22 @@ pub fn apply_mark_clear(
             )?;
             let (_, current) = read_current(&launch, pointer, &address, &launch_id)?;
             let mut replacements = Vec::new();
+            let mut removals = vec![review_path.clone()];
             let mut cleared = None;
+            if current.is_none() {
+                let activity_path = launch.join("activity.json");
+                let activity = read_record(
+                    &activity_path,
+                    Some("activity"),
+                    &RecordIdentity::launch(&address, &launch_id),
+                )?;
+                if activity.as_ref().is_some_and(|activity| {
+                    activity["source"] == source && activity["target"] == json!({"kind":"launch"})
+                }) {
+                    removals.push(activity_path);
+                    cleared = Some(LifecycleResult::new(Disposition::Applied));
+                }
+            }
             if let Some(binding_id) = current
                 .as_ref()
                 .and_then(|record| record["binding_id"].as_str())
@@ -1381,7 +1516,7 @@ pub fn apply_mark_clear(
             Ok(CommitPlan {
                 result: Mutation::plain(result),
                 replacements,
-                removals: vec![review_path.clone()],
+                removals,
                 private_dirs: Vec::new(),
             })
         },
@@ -1407,10 +1542,10 @@ fn apply_child(
         .or(event.child_source.as_deref())
         .ok_or_else(|| AttentionError::new("record_invalid", "child event has no source"))?;
     let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
-    let binding_dir = launch.join("bindings").join(&binding_id);
-    let binding_path = binding_dir.join("binding.json");
-    let agent_key = crate::protocol::sha256_hex(agent_id.as_bytes());
-    let presence_path = binding_dir.join("agents").join(format!("{agent_key}.json"));
+    let binding_path = launch
+        .join("bindings")
+        .join(&binding_id)
+        .join("binding.json");
     let status = if event.action == ProviderAction::ChildActive {
         "active"
     } else {
@@ -1437,83 +1572,18 @@ fn apply_child(
                     private_dirs: Vec::new(),
                 });
             }
-            let identity =
-                RecordIdentity::binding(&resolved.address, &resolved.launch_id, &binding_id);
-            let existing = read_record(
-                &presence_path,
-                Some("subagent_presence"),
-                &RecordIdentity::agent(
-                    &resolved.address,
-                    &resolved.launch_id,
-                    &binding_id,
-                    &agent_key,
-                ),
-            )?;
-            let floor = read_record(
-                &binding_dir.join("agents-floor.json"),
-                Some("subagent_retention_floor"),
-                &identity,
-            )?;
-            let clear = read_record(
-                &binding_dir.join("agents-clear.json"),
-                Some("subagent_clear"),
-                &identity,
-            )?;
             let mut replacements = Vec::new();
-            let result = if let Some(existing) = existing {
-                let existing_order = existing["observed_mono_ns"].as_str().unwrap_or("");
-                if existing["status"] == "stopped" && status == "stopped" {
-                    let mut result = LifecycleResult::new(Disposition::Skipped);
-                    result.event_id = existing["event_id"].as_str().map(str::to_owned);
-                    result
-                } else if observation < existing_order {
-                    LifecycleResult::new(Disposition::Ignored)
-                } else if observation == existing_order {
-                    if existing["status"] == status && existing["source"] == source {
-                        let mut result = LifecycleResult::new(Disposition::Skipped);
-                        result.event_id = existing["event_id"].as_str().map(str::to_owned);
-                        result
-                    } else {
-                        LifecycleResult::diagnosed(
-                            Disposition::Conflict,
-                            "record_invalid",
-                            "equal child order has different content",
-                        )
-                    }
-                } else {
-                    child_replacement(
-                        resolved,
-                        event,
-                        observation,
-                        written_at,
-                        &binding_id,
-                        agent_id,
-                        &agent_key,
-                        source,
-                        status,
-                        &presence_path,
-                        floor.as_ref(),
-                        clear.as_ref(),
-                        &mut replacements,
-                    )?
-                }
-            } else {
-                child_replacement(
-                    resolved,
-                    event,
-                    observation,
-                    written_at,
-                    &binding_id,
-                    agent_id,
-                    &agent_key,
-                    source,
-                    status,
-                    &presence_path,
-                    floor.as_ref(),
-                    clear.as_ref(),
-                    &mut replacements,
-                )?
-            };
+            let result = plan_presence(
+                resolved,
+                event,
+                observation,
+                written_at,
+                &binding_id,
+                agent_id,
+                source,
+                status,
+                &mut replacements,
+            )?;
             Ok(append_observation(
                 resolved,
                 event,
@@ -1533,6 +1603,87 @@ fn apply_child(
         |mutation| apply_observed_outputs(resolved, &binding_id, mutation),
     )?;
     Ok(mutation.result)
+}
+
+/// Plans one child's presence write at `observation`, inside the launch lock.
+/// A newer or equal record, the retention floor, and (for an active child) the
+/// parent clear each keep what is stored.
+#[allow(clippy::too_many_arguments)]
+fn plan_presence(
+    resolved: &ResolvedLaunch,
+    event: &ProviderEvent,
+    observation: &str,
+    written_at: &str,
+    binding_id: &str,
+    agent_id: &str,
+    source: &str,
+    status: &str,
+    replacements: &mut Vec<Replacement>,
+) -> Result<LifecycleResult> {
+    let binding_dir = launch_path(&resolved.root, &resolved.address, &resolved.launch_id)
+        .join("bindings")
+        .join(binding_id);
+    let agent_key = crate::protocol::sha256_hex(agent_id.as_bytes());
+    let presence_path = binding_dir.join("agents").join(format!("{agent_key}.json"));
+    let identity = RecordIdentity::binding(&resolved.address, &resolved.launch_id, binding_id);
+    let existing = read_record(
+        &presence_path,
+        Some("subagent_presence"),
+        &RecordIdentity::agent(
+            &resolved.address,
+            &resolved.launch_id,
+            binding_id,
+            &agent_key,
+        ),
+    )?;
+    let floor = read_record(
+        &binding_dir.join("agents-floor.json"),
+        Some("subagent_retention_floor"),
+        &identity,
+    )?;
+    let clear = read_record(
+        &binding_dir.join("agents-clear.json"),
+        Some("subagent_clear"),
+        &identity,
+    )?;
+    if let Some(existing) = existing {
+        let existing_order = existing["observed_mono_ns"].as_str().unwrap_or("");
+        if existing["status"] == "stopped" && status == "stopped" {
+            let mut result = LifecycleResult::new(Disposition::Skipped);
+            result.event_id = existing["event_id"].as_str().map(str::to_owned);
+            return Ok(result);
+        }
+        if observation < existing_order {
+            return Ok(LifecycleResult::new(Disposition::Ignored));
+        }
+        if observation == existing_order {
+            if existing["status"] == status && existing["source"] == source {
+                let mut result = LifecycleResult::new(Disposition::Skipped);
+                result.event_id = existing["event_id"].as_str().map(str::to_owned);
+                return Ok(result);
+            }
+            return Ok(LifecycleResult::diagnosed(
+                Disposition::Conflict,
+                "record_invalid",
+                "equal child order has different content",
+            ));
+        }
+    }
+    child_replacement(
+        resolved,
+        event,
+        observation,
+        written_at,
+        binding_id,
+        agent_id,
+        &agent_key,
+        source,
+        status,
+        &presence_path,
+        floor.as_ref(),
+        clear.as_ref(),
+        replacements,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

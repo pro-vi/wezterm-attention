@@ -1,5 +1,7 @@
 use super::*;
 use wezterm_attention::lifecycle::apply_mark_clear;
+use wezterm_attention::query::{PaneScope, RecordAvailability, read_pane_facts_with_ports};
+use wezterm_attention::records::FileRecords;
 
 fn mark(setup: &Setup, state: &str, source: &str, observation: &str) {
     apply_mark_activity(
@@ -121,4 +123,123 @@ fn cli_mark_clear_writes_the_activity_clear() {
             .join("activity-clear.json")
             .exists()
     );
+}
+
+/// What the Rust reader reports for the launch's selected activity: its
+/// availability and, when one is present, its source.
+fn rust_activity(setup: &Setup) -> (RecordAvailability, Option<String>) {
+    let launch_id = &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"];
+    let root = state_root(&setup.env).unwrap();
+    let (address, _) = pane_address(&setup.env).unwrap();
+    let pointer: Option<Value> =
+        fs::read(launch_path(&root, &address, launch_id).join("current-binding.json"))
+            .ok()
+            .map(|bytes| serde_json::from_slice(&bytes).unwrap());
+    let scope = PaneScope::new(
+        address,
+        launch_id.clone(),
+        pointer.map(|pointer| pointer["binding_id"].as_str().unwrap().to_owned()),
+    )
+    .unwrap();
+    let facts =
+        read_pane_facts_with_ports(&root, &scope, &FileRecords, &setup.clock, None, None).unwrap();
+    let source = facts
+        .activity
+        .record
+        .as_ref()
+        .filter(|_| facts.activity.availability == RecordAvailability::Present)
+        .and_then(|record| record["source"].as_str().map(str::to_owned));
+    (facts.activity.availability, source)
+}
+
+/// The line the plugin reader, run inside a real WezTerm, prints for this pane.
+fn lua_activity(setup: &Setup) -> String {
+    let (address, _) = pane_address(&setup.env).unwrap();
+    let wire =
+        json!({"wire":2,"address":address,"launch_id":setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]});
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let result = setup._scratch.0.join(format!("view-{}", Uuid::new_v4()));
+    let wezterm = crate::executables::resolve("wezterm");
+    let output = Command::new(&wezterm)
+        .env_clear()
+        .env("PATH", crate::executables::child_path(&[], &[&wezterm]))
+        .env("WEZTERM_ATTENTION_DIR", &setup.env["WEZTERM_ATTENTION_DIR"])
+        .env("WEZTERM_ATTENTION_TEST_ROOT", &root)
+        .env("WEZTERM_ATTENTION_VIEW_RESULT", &result)
+        .env("WEZTERM_ATTENTION_VIEW_NOW", setup.clock.unix)
+        .env("WEZTERM_ATTENTION_VIEW_WIRE", wire.to_string())
+        .arg("--config-file")
+        .arg(root.join("tests/lua/support/read_attention_view.lua"))
+        .args(["show-keys", "--lua"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let line = fs::read_to_string(result).unwrap();
+    line.strip_prefix("ok ")
+        .unwrap_or_else(|| panic!("{line}"))
+        .trim_end()
+        .to_owned()
+}
+
+fn launch_activity_path(setup: &Setup) -> PathBuf {
+    let root = state_root(&setup.env).unwrap();
+    let (address, _) = pane_address(&setup.env).unwrap();
+    launch_path(&root, &address, &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]).join("activity.json")
+}
+
+// Before any provider session binds, `mark` writes the launch's own activity.
+// `mark clear` withdraws it from the same place, so neither reader shows it.
+#[test]
+fn mark_clear_withdraws_a_launch_activity_before_any_binding() {
+    let setup = Setup::new();
+    setup.claim();
+    mark(&setup, "thinking", "build", "00000000000000000300");
+    assert_eq!(
+        rust_activity(&setup),
+        (RecordAvailability::Present, Some("build".to_owned()))
+    );
+    assert_eq!(lua_activity(&setup), "activity=thinking source=build");
+    let cleared = apply_mark_clear(&setup.env, "build", "00000000000000000400").unwrap();
+    assert_eq!(cleared.disposition, "applied");
+    assert!(!launch_activity_path(&setup).exists());
+    assert_eq!(rust_activity(&setup), (RecordAvailability::Absent, None));
+    assert_eq!(lua_activity(&setup), "activity=none source=none");
+    let again = apply_mark_clear(&setup.env, "build", "00000000000000000500").unwrap();
+    assert_eq!(again.disposition, "skipped", "nothing of build's is left");
+}
+
+// The launch has one activity slot too. A source clears only what it wrote.
+#[test]
+fn mark_clear_leaves_another_sources_launch_activity() {
+    let setup = Setup::new();
+    setup.claim();
+    mark(&setup, "thinking", "build", "00000000000000000300");
+    mark(&setup, "notify", "deploy", "00000000000000000350");
+    let result = apply_mark_clear(&setup.env, "build", "00000000000000000400").unwrap();
+    assert_eq!(result.disposition, "skipped");
+    assert!(launch_activity_path(&setup).exists());
+    assert_eq!(
+        rust_activity(&setup),
+        (RecordAvailability::Present, Some("deploy".to_owned()))
+    );
+    assert_eq!(lua_activity(&setup), "activity=notify source=deploy");
+}
+
+// Once a session binds, the activity lives with the binding and `mark clear`
+// hides it with the binding's activity-clear watermark; both readers agree.
+#[test]
+fn both_readers_hide_a_bound_activity_its_source_cleared() {
+    let setup = bound();
+    mark(&setup, "notify", "build", "00000000000000000300");
+    assert_eq!(lua_activity(&setup), "activity=notify source=build");
+    apply_mark_clear(&setup.env, "build", "00000000000000000400").unwrap();
+    assert_eq!(rust_activity(&setup), (RecordAvailability::Cleared, None));
+    assert_eq!(lua_activity(&setup), "activity=none source=none");
+    mark(&setup, "thinking", "deploy", "00000000000000000500");
+    apply_mark_clear(&setup.env, "build", "00000000000000000600").unwrap();
+    assert_eq!(
+        rust_activity(&setup),
+        (RecordAvailability::Present, Some("deploy".to_owned()))
+    );
+    assert_eq!(lua_activity(&setup), "activity=thinking source=deploy");
 }
