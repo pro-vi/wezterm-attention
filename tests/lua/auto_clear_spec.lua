@@ -10,6 +10,18 @@ os.remove(test_dir)
 assert(os.execute("mkdir -p " .. shell_quote(test_dir)) == 0)
 
 local logged_errors = {}
+-- Warnings are captured apart from errors: an unexpected error fails a test,
+-- a warning is only what a test chooses to assert.
+local logged_warnings = {}
+
+local function drain_warnings()
+  local drained = {}
+  for i, message in ipairs(logged_warnings) do
+    drained[i] = message
+    logged_warnings[i] = nil
+  end
+  return drained
+end
 
 local function drain_errors()
   local drained = {}
@@ -213,6 +225,9 @@ local wezterm = {
   end,
   log_error = function(message)
     table.insert(logged_errors, message)
+  end,
+  log_warn = function(message)
+    table.insert(logged_warnings, message)
   end,
   on = function(event, callback)
     handlers[event] = handlers[event] or {}
@@ -582,6 +597,7 @@ local failed = 0
 
 local function test(name, callback)
   drain_errors()
+  drain_warnings()
   for key in pairs(mux_windows_by_id) do mux_windows_by_id[key] = nil end
   local ok, err = pcall(callback)
   if ok and #logged_errors > 0 then
@@ -4116,6 +4132,49 @@ test("a missing protocol module logs once and keeps the v1 reader available", fu
   local errors = drain_errors()
   assert(#errors == 1 and errors[1]:find("protocol", 1, true),
     "the missing module must produce one named log line")
+end)
+
+--- Load a fresh copy of the plugin with the given process environment, which
+--- the plugin reads when it loads.
+local function load_with_environment(environment)
+  local real_getenv = os.getenv
+  os.getenv = function(name)
+    if environment[name] ~= nil then return environment[name] or nil end
+    if name == "WEZTERM_ATTENTION_DIR" or name == "XDG_STATE_HOME" then return nil end
+    return real_getenv(name)
+  end
+  local ok, instance = pcall(dofile, repo_root .. "/plugin/init.lua")
+  os.getenv = real_getenv
+  assert(ok, instance)
+  return instance
+end
+
+test("the default state root follows the same order as the writer", function()
+  local home_default = test_dir .. "/.local/state/wezterm-attention"
+  local cases = {
+    { env = { WEZTERM_ATTENTION_DIR = test_dir .. "/explicit", XDG_STATE_HOME = test_dir .. "/xdg" },
+      root = test_dir .. "/explicit" },
+    { env = { WEZTERM_ATTENTION_DIR = "", XDG_STATE_HOME = test_dir .. "/xdg" },
+      root = test_dir .. "/xdg/wezterm-attention" },
+    { env = { XDG_STATE_HOME = test_dir .. "/xdg/" }, root = test_dir .. "/xdg/wezterm-attention" },
+    { env = { XDG_STATE_HOME = "relative/state" }, root = home_default },
+    { env = { XDG_STATE_HOME = "" }, root = home_default },
+    { env = {}, root = home_default },
+    { env = { WEZTERM_ATTENTION_DIR = "relative/dir" }, root = home_default, warned = true },
+  }
+  for index, case in ipairs(cases) do
+    local instance = load_with_environment(case.env)
+    instance.apply_to_config({}, { auto_poll = false, review_key = false, renderer = "manual" })
+    assert(instance._active_dir == case.root,
+      "case " .. index .. ": expected " .. case.root .. ", got " .. tostring(instance._active_dir))
+    local warnings = drain_warnings()
+    if case.warned then
+      assert(#warnings == 1 and warnings[1]:find("WEZTERM_ATTENTION_DIR", 1, true),
+        "a relative WEZTERM_ATTENTION_DIR must be named once in the log")
+    else
+      assert(#warnings == 0, "case " .. index .. " warned: " .. tostring(warnings[1]))
+    end
+  end
 end)
 
 -- A producer reads WEZTERM_ATTENTION_ROOT as "write through the v2 writer", and

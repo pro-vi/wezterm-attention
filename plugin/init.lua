@@ -7,9 +7,36 @@ local M = {}
 
 local home = wezterm.home_dir or os.getenv("HOME") or os.getenv("USERPROFILE") or "/tmp"
 
+local function is_absolute_path(path)
+  return path:sub(1, 1) == "/" or path:match("^%a:[\\/]") ~= nil or path:sub(1, 2) == "\\\\"
+end
+
+--- The state root, resolved in the order the attention CLI and the Pi
+--- extension use, so a producer, the writer and this reader agree on one
+--- directory: WEZTERM_ATTENTION_DIR, then $XDG_STATE_HOME/wezterm-attention,
+--- then ~/.local/state/wezterm-attention. An empty value counts as unset, and a
+--- relative XDG_STATE_HOME is ignored as the XDG spec says. A relative
+--- WEZTERM_ATTENTION_DIR is an error to the CLI; here it is ignored, and the
+--- second return says so for the log.
+local function resolve_state_root()
+  local note
+  local explicit = os.getenv("WEZTERM_ATTENTION_DIR")
+  if explicit and explicit ~= "" then
+    if is_absolute_path(explicit) then return explicit end
+    note = "WEZTERM_ATTENTION_DIR is not an absolute path, so it is ignored: " .. explicit
+  end
+  local state_home = os.getenv("XDG_STATE_HOME")
+  if state_home and state_home ~= "" and is_absolute_path(state_home) then
+    return (state_home:gsub("(.)/+$", "%1")) .. "/wezterm-attention", note
+  end
+  return home .. "/.local/state/wezterm-attention", note
+end
+
+local default_dir, default_dir_note = resolve_state_root()
+
 local defaults = {
   -- Where marker files are written (one file per pane ID)
-  dir = home .. "/.local/state/wezterm-attention",
+  dir = default_dir,
 
   -- Render mode: "tab" | "manual"
   --   tab:    plugin owns format-tab-title (default)
@@ -216,6 +243,7 @@ local overlays_api = overlays_factory({
 local reported_errors = overlays_api.reported_errors
 local publication_session = overlays_api.publication_session
 local report_error_once = overlays_api.report_error_once
+local report_warning_once = overlays_api.report_warning_once
 local next_publication_id = overlays_api.next_publication_id
 local json_string = overlays_api.json_string
 local json_value = overlays_api.json_value
@@ -438,6 +466,7 @@ function M.apply_to_config(config, opts)
 
   -- Merge options with defaults
   local dir = opts.dir or defaults.dir
+  if not opts.dir and default_dir_note then report_warning_once("state-root", default_dir_note) end
   local auto_poll = opts.auto_poll ~= false
   M._active_dir = dir
   local integration_root = opts.integration_root or plugin_root

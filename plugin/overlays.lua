@@ -241,6 +241,14 @@ return function(context)
     wezterm.log_error("wezterm-attention: " .. message)
   end
 
+  --- The same, for a setup the plugin works around rather than a failure.
+  local function report_warning_once(key, message)
+    if reported_errors[key] then return end
+    reported_errors[key] = true
+    local log = type(wezterm.log_warn) == "function" and wezterm.log_warn or wezterm.log_error
+    log("wezterm-attention: " .. message)
+  end
+
   local function clear_acknowledgement(dir, pane_id)
     local path = acknowledgement_path(dir, pane_id)
     local existing = io.open(path, "r")
@@ -557,6 +565,7 @@ return function(context)
     reported_errors = reported_errors,
     publication_session = publication_session,
     report_error_once = report_error_once,
+    report_warning_once = report_warning_once,
     next_publication_id = next_publication_id,
     json_string = json_string,
     json_value = json_value,
