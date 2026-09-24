@@ -194,14 +194,31 @@ local handlers = {}
 -- Keyed by window id, because a test builds a fresh double for each poll and a
 -- mux window has one current content, not one per time it was looked at.
 local mux_windows_by_id = {}
+-- Defined with the fixtures below; the mux double hands out its panes.
+local mux_pane
 
 local wezterm = {
   home_dir = test_dir,
-  mux = { all_windows = function()
-    local all = {}
-    for _, mux_window in pairs(mux_windows_by_id) do all[#all + 1] = mux_window end
-    return all
-  end },
+  mux = {
+    all_windows = function()
+      local all = {}
+      for _, mux_window in pairs(mux_windows_by_id) do all[#all + 1] = mux_window end
+      return all
+    end,
+    -- A pane in one of this test's mux windows, else a local pane: a tab the
+    -- GUI draws always has its panes in the mux, and most tests draw local ones.
+    get_pane = function(pane_id)
+      for _, mux_window in pairs(mux_windows_by_id) do
+        for _, mux_tab in ipairs(mux_window.tabs()) do
+          local ok, panes = pcall(mux_tab.panes, mux_tab)
+          for _, candidate in ipairs(ok and panes or {}) do
+            if candidate.pane_id() == pane_id then return candidate end
+          end
+        end
+      end
+      return mux_pane(pane_id)
+    end,
+  },
   action_callback = function(callback) return callback end,
   action = {
     -- Recorded, not executed. What the real action does to a live WezTerm is
@@ -435,7 +452,7 @@ end
 --- otherwise) and `spec.published` is the value the pane has published as its
 --- WEZTERM_PANE user var. A plain number therefore describes the ordinary
 --- case: a local pane whose local id is also its marker id.
-local function mux_pane(pane_id, spec)
+mux_pane = function(pane_id, spec)
   spec = spec or {}
   -- A pane whose handle answers but whose mux resolution does not: pane_id is
   -- held by the handle, while the other two go through the mux and fail together.
@@ -1135,6 +1152,28 @@ test("the published ids are the translated ones, not the window's local ids", fu
   assert(published.tabs[1].marker_ids[1] == "9840",
     "a mux client's tab carries the published pane id, got "
       .. tostring(published.tabs[1].marker_ids[1]))
+end)
+
+test("a mux-client pane drawn before any poll shows no other pane's attention", function()
+  write_marker(9746, "stop")
+  -- A client pane that published 9746 as its marker id, walked by polls long
+  -- enough for its title to settle.
+  for _ = 1, 2 do
+    attention.poll(window_double({ tabs = { { { id = 9747, published = 9746, domain = "unix",
+      title = "server-job" } } }, focused = false }))
+  end
+  -- Another client pane whose GUI-local number is 9746, not polled yet.
+  window_double({ window_id = 9748, tabs = { { { id = 9746, domain = "unix" } } }, focused = false })
+  local drawn = gui_tab({ window_id = 9748, tab_id = 9749, tab_index = 0, panes = { 9746 } })
+  local rendered = format_tab_title(drawn, { drawn })
+  assert(not rendered_text(rendered):find("✓", 1, true),
+    "the local number names another pane's markers, got " .. rendered_text(rendered))
+  assert(not rendered_text(rendered):find("server-job", 1, true),
+    "nor the other pane's settled title, got " .. rendered_text(rendered))
+  local published = assert(read_tab_publication(9748))
+  assert(#published.tabs[1].marker_ids == 0, "and is not published as this tab's")
+
+  os.remove(test_dir .. "/9746")
 end)
 
 test("two windows publish their own orders into their own files", function()

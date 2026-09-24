@@ -359,13 +359,30 @@ local refresh_cached_v2 = v2_overlays.refresh_cached_v2
 local acknowledge_focused_v2_pane = v2_overlays.acknowledge_focused_v2_pane
 -- ── Internal helpers ────────────────────────────────────────────────────────
 
+--- The key a pane the GUI draws is cached under, from its GUI-local number:
+--- the one the last poll found for it, or nil when that poll found none (a
+--- mux-client pane that has not published its $WEZTERM_PANE). Before any poll
+--- has walked the pane, its own number where that is the marker id, in a
+--- local-family domain, so single-machine setups render at once; elsewhere
+--- the number names some other pane's markers, and the answer is nil.
+local function drawn_pane_key(local_id)
+  local mapped = marker_id_by_local[local_id]
+  if mapped ~= nil then return mapped or nil end
+  local mux = wezterm.mux
+  if not mux or type(mux.get_pane) ~= "function" then return nil end
+  local ok, pane = pcall(mux.get_pane, tonumber(local_id))
+  if not ok or not pane then return nil end
+  if not reader_api.is_local_domain(pane_method(pane, "get_domain_name")) then return nil end
+  return local_id
+end
+
 local titles_factory = assert(load_plugin_module("titles"))
 local titles_api = titles_factory({
   M = M,
   defaults = defaults,
   report_error_once = report_error_once,
   is_safe_text = is_safe_text,
-  marker_id_by_local = marker_id_by_local,
+  drawn_pane_key = drawn_pane_key,
 })
 local normalized_pane_title = titles_api.normalized_pane_title
 local sample_settled_title = titles_api.sample_settled_title
@@ -377,7 +394,7 @@ local format_factory = assert(load_plugin_module("format"))
 local format_api = format_factory({
   M = M,
   defaults = defaults,
-  marker_id_by_local = marker_id_by_local,
+  drawn_pane_key = drawn_pane_key,
   attention_cache = attention_cache,
   title_sources = title_sources,
   display_text = titles_api.display_text,
