@@ -373,6 +373,27 @@ return function()
       return "pending"
     end
 
+    local realm_by_socket = {}
+
+    --- What this GUI knows of its own mux, the one its local panes run in:
+    --- the tab-source status, then the realm and incarnation the answer named.
+    --- Before an answer the realm is the hash of this GUI's socket path as its
+    --- environment spells it, which is the writer's realm whenever that path
+    --- is already canonical; the incarnation is not known. Nil realm when this
+    --- GUI has no socket to go by.
+    local function own_mux_identity()
+      local status, source = tab_source_status()
+      if source then return status, source.realm_id, source.incarnation_id end
+      local socket = tab_source_state.socket or os.getenv("WEZTERM_UNIX_SOCKET")
+      if type(socket) ~= "string" or socket:sub(1, 1) ~= "/" or not protocol then return status end
+      local realm = realm_by_socket[socket]
+      if not realm then
+        realm = context.sha256(socket)
+        realm_by_socket[socket] = realm
+      end
+      return status, realm
+    end
+
     local function acquire_tab_source(socket)
       local root = M._active_integration_root
       if not can_acquire_tab_source(socket) then return end
@@ -1147,7 +1168,7 @@ return function()
             before_titles[key] = prior_title and prior_title.settled or nil
           end
 
-          if read.kind == "invalid" then
+          if read.kind == "invalid" and not read.deferred then
             local item = read.diagnostic or invalid("pane identity is invalid")
             report_error_once("v2-identity:" .. local_id .. ":" .. item.code,
               item.code .. ": " .. item.message)
@@ -1473,6 +1494,7 @@ return function()
     return {
       tab_source = function() return tab_source_state.source end,
       tab_source_status = tab_source_status,
+      own_mux_identity = own_mux_identity,
       reset_tab_source = reset_tab_source,
       acquire_tab_source = acquire_tab_source,
       parse_tab_source_response = parse_tab_source_response,

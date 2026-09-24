@@ -3627,6 +3627,114 @@ test("focused v2 acknowledgement targets only the active pane's exact event", fu
     "the exact acknowledged activity must be suppressed on the same poll")
 end)
 
+--- A tab-source answer naming `socket`, with `incarnation_id` spelled out.
+local function own_source_response(socket, incarnation_id)
+  return '{"schema":1,"command":"tab-source","status":"ok","complete":true,"result":{'
+    .. '"socket_path":' .. encode_json_string(socket) .. ',"realm_id":"' .. internal.sha256(socket)
+    .. '","incarnation_id":"' .. incarnation_id .. '"},"diagnostics":[]}'
+end
+
+--- A plugin instance that has asked who its GUI is, and been told `socket`
+--- with `incarnation_id`.
+local function instance_knowing_its_mux(socket, incarnation_id)
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
+  local previous = wezterm.run_child_process
+  wezterm.run_child_process = function() return true, own_source_response(socket, incarnation_id), "" end
+  instance._internal.acquire_tab_source(socket)
+  wezterm.run_child_process = previous
+  assert(instance._internal.tab_source(), "precondition: the source was answered")
+  return instance
+end
+
+local function v2_ack_path(wire)
+  return test_dir .. "/v2/realms/" .. wire.address.realm_id .. "/incarnations/"
+    .. wire.address.incarnation_id .. "/panes/" .. wire.address.pane_id .. "/launches/"
+    .. wire.launch_id .. "/bindings/" .. protocol_fixture.record_samples.binding.binding_id .. "/ack.json"
+end
+
+local function focus_v2_pane(instance, spec)
+  instance.poll(window_double({ tabs = { { spec } }, focused = true, active_pane_id = spec }),
+    { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+end
+
+test("a local pane naming another mux's pane of the same number is refused, not acknowledged", function()
+  local fixture_incarnation = protocol_fixture.wire_sample.address.incarnation_id
+  -- This GUI's own mux is another realm than the one the pane's output names.
+  local instance = instance_knowing_its_mux("/test/own-gui.sock", fixture_incarnation)
+  local wire = materialize_v2_fixture(53)
+  os.remove(v2_ack_path(wire))
+  local spec = { id = 53, domain = "local", attention = wire }
+  focus_v2_pane(instance, spec)
+  assert(not path_exists(v2_ack_path(wire)), "another mux's notification must not be acknowledged")
+  local key = internal.address_cache_key(wire.address)
+  assert(instance._internal.attention_cache[key] == nil, "and must not be shown on this pane")
+  local errors = drain_errors()
+  assert(#errors == 1 and errors[1]:find("another mux", 1, true),
+    "the refusal says why, got " .. tostring(errors[1]))
+
+  -- The same identity on a mux-client pane is that pane's own: its local
+  -- number is this GUI's, and the published one is the server's.
+  local client = { id = 9053, domain = "unix", attention = wire }
+  focus_v2_pane(instance, client)
+  assert(path_exists(v2_ack_path(wire)), "a mux-client pane's identity is not checked against this GUI")
+  materialize_v2_fixture(53)
+end)
+
+test("a local pane naming this GUI's own mux is read, and another incarnation of it is not", function()
+  local socket = "/test/own-gui-2.sock"
+  local fixture_incarnation = protocol_fixture.wire_sample.address.incarnation_id
+  local instance = instance_knowing_its_mux(socket, fixture_incarnation)
+  local wire = materialize_v2_fixture(54, internal.sha256(socket))
+  os.remove(v2_ack_path(wire))
+  focus_v2_pane(instance, { id = 54, domain = "local", attention = wire })
+  assert(path_exists(v2_ack_path(wire)), "this GUI's own pane is acknowledged on focus")
+
+  local restarted = instance_knowing_its_mux(socket, string.rep("c", 64))
+  local stale = materialize_v2_fixture(55, internal.sha256(socket))
+  os.remove(v2_ack_path(stale))
+  focus_v2_pane(restarted, { id = 55, domain = "local", attention = stale })
+  assert(not path_exists(v2_ack_path(stale)), "an earlier incarnation's records are not this pane's")
+  local errors = drain_errors()
+  assert(#errors == 1 and errors[1]:find("another mux", 1, true), "refused, got " .. #errors)
+end)
+
+test("before a GUI knows its own mux, a local pane is checked against its socket's realm", function()
+  local socket = "/test/own-gui-3.sock"
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
+  local previous = wezterm.run_child_process
+  wezterm.run_child_process = function() return false, "", "unused failure text" end
+  local foreign = materialize_v2_fixture(56)
+  local own = materialize_v2_fixture(57, internal.sha256(socket))
+  local foreign_key = internal.address_cache_key(foreign.address)
+  local own_key = internal.address_cache_key(own.address)
+  local window = window_double({ tabs = { {
+    { id = 56, domain = "local", attention = foreign },
+    { id = 57, domain = "local", attention = own },
+  } }, focused = false })
+  local ok, failure = pcall(with_gui_socket, socket, function()
+    instance.poll(window, { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+    assert(instance._internal.attention_cache[own_key] ~= nil, "a pane of the socket's realm is read at once")
+    assert(instance._internal.attention_cache[foreign_key] == nil, "another realm's is not read yet")
+    assert(#drain_errors() == 0, "nothing is wrong yet: the answer is still to come")
+    instance._internal.acquire_tab_source(socket)
+    instance.poll(window, { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+  end)
+  wezterm.run_child_process = previous
+  assert(ok, failure)
+  assert(instance._internal.attention_cache[own_key] ~= nil, "still read once no answer will come")
+  assert(instance._internal.attention_cache[foreign_key] == nil, "and another realm's is refused")
+  local errors = drain_errors()
+  local refused = false
+  for _, message in ipairs(errors) do
+    if message:find("another mux", 1, true) then refused = true end
+  end
+  assert(refused, "the refusal is logged once the answer is known not to come")
+end)
+
 test("Alt+B uses full v2 addresses and clear-all preserves activity", function()
   local realm_b = string.rep("9", 64)
   local wire_a = materialize_v2_fixture(61)

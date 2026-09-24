@@ -295,6 +295,8 @@ local clear_review_flag = overlays_api.clear_review_flag
 local remove_expired_marker = overlays_api.remove_expired_marker
 local remove_marker = overlays_api.remove_marker
 local reader_factory = assert(load_plugin_module("reader"))
+-- Bound once the runtime below exists; the reader asks it per pane read.
+local own_mux_identity
 local reader_api = reader_factory({
   M = M,
   wezterm = wezterm,
@@ -319,6 +321,7 @@ local reader_api = reader_factory({
   identity_diagnostic = identity_diagnostic,
   age_exceeds_ms = age_exceeds_ms,
   eligible_subagent = eligible_subagent,
+  own_mux_identity = function() return own_mux_identity() end,
 })
 local canonical_pane_id = reader_api.canonical_pane_id
 local pane_call = reader_api.pane_call
@@ -434,6 +437,7 @@ local runtime_api = runtime_state.bind({
   gui_tab_pane_ids = gui_tab_pane_ids,
   resolve_visible_attention = resolve_visible_attention,
 })
+own_mux_identity = runtime_api.own_mux_identity
 local same_cached_attention = runtime_api.same_cached_attention
 local tab_panes_containing_read = runtime_api.tab_panes_containing_read
 local review_outranks = runtime_api.review_outranks
