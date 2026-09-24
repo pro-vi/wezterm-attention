@@ -1980,17 +1980,13 @@ pub fn sweep(
     // process listing answer all its steps. An apply acts on each answer and
     // takes a fresh look for each decision, except where a socket's listing
     // already failed.
-    let listed_once = (!apply).then(|| ListOncePerSocket::new(panes));
-    let failed_once = apply.then(|| FailedListingOncePerSocket {
+    let listed_once = ListOncePerSocket::new(panes);
+    let failed_once = FailedListingOncePerSocket {
         inner: panes,
         failed: std::sync::Mutex::new(BTreeMap::new()),
-    });
-    let probed_once = processes.filter(|_| !apply).map(ProbeOncePerAssembly::new);
-    let panes = match (&listed_once, &failed_once) {
-        (Some(lister), _) => lister as &dyn PaneLister,
-        (None, Some(lister)) => lister as &dyn PaneLister,
-        (None, None) => panes,
     };
+    let probed_once = processes.filter(|_| !apply).map(ProbeOncePerAssembly::new);
+    let panes: &dyn PaneLister = if apply { &failed_once } else { &listed_once };
     let processes = probed_once
         .as_ref()
         .map(|probe| probe as &dyn ProcessProbe)
