@@ -15,11 +15,13 @@ The state root is `WEZTERM_ATTENTION_DIR` when it is set and non-empty, else
 `$XDG_STATE_HOME/wezterm-attention` when `XDG_STATE_HOME` is set, non-empty and absolute, else
 `$HOME/.local/state/wezterm-attention`. The Rust writer, the plugin and the Pi extension use this
 one order. A relative `WEZTERM_ATTENTION_DIR`, or one longer than 4096 bytes, holding a control
-character or not UTF-8, is an error to the writer; the plugin and Pi ignore it with a warning and fall through
-to the next rule. An `XDG_STATE_HOME` that breaks the same rule is skipped by all three. One that
+character or not UTF-8, is an error to the writer; the plugin, and Pi without a configured writer,
+ignore it with a warning and fall through to the next rule, and Pi with a configured writer refuses a
+value that is not UTF-8 where it decides the root and does not start the writer. An `XDG_STATE_HOME` that breaks the same rule is skipped by all three. One that
 is not UTF-8 is an error to the writer when it decides the root, as such a `WEZTERM_ATTENTION_DIR`
-is, because the writer cannot name that directory; the plugin and Pi skip it with a warning, so
-the failure is reported on every side.
+is, because the writer cannot name that directory; the plugin skips it with a warning, and Pi
+skips it with a warning or, with a configured writer, refuses it, so the failure is reported on
+every side.
 
 A text field is safe only when it contains no control character: nothing in U+0000–U+001F, U+007F
 or U+0080–U+009F (Rust's `char::is_control`). The Rust writer, `plugin/protocol.lua` and the
@@ -63,7 +65,8 @@ copy of anything: a binding is written with its entry in the same commit, and a 
 index only while the `session_index` record `complete.json` is present. A claim that starts a new
 store writes that record; a store with bindings from before the index gets it from the first
 `sweep --apply` that reads every binding and gives each one its entry. Without it, readers walk
-every binding as before. Retention removes an entry with the binding or pane tree it names.
+every binding as before. Retention removes an entry with the binding or pane tree it names, and
+then the session's directory in the index once nothing is left in it.
 
 State that is not addressed by a pane lives outside that tree and outside this manifest. The tab bar publishes the order it draws at `tabs/<incarnation id>-<window id>.json`, one file per identified GUI source and window; it names no pane address, carries no pane execution fence and no TTL, so it carries its own `schema` (currently 2) and is versioned separately from `record_schema`. That is the rule for any published fact with no address to validate against: a local schema field, not a manifest entry, because a record-tree change must not refuse a file that has nothing to do with it. `attention tabs` reads them. The process that wrote a file withdraws it when its window closes, and only its own files; a file whose writer has exited is collected by `attention sweep` when every pane it names is verified absent, or when it names no tab at all. See the [consumer guide](consumer-guide.md) for what the order does and does not promise.
 
