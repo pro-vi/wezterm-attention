@@ -486,7 +486,7 @@ fn installed_shim_names_the_install_command_when_the_rust_binary_is_missing() {
         .arg("doctor")
         .output()
         .expect("run shim without Rust binary");
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(1));
     assert_eq!(output.stdout, b"");
     assert_eq!(
         String::from_utf8(output.stderr).expect("stderr"),

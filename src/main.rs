@@ -304,21 +304,8 @@ fn query_json(command: &str) -> bool {
 }
 
 /// `value` as one line of JSON that is safe to print to a terminal.
-///
-/// serde_json leaves U+0080-U+009F raw, and a terminal reads several of them
-/// as control sequences: U+009B alone starts a CSI. Each becomes a `\u`
-/// escape, which is still valid JSON and decodes to the same value.
 fn printable_json<T: Serialize>(value: &T) -> String {
-    let text = serde_json::to_string(value).expect("response serializes");
-    let mut printable = String::with_capacity(text.len());
-    for character in text.chars() {
-        if ('\u{80}'..='\u{9f}').contains(&character) {
-            printable.push_str(&format!("\\u{:04x}", u32::from(character)));
-        } else {
-            printable.push(character);
-        }
-    }
-    printable
+    wezterm_attention::protocol::printable_json(value).expect("response serializes")
 }
 
 /// Print one line to stdout.

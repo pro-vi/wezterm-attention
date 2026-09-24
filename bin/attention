@@ -32,7 +32,7 @@ if [ ! -x "$ROOT/libexec/attention-rs" ]; then
     done
     exit 0
   fi
-  exit 3
+  exit 1
 fi
 
 exec "$ROOT/libexec/attention-rs" "$@"
