@@ -77,6 +77,8 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - A window's first tab order waits for the GUI's source answer, including across failed runs, for up to the whole retry backoff (about 47 s), so `attention tabs` never lists a window twice. If every retry fails, held and new windows are published without a source, and this is logged once.
 - Alt+B clear recovery restores only its own leftovers or ones older than a clear can take, so it never undoes another GUI's clear.
 - A local pane's published identity must belong to the GUI's own mux, so output from another mux cannot make a local pane show or acknowledge that mux's records.
+- A window the plugin published without a source before a config reload is published under its source after it, and the plugin removes the unsourced file it wrote for that window, so `attention tabs` does not list the window twice after the install steps. A file another GUI has rewritten since stays.
+- The plugin and the Pi extension ignore a `WEZTERM_ATTENTION_DIR` or `XDG_STATE_HOME` that is not UTF-8, and say so in their logs, as the attention command refuses it, instead of each reading a directory the command never writes. The plugin's `dir` option is held to the same rule.
 
 - Sourcing the bash integration twice no longer crashes the shell, and it works beside bash-preexec. It keeps `$?` and `$_` for later prompt commands and commands.
 - The shell integration stays quiet outside a WezTerm pane, and `wezterm_attention_claim && claude` starts the agent there.
