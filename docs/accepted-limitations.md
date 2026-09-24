@@ -294,6 +294,17 @@ uptime passes the uptime at which the end was recorded, so retention of that
 pane's tree waits until then. A machine rebooted more often than that never
 removes the tree. This errs toward keeping records: nothing is removed early.
 
+## The session index trusts every writer to keep it
+
+Once `v2/sessions/complete.json` exists, `bindings --socket` and `inspect` look
+for the other bindings of a session only where the session index names them.
+Every binding this version writes gets its entry in the same commit. A binding
+written without one -- by an older `attention` still running hooks after the
+store was marked, or by hand -- is not found as a rival, so a conflict with it
+is not reported, until an entry is written for it. `attention sweep --apply`
+writes a missing entry for every binding it reads. Realm-wide `bindings` walks
+every binding and is not affected. Nothing is removed on the index's word.
+
 ## Removing a pane tree removes the lock files it holds
 
 Pane retention removes the pane's whole directory while it holds the pane's

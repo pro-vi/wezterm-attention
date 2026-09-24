@@ -140,6 +140,20 @@ impl RecordIdentity {
             .collect();
         let invalid =
             || AttentionError::new("record_invalid", "state record path has the wrong shape");
+        if parts.first() == Some(&Some("v2")) && parts.get(1) == Some(&Some("sessions")) {
+            // The index names each entry by what it holds, which the reader
+            // checks; the path fixes no field of the record.
+            let shaped = match kind {
+                "session_index" => parts.len() == 3 && parts[2] == Some("complete.json"),
+                "session_binding" => parts.len() == 4,
+                _ => false,
+            };
+            return if shaped {
+                Ok(Self::unscoped())
+            } else {
+                Err(invalid())
+            };
+        }
         if parts.len() < 4 || parts[0] != Some("v2") || parts[1] != Some("realms") {
             return Err(invalid());
         }
@@ -419,6 +433,91 @@ pub fn pane_path(root: &Path, address: &PaneAddress) -> PathBuf {
 
 pub fn launch_path(root: &Path, address: &PaneAddress, launch_id: &str) -> PathBuf {
     pane_path(root, address).join("launches").join(launch_id)
+}
+
+/// The session index: `v2/sessions/<session key>/<entry key>.json` names
+/// each binding of one provider session, so finding a session's other
+/// bindings reads one directory instead of walking every binding. The keys
+/// are the manifest's `session_key_input` and `session_entry_key_input`
+/// digests. It is derived state: a binding is written with its entry in the
+/// same commit, and never depends on it.
+///
+/// A reader trusts the index only while `v2/sessions/complete.json` says it
+/// holds every binding. A store that had bindings before its writer wrote
+/// entries has none until `sweep --apply` has written an entry for each.
+pub fn session_dir(root: &Path, provider: &str, provider_session_id: &str) -> PathBuf {
+    let mut input = provider.as_bytes().to_vec();
+    input.push(0);
+    input.extend_from_slice(provider_session_id.as_bytes());
+    root.join("v2/sessions")
+        .join(crate::protocol::sha256_hex(&input))
+}
+
+/// Where the session index names one binding: under its session, by the
+/// digest of the binding record's path below the state root, which no other
+/// binding shares.
+pub fn session_entry_path(
+    root: &Path,
+    provider: &str,
+    provider_session_id: &str,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+) -> PathBuf {
+    let binding = launch_path(Path::new(""), address, launch_id)
+        .join("bindings")
+        .join(binding_id)
+        .join("binding.json");
+    let key = crate::protocol::sha256_hex(binding.to_string_lossy().as_bytes());
+    session_dir(root, provider, provider_session_id).join(format!("{key}.json"))
+}
+
+/// A binding record's session index entry and where it goes.
+pub fn binding_session_entry(root: &Path, binding: &Value) -> Result<(PathBuf, Value)> {
+    let invalid = || AttentionError::new("record_invalid", "binding record is invalid");
+    let text = |field: &str| {
+        binding
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(invalid)
+    };
+    let address: PaneAddress = binding
+        .get("address")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .ok_or_else(invalid)?;
+    let (launch_id, binding_id) = (text("launch_id")?, text("binding_id")?);
+    Ok((
+        session_entry_path(
+            root,
+            text("provider")?,
+            text("provider_session_id")?,
+            &address,
+            launch_id,
+            binding_id,
+        ),
+        session_entry(&address, launch_id, binding_id)?,
+    ))
+}
+
+/// The session index entry for one binding.
+pub fn session_entry(address: &PaneAddress, launch_id: &str, binding_id: &str) -> Result<Value> {
+    Ok(serde_json::json!({
+        "kind": "session_binding",
+        "schema": manifest()?.record_schema,
+        "address": address,
+        "launch_id": launch_id,
+        "binding_id": binding_id,
+    }))
+}
+
+/// The record that says the session index holds every binding.
+pub fn session_index_path(root: &Path) -> PathBuf {
+    root.join("v2/sessions/complete.json")
+}
+
+pub fn session_index_marker() -> Result<Value> {
+    Ok(serde_json::json!({"kind": "session_index", "schema": manifest()?.record_schema}))
 }
 
 /// Whether an end record ends this binding record, the one rule every reader

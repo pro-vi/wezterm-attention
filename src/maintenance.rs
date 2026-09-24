@@ -18,8 +18,9 @@ use crate::query::{
     pane_evidence, read_bindings_with_ports, read_tab_publications,
 };
 use crate::records::{
-    CommitPlan, RecordIdentity, Replacement, commit_nested_with, ends_binding, launch_path,
-    pane_path, read_record, remove_file_durable, with_lock,
+    CommitPlan, RecordIdentity, Replacement, atomic_replace_if_different, binding_session_entry,
+    commit_nested_with, ends_binding, launch_path, pane_path, read_record, remove_file_durable,
+    session_index_marker, session_index_path, with_lock,
 };
 use crate::wezterm::{Clock, PaneLister, Presence, ProcessProbe};
 
@@ -171,6 +172,18 @@ fn binding_files(root: &Path, diagnostics: &mut Vec<Diagnostic>) -> Vec<PathBuf>
 }
 
 fn state_kind(path: &Path) -> Option<&'static str> {
+    let ancestor = |up: usize| {
+        path.ancestors()
+            .nth(up)
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+    };
+    if ancestor(2) == Some("sessions") {
+        return Some("session_binding");
+    }
+    if ancestor(1) == Some("sessions") && ancestor(0) == Some("complete.json") {
+        return Some("session_index");
+    }
     if path
         .parent()
         .and_then(Path::file_name)
@@ -1575,6 +1588,73 @@ fn collect_projection_orphans(
     failed
 }
 
+/// Gives every binding in `files` its session index entry, and marks the index
+/// complete when `files` is every binding in the store and each one now has
+/// its entry. Readers walk every binding until then. Returns whether a write
+/// failed.
+fn complete_session_index(
+    root: &Path,
+    files: &[PathBuf],
+    walked_every_directory: bool,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> bool {
+    let mut complete = walked_every_directory;
+    let mut failed = false;
+    for path in files {
+        let binding = RecordIdentity::from_state_path(root, path, "binding")
+            .and_then(|identity| read_record(path, Some("binding"), &identity));
+        let Ok(Some(binding)) = binding else {
+            // Reported by the binding step. Until it reads, readers walk.
+            complete = false;
+            continue;
+        };
+        let written = binding_session_entry(root, &binding)
+            .and_then(|(path, entry)| atomic_replace_if_different(&path, &entry));
+        if let Err(error) = written {
+            diagnostics.push(error.diagnostic);
+            complete = false;
+            failed = true;
+        }
+    }
+    if complete
+        && let Err(error) = session_index_marker()
+            .and_then(|marker| atomic_replace_if_different(&session_index_path(root), &marker))
+    {
+        diagnostics.push(error.diagnostic);
+        failed = true;
+    }
+    failed
+}
+
+/// The session index entries naming the bindings below `dir`, which go with
+/// `dir` when sweep removes it. An entry is taken only when it names exactly
+/// that binding and removing it stays inside the state root.
+fn session_entries_below(root: &Path, dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_state_files(
+        root,
+        dir,
+        &|path| path.file_name().and_then(|name| name.to_str()) == Some("binding.json"),
+        &mut files,
+        &mut Vec::new(),
+    );
+    files
+        .into_iter()
+        .filter_map(|path| {
+            let identity = RecordIdentity::from_state_path(root, &path, "binding").ok()?;
+            let binding = read_record(&path, Some("binding"), &identity).ok()??;
+            let (entry_path, entry) = binding_session_entry(root, &binding).ok()?;
+            let found = read_record(
+                &entry_path,
+                Some("session_binding"),
+                &RecordIdentity::from_record(&entry),
+            )
+            .ok()??;
+            (found == entry && removal_confined(root, &entry_path)).then_some(entry_path)
+        })
+        .collect()
+}
+
 /// An apply's pane lister: a listing that failed answers every later ask
 /// about that socket for the rest of the run, and one that answered is taken
 /// fresh each time. A failed listing leaves a pane undecided and so removes
@@ -1776,7 +1856,11 @@ fn pane_retention(
                     if !pane_tree_prunable(root, &pane, &mut kept) {
                         return plan("keep", Vec::new(), kept);
                     }
-                    plan("prune", vec![pane.clone()], kept)
+                    // The tree first: an entry left behind names a binding
+                    // that is gone, which a reader skips.
+                    let mut removals = vec![pane.clone()];
+                    removals.extend(session_entries_below(root, &pane));
+                    plan("prune", removals, kept)
                 }
                 other => plan(other, Vec::new(), Vec::new()),
             }
@@ -1947,6 +2031,15 @@ pub fn sweep(
     let files = binding_files(root, &mut diagnostics);
     // A directory the walk could not read hides the bindings below it.
     let mut failed = diagnostics.len();
+    if apply && realm_filter.is_none() {
+        let walked_every_directory = failed == 0;
+        failed += usize::from(complete_session_index(
+            root,
+            &files,
+            walked_every_directory,
+            &mut diagnostics,
+        ));
+    }
     failed += collect_projection_orphans(root, realm_filter, apply, &mut details, &mut diagnostics);
     let mut ended: BTreeMap<String, Vec<(String, PathBuf, bool)>> = BTreeMap::new();
     let mut presence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
@@ -2505,13 +2598,15 @@ pub fn sweep(
                             &mut local_diagnostics,
                         )
                     {
+                        let mut removals = vec![binding_dir.clone()];
+                        removals.extend(session_entries_below(root, &binding_dir));
                         return Ok(CommitPlan {
                             result: RetentionOutcome {
                                 pruned: true,
                                 diagnostics: local_diagnostics,
                             },
                             replacements: Vec::new(),
-                            removals: vec![binding_dir.clone()],
+                            removals,
                             private_dirs: Vec::new(),
                         });
                     }

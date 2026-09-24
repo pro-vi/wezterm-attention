@@ -253,6 +253,8 @@ pub struct DigestRecipes {
     pub incarnation_id_input: String,
     pub tty_fingerprint_input: String,
     pub binding_id_input: String,
+    pub session_key_input: String,
+    pub session_entry_key_input: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]

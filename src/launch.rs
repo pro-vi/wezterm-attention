@@ -15,7 +15,7 @@ use crate::identity::{PaneAddress, pane_address};
 use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, manifest};
 use crate::records::{
     CommitPlan, RecordIdentity, Replacement, commit, mkdir_private, pane_path, read_record,
-    state_root,
+    session_index_marker, session_index_path, state_root,
 };
 use crate::wezterm::{RuntimePorts, publication_bytes};
 
@@ -158,6 +158,9 @@ pub fn claim_launch_at_tty(
 ) -> Result<ApplyResult> {
     let root = state_root(env)?;
     mkdir_private(&root)?;
+    // A store this claim starts holds no binding, so its session index is
+    // complete from the first record, and every binding writer keeps it so.
+    let new_store = !root.join("v2").exists();
     let (address, metadata) = pane_address(env)?;
     let launch_id = match env.get("WEZTERM_ATTENTION_LAUNCH_ID") {
         Some(value) => crate::identity::canonical_uuid(Some(value), "WEZTERM_ATTENTION_LAUNCH_ID")?,
@@ -266,6 +269,13 @@ pub fn claim_launch_at_tty(
                     AttentionError::new("record_invalid", "selected claim has no launch id")
                 })?
                 .to_owned();
+            let mut replacements = replacements;
+            if new_store {
+                replacements.push(Replacement::if_different(
+                    session_index_path(&root),
+                    session_index_marker()?,
+                ));
+            }
             Ok(CommitPlan {
                 result: ApplyResult {
                     disposition,

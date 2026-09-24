@@ -23,7 +23,7 @@ use crate::providers::{ProviderAction, ProviderEvent};
 use crate::records::{
     CommitPlan, PreparedRecordWrite, RecordIdentity, RecordRead, Replacement, commit_nested_with,
     commit_triple_with, commit_with, ends_binding, launch_path, pane_path, read_record,
-    read_record_typed, state_root,
+    read_record_typed, session_entry, session_entry_path, state_root,
 };
 use crate::wezterm::RuntimePorts;
 
@@ -569,6 +569,24 @@ fn binding_mutation(
                 result.event_id = Some(event_id);
                 result
             };
+            // The session index names every binding this writer keeps, in
+            // the commit that keeps it.
+            if matches!(
+                result.disposition,
+                Disposition::Applied | Disposition::Replaced | Disposition::Confirmed
+            ) {
+                replacements.push(Replacement::if_different(
+                    session_entry_path(
+                        &resolved.root,
+                        provider,
+                        session,
+                        &resolved.address,
+                        &resolved.launch_id,
+                        &binding_id,
+                    ),
+                    session_entry(&resolved.address, &resolved.launch_id, &binding_id)?,
+                ));
+            }
             Ok(CommitPlan {
                 result: Mutation::plain(result),
                 replacements,

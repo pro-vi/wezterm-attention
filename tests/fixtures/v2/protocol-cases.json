@@ -208,6 +208,21 @@
       "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "floor_mono_ns": "00000000150000000000",
       "operation_id": "00000000-0000-4000-8000-000000000011"
+    },
+    "session_binding": {
+      "kind": "session_binding",
+      "schema": 3,
+      "address": {
+        "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pane_id": "42"
+      },
+      "launch_id": "00000000-0000-4000-8000-000000000001",
+      "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "session_index": {
+      "kind": "session_index",
+      "schema": 3
     }
   },
   "parse_cases": [
@@ -236,6 +251,8 @@
     { "id": "subagent_presence_valid", "parser": "record", "sample": "subagent_presence", "expected": "valid" },
     { "id": "subagent_clear_valid", "parser": "record", "sample": "subagent_clear", "expected": "valid" },
     { "id": "subagent_retention_floor_valid", "parser": "record", "sample": "subagent_retention_floor", "expected": "valid" },
+    { "id": "session_binding_valid", "parser": "record", "sample": "session_binding", "expected": "valid" },
+    { "id": "session_index_valid", "parser": "record", "sample": "session_index", "expected": "valid" },
     { "id": "record_future", "parser": "record", "sample": "activity", "patch": { "schema": 4 }, "expected": "future_schema" },
     { "id": "record_missing_required", "parser": "record", "sample": "activity", "remove": ["written_at_unix_ns"], "expected": "record_invalid" },
     { "id": "record_unknown_field", "parser": "record", "sample": "claim", "patch": { "unknown": "value" }, "expected": "record_invalid" },

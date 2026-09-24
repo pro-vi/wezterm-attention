@@ -1682,3 +1682,6 @@ mod recorded_servers;
 
 #[path = "maintenance_spec/reboot_ends.rs"]
 mod reboot_ends;
+
+#[path = "maintenance_spec/session_index.rs"]
+mod session_index;

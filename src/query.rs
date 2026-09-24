@@ -11,7 +11,10 @@ use crate::identity::PaneAddress;
 use crate::identity::socket_identity;
 use crate::observations::{LifecycleAvailability, LifecycleSnapshot, LifecycleView};
 use crate::protocol::{AttentionError, Diagnostic, Result};
-use crate::records::{FileRecords, RecordReader, ends_binding, launch_path, pane_path};
+use crate::records::{
+    FileRecords, RecordReader, ends_binding, launch_path, pane_path, session_dir,
+    session_entry_path, session_index_path,
+};
 use crate::records::{RecordIdentity, RecordRead, read_record, read_record_typed};
 use crate::wezterm::Clock;
 use crate::wezterm::{GuiWindowLister, PaneLister, Presence, ProcessListing, ProcessProbe};
@@ -1157,21 +1160,23 @@ pub fn read_bindings_for_socket_timed(
     let mut files = Vec::new();
     let mut diagnostics = Vec::new();
     collect_selected_binding_files(root, &selected, &mut files, &mut diagnostics, true);
-    // Whether a row's provider session is live at another pane address is a
-    // fact about the row, and the other address may be under any server, as
-    // inspect finds it. The rest of the store is walked for those rivals only:
-    // what it cannot read there is not part of this server's answer.
-    let mut elsewhere = Vec::new();
-    collect_binding_files(root, &mut elsewhere, &mut Vec::new());
-    elsewhere.retain(|path| !path.starts_with(&selected) && path_identity(root, path).is_some());
-    files.extend(elsewhere);
     let filter = BindingFilter {
         realm_id: Some(scope.realm_id.clone()),
         incarnation_id: Some(scope.incarnation_id.clone()),
         provider: None,
     };
+    // Whether a row's provider session is live at another pane address is a
+    // fact about the row, and the other address may be under any server, as
+    // inspect finds it. Those rivals are looked up by session: what cannot be
+    // read there is not part of this server's answer.
+    let rivals = |sessions: &Sessions| {
+        let mut elsewhere = session_candidates(root, sessions);
+        elsewhere
+            .retain(|path| !path.starts_with(&selected) && path_identity(root, path).is_some());
+        elsewhere
+    };
     let (rows, mut read_diagnostics, spawns) =
-        assemble_bindings(root, files, &filter, panes, processes, true)?;
+        assemble_bindings(root, files, &filter, Some(&rivals), panes, processes, true)?;
     diagnostics.append(&mut read_diagnostics);
     let after = selected_socket_identity(socket)?;
     if after.0 != scope.realm_id || after.1 != scope.incarnation_id {
@@ -1275,6 +1280,69 @@ fn collect_binding_files(
         output,
         diagnostics,
     );
+}
+
+/// The binding records of one provider session, from the session index, or
+/// None when the index cannot answer and the caller has to walk every
+/// binding: it is not marked complete, or a directory or entry of it could
+/// not be read. An entry whose binding is gone is still listed, and reads as
+/// no record, as a walk would not have found it.
+fn session_binding_files(root: &Path, provider: &str, session: &str) -> Option<Vec<PathBuf>> {
+    read_record(
+        &session_index_path(root),
+        Some("session_index"),
+        &RecordIdentity::unscoped(),
+    )
+    .ok()??;
+    let entries = match fs::read_dir(session_dir(root, provider, session)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let name = entry.ok()?.file_name();
+        let name = name.to_str()?;
+        // A temporary left by an interrupted write, not an entry.
+        if name.starts_with('.') {
+            continue;
+        }
+        let path = session_dir(root, provider, session).join(name);
+        let record =
+            read_record(&path, Some("session_binding"), &RecordIdentity::unscoped()).ok()??;
+        let address = record_address(&record)?;
+        let launch_id = string(&record, "launch_id")?;
+        let binding_id = string(&record, "binding_id")?;
+        // An entry names the binding its file name was made from, and no other.
+        if session_entry_path(root, provider, session, &address, &launch_id, &binding_id) != path {
+            return None;
+        }
+        files.push(
+            launch_path(root, &address, &launch_id)
+                .join("bindings")
+                .join(binding_id)
+                .join("binding.json"),
+        );
+    }
+    Some(files)
+}
+
+/// The binding records that may hold one of these provider sessions: the
+/// session index's entries for them, or every binding in the store where
+/// the index cannot answer for one of them.
+fn session_candidates(root: &Path, sessions: &Sessions) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for (provider, session) in sessions {
+        match session_binding_files(root, provider, session) {
+            Some(indexed) => files.extend(indexed),
+            None => {
+                let mut every = Vec::new();
+                collect_binding_files(root, &mut every, &mut Vec::new());
+                return every;
+            }
+        }
+    }
+    files
 }
 
 /// Every file below `path` that `wanted` accepts, without following a symlink.
@@ -1593,7 +1661,8 @@ pub(crate) fn pane_evidence(
 /// Whether another pane address holds a binding of this provider session that
 /// competes with the inspected one, by the rule `bindings` applies across its
 /// rows. Only same-session bindings have their end read and their pane probed,
-/// so a store with no rival costs a walk of binding records and no subprocess.
+/// and the session index names them, so a store with no rival costs one
+/// directory read and no subprocess.
 fn session_live_elsewhere(
     root: &Path,
     address: &PaneAddress,
@@ -1602,9 +1671,8 @@ fn session_live_elsewhere(
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
 ) -> bool {
-    let mut files = Vec::new();
-    collect_binding_files(root, &mut files, &mut Vec::new());
-    for path in files {
+    let sessions = BTreeSet::from([(provider.to_owned(), session.to_owned())]);
+    for path in session_candidates(root, &sessions) {
         let Some((realm_id, incarnation_id, pane_id, launch_id, binding_id)) =
             path_identity(root, &path)
         else {
@@ -1792,7 +1860,7 @@ pub fn read_bindings_timed(
     collect_binding_files(root, &mut files, &mut diagnostics);
     let walked_every_directory = diagnostics.is_empty();
     let (rows, mut read_diagnostics, spawns) =
-        assemble_bindings(root, files, filter, panes, processes, false)?;
+        assemble_bindings(root, files, filter, None, panes, processes, false)?;
     diagnostics.append(&mut read_diagnostics);
     Ok(RealmBindings {
         rows,
@@ -1983,10 +2051,20 @@ impl BindingFilter {
     }
 }
 
+/// Provider sessions, each as (provider, provider session id).
+type Sessions = BTreeSet<(String, String)>;
+
+/// The binding records outside a query's own that may hold these sessions.
+type RivalLookup<'a> = dyn Fn(&Sessions) -> Vec<PathBuf> + 'a;
+
+/// The rows `files` make under `filter`. `rivals`, when given, names the
+/// binding records outside `files` that may share a provider session with an
+/// admitted row; without it `files` already holds every binding.
 fn assemble_bindings(
     root: &Path,
     mut files: Vec<PathBuf>,
     filter: &BindingFilter,
+    rivals: Option<&RivalLookup<'_>>,
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
     typed: bool,
@@ -2017,49 +2095,63 @@ fn assemble_bindings(
             error
         })
     };
-    files.sort();
     let mut rows = Vec::new();
     let mut diagnostics = Vec::new();
     // Every binding record is read first: its realm and provider decide
     // whether the filter admits it, before any socket is asked.
     let mut read = Vec::new();
-    for path in files {
-        let Some((path_realm, path_incarnation, path_pane, path_launch, path_binding)) =
-            path_identity(root, &path)
-        else {
-            let mut item = diagnostic("record_invalid", "binding path has the wrong shape");
-            item.context
-                .insert("path".into(), Value::String(state_relative(root, &path)));
-            diagnostics.push(item);
-            continue;
-        };
-        let ruled_out = !filter.admits_path(&path_realm, &path_incarnation);
-        let path_address = PaneAddress {
-            realm_id: path_realm,
-            incarnation_id: path_incarnation,
-            pane_id: path_pane,
-        };
-        match read_record(
-            &path,
-            Some("binding"),
-            &RecordIdentity::binding(&path_address, &path_launch, &path_binding),
-        ) {
-            Ok(Some(binding)) => read.push((path, binding)),
-            Ok(None) => {}
-            // A realm or server the filter rules out is not part of the
-            // answer, and neither are its unreadable records.
-            Err(_) if ruled_out => {}
-            Err(error) => diagnostics.push(error.diagnostic),
+    let read_all = |files: Vec<PathBuf>,
+                    read: &mut Vec<(PathBuf, Value)>,
+                    diagnostics: &mut Vec<Diagnostic>| {
+        for path in files {
+            let Some((path_realm, path_incarnation, path_pane, path_launch, path_binding)) =
+                path_identity(root, &path)
+            else {
+                let mut item = diagnostic("record_invalid", "binding path has the wrong shape");
+                item.context
+                    .insert("path".into(), Value::String(state_relative(root, &path)));
+                diagnostics.push(item);
+                continue;
+            };
+            let ruled_out = !filter.admits_path(&path_realm, &path_incarnation);
+            let path_address = PaneAddress {
+                realm_id: path_realm,
+                incarnation_id: path_incarnation,
+                pane_id: path_pane,
+            };
+            match read_record(
+                &path,
+                Some("binding"),
+                &RecordIdentity::binding(&path_address, &path_launch, &path_binding),
+            ) {
+                Ok(Some(binding)) => read.push((path, binding)),
+                Ok(None) => {}
+                // A realm or server the filter rules out is not part of the
+                // answer, and neither are its unreadable records.
+                Err(_) if ruled_out => {}
+                Err(error) => diagnostics.push(error.diagnostic),
+            }
         }
-    }
+    };
+    files.sort();
+    read_all(files, &mut read, &mut diagnostics);
     // A row outside the filter is still assessed when it shares a provider
     // session with an admitted row: whether that session is live elsewhere is
     // a fact about the admitted row. It is dropped from the answer afterwards.
-    let sessions: BTreeSet<(String, String)> = read
+    let sessions: Sessions = read
         .iter()
         .filter(|(_, binding)| filter.admits(binding))
         .map(|(_, binding)| session_key(binding))
         .collect();
+    if let Some(rivals) = rivals {
+        let known: BTreeSet<PathBuf> = read.iter().map(|(path, _)| path.clone()).collect();
+        let mut elsewhere = rivals(&sessions);
+        elsewhere.sort();
+        elsewhere.dedup();
+        elsewhere.retain(|path| !known.contains(path));
+        read_all(elsewhere, &mut read, &mut diagnostics);
+    }
+    read.sort_by(|left, right| left.0.cmp(&right.0));
     let assessed: Vec<(PathBuf, Value, bool)> = read
         .into_iter()
         .filter_map(|(path, binding)| {
