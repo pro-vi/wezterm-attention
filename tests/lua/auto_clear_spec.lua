@@ -671,6 +671,26 @@ test("time-derived frames preserve the public get_attention return shape", funct
   assert(frame == 3, "the second return remains the derived frame, got " .. tostring(frame))
 end)
 
+test("a marker that is not an object, or whose frame is not a count, cannot break a poll", function()
+  for index, content in ipairs({ "5", "true", '"thinking"', "[1]" }) do
+    local id = 7190 + index
+    local out = assert(io.open(test_dir .. "/" .. id, "w")); out:write(content); out:close()
+    poll({ id })
+    assert(attention.get_attention(id) == nil, content .. " is not a marker")
+  end
+  for index, frame in ipairs({ '"2"', "1.5", "-1" }) do
+    local id = 7195 + index
+    local out = assert(io.open(test_dir .. "/" .. id, "w"))
+    out:write('{"type":"thinking","frame":' .. frame .. "}"); out:close()
+    poll({ id })
+    local atype, shown = attention.get_attention(id)
+    assert(atype == "thinking" and type(shown) == "number"
+      and shown == math.floor(shown) and shown >= 0, "frame " .. frame .. " reached the renderer")
+    local rendered = format_tab_title(tab(id, id + 100, false))
+    assert(type(rendered) == "table", "the thinking tab must still render")
+  end
+end)
+
 test("Lua accepts the publication ID marker shape published by Pi", function()
   local file = assert(io.open(test_dir .. "/733", "w"))
   file:write('{"type":"notify","source":"pi","publication_id":"pi-publication",'

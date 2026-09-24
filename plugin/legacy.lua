@@ -16,11 +16,19 @@ return function(context)
     local ok, data = pcall(function()
       return wezterm.json_parse(content)
     end)
-    if ok and data and valid_types[data.type] then
+    -- Any JSON value parses, and a bare number or boolean cannot be indexed.
+    if ok and type(data) == "table" and valid_types[data.type] then
       local publication_id = type(data.publication_id) == "string"
         and data.publication_id ~= "" and data.publication_id or nil
       local source = type(data.source) == "string" and data.source ~= "" and data.source or nil
-      return data.type, data.frame, normalize_epoch_ms(data.updated_at or data.updated_at_ms),
+      -- The frame indexes the configured glyphs. Anything but a whole count is
+      -- dropped, and a thinking marker then takes its frame from the clock.
+      local frame = data.frame
+      if type(frame) ~= "number" or not (frame >= 0 and frame < math.huge)
+          or frame ~= math.floor(frame) then
+        frame = nil
+      end
+      return data.type, frame, normalize_epoch_ms(data.updated_at or data.updated_at_ms),
         data.ttl_ms, content, publication_id, source
     end
 
