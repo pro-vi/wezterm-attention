@@ -334,6 +334,20 @@ return function()
       tab_source_state = { retry_index = 1, retry_at = 0 }
     end
 
+    --- The wait before retry number `index`; the last wait repeats.
+    local function backoff_delay(index)
+      return publish_backoff_seconds[math.min(index, #publish_backoff_seconds)]
+    end
+
+    --- The socket of this GUI's own mux: the one the tab source was asked
+    --- about, else the one in this GUI's environment. Nil unless it is an
+    --- absolute path.
+    local function own_socket()
+      local socket = tab_source_state.socket or os.getenv("WEZTERM_UNIX_SOCKET")
+      if type(socket) == "string" and socket:sub(1, 1) == "/" then return socket end
+      return nil
+    end
+
     local function parse_tab_source_response(stdout)
       if not protocol or type(stdout) ~= "string"
           or #stdout > protocol.limits.max_json_bytes then return nil end
@@ -376,8 +390,7 @@ return function()
     local function tab_source_status()
       local state = tab_source_state
       if state.source then return "ready", state.source end
-      if retries_used_up(state)
-          or not can_acquire_tab_source(state.socket or os.getenv("WEZTERM_UNIX_SOCKET")) then
+      if retries_used_up(state) or not can_acquire_tab_source(own_socket()) then
         return "unavailable"
       end
       return "pending"
@@ -394,8 +407,8 @@ return function()
     local function own_mux_identity()
       local status, source = tab_source_status()
       if source then return status, source.realm_id, source.incarnation_id end
-      local socket = tab_source_state.socket or os.getenv("WEZTERM_UNIX_SOCKET")
-      if type(socket) ~= "string" or socket:sub(1, 1) ~= "/" or not protocol then return status end
+      local socket = own_socket()
+      if not socket or not protocol then return status end
       local realm = realm_by_socket[socket]
       if not realm then
         realm = context.sha256(socket)
@@ -422,8 +435,7 @@ return function()
       if source then
         state.source = source
       else
-        local delay = publish_backoff_seconds[math.min(state.retry_index, #publish_backoff_seconds)]
-        state.retry_at = now_ms() + delay * 1000
+        state.retry_at = now_ms() + backoff_delay(state.retry_index) * 1000
         state.retry_index = state.retry_index + 1
         report_error_once("tab-source:" .. socket,
           "cannot identify the tab publisher's GUI socket yet; unpublished tab orders wait for a retry")
@@ -655,8 +667,7 @@ return function()
           "cannot retry mux identity publication: call_after is unavailable")
         return false
       end
-      local index = math.min(schedule.retry_index, #publish_backoff_seconds)
-      local delay = publish_backoff_seconds[index]
+      local delay = backoff_delay(schedule.retry_index)
       schedule.token = schedule.token + 1
       local token = schedule.token
       call_after(delay, function()
