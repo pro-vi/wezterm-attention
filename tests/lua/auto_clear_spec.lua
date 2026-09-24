@@ -904,6 +904,40 @@ test("a legacy tab order this process never wrote survives its window's sourced 
   os.remove(foreign)
 end)
 
+test("a legacy tab order another process rewrote survives its window's sourced one", function()
+  local previous = wezterm.run_child_process
+  internal.reset_tab_source()
+  local drawn = gui_tab({ window_id = 9830, tab_id = 9831, tab_index = 0, panes = { 9832 } })
+  format_tab_title(drawn, { drawn })
+  local legacy = tab_publication_path(9830)
+  assert(path_exists(legacy), "the first draw publishes under the legacy name")
+  -- Window ids restart in every GUI process, so another one can own this name.
+  local out = assert(io.open(legacy, "w")); out:write("another GUI's window 9830"); out:close()
+  wezterm.run_child_process = function(args) return true, tab_source_response(args[4]), "" end
+  internal.acquire_tab_source("/test/gui.sock")
+  format_tab_title(drawn, { drawn })
+  wezterm.run_child_process = previous
+  internal.reset_tab_source()
+  assert(path_exists(test_dir .. "/tabs/" .. string.rep("a", 64) .. "-9830.json"))
+  assert(read_path(legacy) == "another GUI's window 9830",
+    "a file whose bytes are not the ones this process wrote is not this process's to remove")
+  os.remove(legacy)
+end)
+
+test("a closed window's tab order another process rewrote is not withdrawn", function()
+  internal.reset_tab_source()
+  local drawn = gui_tab({ window_id = 9833, tab_id = 9834, tab_index = 0, panes = { 9835 } })
+  format_tab_title(drawn, { drawn })
+  local legacy = tab_publication_path(9833)
+  assert(path_exists(legacy), "the draw publishes")
+  local out = assert(io.open(legacy, "w")); out:write("another GUI's window 9833"); out:close()
+  local polling = window_double({ window_id = 9836, tabs = {}, focused = false })
+  attention.poll(polling, { gui_windows = { polling } })
+  assert(read_path(legacy) == "another GUI's window 9833",
+    "a file whose bytes are not the ones this process wrote is not this process's to remove")
+  os.remove(legacy)
+end)
+
 test("a window publishes its drawn order once every one of its tabs is drawn", function()
   write_marker(9820, "stop")
   poll({ 9820 })

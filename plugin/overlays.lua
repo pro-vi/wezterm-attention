@@ -125,6 +125,25 @@ return function(context)
   --- The one path each window's order was last written to by this process.
   local published_path_by_window = {}
 
+  --- Remove a tab order this process published, but only while the file still
+  --- holds the bytes this process wrote there. The unsourced name is shared by
+  --- every GUI process, because window ids restart in each one: a file another
+  --- process has rewritten since is that process's, and stays. Returns an error
+  --- text only for a file of ours that could not be removed.
+  local function remove_own_tab_order(path, body)
+    local file = io.open(path, "rb")
+    if not file then return nil end
+    local current = file:read("*a")
+    file:close()
+    if current ~= body then return nil end
+    local removed, err = os.remove(path)
+    if removed then return nil end
+    local still_there = io.open(path, "r")
+    if not still_there then return nil end
+    still_there:close()
+    return tostring(err)
+  end
+
   --- One encoding per drawn tab. The formatter is called once per tab, so
   --- without this every tab's text would be escaped again on every one of those
   --- calls. A drawn tab is a fresh table each time it is drawn, and the entries
@@ -176,7 +195,9 @@ return function(context)
       ',"window_id":', integer(window_id), "}",
     })
     if not replace_file(path, body, "publish-tabs") then return false end
-    published_tab_lists[path] = { list = list, window_id = tostring(window_id), window_key = window_key }
+    published_tab_lists[path] = {
+      list = list, body = body .. "\n", window_id = tostring(window_id), window_key = window_key,
+    }
     drawn_tab_lists[window_key] = { list = list, written_at = written_at }
     -- The first draw can come before the source identity is known, so a
     -- window's first file is often the unsourced one. Once the same window is
@@ -184,14 +205,14 @@ return function(context)
     -- again, and `attention tabs` would list the window twice.
     local superseded = published_path_by_window[window_key]
     published_path_by_window[window_key] = path
-    if superseded and superseded ~= path and published_tab_lists[superseded] then
+    local superseded_publication = superseded and superseded ~= path
+      and published_tab_lists[superseded]
+    if superseded_publication then
       published_tab_lists[superseded] = nil
-      local removed, err = os.remove(superseded)
-      local still_there = not removed and io.open(superseded, "r")
-      if still_there then
-        still_there:close()
+      local err = remove_own_tab_order(superseded, superseded_publication.body)
+      if err then
         report_error_once("supersede-tabs:" .. superseded,
-          "cannot remove superseded tab order " .. superseded .. ": " .. tostring(err))
+          "cannot remove superseded tab order " .. superseded .. ": " .. err)
       end
     end
     return true
@@ -200,9 +221,9 @@ return function(context)
   --- Remove the tab orders this process published for windows no longer in
   --- `live`, a set keyed by window id as a decimal string. A closed window's
   --- bar never redraws, so nothing else would ever take its file back. Only a
-  --- file this process wrote is touched: another GUI process's file, or one
-  --- left behind by a process that has exited, is `attention sweep`'s to
-  --- collect. Forgetting the path is what lets a window that later reuses the
+  --- file this process wrote, still holding what it wrote, is touched: another
+  --- GUI process's file, or one left behind by a process that has exited, is
+  --- `attention sweep`'s to collect. Forgetting the path is what lets a window that later reuses the
   --- id publish again.
   local function withdraw_closed_tab_orders(dir, live)
     local prefix = dir .. "/tabs/"
@@ -212,16 +233,10 @@ return function(context)
         published_tab_lists[path] = nil
         drawn_tab_lists[publication.window_key] = nil
         published_path_by_window[publication.window_key] = nil
-        local removed, err = os.remove(path)
-        if not removed then
-          -- A file already gone is the wanted state; only a file that stays is
-          -- worth a line in the log.
-          local still_there = io.open(path, "r")
-          if still_there then
-            still_there:close()
-            report_error_once("withdraw-tabs:" .. path,
-              "cannot withdraw closed window's tab order " .. path .. ": " .. tostring(err))
-          end
+        local err = remove_own_tab_order(path, publication.body)
+        if err then
+          report_error_once("withdraw-tabs:" .. path,
+            "cannot withdraw closed window's tab order " .. path .. ": " .. err)
         end
       end
     end
