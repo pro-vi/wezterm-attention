@@ -113,7 +113,7 @@ fn a_conflicted_row_reads_conflicted_through_inspect() {
             "binding_id":other_binding,"event_id":Uuid::new_v4().to_string(),
             "provider":"claude","provider_session_id":"session-a","start_source":"resume",
             "observed_mono_ns":"00000000000000000300",
-            "written_at_unix_ns":"00000000001000000000","writer_version":"2.0.0"
+            "written_at_unix_ns":"00000000001000000000","writer_version":"1.0.0"
         }),
     )
     .expect("write the second binding");

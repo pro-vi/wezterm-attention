@@ -937,7 +937,7 @@ fn a_session_resumed_in_a_new_pane_conflicts_only_while_both_panes_live() {
             "binding_id":resumed_binding,"event_id":Uuid::new_v4().to_string(),
             "provider":"claude","provider_session_id":"session-a","start_source":"resume",
             "observed_mono_ns":"00000000000000000300",
-            "written_at_unix_ns":"00000000001000000000","writer_version":"2.0.0"
+            "written_at_unix_ns":"00000000001000000000","writer_version":"1.0.0"
         }),
     )
     .expect("write resumed binding");
@@ -1588,7 +1588,7 @@ fn a_present_row_from_an_incomplete_bindings_answer_inspects_completely() {
             "binding_id":other_id,"event_id":"00000000-0000-4000-8000-000000000702",
             "provider":"claude","provider_session_id":"session-b",
             "start_source":"startup","observed_mono_ns":"00000000000000000702",
-            "written_at_unix_ns":"00000000001000000000","writer_version":"2.0.0"
+            "written_at_unix_ns":"00000000001000000000","writer_version":"1.0.0"
         }),
     )
     .expect("write extra binding");
