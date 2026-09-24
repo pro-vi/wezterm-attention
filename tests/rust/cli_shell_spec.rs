@@ -239,9 +239,10 @@ fn rust_cli_help_errors_and_empty_hook_input_keep_the_documented_shape() {
         .env_clear()
         .output()
         .expect("run JSON error");
-    assert_eq!(operational.status.code(), Some(3));
+    assert_eq!(operational.status.code(), Some(1));
     let envelope: Value = serde_json::from_slice(&operational.stdout).expect("JSON envelope");
     assert_eq!(envelope["status"], "unavailable");
+    assert_eq!(envelope["complete"], false);
 
     let hook_help = Command::new(binary)
         .args(["hooks", "event", "--help"])
@@ -271,7 +272,7 @@ fn rust_cli_help_errors_and_empty_hook_input_keep_the_documented_shape() {
     let envelope: Value = serde_json::from_slice(&malformed.stdout).expect("usage JSON envelope");
     assert_eq!(envelope["command"], "bindings");
     assert_eq!(envelope["status"], "usage_error");
-    assert_eq!(envelope["complete"], true);
+    assert_eq!(envelope["complete"], false);
 }
 
 #[test]
@@ -1332,4 +1333,50 @@ fn printed_json_escapes_c1_control_characters_and_keeps_their_value() {
         .as_str()
         .expect("message");
     assert!(message.contains(argument), "{message}");
+}
+
+#[test]
+fn a_query_that_could_not_run_is_incomplete_and_exits_one() {
+    let scratch = Scratch::new();
+    let run = |args: &[&str], root: &str| {
+        Command::new(env!("CARGO_BIN_EXE_attention"))
+            .args(args)
+            .env_clear()
+            .env("HOME", &scratch.0)
+            .env("WEZTERM_ATTENTION_DIR", root)
+            .output()
+            .expect("run query")
+    };
+    for (args, root) in [
+        (vec!["tabs"], "relative/state"),
+        (vec!["bindings", "--all"], "relative/state"),
+        (
+            vec!["bindings", "--socket", "/missing.sock"],
+            "/unused/state",
+        ),
+    ] {
+        let output = run(&args, root);
+        let envelope: Value = serde_json::from_slice(&output.stdout).expect("error envelope");
+        assert_eq!(envelope["complete"], false, "{args:?}: {envelope}");
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {envelope}");
+    }
+}
+
+#[test]
+fn doctor_findings_beside_a_complete_report_exit_zero() {
+    let scratch = Scratch::new();
+    let state = scratch.0.join("state");
+    fs::create_dir_all(&state).expect("create state root");
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o755)).expect("shared state root");
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .args(["doctor", "--json"])
+        .env_clear()
+        .env("HOME", &scratch.0)
+        .env("WEZTERM_ATTENTION_DIR", &state)
+        .output()
+        .expect("run doctor");
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("doctor JSON");
+    assert_eq!(envelope["status"], "findings", "{envelope}");
+    assert_eq!(envelope["complete"], true, "{envelope}");
+    assert_eq!(output.status.code(), Some(0), "{envelope}");
 }

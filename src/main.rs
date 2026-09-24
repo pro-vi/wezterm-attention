@@ -182,7 +182,7 @@ impl BindingField {
 
 fn bindings_help() -> String {
     format!(
-        "Example: attention bindings --all --fields address,provider,current\nFields: {}\ncomplete is false when rows were dropped (any mode) or a probe did not answer (--socket).\nDropped diagnostics are counted: result.diagnostic_count of result.total_diagnostic_count.\nresult.timing_ms says where the call's time went: pane_list (wezterm cli list), process_list (the process probe), records (the file walk).\nIf truncated, narrow with --provider, raise --limit (maximum 1000), or explicitly use --all.\n--socket queries prevent WezTerm auto-start; --realm selects a recorded realm ID.",
+        "Example: attention bindings --all --fields address,provider,current\nFields: {}\ncomplete is false when --limit truncated the rows, or with --socket when a probe did not answer. Exit 0 when complete, 1 when not, 2 for a usage error.\nDropped diagnostics are counted: result.diagnostic_count of result.total_diagnostic_count.\nresult.timing_ms says where the call's time went: pane_list (wezterm cli list), process_list (the process probe), records (the file walk).\nIf truncated, narrow with --provider, raise --limit (maximum 1000), or explicitly use --all.\n--socket queries prevent WezTerm auto-start; --realm selects a recorded realm ID.",
         BindingField::value_variants()
             .iter()
             .map(|field| field.name())
@@ -352,8 +352,20 @@ fn emit<T: Serialize>(response: &Response<T>, as_json: bool, quiet: bool) {
     }
 }
 
+/// The exit code a query answer earns: 0 when it is complete, 1 when it is
+/// not. Diagnostics beside a complete answer do not change it; `status` and
+/// the diagnostics say what they are.
+fn query_exit(complete: bool) -> ExitCode {
+    if complete {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+/// An error answers nothing, so its envelope is never complete.
 fn emit_error(error: &AttentionError, as_json: bool, command: &str) -> ExitCode {
-    emit_error_with_complete(error, as_json, command, true)
+    emit_error_with_complete(error, as_json, command, false)
 }
 
 fn emit_error_with_complete(
@@ -388,7 +400,9 @@ fn emit_error_with_complete(
         ));
         print_err(&format!("help: {}", error.diagnostic.help));
     }
-    ExitCode::from(error.exit_code as u8)
+    // 2 is kept for a command line that could not be used; every other
+    // failure, whatever the error's own code, is 1.
+    ExitCode::from(if error.exit_code == 2 { 2 } else { 1 })
 }
 
 fn emit_hook_error(error: &AttentionError, debug: bool, strict: bool, command: &str) -> ExitCode {
@@ -402,7 +416,7 @@ fn emit_hook_error(error: &AttentionError, debug: bool, strict: bool, command: &
                 "unavailable"
             }
             .to_owned(),
-            complete: true,
+            complete: false,
             result: serde_json::json!({}),
             diagnostics: vec![error.diagnostic.clone()],
         };
@@ -858,6 +872,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             // diagnostics through the two counts instead, because on a machine
             // where panes outlive mux incarnations they never run out, and a
             // flag that is always false says nothing about the rows.
+            let complete = !truncated && (!socket_mode || diagnostics.is_empty());
             emit(
                 &Response {
                     schema: 1,
@@ -868,27 +883,14 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                         "findings"
                     }
                     .to_owned(),
-                    complete: !truncated && (!socket_mode || diagnostics.is_empty()),
+                    complete,
                     result,
                     diagnostics: shown_diagnostics,
                 },
                 args.json,
                 false,
             );
-            Ok(if diagnostics.is_empty() {
-                ExitCode::SUCCESS
-            } else if socket_mode
-                && diagnostics.iter().any(|item| {
-                    matches!(
-                        item.code.as_str(),
-                        "probe_unavailable" | "realm_unavailable"
-                    )
-                })
-            {
-                ExitCode::from(3)
-            } else {
-                ExitCode::from(1)
-            })
+            Ok(query_exit(complete))
         }
         Some(Command::TabSource(args)) => {
             let source = wezterm_attention::query::read_tab_source(&args.socket)
@@ -935,11 +937,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 args.json,
                 false,
             );
-            Ok(if diagnostics.is_empty() {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            })
+            Ok(query_exit(diagnostics.is_empty()))
         }
         Some(Command::Inspect(args)) => {
             let maximum = wezterm_attention::protocol::manifest()
@@ -1064,25 +1062,21 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             } else {
                 "findings"
             };
+            // A probe that did not answer leaves part of the report unknown.
+            let complete = !unavailable && diagnostics.len() <= 50;
             emit(
                 &Response {
                     schema: 1,
                     command: "doctor".to_owned(),
                     status: status.to_owned(),
-                    complete: diagnostics.len() <= 50,
+                    complete,
                     result,
                     diagnostics: diagnostics.iter().take(50).cloned().collect(),
                 },
                 args.json,
                 false,
             );
-            Ok(if unavailable {
-                ExitCode::from(3)
-            } else if diagnostics.is_empty() {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            })
+            Ok(query_exit(complete))
         }
         Some(Command::Sweep(args)) => {
             if args.operation_id.is_some() && !args.apply {
@@ -1126,26 +1120,23 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             } else {
                 diagnostics.iter().take(50).cloned().collect()
             };
+            // A probe that did not answer leaves some pane's fate undecided.
+            let complete = !unavailable
+                && result.details.len() == total_details
+                && shown_diagnostics.len() == diagnostics.len();
             emit(
                 &Response {
                     schema: 1,
                     command: "sweep".to_owned(),
                     status: status.to_owned(),
-                    complete: result.details.len() == total_details
-                        && shown_diagnostics.len() == diagnostics.len(),
+                    complete,
                     result,
                     diagnostics: shown_diagnostics,
                 },
                 args.json,
                 false,
             );
-            Ok(if unavailable {
-                ExitCode::from(3)
-            } else if diagnostics.is_empty() {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            })
+            Ok(query_exit(complete))
         }
     }
 }

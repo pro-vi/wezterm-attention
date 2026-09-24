@@ -1562,3 +1562,56 @@ fn without_a_listing_a_claim_inside_tmux_or_screen_is_refused_and_others_proceed
         }
     }
 }
+
+#[test]
+fn a_complete_realm_wide_answer_exits_zero_beside_its_diagnostics() {
+    let (scratch, _listener, environment) = setup();
+    let clock = FixedClock("00000000000000000100");
+    let tty = FakeTty::new();
+    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
+        .expect("claim succeeds");
+    let root = state_root(&environment).expect("state root");
+    let (address, _) = pane_address(&environment).expect("pane address");
+    let launch_id = &environment["WEZTERM_ATTENTION_LAUNCH_ID"];
+    let binding_id = "c".repeat(64);
+    let launch = launch_path(&root, &address, launch_id);
+    atomic_replace(
+        &launch
+            .join("bindings")
+            .join(&binding_id)
+            .join("binding.json"),
+        &binding_record(&address, launch_id, &binding_id),
+    )
+    .expect("write binding");
+    // A binding filed under another id is refused with a diagnostic.
+    atomic_replace(
+        &launch
+            .join("bindings")
+            .join("d".repeat(64))
+            .join("binding.json"),
+        &binding_record(&address, launch_id, &binding_id),
+    )
+    .expect("write path-mismatched binding");
+    let bin = scratch.path.join("bin");
+    fs::create_dir(&bin).expect("create bin");
+    trusted_scratch::write_script(
+        &bin.join("wezterm"),
+        "printf '%s' '[{\"pane_id\":42,\"tty_name\":\"/dev/ttys999\"}]'",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .args(["bindings", "--all"])
+        .env_clear()
+        .env("HOME", &environment["HOME"])
+        .env(
+            "WEZTERM_ATTENTION_DIR",
+            &environment["WEZTERM_ATTENTION_DIR"],
+        )
+        .env("PATH", &bin)
+        .output()
+        .expect("run bindings");
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("bindings JSON");
+    assert_eq!(envelope["complete"], true, "{envelope}");
+    assert_eq!(envelope["status"], "findings");
+    assert_eq!(envelope["result"]["rows"].as_array().map(Vec::len), Some(1));
+    assert_eq!(output.status.code(), Some(0), "{envelope}");
+}
