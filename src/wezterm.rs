@@ -137,6 +137,27 @@ impl PaneProcessSet {
         Self { pairs }
     }
 
+    /// Add the pairs one process's environment holds, given as `NAME=value`
+    /// entries.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+    fn add_environment<'a>(&mut self, entries: impl Iterator<Item = &'a [u8]>) {
+        let mut sockets = Vec::new();
+        let mut panes = Vec::new();
+        for entry in entries {
+            if let Some(value) = entry.strip_prefix(b"WEZTERM_UNIX_SOCKET=") {
+                sockets.extend(std::str::from_utf8(value).ok());
+            } else if let Some(value) = entry.strip_prefix(b"WEZTERM_PANE=") {
+                panes.extend(std::str::from_utf8(value).ok());
+            }
+        }
+        for socket in &sockets {
+            for pane in &panes {
+                self.pairs
+                    .insert(((*socket).to_owned(), (*pane).to_owned()));
+            }
+        }
+    }
+
     /// Never `Unavailable`: a set that exists came from a listing that was read.
     pub fn presence(&self, socket_path: &str, pane_id: &str) -> Presence {
         if self
@@ -691,28 +712,10 @@ fn kill_group(child: &mut std::process::Child) {
 }
 
 impl ProcessProbe for SystemProcessProbe {
+    /// The same listing a presence question takes, so a probe reported
+    /// healthy is one whose answers can be read.
     fn available(&self) -> bool {
-        let child = Command::new("/bin/ps")
-            .args(["-axo", "pid="])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-        let Ok(mut child) = child else {
-            return false;
-        };
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => return status.success(),
-                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return false;
-                }
-            }
-        }
+        !matches!(self.pane_processes(), ProcessListing::Failed)
     }
 
     fn presence(&self, socket_path: &str, pane_id: &str) -> Presence {
@@ -723,50 +726,151 @@ impl ProcessProbe for SystemProcessProbe {
     }
 
     fn pane_processes(&self) -> ProcessListing {
-        let Ok(mut child) = Command::new("/bin/ps")
-            .args(["eww", "-axo", "command="])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
-            return ProcessListing::Failed;
-        };
-        let Some(stdout) = child.stdout.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return ProcessListing::Failed;
-        };
-        let reader = thread::spawn(move || {
-            let mut bytes = Vec::new();
-            stdout
-                .take(8 * 1024 * 1024 + 1)
-                .read_to_end(&mut bytes)
-                .map(|_| bytes)
-        });
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break None;
-                }
-            }
-        };
-        let output = reader.join().ok().and_then(std::result::Result::ok);
-        let (Some(status), Some(output)) = (status, output) else {
-            return ProcessListing::Failed;
-        };
-        if !status.success() || output.len() > 8 * 1024 * 1024 {
-            return ProcessListing::Failed;
+        match own_pane_processes() {
+            Some(processes) => ProcessListing::Listed(processes),
+            None => ProcessListing::Failed,
         }
-        ProcessListing::Listed(PaneProcessSet::from_process_listing(
-            &String::from_utf8_lossy(&output),
-        ))
     }
+}
+
+/// The pairs in the environments of this user's processes, read from the
+/// kernel rather than from `ps`.
+///
+/// `ps eww` prints each process's arguments and environment as one line, so
+/// `WEZTERM_PANE=` text in any process's arguments -- any user's -- read as
+/// an environment, and on procps-ng the BSD flags it needs fail outright.
+/// The kernel hands over the environment block alone. Reading this process's
+/// own block is required: a listing that could not read even that one would
+/// report every pane absent for want of permission, not for want of a pane.
+#[cfg(target_os = "macos")]
+fn own_pane_processes() -> Option<PaneProcessSet> {
+    /// `PROC_UID_ONLY` from `<libproc.h>`: processes whose effective uid is
+    /// the one given.
+    const PROC_UID_ONLY: u32 = 4;
+    let uid = unsafe { libc::geteuid() };
+    let pid_size = std::mem::size_of::<libc::pid_t>();
+    let needed = unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, std::ptr::null_mut(), 0) };
+    let needed = usize::try_from(needed).ok().filter(|bytes| *bytes > 0)?;
+    // Room for processes started between the two calls.
+    let mut pids = vec![0 as libc::pid_t; needed / pid_size + 256];
+    let capacity = libc::c_int::try_from(pids.len() * pid_size).ok()?;
+    let filled =
+        unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, pids.as_mut_ptr().cast(), capacity) };
+    pids.truncate(usize::try_from(filled).ok()? / pid_size);
+    let mut argument_bytes: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    let mut name = [libc::CTL_KERN, libc::KERN_ARGMAX];
+    if unsafe {
+        libc::sysctl(
+            name.as_mut_ptr(),
+            2,
+            (&mut argument_bytes as *mut libc::c_int).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+    let mut buffer = vec![0_u8; usize::try_from(argument_bytes).ok()?];
+    let own = libc::pid_t::try_from(std::process::id()).ok()?;
+    let mut read_own = false;
+    let mut processes = PaneProcessSet::default();
+    for pid in pids.into_iter().filter(|pid| *pid > 0) {
+        let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+        let mut size = buffer.len();
+        // A process that exited, or that the kernel will not describe to
+        // this user, is simply not listed.
+        if unsafe {
+            libc::sysctl(
+                name.as_mut_ptr(),
+                3,
+                buffer.as_mut_ptr().cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        } != 0
+        {
+            continue;
+        }
+        read_own |= pid == own;
+        processes.add_environment(procargs_environment(&buffer[..size.min(buffer.len())]));
+    }
+    read_own.then_some(processes)
+}
+
+#[cfg(target_os = "linux")]
+fn own_pane_processes() -> Option<PaneProcessSet> {
+    use std::os::unix::fs::MetadataExt;
+    let uid = unsafe { libc::geteuid() };
+    let own = std::process::id().to_string();
+    let mut read_own = false;
+    let mut processes = PaneProcessSet::default();
+    for entry in fs::read_dir("/proc").ok()?.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .filter(|name| name.bytes().all(|b| b.is_ascii_digit()))
+        else {
+            continue;
+        };
+        // `/proc/<pid>` belongs to the process's effective uid.
+        if entry.metadata().ok().map(|metadata| metadata.uid()) != Some(uid) {
+            continue;
+        }
+        let Ok(environment) = fs::read(entry.path().join("environ")) else {
+            continue;
+        };
+        read_own |= pid == own;
+        processes.add_environment(environment.split(|byte| *byte == 0));
+    }
+    read_own.then_some(processes)
+}
+
+/// Elsewhere only `ps` offers environments, and it prints them after the
+/// arguments on one line, so lines are kept only for this user's processes.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn own_pane_processes() -> Option<PaneProcessSet> {
+    let ps = ["/bin/ps", "/usr/bin/ps"]
+        .into_iter()
+        .map(Path::new)
+        .find(|path| is_executable(path))?;
+    let mut command = Command::new(ps);
+    command.args(["axeww", "-o", "uid=,command="]);
+    let output = run_bounded(&mut command, 8 * 1024 * 1024, CHILD_DEADLINE).ok()?;
+    let uid = unsafe { libc::geteuid() }.to_string();
+    let listing = String::from_utf8_lossy(&output)
+        .lines()
+        .filter_map(|line| {
+            let (owner, rest) = line.trim_start().split_once(' ')?;
+            (owner == uid).then_some(rest)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(PaneProcessSet::from_process_listing(&listing))
+}
+
+/// The environment strings in a `KERN_PROCARGS2` buffer.
+///
+/// The buffer holds `argc`, the executable path, NUL padding, `argc`
+/// argument strings, then the environment strings, ended by an empty string
+/// or by the end of the buffer.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn procargs_environment(buffer: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let count = buffer
+        .get(..4)
+        .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+        .map(i32::from_ne_bytes)
+        .and_then(|count| usize::try_from(count).ok());
+    let mut strings = buffer.get(4..).unwrap_or_default().split(|byte| *byte == 0);
+    let arguments_known = count.is_some() && strings.next().is_some();
+    let mut rest = strings.skip_while(|string| string.is_empty());
+    for _ in 0..count.unwrap_or(0) {
+        rest.next();
+    }
+    rest.take_while(move |string| arguments_known && !string.is_empty())
 }
 
 /// The values `name` takes on one process line, where `name` ends in `=`.
@@ -951,6 +1055,29 @@ mod tests {
             USER,
             &[ADMIN, 0]
         ));
+    }
+
+    #[test]
+    fn only_the_environment_part_of_a_process_argument_block_is_read() {
+        let mut buffer = 2_i32.to_ne_bytes().to_vec();
+        buffer.extend_from_slice(
+            b"/bin/sh\0\0\0\0sh\0WEZTERM_PANE=9 WEZTERM_UNIX_SOCKET=/argv.sock\0\
+              HOME=/h\0WEZTERM_UNIX_SOCKET=/env.sock\0WEZTERM_PANE=7\0\0executable_path=/bin/sh\0",
+        );
+        let environment = super::procargs_environment(&buffer).collect::<Vec<_>>();
+        assert_eq!(
+            environment,
+            [
+                &b"HOME=/h"[..],
+                b"WEZTERM_UNIX_SOCKET=/env.sock",
+                b"WEZTERM_PANE=7"
+            ]
+        );
+        let mut processes = PaneProcessSet::default();
+        processes.add_environment(environment.into_iter());
+        assert_eq!(processes.presence("/env.sock", "7"), Presence::Present);
+        assert_eq!(processes.presence("/argv.sock", "9"), Presence::Absent);
+        assert_eq!(super::procargs_environment(&[1, 0]).count(), 0);
     }
 
     #[test]

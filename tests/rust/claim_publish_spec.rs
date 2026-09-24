@@ -30,8 +30,9 @@ use wezterm_attention::records::{
     state_root, with_lock,
 };
 use wezterm_attention::wezterm::{
-    Clock, PaneLister, PaneRow, RuntimePorts, SystemTtyWriter, TtyWriter, parse_pane_rows,
-    publication_bytes, resolve_wezterm_executable, tty_path_from_fd,
+    Clock, PaneLister, PaneRow, Presence, ProcessListing, ProcessProbe, RuntimePorts,
+    SystemProcessProbe, SystemTtyWriter, TtyWriter, parse_pane_rows, publication_bytes,
+    resolve_wezterm_executable, tty_path_from_fd,
 };
 
 struct Scratch {
@@ -1382,4 +1383,99 @@ fn missing_incarnation_manifest_fails_presence_closed() {
     assert_eq!(rows[0].pane_presence, "unavailable");
     assert_eq!(rows[0].reader_confidence, "unconfirmed");
     assert_eq!(panes.calls.load(Ordering::SeqCst), 0);
+}
+
+/// A child that lives until killed, with exactly `environment`.
+///
+/// It is this crate's own binary waiting on stdin for a hook payload. A
+/// system shell would not do: macOS withholds the environment of its own
+/// platform binaries from every reader, `ps` included.
+struct Waiting(std::process::Child);
+
+impl Waiting {
+    fn spawn(provider: &str, environment: &[(&str, &str)]) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_attention"));
+        command
+            .args(["hooks", "event", provider, "Stop"])
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        for (name, value) in environment {
+            command.env(name, value);
+        }
+        Self(command.spawn().expect("spawn waiting child"))
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Ask until `expected` comes back or two seconds pass, since a child just
+/// spawned may not have reached its own program yet.
+fn settled_presence(socket: &str, pane: &str, expected: Presence) -> Presence {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let presence = SystemProcessProbe.presence(socket, pane);
+        if presence == expected || Instant::now() >= deadline {
+            return presence;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn the_process_probe_finds_a_pane_in_a_live_process_environment() {
+    let socket = format!("/tmp/wa-probe-{}.sock", Uuid::new_v4().simple());
+    assert_eq!(
+        SystemProcessProbe.presence(&socket, "4242"),
+        Presence::Absent
+    );
+    let waiting = Waiting::spawn(
+        "claude",
+        &[("WEZTERM_UNIX_SOCKET", &socket), ("WEZTERM_PANE", "4242")],
+    );
+    assert_eq!(
+        settled_presence(&socket, "4242", Presence::Present),
+        Presence::Present
+    );
+    assert_eq!(
+        SystemProcessProbe.presence(&socket, "424"),
+        Presence::Absent
+    );
+    drop(waiting);
+    assert_eq!(
+        SystemProcessProbe.presence(&socket, "4242"),
+        Presence::Absent
+    );
+}
+
+#[test]
+fn pane_variables_in_a_process_arguments_are_not_its_environment() {
+    let socket = format!("/tmp/wa-probe-{}.sock", Uuid::new_v4().simple());
+    let text = format!("WEZTERM_PANE=4343 WEZTERM_UNIX_SOCKET={socket}");
+    let _waiting = Waiting::spawn(
+        &text,
+        &[("WEZTERM_UNIX_SOCKET", &socket), ("WEZTERM_PANE", "4444")],
+    );
+    assert_eq!(
+        settled_presence(&socket, "4444", Presence::Present),
+        Presence::Present,
+        "the listing read this process"
+    );
+    assert_eq!(
+        SystemProcessProbe.presence(&socket, "4343"),
+        Presence::Absent
+    );
+}
+
+#[test]
+fn the_process_probe_is_available_exactly_when_its_listing_is() {
+    let probe = SystemProcessProbe;
+    assert!(matches!(probe.pane_processes(), ProcessListing::Listed(_)));
+    assert!(probe.available());
 }
