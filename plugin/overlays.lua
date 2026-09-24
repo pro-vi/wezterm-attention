@@ -91,6 +91,36 @@ return function(context)
     return true
   end
 
+  local function file_exists(path)
+    local file = io.open(path, "r")
+    if not file then return false end
+    file:close()
+    return true
+  end
+
+  --- Move `from` to `to` unless a file is already at `to`. A rename replaces
+  --- whatever it finds, so a write that lands at `to` after a caller looked
+  --- would be lost. A hard link is made only where no name is, and Windows'
+  --- rename already refuses an existing target. Returns "placed", "occupied"
+  --- (`from` is left where it was), or "failed" with an error text.
+  local function place_without_replacing(from, to)
+    if package.config:sub(1, 1) == "\\" then
+      local renamed, err = os.rename(from, to)
+      if renamed then return "placed" end
+      if file_exists(to) then return "occupied" end
+      return "failed", tostring(err)
+    end
+    local function quoted(value) return "'" .. value:gsub("'", [['\'']]) .. "'" end
+    -- LuaJIT answers with the exit status, Lua 5.2 and later with true.
+    local linked = os.execute("ln " .. quoted(from) .. " " .. quoted(to) .. " 2>/dev/null")
+    if linked == true or linked == 0 then
+      os.remove(from)
+      return "placed"
+    end
+    if file_exists(to) then return "occupied" end
+    return "failed", "ln could not link it"
+  end
+
   local function write_v2_record(path, record, kind, expected)
     local parsed, parse_diagnostic = parse_v2_record(record, kind)
     if not parsed or (expected and not record_matches(parsed, expected)) then
@@ -530,6 +560,10 @@ return function(context)
       }, "review", { address = read.address })
     end
 
+    --- Panes where a clear left a review moved aside because it could not put
+    --- it back, keyed by cache key, so the next poll of the pane tries again.
+    local panes_with_cleared_leftovers = {}
+
     --- Remove the reviews this pane showed, and only those. A writer can
     --- replace a review between the read above and the removal, and removing
     --- by path would take the newer one, which the user never saw. So each
@@ -553,19 +587,66 @@ return function(context)
           end
         else
           local record = read_expected_record(taken, "review", { address = read.address }, true)
-          local superseded = io.open(path, "r")
-          if superseded then superseded:close() end
           if record and record.event_id == shown[path].event_id then
             os.remove(taken)
             cleared = true
-          elseif superseded then
+          elseif file_exists(path) then
             os.remove(taken)
           else
-            os.rename(taken, path)
+            local placed, place_err = place_without_replacing(taken, path)
+            if placed == "occupied" then
+              -- A write landed after the look above: newer still, as above.
+              os.remove(taken)
+            elseif placed == "failed" then
+              panes_with_cleared_leftovers[read.cache_key] = true
+              report_error_once("restore-v2-review:" .. path,
+                "cannot put back review " .. path .. " from " .. taken .. ": " .. place_err)
+            end
           end
         end
       end
       return cleared
+    end
+
+    --- Put back the reviews a clear moved aside and never finished with,
+    --- because its process died between the move and the removal. Each was a
+    --- flag the pane showed, so it goes back to its name when nothing has taken
+    --- that name since. Beside a live review it stays for `attention sweep`:
+    --- which of the two is newer is not known here.
+    ---
+    --- Looking costs a directory listing, so it is done only where a leftover
+    --- can be: on this process's first read of the pane (a GUI that died
+    --- mid-clear is replaced by a new process), when a review this process
+    --- showed has gone (another GUI's clear), and where this process's own
+    --- clear could not put one back. Returns true when a review was put back.
+    local function restore_cleared_reviews(read, dir, previous_view, view, opts)
+      local key = read.cache_key
+      local look = not previous_view or panes_with_cleared_leftovers[key]
+      if not look then
+        local shown = previous_view._records and previous_view._records.reviews or {}
+        local current = view._records and view._records.reviews or {}
+        for path in pairs(shown) do
+          if not current[path] then look = true; break end
+        end
+      end
+      if not look then return false end
+      panes_with_cleared_leftovers[key] = nil
+      local paths = glob_paths(v2_pane_root(dir, read.address) .. "/reviews/*.clear", opts)
+      if not paths then return false end
+      local restored = false
+      for _, leftover in ipairs(paths) do
+        local path = leftover:match("^(.*%.json)%.%w+%.clear$")
+        if path then
+          local placed, place_err = place_without_replacing(leftover, path)
+          if placed == "placed" then
+            restored = true
+          elseif placed == "failed" then
+            report_error_once("restore-v2-review:" .. path,
+              "cannot put back review " .. path .. " from " .. leftover .. ": " .. place_err)
+          end
+        end
+      end
+      return restored
     end
 
     local function refresh_cached_v2(read, dir, now_unix_ns)
@@ -631,6 +712,7 @@ return function(context)
       v2_review_paths = v2_review_paths,
       write_v2_user_review = write_v2_user_review,
       clear_v2_reviews = clear_v2_reviews,
+      restore_cleared_reviews = restore_cleared_reviews,
       refresh_cached_v2 = refresh_cached_v2,
       acknowledge_focused_v2_pane = acknowledge_focused_v2_pane,
     }

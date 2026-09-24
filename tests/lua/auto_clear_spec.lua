@@ -212,10 +212,10 @@ local wezterm = {
   },
   json_parse = decode_json,
   glob = function(pattern)
-    local directory = pattern:match("^(.*)/%*%.json$")
+    local directory, extension = pattern:match("^(.*)/%*%.(%w+)$")
     if not directory then return {} end
-    local pipe = io.popen(
-      "find " .. shell_quote(directory) .. " -maxdepth 1 -type f -name '*.json' -print 2>/dev/null")
+    local pipe = io.popen("find " .. shell_quote(directory)
+      .. " -maxdepth 1 -type f -name '*." .. extension .. "' -print 2>/dev/null")
     if not pipe then return {} end
     local paths = {}
     for path in pipe:lines() do paths[#paths + 1] = path end
@@ -3553,6 +3553,114 @@ test("Alt+B clear-all leaves a review that was replaced after it looked", functi
   materialize_v2_fixture(82)
 end)
 
+test("Alt+B clear-all does not put a review back over one written after it looked", function()
+  local wire = materialize_v2_fixture(85)
+  local samples = protocol_fixture.record_samples
+  local pane_root = test_dir .. "/v2/realms/" .. wire.address.realm_id
+    .. "/incarnations/" .. wire.address.incarnation_id .. "/panes/85"
+  local path = pane_root .. "/reviews/" .. samples.review.owner_key .. ".json"
+  assert(path_exists(path), "precondition: the fixture carries a review")
+  local function version(event_id)
+    local record = decode_json(encode_json(samples.review))
+    record.address = decode_json(encode_json(wire.address))
+    record.event_id = event_id
+    return record
+  end
+  local unseen = version("00000000-0000-4000-8000-000000000851")
+  local newest = version("00000000-0000-4000-8000-000000000852")
+  local review = dofile(repo_root .. "/plugin/init.lua")
+  local config = {}
+  review.apply_to_config(config, { auto_poll = false, dir = test_dir, integration_root = writer_root })
+  local toggle = assert(config.keys[#config.keys].action)
+  local spec = { id = 9085, domain = "unix", attention = wire }
+  -- One writer replaces the review as the clear moves it aside, so what was
+  -- moved is not what the tab showed and has to go back. A second writer
+  -- lands just after the clear has looked at the path and found it empty.
+  local real_rename, real_open = os.rename, io.open
+  local moved, landed = false, false
+  os.rename = function(from, to)
+    if from == path and not moved then moved = true; write_json_path(path, unseen) end
+    return real_rename(from, to)
+  end
+  io.open = function(target, mode)
+    local file, err = real_open(target, mode)
+    if target == path and moved and not landed and not file then
+      landed = true
+      write_json_path(path, newest)
+    end
+    return file, err
+  end
+  local ok, failure = pcall(toggle, window_double({ tabs = { { spec } }, focused = true,
+    active_pane_id = spec }), pane_from_entry(spec))
+  os.rename, io.open = real_rename, real_open
+  assert(ok, failure)
+  assert(moved and landed, "precondition: both writes reached the clear")
+  local left = read_path(path)
+  assert(left and decode_json(left).event_id == newest.event_id,
+    "the review written last must survive the clear putting its own copy back")
+  materialize_v2_fixture(85)
+end)
+
+--- Move a pane's review aside under the name a clear gives it while it looks,
+--- as a GUI that died in the middle of Alt+B leaves it.
+local function leave_cleared_review(pane_id)
+  local wire = materialize_v2_fixture(pane_id)
+  local samples = protocol_fixture.record_samples
+  local path = test_dir .. "/v2/realms/" .. wire.address.realm_id
+    .. "/incarnations/" .. wire.address.incarnation_id .. "/panes/" .. pane_id
+    .. "/reviews/" .. samples.review.owner_key .. ".json"
+  local before = assert(read_path(path), "precondition: the fixture carries a review")
+  local leftover = path .. ".table0x10a2b3c4.clear"
+  assert(os.rename(path, leftover))
+  return wire, path, leftover, before
+end
+
+local function poll_v2_pane(instance, spec)
+  instance.poll(window_double({ tabs = { { spec } }, focused = false }),
+    { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+end
+
+test("a review a crashed clear left aside is put back on the pane's next read", function()
+  local wire, path, leftover, before = leave_cleared_review(86)
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root })
+  poll_v2_pane(instance, { id = 9086, domain = "unix", attention = wire })
+  assert(read_path(path) == before, "the flag the user set must come back byte for byte")
+  assert(not path_exists(leftover), "the review lives at one name only")
+  local key = internal.address_cache_key(wire.address)
+  assert(instance._internal.attention_cache[key].review == true,
+    "the same poll shows the restored flag")
+end)
+
+test("a review left aside while this process was already showing the pane is put back", function()
+  local wire = materialize_v2_fixture(87)
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root })
+  local spec = { id = 9087, domain = "unix", attention = wire }
+  poll_v2_pane(instance, spec)
+  local _, path, leftover, before = leave_cleared_review(87)
+  poll_v2_pane(instance, spec)
+  assert(read_path(path) == before, "another GUI's crashed clear must not lose the flag")
+  assert(not path_exists(leftover), "the review lives at one name only")
+end)
+
+test("a review left aside stays aside when a live review has taken its name", function()
+  local wire, path, leftover, before = leave_cleared_review(88)
+  local live = decode_json(before)
+  live.event_id = "00000000-0000-4000-8000-000000000881"
+  write_json_path(path, live)
+  local live_raw = read_path(path)
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root })
+  poll_v2_pane(instance, { id = 9088, domain = "unix", attention = wire })
+  assert(read_path(path) == live_raw, "the live review is not replaced")
+  assert(read_path(leftover) == before, "the older copy is sweep's, not the plugin's")
+  os.remove(leftover)
+end)
+
 test("a stop hidden behind a higher-ranked review flag is not acknowledged, v1 or v2", function()
   local wire = materialize_v2_fixture(83)
   local samples = protocol_fixture.record_samples
@@ -4167,7 +4275,7 @@ test("twenty full lifecycle panes keep polling and getter work bounded", functio
   instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false })
   local window = window_double({ tabs = { entries }, focused = false })
   local old_open, old_popen = io.open, io.popen
-  local reads, writes, globs = 0, 0, 0
+  local reads, writes, globs, leftover_looks = 0, 0, 0, 0
   io.open = function(path, mode)
     if mode and mode:find("w", 1, true) then writes = writes + 1 end
     if path:match("/lifecycle%.json$") then reads = reads + 1 end
@@ -4179,6 +4287,10 @@ test("twenty full lifecycle panes keep polling and getter work bounded", functio
     for _ = 1, 2 do
       instance.poll(window, { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end,
         glob = function(pattern)
+          if pattern:match("/reviews/%*%.clear$") then
+            leftover_looks = leftover_looks + 1
+            return {}
+          end
           globs = globs + 1
           local directory = assert(pattern:match("^(.*)/%*%.json$"))
           assert(directory:match("/reviews$") or directory:match("/agents$"), "no historical directory walk")
@@ -4199,6 +4311,8 @@ test("twenty full lifecycle panes keep polling and getter work bounded", functio
   io.open, io.popen = old_open, old_popen
   assert(ok, failure)
   assert(reads == 40 and globs == 80 and writes == 0, "exactly one sidecar read per pane/poll and no writes")
+  assert(leftover_looks == 20, "a pane is searched for a clear's leftovers on its first poll only, got "
+    .. leftover_looks)
   io.write(string.format("lifecycle workload: 20 panes, 2 polls, 128 observations each; CPU %.2f ms; 40 snapshot reads; 0 writes\n", cpu_ms))
 end)
 

@@ -331,6 +331,7 @@ local selected_v2_records_root = v2_overlays.selected_v2_records_root
 local v2_review_paths = v2_overlays.v2_review_paths
 local write_v2_user_review = v2_overlays.write_v2_user_review
 local clear_v2_reviews = v2_overlays.clear_v2_reviews
+local restore_cleared_reviews = v2_overlays.restore_cleared_reviews
 local refresh_cached_v2 = v2_overlays.refresh_cached_v2
 local acknowledge_focused_v2_pane = v2_overlays.acknowledge_focused_v2_pane
 -- ── Internal helpers ────────────────────────────────────────────────────────
@@ -386,6 +387,7 @@ local runtime_api = runtime_state.bind({
   v2_review_paths = v2_review_paths,
   write_v2_user_review = write_v2_user_review,
   clear_v2_reviews = clear_v2_reviews,
+  restore_cleared_reviews = restore_cleared_reviews,
   refresh_cached_v2 = refresh_cached_v2,
   acknowledge_focused_v2_pane = acknowledge_focused_v2_pane,
   read_effective_marker = read_effective_marker,
