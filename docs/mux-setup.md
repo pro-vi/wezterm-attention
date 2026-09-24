@@ -1,6 +1,6 @@
 # Mux setup
 
-This setup keeps attention on the right pane across local and attached WezTerm GUIs. V2 records need a POSIX system and the `attention` command built by `scripts/install-cli.sh` (see [Install](../README.md#install)). Without the command, the plugin still reads and renders v1 flat markers.
+This setup keeps attention on the right pane across local and attached WezTerm GUIs. Writing v2 records needs a POSIX system and the `attention` command built by `scripts/install-cli.sh` (see [Install](../README.md#install)). Without the command, the plugin still reads and renders v1 flat markers.
 
 ## WezTerm configuration
 
