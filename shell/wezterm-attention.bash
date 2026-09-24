@@ -62,6 +62,9 @@ _wezterm_attention_supported_command() {
 wezterm_attention_preexec() {
   [ "$_WEZTERM_ATTENTION_IN_HOOK" -eq 0 ] || return 0
   [ "${BASH_SUBSHELL:-0}" -eq 0 ] || return 0
+  # Outside a WezTerm pane the claim cannot succeed, and the writer would say
+  # so before every agent.
+  [ -n "${WEZTERM_PANE:-}" ] || return 0
   _wezterm_attention_supported_command "${1:-$BASH_COMMAND}" || return 0
   [ -n "${WEZTERM_ATTENTION_ROOT:-}" ] && [ -x "$WEZTERM_ATTENTION_ROOT/bin/attention" ] || return 0
   local _WEZTERM_ATTENTION_IN_HOOK=1 selected_launch= claim_status=0
@@ -146,8 +149,10 @@ _WEZTERM_ATTENTION_PROMPT_INSTALL='_wezterm_attention_install_hooks "$(trap -p D
   trap '"'"'_wezterm_attention_debug_dispatch "$BASH_COMMAND" "$_"'"'"' DEBUG'
 
 # Installing at the first prompt rather than here lets a DEBUG trap set later
-# in the startup files be kept and called. The status of the command before the
-# prompt is handed on, so prompt commands after these still see it.
+# in the startup files be kept and called. The status and last argument of the
+# command before the prompt are handed on, so prompt commands after these still
+# see them as $? and $_: the saved last argument is passed last, which is what
+# bash leaves in $_ after this call.
 _wezterm_attention_prompt_command() {
   _WEZTERM_ATTENTION_TOP_DEPTH=${#FUNCNAME[@]}
   wezterm_attention_precmd
@@ -157,6 +162,6 @@ _wezterm_attention_add_prompt_command() {
   case "${PROMPT_COMMAND[*]:-}" in
     *_wezterm_attention_prompt_command*) return 0 ;;
   esac
-  PROMPT_COMMAND="_WEZTERM_ATTENTION_LAST_STATUS=\$?;eval \"\$_WEZTERM_ATTENTION_PROMPT_INSTALL\";_wezterm_attention_prompt_command${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+  PROMPT_COMMAND="_WEZTERM_ATTENTION_LAST_STATUS=\$? _WEZTERM_ATTENTION_LAST_ARG=\$_;eval \"\$_WEZTERM_ATTENTION_PROMPT_INSTALL\";_wezterm_attention_prompt_command \"\$_WEZTERM_ATTENTION_LAST_ARG\"${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
 }
 _wezterm_attention_add_prompt_command

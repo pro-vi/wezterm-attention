@@ -133,15 +133,16 @@ EOF
   fi
 done
 
-rc "PROMPT_COMMAND='printf \"theme-status=%s\\n\" \"\$?\"'" "source '$integration'"
+rc "PROMPT_COMMAND='printf \"theme-status=%s last=%s\\n\" \"\$?\" \"\$_\"'" "source '$integration'"
 session WEZTERM_PANE=7 <<'EOF'
-false
+echo hello world
+false last-arg
 exit 0
 EOF
-if has '^theme-status=1$'; then
-  pass "a prompt command installed earlier still sees the last command's status"
+if has '^theme-status=0 last=world$' && has '^theme-status=1 last=last-arg$'; then
+  pass "a prompt command installed earlier still sees the last command's \$? and \$_"
 else
-  fail "a prompt command installed earlier still sees the last command's status"
+  fail "a prompt command installed earlier still sees the last command's \$? and \$_"
 fi
 
 rc "trap 'case \$BASH_COMMAND in \"echo marker\") printf \"previous-trap status=%s last=%s\\n\" \"\$?\" \"\$_\";; esac' DEBUG" \
@@ -158,21 +159,24 @@ else
   fail "an earlier DEBUG trap keeps running beside the claim, and commands and that trap still see \$? and \$_"
 fi
 
+# Outside a pane the writer can neither claim nor publish, and would print why
+# before every agent and at every prompt.
 rc "source '$integration'"
 session <<'EOF'
-true
+claude
 exit 0
 EOF
-outside=$(calls_matching '^hooks publish')
+outside=$(grep -c '' "$scratch/calls")
+has '^claude-ran launch=none$' || outside="$outside, and the agent did not start without a launch id"
 session WEZTERM_PANE=7 <<'EOF'
-true
+claude
 exit 0
 EOF
-inside=$(calls_matching '^hooks publish')
-if [ "$outside" -eq 0 ] && [ "$inside" -gt 0 ]; then
-  pass "the prompt hook runs only inside a WezTerm pane"
+inside=$(grep -c '' "$scratch/calls")
+if [ "$outside" = 0 ] && [ "$inside" -gt 0 ]; then
+  pass "the hooks run only inside a WezTerm pane"
 else
-  fail "the prompt hook runs only inside a WezTerm pane (outside $outside, inside $inside)"
+  fail "the hooks run only inside a WezTerm pane (outside $outside, inside $inside)"
 fi
 
 rc "source '$integration'"
