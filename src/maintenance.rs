@@ -824,6 +824,9 @@ fn binding_known_and_prunable(
                 let Ok(file_type) = child.file_type() else {
                     return false;
                 };
+                if file_type.is_file() && write_leftover(&child.file_name().to_string_lossy()) {
+                    continue;
+                }
                 if !file_type.is_file()
                     || child_path.extension().and_then(|value| value.to_str()) != Some("json")
                 {
@@ -855,6 +858,9 @@ fn binding_known_and_prunable(
             }
             continue;
         }
+        if file_type.is_file() && write_leftover(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
         if !path.is_file()
             || !known.contains(
                 path.file_name()
@@ -883,6 +889,22 @@ fn binding_known_and_prunable(
         }
     }
     true
+}
+
+/// Whether a binding directory resolves inside the state root, so removing it
+/// removes nothing outside.
+fn binding_confined(root: &Path, binding_dir: &Path, diagnostics: &mut Vec<Diagnostic>) -> bool {
+    let confined = fs::canonicalize(binding_dir)
+        .ok()
+        .zip(fs::canonicalize(root).ok())
+        .is_some_and(|(target, root)| target.starts_with(root));
+    if !confined {
+        diagnostics.push(diagnostic(
+            "record_invalid",
+            "binding removal target is outside the state root",
+        ));
+    }
+    confined
 }
 
 pub fn binding_cap_paths_by_realm(
@@ -2014,7 +2036,26 @@ pub fn sweep(
             .unwrap_or("")
             .to_owned();
         if !apply {
-            details.push(json!({"kind":"binding_retention","binding_id":binding_id_for_detail,"action":"prune"}));
+            // The preview runs the checks apply runs on the tree itself, so it
+            // says keep where apply would keep.
+            let mut kept = Vec::new();
+            let binding_path = binding_dir.join("binding.json");
+            let binding = RecordIdentity::from_state_path(root, &binding_path, "binding")
+                .and_then(|identity| read_record(&binding_path, Some("binding"), &identity));
+            let prunable = match binding {
+                Ok(Some(binding)) => {
+                    binding_confined(root, &binding_dir, &mut kept)
+                        && binding_known_and_prunable(&binding_dir, &binding, &mut kept)
+                }
+                Ok(None) => false,
+                Err(error) => {
+                    kept.push(error.diagnostic);
+                    false
+                }
+            };
+            diagnostics.extend(kept);
+            let action = if prunable { "prune" } else { "keep" };
+            details.push(json!({"kind":"binding_retention","binding_id":binding_id_for_detail,"action":action}));
             continue;
         }
         let binding_path = binding_dir.join("binding.json");
@@ -2118,26 +2159,18 @@ pub fn sweep(
                         })
                         .transpose()?
                         .unwrap_or(false);
-                    let confined = fs::canonicalize(&binding_dir)
-                        .ok()
-                        .zip(fs::canonicalize(root).ok())
-                        .is_some_and(|(target, root)| target.starts_with(root));
                     if !end_is_current || (!still_old && !cap_paths.contains(&binding_dir)) {
                         local_diagnostics.push(diagnostic(
                             "record_invalid",
                             "binding changed before retention apply",
                         ));
-                    } else if !confined {
-                        local_diagnostics.push(diagnostic(
-                            "record_invalid",
-                            "binding removal target is outside the state root",
-                        ));
-                    } else if !binding_known_and_prunable(
-                        &binding_dir,
-                        &locked_binding,
-                        &mut local_diagnostics,
-                    ) {
-                    } else {
+                    } else if binding_confined(root, &binding_dir, &mut local_diagnostics)
+                        && binding_known_and_prunable(
+                            &binding_dir,
+                            &locked_binding,
+                            &mut local_diagnostics,
+                        )
+                    {
                         return Ok(CommitPlan {
                             result: RetentionOutcome {
                                 pruned: true,

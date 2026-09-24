@@ -1700,3 +1700,6 @@ mod lock_scope;
 
 #[path = "maintenance_spec/pane_retention.rs"]
 mod pane_retention;
+
+#[path = "maintenance_spec/binding_retention.rs"]
+mod binding_retention;
