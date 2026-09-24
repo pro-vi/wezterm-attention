@@ -9,7 +9,8 @@ use uuid::Uuid;
 
 use crate::protocol::{AttentionError, Result, manifest};
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// Ordered by realm, then incarnation, then pane id, as its fields are.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct PaneAddress {
     pub realm_id: String,
     pub incarnation_id: String,

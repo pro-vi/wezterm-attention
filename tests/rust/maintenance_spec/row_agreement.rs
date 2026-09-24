@@ -128,20 +128,25 @@ fn a_conflicted_row_reads_conflicted_through_inspect() {
     other.pane_id = "99".to_owned();
     let launch_id = "00000000-0000-4000-8000-000000000702";
     let other_binding = binding_id("claude", "session-a", launch_id);
+    let record = json!({
+        "kind":"binding","schema":3,"address":other,"launch_id":launch_id,
+        "binding_id":other_binding,"event_id":Uuid::new_v4().to_string(),
+        "provider":"claude","provider_session_id":"session-a","start_source":"resume",
+        "observed_mono_ns":"00000000000000000300",
+        "written_at_unix_ns":"00000000001000000000","writer_version":"1.0.0"
+    });
     atomic_replace(
         &launch_path(&root, &other, launch_id)
             .join("bindings")
             .join(&other_binding)
             .join("binding.json"),
-        &json!({
-            "kind":"binding","schema":3,"address":other,"launch_id":launch_id,
-            "binding_id":other_binding,"event_id":Uuid::new_v4().to_string(),
-            "provider":"claude","provider_session_id":"session-a","start_source":"resume",
-            "observed_mono_ns":"00000000000000000300",
-            "written_at_unix_ns":"00000000001000000000","writer_version":"1.0.0"
-        }),
+        &record,
     )
     .expect("write the second binding");
+    // As the writer does, the binding with its session index entry.
+    let (entry_path, entry) =
+        wezterm_attention::records::binding_session_entry(&root, &record).expect("entry");
+    atomic_replace(&entry_path, &entry).expect("write the entry");
     setup.panes.set(vec![
         PaneRow {
             pane_id: "42".to_owned(),

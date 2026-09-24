@@ -480,6 +480,8 @@ def run(render: bool) -> int:
         "incarnation_id_input": "lp64be(realm_id,socket_device,socket_inode,socket_ctime_ns_decimal)",
         "tty_fingerprint_input": "lp64be(tty_device,tty_inode,tty_rdevice)",
         "binding_id_input": "utf8(provider) || 0x00 || utf8(provider_session_id) || 0x00 || utf8(launch_id)",
+        "session_key_input": "utf8(provider) || 0x00 || utf8(provider_session_id)",
+        "session_entry_key_input": "utf8(v2/realms/<realm_id>/incarnations/<incarnation_id>/panes/<pane_id>/launches/<launch_id>/bindings/<binding_id>/binding.json)",
     }:
         failures.append("manifest digest contract is not the supported SHA-256 relationship")
 

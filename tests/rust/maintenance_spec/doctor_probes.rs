@@ -55,7 +55,7 @@ fn claim_more_panes(setup: &Setup, panes: &[&str]) {
 
 /// One process listing answers for every claim. Each listing reads every
 /// process's environment and takes tens of milliseconds, so one per claim
-/// made doctor take seconds on a machine with a few hundred claims.
+/// would make doctor take seconds on a machine with a few hundred claims.
 #[test]
 fn doctor_takes_one_process_listing_however_many_claims() {
     let setup = Setup::new();

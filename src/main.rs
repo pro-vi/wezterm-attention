@@ -340,17 +340,7 @@ fn emit<T: Serialize>(response: &Response<T>, as_json: bool, quiet: bool) {
         // that reads stdout reads only the word.
         print_out(&response.status);
         for diagnostic in &response.diagnostics {
-            let message = diagnostic
-                .message
-                .chars()
-                .map(|character| {
-                    if character.is_control() {
-                        '?'
-                    } else {
-                        character
-                    }
-                })
-                .collect::<String>();
+            let message = wezterm_attention::protocol::terminal_safe(&diagnostic.message);
             print_err(&format!("attention: {}: {message}", diagnostic.code));
         }
     }
@@ -824,7 +814,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             // and any diagnostic already makes it incomplete.
             let mut walked_every_directory = true;
             let (scope, mut rows, diagnostics, timing) = if let Some(socket) = &args.socket {
-                let (scope, rows, diagnostics, timing) =
+                let (scope, mut rows, diagnostics, timing) =
                     match wezterm_attention::query::read_bindings_for_socket_timed(
                         &root,
                         socket,
@@ -838,6 +828,12 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                             ));
                         }
                     };
+                // After the answer, not in its filter: a row filtered out
+                // sends its diagnostics to the ignored ones, which would
+                // change what makes this answer incomplete.
+                if let Some(provider) = &args.provider {
+                    rows.retain(|row| &row.provider == provider);
+                }
                 (Some(scope), rows, diagnostics, timing)
             } else {
                 // The filters apply before any socket is asked, so a realm or
@@ -852,12 +848,6 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 walked_every_directory = answer.walked_every_directory;
                 (None, answer.rows, answer.diagnostics, answer.timing)
             };
-            if let Some(realm) = args.realm {
-                rows.retain(|row| row.address.realm_id == realm);
-            }
-            if let Some(provider) = args.provider {
-                rows.retain(|row| row.provider == provider);
-            }
             let scanned = rows.len();
             if !args.all {
                 rows.truncate(args.limit);
@@ -1046,11 +1036,9 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     .map_err(|error| (Box::new(error), args.json, "mark".to_owned()))
             };
             let result = match args.state.as_str() {
-                "review" => wezterm_attention::lifecycle::apply_mark_review(
-                    &environment,
-                    &args.source,
-                    false,
-                ),
+                "review" => {
+                    wezterm_attention::lifecycle::apply_mark_review(&environment, &args.source)
+                }
                 "clear" => wezterm_attention::lifecycle::apply_mark_clear(
                     &environment,
                     &args.source,
@@ -1091,9 +1079,13 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
         Some(Command::Doctor(args)) => {
             let root = wezterm_attention::records::state_root(&environment)
                 .map_err(|error| (Box::new(error), args.json, "doctor".to_owned()))?;
-            let (result, diagnostics) =
-                wezterm_attention::maintenance::doctor(&root, Some(&panes), Some(&processes))
-                    .map_err(|error| (Box::new(error), args.json, "doctor".to_owned()))?;
+            let (result, diagnostics) = wezterm_attention::maintenance::doctor_with_environment(
+                &root,
+                &environment,
+                Some(&panes),
+                Some(&processes),
+            )
+            .map_err(|error| (Box::new(error), args.json, "doctor".to_owned()))?;
             // A probe that did not answer, or a mux that did not list its
             // panes, which its socket probe reports.
             let unavailable = diagnostics

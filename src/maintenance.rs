@@ -11,15 +11,17 @@ use uuid::Uuid;
 
 use crate::identity::{PaneAddress, canonical_pane_id, socket_identity};
 use crate::protocol::{
-    AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, manifest, sha256_hex,
+    AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, hex64_text, manifest, sha256_hex,
 };
 use crate::query::{
-    FileStamp, ListOncePerSocket, PaneEvidence, ProbeOncePerAssembly, collect_state_files,
-    pane_evidence, pane_presence, read_bindings_with_ports, read_tab_publications,
+    FileStamp, ListOncePerSocket, PaneEvidence, ProbeOncePerAssembly, collect_binding_files,
+    collect_state_files, kept_history_code, name_address, pane_evidence, read_bindings_with_ports,
+    read_tab_publications, record_address,
 };
 use crate::records::{
-    CommitPlan, RecordIdentity, Replacement, commit_nested_with, launch_path, pane_path,
-    read_record, remove_file_durable, with_lock,
+    CommitPlan, RecordIdentity, Replacement, atomic_replace_if_different, binding_session_entry,
+    commit_nested_with, ends_binding, incarnation_path, launch_path, pane_path, read_record,
+    realm_path, remove_file_durable, session_index_marker, session_index_path, with_lock,
 };
 use crate::wezterm::{Clock, PaneLister, Presence, ProcessProbe};
 
@@ -164,13 +166,24 @@ fn collect_json_complete_at(
 
 fn binding_files(root: &Path, diagnostics: &mut Vec<Diagnostic>) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    collect_json(root, &root.join("v2/realms"), &mut files, diagnostics);
-    files.retain(|path| path.file_name().and_then(|name| name.to_str()) == Some("binding.json"));
+    collect_binding_files(root, &mut files, diagnostics);
     files.sort();
     files
 }
 
 fn state_kind(path: &Path) -> Option<&'static str> {
+    let ancestor = |up: usize| {
+        path.ancestors()
+            .nth(up)
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+    };
+    if ancestor(2) == Some("sessions") {
+        return Some("session_binding");
+    }
+    if ancestor(1) == Some("sessions") && ancestor(0) == Some("complete.json") {
+        return Some("session_index");
+    }
     if path
         .parent()
         .and_then(Path::file_name)
@@ -203,10 +216,6 @@ fn state_kind(path: &Path) -> Option<&'static str> {
         "agents-floor.json" => Some("subagent_retention_floor"),
         _ => None,
     }
-}
-
-fn record_address(record: &Value) -> Option<PaneAddress> {
-    serde_json::from_value(record.get("address")?.clone()).ok()
 }
 
 fn binding_selection(
@@ -303,19 +312,7 @@ fn runtime_manifest_bytes() -> Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
-pub fn doctor(
-    root: &Path,
-    panes: Option<&dyn PaneLister>,
-    processes: Option<&dyn ProcessProbe>,
-) -> Result<(Value, Vec<Diagnostic>)> {
-    let environment: BTreeMap<String, String> = ["WEZTERM_UNIX_SOCKET", "WEZTERM_PANE"]
-        .into_iter()
-        .filter_map(|name| Some((name.to_owned(), std::env::var(name).ok()?)))
-        .collect();
-    doctor_with_environment(root, &environment, panes, processes)
-}
-
-/// `doctor` as run from a process with `environment`. Only
+/// `attention doctor` as run from a process with `environment`. Only
 /// `WEZTERM_UNIX_SOCKET` and `WEZTERM_PANE` are read from it.
 ///
 /// A probe that found nothing to check says `unobserved`, never `healthy`: a
@@ -453,12 +450,10 @@ pub fn doctor_with_environment(
         .any(|item| item.code == "realm_unavailable")
     {
         "unavailable"
-    } else if state_diagnostics.iter().any(|item| {
-        matches!(
-            item.code.as_str(),
-            "socket_gone" | "socket_refused" | "incarnation_changed"
-        )
-    }) {
+    } else if state_diagnostics
+        .iter()
+        .any(|item| kept_history_code(&item.code))
+    {
         "finding"
     } else if realm_sockets.is_empty() {
         "unobserved"
@@ -516,18 +511,14 @@ fn environment_probe(
             return "finding";
         }
     };
-    let realm = root.join("v2/realms").join(&realm_id);
     let published = read_record(
-        &realm.join("realm.json"),
+        &realm_path(root, &realm_id).join("realm.json"),
         Some("realm"),
         &RecordIdentity::realm(&realm_id),
     )
     .is_ok_and(|record| record.is_some())
         && read_record(
-            &realm
-                .join("incarnations")
-                .join(&incarnation_id)
-                .join("incarnation.json"),
+            &incarnation_path(root, &realm_id, &incarnation_id).join("incarnation.json"),
             Some("incarnation"),
             &RecordIdentity::incarnation(&realm_id, &incarnation_id),
         )
@@ -1044,16 +1035,18 @@ fn absence_presence(
 
 /// Names the pane and binding each diagnostic is about.
 fn name_pane(items: &mut [Diagnostic], address: &PaneAddress, binding_id: &str) {
+    name_address(items, address);
     for item in items {
-        for (field, value) in [
-            ("realm_id", address.realm_id.as_str()),
-            ("incarnation_id", &address.incarnation_id),
-            ("pane_id", &address.pane_id),
-            ("binding_id", binding_id),
-        ] {
-            item.context.insert(field.into(), json!(value));
-        }
+        item.context.insert("binding_id".into(), json!(binding_id));
     }
+}
+
+/// The diagnostic for a pane whose absence could not be established, named
+/// by the pane and binding it is about.
+fn absence_unavailable(message: &str, address: &PaneAddress, binding_id: &str) -> Diagnostic {
+    let mut item = diagnostic("probe_unavailable", message);
+    name_pane(std::slice::from_mut(&mut item), address, binding_id);
+    item
 }
 
 /// The diagnostics doctor and sweep report. Kept history, the panes whose
@@ -1076,11 +1069,9 @@ fn fold_kept_history(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         };
-        if matches!(
-            item.code.as_str(),
-            "socket_gone" | "socket_refused" | "incarnation_changed"
-        ) && let (Some(realm_id), Some(incarnation_id), Some(pane_id)) =
-            (field("realm_id"), field("incarnation_id"), field("pane_id"))
+        if kept_history_code(&item.code)
+            && let (Some(realm_id), Some(incarnation_id), Some(pane_id)) =
+                (field("realm_id"), field("incarnation_id"), field("pane_id"))
         {
             let position = folded.len();
             let (_, incarnations) = held.entry(item.code.clone()).or_insert_with(|| {
@@ -1104,7 +1095,7 @@ fn fold_kept_history(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
                 json!({
                     "realm_id": realm_id,
                     "incarnation_id": incarnation_id,
-                    "path": format!("v2/realms/{realm_id}/incarnations/{incarnation_id}"),
+                    "path": incarnation_path(Path::new(""), &realm_id, &incarnation_id),
                     "pane_count": panes.len(),
                 })
             })
@@ -1330,7 +1321,7 @@ fn collect_tab_orders(
     apply: bool,
     panes: &dyn PaneLister,
     processes: Option<&dyn ProcessProbe>,
-    presence_cache: &mut BTreeMap<(String, String, String), String>,
+    presence_cache: &mut BTreeMap<PaneAddress, String>,
     details: &mut Vec<Value>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> usize {
@@ -1345,55 +1336,51 @@ fn collect_tab_orders(
     diagnostics.extend(read_diagnostics);
     for window in windows {
         let relative = window.relative_path.to_string_lossy().into_owned();
-        let mut addresses: BTreeMap<(String, String, String), PaneAddress> = BTreeMap::new();
+        let mut addresses: BTreeSet<PaneAddress> = BTreeSet::new();
         let mut without_address = false;
         for marker_id in window.tabs.iter().flat_map(|tab| tab.marker_ids.iter()) {
             match v2_marker_address(marker_id) {
                 Some(address) => {
-                    let key = (
-                        address.realm_id.clone(),
-                        address.incarnation_id.clone(),
-                        address.pane_id.clone(),
-                    );
-                    addresses.insert(key, address);
+                    addresses.insert(address);
                 }
                 None => without_address = true,
             }
         }
         let mut keep = without_address.then_some("no_address");
         if keep.is_none() {
-            for (key, address) in &addresses {
-                let presence = match presence_cache.get(key) {
+            for address in &addresses {
+                let presence = match presence_cache.get(address) {
                     Some(cached) => cached.clone(),
                     None => {
                         let before = diagnostics.len();
+                        // The evidence a binding's absence is decided on. A
+                        // pane it leaves undecided leaves this file's fate
+                        // undecided too; a server that may be gone is kept
+                        // history, which decides nothing.
                         let observed =
-                            pane_presence(root, address, Some(panes), processes, diagnostics);
-                        // A mux that did not answer leaves this file's fate
-                        // undecided, as it does a binding's.
-                        if observed == "unavailable"
-                            && diagnostics[before..]
-                                .iter()
-                                .any(|item| item.code == "realm_unavailable")
-                        {
-                            diagnostics.push(diagnostic(
-                                "probe_unavailable",
-                                "tab order pane presence cannot be established",
-                            ));
-                        }
+                            match pane_evidence(root, address, Some(panes), processes, diagnostics)
+                            {
+                                PaneEvidence::Observed(presence) => {
+                                    if presence == "unavailable" {
+                                        diagnostics.push(diagnostic(
+                                            "probe_unavailable",
+                                            "tab order pane presence cannot be established",
+                                        ));
+                                    }
+                                    presence
+                                }
+                                PaneEvidence::ServerGone { diagnostic } => {
+                                    diagnostics.push(diagnostic);
+                                    "unavailable".to_owned()
+                                }
+                            };
                         // Named by the file that asked and the pane it asked
                         // about, as a bindings answer names its panes.
+                        name_address(&mut diagnostics[before..], address);
                         for item in &mut diagnostics[before..] {
                             item.context.insert("path".into(), json!(relative));
-                            for (field, value) in [
-                                ("realm_id", &address.realm_id),
-                                ("incarnation_id", &address.incarnation_id),
-                                ("pane_id", &address.pane_id),
-                            ] {
-                                item.context.insert(field.into(), json!(value));
-                            }
                         }
-                        presence_cache.insert(key.clone(), observed.clone());
+                        presence_cache.insert(address.clone(), observed.clone());
                         observed
                     }
                 };
@@ -1568,6 +1555,102 @@ fn collect_projection_orphans(
     failed
 }
 
+/// Gives every binding in `files` its session index entry, and marks the index
+/// complete when `files` is every binding in the store and each one now has
+/// its entry. Readers walk every binding until then. Returns whether a write
+/// failed.
+fn complete_session_index(
+    root: &Path,
+    files: &[PathBuf],
+    walked_every_directory: bool,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> bool {
+    let mut complete = walked_every_directory;
+    let mut failed = false;
+    for path in files {
+        let binding = RecordIdentity::from_state_path(root, path, "binding")
+            .and_then(|identity| read_record(path, Some("binding"), &identity));
+        let Ok(Some(binding)) = binding else {
+            // Reported by the binding step. Until it reads, readers walk.
+            complete = false;
+            continue;
+        };
+        let written = binding_session_entry(root, &binding)
+            .and_then(|(path, entry)| atomic_replace_if_different(&path, &entry));
+        if let Err(error) = written {
+            diagnostics.push(error.diagnostic);
+            complete = false;
+            failed = true;
+        }
+    }
+    if complete
+        && let Err(error) = session_index_marker()
+            .and_then(|marker| atomic_replace_if_different(&session_index_path(root), &marker))
+    {
+        diagnostics.push(error.diagnostic);
+        failed = true;
+    }
+    failed
+}
+
+/// The session index entries naming the bindings below `dir`, which go with
+/// `dir` when sweep removes it. An entry is taken only when it names exactly
+/// that binding and removing it stays inside the state root.
+fn session_entries_below(root: &Path, dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_state_files(
+        root,
+        dir,
+        &|path| path.file_name().and_then(|name| name.to_str()) == Some("binding.json"),
+        &mut files,
+        &mut Vec::new(),
+    );
+    files
+        .into_iter()
+        .filter_map(|path| {
+            let identity = RecordIdentity::from_state_path(root, &path, "binding").ok()?;
+            let binding = read_record(&path, Some("binding"), &identity).ok()??;
+            let (entry_path, entry) = binding_session_entry(root, &binding).ok()?;
+            let found = read_record(
+                &entry_path,
+                Some("session_binding"),
+                &RecordIdentity::from_record(&entry),
+            )
+            .ok()??;
+            (found == entry && removal_confined(root, &entry_path)).then_some(entry_path)
+        })
+        .collect()
+}
+
+/// An apply's pane lister: a listing that failed answers every later ask
+/// about that socket for the rest of the run, and one that answered is taken
+/// fresh each time. A failed listing leaves a pane undecided and so removes
+/// nothing, while each ask against a mux that accepts and never answers
+/// waits out the listing deadline; asking once per pane made an apply's wait
+/// grow with the panes on that socket.
+struct FailedListingOncePerSocket<'a> {
+    inner: &'a dyn PaneLister,
+    failed: std::sync::Mutex<BTreeMap<String, AttentionError>>,
+}
+
+impl PaneLister for FailedListingOncePerSocket<'_> {
+    fn list(&self, socket_path: &str) -> Result<Vec<crate::wezterm::PaneRow>> {
+        if let Some(error) = self
+            .failed
+            .lock()
+            .ok()
+            .and_then(|failed| failed.get(socket_path).cloned())
+        {
+            return Err(error);
+        }
+        let answer = self.inner.list(socket_path);
+        if let (Err(error), Ok(mut failed)) = (&answer, self.failed.lock()) {
+            failed.insert(socket_path.to_owned(), error.clone());
+        }
+        answer
+    }
+}
+
 /// What one sweep run decides with, for the steps that take it whole.
 struct SweepRun<'a> {
     root: &'a Path,
@@ -1646,9 +1729,11 @@ fn pane_retention(
     let detail =
         |action: &str| json!({"kind":"pane_retention","binding_id":binding_id,"action":action});
     if action == "unavailable" {
-        let mut item = diagnostic("probe_unavailable", "pane absence cannot be established");
-        name_pane(std::slice::from_mut(&mut item), address, binding_id);
-        diagnostics.push(item);
+        diagnostics.push(absence_unavailable(
+            "pane absence cannot be established",
+            address,
+            binding_id,
+        ));
     }
     if !run.apply {
         details.push(if action != "end" {
@@ -1740,7 +1825,11 @@ fn pane_retention(
                     if !pane_tree_prunable(root, &pane, &mut kept) {
                         return plan("keep", Vec::new(), kept);
                     }
-                    plan("prune", vec![pane.clone()], kept)
+                    // The tree first: an entry left behind names a binding
+                    // that is gone, which a reader skips.
+                    let mut removals = vec![pane.clone()];
+                    removals.extend(session_entries_below(root, &pane));
+                    plan("prune", removals, kept)
                 }
                 other => plan(other, Vec::new(), Vec::new()),
             }
@@ -1777,12 +1866,7 @@ fn pane_tree_prunable(root: &Path, pane: &Path, diagnostics: &mut Vec<Diagnostic
 fn review_lock_name(name: &str) -> bool {
     name.strip_prefix('.')
         .and_then(|name| name.strip_suffix(".lock"))
-        .is_some_and(|key| {
-            key.len() == 64
-                && key
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
+        .is_some_and(hex64_text)
 }
 
 fn pane_entries_prunable(
@@ -1874,10 +1958,7 @@ pub fn sweep(
     // result reports the id it used.
     let operation_id = operation_id.or_else(|| apply.then(|| Uuid::new_v4().to_string()));
     if let Some(realm) = realm_filter
-        && (realm.len() != 64
-            || !realm
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+        && !hex64_text(realm)
     {
         return Err(AttentionError::usage(
             "realm id must be 64 lowercase hex characters",
@@ -1889,12 +1970,19 @@ pub fn sweep(
     ns20(&now, "record_invalid")?;
     // A preview decides nothing, so one pane listing per socket and one
     // process listing answer all its steps. An apply acts on each answer and
-    // takes a fresh look for each decision.
+    // takes a fresh look for each decision, except where a socket's listing
+    // already failed.
     let listed_once = (!apply).then(|| ListOncePerSocket::new(panes));
+    let failed_once = apply.then(|| FailedListingOncePerSocket {
+        inner: panes,
+        failed: std::sync::Mutex::new(BTreeMap::new()),
+    });
     let probed_once = processes.filter(|_| !apply).map(ProbeOncePerAssembly::new);
-    let panes = listed_once
-        .as_ref()
-        .map_or(panes, |lister| lister as &dyn PaneLister);
+    let panes = match (&listed_once, &failed_once) {
+        (Some(lister), _) => lister as &dyn PaneLister,
+        (None, Some(lister)) => lister as &dyn PaneLister,
+        (None, None) => panes,
+    };
     let processes = probed_once
         .as_ref()
         .map(|probe| probe as &dyn ProcessProbe)
@@ -1904,13 +1992,22 @@ pub fn sweep(
     let files = binding_files(root, &mut diagnostics);
     // A directory the walk could not read hides the bindings below it.
     let mut failed = diagnostics.len();
+    if apply && realm_filter.is_none() {
+        let walked_every_directory = failed == 0;
+        failed += usize::from(complete_session_index(
+            root,
+            &files,
+            walked_every_directory,
+            &mut diagnostics,
+        ));
+    }
     failed += collect_projection_orphans(root, realm_filter, apply, &mut details, &mut diagnostics);
     let mut ended: BTreeMap<String, Vec<(String, PathBuf, bool)>> = BTreeMap::new();
-    let mut presence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
+    let mut presence_cache: BTreeMap<PaneAddress, String> = BTreeMap::new();
     // Kept apart from the readers' view above, which reads a pane of kept
     // history as unavailable where the absence rule reads it as
     // `SERVER_GONE`.
-    let mut absence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
+    let mut absence_cache: BTreeMap<PaneAddress, String> = BTreeMap::new();
     if realm_filter.is_none() {
         failed += collect_tab_orders(
             root,
@@ -1974,10 +2071,7 @@ pub fn sweep(
                 continue;
             }
         };
-        let ended_now = end.as_ref().is_some_and(|end| {
-            end["observed_mono_ns"].as_str().unwrap_or("")
-                >= binding["observed_mono_ns"].as_str().unwrap_or("")
-        });
+        let ended_now = end.as_ref().is_some_and(|end| ends_binding(end, &binding));
         if let Some(end) = &end
             && ended_now
             && !current
@@ -2143,12 +2237,7 @@ pub fn sweep(
             }
             continue;
         }
-        let presence_key = (
-            address.realm_id.clone(),
-            address.incarnation_id.clone(),
-            address.pane_id.clone(),
-        );
-        let presence = if let Some(cached) = absence_cache.get(&presence_key) {
+        let presence = if let Some(cached) = absence_cache.get(&address) {
             cached.clone()
         } else {
             let observed = absence_presence(
@@ -2159,7 +2248,7 @@ pub fn sweep(
                 processes,
                 &mut diagnostics,
             );
-            absence_cache.insert(presence_key, observed.clone());
+            absence_cache.insert(address.clone(), observed.clone());
             observed
         };
         // Kept history: reported once for the run, and nothing to decide.
@@ -2188,10 +2277,11 @@ pub fn sweep(
         if !apply {
             details.push(json!({"kind":"absence","binding_id":binding_id,"action":preview_action}));
             if preview_action == "unavailable" {
-                let mut item =
-                    diagnostic("probe_unavailable", "binding absence cannot be established");
-                name_pane(std::slice::from_mut(&mut item), &address, binding_id);
-                diagnostics.push(item);
+                diagnostics.push(absence_unavailable(
+                    "binding absence cannot be established",
+                    &address,
+                    binding_id,
+                ));
             }
             continue;
         }
@@ -2236,7 +2326,7 @@ pub fn sweep(
                     Some("absence_probe"),
                     &RecordIdentity::pane(&address),
                 )?;
-                let action = absence_action(
+                let mut action = absence_action(
                     &fresh_presence,
                     locked_probe.as_ref(),
                     Some(operation),
@@ -2248,7 +2338,7 @@ pub fn sweep(
                     if !removal_confined(root, &probe_path) {
                         return Ok(CommitPlan {
                             result: AbsenceOutcome {
-                                action: "changed".to_owned(),
+                                action: "keep".to_owned(),
                                 diagnostic: Some(diagnostic(
                                     "record_invalid",
                                     "absence probe outside the state root is preserved",
@@ -2268,12 +2358,17 @@ pub fn sweep(
                 } else if action == "end" {
                     let locked_end =
                         read_record(&end_path, Some("binding_end"), &binding_identity)?;
-                    if locked_end.as_ref().is_none_or(|end| {
-                        end["observed_mono_ns"].as_str().unwrap_or("") < observation.as_str()
-                    }) {
+                    // An end that arrived since the look above already ends
+                    // this binding, and keeps its own reason.
+                    if locked_end
+                        .as_ref()
+                        .is_some_and(|end| ends_binding(end, &binding))
+                    {
+                        action = "already_ended";
+                    } else {
                         replacements.push(Replacement::always(
                             end_path.clone(),
-                            json!({"kind":"binding_end","schema":manifest()?.record_schema,"address":address,"launch_id":launch_id,"binding_id":binding_id,"reason":"sweep_absent","operation_id":operation,"event_id":Uuid::new_v4().to_string(),"observed_mono_ns":observation,"written_at_unix_ns":clock.unix_ns20()?}),
+                            json!({"kind":"binding_end","schema":manifest()?.record_schema,"address":address,"launch_id":launch_id,"binding_id":binding_id,"reason":"sweep_absent","operation_id":operation,"event_id":Uuid::new_v4().to_string(),"binding_event_id":binding["event_id"],"observed_mono_ns":observation,"written_at_unix_ns":clock.unix_ns20()?}),
                         ));
                     }
                 }
@@ -2291,19 +2386,17 @@ pub fn sweep(
         );
         match applied {
             Ok((outcome, ())) => {
-                if let Some(diagnostic) = outcome.diagnostic {
-                    diagnostics.push(diagnostic);
-                } else {
+                diagnostics.extend(outcome.diagnostic);
+                if outcome.action != "changed" {
                     details.push(
                         json!({"kind":"absence","binding_id":binding_id,"action":outcome.action}),
                     );
                     if outcome.action == "unavailable" && fresh_presence != SERVER_GONE {
-                        let mut item = diagnostic(
-                            "probe_unavailable",
+                        diagnostics.push(absence_unavailable(
                             "binding absence cannot be established",
-                        );
-                        name_pane(std::slice::from_mut(&mut item), &address, binding_id);
-                        diagnostics.push(item);
+                            &address,
+                            binding_id,
+                        ));
                     }
                 }
             }
@@ -2435,10 +2528,9 @@ pub fn sweep(
                         Some("binding_end"),
                         &RecordIdentity::binding(&address, launch_id, binding_id),
                     )?;
-                    let end_is_current = end.as_ref().is_some_and(|end| {
-                        end["observed_mono_ns"].as_str().unwrap_or("")
-                            >= locked_binding["observed_mono_ns"].as_str().unwrap_or("")
-                    });
+                    let end_is_current = end
+                        .as_ref()
+                        .is_some_and(|end| ends_binding(end, &locked_binding));
                     let still_old = end
                         .as_ref()
                         .map(|end| {
@@ -2462,13 +2554,15 @@ pub fn sweep(
                             &mut local_diagnostics,
                         )
                     {
+                        let mut removals = vec![binding_dir.clone()];
+                        removals.extend(session_entries_below(root, &binding_dir));
                         return Ok(CommitPlan {
                             result: RetentionOutcome {
                                 pruned: true,
                                 diagnostics: local_diagnostics,
                             },
                             replacements: Vec::new(),
-                            removals: vec![binding_dir.clone()],
+                            removals,
                             private_dirs: Vec::new(),
                         });
                     }

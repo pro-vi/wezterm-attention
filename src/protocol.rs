@@ -253,6 +253,8 @@ pub struct DigestRecipes {
     pub incarnation_id_input: String,
     pub tty_fingerprint_input: String,
     pub binding_id_input: String,
+    pub session_key_input: String,
+    pub session_entry_key_input: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -460,6 +462,20 @@ pub fn free_of_control(text: &str) -> bool {
     !text.chars().any(char::is_control)
 }
 
+/// `text` as a terminal may print it: every character [`free_of_control`]
+/// refuses becomes `?`, so a message cannot restyle the terminal reading it.
+pub fn terminal_safe(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_control() {
+                '?'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 fn safe_text(value: &Value, maximum: usize) -> bool {
     value
         .as_str()
@@ -467,12 +483,15 @@ fn safe_text(value: &Value, maximum: usize) -> bool {
 }
 
 fn hex64(value: &Value) -> bool {
-    value.as_str().is_some_and(|text| {
-        text.len() == 64
-            && text
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    })
+    value.as_str().is_some_and(hex64_text)
+}
+
+/// Whether `text` is 64 lowercase hex digits, the form every digest here takes.
+pub(crate) fn hex64_text(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn decimal_ns20(value: &Value) -> bool {

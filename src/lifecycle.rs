@@ -22,8 +22,8 @@ use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, free_of_c
 use crate::providers::{ProviderAction, ProviderEvent};
 use crate::records::{
     CommitPlan, PreparedRecordWrite, RecordIdentity, RecordRead, Replacement, commit_nested_with,
-    commit_triple_with, commit_with, launch_path, pane_path, read_record, read_record_typed,
-    state_root,
+    commit_triple_with, commit_with, ends_binding, launch_path, pane_path, read_record,
+    read_record_typed, session_entry, session_entry_path, state_root,
 };
 use crate::wezterm::RuntimePorts;
 
@@ -464,9 +464,9 @@ fn binding_mutation(
                     Some("binding_end"),
                     &RecordIdentity::binding(&resolved.address, &resolved.launch_id, current_id),
                 )?;
-                let current_ended = current_end.as_ref().is_some_and(|end| {
-                    end["observed_mono_ns"].as_str().unwrap_or("") >= current_order
-                });
+                let current_ended = current_end
+                    .as_ref()
+                    .is_some_and(|end| ends_binding(end, current));
                 let replace = match provider {
                     "claude" | "codex" => matches!(source, "resume" | "clear" | "fork"),
                     "pi" => matches!(source, "new" | "resume" | "fork"),
@@ -569,6 +569,24 @@ fn binding_mutation(
                 result.event_id = Some(event_id);
                 result
             };
+            // The session index names every binding this writer keeps, in
+            // the commit that keeps it.
+            if matches!(
+                result.disposition,
+                Disposition::Applied | Disposition::Replaced | Disposition::Confirmed
+            ) {
+                replacements.push(Replacement::if_different(
+                    session_entry_path(
+                        &resolved.root,
+                        provider,
+                        session,
+                        &resolved.address,
+                        &resolved.launch_id,
+                        &binding_id,
+                    ),
+                    session_entry(&resolved.address, &resolved.launch_id, &binding_id)?,
+                ));
+            }
             Ok(CommitPlan {
                 result: Mutation::plain(result),
                 replacements,
@@ -1340,11 +1358,7 @@ pub fn apply_mark_activity(
     Ok(mutation.result)
 }
 
-pub fn apply_mark_review(
-    env: &BTreeMap<String, String>,
-    source: &str,
-    clear: bool,
-) -> Result<LifecycleResult> {
+pub fn apply_mark_review(env: &BTreeMap<String, String>, source: &str) -> Result<LifecycleResult> {
     safe_mark_source(source)?;
     let root = state_root(env)?;
     let (address, _) = pane_address(env)?;
@@ -1372,23 +1386,13 @@ pub fn apply_mark_review(
                     "current launch does not match claim",
                 ));
             }
-            let existing = read_record(
+            // Replaced whatever is there, but never over a review this
+            // version cannot read.
+            read_record(
                 &review_path,
                 Some("review"),
                 &RecordIdentity::review(&address, &owner_key),
             )?;
-            if clear {
-                return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::new(if existing.is_some() {
-                        Disposition::Applied
-                    } else {
-                        Disposition::Skipped
-                    })),
-                    replacements: Vec::new(),
-                    removals: vec![review_path.clone()],
-                    private_dirs: Vec::new(),
-                });
-            }
             let event_id = Uuid::new_v4().to_string();
             let record = json!({
                 "kind": "review",
@@ -1797,9 +1801,7 @@ fn apply_end(
                 let order = existing["observed_mono_ns"].as_str().unwrap_or("");
                 let disposition = if observation < order {
                     Disposition::Ignored
-                } else if existing["reason"] == "session_end"
-                    && order >= binding["observed_mono_ns"].as_str().unwrap_or("")
-                {
+                } else if existing["reason"] == "session_end" && ends_binding(&existing, &binding) {
                     Disposition::Skipped
                 } else if observation == order {
                     Disposition::Conflict
@@ -1826,6 +1828,7 @@ fn apply_end(
                 "binding_id": binding_id,
                 "reason": "session_end",
                 "event_id": event_id,
+                "binding_event_id": binding["event_id"],
                 "observed_mono_ns": observation,
                 "written_at_unix_ns": written_at,
             });

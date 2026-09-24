@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 use wezterm_attention::identity::pane_address;
 use wezterm_attention::lifecycle::{
-    apply_mark_activity, apply_mark_review, apply_provider_event, binding_id, prompt_return,
+    apply_mark_activity, apply_mark_clear, apply_mark_review, apply_provider_event, binding_id,
+    prompt_return,
 };
 use wezterm_attention::observations::LifecycleSnapshot;
 use wezterm_attention::providers::{ProviderAction, ProviderEvent, parse_provider_event};
@@ -2071,8 +2072,8 @@ fn future_review_is_never_deleted_or_replaced() {
         future
     );
 
-    let delete_error =
-        apply_mark_review(&setup.env, "pi-bus", true).expect_err("future review cannot be deleted");
+    let delete_error = apply_mark_clear(&setup.env, "pi-bus", "00000000000000000400")
+        .expect_err("future review cannot be deleted");
     assert_eq!(delete_error.diagnostic.code, "future_schema");
     assert_eq!(fs::read(review_path).expect("review after delete"), future);
 }
@@ -2213,7 +2214,7 @@ fn every_review_writer_obeys_claim_and_owner_locks() {
 
     let claim_lock = pane.join(".claim.lock");
     let error = with_lock(&claim_lock, Duration::from_secs(1), || {
-        apply_mark_review(&setup.env, "pi-bus", false)
+        apply_mark_review(&setup.env, "pi-bus")
     })
     .expect_err("manual review must honor the claim lock");
     assert_eq!(error.diagnostic.code, "probe_unavailable");
@@ -2443,7 +2444,7 @@ fn manual_mark_targets_the_launch_and_a_duplicate_is_skipped() {
     );
 
     assert_eq!(
-        apply_mark_review(&setup.env, "manual", false)
+        apply_mark_review(&setup.env, "manual")
             .expect("set review")
             .disposition,
         "applied"
@@ -2454,7 +2455,7 @@ fn manual_mark_targets_the_launch_and_a_duplicate_is_skipped() {
         wezterm_attention::protocol::sha256_hex(b"manual")
     ));
     assert!(review.exists());
-    apply_mark_review(&setup.env, "manual", true).expect("clear review");
+    apply_mark_clear(&setup.env, "manual", "00000000000000000500").expect("clear review");
     assert!(!review.exists());
 }
 

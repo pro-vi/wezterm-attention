@@ -2,8 +2,9 @@
 //! an incarnation. A server shown to have exited -- its GUI process is gone,
 //! or no process carries the pane -- leaves its panes absent, and the
 //! two-observation rule reclaims them. A socket that is gone, replaced or
-//! refusing with nothing to show the server gone keeps every record, and doctor and sweep report that history once, however much
-//! of it there is. A mux that did not answer leaves them incomplete.
+//! refusing with nothing to show the server gone keeps every record, and
+//! doctor and sweep report that history once, however much of it there is. A
+//! mux that did not answer leaves them incomplete.
 
 use super::pane_retention::{OP_1, OP_2, actions, end_long_ago, end_reason, pane_dir, tree_bytes};
 use super::*;
@@ -156,8 +157,7 @@ fn a_live_socket_whose_metadata_changed_keeps_an_old_panes_tree() {
     for presence in [Presence::Present, Presence::Unseen, Presence::Unavailable] {
         let setup = Setup::new();
         setup.claim_and_bind();
-        wezterm_attention::lifecycle::apply_mark_review(&setup.env, "build", false)
-            .expect("mark review");
+        wezterm_attention::lifecycle::apply_mark_review(&setup.env, "build").expect("mark review");
         end_long_ago(&setup);
         let pane = pane_dir(&setup);
         change_socket_metadata(&setup);
@@ -275,8 +275,7 @@ fn a_live_mux_with_a_full_accept_queue_keeps_an_old_panes_tree() {
     for presence in [Presence::Present, Presence::Unseen, Presence::Unavailable] {
         let setup = Setup::new();
         setup.claim_and_bind();
-        wezterm_attention::lifecycle::apply_mark_review(&setup.env, "build", false)
-            .expect("mark review");
+        wezterm_attention::lifecycle::apply_mark_review(&setup.env, "build").expect("mark review");
         end_long_ago(&setup);
         let pane = pane_dir(&setup);
         let (_queued, _) = fill_accept_queue(&setup.env["WEZTERM_UNIX_SOCKET"]);
@@ -406,6 +405,92 @@ fn a_tab_order_pane_whose_mux_does_not_answer_leaves_sweep_incomplete() {
         assert_eq!(response["complete"], false, "{arguments:?}: {response}");
         assert!(path.exists());
     }
+}
+
+/// A pane lister whose `wezterm cli list` fails with `code`.
+struct FailingPanes(&'static str);
+
+impl PaneLister for FailingPanes {
+    fn list(&self, _socket_path: &str) -> wezterm_attention::protocol::Result<Vec<PaneRow>> {
+        Err(AttentionError::new(self.0, "wezterm cli list failed"))
+    }
+}
+
+/// However the pane listing fails -- no answer, or an answer that is not a
+/// pane list -- the pane is undecided. A tab order naming it leaves sweep
+/// incomplete exactly as the pane's binding does.
+#[test]
+fn a_failed_listing_leaves_a_tab_order_undecided_as_it_does_a_binding() {
+    for code in ["realm_unavailable", "record_invalid"] {
+        let setup = Setup::new();
+        setup.claim_and_bind();
+        let (address, _) = pane_address(&setup.env).expect("address");
+        let marker = format!("v2:{}:{}:42", address.realm_id, address.incarnation_id);
+        let path = write_tab_order(&setup.root(), 5, &[&marker]);
+        for operation in [None, Some(OP_1)] {
+            let (_, diagnostics) = sweep(
+                &setup.root(),
+                None,
+                operation.is_some(),
+                operation,
+                &setup.clock,
+                &FailingPanes(code),
+                Some(&setup.processes),
+            )
+            .expect("sweep");
+            let undecided = |named: &str| {
+                diagnostics.iter().any(|item| {
+                    item.code == "probe_unavailable" && item.context.contains_key(named)
+                })
+            };
+            assert!(undecided("binding_id"), "{code}: {diagnostics:?}");
+            assert!(undecided("path"), "{code}: {diagnostics:?}");
+            assert!(path.exists());
+        }
+    }
+}
+
+/// A pane lister that never answers, counting how often it is asked.
+struct CountedUnansweredPanes(std::sync::atomic::AtomicUsize);
+
+impl PaneLister for CountedUnansweredPanes {
+    fn list(&self, socket_path: &str) -> wezterm_attention::protocol::Result<Vec<PaneRow>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        UnansweredPanes.list(socket_path)
+    }
+}
+
+/// A failed listing decides nothing, so an apply gives it to every later pane
+/// of the same socket instead of waiting out another listing deadline per
+/// pane against a mux that does not answer.
+#[test]
+fn an_apply_asks_an_unanswered_socket_once() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    bind_panes(&setup, 3);
+    let panes = CountedUnansweredPanes(std::sync::atomic::AtomicUsize::new(0));
+    let (result, diagnostics) = sweep(
+        &setup.root(),
+        None,
+        true,
+        Some(OP_1),
+        &setup.clock,
+        &panes,
+        Some(&setup.processes),
+    )
+    .expect("sweep");
+    assert_eq!(actions(&result.details, "absence").len(), 4);
+    assert!(
+        actions(&result.details, "absence")
+            .iter()
+            .all(|action| **action == json!("unavailable"))
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|item| item.code == "probe_unavailable")
+    );
+    assert_eq!(panes.0.load(Ordering::SeqCst), 1);
 }
 
 /// A missing `gui-sock-<pid>` socket whose GUI process has exited: the GUI's
@@ -802,6 +887,46 @@ fn a_state_directory_that_is_not_utf8_is_refused() {
         (output.status.code(), response["diagnostics"].clone())
     };
     let refused = run(&not_utf8);
-    assert_eq!(refused, run(std::ffi::OsStr::new("relative")));
+    let relative = run(std::ffi::OsStr::new("relative"));
+    assert_eq!(refused.0, relative.0);
+    assert_eq!(refused.1[0]["code"], relative.1[0]["code"]);
     assert_eq!(refused.1[0]["code"], "record_invalid", "{refused:?}");
+    assert_eq!(
+        refused.1[0]["message"], "WEZTERM_ATTENTION_DIR is not UTF-8",
+        "{refused:?}"
+    );
+}
+
+/// An `XDG_STATE_HOME` that is not UTF-8 is refused the same way when it is
+/// what decides the root, rather than skipped for the root under `HOME`,
+/// which the plugin would not read. A `WEZTERM_ATTENTION_DIR` that decides
+/// the root makes it irrelevant.
+#[test]
+fn a_state_home_that_is_not_utf8_is_refused_where_it_decides_the_root() {
+    use std::os::unix::ffi::OsStrExt;
+    let setup = Setup::new();
+    let not_utf8 = std::ffi::OsStr::from_bytes(b"/tmp/state-\xe9").to_owned();
+    let run = |state_dir: Option<&str>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_attention"));
+        command
+            .env_clear()
+            .env("HOME", &setup.env["HOME"])
+            .env("XDG_STATE_HOME", &not_utf8)
+            .args(["bindings", "--json"]);
+        if let Some(state_dir) = state_dir {
+            command.env("WEZTERM_ATTENTION_DIR", state_dir);
+        }
+        let output = command.output().expect("run attention");
+        let response: Value = serde_json::from_slice(&output.stdout).expect("JSON envelope");
+        (output.status.code(), response["diagnostics"].clone())
+    };
+    let refused = run(None);
+    assert_eq!(refused.0, Some(1), "{refused:?}");
+    assert_eq!(refused.1[0]["code"], "record_invalid", "{refused:?}");
+    assert_eq!(
+        refused.1[0]["message"], "XDG_STATE_HOME is not UTF-8",
+        "{refused:?}"
+    );
+    let decided = run(Some(&setup.env["WEZTERM_ATTENTION_DIR"]));
+    assert_eq!(decided.0, Some(0), "{decided:?}");
 }

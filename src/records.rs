@@ -140,6 +140,20 @@ impl RecordIdentity {
             .collect();
         let invalid =
             || AttentionError::new("record_invalid", "state record path has the wrong shape");
+        if parts.first() == Some(&Some("v2")) && parts.get(1) == Some(&Some("sessions")) {
+            // The index names each entry by what it holds, which the reader
+            // checks; the path fixes no field of the record.
+            let shaped = match kind {
+                "session_index" => parts.len() == 3 && parts[2] == Some("complete.json"),
+                "session_binding" => parts.len() == 4,
+                _ => false,
+            };
+            return if shaped {
+                Ok(Self::unscoped())
+            } else {
+                Err(invalid())
+            };
+        }
         if parts.len() < 4 || parts[0] != Some("v2") || parts[1] != Some("realms") {
             return Err(invalid());
         }
@@ -350,11 +364,32 @@ pub struct CommitPlan<T> {
     pub private_dirs: Vec<PathBuf>,
 }
 
+/// The variables that can name the state root, in the order they decide it.
+pub(crate) const STATE_ROOT_VARIABLES: [&str; 2] = ["WEZTERM_ATTENTION_DIR", "XDG_STATE_HOME"];
+
+/// What [`crate::environment`] gives a state-root variable whose value is not
+/// UTF-8. The environment is handed on as text, and a value it cannot hold
+/// still has to decide the root, as it does for the plugin, which reads the
+/// raw bytes; no path holds a NUL, so this can stand for nothing else.
+pub(crate) const NOT_UTF8: &str = "\0";
+
 /// The plugin and the Pi extension resolve the same root in the same order.
 /// An empty WEZTERM_ATTENTION_DIR counts as unset; any other value must be a
 /// safe absolute path. XDG_STATE_HOME is used only when it is one, because the
-/// XDG spec says a relative or empty value is to be ignored.
+/// XDG spec says a relative or empty value is to be ignored. Either one that
+/// is not UTF-8 is refused where it decides the root: this writer cannot name
+/// that directory, and another root would hide every record from the plugin.
 pub fn state_root(env: &BTreeMap<String, String>) -> Result<PathBuf> {
+    if let Some(name) = STATE_ROOT_VARIABLES
+        .into_iter()
+        .find(|name| env.get(*name).is_some_and(|value| !value.is_empty()))
+        && env[name] == NOT_UTF8
+    {
+        return Err(AttentionError::new(
+            "record_invalid",
+            format!("{name} is not UTF-8"),
+        ));
+    }
     if let Some(path) = env
         .get("WEZTERM_ATTENTION_DIR")
         .filter(|path| !path.is_empty())
@@ -387,17 +422,135 @@ fn absolute_path(value: &str, name: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(value))
 }
 
-pub fn pane_path(root: &Path, address: &PaneAddress) -> PathBuf {
-    root.join("v2/realms")
-        .join(&address.realm_id)
+pub fn realm_path(root: &Path, realm_id: &str) -> PathBuf {
+    root.join("v2/realms").join(realm_id)
+}
+
+pub fn incarnation_path(root: &Path, realm_id: &str, incarnation_id: &str) -> PathBuf {
+    realm_path(root, realm_id)
         .join("incarnations")
-        .join(&address.incarnation_id)
+        .join(incarnation_id)
+}
+
+pub fn pane_path(root: &Path, address: &PaneAddress) -> PathBuf {
+    incarnation_path(root, &address.realm_id, &address.incarnation_id)
         .join("panes")
         .join(&address.pane_id)
 }
 
 pub fn launch_path(root: &Path, address: &PaneAddress, launch_id: &str) -> PathBuf {
     pane_path(root, address).join("launches").join(launch_id)
+}
+
+/// The session index: `v2/sessions/<session key>/<entry key>.json` names
+/// each binding of one provider session, so finding a session's other
+/// bindings reads one directory instead of walking every binding. The keys
+/// are the manifest's `session_key_input` and `session_entry_key_input`
+/// digests. It is derived state: a binding is written with its entry in the
+/// same commit, and never depends on it.
+///
+/// A reader trusts the index only while `v2/sessions/complete.json` says it
+/// holds every binding. A store that had bindings before its writer wrote
+/// entries has none until `sweep --apply` has written an entry for each.
+pub fn session_dir(root: &Path, provider: &str, provider_session_id: &str) -> PathBuf {
+    let mut input = provider.as_bytes().to_vec();
+    input.push(0);
+    input.extend_from_slice(provider_session_id.as_bytes());
+    root.join("v2/sessions")
+        .join(crate::protocol::sha256_hex(&input))
+}
+
+/// Where the session index names one binding: under its session, by the
+/// digest of the binding record's path below the state root, which no other
+/// binding shares.
+pub fn session_entry_path(
+    root: &Path,
+    provider: &str,
+    provider_session_id: &str,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+) -> PathBuf {
+    let binding = launch_path(Path::new(""), address, launch_id)
+        .join("bindings")
+        .join(binding_id)
+        .join("binding.json");
+    let key = crate::protocol::sha256_hex(binding.to_string_lossy().as_bytes());
+    session_dir(root, provider, provider_session_id).join(format!("{key}.json"))
+}
+
+/// A binding record's session index entry and where it goes.
+pub fn binding_session_entry(root: &Path, binding: &Value) -> Result<(PathBuf, Value)> {
+    let invalid = || AttentionError::new("record_invalid", "binding record is invalid");
+    let text = |field: &str| {
+        binding
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(invalid)
+    };
+    let address: PaneAddress = binding
+        .get("address")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .ok_or_else(invalid)?;
+    let (launch_id, binding_id) = (text("launch_id")?, text("binding_id")?);
+    Ok((
+        session_entry_path(
+            root,
+            text("provider")?,
+            text("provider_session_id")?,
+            &address,
+            launch_id,
+            binding_id,
+        ),
+        session_entry(&address, launch_id, binding_id)?,
+    ))
+}
+
+/// The session index entry for one binding.
+pub fn session_entry(address: &PaneAddress, launch_id: &str, binding_id: &str) -> Result<Value> {
+    Ok(serde_json::json!({
+        "kind": "session_binding",
+        "schema": manifest()?.record_schema,
+        "address": address,
+        "launch_id": launch_id,
+        "binding_id": binding_id,
+    }))
+}
+
+/// The record that says the session index holds every binding.
+pub fn session_index_path(root: &Path) -> PathBuf {
+    root.join("v2/sessions/complete.json")
+}
+
+pub fn session_index_marker() -> Result<Value> {
+    Ok(serde_json::json!({"kind": "session_index", "schema": manifest()?.record_schema}))
+}
+
+/// Whether an end record ends this binding record, the one rule every reader
+/// and writer applies.
+///
+/// An end ends the binding event it names in `binding_event_id`, whatever the
+/// clocks say: the monotonic clock restarts at boot, so an end sweep writes
+/// after a reboot carries a smaller stamp than a binding recorded before it.
+/// An end observed at or after the binding ends it too, which covers an end
+/// that names no event and one whose event raced a resumed start. Any other
+/// end belongs to an earlier binding of the same id, which a resume replaced.
+pub fn ends_binding(end: &Value, binding: &Value) -> bool {
+    let named = end
+        .get("binding_event_id")
+        .and_then(Value::as_str)
+        .is_some_and(|event| binding.get("event_id").and_then(Value::as_str) == Some(event));
+    let observed = |record: &Value| {
+        record
+            .get("observed_mono_ns")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    named
+        || observed(end)
+            .zip(observed(binding))
+            .is_some_and(|(end, binding)| end >= binding)
 }
 
 pub fn mkdir_private(path: &Path) -> Result<()> {
@@ -907,7 +1060,31 @@ mod tests {
 
     use std::collections::BTreeMap;
 
-    use super::{PreparedRecordWrite, state_root, sync_parent_directory_with};
+    use super::{PreparedRecordWrite, ends_binding, state_root, sync_parent_directory_with};
+
+    #[test]
+    fn an_end_ends_the_binding_it_names_or_one_it_was_observed_after() {
+        let binding = serde_json::json!({
+            "event_id": "00000000-0000-4000-8000-000000000001",
+            "observed_mono_ns": "00000000000000000500",
+        });
+        let end = |event: Option<&str>, observed: &str| {
+            let mut end = serde_json::json!({"observed_mono_ns": observed});
+            if let Some(event) = event {
+                end["binding_event_id"] = serde_json::json!(event);
+            }
+            end
+        };
+        let named = Some("00000000-0000-4000-8000-000000000001");
+        let other = Some("00000000-0000-4000-8000-000000000002");
+        // Written after a reboot: a smaller stamp, and the binding's own event.
+        assert!(ends_binding(&end(named, "00000000000000000100"), &binding));
+        assert!(ends_binding(&end(None, "00000000000000000500"), &binding));
+        assert!(ends_binding(&end(other, "00000000000000000600"), &binding));
+        // An earlier binding of the same id, which a resume replaced.
+        assert!(!ends_binding(&end(other, "00000000000000000100"), &binding));
+        assert!(!ends_binding(&end(None, "00000000000000000499"), &binding));
+    }
 
     #[test]
     fn concurrent_writers_creating_one_directory_all_succeed() {
@@ -915,8 +1092,8 @@ mod tests {
         use std::sync::{Arc, Barrier};
         let root = std::env::temp_dir().join(format!("attention-mkdir-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
-        for round in 0..40 {
-            let target = root.join(format!("{round}/panes/42/launches"));
+        for attempt in 0..40 {
+            let target = root.join(format!("{attempt}/panes/42/launches"));
             let barrier = Arc::new(Barrier::new(8));
             let writers: Vec<_> = (0..8)
                 .map(|_| {
@@ -933,7 +1110,7 @@ mod tests {
                     .unwrap()
                     .expect("a racing writer still succeeds");
             }
-            for directory in [root.join(round.to_string()), target] {
+            for directory in [root.join(attempt.to_string()), target] {
                 let mode = std::fs::metadata(directory).unwrap().permissions().mode();
                 assert_eq!(mode & 0o777, 0o700);
             }

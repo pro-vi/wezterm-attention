@@ -16,7 +16,10 @@ The state root is `WEZTERM_ATTENTION_DIR` when it is set and non-empty, else
 `$HOME/.local/state/wezterm-attention`. The Rust writer, the plugin and the Pi extension use this
 one order. A relative `WEZTERM_ATTENTION_DIR`, or one longer than 4096 bytes, holding a control
 character or not UTF-8, is an error to the writer; the plugin and Pi ignore it with a warning and fall through
-to the next rule. An `XDG_STATE_HOME` that breaks the same rule is skipped by all three, silently.
+to the next rule. An `XDG_STATE_HOME` that breaks the same rule is skipped by all three, silently,
+except that one which is not UTF-8 is an error to the writer when it decides the root, as such a
+`WEZTERM_ATTENTION_DIR` is: the writer cannot name that directory, and skipping it would write
+where the plugin does not read.
 
 A text field is safe only when it contains no control character: nothing in U+0000–U+001F, U+007F
 or U+0080–U+009F (Rust's `char::is_control`). The Rust writer, `plugin/protocol.lua` and the
@@ -46,7 +49,21 @@ v2/realms/<realm>/
           agents-clear.json
           agents-floor.json
           agents/<agent-key>.json
+v2/sessions/
+  complete.json
+  <session-key>/<entry-key>.json
 ```
+
+`v2/sessions/` is the session index: one `session_binding` record per binding, under the
+`session_key_input` digest of its provider and provider session id and named by the
+`session_entry_key_input` digest of the binding record's path. It holds the binding's address,
+launch id and binding id, so `bindings --socket` and `inspect` find the other bindings of a
+session by reading one directory rather than every binding. It is derived state, never the only
+copy of anything: a binding is written with its entry in the same commit, and a reader trusts the
+index only while the `session_index` record `complete.json` is present. A claim that starts a new
+store writes that record; a store with bindings from before the index gets it from the first
+`sweep --apply` that reads every binding and gives each one its entry. Without it, readers walk
+every binding as before. Retention removes an entry with the binding or pane tree it names.
 
 State that is not addressed by a pane lives outside that tree and outside this manifest. The tab bar publishes the order it draws at `tabs/<incarnation id>-<window id>.json`, one file per identified GUI source and window; it names no pane address, carries no pane execution fence and no TTL, so it carries its own `schema` (currently 2) and is versioned separately from `record_schema`. That is the rule for any published fact with no address to validate against: a local schema field, not a manifest entry, because a record-tree change must not refuse a file that has nothing to do with it. `attention tabs` reads them. The process that wrote a file withdraws it when its window closes, and only its own files; a file whose writer has exited is collected by `attention sweep` when every pane it names is verified absent, or when it names no tab at all. See the [consumer guide](consumer-guide.md) for what the order does and does not promise.
 
@@ -63,6 +80,12 @@ Window checks are derived per query and never stored in publication files. Their
 `observed_mono_ns` orders competing writes and supplies activity-clear, child-clear,
 retention-floor, and absence fences. `written_at_unix_ns` is required on activity, child presence,
 binding, and binding-end records. It supplies TTL and 30-day retention age.
+
+A binding-end record ends the binding event its `binding_event_id` names, and any binding it was
+observed at or after. The name is what orders an end across a reboot: the monotonic clock restarts
+at boot, so an end sweep writes after one carries a smaller stamp than a binding recorded before
+it. Both writers name the event; an end that names none is ordered by its stamp alone. Any other
+end belongs to an earlier binding of the same id, which a resume replaced, and ends nothing.
 
 Exact TTL equality remains eligible. The first ineligible instant is one nanosecond later. Missing,
 malformed, unavailable, or negative wall age fails closed: TTL-bearing state is omitted, retention
@@ -183,8 +206,9 @@ of a file or the far end of an ssh session, can set that pane's `WEZTERM_PANE` a
 `WEZTERM_ATTENTION` user variables. In the GUI's own domains (local, exec, serial, WSL) the plugin
 therefore trusts the pane's own id over a published one, and a published identity naming another
 pane is invalid. `WEZTERM_ATTENTION` values over 4096 bytes, and pane ids wider than 20 digits,
-are refused. One gap remains: a printed identity with the right pane id but another mux's realm is
-still believed. On a mux-attached pane the published value is the only identity there is.
+are refused. Until the GUI's tab-source answer arrives, the realm is checked by socket path only;
+see [accepted limitations](accepted-limitations.md#before-the-gui-knows-its-own-mux-a-local-panes-realm-is-checked-by-socket-path-only).
+On a mux-attached pane the published value is the only identity there is.
 
 A current binding is selected by the pane's current claim and then that launch's pointer. A pointer
 inside a historical launch cannot make its binding current or confirmed. Doctor validates v2
@@ -229,7 +253,9 @@ resolved path, device, inode and change time) and what else can be shown:
 - **Did not answer.** The socket still carries the incarnation, does not refuse, and its pane
   listing fails or times out. That is an unavailable probe in `doctor` and `sweep` alike: the
   diagnostic is `realm_unavailable` with the listing's own message, and the report is incomplete.
-  A tab-order file naming such a pane is kept, and leaves sweep incomplete the same way.
+  A tab-order file naming such a pane is kept, and leaves sweep incomplete the same way. So does
+  one naming any pane whose absence sweep could not decide for its binding: a pane listing that
+  failed another way, or an unlisted pane the process probe did not answer for.
 
 A probe recorded at a monotonic time later than the current clock, as after a reboot, restarts
 the count; that can only delay an end. Every other diagnostic of sweep's absence and retention
@@ -240,9 +266,11 @@ most one pane listing per mux socket and one process listing. A realm-wide `bind
 sockets in parallel, so it waits about as long as the slowest one, bounded by the per-listing
 deadline. A sweep preview and `doctor` do the same. A sweep apply looks again for each pane it
 decides on, and probes it before taking that pane's locks, so hooks are not held up behind a slow
-mux.
+mux. A pane listing that failed during an apply is not asked again: every later pane of that
+socket in the same run reads the same failure, so a mux that never answers costs one listing
+deadline, not one per pane.
 
-The process probe reads environments, never command-line arguments. On macOS it reads each of
+On macOS and Linux the process probe reads environments, never command-line arguments. On macOS it reads each of
 this user's processes' environment with `KERN_PROCARGS2`; on Linux it reads `/proc/<pid>/environ`
 for processes this user owns; elsewhere it runs `ps axeww -o uid=,command=` from `/bin` or
 `/usr/bin` and keeps this user's lines. If it cannot read its own process's environment, the whole
@@ -267,7 +295,8 @@ interrupted, and the lock `reviews/.<owner key>.lock` that `mark review`, `mark 
 review events leave beside the reviews, do not hold a binding or pane tree back from retention; a
 lock-like file of any other name or place does. Every removal sweep makes stays inside the state
 root: a target reached through a symlinked directory below the root is kept, with a
-`record_invalid` diagnostic, and so are subagent records below a symlinked directory.
+`record_invalid` diagnostic, and so are subagent records below a symlinked directory. An absence
+probe kept that way shows as action `keep` in its `absence` or `pane_retention` detail.
 
 A retention floor advances only across complete monotonic-timestamp groups that were already
 ineligible under the prior floor. An eligible member blocks the whole equal-timestamp group.

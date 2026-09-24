@@ -192,7 +192,9 @@
     "realm_id_input": "utf8(canonical_socket_path)",
     "incarnation_id_input": "lp64be(realm_id,socket_device,socket_inode,socket_ctime_ns_decimal)",
     "tty_fingerprint_input": "lp64be(tty_device,tty_inode,tty_rdevice)",
-    "binding_id_input": "utf8(provider) || 0x00 || utf8(provider_session_id) || 0x00 || utf8(launch_id)"
+    "binding_id_input": "utf8(provider) || 0x00 || utf8(provider_session_id) || 0x00 || utf8(launch_id)",
+    "session_key_input": "utf8(provider) || 0x00 || utf8(provider_session_id)",
+    "session_entry_key_input": "utf8(v2/realms/<realm_id>/incarnations/<incarnation_id>/panes/<pane_id>/launches/<launch_id>/bindings/<binding_id>/binding.json)"
   },
   "limits": {
     "pane_id_max_digits": 20,
@@ -954,7 +956,7 @@
     },
     "binding_end": {
       "required": ["kind", "schema", "address", "launch_id", "binding_id", "reason", "event_id", "observed_mono_ns", "written_at_unix_ns"],
-      "optional": ["operation_id"],
+      "optional": ["operation_id", "binding_event_id"],
       "types": {
         "kind": "record_kind",
         "schema": "record_schema",
@@ -965,7 +967,8 @@
         "event_id": "uuid",
         "observed_mono_ns": "monotonic_ns20",
         "written_at_unix_ns": "unix_ns20",
-        "operation_id": "uuid"
+        "operation_id": "uuid",
+        "binding_event_id": "uuid"
       }
     },
     "acknowledgement": {
@@ -1036,6 +1039,25 @@
         "binding_id": "hex64",
         "floor_mono_ns": "monotonic_ns20",
         "operation_id": "uuid"
+      }
+    },
+    "session_binding": {
+      "required": ["kind", "schema", "address", "launch_id", "binding_id"],
+      "optional": [],
+      "types": {
+        "kind": "record_kind",
+        "schema": "record_schema",
+        "address": "pane_address",
+        "launch_id": "uuid",
+        "binding_id": "hex64"
+      }
+    },
+    "session_index": {
+      "required": ["kind", "schema"],
+      "optional": [],
+      "types": {
+        "kind": "record_kind",
+        "schema": "record_schema"
       }
     }
   }
