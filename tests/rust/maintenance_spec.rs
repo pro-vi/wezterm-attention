@@ -1669,3 +1669,6 @@ fn a_present_row_from_an_incomplete_bindings_answer_inspects_completely() {
         wezterm_attention::query::PanePresence::Present
     );
 }
+
+#[path = "maintenance_spec/tab_orders.rs"]
+mod tab_orders;

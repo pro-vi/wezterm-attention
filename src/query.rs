@@ -2045,11 +2045,10 @@ fn tab_publication(
         let text = entry
             .get("text")
             .and_then(Value::as_str)
+            // C1 controls count too: U+009B alone starts an escape sequence
+            // in a terminal that draws this text back.
             .filter(|text| {
-                text.len() <= limits.safe_label_max_bytes
-                    && !text
-                        .chars()
-                        .any(|character| character < ' ' || character == '\u{7f}')
+                text.len() <= limits.safe_label_max_bytes && !text.chars().any(char::is_control)
             })
             .ok_or_else(invalid)?
             .to_owned();
