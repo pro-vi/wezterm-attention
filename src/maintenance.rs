@@ -316,19 +316,7 @@ fn runtime_manifest_bytes() -> Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
-pub fn doctor(
-    root: &Path,
-    panes: Option<&dyn PaneLister>,
-    processes: Option<&dyn ProcessProbe>,
-) -> Result<(Value, Vec<Diagnostic>)> {
-    let environment: BTreeMap<String, String> = ["WEZTERM_UNIX_SOCKET", "WEZTERM_PANE"]
-        .into_iter()
-        .filter_map(|name| Some((name.to_owned(), std::env::var(name).ok()?)))
-        .collect();
-    doctor_with_environment(root, &environment, panes, processes)
-}
-
-/// `doctor` as run from a process with `environment`. Only
+/// `attention doctor` as run from a process with `environment`. Only
 /// `WEZTERM_UNIX_SOCKET` and `WEZTERM_PANE` are read from it.
 ///
 /// A probe that found nothing to check says `unobserved`, never `healthy`: a

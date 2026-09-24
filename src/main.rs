@@ -1091,9 +1091,13 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
         Some(Command::Doctor(args)) => {
             let root = wezterm_attention::records::state_root(&environment)
                 .map_err(|error| (Box::new(error), args.json, "doctor".to_owned()))?;
-            let (result, diagnostics) =
-                wezterm_attention::maintenance::doctor(&root, Some(&panes), Some(&processes))
-                    .map_err(|error| (Box::new(error), args.json, "doctor".to_owned()))?;
+            let (result, diagnostics) = wezterm_attention::maintenance::doctor_with_environment(
+                &root,
+                &environment,
+                Some(&panes),
+                Some(&processes),
+            )
+            .map_err(|error| (Box::new(error), args.json, "doctor".to_owned()))?;
             // A probe that did not answer, or a mux that did not list its
             // panes, which its socket probe reports.
             let unavailable = diagnostics
