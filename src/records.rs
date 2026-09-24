@@ -817,30 +817,17 @@ fn atomic_replace_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
         Uuid::new_v4()
     ));
     let result = (|| {
-        let create = || {
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&temporary)
-        };
-        // Sweep removes a session directory once its last entry is gone, which
-        // can land between the directory's creation and the temporary's. The
-        // directory is created once more; with the temporary in it, it is no
-        // longer empty and stays.
-        let mut file = match create() {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                mkdir_private(parent)?;
-                create()
-            }
-            created => created,
-        }
-        .map_err(|_| {
-            AttentionError::new(
-                "state_permissions",
-                "temporary state record could not be created",
-            )
-        })?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)
+            .map_err(|_| {
+                AttentionError::new(
+                    "state_permissions",
+                    "temporary state record could not be created",
+                )
+            })?;
         file.write_all(bytes)
             .and_then(|()| sync_via_fsync(&file))
             .map_err(|_| {
