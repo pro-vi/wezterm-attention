@@ -229,8 +229,7 @@ return function(context)
   --- starts the module afresh, and the plugin before it may have had no
   --- writer to ask: a window it published unsourced gets its sourced name
   --- now, and the unsourced file is removed while it still holds the bytes
-  --- this process wrote. That name is shared with every other GUI process,
-  --- because window ids restart in each, so a file rewritten since stays.
+  --- this process wrote.
   ---
   --- Honest about when it was written, not guaranteed current: nothing
   --- refreshes `published_at_ms` while the bar draws the same thing. The write

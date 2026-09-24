@@ -930,3 +930,27 @@ fn a_state_home_that_is_not_utf8_is_refused_where_it_decides_the_root() {
     let decided = run(Some(&setup.env["WEZTERM_ATTENTION_DIR"]));
     assert_eq!(decided.0, Some(0), "{decided:?}");
 }
+
+/// A relative `XDG_STATE_HOME` never decides the root, since the XDG spec
+/// says to ignore it, so one that is also not UTF-8 is ignored as a relative
+/// one that is UTF-8 is, and the root under `HOME` answers.
+#[test]
+fn a_relative_state_home_that_is_not_utf8_is_ignored() {
+    use std::os::unix::ffi::OsStrExt;
+    let setup = Setup::new();
+    let run = |value: &std::ffi::OsStr| {
+        let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+            .env_clear()
+            .env("HOME", &setup.env["HOME"])
+            .env("XDG_STATE_HOME", value)
+            .args(["bindings", "--json"])
+            .output()
+            .expect("run attention");
+        let response: Value = serde_json::from_slice(&output.stdout).expect("JSON envelope");
+        (output.status.code(), response["diagnostics"].clone())
+    };
+    let not_utf8 = run(std::ffi::OsStr::from_bytes(b"state-\xe9"));
+    let relative = run(std::ffi::OsStr::new("state-e"));
+    assert_eq!(not_utf8.0, Some(0), "{not_utf8:?}");
+    assert_eq!(not_utf8, relative);
+}

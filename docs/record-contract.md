@@ -17,7 +17,7 @@ The state root is `WEZTERM_ATTENTION_DIR` when it is set and non-empty, else
 one order. A relative `WEZTERM_ATTENTION_DIR`, or one longer than 4096 bytes, holding a control
 character or not UTF-8, is an error to the writer; the plugin, and Pi without a configured writer,
 ignore it with a warning and fall through to the next rule, and Pi with a configured writer refuses a
-value that is not UTF-8 where it decides the root and does not start the writer. An `XDG_STATE_HOME` that breaks the same rule is skipped by all three. One that
+value that is not UTF-8 where it decides the root and does not start the writer. An `XDG_STATE_HOME` that is relative, too long or holds a control character is skipped by all three. One that
 is not UTF-8 is an error to the writer when it decides the root, as such a `WEZTERM_ATTENTION_DIR`
 is, because the writer cannot name that directory; the plugin skips it with a warning, and Pi
 skips it with a warning or, with a configured writer, refuses it, so the failure is reported on
@@ -64,9 +64,11 @@ session by reading one directory rather than every binding. It is derived state,
 copy of anything: a binding is written with its entry in the same commit, and a reader trusts the
 index only while the `session_index` record `complete.json` is present. A claim that starts a new
 store writes that record; a store with bindings from before the index gets it from the first
-`sweep --apply` that reads every binding and gives each one its entry. Without it, readers walk
-every binding as before. Retention removes an entry with the binding or pane tree it names; the
-session's directory in the index stays, empty, once its last entry is gone.
+`sweep --apply` without `--realm` that reads every binding and gives each one its entry. A binding
+written into a store marked complete by an `attention` binary older than the index has no entry,
+so it is not found as a rival until the next `sweep --apply` without `--realm`. Without that
+record, readers walk every binding as before. Retention removes an entry with the binding or pane
+tree it names; the session's directory in the index stays, empty, once its last entry is gone.
 
 State that is not addressed by a pane lives outside that tree and outside this manifest. The tab bar publishes the order it draws at `tabs/<incarnation id>-<window id>.json`, one file per identified GUI source and window; it names no pane address, carries no pane execution fence and no TTL, so it carries its own `schema` (currently 2) and is versioned separately from `record_schema`. That is the rule for any published fact with no address to validate against: a local schema field, not a manifest entry, because a record-tree change must not refuse a file that has nothing to do with it. `attention tabs` reads them. The process that wrote a file withdraws it when its window closes, and only its own files; a file whose writer has exited is collected by `attention sweep` when every pane it names is verified absent, or when it names no tab at all. See the [consumer guide](consumer-guide.md) for what the order does and does not promise.
 
@@ -258,7 +260,9 @@ resolved path, device, inode and change time) and what else can be shown:
   diagnostic is `realm_unavailable` with the listing's own message, and the report is incomplete.
   A tab-order file naming such a pane is kept, and leaves sweep incomplete the same way. So does
   one naming any pane whose absence sweep could not decide for its binding: a pane listing that
-  failed another way, or an unlisted pane the process probe did not answer for.
+  failed another way, or an unlisted pane the process probe did not answer for. A tab-order file
+  naming a pane whose realm or incarnation is not recorded is kept too, with the reason
+  `not_recorded`; there is no socket to ask, so it leaves sweep complete.
 
 A probe recorded at a monotonic time later than the current clock, as after a reboot, restarts
 the count; that can only delay an end. Every other diagnostic of sweep's absence and retention

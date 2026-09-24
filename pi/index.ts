@@ -93,9 +93,8 @@ function safeRootText(path: string): boolean {
 // used: a relative root would scatter markers under the cwd and let clear's rm()
 // delete a cwd-relative file. So is a value the writer would refuse; here, as
 // in the plugin, a WEZTERM_ATTENTION_DIR like that, or an XDG_STATE_HOME that
-// is not UTF-8, is reported and the next rule applies. The Rust writer refuses
-// such a WEZTERM_ATTENTION_DIR outright, but a value that is not UTF-8 reaches
-// it re-encoded, so writerStateRootRefusal refuses that one before it starts.
+// is not UTF-8, is reported and the next rule applies. writerStateRootRefusal
+// handles the configured writer.
 // The final isAbsolute gate closes the HOME="" hole (homedir() also returns ""
 // for HOME=""), so don't drop it.
 function markerDirectory(report: Report): string | undefined {
@@ -298,14 +297,16 @@ function requestFromSessionStart(event: SessionStartEvent, ctx: ExtensionContext
 }
 
 // The Rust writer refuses a WEZTERM_ATTENTION_DIR or XDG_STATE_HOME that is
-// not UTF-8 where it decides the root: the first of the two that is not empty.
+// not UTF-8 where it decides the root: the first of the two that is not empty,
+// and XDG_STATE_HOME only when absolute, since a relative one is ignored.
 // The child is given the decoded text, U+FFFD encoded as valid UTF-8, so it
 // would take that as a root no reader resolves; the refusal is made here.
 function writerStateRootRefusal(): string | undefined {
 	for (const name of ["WEZTERM_ATTENTION_DIR", "XDG_STATE_HOME"]) {
 		const value = process.env[name];
 		if (!value) continue;
-		return decodedFromBrokenBytes(value) ? `wezterm-attention: ${name} is not UTF-8` : undefined;
+		const decides = name !== "XDG_STATE_HOME" || isAbsolute(value);
+		return decides && decodedFromBrokenBytes(value) ? `wezterm-attention: ${name} is not UTF-8` : undefined;
 	}
 	return undefined;
 }

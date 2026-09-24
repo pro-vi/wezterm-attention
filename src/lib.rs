@@ -73,6 +73,7 @@ pub use launch::{
 
 use std::collections::BTreeMap;
 use std::env;
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use crate::protocol::Result;
@@ -81,17 +82,21 @@ use crate::records::{NOT_UTF8, STATE_ROOT_VARIABLES, state_root};
 /// The process environment, keeping only variables whose name and value are
 /// both UTF-8. `env::vars` panics on the first variable that is not, which
 /// would stop every command -- hooks included -- before it could run; no
-/// variable this crate reads is expected to hold anything but text. The two
-/// that can name the state root are kept as [`NOT_UTF8`], which the root
-/// refuses, where dropping one would send every write to another root
-/// without a word.
+/// variable this crate reads is expected to hold anything but text. A
+/// variable that can name the state root is kept as [`NOT_UTF8`], which the
+/// root refuses, where dropping it would send every write to another root
+/// without a word. A relative `XDG_STATE_HOME` names no root, so one that is
+/// not UTF-8 is dropped as a relative one that is would be ignored.
 pub fn environment() -> BTreeMap<String, String> {
     env::vars_os()
         .filter_map(|(name, value)| {
             let name = name.into_string().ok()?;
             match value.into_string() {
                 Ok(value) => Some((name, value)),
-                Err(_) if STATE_ROOT_VARIABLES.contains(&name.as_str()) => {
+                Err(value)
+                    if STATE_ROOT_VARIABLES.contains(&name.as_str())
+                        && (name != "XDG_STATE_HOME" || value.as_bytes().starts_with(b"/")) =>
+                {
                     Some((name, NOT_UTF8.to_owned()))
                 }
                 Err(_) => None,

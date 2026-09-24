@@ -712,6 +712,8 @@ test("env: a configured writer is never started with a root that is not UTF-8", 
 		{ stateHome: broken, refused: "XDG_STATE_HOME" },
 		{ dir: "", stateHome: broken, refused: "XDG_STATE_HOME" },
 		{ dir: scratch, stateHome: broken },
+		// A relative XDG_STATE_HOME is ignored by the writer, as by every reader.
+		{ stateHome: "x\uFFFDy" },
 	];
 	for (const { dir, stateHome, refused } of cases) {
 		delete process.env.WEZTERM_ATTENTION_DIR;

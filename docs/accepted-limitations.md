@@ -216,12 +216,13 @@ An in-place rewrite of equal size that restores mtime is not.
 
 ## What sweep leaves behind
 
-`attention sweep --apply` removes only ended bindings under the retention rules,
-subagent records below a retention floor, a closed pane's whole tree under the
-pane retention rule in the [record contract](record-contract.md#trust-boundary),
-and the leftover files listed there. That rule keeps sweep from
-removing state it cannot prove abandoned, and it means four kinds of leftover
-stay on disk:
+`attention sweep --apply` removes only ended bindings and closed panes' whole
+trees under the retention rules in the
+[record contract](record-contract.md#trust-boundary), with their session index
+entries; the subagent records a floor advance covers; and the v1 projection
+leftovers and exited GUIs' tab-order files the record contract lists as
+collected. Those rules keep sweep from removing state it cannot prove
+abandoned, and they mean four kinds of leftover stay on disk:
 
 - **An exited GUI's tab-order files that name mux panes.** A file is removed
   only when it names no tab, or when every pane it names is verified absent.
@@ -229,9 +230,12 @@ stay on disk:
   a file naming only those goes. A window attached to a mux server names that
   server's panes, which are usually still running, or gone together with their
   socket with nothing to show the server gone, which a reader reports as
-  unavailable rather than absent. So that file stays until you remove it. It
-  is safe to delete `tabs/<incarnation id>-<window id>.json` by hand once no
-  GUI with that window is running.
+  unavailable rather than absent. So that file stays until you remove it. So
+  does a file naming a pane whose realm or incarnation records are gone, as
+  after you remove a server's records by hand; with no socket to ask, it
+  leaves sweep complete. It is safe to delete
+  `tabs/<incarnation id>-<window id>.json` by hand once no GUI with that
+  window is running.
 - **Temporary files from an interrupted write, outside a tree being removed.**
   So is a review that Alt+B had moved aside to `<review>.json.<session>.clear`
   when it was interrupted. They do not stop a binding or pane tree from being
@@ -291,8 +295,14 @@ The session index keeps one directory per provider session, `v2/sessions/<sessio
 Retention removes a binding's entry but never the directory, even once it is empty: a bind of
 the same session in another pane may be creating its entry there at that moment, and removing
 the directory under it would refuse that bind. So one empty directory stays for every provider
-session ever bound, and `doctor` walks them. Each is an empty directory; remove the empty ones by
-hand if their number matters to you.
+session ever bound. Each is an empty directory; remove the empty ones by hand if their number
+matters to you.
+
+An entry whose binding is gone stays too. Retention finds an entry only through the binding it
+names, so the entry left by a bind that stopped after writing it and before writing its binding,
+or by removing an incarnation's records by hand, is never removed. Readers skip such an entry, as
+a walk would find no binding there. `doctor` walks every directory the index keeps, so its cost
+grows with the number of provider sessions ever started, not with the live store.
 
 ## After a reboot, pane retention can wait without bound
 

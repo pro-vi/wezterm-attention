@@ -12,8 +12,8 @@ use crate::identity::socket_identity;
 use crate::observations::{LifecycleAvailability, LifecycleSnapshot, LifecycleView};
 use crate::protocol::{AttentionError, Diagnostic, Result, hex64_text};
 use crate::records::{
-    FileRecords, RecordReader, ends_binding, incarnation_path, launch_path, pane_path, realm_path,
-    session_dir, session_entry_path, session_index_path,
+    FileRecords, RecordReader, binding_path, ends_binding, incarnation_path, launch_path,
+    pane_path, realm_path, session_dir, session_entry_path, session_index_path,
 };
 use crate::records::{RecordIdentity, RecordRead, read_record, read_record_typed};
 use crate::wezterm::Clock;
@@ -1261,7 +1261,8 @@ fn session_binding_files(root: &Path, provider: &str, session: &str) -> Option<V
         &RecordIdentity::unscoped(),
     )
     .ok()??;
-    let entries = match fs::read_dir(session_dir(root, provider, session)) {
+    let dir = session_dir(root, provider, session);
+    let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
         Err(_) => return None,
@@ -1274,7 +1275,7 @@ fn session_binding_files(root: &Path, provider: &str, session: &str) -> Option<V
         if name.starts_with('.') {
             continue;
         }
-        let path = session_dir(root, provider, session).join(name);
+        let path = dir.join(name);
         let record =
             read_record(&path, Some("session_binding"), &RecordIdentity::unscoped()).ok()??;
         let address = record_address(&record)?;
@@ -1284,12 +1285,7 @@ fn session_binding_files(root: &Path, provider: &str, session: &str) -> Option<V
         if session_entry_path(root, provider, session, &address, &launch_id, &binding_id) != path {
             return None;
         }
-        files.push(
-            launch_path(root, &address, &launch_id)
-                .join("bindings")
-                .join(binding_id)
-                .join("binding.json"),
-        );
+        files.push(binding_path(root, &address, &launch_id, &binding_id));
     }
     Some(files)
 }
@@ -1616,7 +1612,7 @@ pub(crate) fn replaced_server_pane_gone(
 
 /// A pane's presence as a reader reports it, and whether the server that
 /// held its incarnation may be gone, which the report alone does not say.
-fn reader_presence(
+pub(crate) fn reader_presence(
     root: &Path,
     address: &PaneAddress,
     panes: Option<&dyn PaneLister>,
@@ -1667,8 +1663,9 @@ pub(crate) fn pane_evidence(
 /// Whether another pane address holds a binding of this provider session that
 /// competes with the inspected one, by the rule `bindings` applies across its
 /// rows. Only same-session bindings have their end read and their pane probed,
-/// and the session index names them, so a store with no rival costs one
-/// directory read and no subprocess.
+/// and once the session index is complete it names them, so a store with no
+/// rival costs one directory read and no subprocess; before that, a walk of
+/// binding records.
 fn session_live_elsewhere(
     root: &Path,
     address: &PaneAddress,
@@ -1727,7 +1724,7 @@ pub(crate) fn record_address(record: &Value) -> Option<PaneAddress> {
 
 /// The socket a pane's realm record names, when both the realm and this
 /// incarnation are recorded.
-fn recorded_socket(root: &Path, address: &PaneAddress) -> Result<Option<String>> {
+pub(crate) fn recorded_socket(root: &Path, address: &PaneAddress) -> Result<Option<String>> {
     let Some(realm) = read_record(
         &realm_path(root, &address.realm_id).join("realm.json"),
         Some("realm"),
