@@ -1003,9 +1003,13 @@ fn apply_activity(
             };
             // Only a child's permission request reaches here with an agent id.
             // Its presence marks the child as waiting until its next tool call
-            // or its stop.
+            // or its stop. The presence only holds the notify against the
+            // lead's tool calls, so a presence that cannot be planned is
+            // reported and the notify still applies.
+            let mut presence_error = None;
             if let Some(agent_id) = event.agent_id.as_deref() {
-                plan_presence(
+                let mut presence = Vec::new();
+                match plan_presence(
                     resolved,
                     event,
                     observation,
@@ -1014,8 +1018,11 @@ fn apply_activity(
                     agent_id,
                     WAITING_FOR_PERMISSION,
                     "active",
-                    &mut replacements,
-                )?;
+                    &mut presence,
+                ) {
+                    Ok(_) => replacements.extend(presence),
+                    Err(error) => presence_error = Some(error),
+                }
             }
             if parent_stop && !matches!(result.disposition.as_str(), "ignored" | "conflict") {
                 let surviving_activity = activity.as_ref().ok_or_else(|| {
@@ -1055,7 +1062,7 @@ fn apply_activity(
                     });
                 }
             }
-            Ok(append_observation(
+            let mut plan = append_observation(
                 resolved,
                 event,
                 observation,
@@ -1069,7 +1076,17 @@ fn apply_activity(
                     removals: Vec::new(),
                     private_dirs: Vec::new(),
                 },
-            ))
+            );
+            if let Some(error) = presence_error {
+                let result = &mut plan.result.result;
+                if accepted(result) {
+                    result.disposition = Disposition::Partial;
+                }
+                if result.diagnostic.is_none() {
+                    result.diagnostic = Some(error.diagnostic);
+                }
+            }
+            Ok(plan)
         },
         |mutation| apply_observed_outputs(resolved, &binding_id, mutation),
     )?;

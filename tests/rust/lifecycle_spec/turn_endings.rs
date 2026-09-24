@@ -295,3 +295,33 @@ fn a_waiting_childs_notify_outlasts_its_presence_lifetime() {
         assert_eq!(shown(&setup, provider), "thinking", "{provider}");
     }
 }
+
+// The child's presence only extends the notify. A presence or fence record
+// that cannot be read must not take the notify down with it: the request still
+// shows, and the unreadable record is reported.
+#[test]
+fn a_child_permission_request_shows_past_an_unreadable_presence() {
+    let key = wezterm_attention::protocol::sha256_hex(b"child-a");
+    let presence = format!("agents/{key}.json");
+    for (provider, agent_type) in [("claude", "Explore"), ("codex", "worker")] {
+        for record in [presence.as_str(), "agents-clear.json", "agents-floor.json"] {
+            let setup = bound(provider, "parent");
+            let directory = setup.binding_dir(provider, "parent");
+            fs::create_dir_all(directory.join("agents")).unwrap();
+            fs::write(directory.join(record), b"{not json").unwrap();
+            let result = setup.apply(
+                &child(provider, "PermissionRequest", "child-a", agent_type),
+                "00000000000000000400",
+            );
+            assert_eq!(result.disposition, "partial", "{provider} {record}");
+            assert_eq!(
+                result.diagnostic.as_ref().map(|d| d.code.as_str()),
+                Some("record_invalid"),
+                "{provider} {record}"
+            );
+            assert_eq!(shown(&setup, provider), "notify", "{provider} {record}");
+            let raw = fs::read_to_string(directory.join("lifecycle.json")).unwrap();
+            assert!(raw.contains("approval_requested"), "{provider}: {raw}");
+        }
+    }
+}
