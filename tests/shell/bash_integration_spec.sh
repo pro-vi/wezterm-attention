@@ -83,6 +83,24 @@ else
   fail "sourcing again after the first prompt neither crashes nor adds a second hook (status $session_status)"
 fi
 
+# An rc file that assigns PROMPT_COMMAND instead of appending to it removes
+# this file's prompt command each time it is sourced again.
+rc "PROMPT_COMMAND='history -a'" "source '$integration'"
+session WEZTERM_PANE=7 <<EOF
+source '$scratch/rc'
+claude
+show-launch
+exit 0
+EOF
+# Four prompts: before each of the four lines typed.
+if [ "$session_status" -eq 0 ] && has "^claude-ran launch=$launch$" && has '^child-launch=none$' \
+  && [ "$(calls_matching '^hooks publish')" -eq 4 ] && [ "$(calls_matching '^hooks claim|$')" -eq 1 ] \
+  && [ "$(calls_matching "^hooks publish --quiet|$launch$")" -eq 1 ]; then
+  pass "sourcing again from an rc file that assigns PROMPT_COMMAND puts the prompt hook back once"
+else
+  fail "sourcing again from an rc file that assigns PROMPT_COMMAND puts the prompt hook back once (status $session_status)"
+fi
+
 user_preexec='preexec() { printf "user-preexec=%s\n" "$1"; }'
 for order in before after "at a prompt after"; do
   typed=true

@@ -2,8 +2,14 @@
 
 # `source ~/.bashrc` after an edit sources this file again. A second copy of
 # the hooks would treat the first copy's DEBUG trap as someone else's and call
-# it from itself, which recurses until bash crashes, so a repeat is a no-op.
-[ -z "${_WEZTERM_ATTENTION_LOADED:-}" ] || return 0
+# it from itself, which recurses until bash crashes, so a repeat installs
+# nothing new. It only puts back this file's prompt command, which an rc file
+# that assigns PROMPT_COMMAND instead of appending to it has just removed;
+# without it nothing publishes and a claimed launch id is never unset.
+if [ -n "${_WEZTERM_ATTENTION_LOADED:-}" ]; then
+  _wezterm_attention_add_prompt_command
+  return 0
+fi
 _WEZTERM_ATTENTION_LOADED=1
 
 : "${WEZTERM_ATTENTION_COMMANDS:=claude codex pi}"
@@ -140,4 +146,10 @@ _wezterm_attention_prompt_command() {
   wezterm_attention_precmd
   return "$_WEZTERM_ATTENTION_LAST_STATUS"
 }
-PROMPT_COMMAND="_WEZTERM_ATTENTION_LAST_STATUS=\$?;eval \"\$_WEZTERM_ATTENTION_PROMPT_INSTALL\";_wezterm_attention_prompt_command${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+_wezterm_attention_add_prompt_command() {
+  case "${PROMPT_COMMAND[*]:-}" in
+    *_wezterm_attention_prompt_command*) return 0 ;;
+  esac
+  PROMPT_COMMAND="_WEZTERM_ATTENTION_LAST_STATUS=\$?;eval \"\$_WEZTERM_ATTENTION_PROMPT_INSTALL\";_wezterm_attention_prompt_command${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+}
+_wezterm_attention_add_prompt_command
