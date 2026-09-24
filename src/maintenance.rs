@@ -1598,9 +1598,33 @@ fn pane_retention(
 
 /// Whether every entry under a pane directory is state sweep recognises, so
 /// removing the tree removes nothing else: records that read as valid for
-/// their path, the two lock files, and the temporary files an interrupted
-/// write leaves beside a record. A symlink anywhere keeps the tree.
-fn pane_tree_prunable(root: &Path, directory: &Path, diagnostics: &mut Vec<Diagnostic>) -> bool {
+/// their path, the two lock files, the lock a review writer leaves beside
+/// the reviews, and the temporary files an interrupted write leaves beside a
+/// record. A symlink anywhere keeps the tree.
+fn pane_tree_prunable(root: &Path, pane: &Path, diagnostics: &mut Vec<Diagnostic>) -> bool {
+    pane_entries_prunable(root, pane, pane, diagnostics)
+}
+
+/// The lock a review writer takes beside the review it writes and leaves in
+/// place: `reviews/.<owner key>.lock`, where the owner key is the SHA-256 of
+/// the review's source in lowercase hex.
+fn review_lock_name(name: &str) -> bool {
+    name.strip_prefix('.')
+        .and_then(|name| name.strip_suffix(".lock"))
+        .is_some_and(|key| {
+            key.len() == 64
+                && key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+
+fn pane_entries_prunable(
+    root: &Path,
+    pane: &Path,
+    directory: &Path,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> bool {
     let preserved = |diagnostics: &mut Vec<Diagnostic>, message: &str, path: &Path| {
         let mut item = diagnostic("record_invalid", message);
         item.context.insert(
@@ -1624,12 +1648,15 @@ fn pane_tree_prunable(root: &Path, directory: &Path, diagnostics: &mut Vec<Diagn
                 return preserved(diagnostics, "symlinked pane state is preserved", &path);
             }
             Ok(kind) if kind.is_dir() => {
-                if !pane_tree_prunable(root, &path, diagnostics) {
+                if !pane_entries_prunable(root, pane, &path, diagnostics) {
                     return false;
                 }
             }
             Ok(kind) if kind.is_file() => {
-                if matches!(name.as_str(), ".lock" | ".claim.lock") || write_leftover(&name) {
+                if matches!(name.as_str(), ".lock" | ".claim.lock")
+                    || write_leftover(&name)
+                    || (directory == pane.join("reviews") && review_lock_name(&name))
+                {
                     continue;
                 }
                 let recognised = state_kind(&path).is_some_and(|kind| {

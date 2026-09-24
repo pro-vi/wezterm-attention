@@ -505,3 +505,70 @@ fn an_apply_without_an_operation_id_uses_a_fresh_one() {
     // A preview has no operation.
     assert_eq!(setup.run_sweep(false, None).0.operation_id, None);
 }
+
+/// `mark review`, `mark clear` and Pi's review events each take a lock beside
+/// the review they write, `reviews/.<owner key>.lock`, and leave it there.
+/// That lock is the writer's own, and does not keep an old pane's tree.
+#[test]
+fn a_pane_where_reviews_were_marked_and_cleared_is_removed_once_old() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    wezterm_attention::lifecycle::apply_mark_review(&setup.env, "build", false)
+        .expect("mark review");
+    wezterm_attention::lifecycle::apply_mark_clear(&setup.env, "build", "00000000000000000250")
+        .expect("mark clear");
+    let lock = pane_dir(&setup).join("reviews").join(format!(
+        ".{}.lock",
+        wezterm_attention::protocol::sha256_hex(b"build")
+    ));
+    assert!(lock.exists(), "the review lock stays behind");
+    end_long_ago(&setup);
+    setup.panes.set(Vec::new());
+    setup.processes.set(Presence::Absent);
+    setup.clock.set_monotonic(1_000);
+    setup.run_sweep(true, Some(OP_1));
+    setup
+        .clock
+        .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
+    let (result, diagnostics) = setup.run_sweep(true, Some(OP_2));
+    assert_eq!(
+        actions(&result.details, "pane_retention"),
+        [&json!("prune")],
+        "{diagnostics:?}"
+    );
+    assert!(!pane_dir(&setup).exists());
+}
+
+/// Only the name the review writer uses is its lock. A lock-like file of any
+/// other name, or in another directory, is unknown state and keeps the tree.
+#[test]
+fn a_lock_like_file_the_review_writer_does_not_leave_keeps_the_pane_tree() {
+    let key = "a".repeat(64);
+    for relative in [
+        format!("reviews/.{}.lock", "A".repeat(64)),
+        format!("reviews/.{}.lock", &key[..63]),
+        format!("reviews/{key}.lock"),
+        format!(".{key}.lock"),
+        format!("reviews/nested/.{key}.lock"),
+    ] {
+        let setup = Setup::new();
+        setup.claim_and_bind();
+        end_long_ago(&setup);
+        setup.panes.set(Vec::new());
+        setup.processes.set(Presence::Absent);
+        let planted = pane_dir(&setup).join(&relative);
+        fs::create_dir_all(planted.parent().expect("parent")).expect("create parent");
+        fs::write(&planted, "").expect("plant lock-like file");
+        setup.clock.set_monotonic(1_000);
+        setup.run_sweep(true, Some(OP_1));
+        setup
+            .clock
+            .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
+        let (result, _) = setup.run_sweep(true, Some(OP_2));
+        assert!(planted.exists(), "{relative} was removed");
+        assert!(
+            !actions(&result.details, "pane_retention").contains(&&json!("prune")),
+            "{relative} did not keep the tree"
+        );
+    }
+}
