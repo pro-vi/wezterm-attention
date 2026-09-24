@@ -1693,129 +1693,156 @@ fn apply_review_event(
     Ok(mutation.result)
 }
 
+/// Plans the activity-clear watermark for one binding at `observation`. A
+/// watermark already newer wins and an equal one is a replay, so neither
+/// writes; either way the result names the stored watermark's event.
+fn activity_clear_plan(
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+    clear_path: &Path,
+    observation: &str,
+) -> Result<(LifecycleResult, Option<Replacement>)> {
+    let existing = read_record(
+        clear_path,
+        Some("activity_clear"),
+        &RecordIdentity::binding(address, launch_id, binding_id),
+    )?;
+    if let Some(existing) = &existing {
+        let order = existing["observed_mono_ns"].as_str().unwrap_or("");
+        if observation <= order {
+            let mut result = LifecycleResult::new(if observation < order {
+                Disposition::Ignored
+            } else {
+                Disposition::Skipped
+            });
+            result.event_id = existing["event_id"].as_str().map(str::to_owned);
+            return Ok((result, None));
+        }
+    }
+    let event_id = Uuid::new_v4().to_string();
+    let record = json!({
+        "kind": "activity_clear",
+        "schema": manifest()?.record_schema,
+        "address": address,
+        "launch_id": launch_id,
+        "binding_id": binding_id,
+        "event_id": event_id,
+        "observed_mono_ns": observation,
+    });
+    let mut result = LifecycleResult::new(Disposition::Applied);
+    result.event_id = Some(event_id);
+    Ok((
+        result,
+        Some(Replacement::always(clear_path.to_owned(), record)),
+    ))
+}
+
+// Pi's bus `clear` withdraws both its activity and its review. A Codex
+// interrupt withdraws only the activity: the review belongs to another writer.
 fn apply_clear_event(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
     observation: &str,
+    written_at: &str,
 ) -> Result<LifecycleResult> {
     let binding_id = event_binding_id(event, &resolved.launch_id)?;
     let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
     let binding_dir = launch.join("bindings").join(&binding_id);
     let pointer_path = launch.join("current-binding.json");
     let clear_path = binding_dir.join("activity-clear.json");
-    let claim_path = pane_path(&resolved.root, &resolved.address).join("claim.json");
+    let pane = pane_path(&resolved.root, &resolved.address);
+    let claim_path = pane.join("claim.json");
     let owner_key = crate::protocol::sha256_hex(b"pi-bus");
-    let review_path = pane_path(&resolved.root, &resolved.address)
-        .join("reviews")
-        .join(format!("{owner_key}.json"));
-    let (mutation, ()) = commit_triple_with(
-        &launch.join(".lock"),
-        &pane_path(&resolved.root, &resolved.address).join(".claim.lock"),
-        &pane_path(&resolved.root, &resolved.address)
-            .join("reviews")
-            .join(format!(".{owner_key}.lock")),
-        &pointer_path,
-        Some("current_binding"),
-        &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
-        Duration::from_secs(2),
-        |pointer| {
-            let claim = read_record(
-                &claim_path,
-                Some("claim"),
-                &RecordIdentity::pane(&resolved.address),
-            )?;
-            if claim.as_ref().is_none_or(|claim| {
-                !record_matches_launch(claim, &resolved.address, &resolved.launch_id)
-            }) {
-                return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::diagnosed(
-                        Disposition::Ignored,
-                        "claim_stale",
-                        "clear event is not for the current launch",
-                    )),
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                });
-            }
-            let (_, current) =
-                read_current(&launch, pointer, &resolved.address, &resolved.launch_id)?;
-            if current
-                .as_ref()
-                .and_then(|record| record.get("binding_id"))
-                .and_then(Value::as_str)
-                != Some(binding_id.as_str())
-            {
-                return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::diagnosed(
-                        Disposition::Ignored,
-                        "claim_stale",
-                        "clear event is not for the current binding",
-                    )),
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                });
-            }
-            let existing = read_record(
-                &clear_path,
-                Some("activity_clear"),
-                &RecordIdentity::binding(&resolved.address, &resolved.launch_id, &binding_id),
-            )?;
-            let mut replacements = Vec::new();
-            if let Some(existing) = &existing
-                && observation < existing["observed_mono_ns"].as_str().unwrap_or("")
-            {
-                let mut result = LifecycleResult::new(Disposition::Ignored);
-                result.event_id = existing["event_id"].as_str().map(str::to_owned);
-                return Ok(CommitPlan {
-                    result: Mutation::plain(result),
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                });
-            }
-            let mut result = if existing.as_ref().is_some_and(|clear| {
-                observation == clear["observed_mono_ns"].as_str().unwrap_or("")
-            }) {
-                let mut result = LifecycleResult::new(Disposition::Skipped);
-                result.event_id = existing
-                    .as_ref()
-                    .and_then(|clear| clear["event_id"].as_str())
-                    .map(str::to_owned);
-                result
-            } else {
-                let event_id = Uuid::new_v4().to_string();
-                let record = json!({
-                    "kind": "activity_clear",
-                    "schema": manifest()?.record_schema,
-                    "address": resolved.address,
-                    "launch_id": resolved.launch_id,
-                    "binding_id": binding_id,
-                    "event_id": event_id,
-                    "observed_mono_ns": observation,
-                });
-                replacements.push(Replacement::always(clear_path.clone(), record));
-                let mut result = LifecycleResult::new(Disposition::Applied);
-                result.event_id = Some(event_id);
-                result
-            };
-            let review_existed = review_path.exists();
-            if review_existed && result.disposition == Disposition::Skipped {
-                result.disposition = Disposition::Applied;
-            }
+    let review_path = (event.provider == Some(crate::providers::Provider::Pi))
+        .then(|| pane.join("reviews").join(format!("{owner_key}.json")));
+    let decide = |pointer: Option<Value>| {
+        let ignored = |message| {
             Ok(CommitPlan {
-                result: Mutation {
-                    lifecycle_replacement: None,
-                    result,
-                },
-                replacements,
-                removals: vec![review_path.clone()],
+                result: Mutation::plain(LifecycleResult::diagnosed(
+                    Disposition::Ignored,
+                    "claim_stale",
+                    message,
+                )),
+                replacements: Vec::new(),
+                removals: Vec::new(),
                 private_dirs: Vec::new(),
             })
-        },
-        |mutation| apply_observed_outputs(resolved, &binding_id, mutation),
-    )?;
+        };
+        let claim = read_record(
+            &claim_path,
+            Some("claim"),
+            &RecordIdentity::pane(&resolved.address),
+        )?;
+        if claim.as_ref().is_none_or(|claim| {
+            !record_matches_launch(claim, &resolved.address, &resolved.launch_id)
+        }) {
+            return ignored("clear event is not for the current launch");
+        }
+        let (_, current) = read_current(&launch, pointer, &resolved.address, &resolved.launch_id)?;
+        if current
+            .as_ref()
+            .and_then(|record| record.get("binding_id"))
+            .and_then(Value::as_str)
+            != Some(binding_id.as_str())
+        {
+            return ignored("clear event is not for the current binding");
+        }
+        let (mut result, replacement) = activity_clear_plan(
+            &resolved.address,
+            &resolved.launch_id,
+            &binding_id,
+            &clear_path,
+            observation,
+        )?;
+        let mut removals = Vec::new();
+        if result.disposition != Disposition::Ignored
+            && let Some(review_path) = &review_path
+        {
+            if review_path.exists() && result.disposition == Disposition::Skipped {
+                result.disposition = Disposition::Applied;
+            }
+            removals.push(review_path.clone());
+        }
+        Ok(append_observation(
+            resolved,
+            event,
+            observation,
+            written_at,
+            CommitPlan {
+                result: Mutation::plain(result),
+                replacements: replacement.into_iter().collect(),
+                removals,
+                private_dirs: Vec::new(),
+            },
+        ))
+    };
+    let after_apply = |mutation: &Mutation| apply_observed_outputs(resolved, &binding_id, mutation);
+    let identity = RecordIdentity::launch(&resolved.address, &resolved.launch_id);
+    let (mutation, ()) = if review_path.is_some() {
+        commit_triple_with(
+            &launch.join(".lock"),
+            &pane.join(".claim.lock"),
+            &pane.join("reviews").join(format!(".{owner_key}.lock")),
+            &pointer_path,
+            Some("current_binding"),
+            &identity,
+            Duration::from_secs(2),
+            decide,
+            after_apply,
+        )?
+    } else {
+        commit_nested_with(
+            &launch.join(".lock"),
+            &pane.join(".claim.lock"),
+            &pointer_path,
+            Some("current_binding"),
+            &identity,
+            Duration::from_secs(2),
+            decide,
+            after_apply,
+        )?
+    };
     Ok(mutation.result)
 }
 
@@ -2064,7 +2091,7 @@ fn apply_provider_event_inner(
         }
         ProviderAction::End => apply_end(&resolved, event, observation, &written_at),
         ProviderAction::Review => apply_review_event(&resolved, event, false),
-        ProviderAction::Clear => apply_clear_event(&resolved, event, observation),
+        ProviderAction::Clear => apply_clear_event(&resolved, event, observation, &written_at),
         ProviderAction::Ignored => unreachable!(),
     }
 }

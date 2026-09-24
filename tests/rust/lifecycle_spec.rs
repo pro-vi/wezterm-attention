@@ -39,6 +39,9 @@ mod untrusted_text;
 #[path = "lifecycle_spec/session_starts.rs"]
 mod session_starts;
 
+#[path = "lifecycle_spec/turn_endings.rs"]
+mod turn_endings;
+
 struct Scratch(PathBuf);
 
 #[test]

@@ -24,6 +24,8 @@
     { "id": "root_notification_activity", "event": "Notification", "patch": { "notification_type": "permission_prompt" }, "expected": "activity", "activity_type": "notify" },
     { "id": "idle_notification_is_inert", "event": "Notification", "patch": { "notification_type": "idle_prompt" }, "expected": "ignored" },
     { "id": "root_stop_activity", "event": "Stop", "patch": { "stop_hook_active": false }, "expected": "activity", "activity_type": "stop" },
+    { "id": "root_failed_turn_notifies", "event": "StopFailure", "patch": { "error": "rate_limit" }, "expected": "activity", "activity_type": "notify" },
+    { "id": "child_failed_turn_observation", "event": "StopFailure", "patch": { "error": "overloaded", "agent_id": "child-a", "agent_type": "Explore" }, "expected": "observation" },
     { "id": "child_stop_fence", "event": "SubagentStop", "patch": { "agent_id": "child-a", "agent_type": "Explore", "stop_hook_active": false }, "expected": "child_stopped" },
     { "id": "session_end", "event": "SessionEnd", "patch": { "reason": "other" }, "expected": "end" },
     { "id": "subagent_start_is_inert", "event": "SubagentStart", "patch": { "agent_id": "child-a", "agent_type": "Explore" }, "expected": "ignored" },

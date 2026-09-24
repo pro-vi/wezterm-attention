@@ -392,6 +392,24 @@ fn parse_claude_or_codex(
         event.activity_type = Some("thinking".to_owned());
         return event;
     }
+    // Claude sends StopFailure in place of Stop when an API error ends the
+    // turn, and Codex runs no Stop after an interrupt. Either way the turn is
+    // over and the prompt's thinking must not outlive it: a failed turn needs
+    // the user, and an interrupted one has nothing left to report.
+    if event.agent_id.is_none() {
+        match event_name {
+            "StopFailure" => {
+                event.action = ProviderAction::Activity;
+                event.activity_type = Some("notify".to_owned());
+                return event;
+            }
+            "Interrupt" => {
+                event.action = ProviderAction::Clear;
+                return event;
+            }
+            _ => {}
+        }
+    }
     if matches!(
         event_name,
         "PostToolUse"
