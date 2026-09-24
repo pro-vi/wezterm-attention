@@ -798,15 +798,15 @@ fn apply_observation(
 const WAITING_FOR_PERMISSION: &str = "permission";
 
 /// Whether a child that asked for permission at or after `since` has not
-/// emitted anything since. Its presence must still be eligible: a parent clear,
-/// the retention floor or its TTL ends the wait. A fence or presence that
-/// cannot be read answers no, which leaves the activity to its usual order.
+/// emitted anything since. A parent clear or the retention floor ends the wait;
+/// the presence TTL does not, because a child blocked on an approval prompt
+/// sends nothing to refresh it. A fence or presence that cannot be read answers
+/// no, which leaves the activity to its usual order.
 fn child_still_waits(
     resolved: &ResolvedLaunch,
     binding_dir: &Path,
     binding_id: &str,
     since: &str,
-    now: &str,
 ) -> bool {
     let identity = RecordIdentity::binding(&resolved.address, &resolved.launch_id, binding_id);
     let fence = |name: &str, kind: &str, field: &str| match read_record_typed(
@@ -818,14 +818,13 @@ fn child_still_waits(
         RecordRead::Missing => Ok(None),
         _ => Err(()),
     };
-    let (Ok(clear), Ok(floor), Ok(protocol)) = (
+    let (Ok(clear), Ok(floor)) = (
         fence("agents-clear.json", "subagent_clear", "observed_mono_ns"),
         fence(
             "agents-floor.json",
             "subagent_retention_floor",
             "floor_mono_ns",
         ),
-        manifest(),
     ) else {
         return false;
     };
@@ -852,18 +851,12 @@ fn child_still_waits(
         ) else {
             return false;
         };
+        let order = presence["observed_mono_ns"].as_str().unwrap_or("");
         presence["source"] == WAITING_FOR_PERMISSION
-            && presence["observed_mono_ns"]
-                .as_str()
-                .is_some_and(|order| order >= since)
-            && crate::protocol::eligible_subagent_presence(
-                &presence,
-                clear.as_deref(),
-                floor.as_deref(),
-                Some(now),
-                protocol,
-            )
-            .0
+            && presence["status"] == "active"
+            && order >= since
+            && clear.as_deref().is_none_or(|clear| order > clear)
+            && floor.as_deref().is_none_or(|floor| order > floor)
     })
 }
 
@@ -937,7 +930,6 @@ fn apply_activity(
                             &binding_dir,
                             &binding_id,
                             activity["observed_mono_ns"].as_str().unwrap_or(""),
-                            written_at,
                         )
                 });
             let mut replacements = Vec::new();
@@ -1011,9 +1003,13 @@ fn apply_activity(
             };
             // Only a child's permission request reaches here with an agent id.
             // Its presence marks the child as waiting until its next tool call
-            // or its stop.
+            // or its stop. The presence only holds the notify against the
+            // lead's tool calls, so a presence that cannot be planned is
+            // reported and the notify still applies.
+            let mut presence_error = None;
             if let Some(agent_id) = event.agent_id.as_deref() {
-                plan_presence(
+                let mut presence = Vec::new();
+                match plan_presence(
                     resolved,
                     event,
                     observation,
@@ -1022,8 +1018,11 @@ fn apply_activity(
                     agent_id,
                     WAITING_FOR_PERMISSION,
                     "active",
-                    &mut replacements,
-                )?;
+                    &mut presence,
+                ) {
+                    Ok(_) => replacements.extend(presence),
+                    Err(error) => presence_error = Some(error),
+                }
             }
             if parent_stop && !matches!(result.disposition.as_str(), "ignored" | "conflict") {
                 let surviving_activity = activity.as_ref().ok_or_else(|| {
@@ -1063,7 +1062,7 @@ fn apply_activity(
                     });
                 }
             }
-            Ok(append_observation(
+            let mut plan = append_observation(
                 resolved,
                 event,
                 observation,
@@ -1077,7 +1076,17 @@ fn apply_activity(
                     removals: Vec::new(),
                     private_dirs: Vec::new(),
                 },
-            ))
+            );
+            if let Some(error) = presence_error {
+                let result = &mut plan.result.result;
+                if accepted(result) {
+                    result.disposition = Disposition::Partial;
+                }
+                if result.diagnostic.is_none() {
+                    result.diagnostic = Some(error.diagnostic);
+                }
+            }
+            Ok(plan)
         },
         |mutation| apply_observed_outputs(resolved, &binding_id, mutation),
     )?;
