@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -9,11 +9,14 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::identity::{PaneAddress, canonical_pane_id};
+use crate::identity::{PaneAddress, canonical_pane_id, socket_identity};
 use crate::protocol::{
     AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, manifest, sha256_hex,
 };
-use crate::query::{pane_presence, read_bindings_with_ports, read_tab_publications};
+use crate::query::{
+    FileStamp, PaneEvidence, ProbeOncePerAssembly, collect_state_files, pane_evidence,
+    pane_presence, read_bindings_with_ports, read_tab_publications,
+};
 use crate::records::{
     CommitPlan, RecordIdentity, Replacement, commit_nested_with, launch_path, pane_path,
     read_record, remove_file_durable, with_lock,
@@ -60,21 +63,21 @@ fn diagnostic(code: &str, message: &str) -> Diagnostic {
     AttentionError::new(code, message).diagnostic
 }
 
-fn collect_json(path: &Path, output: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(path) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if file_type.is_dir() && !file_type.is_symlink() {
-            collect_json(&path, output);
-        } else if path.extension().and_then(|extension| extension.to_str()) == Some("json") {
-            output.push(path);
-        }
-    }
+/// Every JSON file below `path`, with a diagnostic for each directory that
+/// could not be read.
+fn collect_json(
+    root: &Path,
+    path: &Path,
+    output: &mut Vec<PathBuf>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    collect_state_files(
+        root,
+        path,
+        &|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"),
+        output,
+        diagnostics,
+    );
 }
 
 fn collect_json_complete(path: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
@@ -154,9 +157,9 @@ fn collect_json_complete_at(
     Ok(())
 }
 
-fn binding_files(root: &Path) -> Vec<PathBuf> {
+fn binding_files(root: &Path, diagnostics: &mut Vec<Diagnostic>) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    collect_json(&root.join("v2/realms"), &mut files);
+    collect_json(root, &root.join("v2/realms"), &mut files, diagnostics);
     files.retain(|path| path.file_name().and_then(|name| name.to_str()) == Some("binding.json"));
     files.sort();
     files
@@ -230,10 +233,10 @@ fn binding_selection(
 
 fn audit_state(root: &Path) -> (Vec<Value>, Vec<Diagnostic>) {
     let mut files = Vec::new();
-    collect_json(&root.join("v2"), &mut files);
+    let mut diagnostics = Vec::new();
+    collect_json(root, &root.join("v2"), &mut files, &mut diagnostics);
     files.sort();
     let mut records = Vec::new();
-    let mut diagnostics = Vec::new();
     for path in files {
         let Some(kind) = state_kind(&path) else {
             diagnostics.push(diagnostic(
@@ -300,10 +303,39 @@ pub fn doctor(
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
 ) -> Result<(Value, Vec<Diagnostic>)> {
+    let environment: BTreeMap<String, String> = ["WEZTERM_UNIX_SOCKET", "WEZTERM_PANE"]
+        .into_iter()
+        .filter_map(|name| Some((name.to_owned(), std::env::var(name).ok()?)))
+        .collect();
+    doctor_with_environment(root, &environment, panes, processes)
+}
+
+/// `doctor` as run from a process with `environment`. Only
+/// `WEZTERM_UNIX_SOCKET` and `WEZTERM_PANE` are read from it.
+///
+/// A probe that found nothing to check says `unobserved`, never `healthy`: a
+/// setup with no state, no claims and no pane passes every check vacuously,
+/// and that is the setup that cannot work.
+pub fn doctor_with_environment(
+    root: &Path,
+    environment: &BTreeMap<String, String>,
+    panes: Option<&dyn PaneLister>,
+    processes: Option<&dyn ProcessProbe>,
+) -> Result<(Value, Vec<Diagnostic>)> {
+    // One process listing answers every claim and every binding doctor asks
+    // about; a listing per claim cost seconds on a store with many claims.
+    let probed_once = processes.map(ProbeOncePerAssembly::new);
+    let processes = probed_once.as_ref().map(|probe| probe as &dyn ProcessProbe);
     let mut diagnostics = Vec::new();
     let mut probes = Vec::new();
+    let (audited_records, audit_diagnostics) = audit_state(root);
+    let unreadable = audit_diagnostics
+        .iter()
+        .any(|item| item.code == "state_permissions");
     let permission_status = if !root.exists() {
-        "healthy"
+        "unobserved"
+    } else if unreadable {
+        "finding"
     } else {
         match fs::metadata(root) {
             Ok(metadata) if metadata.permissions().mode() & 0o077 == 0 => "healthy",
@@ -324,11 +356,17 @@ pub fn doctor(
         }
     };
     probes.push(json!({"name":"permissions","status":permission_status}));
-    let (audited_records, audit_diagnostics) = audit_state(root);
     let (rows, binding_diagnostics) = read_bindings_with_ports(root, panes, processes)?;
     let mut state_diagnostics = audit_diagnostics;
     state_diagnostics.extend(binding_diagnostics);
-    probes.push(json!({"name":"state_files","status":if state_diagnostics.is_empty(){"healthy"}else{"finding"}}));
+    let state_status = if !state_diagnostics.is_empty() {
+        "finding"
+    } else if audited_records.is_empty() {
+        "unobserved"
+    } else {
+        "healthy"
+    };
+    probes.push(json!({"name":"state_files","status":state_status}));
     let realm_sockets: BTreeMap<_, _> = audited_records
         .iter()
         .filter(|record| record["kind"] == "realm")
@@ -339,22 +377,28 @@ pub fn doctor(
             ))
         })
         .collect();
-    let process_unavailable = match processes {
-        Some(processes) if processes.available() => audited_records
-            .iter()
-            .filter(|record| record["kind"] == "claim")
-            .filter_map(|claim| {
-                let address = record_address(claim)?;
-                let socket = realm_sockets.get(&address.realm_id)?;
-                Some(processes.presence(socket, &address.pane_id))
-            })
-            .any(|presence| presence == Presence::Unavailable),
-        _ => true,
-    };
-    let process_status = if process_unavailable {
-        "unavailable"
-    } else {
-        "healthy"
+    let claimed: Vec<(&String, String)> = audited_records
+        .iter()
+        .filter(|record| record["kind"] == "claim")
+        .filter_map(|claim| {
+            let address = record_address(claim)?;
+            Some((realm_sockets.get(&address.realm_id)?, address.pane_id))
+        })
+        .collect();
+    let process_status = match processes {
+        Some(processes) if processes.available() => {
+            if claimed.is_empty() {
+                "unobserved"
+            } else if claimed
+                .iter()
+                .any(|(socket, pane)| processes.presence(socket, pane) == Presence::Unavailable)
+            {
+                "unavailable"
+            } else {
+                "healthy"
+            }
+        }
+        _ => "unavailable",
     };
     if process_status == "unavailable"
         && !diagnostics
@@ -399,12 +443,33 @@ pub fn doctor(
             .iter()
             .any(|item| item.code == "integration_version_mismatch");
     probes.push(json!({"name":"versions","status":if version_finding{"finding"}else{"healthy"}}));
-    probes.push(json!({"name":"socket","status":if state_diagnostics.iter().any(|item| matches!(item.code.as_str(),"realm_unavailable"|"incarnation_changed")){"finding"}else{"healthy"}}));
+    let socket_status = if state_diagnostics.iter().any(|item| {
+        matches!(
+            item.code.as_str(),
+            "realm_unavailable" | "incarnation_changed"
+        )
+    }) {
+        "finding"
+    } else if realm_sockets.is_empty() {
+        "unobserved"
+    } else {
+        "healthy"
+    };
+    probes.push(json!({"name":"socket","status":socket_status}));
+    let environment_status = environment_probe(root, environment, &mut diagnostics);
+    probes.push(json!({"name":"environment","status":environment_status}));
     diagnostics.extend(state_diagnostics);
+    let mut unobserved = vec![json!("gui_user_vars")];
+    unobserved.extend(
+        probes
+            .iter()
+            .filter(|probe| probe["status"] == "unobserved")
+            .map(|probe| probe["name"].clone()),
+    );
     Ok((
         json!({
-            "scope": ["state_files","socket","processes","permissions","versions"],
-            "unobserved": ["gui_user_vars"],
+            "scope": ["state_files","socket","processes","permissions","versions","environment"],
+            "unobserved": unobserved,
             "probes": probes,
             "bindings_scanned": rows.len(),
             "manifest": {
@@ -416,6 +481,55 @@ pub fn doctor(
         }),
         diagnostics,
     ))
+}
+
+/// Whether the pane doctor runs in has a server identity anything can find.
+/// Outside a pane there is nothing to check. Inside one, the socket must read
+/// as a mux socket and its realm and incarnation must be published, or hooks
+/// run and nothing they write is ever shown.
+fn environment_probe(
+    root: &Path,
+    environment: &BTreeMap<String, String>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> &'static str {
+    let (Some(socket), Some(_)) = (
+        environment.get("WEZTERM_UNIX_SOCKET"),
+        environment.get("WEZTERM_PANE"),
+    ) else {
+        return "unobserved";
+    };
+    let (realm_id, incarnation_id, _) = match socket_identity(socket) {
+        Ok(identity) => identity,
+        Err(error) => {
+            diagnostics.push(error.diagnostic);
+            return "finding";
+        }
+    };
+    let realm = root.join("v2/realms").join(&realm_id);
+    let published = read_record(
+        &realm.join("realm.json"),
+        Some("realm"),
+        &RecordIdentity::realm(&realm_id),
+    )
+    .is_ok_and(|record| record.is_some())
+        && read_record(
+            &realm
+                .join("incarnations")
+                .join(&incarnation_id)
+                .join("incarnation.json"),
+            Some("incarnation"),
+            &RecordIdentity::incarnation(&realm_id, &incarnation_id),
+        )
+        .is_ok_and(|record| record.is_some());
+    if published {
+        "healthy"
+    } else {
+        diagnostics.push(diagnostic(
+            "identity_unpublished",
+            "this pane's mux server identity is not published",
+        ));
+        "finding"
+    }
 }
 
 fn ns20(value: &str, code: &str) -> Result<u128> {
@@ -710,6 +824,9 @@ fn binding_known_and_prunable(
                 let Ok(file_type) = child.file_type() else {
                     return false;
                 };
+                if file_type.is_file() && write_leftover(&child.file_name().to_string_lossy()) {
+                    continue;
+                }
                 if !file_type.is_file()
                     || child_path.extension().and_then(|value| value.to_str()) != Some("json")
                 {
@@ -741,6 +858,9 @@ fn binding_known_and_prunable(
             }
             continue;
         }
+        if file_type.is_file() && write_leftover(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
         if !path.is_file()
             || !known.contains(
                 path.file_name()
@@ -769,6 +889,22 @@ fn binding_known_and_prunable(
         }
     }
     true
+}
+
+/// Whether a binding directory resolves inside the state root, so removing it
+/// removes nothing outside.
+fn binding_confined(root: &Path, binding_dir: &Path, diagnostics: &mut Vec<Diagnostic>) -> bool {
+    let confined = fs::canonicalize(binding_dir)
+        .ok()
+        .zip(fs::canonicalize(root).ok())
+        .is_some_and(|(target, root)| target.starts_with(root));
+    if !confined {
+        diagnostics.push(diagnostic(
+            "record_invalid",
+            "binding removal target is outside the state root",
+        ));
+    }
+    confined
 }
 
 pub fn binding_cap_paths_by_realm(
@@ -808,13 +944,48 @@ fn absence_action(
                 "record_invalid",
             )?;
             let current = ns20(observation, "record_invalid")?;
-            Ok(if current.saturating_sub(prior) < ABSENCE_INTERVAL_NS {
+            // The monotonic clock restarts at boot, so a probe ahead of it was
+            // taken before a restart and cannot be measured against: it is
+            // replaced, and the count starts again.
+            Ok(if prior > current {
+                "first_absence"
+            } else if current - prior < ABSENCE_INTERVAL_NS {
                 "too_soon"
             } else {
                 "end"
             })
         }
         _ => Ok("unavailable"),
+    }
+}
+
+/// A pane's presence as the absence rule reads it. Beyond what a reader
+/// reports, a pane whose server is gone -- its socket path vanished, or a new
+/// server owns it -- is absent: one sighting, which the two-observation rule
+/// then weighs like any other.
+fn absence_presence(
+    root: &Path,
+    address: &PaneAddress,
+    panes: &dyn PaneLister,
+    processes: Option<&dyn ProcessProbe>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> String {
+    match pane_evidence(root, address, Some(panes), processes, diagnostics) {
+        PaneEvidence::Observed(presence) => presence,
+        // A process still carrying the vanished socket and this pane id may
+        // belong to a server whose socket file was removed while it runs.
+        PaneEvidence::IncarnationEnded {
+            diagnostic,
+            socket_path,
+            vanished: true,
+        } if processes.is_some_and(|probe| {
+            probe.presence(&socket_path, &address.pane_id) == Presence::Present
+        }) =>
+        {
+            diagnostics.push(diagnostic);
+            "unavailable".to_owned()
+        }
+        PaneEvidence::IncarnationEnded { .. } => "verified_absent".to_owned(),
     }
 }
 
@@ -858,39 +1029,14 @@ fn flat_projection_stem(name: &str) -> Option<String> {
     canonical_pane_id(stem).ok()
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct FileIdentity {
-    dev: u64,
-    ino: u64,
-    nlink: u64,
-    size: u64,
-    mtime: i128,
-}
-
 struct FlatFile {
     path: PathBuf,
-    identity: FileIdentity,
+    identity: FileStamp,
 }
 
-fn regular_file_identity(path: &Path) -> Result<Option<FileIdentity>> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
-            Ok(Some(FileIdentity {
-                dev: metadata.dev(),
-                ino: metadata.ino(),
-                nlink: metadata.nlink(),
-                size: metadata.size(),
-                mtime: i128::from(metadata.mtime()) * 1_000_000_000
-                    + i128::from(metadata.mtime_nsec()),
-            }))
-        }
-        Ok(_) => Ok(None),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(AttentionError::new(
-            "state_permissions",
-            "flat marker could not be inspected",
-        )),
-    }
+fn regular_file_identity(path: &Path) -> Result<Option<FileStamp>> {
+    FileStamp::regular_file(path)
+        .map_err(|_| AttentionError::new("state_permissions", "flat marker could not be inspected"))
 }
 
 struct ClaimInventory {
@@ -1123,6 +1269,21 @@ fn collect_tab_orders(
                 "path": relative,
                 "action": "collect",
             }),
+            // The panes were probed after the file was read. One that changed
+            // since is a newer draw from a live bar, not the one judged here.
+            None if FileStamp::regular_file(&root.join(&relative))
+                .ok()
+                .flatten()
+                .is_none_or(|now| Some(now) != window.stamp) =>
+            {
+                json!({
+                    "kind": "tab_order_collection",
+                    "window_id": window.window_id,
+                    "path": relative,
+                    "action": "keep",
+                    "reason": "changed",
+                })
+            }
             None => match remove_file_durable(&root.join(&relative)) {
                 Ok(_) => json!({
                     "kind": "tab_order_collection",
@@ -1238,6 +1399,240 @@ fn collect_projection_orphans(
     }
 }
 
+/// What one sweep run decides with, for the steps that take it whole.
+struct SweepRun<'a> {
+    root: &'a Path,
+    apply: bool,
+    operation_id: Option<&'a str>,
+    observation: &'a str,
+    now: &'a str,
+    panes: &'a dyn PaneLister,
+    processes: Option<&'a dyn ProcessProbe>,
+}
+
+/// An absence probe counts toward removing a pane only if it was taken after
+/// the binding ended; one from before belongs to the binding's own absence,
+/// and the pane may have been seen since without anything clearing it. A
+/// probe ahead of this run's clock predates a restart and does not count
+/// either. An end ahead of the clock predates a restart too, so no probe from
+/// this boot can be shown to follow it: such a probe is taken again, which
+/// only delays removal.
+fn retention_probe(probe: Option<Value>, end: &Value, observation: &str) -> Option<Value> {
+    let ended = end["observed_mono_ns"].as_str().unwrap_or("");
+    probe.filter(|probe| {
+        let observed = probe["observed_mono_ns"].as_str().unwrap_or("");
+        observed <= observation && observed > ended
+    })
+}
+
+/// Removes a closed pane's whole tree -- claim, launches, bindings, reviews --
+/// once its current binding has been over for the retention age. The pane's
+/// absence is established by the same two-observation rule that ends a
+/// binding, counted afresh after the end, and nothing is removed without
+/// `--apply`. A tree holding anything sweep does not recognise is kept.
+fn pane_retention(
+    run: &SweepRun<'_>,
+    binding_path: &Path,
+    binding: &Value,
+    address: &PaneAddress,
+    end: &Value,
+    details: &mut Vec<Value>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<()> {
+    let root = run.root;
+    let launch_id = binding["launch_id"].as_str().unwrap_or("");
+    let binding_id = binding["binding_id"].as_str().unwrap_or("");
+    let written = end["written_at_unix_ns"].as_str().unwrap_or("");
+    match wall_age_exceeds(run.now, written, RETENTION_AGE_NS) {
+        Ok(true) => {}
+        Ok(false) => return Ok(()),
+        Err(error) => {
+            diagnostics.push(error.diagnostic);
+            return Ok(());
+        }
+    }
+    let pane = pane_path(root, address);
+    let probe_path = pane.join("absence-probe.json");
+    let probe_identity = RecordIdentity::pane(address);
+    let probe = match read_record(&probe_path, Some("absence_probe"), &probe_identity) {
+        Ok(probe) => retention_probe(probe, end, run.observation),
+        Err(error) => {
+            diagnostics.push(error.diagnostic);
+            return Ok(());
+        }
+    };
+    let presence = absence_presence(root, address, run.panes, run.processes, diagnostics);
+    let action = absence_action(&presence, probe.as_ref(), run.operation_id, run.observation)?;
+    let detail =
+        |action: &str| json!({"kind":"pane_retention","binding_id":binding_id,"action":action});
+    if action == "unavailable" {
+        diagnostics.push(diagnostic(
+            "probe_unavailable",
+            "pane absence cannot be established",
+        ));
+    }
+    if !run.apply {
+        details.push(if action != "end" {
+            detail(action)
+        } else if pane_tree_prunable(root, &pane, diagnostics) {
+            detail("prune")
+        } else {
+            detail("keep")
+        });
+        return Ok(());
+    }
+    let operation = run.operation_id.expect("apply operation id");
+    let binding_identity = RecordIdentity::binding(address, launch_id, binding_id);
+    let end_path = binding_path
+        .parent()
+        .expect("binding parent")
+        .join("end.json");
+    // The presence above was taken before the locks, as for a binding's own
+    // absence. Under them only the records are checked again.
+    let applied = commit_nested_with(
+        &launch_path(root, address, launch_id).join(".lock"),
+        &pane.join(".claim.lock"),
+        binding_path,
+        Some("binding"),
+        &binding_identity,
+        Duration::from_secs(2),
+        |locked_binding| {
+            let plan = |action: &str, removals: Vec<PathBuf>, diagnostics: Vec<Diagnostic>| {
+                Ok(CommitPlan {
+                    result: (action.to_owned(), diagnostics),
+                    replacements: Vec::new(),
+                    removals,
+                    private_dirs: Vec::new(),
+                })
+            };
+            let locked_end = read_record(&end_path, Some("binding_end"), &binding_identity)?;
+            if locked_binding.as_ref() != Some(binding)
+                || locked_end.as_ref() != Some(end)
+                || binding_selection(root, address, launch_id, binding_id)? != Some(true)
+            {
+                return plan(
+                    "changed",
+                    Vec::new(),
+                    vec![diagnostic(
+                        "record_invalid",
+                        "binding changed before pane retention",
+                    )],
+                );
+            }
+            let locked_probe = retention_probe(
+                read_record(&probe_path, Some("absence_probe"), &probe_identity)?,
+                end,
+                run.observation,
+            );
+            let action = absence_action(
+                &presence,
+                locked_probe.as_ref(),
+                Some(operation),
+                run.observation,
+            )?;
+            match action {
+                "clear_absence" => plan(action, vec![probe_path.clone()], Vec::new()),
+                "first_absence" => Ok(CommitPlan {
+                    result: (action.to_owned(), Vec::new()),
+                    replacements: vec![Replacement::always(
+                        probe_path.clone(),
+                        json!({"kind":"absence_probe","schema":manifest()?.record_schema,"address":address,"operation_id":operation,"observed_mono_ns":run.observation}),
+                    )],
+                    removals: Vec::new(),
+                    private_dirs: Vec::new(),
+                }),
+                "end" => {
+                    let mut kept = Vec::new();
+                    let confined = fs::canonicalize(&pane)
+                        .ok()
+                        .zip(fs::canonicalize(root).ok())
+                        .is_some_and(|(target, root)| target.starts_with(root));
+                    if !confined {
+                        kept.push(diagnostic(
+                            "record_invalid",
+                            "pane removal target is outside the state root",
+                        ));
+                        return plan("keep", Vec::new(), kept);
+                    }
+                    if !pane_tree_prunable(root, &pane, &mut kept) {
+                        return plan("keep", Vec::new(), kept);
+                    }
+                    plan("prune", vec![pane.clone()], kept)
+                }
+                other => plan(other, Vec::new(), Vec::new()),
+            }
+        },
+        |_| Ok(()),
+    );
+    match applied {
+        Ok(((action, locked_diagnostics), ())) => {
+            diagnostics.extend(locked_diagnostics);
+            if action != "changed" {
+                details.push(detail(&action));
+            }
+        }
+        Err(error) => diagnostics.push(error.diagnostic),
+    }
+    Ok(())
+}
+
+/// Whether every entry under a pane directory is state sweep recognises, so
+/// removing the tree removes nothing else: records that read as valid for
+/// their path, the two lock files, and the temporary files an interrupted
+/// write leaves beside a record. A symlink anywhere keeps the tree.
+fn pane_tree_prunable(root: &Path, directory: &Path, diagnostics: &mut Vec<Diagnostic>) -> bool {
+    let preserved = |diagnostics: &mut Vec<Diagnostic>, message: &str, path: &Path| {
+        let mut item = diagnostic("record_invalid", message);
+        item.context.insert(
+            "path".into(),
+            json!(path.strip_prefix(root).unwrap_or(path).to_string_lossy()),
+        );
+        diagnostics.push(item);
+        false
+    };
+    let Ok(entries) = fs::read_dir(directory) else {
+        return preserved(diagnostics, "pane state could not be read", directory);
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return preserved(diagnostics, "pane state could not be read", directory);
+        };
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        match entry.file_type() {
+            Ok(kind) if kind.is_symlink() => {
+                return preserved(diagnostics, "symlinked pane state is preserved", &path);
+            }
+            Ok(kind) if kind.is_dir() => {
+                if !pane_tree_prunable(root, &path, diagnostics) {
+                    return false;
+                }
+            }
+            Ok(kind) if kind.is_file() => {
+                if matches!(name.as_str(), ".lock" | ".claim.lock") || write_leftover(&name) {
+                    continue;
+                }
+                let recognised = state_kind(&path).is_some_and(|kind| {
+                    RecordIdentity::from_state_path(root, &path, kind)
+                        .and_then(|identity| read_record(&path, Some(kind), &identity))
+                        .is_ok_and(|record| record.is_some())
+                });
+                if !recognised {
+                    return preserved(diagnostics, "unknown pane state is preserved", &path);
+                }
+            }
+            _ => return preserved(diagnostics, "unknown pane state is preserved", &path),
+        }
+    }
+    true
+}
+
+/// A temporary file an interrupted atomic write left beside a record: the
+/// writer here names it `.<record>.<uuid>`, the plugin `<record>.<session>.tmp`.
+fn write_leftover(name: &str) -> bool {
+    name.contains(".json.") && (name.starts_with('.') || name.ends_with(".tmp"))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn sweep(
     root: &Path,
@@ -1248,9 +1643,6 @@ pub fn sweep(
     panes: &dyn PaneLister,
     processes: Option<&dyn ProcessProbe>,
 ) -> Result<(SweepResult, Vec<Diagnostic>)> {
-    if apply && operation_id.is_none() {
-        return Err(AttentionError::usage("--apply requires --operation-id"));
-    }
     let operation_id = operation_id
         .map(|value| {
             Uuid::parse_str(value)
@@ -1260,6 +1652,11 @@ pub fn sweep(
                 .ok_or_else(|| AttentionError::usage("operation id is not canonical"))
         })
         .transpose()?;
+    // An operation id lets a retried apply recognise its own earlier work, and
+    // a repeat under the same id changes nothing. An apply with nothing to
+    // retry gets a fresh id, so running it again is a new observation; the
+    // result reports the id it used.
+    let operation_id = operation_id.or_else(|| apply.then(|| Uuid::new_v4().to_string()));
     if let Some(realm) = realm_filter
         && (realm.len() != 64
             || !realm
@@ -1274,12 +1671,15 @@ pub fn sweep(
     let now = clock.unix_ns20()?;
     ns20(&observation, "record_invalid")?;
     ns20(&now, "record_invalid")?;
-    let files = binding_files(root);
     let mut details = Vec::new();
     let mut diagnostics = Vec::new();
+    let files = binding_files(root, &mut diagnostics);
     collect_projection_orphans(root, realm_filter, apply, &mut details, &mut diagnostics);
     let mut ended: BTreeMap<String, Vec<(String, PathBuf, bool)>> = BTreeMap::new();
     let mut presence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
+    // Kept apart from the readers' view above: here a vanished server counts
+    // as absence, which tab-order collection must not act on at first sight.
+    let mut absence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
     if realm_filter.is_none() {
         collect_tab_orders(
             root,
@@ -1471,6 +1871,26 @@ pub fn sweep(
                 "already_ended"
             };
             details.push(json!({"kind":"absence","binding_id":binding_id,"action":action}));
+            if let Some(end) = &end {
+                let run = SweepRun {
+                    root,
+                    apply,
+                    operation_id: operation_id.as_deref(),
+                    observation: &observation,
+                    now: &now,
+                    panes,
+                    processes,
+                };
+                pane_retention(
+                    &run,
+                    binding_path,
+                    &binding,
+                    &address,
+                    end,
+                    &mut details,
+                    &mut diagnostics,
+                )?;
+            }
             continue;
         }
         let presence_key = (
@@ -1478,11 +1898,11 @@ pub fn sweep(
             address.incarnation_id.clone(),
             address.pane_id.clone(),
         );
-        let presence = if let Some(cached) = presence_cache.get(&presence_key) {
+        let presence = if let Some(cached) = absence_cache.get(&presence_key) {
             cached.clone()
         } else {
-            let observed = pane_presence(root, &address, Some(panes), processes, &mut diagnostics);
-            presence_cache.insert(presence_key, observed.clone());
+            let observed = absence_presence(root, &address, panes, processes, &mut diagnostics);
+            absence_cache.insert(presence_key, observed.clone());
             observed
         };
         let probe_path = pane.join("absence-probe.json");
@@ -1514,7 +1934,10 @@ pub fn sweep(
             continue;
         }
         let operation = operation_id.as_deref().expect("apply operation id");
-        let mut locked_diagnostics = Vec::new();
+        // A fresh look for the decision, taken before the locks: listing panes
+        // can take seconds, and a hook writer gives up on these locks after
+        // two. Under the locks only the records are checked again.
+        let fresh_presence = absence_presence(root, &address, panes, processes, &mut diagnostics);
         let applied = commit_nested_with(
             &launch.join(".lock"),
             &pane.join(".claim.lock"),
@@ -1539,20 +1962,13 @@ pub fn sweep(
                         private_dirs: Vec::new(),
                     });
                 }
-                let locked_presence = pane_presence(
-                    root,
-                    &address,
-                    Some(panes),
-                    processes,
-                    &mut locked_diagnostics,
-                );
                 let locked_probe = read_record(
                     &probe_path,
                     Some("absence_probe"),
                     &RecordIdentity::pane(&address),
                 )?;
                 let action = absence_action(
-                    &locked_presence,
+                    &fresh_presence,
                     locked_probe.as_ref(),
                     Some(operation),
                     &observation,
@@ -1590,7 +2006,6 @@ pub fn sweep(
             },
             |_| Ok(()),
         );
-        diagnostics.extend(locked_diagnostics);
         match applied {
             Ok((outcome, ())) => {
                 if let Some(diagnostic) = outcome.diagnostic {
@@ -1623,7 +2038,26 @@ pub fn sweep(
             .unwrap_or("")
             .to_owned();
         if !apply {
-            details.push(json!({"kind":"binding_retention","binding_id":binding_id_for_detail,"action":"prune"}));
+            // The preview runs the checks apply runs on the tree itself, so it
+            // says keep where apply would keep.
+            let mut kept = Vec::new();
+            let binding_path = binding_dir.join("binding.json");
+            let binding = RecordIdentity::from_state_path(root, &binding_path, "binding")
+                .and_then(|identity| read_record(&binding_path, Some("binding"), &identity));
+            let prunable = match binding {
+                Ok(Some(binding)) => {
+                    binding_confined(root, &binding_dir, &mut kept)
+                        && binding_known_and_prunable(&binding_dir, &binding, &mut kept)
+                }
+                Ok(None) => false,
+                Err(error) => {
+                    kept.push(error.diagnostic);
+                    false
+                }
+            };
+            diagnostics.extend(kept);
+            let action = if prunable { "prune" } else { "keep" };
+            details.push(json!({"kind":"binding_retention","binding_id":binding_id_for_detail,"action":action}));
             continue;
         }
         let binding_path = binding_dir.join("binding.json");
@@ -1727,26 +2161,18 @@ pub fn sweep(
                         })
                         .transpose()?
                         .unwrap_or(false);
-                    let confined = fs::canonicalize(&binding_dir)
-                        .ok()
-                        .zip(fs::canonicalize(root).ok())
-                        .is_some_and(|(target, root)| target.starts_with(root));
                     if !end_is_current || (!still_old && !cap_paths.contains(&binding_dir)) {
                         local_diagnostics.push(diagnostic(
                             "record_invalid",
                             "binding changed before retention apply",
                         ));
-                    } else if !confined {
-                        local_diagnostics.push(diagnostic(
-                            "record_invalid",
-                            "binding removal target is outside the state root",
-                        ));
-                    } else if !binding_known_and_prunable(
-                        &binding_dir,
-                        &locked_binding,
-                        &mut local_diagnostics,
-                    ) {
-                    } else {
+                    } else if binding_confined(root, &binding_dir, &mut local_diagnostics)
+                        && binding_known_and_prunable(
+                            &binding_dir,
+                            &locked_binding,
+                            &mut local_diagnostics,
+                        )
+                    {
                         return Ok(CommitPlan {
                             result: RetentionOutcome {
                                 pruned: true,
@@ -1792,4 +2218,122 @@ pub fn sweep(
         },
         diagnostics,
     ))
+}
+
+#[cfg(test)]
+mod projection_collection_tests {
+    use super::*;
+
+    struct Root(PathBuf);
+
+    impl Drop for Root {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn address(realm: char) -> PaneAddress {
+        PaneAddress {
+            realm_id: realm.to_string().repeat(64),
+            incarnation_id: "b".repeat(64),
+            pane_id: "42".to_owned(),
+        }
+    }
+
+    /// Writes a claim for `address`, with `schema` in place of the current
+    /// record schema when they differ.
+    fn claim(root: &Path, address: &PaneAddress, schema: u64) {
+        let path = pane_path(root, address).join("claim.json");
+        crate::records::atomic_replace(
+            &path,
+            &json!({
+                "kind":"claim","schema":manifest().expect("manifest").record_schema,
+                "address":address,"launch_id":"00000000-0000-4000-8000-000000000701",
+                "tty_path":"/dev/ttys888","tty_fingerprint":"f".repeat(64),
+                "observed_mono_ns":"00000000000000000100"
+            }),
+        )
+        .expect("claim");
+        let mut value: Value =
+            serde_json::from_slice(&fs::read(&path).expect("claim")).expect("claim JSON");
+        value["schema"] = json!(schema);
+        fs::write(&path, serde_json::to_vec(&value).expect("JSON")).expect("rewrite claim");
+    }
+
+    fn current_schema() -> u64 {
+        manifest().expect("manifest").record_schema
+    }
+
+    /// A state root holding pane 42's claim at realm `a` and its three flat
+    /// files, enumerated as collection first sees them.
+    fn enumerated() -> (Root, PaneAddress, BTreeMap<String, Vec<FlatFile>>) {
+        let root = Root(
+            std::env::temp_dir().join(format!("attention-collect-{}", Uuid::new_v4().simple())),
+        );
+        let address = address('a');
+        claim(&root.0, &address, current_schema());
+        for name in ["42", "42.agents", "42.ack"] {
+            fs::write(root.0.join(name), "stop\n").expect("flat file");
+        }
+        let (files, malformed) = enumerate_flat_candidates(&root.0).expect("enumerate");
+        assert!(malformed.is_empty());
+        (root, address, files)
+    }
+
+    fn assert_nothing_collected(root: &Path) {
+        for name in ["42", "42.agents", "42.ack"] {
+            assert!(root.join(name).exists(), "{name} was collected");
+        }
+    }
+
+    /// Collection enumerates the flat files, then takes the pane's claim lock
+    /// and checks each file is still the one it enumerated. Calling the two
+    /// steps in turn puts a replacement exactly between them, which a test
+    /// racing a sweep thread against a sleep could only hope to do.
+    #[test]
+    fn a_marker_replaced_after_enumeration_is_refused_not_collected() {
+        let (root, address, files) = enumerated();
+        let next = root.0.join("42.agents.next");
+        fs::write(&next, "thinking\n").expect("replacement");
+        fs::rename(&next, root.0.join("42.agents")).expect("replace agents");
+
+        let error = apply_projection_collection(&root.0, &address, "42", &files["42"])
+            .expect_err("a replaced file is refused");
+        assert_eq!(error.diagnostic.code, "record_invalid");
+        assert!(error.diagnostic.message.contains("changed"));
+        assert_eq!(
+            fs::read_to_string(root.0.join("42")).expect("marker"),
+            "stop\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.0.join("42.agents")).expect("agents"),
+            "thinking\n"
+        );
+        assert!(root.0.join("42.ack").exists());
+    }
+
+    /// Collection decided the markers belong to one claimed pane. A claim for
+    /// the same pane id that appears before the lock and cannot be read makes
+    /// them unattributable, and the check under the lock sees it.
+    #[test]
+    fn a_claim_that_turns_unreadable_before_the_lock_stops_collection() {
+        let (root, owner, files) = enumerated();
+        claim(&root.0, &address('c'), 999);
+        let error = apply_projection_collection(&root.0, &owner, "42", &files["42"])
+            .expect_err("unattributable markers are refused");
+        assert_eq!(error.diagnostic.code, "record_invalid");
+        assert_nothing_collected(&root.0);
+    }
+
+    /// A second claim for the same pane id at another address, appearing
+    /// before the lock, makes the markers ambiguous.
+    #[test]
+    fn a_second_owner_that_appears_before_the_lock_stops_collection() {
+        let (root, owner, files) = enumerated();
+        claim(&root.0, &address('c'), current_schema());
+        let error = apply_projection_collection(&root.0, &owner, "42", &files["42"])
+            .expect_err("ambiguous markers are refused");
+        assert_eq!(error.diagnostic.code, "binding_conflict");
+        assert_nothing_collected(&root.0);
+    }
 }

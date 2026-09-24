@@ -12,8 +12,7 @@ use uuid::Uuid;
 use wezterm_attention::identity::{PaneAddress, pane_address};
 use wezterm_attention::lifecycle::{apply_provider_event, binding_id};
 use wezterm_attention::maintenance::{
-    ABSENCE_INTERVAL_NS, RETENTION_AGE_NS, binding_cap_paths_by_realm, doctor, limit_sweep_preview,
-    sweep,
+    ABSENCE_INTERVAL_NS, RETENTION_AGE_NS, binding_cap_paths_by_realm, limit_sweep_preview, sweep,
 };
 use wezterm_attention::providers::parse_provider_event;
 use wezterm_attention::query::read_bindings_with_ports;
@@ -275,6 +274,17 @@ impl Setup {
         path
     }
 
+    /// Doctor as run inside this fixture's pane, whatever pane runs the tests.
+    fn doctor(&self) -> (Value, Vec<wezterm_attention::protocol::Diagnostic>) {
+        wezterm_attention::maintenance::doctor_with_environment(
+            &self.root(),
+            &self.env,
+            Some(&self.panes),
+            Some(&self.processes),
+        )
+        .expect("doctor")
+    }
+
     fn run_sweep(
         &self,
         apply: bool,
@@ -300,8 +310,7 @@ impl Setup {
 fn doctor_reports_embedded_manifest_digest_and_confirmed_binding() {
     let setup = Setup::new();
     setup.claim_and_bind();
-    let (result, diagnostics) =
-        doctor(&setup.root(), Some(&setup.panes), Some(&setup.processes)).expect("doctor");
+    let (result, diagnostics) = setup.doctor();
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     assert_eq!(result["manifest"]["matches"], true);
     assert_eq!(
@@ -330,8 +339,7 @@ fn doctor_reports_a_future_claim_without_any_binding() {
         serde_json::to_vec(&claim).expect("future claim JSON"),
     )
     .expect("write future claim");
-    let (result, diagnostics) =
-        doctor(&setup.root(), Some(&setup.panes), Some(&setup.processes)).expect("doctor");
+    let (result, diagnostics) = setup.doctor();
     assert!(diagnostics.iter().any(|item| item.code == "future_schema"));
     assert!(
         result["probes"]
@@ -852,8 +860,7 @@ fn doctor_rejects_a_valid_record_at_the_wrong_depth() {
         }),
     )
     .expect("write misplaced record");
-    let (_, diagnostics) =
-        doctor(&setup.root(), Some(&setup.panes), Some(&setup.processes)).expect("doctor");
+    let (_, diagnostics) = setup.doctor();
     assert!(diagnostics.iter().any(|item| item.code == "record_invalid"));
 }
 
@@ -1160,54 +1167,6 @@ fn an_incomplete_claim_walk_does_not_grant_collection() {
         assert!(collection_details(&applied.0.details).is_empty());
         assert!(root.join("42").exists());
     }
-}
-
-#[test]
-fn a_replaced_marker_is_refused_not_collected() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let root = setup.root();
-    plant_flat_files(&root, "42");
-    let (address, _) = pane_address(&setup.env).expect("address");
-    let lock = pane_path(&root, &address).join(".claim.lock");
-    let locked = Arc::new(Barrier::new(2));
-    let release = Arc::new(Barrier::new(2));
-    let (details, diagnostics) = std::thread::scope(|scope| {
-        let holder = scope.spawn(|| {
-            with_lock(&lock, std::time::Duration::from_secs(5), || {
-                locked.wait();
-                release.wait();
-                Ok(())
-            })
-            .expect("hold claim lock")
-        });
-        locked.wait();
-        let sweep =
-            scope.spawn(|| setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000805")));
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        let next = root.join("42.agents.next");
-        fs::write(&next, "thinking\n").expect("write replacement");
-        fs::rename(&next, root.join("42.agents")).expect("replace agents");
-        release.wait();
-        holder.join().expect("holder");
-        sweep.join().expect("sweep")
-    });
-    assert!(collection_details(&details.details).is_empty());
-    assert!(
-        diagnostics
-            .iter()
-            .any(|item| item.code == "record_invalid" && item.message.contains("changed")),
-        "{diagnostics:?}"
-    );
-    assert_eq!(
-        fs::read_to_string(root.join("42")).expect("marker"),
-        "stop\n"
-    );
-    assert_eq!(
-        fs::read_to_string(root.join("42.agents")).expect("agents"),
-        "thinking\n"
-    );
-    assert!(root.join("42.ack").exists());
 }
 
 fn write_tab_order(root: &Path, window_id: u64, marker_ids: &[&str]) -> PathBuf {
@@ -1669,3 +1628,33 @@ fn a_present_row_from_an_incomplete_bindings_answer_inspects_completely() {
         wezterm_attention::query::PanePresence::Present
     );
 }
+
+#[path = "maintenance_spec/tab_orders.rs"]
+mod tab_orders;
+
+#[path = "maintenance_spec/row_agreement.rs"]
+mod row_agreement;
+
+#[path = "maintenance_spec/unreadable_state.rs"]
+mod unreadable_state;
+
+#[path = "maintenance_spec/diagnostic_context.rs"]
+mod diagnostic_context;
+
+#[path = "maintenance_spec/realm_filters.rs"]
+mod realm_filters;
+
+#[path = "maintenance_spec/doctor_probes.rs"]
+mod doctor_probes;
+
+#[path = "maintenance_spec/lock_scope.rs"]
+mod lock_scope;
+
+#[path = "maintenance_spec/pane_retention.rs"]
+mod pane_retention;
+
+#[path = "maintenance_spec/binding_retention.rs"]
+mod binding_retention;
+
+#[path = "maintenance_spec/destructive_guards.rs"]
+mod destructive_guards;

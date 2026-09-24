@@ -159,6 +159,17 @@ impl RecordFacet {
                 | RecordAvailability::Unsupported
         )
     }
+    /// The diagnostic code of a failed read, or None when the read did not fail.
+    fn failure_code(&self) -> Option<&str> {
+        if !self.failed() {
+            return None;
+        }
+        Some(
+            self.diagnostics
+                .first()
+                .map_or("record_invalid", |diagnostic| diagnostic.code.as_str()),
+        )
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -214,6 +225,8 @@ pub struct PaneFacts {
     pub review: EvidenceCollection,
     pub lifecycle: LifecycleView,
     pub diagnostics: Vec<Diagnostic>,
+    /// Where the call spent its time, in the shape a bindings answer uses.
+    pub timing_ms: BindingTiming,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Eq, PartialEq)]
@@ -238,11 +251,71 @@ pub enum BindingHealth {
     Conflicted,
 }
 
+impl BindingHealth {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Invalid => "invalid",
+            Self::FutureSchema => "future_schema",
+            Self::Conflicted => "conflicted",
+        }
+    }
+}
+
+impl ReaderConfidence {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::Unconfirmed => "unconfirmed",
+        }
+    }
+}
+
+/// A binding's health, one rule for `bindings` and `inspect` so a row reads
+/// the same through both. It rests only on the records that make the row: the
+/// binding record, its end record, the pane's claim and the launch's
+/// current-binding pointer, the first failed read deciding, and on whether the
+/// provider session is live at another pane address, which outranks them. An
+/// unreadable review, activity or child record is a diagnostic about that
+/// record, not about the binding.
+fn binding_health(failed_reads: [Option<&str>; 4], conflicted: bool) -> BindingHealth {
+    if conflicted {
+        return BindingHealth::Conflicted;
+    }
+    match failed_reads.into_iter().flatten().next() {
+        None => BindingHealth::Valid,
+        Some("future_schema") => BindingHealth::FutureSchema,
+        Some(_) => BindingHealth::Invalid,
+    }
+}
+
+/// A reader can act on a row when it is the pane's current binding and the
+/// pane was seen. The same rule for `bindings` and `inspect`.
+fn reader_confidence(current: bool, presence: &str) -> ReaderConfidence {
+    if current && presence == "present" {
+        ReaderConfidence::Confirmed
+    } else {
+        ReaderConfidence::Unconfirmed
+    }
+}
+
+/// Whether a row takes part in the provider-session conflict check. Only live
+/// claims compete: a binding that has ended, or whose pane is verified absent,
+/// is history. A session resumed in a new pane leaves one behind every time,
+/// and calling that a conflict hides the pane the session actually runs in.
+fn competes(ended: bool, presence: &str) -> bool {
+    !ended && presence != "verified_absent"
+}
+
 impl PaneFacts {
+    /// An answer with no row: the scope did not match, or a record that makes
+    /// the row could not be read. `failed` is that read's diagnostic code, if
+    /// one failed, and decides health by the rule a bindings row follows.
     fn unavailable(
         scope: &PaneScope,
         relation: ScopeRelation,
         diagnostics: Vec<Diagnostic>,
+        failed: Option<&str>,
     ) -> Self {
         Self {
             scope: scope.clone(),
@@ -250,17 +323,14 @@ impl PaneFacts {
             binding: None,
             pane_presence: PanePresence::Unavailable,
             reader_confidence: ReaderConfidence::Unconfirmed,
-            binding_health: if diagnostics.iter().any(|d| d.code == "future_schema") {
-                BindingHealth::FutureSchema
-            } else {
-                BindingHealth::Invalid
-            },
+            binding_health: binding_health([failed, None, None, None], false),
             activity: RecordFacet::empty(RecordAvailability::Unavailable),
             binding_end: RecordFacet::empty(RecordAvailability::Unavailable),
             children: EvidenceCollection::empty(RecordAvailability::Unavailable),
             review: EvidenceCollection::empty(RecordAvailability::Unavailable),
             lifecycle: LifecycleView::empty(LifecycleAvailability::Unavailable),
             diagnostics,
+            timing_ms: BindingTiming::default(),
         }
     }
     pub fn complete(&self) -> bool {
@@ -288,6 +358,43 @@ pub fn read_pane_facts(root: &Path, scope: &PaneScope) -> Result<PaneFacts> {
 }
 
 pub fn read_pane_facts_with_ports(
+    root: &Path,
+    scope: &PaneScope,
+    reader: &dyn RecordReader,
+    clock: &dyn Clock,
+    panes: Option<&dyn PaneLister>,
+    processes: Option<&dyn ProcessProbe>,
+) -> Result<PaneFacts> {
+    let started = Instant::now();
+    let listed_once = panes.map(ListOncePerSocket::new);
+    let probed_once = processes.map(ProbeOncePerAssembly::new);
+    let mut facts = read_pane_facts_once(
+        root,
+        scope,
+        reader,
+        clock,
+        listed_once.as_ref().map(|lister| lister as &dyn PaneLister),
+        probed_once.as_ref().map(|probe| probe as &dyn ProcessProbe),
+    )?;
+    facts.timing_ms = BindingTiming::from_wall(
+        started,
+        SpawnSpend {
+            pane_list: listed_once
+                .as_ref()
+                .map(ListOncePerSocket::spent)
+                .unwrap_or_default(),
+            process_list: probed_once
+                .as_ref()
+                .map(ProbeOncePerAssembly::spent)
+                .unwrap_or_default(),
+        },
+    );
+    Ok(facts)
+}
+
+/// One inspection, with ports that list each socket and take the process
+/// listing at most once, so the rival lookup reuses what presence asked.
+fn read_pane_facts_once(
     root: &Path,
     scope: &PaneScope,
     reader: &dyn RecordReader,
@@ -331,6 +438,7 @@ pub fn read_pane_facts_with_ports(
             scope,
             ScopeRelation::Unavailable,
             diagnostics,
+            None,
         ));
     };
     let check_socket = || -> Result<()> {
@@ -352,6 +460,7 @@ pub fn read_pane_facts_with_ports(
             scope,
             ScopeRelation::Unavailable,
             vec![error.diagnostic],
+            None,
         ));
     }
     let pane = pane_path(root, address);
@@ -374,8 +483,9 @@ pub fn read_pane_facts_with_ports(
                     "claim is absent",
                 )]
             } else {
-                claim.diagnostics
+                claim.diagnostics.clone()
             },
+            claim.failure_code(),
         ));
     }
     if claim.record.as_ref().and_then(|r| r["launch_id"].as_str()) != Some(&scope.launch_id) {
@@ -387,6 +497,7 @@ pub fn read_pane_facts_with_ports(
                 "claim",
                 "requested launch is no longer current",
             )],
+            None,
         ));
     }
     let pointer = RecordFacet::read(
@@ -400,7 +511,8 @@ pub fn read_pane_facts_with_ports(
         return Ok(PaneFacts::unavailable(
             scope,
             ScopeRelation::Unavailable,
-            pointer.diagnostics,
+            pointer.diagnostics.clone(),
+            pointer.failure_code(),
         ));
     }
     let selected = pointer
@@ -420,6 +532,7 @@ pub fn read_pane_facts_with_ports(
                 "binding_selection",
                 "requested binding is no longer current",
             )],
+            None,
         ));
     }
     let selected_root = selected
@@ -448,10 +561,12 @@ pub fn read_pane_facts_with_ports(
                 "selected binding record is absent",
             ));
         }
+        let failed = binding.failure_code().unwrap_or("record_invalid");
         return Ok(PaneFacts::unavailable(
             scope,
             ScopeRelation::Matched,
             diagnostics,
+            Some(failed),
         ));
     }
     let now = match clock.unix_ns20() {
@@ -640,7 +755,6 @@ pub fn read_pane_facts_with_ports(
     ] {
         diagnostics.extend(items.clone());
     }
-    let base_diagnostics = diagnostics.len();
     diagnostics.extend(lifecycle.diagnostics.clone());
     let before_presence = diagnostics.len();
     let presence = presence_at_socket(socket, &address.pane_id, panes, processes, &mut diagnostics);
@@ -648,42 +762,32 @@ pub fn read_pane_facts_with_ports(
         item.context
             .insert("facet".into(), Value::String("pane_presence".into()));
     }
-    let base_unavailable = now.is_none()
-        || [&binding, &activity, &clear, &end, &ack]
-            .iter()
-            .any(|facet| facet.availability == A::Unavailable)
-        || children.availability == A::Unavailable
-        || review.availability == A::Unavailable;
-    let confidence = if presence == "present" && !base_unavailable {
-        "confirmed"
-    } else {
-        "unconfirmed"
-    };
-    let health = if diagnostics[..base_diagnostics]
-        .iter()
-        .any(|d| d.code == "future_schema")
-    {
-        "future_schema"
-    } else if base_diagnostics == 0 {
-        "valid"
-    } else {
-        "invalid"
-    };
+    // The claim names this launch and the pointer this binding, or the scope
+    // would not have matched, so the row is the pane's current one.
+    let confidence = reader_confidence(true, &presence);
+    let ended = end.availability == A::Present;
+    let conflicted = binding.record.as_ref().is_some_and(|record| {
+        competes(ended, &presence)
+            && session_live_elsewhere(
+                root,
+                address,
+                &string(record, "provider").unwrap_or_default(),
+                &string(record, "provider_session_id").unwrap_or_default(),
+                panes,
+                processes,
+            )
+    });
+    let health = binding_health([None, end.failure_code(), None, None], conflicted);
     let row = binding.record.as_ref().map(|record| BindingRow {
         address: address.clone(),
         launch_id: scope.launch_id.clone(),
         binding_id: selected.unwrap().into(),
         provider: string(record, "provider").unwrap(),
         provider_session_id: string(record, "provider_session_id").unwrap(),
-        binding_phase: if end.availability == A::Present {
-            "ended"
-        } else {
-            "active"
-        }
-        .into(),
+        binding_phase: if ended { "ended" } else { "active" }.into(),
         pane_presence: presence.clone(),
-        reader_confidence: confidence.into(),
-        binding_health: health.into(),
+        reader_confidence: confidence.as_str().into(),
+        binding_health: health.as_str().into(),
         current: true,
         expected_session_match: string(record, "expected_session_id")
             .map(|v| Some(v) == string(record, "provider_session_id")),
@@ -717,13 +821,21 @@ pub fn read_pane_facts_with_ports(
             scope,
             ScopeRelation::Unavailable,
             vec![error.diagnostic],
+            None,
         ));
     }
     if after_claim.failed() || after_pointer.failed() {
         return Ok(PaneFacts::unavailable(
             scope,
             ScopeRelation::Unavailable,
-            [after_claim.diagnostics, after_pointer.diagnostics].concat(),
+            [
+                after_claim.diagnostics.clone(),
+                after_pointer.diagnostics.clone(),
+            ]
+            .concat(),
+            after_claim
+                .failure_code()
+                .or_else(|| after_pointer.failure_code()),
         ));
     }
     if claim.record != after_claim.record || pointer.record != after_pointer.record {
@@ -735,6 +847,7 @@ pub fn read_pane_facts_with_ports(
                 "scope",
                 "scope changed or became unavailable during inspection",
             )],
+            None,
         ));
     }
     Ok(PaneFacts {
@@ -746,22 +859,15 @@ pub fn read_pane_facts_with_ports(
             "verified_absent" => PanePresence::VerifiedAbsent,
             _ => PanePresence::Unavailable,
         },
-        reader_confidence: if confidence == "confirmed" {
-            ReaderConfidence::Confirmed
-        } else {
-            ReaderConfidence::Unconfirmed
-        },
-        binding_health: match health {
-            "valid" => BindingHealth::Valid,
-            "future_schema" => BindingHealth::FutureSchema,
-            _ => BindingHealth::Invalid,
-        },
+        reader_confidence: confidence,
+        binding_health: health,
         activity,
         binding_end: end,
         children,
         review,
         lifecycle,
         diagnostics,
+        timing_ms: BindingTiming::default(),
     })
 }
 
@@ -976,7 +1082,7 @@ pub struct BindingQueryScope {
 pub fn validate_socket_selector(socket: &str) -> Result<()> {
     if !Path::new(socket).is_absolute()
         || socket.len() > crate::protocol::manifest()?.limits.path_max_bytes
-        || socket.chars().any(|c| c < ' ' || c == '\u{7f}')
+        || socket.chars().any(char::is_control)
     {
         return Err(AttentionError::usage(
             "--socket must be an absolute path within the path bound",
@@ -1023,8 +1129,14 @@ pub fn read_bindings_for_socket_timed(
     let mut files = Vec::new();
     let mut diagnostics = Vec::new();
     collect_selected_binding_files(&selected, &mut files, &mut diagnostics, true);
-    let (rows, mut read_diagnostics, spawns) =
-        assemble_bindings(root, files, panes, processes, true)?;
+    let (rows, mut read_diagnostics, spawns) = assemble_bindings(
+        root,
+        files,
+        &BindingFilter::default(),
+        panes,
+        processes,
+        true,
+    )?;
     diagnostics.append(&mut read_diagnostics);
     let after = socket_identity(socket)?;
     if after.0 != scope.realm_id || after.1 != scope.incarnation_id {
@@ -1098,21 +1210,74 @@ fn collect_selected_binding_files(
     }
 }
 
-fn collect_binding_files(path: &Path, output: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(path) else {
-        return;
+fn collect_binding_files(
+    root: &Path,
+    output: &mut Vec<PathBuf>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    collect_state_files(
+        root,
+        &root.join("v2/realms"),
+        &|path| path.file_name().and_then(|name| name.to_str()) == Some("binding.json"),
+        output,
+        diagnostics,
+    );
+}
+
+/// Every file below `path` that `wanted` accepts, without following a symlink.
+///
+/// A directory or entry that cannot be read is reported, not skipped: whatever
+/// is below it is missing from the answer, and an answer that looks complete
+/// hides that. The diagnostic names the path relative to the state root. A
+/// starting directory that does not exist is an empty store, and one removed
+/// mid-walk was removed by its owner.
+pub(crate) fn collect_state_files(
+    root: &Path,
+    path: &Path,
+    wanted: &dyn Fn(&Path) -> bool,
+    output: &mut Vec<PathBuf>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(_) => {
+            diagnostics.push(unreadable_state(root, path));
+            return;
+        }
     };
-    for entry in entries.flatten() {
-        let candidate = entry.path();
-        let Ok(file_type) = entry.file_type() else {
+    for entry in entries {
+        let Ok(entry) = entry else {
+            diagnostics.push(unreadable_state(root, path));
             continue;
         };
-        if file_type.is_dir() && !file_type.is_symlink() {
-            collect_binding_files(&candidate, output);
-        } else if candidate.file_name().and_then(|name| name.to_str()) == Some("binding.json") {
-            output.push(candidate);
+        let candidate = entry.path();
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => {
+                collect_state_files(root, &candidate, wanted, output, diagnostics)
+            }
+            Ok(_) if wanted(&candidate) => output.push(candidate),
+            Ok(_) => {}
+            Err(_) => diagnostics.push(unreadable_state(root, &candidate)),
         }
     }
+}
+
+/// The diagnostic for a state path a walk could not read.
+pub(crate) fn unreadable_state(root: &Path, path: &Path) -> Diagnostic {
+    let mut item = diagnostic("state_permissions", "state directory could not be read");
+    item.context
+        .insert("path".into(), Value::String(state_relative(root, path)));
+    item
+}
+
+/// A state path as the diagnostic context names it: relative to the state
+/// root, so a diagnostic never carries the local home directory.
+pub(crate) fn state_relative(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn string(record: &Value, field: &str) -> Option<String> {
@@ -1154,11 +1319,12 @@ pub fn read_bindings(root: &Path) -> Result<(Vec<BindingRow>, Vec<Diagnostic>)> 
     read_bindings_with_ports(root, None, None)
 }
 
-/// Where a bindings query spent its wall time.
+/// Where a bindings or inspect query spent its wall time.
 ///
 /// A query that took seconds either waited on a subprocess or read a lot of
 /// files, and a caller's own clock cannot tell those apart. `pane_list` is the
-/// time inside `wezterm cli list`, summed over the sockets asked. `process_list`
+/// wall time spent waiting on `wezterm cli list`; sockets asked together count
+/// once, for as long as the slowest took. `process_list`
 /// is the time inside the process listing that answers for panes the mux no
 /// longer lists. `records` is everything else: finding and reading the binding
 /// records, measured as the query's wall time with the two spawns taken out.
@@ -1191,6 +1357,15 @@ impl BindingTiming {
     }
 }
 
+impl Serialize for BindingTiming {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        self.as_millis().serialize(serializer)
+    }
+}
+
 /// Time spent inside the subprocesses one assembly spawned.
 #[derive(Clone, Copy, Debug, Default)]
 struct SpawnSpend {
@@ -1209,6 +1384,24 @@ fn record_spent<T>(spent: &Mutex<Duration>, call: impl FnOnce() -> T) -> T {
     answer
 }
 
+/// What the state and the mux say about one pane, before a caller decides
+/// what to make of it.
+pub(crate) enum PaneEvidence {
+    /// `present`, `verified_absent` or `unavailable`, as a reader reports it.
+    Observed(String),
+    /// The server that held this incarnation's panes is gone: the realm's
+    /// socket path no longer exists (`vanished`), or a different server now
+    /// owns it. A reader reports this as unavailable, with the diagnostic.
+    /// Sweep counts it as one sighting of absence, and only its
+    /// two-observation rule turns sightings into an ended binding.
+    IncarnationEnded {
+        diagnostic: Diagnostic,
+        socket_path: String,
+        vanished: bool,
+    },
+}
+
+/// A pane's presence as a reader reports it.
 pub(crate) fn pane_presence(
     root: &Path,
     address: &PaneAddress,
@@ -1216,8 +1409,25 @@ pub(crate) fn pane_presence(
     processes: Option<&dyn ProcessProbe>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> String {
+    match pane_evidence(root, address, panes, processes, diagnostics) {
+        PaneEvidence::Observed(presence) => presence,
+        PaneEvidence::IncarnationEnded { diagnostic, .. } => {
+            diagnostics.push(diagnostic);
+            "unavailable".to_owned()
+        }
+    }
+}
+
+pub(crate) fn pane_evidence(
+    root: &Path,
+    address: &PaneAddress,
+    panes: Option<&dyn PaneLister>,
+    processes: Option<&dyn ProcessProbe>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> PaneEvidence {
+    let unavailable = || PaneEvidence::Observed("unavailable".to_owned());
     let Some(panes) = panes else {
-        return "unavailable".to_owned();
+        return unavailable();
     };
     let realm_path = root
         .join("v2/realms")
@@ -1235,10 +1445,10 @@ pub(crate) fn pane_presence(
         &RecordIdentity::realm(&address.realm_id),
     ) {
         Ok(Some(record)) => record,
-        Ok(None) => return "unavailable".to_owned(),
+        Ok(None) => return unavailable(),
         Err(error) => {
             diagnostics.push(error.diagnostic);
-            return "unavailable".to_owned();
+            return unavailable();
         }
     };
     match read_record(
@@ -1247,37 +1457,155 @@ pub(crate) fn pane_presence(
         &RecordIdentity::incarnation(&address.realm_id, &address.incarnation_id),
     ) {
         Ok(Some(_)) => {}
-        Ok(None) => return "unavailable".to_owned(),
+        Ok(None) => return unavailable(),
         Err(error) => {
             diagnostics.push(error.diagnostic);
-            return "unavailable".to_owned();
+            return unavailable();
         }
     }
     let Some(socket_path) = realm.get("socket_path").and_then(Value::as_str) else {
-        return "unavailable".to_owned();
+        return unavailable();
     };
     match socket_identity(socket_path) {
         Ok((realm_id, incarnation_id, _))
             if realm_id == address.realm_id && incarnation_id == address.incarnation_id => {}
+        Ok((realm_id, _, _)) if realm_id == address.realm_id => {
+            return PaneEvidence::IncarnationEnded {
+                diagnostic: diagnostic("incarnation_changed", "realm socket identity changed"),
+                socket_path: socket_path.to_owned(),
+                vanished: false,
+            };
+        }
         Ok(_) => {
             diagnostics.push(diagnostic(
                 "incarnation_changed",
                 "realm socket identity changed",
             ));
-            return "unavailable".to_owned();
+            return unavailable();
+        }
+        // Only a path that is not there at all. A socket that exists and
+        // cannot be read, or is not a socket, says nothing about the server.
+        Err(error)
+            if fs::symlink_metadata(socket_path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return PaneEvidence::IncarnationEnded {
+                diagnostic: error.diagnostic,
+                socket_path: socket_path.to_owned(),
+                vanished: true,
+            };
         }
         Err(error) => {
             diagnostics.push(error.diagnostic);
-            return "unavailable".to_owned();
+            return unavailable();
         }
     }
-    presence_at_socket(
+    PaneEvidence::Observed(presence_at_socket(
         socket_path,
         &address.pane_id,
         Some(panes),
         processes,
         diagnostics,
+    ))
+}
+
+/// Whether another pane address holds a binding of this provider session that
+/// competes with the inspected one, by the rule `bindings` applies across its
+/// rows. Only same-session bindings have their end read and their pane probed,
+/// so a store with no rival costs a walk of binding records and no subprocess.
+fn session_live_elsewhere(
+    root: &Path,
+    address: &PaneAddress,
+    provider: &str,
+    session: &str,
+    panes: Option<&dyn PaneLister>,
+    processes: Option<&dyn ProcessProbe>,
+) -> bool {
+    let mut files = Vec::new();
+    collect_binding_files(root, &mut files, &mut Vec::new());
+    for path in files {
+        let Some((realm_id, incarnation_id, pane_id, launch_id, binding_id)) =
+            path_identity(root, &path)
+        else {
+            continue;
+        };
+        let other = PaneAddress {
+            realm_id,
+            incarnation_id,
+            pane_id,
+        };
+        if other == *address {
+            continue;
+        }
+        let identity = RecordIdentity::binding(&other, &launch_id, &binding_id);
+        let Ok(Some(binding)) = read_record(&path, Some("binding"), &identity) else {
+            continue;
+        };
+        if string(&binding, "provider").as_deref() != Some(provider)
+            || string(&binding, "provider_session_id").as_deref() != Some(session)
+        {
+            continue;
+        }
+        if competes(
+            binding_ended(&path, &binding, &identity),
+            &pane_presence(root, &other, panes, processes, &mut Vec::new()),
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+fn session_key(binding: &Value) -> (String, String) {
+    (
+        string(binding, "provider").unwrap_or_default(),
+        string(binding, "provider_session_id").unwrap_or_default(),
     )
+}
+
+fn record_address(record: &Value) -> Option<PaneAddress> {
+    serde_json::from_value(record.get("address")?.clone()).ok()
+}
+
+/// The socket `pane_presence` would list for this address: the realm's
+/// recorded socket, when it still carries this incarnation. None when it would
+/// answer without listing.
+fn realm_socket(root: &Path, address: &PaneAddress) -> Option<String> {
+    let realm = root.join("v2/realms").join(&address.realm_id);
+    let record = read_record(
+        &realm.join("realm.json"),
+        Some("realm"),
+        &RecordIdentity::realm(&address.realm_id),
+    )
+    .ok()??;
+    read_record(
+        &realm
+            .join("incarnations")
+            .join(&address.incarnation_id)
+            .join("incarnation.json"),
+        Some("incarnation"),
+        &RecordIdentity::incarnation(&address.realm_id, &address.incarnation_id),
+    )
+    .ok()??;
+    let socket = string(&record, "socket_path")?;
+    let (realm_id, incarnation_id, _) = socket_identity(&socket).ok()?;
+    (realm_id == address.realm_id && incarnation_id == address.incarnation_id).then_some(socket)
+}
+
+/// Whether the end record beside a binding ends it. An end older than the
+/// binding belongs to an earlier binding of the same id; an unreadable one
+/// ends nothing.
+fn binding_ended(binding_path: &Path, binding: &Value, identity: &RecordIdentity) -> bool {
+    let order = string(binding, "observed_mono_ns").unwrap_or_default();
+    binding_path
+        .parent()
+        .and_then(|dir| {
+            read_record(&dir.join("end.json"), Some("binding_end"), identity)
+                .ok()
+                .flatten()
+        })
+        .and_then(|end| string(&end, "observed_mono_ns"))
+        .is_some_and(|ended| ended >= order)
 }
 
 fn presence_at_socket(
@@ -1316,22 +1644,44 @@ pub fn read_bindings_with_ports(
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
 ) -> Result<(Vec<BindingRow>, Vec<Diagnostic>)> {
-    let (rows, diagnostics, _) = read_bindings_timed(root, panes, processes)?;
-    Ok((rows, diagnostics))
+    let answer = read_bindings_timed(root, &BindingFilter::default(), panes, processes)?;
+    Ok((answer.rows, answer.diagnostics))
+}
+
+/// A realm-wide bindings answer as the CLI reports it.
+#[derive(Debug)]
+pub struct RealmBindings {
+    pub rows: Vec<BindingRow>,
+    pub diagnostics: Vec<Diagnostic>,
+    pub timing: BindingTiming,
+    /// False when a directory in the state tree could not be read, so rows
+    /// below it may be missing. An unreadable binding record is not counted:
+    /// it is reported, and it is not a row.
+    pub walked_every_directory: bool,
 }
 
 /// The realm-wide query with where its time went; the CLI prints the timing,
 /// maintenance and the other library callers do not want it.
 pub fn read_bindings_timed(
     root: &Path,
+    filter: &BindingFilter,
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
-) -> Result<(Vec<BindingRow>, Vec<Diagnostic>, BindingTiming)> {
+) -> Result<RealmBindings> {
     let started = Instant::now();
     let mut files = Vec::new();
-    collect_binding_files(&root.join("v2/realms"), &mut files);
-    let (rows, diagnostics, spawns) = assemble_bindings(root, files, panes, processes, false)?;
-    Ok((rows, diagnostics, BindingTiming::from_wall(started, spawns)))
+    let mut diagnostics = Vec::new();
+    collect_binding_files(root, &mut files, &mut diagnostics);
+    let walked_every_directory = diagnostics.is_empty();
+    let (rows, mut read_diagnostics, spawns) =
+        assemble_bindings(root, files, filter, panes, processes, false)?;
+    diagnostics.append(&mut read_diagnostics);
+    Ok(RealmBindings {
+        rows,
+        diagnostics,
+        timing: BindingTiming::from_wall(started, spawns),
+        walked_every_directory,
+    })
 }
 
 /// One pane listing per socket, rather than one per bound pane.
@@ -1360,6 +1710,37 @@ impl<'a> ListOncePerSocket<'a> {
     fn spent(&self) -> Duration {
         self.spent.lock().map(|spent| *spent).unwrap_or_default()
     }
+
+    /// Lists every socket in `sockets` at once, one thread each, and keeps
+    /// the answers for the per-pane asks that follow. A hung socket then costs
+    /// one listing deadline for the whole query rather than one per socket.
+    /// The time charged is the wall time of the batch, not the sum.
+    fn list_together(&self, sockets: BTreeSet<String>) {
+        let wanted: Vec<String> = match self.listed.lock() {
+            Ok(listed) => sockets
+                .into_iter()
+                .filter(|socket| !listed.contains_key(socket))
+                .collect(),
+            Err(_) => return,
+        };
+        if wanted.len() < 2 {
+            return;
+        }
+        let answers = record_spent(&self.spent, || {
+            std::thread::scope(|scope| {
+                let asks: Vec<_> = wanted
+                    .iter()
+                    .map(|socket| (socket, scope.spawn(|| self.inner.list(socket))))
+                    .collect();
+                asks.into_iter()
+                    .filter_map(|(socket, ask)| Some((socket.clone(), ask.join().ok()?)))
+                    .collect::<Vec<_>>()
+            })
+        });
+        if let Ok(mut listed) = self.listed.lock() {
+            listed.extend(answers);
+        }
+    }
 }
 
 impl PaneLister for ListOncePerSocket<'_> {
@@ -1387,16 +1768,17 @@ impl PaneLister for ListOncePerSocket<'_> {
 /// kept for the lifetime of one assembly and no longer. A listing that failed
 /// is kept the same way, and answers every later miss as unavailable: asking
 /// the probe pane by pane would run the failed listing once per pane, under
-/// a fresh deadline each time. Maintenance does not use this: it deletes on
-/// the answer, so it keeps a fresh look per decision.
-struct ProbeOncePerAssembly<'a> {
+/// a fresh deadline each time. Doctor shares one across its checks. Sweep does
+/// not use this: it deletes on the answer, so it keeps a fresh look per
+/// decision.
+pub(crate) struct ProbeOncePerAssembly<'a> {
     inner: &'a dyn ProcessProbe,
     listed: Mutex<Option<ProcessListing>>,
     spent: Mutex<Duration>,
 }
 
 impl<'a> ProbeOncePerAssembly<'a> {
-    fn new(inner: &'a dyn ProcessProbe) -> Self {
+    pub(crate) fn new(inner: &'a dyn ProcessProbe) -> Self {
         Self {
             inner,
             listed: Mutex::new(None),
@@ -1432,9 +1814,32 @@ impl ProcessProbe for ProbeOncePerAssembly<'_> {
     }
 }
 
+/// Which rows a realm-wide bindings query returns. Applied before any socket
+/// is asked, so a realm ruled out costs no `wezterm cli list`.
+#[derive(Clone, Debug, Default)]
+pub struct BindingFilter {
+    pub realm_id: Option<String>,
+    pub provider: Option<String>,
+}
+
+impl BindingFilter {
+    fn admits(&self, binding: &Value) -> bool {
+        let address = binding.get("address");
+        self.realm_id.as_deref().is_none_or(|realm| {
+            address
+                .and_then(|value| value.get("realm_id"))
+                .and_then(Value::as_str)
+                == Some(realm)
+        }) && self.provider.as_deref().is_none_or(|provider| {
+            binding.get("provider").and_then(Value::as_str) == Some(provider)
+        })
+    }
+}
+
 fn assemble_bindings(
     root: &Path,
     mut files: Vec<PathBuf>,
+    filter: &BindingFilter,
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
     typed: bool,
@@ -1444,50 +1849,99 @@ fn assemble_bindings(
     let probed_once = processes.map(ProbeOncePerAssembly::new);
     let processes = probed_once.as_ref().map(|probe| probe as &dyn ProcessProbe);
     let read_record = |path: &Path, kind: Option<&str>, identity: &RecordIdentity| {
-        if !typed {
-            return read_record(path, kind, identity);
-        }
-        match read_record_typed(path, kind, identity) {
-            RecordRead::Present(value) => Ok(Some(value)),
-            RecordRead::Missing => Ok(None),
-            RecordRead::Unavailable(mut error) => {
-                error.diagnostic.message = "selected state record I/O is unavailable".into();
-                Err(error)
+        let read = if !typed {
+            read_record(path, kind, identity)
+        } else {
+            match read_record_typed(path, kind, identity) {
+                RecordRead::Present(value) => Ok(Some(value)),
+                RecordRead::Missing => Ok(None),
+                RecordRead::Unavailable(mut error) => {
+                    error.diagnostic.message = "selected state record I/O is unavailable".into();
+                    Err(error)
+                }
+                RecordRead::Invalid(error) | RecordRead::Unsupported(error) => Err(error),
             }
-            RecordRead::Invalid(error) | RecordRead::Unsupported(error) => Err(error),
-        }
+        };
+        read.map_err(|mut error| {
+            error
+                .diagnostic
+                .context
+                .insert("path".into(), Value::String(state_relative(root, path)));
+            error
+        })
     };
     files.sort();
     let mut rows = Vec::new();
     let mut diagnostics = Vec::new();
-    let mut presence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
-    let mut claim_cache: BTreeMap<PathBuf, (Option<Value>, Option<String>)> = BTreeMap::new();
+    // Every binding record is read first: its realm and provider decide
+    // whether the filter admits it, before any socket is asked.
+    let mut read = Vec::new();
     for path in files {
         let Some((path_realm, path_incarnation, path_pane, path_launch, path_binding)) =
             path_identity(root, &path)
         else {
-            diagnostics.push(diagnostic(
-                "record_invalid",
-                "binding path has the wrong shape",
-            ));
+            let mut item = diagnostic("record_invalid", "binding path has the wrong shape");
+            item.context
+                .insert("path".into(), Value::String(state_relative(root, &path)));
+            diagnostics.push(item);
             continue;
         };
+        let ruled_out = filter
+            .realm_id
+            .as_deref()
+            .is_some_and(|realm| realm != path_realm);
         let path_address = PaneAddress {
             realm_id: path_realm,
             incarnation_id: path_incarnation,
             pane_id: path_pane,
         };
-        let binding = match read_record(
+        match read_record(
             &path,
             Some("binding"),
             &RecordIdentity::binding(&path_address, &path_launch, &path_binding),
         ) {
-            Ok(Some(binding)) => binding,
-            Ok(None) => continue,
-            Err(error) => {
-                diagnostics.push(error.diagnostic);
-                continue;
-            }
+            Ok(Some(binding)) => read.push((path, binding)),
+            Ok(None) => {}
+            // A realm the filter rules out is not part of the answer, and
+            // neither are its unreadable records.
+            Err(_) if ruled_out => {}
+            Err(error) => diagnostics.push(error.diagnostic),
+        }
+    }
+    // A row outside the filter is still assessed when it shares a provider
+    // session with an admitted row: whether that session is live elsewhere is
+    // a fact about the admitted row. It is dropped from the answer afterwards.
+    let sessions: BTreeSet<(String, String)> = read
+        .iter()
+        .filter(|(_, binding)| filter.admits(binding))
+        .map(|(_, binding)| session_key(binding))
+        .collect();
+    let assessed: Vec<(PathBuf, Value, bool)> = read
+        .into_iter()
+        .filter_map(|(path, binding)| {
+            let admitted = filter.admits(&binding);
+            (admitted || sessions.contains(&session_key(&binding)))
+                .then_some((path, binding, admitted))
+        })
+        .collect();
+    if let Some(listed_once) = &listed_once {
+        listed_once.list_together(
+            assessed
+                .iter()
+                .filter_map(|(_, binding, _)| record_address(binding))
+                .filter_map(|address| realm_socket(root, &address))
+                .collect(),
+        );
+    }
+    let mut admitted_rows = Vec::new();
+    let mut ignored = Vec::new();
+    let mut presence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
+    let mut claim_cache: BTreeMap<PathBuf, (Option<Value>, Option<String>)> = BTreeMap::new();
+    for (path, binding, admitted) in assessed {
+        let diagnostics = if admitted {
+            &mut diagnostics
+        } else {
+            &mut ignored
         };
         let Some(address_value) = binding.get("address") else {
             continue;
@@ -1592,21 +2046,34 @@ fn assemble_bindings(
             cached.clone()
         } else {
             let before_presence = diagnostics.len();
-            let observed = pane_presence(root, &address, panes, processes, &mut diagnostics);
+            let observed = pane_presence(root, &address, panes, processes, diagnostics);
             if typed && observed == "unavailable" && diagnostics.len() == before_presence {
                 diagnostics.push(diagnostic(
                     "probe_unavailable",
                     "selected binding presence is unavailable",
                 ));
             }
+            // One socket failure is reported once per pane it leaves unknown;
+            // the address says which.
+            for item in &mut diagnostics[before_presence..] {
+                for (field, value) in [
+                    ("realm_id", &address.realm_id),
+                    ("incarnation_id", &address.incarnation_id),
+                    ("pane_id", &address.pane_id),
+                ] {
+                    item.context
+                        .insert(field.into(), Value::String(value.clone()));
+                }
+            }
             presence_cache.insert(presence_key, observed.clone());
             observed
         };
-        let binding_health = end_health
-            .map(str::to_owned)
-            .or(claim_health)
-            .or_else(|| pointer_health.map(str::to_owned))
-            .unwrap_or_else(|| "valid".to_owned());
+        let binding_health = binding_health(
+            [None, end_health, claim_health.as_deref(), pointer_health],
+            false,
+        )
+        .as_str()
+        .to_owned();
         rows.push(BindingRow {
             address,
             launch_id,
@@ -1615,12 +2082,7 @@ fn assemble_bindings(
             provider_session_id: string(&binding, "provider_session_id").unwrap_or_default(),
             binding_phase: if ended { "ended" } else { "active" }.to_owned(),
             pane_presence: presence.clone(),
-            reader_confidence: if current && presence == "present" {
-                "confirmed"
-            } else {
-                "unconfirmed"
-            }
-            .to_owned(),
+            reader_confidence: reader_confidence(current, &presence).as_str().to_owned(),
             binding_health,
             current,
             expected_session_match,
@@ -1631,14 +2093,11 @@ fn assemble_bindings(
             model: string(&binding, "model"),
             start_source: string(&binding, "start_source"),
         });
+        admitted_rows.push(admitted);
     }
-    // Only live claims compete. A binding that has ended, or whose pane is
-    // verified absent, is history: a session resumed in a new pane leaves one
-    // behind every time, and calling that a conflict hides the pane the session
-    // actually runs in.
     let mut duplicates: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
     for (index, row) in rows.iter().enumerate() {
-        if row.binding_phase == "ended" || row.pane_presence == "verified_absent" {
+        if !competes(row.binding_phase == "ended", &row.pane_presence) {
             continue;
         }
         duplicates
@@ -1656,7 +2115,7 @@ fn assemble_bindings(
             .collect();
         if addresses.len() > 1 {
             for index in indices {
-                rows[*index].binding_health = "conflicted".to_owned();
+                rows[*index].binding_health = BindingHealth::Conflicted.as_str().to_owned();
             }
             diagnostics.push(diagnostic(
                 "binding_conflict",
@@ -1664,6 +2123,8 @@ fn assemble_bindings(
             ));
         }
     }
+    let mut admitted_rows = admitted_rows.into_iter();
+    rows.retain(|_| admitted_rows.next().unwrap_or(false));
     rows.sort_by(|left, right| {
         (
             &left.address.realm_id,
@@ -1726,6 +2187,45 @@ pub struct TabPublication {
     pub source: Option<TabSource>,
     #[serde(skip)]
     pub(crate) relative_path: PathBuf,
+    /// The file as it stood before it was read, so a deletion decided from
+    /// these contents can refuse a file that has since been replaced.
+    #[serde(skip)]
+    pub(crate) stamp: Option<FileStamp>,
+}
+
+/// Enough of a regular file's metadata to tell that it was replaced or
+/// rewritten: a rename changes the inode, an in-place write the size or mtime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FileStamp {
+    dev: u64,
+    ino: u64,
+    nlink: u64,
+    size: u64,
+    mtime: i128,
+}
+
+impl FileStamp {
+    pub(crate) fn of(metadata: &fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            nlink: metadata.nlink(),
+            size: metadata.size(),
+            mtime: i128::from(metadata.mtime()) * 1_000_000_000 + i128::from(metadata.mtime_nsec()),
+        }
+    }
+
+    /// The stamp of the regular file at `path`, or None when nothing, or
+    /// something other than a regular file, is there now.
+    pub(crate) fn regular_file(path: &Path) -> std::io::Result<Option<Self>> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() => Ok(Some(Self::of(&metadata))),
+            Ok(_) => Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1848,7 +2348,16 @@ pub fn read_tab_publications(root: &Path) -> Result<(Vec<TabPublication>, Vec<Di
     let limits = &crate::protocol::manifest()?.limits;
     let mut windows: Vec<TabPublication> = Vec::new();
     let mut diagnostics = Vec::new();
-    let entries = match fs::read_dir(root.join("tabs")) {
+    let directory = root.join("tabs");
+    // `read_dir` follows a symlink, and sweep deletes by the paths read here,
+    // so a linked directory would aim the collection outside the state root.
+    if fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(AttentionError::new(
+            "record_invalid",
+            "tab publication directory is a symlink",
+        ));
+    }
+    let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok((windows, diagnostics));
@@ -1869,59 +2378,11 @@ pub fn read_tab_publications(root: &Path) -> Result<(Vec<TabPublication>, Vec<Di
             continue;
         };
         let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("json") {
-            continue;
-        }
-        match entry.file_type() {
-            Ok(kind) if kind.is_symlink() => {
-                diagnostics.push(diagnostic("record_invalid", "tab publication is a symlink"));
-                continue;
-            }
-            Ok(kind) if !kind.is_file() => continue,
-            Ok(_) => {}
-            Err(_) => {
-                diagnostics.push(diagnostic(
-                    "probe_unavailable",
-                    "tab publication entry type is unavailable",
-                ));
-                continue;
-            }
-        }
-        let stem = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("");
-        let (incarnation, id) = match stem.split_once('-') {
-            Some((incarnation, id)) if hex64(incarnation) => (Some(incarnation), id),
-            None => (None, stem),
-            _ => (None, ""),
-        };
-        let window_id = canonical_decimal(id, limits.canonical_decimal_max_digits)
-            .then(|| id.parse::<u64>().ok())
-            .flatten();
-        let Some(window_id) = window_id else {
-            diagnostics.push(diagnostic(
-                "record_invalid",
-                "tab publication is not named by a window ID",
-            ));
-            continue;
-        };
-        match read_record_typed(&path, None, &RecordIdentity::unscoped()) {
-            RecordRead::Present(value) => {
-                match tab_publication(&value, window_id, incarnation, limits) {
-                    Ok(mut window) => {
-                        window.relative_path = Path::new("tabs").join(format!("{stem}.json"));
-                        windows.push(window);
-                    }
-                    Err(error) => diagnostics.push(error.diagnostic),
-                }
-            }
-            // Published and removed between the listing and the read. The window
-            // it described is gone or is about to publish again.
-            RecordRead::Missing => {}
-            RecordRead::Unavailable(error)
-            | RecordRead::Invalid(error)
-            | RecordRead::Unsupported(error) => diagnostics.push(error.diagnostic),
+        let before = diagnostics.len();
+        read_tab_publication(&path, &entry, limits, &mut windows, &mut diagnostics);
+        for item in &mut diagnostics[before..] {
+            item.context
+                .insert("path".into(), Value::String(state_relative(root, &path)));
         }
     }
     windows.sort_by(|a, b| {
@@ -1930,6 +2391,73 @@ pub fn read_tab_publications(root: &Path) -> Result<(Vec<TabPublication>, Vec<Di
             .then_with(|| a.source.cmp(&b.source))
     });
     Ok((windows, diagnostics))
+}
+
+/// One entry of `tabs/`: a publication, a diagnostic, or nothing for a file
+/// that is not a tab order.
+fn read_tab_publication(
+    path: &Path,
+    entry: &fs::DirEntry,
+    limits: &crate::protocol::Limits,
+    windows: &mut Vec<TabPublication>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if path.extension().and_then(|value| value.to_str()) != Some("json") {
+        return;
+    }
+    match entry.file_type() {
+        Ok(kind) if kind.is_symlink() => {
+            diagnostics.push(diagnostic("record_invalid", "tab publication is a symlink"));
+            return;
+        }
+        Ok(kind) if !kind.is_file() => return,
+        Ok(_) => {}
+        Err(_) => {
+            diagnostics.push(diagnostic(
+                "probe_unavailable",
+                "tab publication entry type is unavailable",
+            ));
+            return;
+        }
+    }
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("");
+    let (incarnation, id) = match stem.split_once('-') {
+        Some((incarnation, id)) if hex64(incarnation) => (Some(incarnation), id),
+        None => (None, stem),
+        _ => (None, ""),
+    };
+    let window_id = canonical_decimal(id, limits.canonical_decimal_max_digits)
+        .then(|| id.parse::<u64>().ok())
+        .flatten();
+    let Some(window_id) = window_id else {
+        diagnostics.push(diagnostic(
+            "record_invalid",
+            "tab publication is not named by a window ID",
+        ));
+        return;
+    };
+    let stamp = FileStamp::regular_file(path).ok().flatten();
+    match read_record_typed(path, None, &RecordIdentity::unscoped()) {
+        RecordRead::Present(value) => {
+            match tab_publication(&value, window_id, incarnation, limits) {
+                Ok(mut window) => {
+                    window.relative_path = Path::new("tabs").join(format!("{stem}.json"));
+                    window.stamp = stamp;
+                    windows.push(window);
+                }
+                Err(error) => diagnostics.push(error.diagnostic),
+            }
+        }
+        // Published and removed between the listing and the read. The window
+        // it described is gone or is about to publish again.
+        RecordRead::Missing => {}
+        RecordRead::Unavailable(error)
+        | RecordRead::Invalid(error)
+        | RecordRead::Unsupported(error) => diagnostics.push(error.diagnostic),
+    }
 }
 
 /// Digits with no leading zero, the way every ID this project writes is spelled.
@@ -2045,11 +2573,10 @@ fn tab_publication(
         let text = entry
             .get("text")
             .and_then(Value::as_str)
+            // C1 controls count too: U+009B alone starts an escape sequence
+            // in a terminal that draws this text back.
             .filter(|text| {
-                text.len() <= limits.safe_label_max_bytes
-                    && !text
-                        .chars()
-                        .any(|character| character < ' ' || character == '\u{7f}')
+                text.len() <= limits.safe_label_max_bytes && !text.chars().any(char::is_control)
             })
             .ok_or_else(invalid)?
             .to_owned();
@@ -2077,6 +2604,7 @@ fn tab_publication(
         tabs,
         source,
         relative_path: PathBuf::new(),
+        stamp: None,
     })
 }
 
@@ -2276,5 +2804,25 @@ mod published_marker_id_tests {
             "v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:016",
             20
         ));
+    }
+}
+
+#[cfg(test)]
+mod socket_selector_tests {
+    use super::validate_socket_selector;
+
+    /// A socket path is echoed back in answers and diagnostics, so a C1
+    /// control in it is refused like any C0 one.
+    #[test]
+    fn refuses_a_socket_path_with_any_control_character() {
+        assert!(validate_socket_selector("/tmp/mux.sock").is_ok());
+        for socket in [
+            "/tmp/a\u{1b}b",
+            "/tmp/a\u{7f}b",
+            "/tmp/a\u{85}b",
+            "/tmp/a\u{9b}b",
+        ] {
+            assert!(validate_socket_selector(socket).is_err(), "{socket:?}");
+        }
     }
 }
