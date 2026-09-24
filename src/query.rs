@@ -1499,6 +1499,20 @@ pub(crate) enum PaneEvidence {
     ServerGone { diagnostic: Diagnostic },
 }
 
+/// Names the pane each diagnostic is about: its realm, incarnation and id.
+pub(crate) fn name_address(items: &mut [Diagnostic], address: &PaneAddress) {
+    for item in items {
+        for (field, value) in [
+            ("realm_id", &address.realm_id),
+            ("incarnation_id", &address.incarnation_id),
+            ("pane_id", &address.pane_id),
+        ] {
+            item.context
+                .insert(field.into(), Value::String(value.clone()));
+        }
+    }
+}
+
 /// Whether a diagnostic says a pane's server may be gone, which
 /// [`PaneEvidence::ServerGone`] carries: kept history, not a probe that did
 /// not answer.
@@ -2276,16 +2290,7 @@ fn assemble_bindings(
             }
             // One socket failure is reported once per pane it leaves unknown;
             // the address says which.
-            for item in &mut diagnostics[before_presence..] {
-                for (field, value) in [
-                    ("realm_id", &address.realm_id),
-                    ("incarnation_id", &address.incarnation_id),
-                    ("pane_id", &address.pane_id),
-                ] {
-                    item.context
-                        .insert(field.into(), Value::String(value.clone()));
-                }
-            }
+            name_address(&mut diagnostics[before_presence..], &address);
             presence_cache.insert(presence_key, observed.clone());
             observed
         };

@@ -15,7 +15,7 @@ use crate::protocol::{
 };
 use crate::query::{
     FileStamp, ListOncePerSocket, PaneEvidence, ProbeOncePerAssembly, collect_binding_files,
-    collect_state_files, kept_history_code, pane_evidence, read_bindings_with_ports,
+    collect_state_files, kept_history_code, name_address, pane_evidence, read_bindings_with_ports,
     read_tab_publications, record_address,
 };
 use crate::records::{
@@ -1039,16 +1039,18 @@ fn absence_presence(
 
 /// Names the pane and binding each diagnostic is about.
 fn name_pane(items: &mut [Diagnostic], address: &PaneAddress, binding_id: &str) {
+    name_address(items, address);
     for item in items {
-        for (field, value) in [
-            ("realm_id", address.realm_id.as_str()),
-            ("incarnation_id", &address.incarnation_id),
-            ("pane_id", &address.pane_id),
-            ("binding_id", binding_id),
-        ] {
-            item.context.insert(field.into(), json!(value));
-        }
+        item.context.insert("binding_id".into(), json!(binding_id));
     }
+}
+
+/// The diagnostic for a pane whose absence could not be established, named
+/// by the pane and binding it is about.
+fn absence_unavailable(message: &str, address: &PaneAddress, binding_id: &str) -> Diagnostic {
+    let mut item = diagnostic("probe_unavailable", message);
+    name_pane(std::slice::from_mut(&mut item), address, binding_id);
+    item
 }
 
 /// The diagnostics doctor and sweep report. Kept history, the panes whose
@@ -1383,15 +1385,9 @@ fn collect_tab_orders(
                             };
                         // Named by the file that asked and the pane it asked
                         // about, as a bindings answer names its panes.
+                        name_address(&mut diagnostics[before..], address);
                         for item in &mut diagnostics[before..] {
                             item.context.insert("path".into(), json!(relative));
-                            for (field, value) in [
-                                ("realm_id", &address.realm_id),
-                                ("incarnation_id", &address.incarnation_id),
-                                ("pane_id", &address.pane_id),
-                            ] {
-                                item.context.insert(field.into(), json!(value));
-                            }
                         }
                         presence_cache.insert(key.clone(), observed.clone());
                         observed
@@ -1742,9 +1738,11 @@ fn pane_retention(
     let detail =
         |action: &str| json!({"kind":"pane_retention","binding_id":binding_id,"action":action});
     if action == "unavailable" {
-        let mut item = diagnostic("probe_unavailable", "pane absence cannot be established");
-        name_pane(std::slice::from_mut(&mut item), address, binding_id);
-        diagnostics.push(item);
+        diagnostics.push(absence_unavailable(
+            "pane absence cannot be established",
+            address,
+            binding_id,
+        ));
     }
     if !run.apply {
         details.push(if action != "end" {
@@ -2293,10 +2291,11 @@ pub fn sweep(
         if !apply {
             details.push(json!({"kind":"absence","binding_id":binding_id,"action":preview_action}));
             if preview_action == "unavailable" {
-                let mut item =
-                    diagnostic("probe_unavailable", "binding absence cannot be established");
-                name_pane(std::slice::from_mut(&mut item), &address, binding_id);
-                diagnostics.push(item);
+                diagnostics.push(absence_unavailable(
+                    "binding absence cannot be established",
+                    &address,
+                    binding_id,
+                ));
             }
             continue;
         }
@@ -2407,12 +2406,11 @@ pub fn sweep(
                         json!({"kind":"absence","binding_id":binding_id,"action":outcome.action}),
                     );
                     if outcome.action == "unavailable" && fresh_presence != SERVER_GONE {
-                        let mut item = diagnostic(
-                            "probe_unavailable",
+                        diagnostics.push(absence_unavailable(
                             "binding absence cannot be established",
-                        );
-                        name_pane(std::slice::from_mut(&mut item), &address, binding_id);
-                        diagnostics.push(item);
+                            &address,
+                            binding_id,
+                        ));
                     }
                 }
             }
