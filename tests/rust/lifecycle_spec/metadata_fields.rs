@@ -74,3 +74,54 @@ fn a_bad_optional_field_is_dropped_and_the_event_kept() {
     let clean = event("claude", "Stop", "metadata", json!({}));
     assert!(clean.diagnostic.is_none());
 }
+
+// Providers add enum values faster than the manifest does (Claude 2.1.280
+// already sends error "verification_required"). A value this writer does not
+// know keeps the observation: it reads as "unknown" where the vocabulary has
+// that word, and is left out where it does not. A known value that another
+// provider owns is a contradiction, not news, and is still refused.
+#[test]
+fn an_unknown_native_enum_value_keeps_the_observation() {
+    let snapshot_json = |value: &ProviderEvent| {
+        serde_json::to_value(value.observation.as_ref().expect("observation kept")).unwrap()
+    };
+    let failure = event(
+        "claude",
+        "StopFailure",
+        "enums",
+        json!({"error":"verification_required"}),
+    );
+    assert!(failure.observation_diagnostic.is_none());
+    assert_eq!(snapshot_json(&failure)["error_category"], "unknown");
+
+    let known = event(
+        "claude",
+        "StopFailure",
+        "enums",
+        json!({"error":"rate_limit"}),
+    );
+    assert_eq!(snapshot_json(&known)["error_category"], "rate_limit");
+
+    let input = event("pi", "input", "enums", json!({"source":"voice"}));
+    assert!(input.observation_diagnostic.is_none());
+    assert!(snapshot_json(&input).get("input_source").is_none());
+
+    for (provider, name, field, value) in [
+        ("claude", "PreCompact", "trigger", "scheduled"),
+        ("pi", "session_compact", "reason", "idle"),
+    ] {
+        let compaction = event(provider, name, "enums", json!({ field: value }));
+        assert!(
+            compaction.observation_diagnostic.is_none(),
+            "{provider} {value}"
+        );
+        assert!(snapshot_json(&compaction).get("trigger").is_none());
+    }
+    let foreign = event(
+        "claude",
+        "PreCompact",
+        "enums",
+        json!({"trigger":"threshold"}),
+    );
+    assert!(foreign.observation_diagnostic.is_some());
+}

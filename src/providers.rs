@@ -1086,16 +1086,17 @@ fn optional_observation_enum(
     vocabulary: &str,
 ) -> std::result::Result<Option<String>, Diagnostic> {
     let value = strict_optional_label(payload, field)?;
-    if value.as_ref().is_some_and(|value| {
-        !manifest().expect("manifest was validated").lifecycle_enums[vocabulary].contains(value)
-    }) {
-        return Err(AttentionError::new(
-            "integration_version_mismatch",
-            "native lifecycle enum is unsupported",
-        )
-        .diagnostic);
-    }
-    Ok(value)
+    let known = &manifest().expect("manifest was validated").lifecycle_enums[vocabulary];
+    // Providers add values before this writer learns them. The observation is
+    // still true without the detail, so an unknown value becomes "unknown"
+    // where the vocabulary has that word and is left out where it does not.
+    Ok(value.and_then(|value| {
+        if known.contains(&value) {
+            Some(value)
+        } else {
+            known.get("unknown").cloned()
+        }
+    }))
 }
 
 fn parse_run_observation(
