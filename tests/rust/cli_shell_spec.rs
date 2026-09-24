@@ -14,6 +14,109 @@ mod executables;
 #[path = "support/trusted_scratch.rs"]
 mod trusted_scratch;
 
+/// The build script itself, included so the identity it computes can be
+/// checked against scratch repositories without a nested cargo build.
+#[allow(dead_code)]
+mod build_script {
+    include!("../../build.rs");
+
+    use super::Scratch;
+    use std::fs;
+
+    #[test]
+    fn the_build_identity_names_only_this_checkout_and_watches_only_files_that_exist() {
+        let scratch = Scratch::new();
+        let git = |directory: &Path, args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(directory)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+        };
+        let crate_files = |directory: &Path| {
+            for (path, text) in [
+                ("src/main.rs", "fn main() {}\n"),
+                ("protocol/v2.json", "{}\n"),
+                ("build.rs", "fn main() {}\n"),
+                ("Cargo.toml", "[package]\n"),
+                ("Cargo.lock", "\n"),
+                ("docs/notes.md", "notes\n"),
+            ] {
+                let path = directory.join(path);
+                fs::create_dir_all(path.parent().expect("parent")).expect("create directory");
+                fs::write(path, text).expect("write crate file");
+            }
+        };
+        let every_watched_path_exists = |identity: &BuildIdentity| {
+            for path in &identity.watched {
+                assert!(
+                    path.exists(),
+                    "watching a missing path rebuilds every time: {path:?}"
+                );
+            }
+        };
+        let is_commit =
+            |build: &str| build.len() == 12 && build.bytes().all(|b| b.is_ascii_hexdigit());
+
+        let repository = scratch.0.join("repository");
+        crate_files(&repository);
+        git(&repository, &["init", "-q", "-b", "main"]);
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "-q", "-m", "initial"]);
+        let clean = build_identity(&repository);
+        assert!(is_commit(&clean.build), "{}", clean.build);
+        every_watched_path_exists(&clean);
+        assert!(clean.watched.contains(&repository.join("src")));
+
+        fs::write(repository.join("docs/notes.md"), "edited\n").expect("edit a document");
+        assert_eq!(build_identity(&repository).build, clean.build);
+        fs::write(repository.join("src/main.rs"), "fn main() { }\n").expect("edit a source");
+        assert_eq!(
+            build_identity(&repository).build,
+            format!("{}-dirty", clean.build)
+        );
+        git(
+            &repository,
+            &["checkout", "-q", "--", "src/main.rs", "docs/notes.md"],
+        );
+
+        let vendored = repository.join("vendor/attention");
+        crate_files(&vendored);
+        let copy = build_identity(&vendored);
+        assert_eq!(copy.build, "unknown", "a vendored copy names no commit");
+        assert_eq!(copy.watched.len(), BINARY_INPUTS.len());
+
+        let linked = scratch.0.join("linked");
+        let linked_path = linked.to_str().expect("UTF-8 scratch path");
+        git(
+            &repository,
+            &["worktree", "add", "-q", "-b", "linked", linked_path],
+        );
+        git(&repository, &["pack-refs", "--all"]);
+        for checkout in [&repository, &linked] {
+            let identity = build_identity(checkout);
+            assert_eq!(identity.build, clean.build, "{checkout:?}");
+            every_watched_path_exists(&identity);
+            assert!(
+                identity
+                    .watched
+                    .iter()
+                    .any(|path| path.ends_with("logs/HEAD")),
+                "a commit on a packed ref still moves a watched file: {:?}",
+                identity.watched
+            );
+        }
+    }
+}
+
 struct Scratch(PathBuf);
 
 impl Scratch {
