@@ -39,8 +39,8 @@ local unsafe_root_problem = "longer than " .. path_max_bytes
 --- then ~/.local/state/wezterm-attention. An empty value counts as unset, and a
 --- relative XDG_STATE_HOME is ignored as the XDG spec says, as is one the
 --- writer would refuse. A WEZTERM_ATTENTION_DIR that is relative or that the
---- writer would refuse, and an XDG_STATE_HOME that is not UTF-8, are errors
---- to the CLI; here they are ignored, and the second return says so for the
+--- writer would refuse, and an absolute XDG_STATE_HOME that is not UTF-8, are
+--- errors to the CLI; here they are ignored, and the second return says so for the
 --- log.
 local function resolve_state_root()
   local note

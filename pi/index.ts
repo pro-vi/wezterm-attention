@@ -93,7 +93,8 @@ function safeRootText(path: string): boolean {
 // used: a relative root would scatter markers under the cwd and let clear's rm()
 // delete a cwd-relative file. So is a value the writer would refuse; here, as
 // in the plugin, a WEZTERM_ATTENTION_DIR like that, or an XDG_STATE_HOME that
-// is not UTF-8, is reported and the next rule applies. writerStateRootRefusal
+// is not UTF-8 (the writer refuses only an absolute one), is reported and the
+// next rule applies. writerStateRootRefusal
 // handles the configured writer.
 // The final isAbsolute gate closes the HOME="" hole (homedir() also returns ""
 // for HOME=""), so don't drop it.

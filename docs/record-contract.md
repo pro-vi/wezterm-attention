@@ -17,9 +17,9 @@ The state root is `WEZTERM_ATTENTION_DIR` when it is set and non-empty, else
 one order. A relative `WEZTERM_ATTENTION_DIR`, or one longer than 4096 bytes, holding a control
 character or not UTF-8, is an error to the writer; the plugin, and Pi without a configured writer,
 ignore it with a warning and fall through to the next rule, and Pi with a configured writer refuses a
-value that is not UTF-8 where it decides the root and does not start the writer. An `XDG_STATE_HOME` that is relative, too long or holds a control character is skipped by all three. One that
-is not UTF-8 is an error to the writer when it decides the root, as such a `WEZTERM_ATTENTION_DIR`
-is, because the writer cannot name that directory; the plugin skips it with a warning, and Pi
+value that is not UTF-8 where it decides the root and does not start the writer. An `XDG_STATE_HOME` that is relative, too long or holds a control character is skipped by all three. An absolute one
+that is not UTF-8 is an error to the writer when it decides the root, even when it is also too long or
+holds a control character, as such a `WEZTERM_ATTENTION_DIR` is, because the writer cannot name that directory; the plugin skips it with a warning, and Pi
 skips it with a warning or, with a configured writer, refuses it, so the failure is reported on
 every side.
 
