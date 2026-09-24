@@ -844,6 +844,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 // provider left out costs no pane listing.
                 let filter = wezterm_attention::query::BindingFilter {
                     realm_id: args.realm.clone(),
+                    incarnation_id: None,
                     provider: args.provider.clone(),
                 };
                 let answer = read_bindings_timed(&root, &filter, Some(&panes), Some(&processes))

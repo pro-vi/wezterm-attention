@@ -1129,14 +1129,21 @@ pub fn read_bindings_for_socket_timed(
     let mut files = Vec::new();
     let mut diagnostics = Vec::new();
     collect_selected_binding_files(&selected, &mut files, &mut diagnostics, true);
-    let (rows, mut read_diagnostics, spawns) = assemble_bindings(
-        root,
-        files,
-        &BindingFilter::default(),
-        panes,
-        processes,
-        true,
-    )?;
+    // Whether a row's provider session is live at another pane address is a
+    // fact about the row, and the other address may be under any server, as
+    // inspect finds it. The rest of the store is walked for those rivals only:
+    // what it cannot read there is not part of this server's answer.
+    let mut elsewhere = Vec::new();
+    collect_binding_files(root, &mut elsewhere, &mut Vec::new());
+    elsewhere.retain(|path| !path.starts_with(&selected) && path_identity(root, path).is_some());
+    files.extend(elsewhere);
+    let filter = BindingFilter {
+        realm_id: Some(scope.realm_id.clone()),
+        incarnation_id: Some(scope.incarnation_id.clone()),
+        provider: None,
+    };
+    let (rows, mut read_diagnostics, spawns) =
+        assemble_bindings(root, files, &filter, panes, processes, true)?;
     diagnostics.append(&mut read_diagnostics);
     let after = socket_identity(socket)?;
     if after.0 != scope.realm_id || after.1 != scope.incarnation_id {
@@ -1815,25 +1822,41 @@ impl ProcessProbe for ProbeOncePerAssembly<'_> {
     }
 }
 
-/// Which rows a realm-wide bindings query returns. Applied before any socket
-/// is asked, so a realm ruled out costs no `wezterm cli list`.
+/// Which rows a bindings query returns. Applied before any socket is asked,
+/// so a realm ruled out costs no `wezterm cli list`. `incarnation_id` is set
+/// by the socket-scoped query, which returns one server's rows.
 #[derive(Clone, Debug, Default)]
 pub struct BindingFilter {
     pub realm_id: Option<String>,
+    pub incarnation_id: Option<String>,
     pub provider: Option<String>,
 }
 
 impl BindingFilter {
+    /// Whether a binding at this realm and incarnation can be returned,
+    /// whatever its provider.
+    fn admits_path(&self, realm_id: &str, incarnation_id: &str) -> bool {
+        self.realm_id
+            .as_deref()
+            .is_none_or(|realm| realm == realm_id)
+            && self
+                .incarnation_id
+                .as_deref()
+                .is_none_or(|incarnation| incarnation == incarnation_id)
+    }
+
     fn admits(&self, binding: &Value) -> bool {
         let address = binding.get("address");
-        self.realm_id.as_deref().is_none_or(|realm| {
+        let field = |name: &str| {
             address
-                .and_then(|value| value.get("realm_id"))
+                .and_then(|value| value.get(name))
                 .and_then(Value::as_str)
-                == Some(realm)
-        }) && self.provider.as_deref().is_none_or(|provider| {
-            binding.get("provider").and_then(Value::as_str) == Some(provider)
-        })
+                .unwrap_or_default()
+        };
+        self.admits_path(field("realm_id"), field("incarnation_id"))
+            && self.provider.as_deref().is_none_or(|provider| {
+                binding.get("provider").and_then(Value::as_str) == Some(provider)
+            })
     }
 }
 
@@ -1887,10 +1910,7 @@ fn assemble_bindings(
             diagnostics.push(item);
             continue;
         };
-        let ruled_out = filter
-            .realm_id
-            .as_deref()
-            .is_some_and(|realm| realm != path_realm);
+        let ruled_out = !filter.admits_path(&path_realm, &path_incarnation);
         let path_address = PaneAddress {
             realm_id: path_realm,
             incarnation_id: path_incarnation,
@@ -1903,8 +1923,8 @@ fn assemble_bindings(
         ) {
             Ok(Some(binding)) => read.push((path, binding)),
             Ok(None) => {}
-            // A realm the filter rules out is not part of the answer, and
-            // neither are its unreadable records.
+            // A realm or server the filter rules out is not part of the
+            // answer, and neither are its unreadable records.
             Err(_) if ruled_out => {}
             Err(error) => diagnostics.push(error.diagnostic),
         }
@@ -2117,6 +2137,11 @@ fn assemble_bindings(
         if addresses.len() > 1 {
             for index in indices {
                 rows[*index].binding_health = BindingHealth::Conflicted.as_str().to_owned();
+            }
+            // Rows outside the filter that conflict only with each other are
+            // not part of this answer.
+            if !indices.iter().any(|index| admitted_rows[*index]) {
+                continue;
             }
             diagnostics.push(diagnostic(
                 "binding_conflict",

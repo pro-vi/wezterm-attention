@@ -119,9 +119,9 @@ attention bindings --socket /absolute/path/to/mux.sock --json
 attention hooks publish --socket /absolute/path/to/mux.sock --json
 ```
 
-Socket-selected discovery resolves the socket before enumerating its exact realm and incarnation, then checks the original path again after reading. Stable responses add `result.scope` with exactly `realm_id` and `incarnation_id`, including when `rows` is empty. Existing `rows`, `scanned`, `returned`, `truncated`, `--provider`, `--limit` and `--all` retain their meanings. `--socket` conflicts with `--realm`.
+Socket-selected discovery resolves the socket before enumerating its exact realm and incarnation, then checks the original path again after reading. Stable responses add `result.scope` with exactly `realm_id` and `incarnation_id`, including when `rows` is empty. Existing `rows`, `scanned`, `returned`, `truncated`, `--provider`, `--limit` and `--all` retain their meanings. `--socket` conflicts with `--realm`. The rows are that server's, but a rival binding of the same provider session is looked for across the whole store, as `inspect` does, so a row's `binding_health` reads the same in both; records outside the selected server that cannot be read are not reported.
 
-Selected-record or directory failures, detected identity rotation, and socket resolution or required mux/process probe failures make the answer incomplete; see [Exit codes and envelopes](#exit-codes-and-envelopes). Identity failure or rotation supplies no usable scope or rows. Empty bindings do not prove that no agents exist.
+Selected-record or directory failures, detected identity rotation, socket resolution or required mux/process probe failures, and a `binding_conflict` on a returned row make the answer incomplete; see [Exit codes and envelopes](#exit-codes-and-envelopes). Identity failure or rotation supplies no usable scope or rows. Empty bindings do not prove that no agents exist.
 
 The socket query creates no state directories, takes no writer locks, and performs no publication, acknowledgement or maintenance. Its WezTerm pane query explicitly supplies `--no-auto-start`. Queries without `--socket` retain the existing response shape.
 
