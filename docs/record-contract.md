@@ -76,8 +76,11 @@ The flat format remains permanently supported input: third-party writers and
 Pi's fallback may still create `<root>/<pane_id>` and `<pane_id>.agents`, and
 the Lua reader keeps accepting them. Writer-owned leftovers from development builds that
 projected v2 records into those names are collected with `attention sweep --json` to preview,
-then `attention sweep --apply --operation-id 00000000-0000-4000-8000-000000000001`.
-The operation id must be a canonical lowercase UUID. Collection follows a unique
+then `attention sweep --apply --operation-id "$(uuidgen | tr A-Z a-z)"`.
+The operation id must be a canonical lowercase UUID, new for every run. A run
+that reuses an earlier run's id is treated as a replay of that run: it ends no
+binding and advances no retention floor, and no diagnostic says so, because the
+absence rule needs two observations under different ids. Collection follows a unique
 v2 claim for that scalar pane id; it does not ask whether a live writer of v1 flat markers currently
 occupies the same number, so preview the stems before applying. `.review` is user
 state and is never collected that way.
