@@ -15,8 +15,8 @@ use crate::protocol::{
 };
 use crate::query::{
     FileStamp, ListOncePerSocket, PaneEvidence, ProbeOncePerAssembly, collect_binding_files,
-    collect_state_files, pane_evidence, read_bindings_with_ports, read_tab_publications,
-    record_address,
+    collect_state_files, kept_history_code, pane_evidence, read_bindings_with_ports,
+    read_tab_publications, record_address,
 };
 use crate::records::{
     CommitPlan, RecordIdentity, Replacement, atomic_replace_if_different, binding_session_entry,
@@ -450,12 +450,10 @@ pub fn doctor_with_environment(
         .any(|item| item.code == "realm_unavailable")
     {
         "unavailable"
-    } else if state_diagnostics.iter().any(|item| {
-        matches!(
-            item.code.as_str(),
-            "socket_gone" | "socket_refused" | "incarnation_changed"
-        )
-    }) {
+    } else if state_diagnostics
+        .iter()
+        .any(|item| kept_history_code(&item.code))
+    {
         "finding"
     } else if realm_sockets.is_empty() {
         "unobserved"
@@ -1073,11 +1071,9 @@ fn fold_kept_history(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         };
-        if matches!(
-            item.code.as_str(),
-            "socket_gone" | "socket_refused" | "incarnation_changed"
-        ) && let (Some(realm_id), Some(incarnation_id), Some(pane_id)) =
-            (field("realm_id"), field("incarnation_id"), field("pane_id"))
+        if kept_history_code(&item.code)
+            && let (Some(realm_id), Some(incarnation_id), Some(pane_id)) =
+                (field("realm_id"), field("incarnation_id"), field("pane_id"))
         {
             let position = folded.len();
             let (_, incarnations) = held.entry(item.code.clone()).or_insert_with(|| {

@@ -1516,6 +1516,16 @@ pub(crate) enum PaneEvidence {
     ServerGone { diagnostic: Diagnostic },
 }
 
+/// Whether a diagnostic says a pane's server may be gone, which
+/// [`PaneEvidence::ServerGone`] carries: kept history, not a probe that did
+/// not answer.
+pub(crate) fn kept_history_code(code: &str) -> bool {
+    matches!(
+        code,
+        "socket_gone" | "socket_refused" | "incarnation_changed"
+    )
+}
+
 /// What the socket at a realm's recorded path says of the server that held
 /// one of its incarnations.
 pub(crate) enum RecordedServer {
