@@ -285,6 +285,15 @@ Once you know such a server is gone, remove its records yourself: the `path`
 each incarnation carries in that diagnostic is relative to the state root, as
 in `<state root>/v2/realms/<realm id>/incarnations/<incarnation id>`.
 
+## Empty session directories stay in the index
+
+The session index keeps one directory per provider session, `v2/sessions/<session key>/`.
+Retention removes a binding's entry but never the directory, even once it is empty: a bind of
+the same session in another pane may be creating its entry there at that moment, and removing
+the directory under it would refuse that bind. So one empty directory stays for every provider
+session ever bound, and `doctor` walks them. Each is an empty directory; remove the empty ones by
+hand if their number matters to you.
+
 ## After a reboot, pane retention can wait without bound
 
 Absence sightings are ordered by the monotonic clock, which restarts at boot. A

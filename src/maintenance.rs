@@ -1622,17 +1622,6 @@ fn session_entries_below(root: &Path, dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Removes the session directory of each entry sweep removed, when nothing
-/// is left in it, so the index does not keep a directory for every provider
-/// session ever bound. A directory a bind has since written an entry into is
-/// not empty and stays; a failure here removes nothing else and is not
-/// reported.
-fn remove_emptied_session_dirs(entries: &[PathBuf]) {
-    for dir in entries.iter().filter_map(|entry| entry.parent()) {
-        let _ = fs::remove_dir(dir);
-    }
-}
-
 /// An apply's pane lister: a listing that failed answers every later ask
 /// about that socket for the rest of the run, and one that answered is taken
 /// fresh each time. A failed listing leaves a pane undecided and so removes
@@ -1764,7 +1753,6 @@ fn pane_retention(
         .join("end.json");
     // The presence above was taken before the locks, as for a binding's own
     // absence. Under them only the records are checked again.
-    let mut entries = Vec::new();
     let applied = commit_nested_with(
         &launch_path(root, address, launch_id).join(".lock"),
         &pane.join(".claim.lock"),
@@ -1839,9 +1827,8 @@ fn pane_retention(
                     }
                     // The tree first: an entry left behind names a binding
                     // that is gone, which a reader skips.
-                    entries = session_entries_below(root, &pane);
                     let mut removals = vec![pane.clone()];
-                    removals.extend(entries.iter().cloned());
+                    removals.extend(session_entries_below(root, &pane));
                     plan("prune", removals, kept)
                 }
                 other => plan(other, Vec::new(), Vec::new()),
@@ -1851,7 +1838,6 @@ fn pane_retention(
     );
     match applied {
         Ok(((action, locked_diagnostics), ())) => {
-            remove_emptied_session_dirs(&entries);
             diagnostics.extend(locked_diagnostics);
             if action != "changed" {
                 details.push(detail(&action));
@@ -2474,7 +2460,6 @@ pub fn sweep(
         let binding_id = binding["binding_id"].as_str().unwrap_or("");
         let launch = launch_path(root, &address, launch_id);
         let pane = pane_path(root, &address);
-        let mut entries = Vec::new();
         let outcome = commit_nested_with(
             &launch.join(".lock"),
             &pane.join(".claim.lock"),
@@ -2569,9 +2554,8 @@ pub fn sweep(
                             &mut local_diagnostics,
                         )
                     {
-                        entries = session_entries_below(root, &binding_dir);
                         let mut removals = vec![binding_dir.clone()];
-                        removals.extend(entries.iter().cloned());
+                        removals.extend(session_entries_below(root, &binding_dir));
                         return Ok(CommitPlan {
                             result: RetentionOutcome {
                                 pruned: true,
@@ -2597,7 +2581,6 @@ pub fn sweep(
         );
         match outcome {
             Ok((outcome, ())) => {
-                remove_emptied_session_dirs(&entries);
                 diagnostics.extend(outcome.diagnostics);
                 if outcome.pruned {
                     details.push(json!({"kind":"binding_retention","binding_id":binding_id_for_detail,"action":"prune"}));

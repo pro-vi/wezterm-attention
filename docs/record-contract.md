@@ -65,8 +65,8 @@ copy of anything: a binding is written with its entry in the same commit, and a 
 index only while the `session_index` record `complete.json` is present. A claim that starts a new
 store writes that record; a store with bindings from before the index gets it from the first
 `sweep --apply` that reads every binding and gives each one its entry. Without it, readers walk
-every binding as before. Retention removes an entry with the binding or pane tree it names, and
-then the session's directory in the index once nothing is left in it.
+every binding as before. Retention removes an entry with the binding or pane tree it names; the
+session's directory in the index stays, empty, once its last entry is gone.
 
 State that is not addressed by a pane lives outside that tree and outside this manifest. The tab bar publishes the order it draws at `tabs/<incarnation id>-<window id>.json`, one file per identified GUI source and window; it names no pane address, carries no pane execution fence and no TTL, so it carries its own `schema` (currently 2) and is versioned separately from `record_schema`. That is the rule for any published fact with no address to validate against: a local schema field, not a manifest entry, because a record-tree change must not refuse a file that has nothing to do with it. `attention tabs` reads them. The process that wrote a file withdraws it when its window closes, and only its own files; a file whose writer has exited is collected by `attention sweep` when every pane it names is verified absent, or when it names no tab at all. See the [consumer guide](consumer-guide.md) for what the order does and does not promise.
 
