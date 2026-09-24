@@ -55,12 +55,11 @@ return function(context)
   end
 
   -- What follows an ESC byte, or the C1 character that stands for ESC and
-  -- that byte, to open a sequence with a body. Anything else after an ESC is
-  -- a short sequence: intermediate bytes, then one final byte.
+  -- that byte, to open a sequence with a body. That C1 character is 0xC2 and
+  -- then the byte plus 0x40. Anything else after an ESC is a short sequence:
+  -- intermediate bytes, then one final byte.
   local after_esc = { [0x5B] = "csi", [0x5D] = "osc", [0x50] = "string", [0x58] = "string",
     [0x5E] = "string", [0x5F] = "string" }
-  local c1_opener = { [0x9B] = "csi", [0x9D] = "osc", [0x90] = "string", [0x98] = "string",
-    [0x9E] = "string", [0x9F] = "string" }
 
   --- Where the sequence of `kind` whose body starts at `body` ends: the index
   --- just past it, or past the text when it is never closed. A string runs to
@@ -104,7 +103,7 @@ return function(context)
         if kind then body = start + 2
         elseif next_byte and next_byte >= 0x20 and next_byte <= 0x7E then kind, body = "short", start + 1 end
       else
-        kind = next_byte and c1_opener[next_byte]
+        kind = next_byte and after_esc[next_byte - 0x40]
         body = start + 2
       end
       if kind then
