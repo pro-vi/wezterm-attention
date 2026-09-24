@@ -15,7 +15,9 @@ cd "$root"
 # The build script records the commit; touching it makes cargo run it again
 # even when no source file changed since the last build.
 touch -- "$root/build.rs"
-cargo build --release
+# CARGO_TARGET_DIR or build.target-dir would move the build elsewhere, and the
+# copy below would take a stale binary from an earlier build.
+cargo build --release --target-dir "$root/target"
 cp -- "$root/target/release/attention" "$temporary"
 chmod 755 "$temporary"
 mv -f -- "$temporary" "$destination"

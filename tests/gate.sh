@@ -98,6 +98,7 @@ for bash_shell in "$@"; do
   sh tests/shell/bash_integration_spec.sh "$bash_shell" "$bash_preexec"
 done
 sh tests/shell/zsh_integration_spec.sh
+sh tests/shell/scripts_spec.sh
 
 pi_baseline=${ATTENTION_PI_BASELINE_ROOT:-}
 if [ -z "$pi_baseline" ]; then
@@ -137,7 +138,7 @@ if [ -z "$baseline_binary" ]; then
   cargo build --release --manifest-path "$gate_scratch/baseline/Cargo.toml" --target-dir "$root/target/performance-baseline"
   baseline_binary="$root/target/performance-baseline/release/attention"
 fi
-cargo build --release
+cargo build --release --target-dir "$root/target"
 python3 tests/python/measure.py --baseline-rust "$baseline_binary" --rust-binary "$root/target/release/attention"
 
 
