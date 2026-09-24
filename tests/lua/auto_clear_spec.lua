@@ -3263,6 +3263,36 @@ test("a newer same-binding confirmation reopens an older end snapshot", function
   assert(view.binding_phase == "active", "an end older than the latest binding confirmation must not remain terminal")
 end)
 
+test("an end naming its binding event ends it though its stamp is older, as after a reboot", function()
+  materialize_state_case(protocol_fixture.state_case)
+  local samples = protocol_fixture.record_samples
+  local bindings = test_dir .. "/v2/realms/" .. samples.claim.address.realm_id
+    .. "/incarnations/" .. samples.claim.address.incarnation_id
+    .. "/panes/42/launches/" .. samples.claim.launch_id
+    .. "/bindings/" .. samples.binding.binding_id
+  -- The monotonic clock restarts at boot: an end written after a reboot
+  -- carries a smaller stamp than the binding recorded before it.
+  local binding = decode_json(encode_json(samples.binding))
+  binding.observed_mono_ns = "00000000005000000000"
+  write_json_path(bindings .. "/binding.json", binding)
+  local ending = decode_json(encode_json(samples.binding_end))
+  ending.binding_event_id = binding.event_id
+  write_json_path(bindings .. "/end.json", ending)
+  local function phase(pane_id)
+    local read = internal.resolve_pane_read(mux_pane(pane_id, {
+      domain = "unix", attention = protocol_fixture.wire_sample,
+    }))
+    return internal.read_attention_view(read,
+      protocol_fixture.state_case.now_unix_ns, { dir = test_dir, glob = wezterm.glob }).binding_phase
+  end
+  assert(phase(4283) == "ended", "the end names this binding event, whatever the clocks say")
+  -- A resume records a new binding event; an older end naming the earlier one
+  -- does not end it.
+  binding.event_id = "00000000-0000-4000-8000-000000000015"
+  write_json_path(bindings .. "/binding.json", binding)
+  assert(phase(4284) == "active", "an end naming an earlier binding event does not end a resumed one")
+end)
+
 test("raw subagent and review ids never become fixture paths", function()
   local state = protocol_fixture.state_case
   local samples = protocol_fixture.record_samples

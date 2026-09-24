@@ -360,6 +360,19 @@ return function(context)
     }
   end
 
+  --- Whether an end record ends this binding record, the rule the writer
+  --- applies. An end ends the binding event it names in `binding_event_id`,
+  --- whatever the clocks say: the monotonic clock restarts at boot, so an end
+  --- written after a reboot carries a smaller stamp than a binding recorded
+  --- before it. An end observed at or after the binding ends it too. Any
+  --- other end belongs to an earlier binding of the same id, which a resume
+  --- replaced.
+  local function ends_binding(binding_end, binding)
+    return (binding_end.binding_event_id ~= nil
+        and binding_end.binding_event_id == binding.event_id)
+      or binding_end.observed_mono_ns >= binding.observed_mono_ns
+  end
+
   local function read_view_at(read, now_unix_ns, opts)
     local diagnostics = {}
     local previous = opts and opts.previous_view or nil
@@ -629,8 +642,7 @@ return function(context)
       source = activity and activity.source or nil,
       subagents = subagents,
       review = review,
-      binding_phase = binding_end and binding
-        and binding_end.observed_mono_ns >= binding.observed_mono_ns
+      binding_phase = binding_end and binding and ends_binding(binding_end, binding)
         and "ended" or (binding and "active" or nil),
       pane_presence = unavailable and "unavailable" or "present",
       reader_confidence = unavailable and "unconfirmed" or "confirmed",
