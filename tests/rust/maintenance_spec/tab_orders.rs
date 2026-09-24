@@ -131,8 +131,8 @@ fn a_tab_order_rewritten_during_the_decision_is_kept() {
 }
 
 /// A tab order naming a pane whose socket is gone is kept, as one naming an
-/// unanswered pane is, and what sweep found about that pane names the file
-/// and the pane it was looking at.
+/// unanswered pane is, and the gone socket is reported with the rest of the
+/// kept history, by the incarnation that holds the pane.
 #[test]
 fn a_tab_order_naming_a_pane_of_a_gone_socket_is_kept_and_named() {
     let setup = Setup::new();
@@ -158,12 +158,19 @@ fn a_tab_order_naming_a_pane_of_a_gone_socket_is_kept_and_named() {
             !diagnostics.iter().any(|d| d.code == "probe_unavailable"),
             "{diagnostics:?}"
         );
-        assert!(
-            diagnostics.iter().any(|d| d.code == "realm_unavailable"
-                && d.context.get("path") == Some(&json!("tabs/5.json"))
-                && d.context.get("pane_id") == Some(&json!("42"))
-                && d.context.get("realm_id") == Some(&json!(address.realm_id))
-                && d.context.get("incarnation_id") == Some(&json!(address.incarnation_id))),
+        let gone: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == "socket_gone")
+            .collect();
+        assert_eq!(gone.len(), 1, "{diagnostics:?}");
+        assert_eq!(
+            gone[0].context.get("incarnations"),
+            Some(&json!([{
+                "realm_id": address.realm_id,
+                "incarnation_id": address.incarnation_id,
+                "path": format!("v2/realms/{}/incarnations/{}", address.realm_id, address.incarnation_id),
+                "pane_count": 1,
+            }])),
             "{diagnostics:?}"
         );
     }

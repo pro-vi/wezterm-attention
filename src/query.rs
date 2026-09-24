@@ -443,28 +443,35 @@ fn read_pane_facts_once(
             None,
         ));
     };
-    let check_socket = || -> Result<()> {
-        let (realm, incarnation, _) = socket_identity(socket)?;
-        if realm != address.realm_id || incarnation != address.incarnation_id {
-            return Err(AttentionError::new(
-                "incarnation_changed",
-                "requested socket identity changed",
+    // Whether the scope's server still owns the socket, by the rule every
+    // reader applies. True when it is shown to have exited, so the pane is
+    // absent and the records are still the latest word about it.
+    let check_socket = || -> std::result::Result<bool, Diagnostic> {
+        match recorded_server(socket, &address.realm_id, &address.incarnation_id) {
+            RecordedServer::Current => Ok(false),
+            RecordedServer::Replaced(_)
+                if replaced_server_pane_gone(socket, &address.pane_id, processes) =>
+            {
+                Ok(true)
+            }
+            RecordedServer::Replaced(diagnostic) => Err(diagnostic),
+            RecordedServer::Unreadable(error) => Err(error.diagnostic),
+        }
+    };
+    let server_exited = match check_socket() {
+        Ok(exited) => exited,
+        Err(mut diagnostic) => {
+            diagnostic
+                .context
+                .insert("facet".into(), Value::String("scope".into()));
+            return Ok(PaneFacts::unavailable(
+                scope,
+                ScopeRelation::Unavailable,
+                vec![diagnostic],
+                None,
             ));
         }
-        Ok(())
     };
-    if let Err(mut error) = check_socket() {
-        error
-            .diagnostic
-            .context
-            .insert("facet".into(), Value::String("scope".into()));
-        return Ok(PaneFacts::unavailable(
-            scope,
-            ScopeRelation::Unavailable,
-            vec![error.diagnostic],
-            None,
-        ));
-    }
     let pane = pane_path(root, address);
     let launch = launch_path(root, address, &scope.launch_id);
     let claim = RecordFacet::read(
@@ -759,7 +766,11 @@ fn read_pane_facts_once(
     }
     diagnostics.extend(lifecycle.diagnostics.clone());
     let before_presence = diagnostics.len();
-    let presence = presence_at_socket(socket, &address.pane_id, panes, processes, &mut diagnostics);
+    let presence = if server_exited {
+        "verified_absent".to_owned()
+    } else {
+        presence_at_socket(socket, address, panes, processes, &mut diagnostics)
+    };
     for item in &mut diagnostics[before_presence..] {
         item.context
             .insert("facet".into(), Value::String("pane_presence".into()));
@@ -768,8 +779,8 @@ fn read_pane_facts_once(
     // would not have matched, so the row is the pane's current one.
     let confidence = reader_confidence(true, &presence);
     let ended = end.availability == A::Present;
-    // The socket was checked above to carry this incarnation, so its server
-    // is the one that owns the socket.
+    // The socket was checked above to carry this incarnation, or its server
+    // to have exited, so no newer server owns this pane's socket.
     let conflicted = binding.record.as_ref().is_some_and(|record| {
         competes(ended, false, &presence)
             && session_live_elsewhere(
@@ -816,15 +827,14 @@ fn read_pane_facts_once(
         &RecordIdentity::launch(address, &scope.launch_id),
         "binding_selection",
     );
-    if let Err(mut error) = check_socket() {
-        error
-            .diagnostic
+    if let Err(mut diagnostic) = check_socket() {
+        diagnostic
             .context
             .insert("facet".into(), Value::String("scope".into()));
         return Ok(PaneFacts::unavailable(
             scope,
             ScopeRelation::Unavailable,
-            vec![error.diagnostic],
+            vec![diagnostic],
             None,
         ));
     }
@@ -1120,7 +1130,7 @@ pub fn read_bindings_for_socket_timed(
 )> {
     let started = Instant::now();
     validate_socket_selector(socket)?;
-    let (realm_id, incarnation_id, _) = socket_identity(socket)?;
+    let (realm_id, incarnation_id, _) = selected_socket_identity(socket)?;
     let scope = BindingQueryScope {
         realm_id,
         incarnation_id,
@@ -1149,7 +1159,7 @@ pub fn read_bindings_for_socket_timed(
     let (rows, mut read_diagnostics, spawns) =
         assemble_bindings(root, files, &filter, panes, processes, true)?;
     diagnostics.append(&mut read_diagnostics);
-    let after = socket_identity(socket)?;
+    let after = selected_socket_identity(socket)?;
     if after.0 != scope.realm_id || after.1 != scope.incarnation_id {
         let mut error = AttentionError::new(
             "incarnation_changed",
@@ -1164,6 +1174,24 @@ pub fn read_bindings_for_socket_timed(
         diagnostics,
         BindingTiming::from_wall(started, spawns),
     ))
+}
+
+/// The identity of the socket a caller named. A path with nothing there is
+/// a server whose socket is gone, as readers of a recorded socket say it.
+fn selected_socket_identity(
+    socket: &str,
+) -> Result<(String, String, crate::identity::SocketMetadata)> {
+    socket_identity(socket).map_err(|error| {
+        if fs::symlink_metadata(socket)
+            .is_err_and(|missing| missing.kind() == std::io::ErrorKind::NotFound)
+        {
+            let mut gone = AttentionError::new("socket_gone", "mux socket no longer exists");
+            gone.exit_code = error.exit_code;
+            gone
+        } else {
+            error
+        }
+    })
 }
 
 /// The binding records below one server's incarnation. A directory or entry
@@ -1399,20 +1427,70 @@ fn record_spent<T>(spent: &Mutex<Duration>, call: impl FnOnce() -> T) -> T {
 /// what to make of it.
 pub(crate) enum PaneEvidence {
     /// `present`, `verified_absent` or `unavailable`, as a reader reports it.
+    /// A pane whose server is shown to have exited reads `verified_absent`.
     Observed(String),
-    /// The server that held this incarnation's panes may be gone: the realm's
-    /// socket path no longer exists (`vanished`), or a different server now
-    /// owns it. A reader reports this as unavailable, with the diagnostic,
-    /// which says what became of the server: no probe failed to answer.
-    /// Sweep counts a new owner as one sighting of absence, and a vanished
-    /// path only when the process probe read every process and none carries
-    /// the pane; only its two-observation rule turns sightings into an ended
-    /// binding.
-    IncarnationEnded {
-        diagnostic: Diagnostic,
-        socket_path: String,
-        vanished: bool,
-    },
+    /// The realm's socket path no longer carries this incarnation: the file
+    /// is gone (`socket_gone`) or holds another identity
+    /// (`incarnation_changed`), and nothing shows the server gone with it. It
+    /// may still run with its socket removed or replaced, so its records are
+    /// kept. A reader reports the pane as unavailable, with the diagnostic,
+    /// which says what became of the socket: no probe failed to answer.
+    ServerGone { diagnostic: Diagnostic },
+}
+
+/// What the socket at a realm's recorded path says of the server that held
+/// one of its incarnations.
+pub(crate) enum RecordedServer {
+    /// The socket still carries the incarnation.
+    Current,
+    /// It no longer does. The diagnostic says how: `socket_gone` or
+    /// `incarnation_changed`.
+    Replaced(Diagnostic),
+    /// Its identity could not be read.
+    Unreadable(AttentionError),
+}
+
+pub(crate) fn recorded_server(
+    socket_path: &str,
+    realm_id: &str,
+    incarnation_id: &str,
+) -> RecordedServer {
+    match socket_identity(socket_path) {
+        Ok((realm, incarnation, _)) if realm == realm_id && incarnation == incarnation_id => {
+            RecordedServer::Current
+        }
+        Ok(_) => RecordedServer::Replaced(diagnostic(
+            "incarnation_changed",
+            "realm socket identity changed",
+        )),
+        // Only a path that is not there at all. A socket that exists and
+        // cannot be read says nothing about the server.
+        Err(_)
+            if fs::symlink_metadata(socket_path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            RecordedServer::Replaced(diagnostic("socket_gone", "mux socket no longer exists"))
+        }
+        // Something other than this user's socket now holds the path.
+        Err(error) if error.diagnostic.code == "realm_unavailable" => RecordedServer::Replaced(
+            diagnostic("incarnation_changed", "realm socket identity changed"),
+        ),
+        Err(error) => RecordedServer::Unreadable(error),
+    }
+}
+
+/// Whether a pane whose server's socket no longer carries its incarnation is
+/// shown gone: the socket was a GUI's own and that GUI has exited, or the
+/// process probe read every process and none carries the socket and pane id.
+/// A process that carries it, one the probe could not read, or a probe that
+/// did not answer shows nothing.
+pub(crate) fn replaced_server_pane_gone(
+    socket_path: &str,
+    pane_id: &str,
+    processes: Option<&dyn ProcessProbe>,
+) -> bool {
+    crate::wezterm::gui_process_exited(socket_path)
+        || processes.is_some_and(|probe| probe.presence(socket_path, pane_id) == Presence::Absent)
 }
 
 /// A pane's presence as a reader reports it.
@@ -1427,7 +1505,7 @@ pub(crate) fn pane_presence(
 }
 
 /// A pane's presence as a reader reports it, and whether the server that
-/// held its incarnation is gone, which the report alone does not say.
+/// held its incarnation may be gone, which the report alone does not say.
 fn reader_presence(
     root: &Path,
     address: &PaneAddress,
@@ -1437,7 +1515,7 @@ fn reader_presence(
 ) -> (String, bool) {
     match pane_evidence(root, address, panes, processes, diagnostics) {
         PaneEvidence::Observed(presence) => (presence, false),
-        PaneEvidence::IncarnationEnded { diagnostic, .. } => {
+        PaneEvidence::ServerGone { diagnostic } => {
             diagnostics.push(diagnostic);
             ("unavailable".to_owned(), true)
         }
@@ -1492,43 +1570,22 @@ pub(crate) fn pane_evidence(
     let Some(socket_path) = realm.get("socket_path").and_then(Value::as_str) else {
         return unavailable();
     };
-    match socket_identity(socket_path) {
-        Ok((realm_id, incarnation_id, _))
-            if realm_id == address.realm_id && incarnation_id == address.incarnation_id => {}
-        Ok((realm_id, _, _)) if realm_id == address.realm_id => {
-            return PaneEvidence::IncarnationEnded {
-                diagnostic: diagnostic("incarnation_changed", "realm socket identity changed"),
-                socket_path: socket_path.to_owned(),
-                vanished: false,
-            };
-        }
-        Ok(_) => {
-            diagnostics.push(diagnostic(
-                "incarnation_changed",
-                "realm socket identity changed",
-            ));
-            return unavailable();
-        }
-        // Only a path that is not there at all. A socket that exists and
-        // cannot be read, or is not a socket, says nothing about the server.
-        Err(_)
-            if fs::symlink_metadata(socket_path)
-                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+    match recorded_server(socket_path, &address.realm_id, &address.incarnation_id) {
+        RecordedServer::Current => {}
+        RecordedServer::Replaced(_)
+            if replaced_server_pane_gone(socket_path, &address.pane_id, processes) =>
         {
-            return PaneEvidence::IncarnationEnded {
-                diagnostic: diagnostic("realm_unavailable", "mux socket no longer exists"),
-                socket_path: socket_path.to_owned(),
-                vanished: true,
-            };
+            return PaneEvidence::Observed("verified_absent".to_owned());
         }
-        Err(error) => {
+        RecordedServer::Replaced(diagnostic) => return PaneEvidence::ServerGone { diagnostic },
+        RecordedServer::Unreadable(error) => {
             diagnostics.push(error.diagnostic);
             return unavailable();
         }
     }
     PaneEvidence::Observed(presence_at_socket(
         socket_path,
-        &address.pane_id,
+        address,
         Some(panes),
         processes,
         diagnostics,
@@ -1637,13 +1694,16 @@ fn binding_ended(binding_path: &Path, binding: &Value, identity: &RecordIdentity
         .is_some_and(|ended| ended >= order)
 }
 
+/// A pane's presence under a socket that carried its incarnation when last
+/// looked at.
 fn presence_at_socket(
     socket_path: &str,
-    pane_id: &str,
+    address: &PaneAddress,
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> String {
+    let pane_id = address.pane_id.as_str();
     let Some(panes) = panes else {
         diagnostics.push(diagnostic("probe_unavailable", "pane probe is unavailable"));
         return "unavailable".into();
@@ -1666,6 +1726,19 @@ fn presence_at_socket(
                 "unavailable".to_owned()
             }
         },
+        // A socket file nobody listens on can never be listened on again, so
+        // its server has exited, as a GUI that quit leaves its socket file
+        // behind. The identity is read again after the refusal: a file put in
+        // its place meanwhile would have refused for its own server.
+        Err(_)
+            if crate::wezterm::listener_refuses(socket_path)
+                && matches!(
+                    recorded_server(socket_path, &address.realm_id, &address.incarnation_id),
+                    RecordedServer::Current
+                ) =>
+        {
+            "verified_absent".to_owned()
+        }
         Err(error) => {
             diagnostics.push(error.diagnostic);
             "unavailable".to_owned()
@@ -2353,6 +2426,7 @@ pub enum WindowCheck {
 pub enum WindowCheckReason {
     SourceUnrecorded,
     SourceChanged,
+    SocketGone,
     ProbeUnavailable,
     InventoryInvalid,
 }
@@ -2361,13 +2435,31 @@ fn observe_tab_source(
     source: &TabSource,
     lister: &dyn GuiWindowLister,
 ) -> std::result::Result<BTreeSet<u64>, WindowCheckReason> {
+    // The same reading of the socket as a pane's reader makes of its realm's.
     let matches = || match read_tab_source(&source.socket_path) {
         Ok(current) if current == *source => Ok(()),
         Ok(_) => Err(WindowCheckReason::SourceChanged),
-        Err(_) => Err(WindowCheckReason::ProbeUnavailable),
+        Err(_) => match recorded_server(
+            &source.socket_path,
+            &source.realm_id,
+            &source.incarnation_id,
+        ) {
+            RecordedServer::Replaced(diagnostic) if diagnostic.code == "socket_gone" => {
+                Err(WindowCheckReason::SocketGone)
+            }
+            RecordedServer::Replaced(_) => Err(WindowCheckReason::SourceChanged),
+            RecordedServer::Current | RecordedServer::Unreadable(_) => {
+                Err(WindowCheckReason::ProbeUnavailable)
+            }
+        },
     };
     matches()?;
     let inventory = lister.list_windows(&source.socket_path);
+    if inventory.is_err() && crate::wezterm::listener_refuses(&source.socket_path) {
+        // Nothing listens on the GUI's socket file: that GUI has exited.
+        matches()?;
+        return Err(WindowCheckReason::SocketGone);
+    }
     matches()?;
     inventory.map_err(|error| {
         if error.diagnostic.code == "record_invalid" {

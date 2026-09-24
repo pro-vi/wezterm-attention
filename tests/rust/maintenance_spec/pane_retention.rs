@@ -6,16 +6,16 @@
 use super::lock_scope::LockCheckingPanes;
 use super::*;
 
-const OP_1: &str = "00000000-0000-4000-8000-000000000911";
-const OP_2: &str = "00000000-0000-4000-8000-000000000912";
-const OP_3: &str = "00000000-0000-4000-8000-000000000913";
-const OP_4: &str = "00000000-0000-4000-8000-000000000914";
+pub(super) const OP_1: &str = "00000000-0000-4000-8000-000000000911";
+pub(super) const OP_2: &str = "00000000-0000-4000-8000-000000000912";
+pub(super) const OP_3: &str = "00000000-0000-4000-8000-000000000913";
+pub(super) const OP_4: &str = "00000000-0000-4000-8000-000000000914";
 
-fn pane_dir(setup: &Setup) -> PathBuf {
+pub(super) fn pane_dir(setup: &Setup) -> PathBuf {
     pane_path(&setup.root(), &pane_address(&setup.env).expect("address").0)
 }
 
-fn actions<'a>(details: &'a [Value], kind: &str) -> Vec<&'a Value> {
+pub(super) fn actions<'a>(details: &'a [Value], kind: &str) -> Vec<&'a Value> {
     details
         .iter()
         .filter(|detail| detail["kind"] == kind)
@@ -23,7 +23,7 @@ fn actions<'a>(details: &'a [Value], kind: &str) -> Vec<&'a Value> {
         .collect()
 }
 
-fn end_reason(binding_dir: &Path) -> Option<Value> {
+pub(super) fn end_reason(binding_dir: &Path) -> Option<Value> {
     let end = fs::read(binding_dir.join("end.json")).ok()?;
     Some(serde_json::from_slice::<Value>(&end).expect("end JSON")["reason"].clone())
 }
@@ -58,31 +58,9 @@ fn a_binding_on_a_vanished_socket_ends_after_two_observations() {
     assert_eq!(end_reason(&binding_dir), Some(json!("sweep_absent")));
 }
 
-/// A new server bound the same path: the old incarnation's panes are gone.
-#[test]
-fn a_binding_whose_socket_has_a_new_server_ends_after_two_observations() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let binding_dir = setup.binding_dir();
-    let socket = PathBuf::from(&setup.env["WEZTERM_UNIX_SOCKET"]);
-    fs::remove_file(&socket).expect("remove socket");
-    let _new_server = UnixListener::bind(&socket).expect("rebind socket");
-    setup.clock.set_monotonic(1_000);
-    let (first, _) = setup.run_sweep(true, Some(OP_1));
-    assert_eq!(
-        actions(&first.details, "absence"),
-        [&json!("first_absence")]
-    );
-    setup
-        .clock
-        .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
-    let (second, _) = setup.run_sweep(true, Some(OP_2));
-    assert_eq!(actions(&second.details, "absence"), [&json!("end")]);
-    assert_eq!(end_reason(&binding_dir), Some(json!("sweep_absent")));
-}
-
 /// A process still running with the pane's socket and id means the server
-/// may be alive with its socket file removed; that is not absence.
+/// may be alive with its socket file removed; that is not absence, and there
+/// is nothing to decide about the binding.
 #[test]
 fn a_process_still_on_a_vanished_socket_is_not_absence() {
     let setup = Setup::new();
@@ -91,14 +69,16 @@ fn a_process_still_on_a_vanished_socket_is_not_absence() {
     fs::remove_file(&setup.env["WEZTERM_UNIX_SOCKET"]).expect("remove socket");
     setup.processes.set(Presence::Present);
     let (result, _) = setup.run_sweep(true, Some(OP_1));
-    assert_eq!(actions(&result.details, "absence"), [&json!("unavailable")]);
+    assert!(actions(&result.details, "absence").is_empty());
     assert!(!pane.join("absence-probe.json").exists());
 }
 
 /// A vanished socket alone does not show the server gone: it may still run
 /// with its socket file deleted. Without a process probe that answers "no
 /// process carries this pane" -- the probe failed, or there is none -- the
-/// pane is unavailable, however many sweeps see the socket missing.
+/// records are kept however many sweeps see the socket missing. That is the
+/// recorded history, reported as the gone socket, not a probe that did not
+/// answer.
 #[test]
 fn a_vanished_socket_without_a_process_answer_never_ends_a_binding() {
     let setup = Setup::new();
@@ -126,8 +106,9 @@ fn a_vanished_socket_without_a_process_answer_never_ends_a_binding() {
             processes,
         )
         .expect("sweep");
-        assert_eq!(actions(&result.details, "absence"), [&json!("unavailable")]);
-        assert!(diagnostics.iter().any(|d| d.code == "probe_unavailable"));
+        assert!(actions(&result.details, "absence").is_empty());
+        assert!(!diagnostics.iter().any(|d| d.code == "probe_unavailable"));
+        assert!(diagnostics.iter().any(|d| d.code == "socket_gone"));
     }
     assert_eq!(end_reason(&binding_dir), None);
     assert!(!pane.join("absence-probe.json").exists());
@@ -160,10 +141,7 @@ fn a_vanished_socket_without_a_process_answer_keeps_an_old_panes_tree() {
                 processes,
             )
             .expect("sweep");
-            assert_eq!(
-                actions(&result.details, "pane_retention"),
-                [&json!("unavailable")]
-            );
+            assert!(actions(&result.details, "pane_retention").is_empty());
         }
         assert!(pane.join("claim.json").exists(), "the pane tree is kept");
         assert_eq!(tree_bytes(&setup.root()), before);
@@ -182,14 +160,14 @@ fn readers_report_a_vanished_socket_as_unavailable_and_change_nothing() {
         read_bindings_with_ports(&setup.root(), Some(&setup.panes), Some(&setup.processes))
             .expect("bindings");
     assert_eq!(rows[0].pane_presence, "unavailable");
-    assert!(diagnostics.iter().any(|d| d.code == "realm_unavailable"));
+    assert!(diagnostics.iter().any(|d| d.code == "socket_gone"));
     assert!(!diagnostics.iter().any(|d| d.code == "probe_unavailable"));
     setup.doctor();
     setup.run_sweep(false, None);
     assert_eq!(tree_bytes(&setup.root()), before);
 }
 
-fn tree_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+pub(super) fn tree_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut result = BTreeMap::new();
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
@@ -207,7 +185,7 @@ fn tree_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 
 /// Ends the fixture's binding at unix time 1 and moves the wall clock past
 /// the retention age.
-fn end_long_ago(setup: &Setup) {
+pub(super) fn end_long_ago(setup: &Setup) {
     setup.clock.set_unix(1);
     setup.provider_event(
         "SessionEnd",
@@ -591,11 +569,7 @@ fn a_pane_whose_process_hides_its_environment_is_not_absent_when_its_socket_vani
     fs::remove_file(&socket).expect("remove socket");
     let (runs, diagnostics) = real_sweeps(&setup);
     for details in &runs {
-        assert_eq!(
-            actions(details, "absence"),
-            [&json!("unavailable")],
-            "{diagnostics:?}"
-        );
+        assert!(actions(details, "absence").is_empty(), "{diagnostics:?}");
     }
     assert_eq!(end_reason(&binding_dir), None);
     assert!(!pane.join("absence-probe.json").exists());
@@ -604,7 +578,7 @@ fn a_pane_whose_process_hides_its_environment_is_not_absent_when_its_socket_vani
         "{diagnostics:?}"
     );
     assert!(
-        diagnostics.iter().any(|d| d.code == "realm_unavailable"),
+        diagnostics.iter().any(|d| d.code == "socket_gone"),
         "{diagnostics:?}"
     );
 }
@@ -640,19 +614,15 @@ fn a_process_naming_the_socket_through_a_symlinked_directory_keeps_its_pane() {
     fs::remove_file(&socket).expect("remove socket");
     let (runs, diagnostics) = real_sweeps(&setup);
     for details in &runs {
-        assert_eq!(
-            actions(details, "absence"),
-            [&json!("unavailable")],
-            "{diagnostics:?}"
-        );
+        assert!(actions(details, "absence").is_empty(), "{diagnostics:?}");
     }
     assert_eq!(end_reason(&binding_dir), None);
 }
 
-/// After a GUI exits, its socket file is gone and its panes' records stay.
-/// That is the server's state, not a probe that failed to answer, so doctor
-/// and sweep still give a complete answer and exit 0, with the gone socket
-/// among their findings.
+/// A socket file that is gone, with nothing to show its server gone, keeps
+/// its panes' records. That is the recorded history, not a probe that failed
+/// to answer, so doctor and sweep still give a complete answer and exit 0,
+/// with the gone socket among their findings.
 #[test]
 fn a_gone_socket_leaves_doctor_and_sweep_complete() {
     let setup = Setup::new();
@@ -689,7 +659,7 @@ fn a_gone_socket_leaves_doctor_and_sweep_complete() {
             .iter()
             .map(|d| &d["code"])
             .collect();
-        assert!(codes.contains(&&json!("realm_unavailable")), "{response}");
+        assert!(codes.contains(&&json!("socket_gone")), "{response}");
         if arguments[0] == "doctor" {
             let socket = response["result"]["probes"]
                 .as_array()
