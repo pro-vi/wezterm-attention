@@ -1,4 +1,4 @@
-use std::io::{IsTerminal, Read};
+use std::io::{IsTerminal, Read, Write};
 use std::process::ExitCode;
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
@@ -303,17 +303,52 @@ fn query_json(command: &str) -> bool {
     )
 }
 
+/// `value` as one line of JSON that is safe to print to a terminal.
+///
+/// serde_json leaves U+0080-U+009F raw, and a terminal reads several of them
+/// as control sequences: U+009B alone starts a CSI. Each becomes a `\u`
+/// escape, which is still valid JSON and decodes to the same value.
+fn printable_json<T: Serialize>(value: &T) -> String {
+    let text = serde_json::to_string(value).expect("response serializes");
+    let mut printable = String::with_capacity(text.len());
+    for character in text.chars() {
+        if ('\u{80}'..='\u{9f}').contains(&character) {
+            printable.push_str(&format!("\\u{:04x}", u32::from(character)));
+        } else {
+            printable.push(character);
+        }
+    }
+    printable
+}
+
+/// Print one line to stdout.
+///
+/// A reader that closed the pipe early, as `| head` does, already has what it
+/// wanted, so a broken pipe is not an error; `println!` would panic there and
+/// exit 101. Any other write failure is reported on stderr.
+fn print_out(text: &str) {
+    let mut stdout = std::io::stdout().lock();
+    if let Err(error) = writeln!(stdout, "{text}").and_then(|()| stdout.flush())
+        && error.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        print_err(&format!("attention: stdout: {error}"));
+    }
+}
+
+/// Print one line to stderr. A closed stderr leaves nowhere to say so, and a
+/// hook must still exit with its own code, so a failure here is dropped.
+fn print_err(text: &str) {
+    let _ = writeln!(std::io::stderr().lock(), "{text}");
+}
+
 fn emit<T: Serialize>(response: &Response<T>, as_json: bool, quiet: bool) {
     if quiet {
         return;
     }
     if as_json || query_json(&response.command) {
-        println!(
-            "{}",
-            serde_json::to_string(response).expect("response serializes")
-        );
+        print_out(&printable_json(response));
     } else {
-        println!("{}", response.status);
+        print_out(&response.status);
     }
 }
 
@@ -345,16 +380,13 @@ fn emit_error_with_complete(
             result: serde_json::json!({}),
             diagnostics: vec![error.diagnostic.clone()],
         };
-        println!(
-            "{}",
-            serde_json::to_string(&response).expect("response serializes")
-        );
+        print_out(&printable_json(&response));
     } else {
-        eprintln!(
+        print_err(&format!(
             "attention: {}: {}",
             error.diagnostic.code, error.diagnostic.message
-        );
-        eprintln!("help: {}", error.diagnostic.help);
+        ));
+        print_err(&format!("help: {}", error.diagnostic.help));
     }
     ExitCode::from(error.exit_code as u8)
 }
@@ -374,15 +406,12 @@ fn emit_hook_error(error: &AttentionError, debug: bool, strict: bool, command: &
             result: serde_json::json!({}),
             diagnostics: vec![error.diagnostic.clone()],
         };
-        eprintln!(
-            "{}",
-            serde_json::to_string(&response).expect("response serializes")
-        );
+        print_err(&printable_json(&response));
     } else {
-        eprintln!(
+        print_err(&format!(
             "attention: {}: {}",
             error.diagnostic.code, error.diagnostic.message
-        );
+        ));
     }
     if strict {
         ExitCode::from(error.exit_code as u8)
@@ -401,7 +430,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
     match cli.command {
         None => {
             let mut command = Cli::command();
-            println!("{}", command.render_help());
+            print_out(&command.render_help().to_string());
             Ok(ExitCode::SUCCESS)
         }
         Some(Command::Hooks { command: None }) => {
@@ -409,7 +438,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             let hooks = command
                 .find_subcommand_mut("hooks")
                 .expect("hooks subcommand is declared");
-            println!("{}", hooks.render_help());
+            print_out(&hooks.render_help().to_string());
             Ok(ExitCode::SUCCESS)
         }
         Some(Command::Claim) => Err((
@@ -463,12 +492,12 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     false,
                 );
             } else {
-                println!("{}", result.launch_id);
+                print_out(&result.launch_id);
                 if let Some(diagnostic) = &result.publication_diagnostic {
-                    eprintln!(
+                    print_err(&format!(
                         "attention: publication pending: {}: {}",
                         diagnostic.code, diagnostic.message
-                    );
+                    ));
                 }
             }
             Ok(ExitCode::SUCCESS)
@@ -648,18 +677,14 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 };
                 let result = serde_json::json!({"native": outcome.result.as_ref().ok(), "admission": outcome.admission, "persistence": outcome.persistence, "consumers": consumers});
                 // Prompt/reply bodies and child output never enter this diagnostic projection.
-                eprintln!(
-                    "{}",
-                    serde_json::to_string(&Response {
-                        schema: 1,
-                        command,
-                        status: if failed { "findings" } else { "ok" }.into(),
-                        complete: true,
-                        result,
-                        diagnostics
-                    })
-                    .expect("diagnostic serializes")
-                );
+                print_err(&printable_json(&Response {
+                    schema: 1,
+                    command,
+                    status: if failed { "findings" } else { "ok" }.into(),
+                    complete: true,
+                    result,
+                    diagnostics,
+                }));
                 return Ok(if args.strict && failed {
                     ExitCode::from(1)
                 } else {
@@ -690,12 +715,12 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     diagnostics: result.diagnostic.iter().cloned().collect(),
                     result,
                 };
-                eprintln!(
-                    "{}",
-                    serde_json::to_string(&response).expect("response serializes")
-                );
+                print_err(&printable_json(&response));
             } else if let Some(diagnostic) = &result.diagnostic {
-                eprintln!("attention: {}: {}", diagnostic.code, diagnostic.message);
+                print_err(&format!(
+                    "attention: {}: {}",
+                    diagnostic.code, diagnostic.message
+                ));
             }
             Ok(if args.strict && failed {
                 ExitCode::from(1)

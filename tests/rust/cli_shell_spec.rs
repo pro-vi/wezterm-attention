@@ -1294,3 +1294,42 @@ fn a_descendant_holding_the_listing_output_open_is_killed_at_the_deadline() {
         .expect("probe holder");
     assert!(!alive.success(), "the descendant outlived the deadline");
 }
+
+#[test]
+fn a_reader_that_closes_stdout_early_does_not_make_the_cli_panic() {
+    let mut ends = [0; 2];
+    assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
+    unsafe { libc::close(ends[0]) };
+    let closed = unsafe { Stdio::from_raw_fd(ends[1]) };
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .args(["hooks", "describe", "--provider", "claude"])
+        .env_clear()
+        .stdout(closed)
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run with a closed stdout");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[test]
+fn printed_json_escapes_c1_control_characters_and_keeps_their_value() {
+    let argument = "--unknown\u{9b}31m";
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .args(["bindings", argument])
+        .env_clear()
+        .output()
+        .expect("run with a C1 character in an argument");
+    assert!(
+        !output.stdout.windows(2).any(|pair| pair == [0xc2, 0x9b]),
+        "raw C1 reached stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let text = String::from_utf8(output.stdout).expect("UTF-8 JSON");
+    assert!(text.contains("\\u009b"), "{text}");
+    let envelope: Value = serde_json::from_str(&text).expect("still valid JSON");
+    let message = envelope["diagnostics"][0]["message"]
+        .as_str()
+        .expect("message");
+    assert!(message.contains(argument), "{message}");
+}
