@@ -841,6 +841,25 @@ return function()
       return true
     end
 
+    --- Once per distinct error, so a consumer's bug is visible with its own
+    --- words and a failure on every poll is still one line. The count of
+    --- distinct errors is bounded too: text that changes on every call would
+    --- otherwise be a line per poll.
+    local view_change_failures, distinct_view_change_failures = {}, 0
+    local function report_view_change_failure(failure)
+      local text = tostring(failure):sub(1, 512)
+      if view_change_failures[text] then return end
+      view_change_failures[text] = true
+      distinct_view_change_failures = distinct_view_change_failures + 1
+      if distinct_view_change_failures > 16 then
+        report_error_once("on-view-change-error-cap",
+          "on_view_change keeps failing with new errors; further ones are not logged")
+        return
+      end
+      report_error_once("on-view-change-error:" .. text,
+        "on_view_change failed: " .. text .. "; future polls remain enabled")
+    end
+
     --- `unsettled` says a tab in this window could not be read. A scope nobody
     --- could look at has not been lost, and reporting it so would have a consumer
     --- discard state it still needs -- a dismissal, a policy -- and rebuild it as
@@ -893,8 +912,8 @@ return function()
       delivering_views = true
       for _, batch in ipairs({ losses, messages }) do
         for _, message in ipairs(batch) do
-          local ok = pcall(callback, message)
-          if not ok then report_error_once("on-view-change-error", "on_view_change failed; future polls remain enabled") end
+          local ok, failure = pcall(callback, message)
+          if not ok then report_view_change_failure(failure) end
         end
       end
       delivering_views = false

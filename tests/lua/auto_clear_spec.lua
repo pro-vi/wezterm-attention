@@ -4333,6 +4333,31 @@ test("GUI callback exceptions do not corrupt future polls and title opt-out does
   instance.poll(window,options);assert(calls==3,"scope loss and new initial still deliver after exceptions")
 end)
 
+test("an on_view_change error is logged with its text, once per distinct error", function()
+  local failures = { "first failure", "first failure", "second failure" }
+  local calls = 0
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root, on_view_change = function()
+      calls = calls + 1
+      error(failures[calls] or "later failure", 0)
+    end })
+  local options = { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end }
+  for index = 1, 3 do
+    local wire = materialize_v2_fixture(13070 + index, string.rep("9", 64))
+    instance.poll(window_double({ window_id = 13080 + index, focused = false,
+      tabs = { { { id = 13070 + index, domain = "mux", attention = wire } } } }), options)
+  end
+  local logged = {}
+  for _, message in ipairs(drain_errors()) do
+    if message:find("on_view_change", 1, true) then logged[#logged + 1] = message end
+  end
+  assert(calls == 3, "every delivery must run, got " .. calls)
+  assert(#logged == 2 and logged[1]:find("first failure", 1, true)
+      and logged[2]:find("second failure", 1, true),
+    "expected one line per distinct error with its text, got " .. #logged)
+end)
+
 test("C1 scalar lookup refuses two full pane addresses", function()
   local a = materialize_v2_fixture(42, string.rep("a",64))
   local b = materialize_v2_fixture(42, string.rep("b",64))
