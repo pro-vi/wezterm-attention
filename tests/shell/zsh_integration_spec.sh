@@ -115,4 +115,61 @@ check_typed "a claim alone on its line keeps the launch id for the agent on the 
   "agent=$launch
 next="
 
+# Ctrl-C while the writer runs stops that one claim or publication, and the
+# ones after it still happen. A person types Ctrl-C at a terminal, so these
+# drive zsh through one, with startup files in a scratch ZDOTDIR.
+driver="$root/tests/python/interactive_shell.py"
+python=${ATTENTION_TEST_PYTHON3:-$(command -v python3)}
+mkdir -p "$scratch/slow/bin" "$scratch/tools" "$scratch/zdot"
+cat > "$scratch/slow/bin/attention" <<EOF
+#!/bin/sh
+printf '%s|%s\n' "\$*" "\${WEZTERM_ATTENTION_LAUNCH_ID:-}" >> "$scratch/calls"
+# The first call named in slow-call hangs until it is interrupted, and records
+# it when it was not.
+if [ "\$1 \$2" = "\$(cat "$scratch/slow-call")" ] && [ ! -e "$scratch/slowed" ]; then
+  : > "$scratch/slowed"
+  printf 'writer-waiting\n' >&2
+  sleep 10
+  : > "$scratch/slow-finished"
+fi
+if [ "\$1 \$2" = "hooks claim" ]; then printf '%s\n' $launch; fi
+exit 0
+EOF
+cat > "$scratch/tools/claude" <<'EOF'
+#!/bin/sh
+printf 'claude-ran launch=%s\n' "${WEZTERM_ATTENTION_LAUNCH_ID:-none}"
+EOF
+cat > "$scratch/tools/show-launch" <<'EOF'
+#!/bin/sh
+printf 'child-launch=%s\n' "${WEZTERM_ATTENTION_LAUNCH_ID:-none}"
+EOF
+chmod 755 "$scratch/slow/bin/attention" "$scratch/tools/claude" "$scratch/tools/show-launch"
+printf '%s\n' 'unsetopt global_rcs' > "$scratch/zdot/.zshenv"
+printf '%s\n' "PS1='@P@ '" 'HISTFILE=/dev/null' \
+  "export PATH='$scratch/tools':\"\$PATH\" WEZTERM_ATTENTION_ROOT='$scratch/slow'" \
+  "source '$integration'" > "$scratch/zdot/.zshrc"
+for slow_call in "hooks claim" "hooks publish"; do
+  printf '%s\n' "$slow_call" > "$scratch/slow-call"
+  rm -f "$scratch/calls" "$scratch/slowed" "$scratch/slow-finished"
+  : > "$scratch/calls"
+  typed_status=0
+  env -i HOME="$scratch" ZDOTDIR="$scratch/zdot" PATH=/usr/bin:/bin TERM=dumb WEZTERM_PANE=7 \
+    "$python" "$driver" --interrupt-on writer-waiting '@P@ ' 20 "$zsh_under_test" -i \
+    > "$scratch/out" 2>&1 <<'EOF' || typed_status=$?
+wezterm_attention_claim && claude
+wezterm_attention_claim && claude
+show-launch
+exit
+EOF
+  if [ "$typed_status" -eq 0 ] && [ -e "$scratch/slowed" ] && [ ! -e "$scratch/slow-finished" ] \
+    && grep -q "^claude-ran launch=$launch$" "$scratch/out" && grep -q '^child-launch=none$' "$scratch/out" \
+    && grep -q "^hooks publish --quiet|$launch$" "$scratch/calls"; then
+    printf 'ok - %s\n' "an interrupted $slow_call leaves later claims and publications working"
+  else
+    printf 'not ok - %s\n' "an interrupted $slow_call leaves later claims and publications working (status $typed_status)"
+    sed 's/^/#   /' "$scratch/out"
+    failures=$((failures + 1))
+  fi
+done
+
 [ "$failures" -eq 0 ]

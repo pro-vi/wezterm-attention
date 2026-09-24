@@ -18,12 +18,21 @@ python=${ATTENTION_TEST_PYTHON3:-$(command -v python3)}
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/attention-bash-spec.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
 failures=0
+interrupt_marker=
 launch=00000000-0000-4000-8000-000000000201
 
 mkdir -p "$scratch/home" "$scratch/work" "$scratch/root/bin" "$scratch/tools"
 cat > "$scratch/root/bin/attention" <<EOF
 #!/bin/sh
 printf '%s|%s\n' "\$*" "\${WEZTERM_ATTENTION_LAUNCH_ID:-}" >> "$scratch/calls"
+# The first call named in slow-call hangs until it is interrupted, and records
+# it when it was not.
+if [ -f "$scratch/slow-call" ] && [ "\$1 \$2" = "\$(cat "$scratch/slow-call")" ] && [ ! -e "$scratch/slowed" ]; then
+  : > "$scratch/slowed"
+  printf 'writer-waiting\n' >&2
+  sleep 10
+  : > "$scratch/slow-finished"
+fi
 if [ "\$1 \$2" = "hooks claim" ]; then printf '%s\n' $launch; fi
 exit 0
 EOF
@@ -55,11 +64,13 @@ rc() {
 
 # Types stdin into an interactive bash that reads the last rc file written.
 # Leaves the output in session.out and the writer's calls in calls.
+# With interrupt_marker set, types Ctrl-C each time that text is printed.
 session() {
   rm -f "$scratch/calls" "$scratch/session.out"
   : > "$scratch/calls"
   env -i HOME="$scratch/home" PATH=/usr/bin:/bin TERM=dumb "$@" \
-    "$python" "$driver" '@P@ ' 20 "$bash_under_test" --noprofile --rcfile "$scratch/rc" -i \
+    "$python" "$driver" ${interrupt_marker:+--interrupt-on "$interrupt_marker"} \
+    '@P@ ' 20 "$bash_under_test" --noprofile --rcfile "$scratch/rc" -i \
     > "$scratch/session.out" 2>&1
   session_status=$?
 }
@@ -176,6 +187,30 @@ if has "^claude-ran launch=$launch$" && has '^child-launch=none$' \
 else
   fail "the claimed launch id reaches one prompt publication and no later program"
 fi
+
+# Ctrl-C while the writer runs stops that one claim or publication, and the
+# ones after it still happen.
+for slow_call in "hooks claim" "hooks publish"; do
+  printf '%s\n' "$slow_call" > "$scratch/slow-call"
+  rm -f "$scratch/slowed" "$scratch/slow-finished"
+  rc "source '$integration'"
+  interrupt_marker=writer-waiting
+  session WEZTERM_PANE=7 <<'EOF'
+claude
+claude
+show-launch
+exit 0
+EOF
+  interrupt_marker=
+  rm -f "$scratch/slow-call"
+  if [ "$session_status" -eq 0 ] && [ -e "$scratch/slowed" ] && [ ! -e "$scratch/slow-finished" ] \
+    && has "^claude-ran launch=$launch$" && has '^child-launch=none$' \
+    && [ "$(calls_matching "^hooks publish --quiet|$launch$")" -ge 1 ]; then
+    pass "an interrupted $slow_call leaves later claims and publications working"
+  else
+    fail "an interrupted $slow_call leaves later claims and publications working (status $session_status)"
+  fi
+done
 
 # Reading a long literal command character by character took seconds before
 # the command could start: in a UTF-8 locale each character read walks the
