@@ -793,7 +793,8 @@ fn apply_observation(
 }
 
 /// The presence source a child's permission request writes. The child's next
-/// event replaces that presence, so while it stands the child is waiting.
+/// tool call or its stop replaces that presence, so while it stands the child
+/// is waiting.
 const WAITING_FOR_PERMISSION: &str = "permission";
 
 /// Whether a child that asked for permission at or after `since` has not
@@ -1014,7 +1015,8 @@ fn apply_activity(
                 (result, Some(record))
             };
             // Only a child's permission request reaches here with an agent id.
-            // Its presence marks the child as waiting until its next event.
+            // Its presence marks the child as waiting until its next tool call
+            // or its stop.
             if let Some(agent_id) = event.agent_id.as_deref() {
                 plan_presence(
                     resolved,
