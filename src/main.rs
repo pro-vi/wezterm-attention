@@ -784,7 +784,13 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     };
                 (Some(scope), rows, diagnostics, timing)
             } else {
-                let answer = read_bindings_timed(&root, Some(&panes), Some(&processes))
+                // The filters apply before any socket is asked, so a realm or
+                // provider left out costs no pane listing.
+                let filter = wezterm_attention::query::BindingFilter {
+                    realm_id: args.realm.clone(),
+                    provider: args.provider.clone(),
+                };
+                let answer = read_bindings_timed(&root, &filter, Some(&panes), Some(&processes))
                     .map_err(|error| (Box::new(error), args.json, "bindings".to_owned()))?;
                 walked_every_directory = answer.walked_every_directory;
                 (None, answer.rows, answer.diagnostics, answer.timing)

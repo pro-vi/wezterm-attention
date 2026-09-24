@@ -1129,8 +1129,14 @@ pub fn read_bindings_for_socket_timed(
     let mut files = Vec::new();
     let mut diagnostics = Vec::new();
     collect_selected_binding_files(&selected, &mut files, &mut diagnostics, true);
-    let (rows, mut read_diagnostics, spawns) =
-        assemble_bindings(root, files, panes, processes, true)?;
+    let (rows, mut read_diagnostics, spawns) = assemble_bindings(
+        root,
+        files,
+        &BindingFilter::default(),
+        panes,
+        processes,
+        true,
+    )?;
     diagnostics.append(&mut read_diagnostics);
     let after = socket_identity(socket)?;
     if after.0 != scope.realm_id || after.1 != scope.incarnation_id {
@@ -1317,7 +1323,8 @@ pub fn read_bindings(root: &Path) -> Result<(Vec<BindingRow>, Vec<Diagnostic>)> 
 ///
 /// A query that took seconds either waited on a subprocess or read a lot of
 /// files, and a caller's own clock cannot tell those apart. `pane_list` is the
-/// time inside `wezterm cli list`, summed over the sockets asked. `process_list`
+/// wall time spent waiting on `wezterm cli list`; sockets asked together count
+/// once, for as long as the slowest took. `process_list`
 /// is the time inside the process listing that answers for panes the mux no
 /// longer lists. `records` is everything else: finding and reading the binding
 /// records, measured as the query's wall time with the two spawns taken out.
@@ -1495,6 +1502,42 @@ fn session_live_elsewhere(
     false
 }
 
+fn session_key(binding: &Value) -> (String, String) {
+    (
+        string(binding, "provider").unwrap_or_default(),
+        string(binding, "provider_session_id").unwrap_or_default(),
+    )
+}
+
+fn record_address(record: &Value) -> Option<PaneAddress> {
+    serde_json::from_value(record.get("address")?.clone()).ok()
+}
+
+/// The socket `pane_presence` would list for this address: the realm's
+/// recorded socket, when it still carries this incarnation. None when it would
+/// answer without listing.
+fn realm_socket(root: &Path, address: &PaneAddress) -> Option<String> {
+    let realm = root.join("v2/realms").join(&address.realm_id);
+    let record = read_record(
+        &realm.join("realm.json"),
+        Some("realm"),
+        &RecordIdentity::realm(&address.realm_id),
+    )
+    .ok()??;
+    read_record(
+        &realm
+            .join("incarnations")
+            .join(&address.incarnation_id)
+            .join("incarnation.json"),
+        Some("incarnation"),
+        &RecordIdentity::incarnation(&address.realm_id, &address.incarnation_id),
+    )
+    .ok()??;
+    let socket = string(&record, "socket_path")?;
+    let (realm_id, incarnation_id, _) = socket_identity(&socket).ok()?;
+    (realm_id == address.realm_id && incarnation_id == address.incarnation_id).then_some(socket)
+}
+
 /// Whether the end record beside a binding ends it. An end older than the
 /// binding belongs to an earlier binding of the same id; an unreadable one
 /// ends nothing.
@@ -1547,7 +1590,7 @@ pub fn read_bindings_with_ports(
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
 ) -> Result<(Vec<BindingRow>, Vec<Diagnostic>)> {
-    let answer = read_bindings_timed(root, panes, processes)?;
+    let answer = read_bindings_timed(root, &BindingFilter::default(), panes, processes)?;
     Ok((answer.rows, answer.diagnostics))
 }
 
@@ -1567,6 +1610,7 @@ pub struct RealmBindings {
 /// maintenance and the other library callers do not want it.
 pub fn read_bindings_timed(
     root: &Path,
+    filter: &BindingFilter,
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
 ) -> Result<RealmBindings> {
@@ -1576,7 +1620,7 @@ pub fn read_bindings_timed(
     collect_binding_files(root, &mut files, &mut diagnostics);
     let walked_every_directory = diagnostics.is_empty();
     let (rows, mut read_diagnostics, spawns) =
-        assemble_bindings(root, files, panes, processes, false)?;
+        assemble_bindings(root, files, filter, panes, processes, false)?;
     diagnostics.append(&mut read_diagnostics);
     Ok(RealmBindings {
         rows,
@@ -1611,6 +1655,37 @@ impl<'a> ListOncePerSocket<'a> {
 
     fn spent(&self) -> Duration {
         self.spent.lock().map(|spent| *spent).unwrap_or_default()
+    }
+
+    /// Lists every socket in `sockets` at once, one thread each, and keeps
+    /// the answers for the per-pane asks that follow. A hung socket then costs
+    /// one listing deadline for the whole query rather than one per socket.
+    /// The time charged is the wall time of the batch, not the sum.
+    fn list_together(&self, sockets: BTreeSet<String>) {
+        let wanted: Vec<String> = match self.listed.lock() {
+            Ok(listed) => sockets
+                .into_iter()
+                .filter(|socket| !listed.contains_key(socket))
+                .collect(),
+            Err(_) => return,
+        };
+        if wanted.len() < 2 {
+            return;
+        }
+        let answers = record_spent(&self.spent, || {
+            std::thread::scope(|scope| {
+                let asks: Vec<_> = wanted
+                    .iter()
+                    .map(|socket| (socket, scope.spawn(|| self.inner.list(socket))))
+                    .collect();
+                asks.into_iter()
+                    .filter_map(|(socket, ask)| Some((socket.clone(), ask.join().ok()?)))
+                    .collect::<Vec<_>>()
+            })
+        });
+        if let Ok(mut listed) = self.listed.lock() {
+            listed.extend(answers);
+        }
     }
 }
 
@@ -1684,9 +1759,32 @@ impl ProcessProbe for ProbeOncePerAssembly<'_> {
     }
 }
 
+/// Which rows a realm-wide bindings query returns. Applied before any socket
+/// is asked, so a realm ruled out costs no `wezterm cli list`.
+#[derive(Clone, Debug, Default)]
+pub struct BindingFilter {
+    pub realm_id: Option<String>,
+    pub provider: Option<String>,
+}
+
+impl BindingFilter {
+    fn admits(&self, binding: &Value) -> bool {
+        let address = binding.get("address");
+        self.realm_id.as_deref().is_none_or(|realm| {
+            address
+                .and_then(|value| value.get("realm_id"))
+                .and_then(Value::as_str)
+                == Some(realm)
+        }) && self.provider.as_deref().is_none_or(|provider| {
+            binding.get("provider").and_then(Value::as_str) == Some(provider)
+        })
+    }
+}
+
 fn assemble_bindings(
     root: &Path,
     mut files: Vec<PathBuf>,
+    filter: &BindingFilter,
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
     typed: bool,
@@ -1720,8 +1818,9 @@ fn assemble_bindings(
     files.sort();
     let mut rows = Vec::new();
     let mut diagnostics = Vec::new();
-    let mut presence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
-    let mut claim_cache: BTreeMap<PathBuf, (Option<Value>, Option<String>)> = BTreeMap::new();
+    // Every binding record is read first: its realm and provider decide
+    // whether the filter admits it, before any socket is asked.
+    let mut read = Vec::new();
     for path in files {
         let Some((path_realm, path_incarnation, path_pane, path_launch, path_binding)) =
             path_identity(root, &path)
@@ -1732,22 +1831,62 @@ fn assemble_bindings(
             diagnostics.push(item);
             continue;
         };
+        let ruled_out = filter
+            .realm_id
+            .as_deref()
+            .is_some_and(|realm| realm != path_realm);
         let path_address = PaneAddress {
             realm_id: path_realm,
             incarnation_id: path_incarnation,
             pane_id: path_pane,
         };
-        let binding = match read_record(
+        match read_record(
             &path,
             Some("binding"),
             &RecordIdentity::binding(&path_address, &path_launch, &path_binding),
         ) {
-            Ok(Some(binding)) => binding,
-            Ok(None) => continue,
-            Err(error) => {
-                diagnostics.push(error.diagnostic);
-                continue;
-            }
+            Ok(Some(binding)) => read.push((path, binding)),
+            Ok(None) => {}
+            // A realm the filter rules out is not part of the answer, and
+            // neither are its unreadable records.
+            Err(_) if ruled_out => {}
+            Err(error) => diagnostics.push(error.diagnostic),
+        }
+    }
+    // A row outside the filter is still assessed when it shares a provider
+    // session with an admitted row: whether that session is live elsewhere is
+    // a fact about the admitted row. It is dropped from the answer afterwards.
+    let sessions: BTreeSet<(String, String)> = read
+        .iter()
+        .filter(|(_, binding)| filter.admits(binding))
+        .map(|(_, binding)| session_key(binding))
+        .collect();
+    let assessed: Vec<(PathBuf, Value, bool)> = read
+        .into_iter()
+        .filter_map(|(path, binding)| {
+            let admitted = filter.admits(&binding);
+            (admitted || sessions.contains(&session_key(&binding)))
+                .then_some((path, binding, admitted))
+        })
+        .collect();
+    if let Some(listed_once) = &listed_once {
+        listed_once.list_together(
+            assessed
+                .iter()
+                .filter_map(|(_, binding, _)| record_address(binding))
+                .filter_map(|address| realm_socket(root, &address))
+                .collect(),
+        );
+    }
+    let mut admitted_rows = Vec::new();
+    let mut ignored = Vec::new();
+    let mut presence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
+    let mut claim_cache: BTreeMap<PathBuf, (Option<Value>, Option<String>)> = BTreeMap::new();
+    for (path, binding, admitted) in assessed {
+        let diagnostics = if admitted {
+            &mut diagnostics
+        } else {
+            &mut ignored
         };
         let Some(address_value) = binding.get("address") else {
             continue;
@@ -1852,7 +1991,7 @@ fn assemble_bindings(
             cached.clone()
         } else {
             let before_presence = diagnostics.len();
-            let observed = pane_presence(root, &address, panes, processes, &mut diagnostics);
+            let observed = pane_presence(root, &address, panes, processes, diagnostics);
             if typed && observed == "unavailable" && diagnostics.len() == before_presence {
                 diagnostics.push(diagnostic(
                     "probe_unavailable",
@@ -1899,6 +2038,7 @@ fn assemble_bindings(
             model: string(&binding, "model"),
             start_source: string(&binding, "start_source"),
         });
+        admitted_rows.push(admitted);
     }
     let mut duplicates: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
     for (index, row) in rows.iter().enumerate() {
@@ -1928,6 +2068,8 @@ fn assemble_bindings(
             ));
         }
     }
+    let mut admitted_rows = admitted_rows.into_iter();
+    rows.retain(|_| admitted_rows.next().unwrap_or(false));
     rows.sort_by(|left, right| {
         (
             &left.address.realm_id,
