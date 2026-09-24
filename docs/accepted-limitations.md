@@ -379,6 +379,19 @@ wrote, but the check and the removal are two steps. If another such GUI writes
 the same name between them, its file is removed, and it is written again only
 when that GUI's bar changes. Only GUIs without a source answer share a name.
 
+## A second agent in one launch after the first died without ending
+
+A launch claim covers one command line, so two agents can start under one
+claim: `claude; claude` on one line, or a wrapper that restarts the agent.
+When the first agent dies without its session-end hook running (killed, or
+crashed), its binding is never ended. The second agent's fresh session start is
+then refused (`binding_conflict`, "provider start cannot replace the active
+binding"), and its later events are ignored (`claim_stale`), so its tab shows no
+indicator for that session. The writer cannot tell a dead first agent from one
+still running beside the second, as in `claude & claude`, and replacing a live
+agent's binding would take over its tab. Nothing is lost: the next command line
+gets a fresh claim and binds normally.
+
 ## A mark stamped before an unbound clear
 
 `attention mark clear --source NAME` in a claimed launch that no provider
