@@ -92,7 +92,7 @@ fi
 # is configured to be, never a stale binary left in ./target.
 cargo=$(command -v cargo)
 mkdir -p "$scratch/crate/scripts" "$scratch/crate/src" "$scratch/crate/target/release" "$scratch/elsewhere"
-cp "$root/scripts/install-cli.sh" "$scratch/crate/scripts/install-cli.sh"
+cp "$root/scripts/install-cli.sh" "$root/scripts/build-attention.sh" "$scratch/crate/scripts/"
 printf '[package]\nname = "attention"\nversion = "0.0.0"\nedition = "2021"\n' > "$scratch/crate/Cargo.toml"
 printf 'fn main() {}\n' > "$scratch/crate/build.rs"
 printf 'fn main() { println!("fresh build"); }\n' > "$scratch/crate/src/main.rs"
@@ -121,7 +121,7 @@ fi
 
 # A crate whose build reports no attention binary installs nothing.
 mkdir -p "$scratch/other/scripts" "$scratch/other/src"
-cp "$root/scripts/install-cli.sh" "$scratch/other/scripts/install-cli.sh"
+cp "$root/scripts/install-cli.sh" "$root/scripts/build-attention.sh" "$scratch/other/scripts/"
 printf '[package]\nname = "other"\nversion = "0.0.0"\nedition = "2021"\n' > "$scratch/other/Cargo.toml"
 printf 'fn main() {}\n' > "$scratch/other/build.rs"
 printf 'fn main() {}\n' > "$scratch/other/src/main.rs"
@@ -132,6 +132,29 @@ if [ "$status" -eq 1 ] && [ ! -e "$scratch/other/libexec/attention-rs" ] \
   pass "the installer refuses when cargo reports no attention binary"
 else
   fail "the installer refuses when cargo reports no attention binary (status $status)"
+fi
+
+# The gate measures the binaries this build reports, not a fixed path under
+# the target directory. A stand-in cargo reports one beside a stale
+# target/release/attention.
+reported="$scratch/reporting/target/other/release/attention"
+mkdir -p "$scratch/reporting/bin" "$scratch/reporting/target/release" "${reported%/*}"
+printf '#!/bin/sh\necho stale build\n' > "$scratch/reporting/target/release/attention"
+printf '#!/bin/sh\necho fresh build\n' > "$reported"
+cat > "$scratch/reporting/bin/cargo" <<EOF
+#!/bin/sh
+printf '%s\n' '{"reason":"compiler-artifact","target":{"kind":["bin"],"name":"attention"},"executable":"$reported"}'
+printf '%s\n' '{"reason":"build-finished","success":true}'
+EOF
+chmod 755 "$scratch/reporting/bin/cargo" "$scratch/reporting/target/release/attention" "$reported"
+run PATH="$scratch/reporting/bin:/usr/bin:/bin" sh "$root/scripts/build-attention.sh" \
+  "$scratch/reporting" "$scratch/reporting/target"
+if [ "$status" -eq 0 ] && [ "$(cat "$scratch/out")" = "$reported" ] \
+  && ! grep -n 'release/attention' "$root/tests/gate.sh" > "$scratch/out" \
+  && grep -q 'scripts/build-attention.sh' "$root/tests/gate.sh"; then
+  pass "the gate measures the binaries cargo reports building"
+else
+  fail "the gate measures the binaries cargo reports building (status $status)"
 fi
 
 [ "$failures" -eq 0 ]

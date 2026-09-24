@@ -20,7 +20,7 @@ cd "$root"
 # install) and one file from GitHub.
 
 # `sh -n` parses only its first file; the rest become positional arguments.
-for script in bin/attention examples/hook.sh scripts/install-cli.sh tests/gate.sh \
+for script in bin/attention examples/hook.sh scripts/*.sh tests/gate.sh \
   tests/shell/*.sh tests/fixtures/consumer-migration/*.sh; do
   sh -n "$script"
 done
@@ -177,12 +177,11 @@ if [ -z "$baseline_binary" ] && git cat-file -e "$baseline_commit^{commit}" 2>/d
   git archive --output="$gate_scratch/baseline.tar" "$baseline_commit" \
     Cargo.toml Cargo.lock src tests protocol bin shell plugin scripts
   tar -xf "$gate_scratch/baseline.tar" -C "$gate_scratch/baseline"
-  cargo build --release --manifest-path "$gate_scratch/baseline/Cargo.toml" --target-dir "$root/target/performance-baseline"
-  baseline_binary="$root/target/performance-baseline/release/attention"
+  baseline_binary=$(sh scripts/build-attention.sh "$gate_scratch/baseline" "$root/target/performance-baseline")
 fi
 if [ -n "$baseline_binary" ]; then
-  cargo build --release --target-dir "$root/target"
-  python3 tests/python/measure.py --baseline-rust "$baseline_binary" --rust-binary "$root/target/release/attention"
+  candidate_binary=$(sh scripts/build-attention.sh "$root" "$root/target")
+  python3 tests/python/measure.py --baseline-rust "$baseline_binary" --rust-binary "$candidate_binary"
 else
   printf 'gate: performance comparison SKIPPED (commit %s is not in this clone; fetch a ref that contains it, or set ATTENTION_BASELINE_RUST to a build of it)\n' \
     "$baseline_commit"
