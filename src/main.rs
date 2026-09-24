@@ -348,7 +348,24 @@ fn emit<T: Serialize>(response: &Response<T>, as_json: bool, quiet: bool) {
     if as_json || query_json(&response.command) {
         print_out(&printable_json(response));
     } else {
+        // The status word alone cannot say what to fix, and every
+        // diagnostic points here. Its reasons go to stderr, so a script
+        // that reads the word from stdout reads the same thing as before.
         print_out(&response.status);
+        for diagnostic in &response.diagnostics {
+            let message = diagnostic
+                .message
+                .chars()
+                .map(|character| {
+                    if character.is_control() {
+                        '?'
+                    } else {
+                        character
+                    }
+                })
+                .collect::<String>();
+            print_err(&format!("attention: {}: {message}", diagnostic.code));
+        }
     }
 }
 

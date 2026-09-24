@@ -1440,3 +1440,23 @@ fn a_hook_command_never_exits_two_and_says_why_on_stderr() {
         assert_eq!(output.status.code(), Some(expected), "{args:?}: {output:?}");
     }
 }
+
+#[test]
+fn doctor_in_text_mode_gives_its_reasons_on_stderr() {
+    let scratch = Scratch::new();
+    let state = scratch.0.join("state");
+    fs::create_dir_all(&state).expect("create state root");
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o755)).expect("shared state root");
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .arg("doctor")
+        .env_clear()
+        .env("HOME", &scratch.0)
+        .env("WEZTERM_ATTENTION_DIR", &state)
+        .output()
+        .expect("run doctor");
+    assert_eq!(output.stdout, b"findings\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "attention: state_permissions: state directory is accessible to other users\n"
+    );
+}
