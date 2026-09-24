@@ -1,4 +1,4 @@
--- Adapted copy of bootstrap's detect_agent consumer. The v2 cached view is
+-- Adapted copy of a downstream WezTerm config's detect_agent consumer. The v2 cached view is
 -- authoritative; process and title checks remain only as legacy fallback.
 return function(attention, agent_relay)
   local valid = { claude = true, codex = true, pi = true }

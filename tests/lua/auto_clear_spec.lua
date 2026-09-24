@@ -3920,8 +3920,8 @@ test("lifecycle facts reach the cached reader without changing the badge", funct
   assert(view.type == "notify" and view.lifecycle.availability == "available")
   assert(#view.lifecycle.observations == 2)
   -- A consumer dates a pane's last request from these fields and keys an idle
-  -- stretch by the binding: the prompt-cache countdown in the bootstrap
-  -- WezTerm config. It reads them without error handling beyond "absent means
+  -- stretch by the binding, as a prompt-cache countdown in a WezTerm config
+  -- does. It reads them without error handling beyond "absent means
   -- nothing to show", so a rename switches it off silently; this is where
   -- that becomes loud.
   assert(view.provider == samples.binding.provider and view.binding_id == snapshot.binding_id)
