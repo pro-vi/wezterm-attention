@@ -139,6 +139,7 @@ else
     stale_ttl_ms = function() return nil end,
     is_safe_text = function(value, maximum)
       return type(value) == "string" and value ~= "" and #value <= maximum
+        and not value:find("[%z\1-\31\127]") and not value:find("\194[\128-\159]")
     end,
   }
 end

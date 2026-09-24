@@ -66,13 +66,35 @@ local function decode_json(content)
           b = "\b", f = "\f", n = "\n", r = "\r", t = "\t",
         }
         if escaped == "u" then
-          local hex = content:sub(index + 2, index + 5)
-          assert(hex:match("^[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]$"),
-            "invalid JSON unicode escape")
-          local code = tonumber(hex, 16)
-          assert(code < 128, "test JSON decoder only accepts ASCII unicode escapes")
-          parts[#parts + 1] = string.char(code)
+          local function hex_at(at)
+            local hex = content:sub(at, at + 3)
+            assert(hex:match("^[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]$"),
+              "invalid JSON unicode escape")
+            return tonumber(hex, 16)
+          end
+          local code = hex_at(index + 2)
           index = index + 6
+          if code >= 0xD800 and code <= 0xDBFF then
+            assert(content:sub(index, index + 1) == "\\u", "unpaired JSON surrogate")
+            local low = hex_at(index + 2)
+            assert(low >= 0xDC00 and low <= 0xDFFF, "unpaired JSON surrogate")
+            code = 0x10000 + (code - 0xD800) * 0x400 + (low - 0xDC00)
+            index = index + 6
+          end
+          assert(code < 0xD800 or code > 0xDFFF, "unpaired JSON surrogate")
+          -- UTF-8, as serde_json and WezTerm's decoder produce it.
+          if code < 0x80 then
+            parts[#parts + 1] = string.char(code)
+          elseif code < 0x800 then
+            parts[#parts + 1] = string.char(0xC0 + math.floor(code / 0x40), 0x80 + code % 0x40)
+          elseif code < 0x10000 then
+            parts[#parts + 1] = string.char(0xE0 + math.floor(code / 0x1000),
+              0x80 + math.floor(code / 0x40) % 0x40, 0x80 + code % 0x40)
+          else
+            parts[#parts + 1] = string.char(0xF0 + math.floor(code / 0x40000),
+              0x80 + math.floor(code / 0x1000) % 0x40,
+              0x80 + math.floor(code / 0x40) % 0x40, 0x80 + code % 0x40)
+          end
         else
           assert(simple[escaped], "invalid JSON escape")
           parts[#parts + 1] = simple[escaped]
@@ -2288,6 +2310,28 @@ test("Lua accepts and rejects every shared protocol fixture row", function()
   end
 end)
 
+test("text checks refuse C1 controls the way Rust's char::is_control does", function()
+  local api = dofile(repo_root .. "/plugin/protocol.lua")({
+    wezterm = wezterm, protocol_path = repo_root .. "/protocol/v2.json" })
+  -- U+0080, U+0085 (NEL) and U+009F, the first, a middle and the last C1.
+  for _, text in ipairs({ "a\194\128b", "tty\194\133", "\194\159" }) do
+    assert(not api.is_safe_text(text, 256), "C1 text passed: " .. text:gsub("[\128-\255]", "?"))
+  end
+  -- Neighbours that are not control characters: U+00A0, U+00E9 and U+2028.
+  for _, text in ipairs({ "a\194\160b", "caf\195\169", "a\226\128\168b" }) do
+    assert(api.is_safe_text(text, 256), "non-control text refused")
+  end
+  local claim = internal.deep_copy(protocol_fixture.record_samples.claim)
+  claim.tty_path = "/dev/tty\194\133"
+  local parsed, problem = api.parse_v2_record(claim, "claim")
+  assert(not parsed and problem.code == "record_invalid", "a C1 path must make the record invalid")
+  -- The escaped spelling decodes to the same character, so it fails the same way.
+  claim.tty_path = "/dev/ttyNEL"
+  local raw = encode_json(claim):gsub("NEL", "\\u0085")
+  parsed, problem = api.parse_v2_record_json(raw, "claim")
+  assert(not parsed and problem.code == "record_invalid", "an escaped C1 must make the record invalid")
+end)
+
 test("Lua and Python fixture semantics cover exact wall-age boundaries", function()
   local results = fixtures.fixture_eligibility_cases(protocol_fixture)
   assert(#results == #protocol_fixture.eligibility_cases, "every eligibility row must run")
@@ -4018,6 +4062,12 @@ test("a missing protocol module logs once and keeps the v1 reader available", fu
   write_marker("9951", "stop", "missing-module-v1")
   local atype = fallback.get_attention("9951", { dir = test_dir, now_ms = 1000 })
   assert(atype == "stop", "the missing v2 module must not disable v1 rendering")
+  local sample = fallback._internal.sample_settled_title
+  for _, title in ipairs({ "bell\7", "next\194\133line" }) do
+    sample("fallback-title", "launch", title, nil)
+    assert(sample("fallback-title", "launch", title, nil) == nil,
+      "the fallback text check must refuse control characters too")
+  end
   local errors = drain_errors()
   assert(#errors == 1 and errors[1]:find("protocol", 1, true),
     "the missing module must produce one named log line")

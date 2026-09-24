@@ -62,6 +62,14 @@ return function(context)
     return value
   end
 
+  --- Rust's char::is_control: U+0000-U+001F, U+007F and U+0080-U+009F. In
+  --- UTF-8 every C1 character is 0xC2 followed by 0x80-0x9F, and 0xC2 is never
+  --- a continuation byte, so the byte test cannot match inside another
+  --- character.
+  local function has_control_character(value)
+    return value:find("[%z\1-\31\127]") ~= nil or value:find("\194[\128-\159]") ~= nil
+  end
+
   local protocol
   local protocol_load_error
   local function valid_tool_classification(parsed)
@@ -76,7 +84,7 @@ return function(context)
       if not providers[provider] or type(tools) ~= "table" then return false end
       for name, class in pairs(tools) do
         if type(name) ~= "string" or #name == 0 or #name > parsed.limits.safe_label_max_bytes
-            or name:find("[%z\1-\31\127]") or type(class) ~= "table" then return false end
+            or has_control_character(name) or type(class) ~= "table" then return false end
         for key in pairs(class) do if key ~= "tool_class" and key ~= "question_mode" then return false end end
         if class.tool_class == "question" then
           if class.question_mode ~= "blocking" and class.question_mode ~= "nonblocking" then return false end
@@ -96,7 +104,7 @@ return function(context)
       if not providers[provider] then return false end
       for event, declaration in pairs(hooks) do
         if type(event) ~= "string" or #event == 0 or #event > parsed.limits.safe_label_max_bytes
-            or event:find("[%z\1-\31\127]") or type(declaration) ~= "table"
+            or has_control_character(event) or type(declaration) ~= "table"
             or type(declaration.native_event) ~= "string" or #declaration.native_event == 0
             or (declaration.registration ~= "register" and declaration.registration ~= "ignored") then return false end
         for key in pairs(declaration) do if key ~= "native_event" and key ~= "registration" then return false end end
@@ -180,7 +188,7 @@ return function(context)
     return type(value) == "string"
       and #value > 0
       and #value <= max_bytes
-      and not value:find("[%z\1-\31\127]")
+      and not has_control_character(value)
   end
 
   local U32 = 4294967296
