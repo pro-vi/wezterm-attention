@@ -298,17 +298,29 @@ impl TtyWriter for SystemTtyWriter {
 }
 
 fn tty_name_for_fd(fd: libc::c_int) -> Result<String> {
-    let mut buffer = vec![0_i8; 4096];
-    let result = unsafe { libc::ttyname_r(fd, buffer.as_mut_ptr(), buffer.len()) };
+    ttyname(fd).ok_or_else(|| AttentionError::new("unsafe_tty", "stdin is not a terminal"))?
+}
+
+/// The terminal path behind `fd`, or `None` when it is not a terminal.
+///
+/// The buffer is bytes and only its pointer is cast, because `c_char` is `i8`
+/// on some targets and `u8` on others (aarch64 Linux among them).
+fn ttyname(fd: libc::c_int) -> Option<Result<String>> {
+    let mut buffer = vec![0_u8; 4096];
+    let result =
+        unsafe { libc::ttyname_r(fd, buffer.as_mut_ptr().cast::<libc::c_char>(), buffer.len()) };
     if result != 0 {
-        return Err(AttentionError::new("unsafe_tty", "stdin is not a terminal"));
+        return None;
     }
-    let bytes = buffer
+    let length = buffer
         .iter()
-        .take_while(|byte| **byte != 0)
-        .map(|byte| *byte as u8)
-        .collect::<Vec<_>>();
-    String::from_utf8(bytes).map_err(|_| AttentionError::new("unsafe_tty", "tty path is not UTF-8"))
+        .position(|byte| *byte == 0)
+        .unwrap_or(buffer.len());
+    buffer.truncate(length);
+    Some(
+        String::from_utf8(buffer)
+            .map_err(|_| AttentionError::new("unsafe_tty", "tty path is not UTF-8")),
+    )
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -680,19 +692,9 @@ pub fn file_from_fd(fd: libc::c_int) -> File {
 
 pub fn tty_path_from_fd(fd: libc::c_int) -> Result<String> {
     let file = file_from_fd(fd);
-    let raw = file.as_raw_fd();
-    let mut buffer = vec![0_i8; 4096];
-    let result = unsafe { libc::ttyname_r(raw, buffer.as_mut_ptr(), buffer.len()) };
+    let name = ttyname(file.as_raw_fd());
     std::mem::forget(file);
-    if result != 0 {
-        return Err(AttentionError::new("unsafe_tty", "descriptor is not a tty"));
-    }
-    let bytes = buffer
-        .iter()
-        .take_while(|byte| **byte != 0)
-        .map(|byte| *byte as u8)
-        .collect();
-    String::from_utf8(bytes).map_err(|_| AttentionError::new("unsafe_tty", "tty path is not UTF-8"))
+    name.ok_or_else(|| AttentionError::new("unsafe_tty", "descriptor is not a tty"))?
 }
 
 #[cfg(test)]
