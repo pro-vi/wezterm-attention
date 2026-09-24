@@ -564,6 +564,15 @@ Do not register `SubagentStart`. Child attribution needs matching native `agent_
 - **Long-running scripts** — any background job that wants your attention when done
 - **Manual triage** — `Alt+B` to flag tabs for review during code review sessions
 
+## Built on Attention
+
+These are built outside this repository from its public facts; each names what it reads.
+
+- **A prompt-cache countdown in the status bar.** It dates the pane's last request from the newest `written_at_unix_ns` among the `lifecycle.observations` of `get_attention_view(pane)` whose `actor.kind` is `lead`, and keys the countdown by `binding_id`, so a new session starts a new one. The timestamp is a decimal string of nanoseconds, too large for a Lua number.
+- **A pane jump picker that names the agent in every pane.** It reads `provider` from `get_attention_view(pane)`, and trusts it only when `binding_phase` is `active` and `reader_confidence` is `confirmed`.
+- **An unanswered-question highlight.** It is driven by `on_view_change` and looks for entries in `lifecycle.requests` whose `kind` is `question`. [`examples/follow-up.lua`](examples/follow-up.lua) is the starting point.
+- **An exact reply relay between panes.** An executable registered on the `Stop` hook with `--consumer … --include-reply` receives the agent's final message as `reply.text`, exactly as the provider sent it, together with the scope of the pane it came from.
+
 ## The drawn tab order
 
 A WezTerm window attached to a mux server mirrors the server's tabs under numbers of its own, and those are the numbers the tab bar prints. They are not the order of `wezterm cli list`: a consumer of this project measured one 29-tab window on 2026-09-19 and found 22 of the 29 numbers differing. Nothing outside the GUI process can see the drawn order, so the tab bar publishes it — one file per window, under the state directory, named by the incarnation of the GUI's own mux socket and the window id:
