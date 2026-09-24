@@ -6,7 +6,7 @@
 use super::pane_retention::{OP_1, OP_2, OP_3, actions, end_long_ago, pane_dir};
 use super::*;
 use wezterm_attention::query::read_bindings_for_socket_with_ports;
-use wezterm_attention::records::{session_entry_path, session_index_path};
+use wezterm_attention::records::{session_entry, session_entry_path, session_index_path};
 
 fn entry_of(setup: &Setup, pane_id: &str, session: &str, launch_id: &str) -> PathBuf {
     let (mut address, _) = pane_address(&setup.env).expect("address");
@@ -203,6 +203,48 @@ fn pane_retention_removes_the_entries_of_the_tree_it_removes() {
     );
     assert!(!pane_dir(&setup).exists());
     assert!(!entry.exists());
+    assert!(
+        !entry.parent().expect("session directory").exists(),
+        "an emptied session directory is left behind"
+    );
+}
+
+/// A session directory that still names another binding stays when sweep
+/// removes one of its entries.
+#[test]
+fn pane_retention_keeps_a_session_directory_another_entry_uses() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    end_long_ago(&setup);
+    let other = entry_of(
+        &setup,
+        "99",
+        "session-a",
+        "00000000-0000-4000-8000-000000000702",
+    );
+    let (mut address, _) = pane_address(&setup.env).expect("address");
+    address.pane_id = "99".to_owned();
+    let other_entry = session_entry(
+        &address,
+        "00000000-0000-4000-8000-000000000702",
+        &binding_id(
+            "claude",
+            "session-a",
+            "00000000-0000-4000-8000-000000000702",
+        ),
+    )
+    .expect("entry");
+    atomic_replace(&other, &other_entry).expect("write the other entry");
+    setup.panes.set(Vec::new());
+    setup.processes.set(Presence::Absent);
+    setup.clock.set_monotonic(1_000);
+    setup.run_sweep(true, Some(OP_2));
+    setup
+        .clock
+        .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
+    setup.run_sweep(true, Some(OP_3));
+    assert!(!own_entry(&setup).exists());
+    assert!(other.exists());
 }
 
 #[test]
@@ -233,6 +275,10 @@ fn binding_retention_removes_the_entry_of_the_binding_it_removes() {
     setup.run_sweep(true, Some(OP_1));
     assert!(!setup.binding_dir().exists());
     assert!(!old_entry.exists());
+    assert!(
+        !old_entry.parent().expect("session directory").exists(),
+        "an emptied session directory is left behind"
+    );
     assert!(current_entry.exists());
 }
 
