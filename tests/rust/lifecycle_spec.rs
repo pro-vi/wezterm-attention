@@ -536,17 +536,23 @@ fn same_key_order_conflict_and_equal_time_eviction() {
     let mut conflict = item.clone();
     conflict.source_version = Some("conflict".into());
     assert!(snapshot.reduce(conflict).is_err());
-    for _ in 0..64 {
+    for _ in 0..63 {
         let mut sibling = item.clone();
         sibling.observation_id = Uuid::new_v4().to_string();
         sibling.correlation = None;
-        snapshot.reduce(sibling).unwrap();
+        assert!(snapshot.reduce(sibling).unwrap());
     }
-    assert!(snapshot.pools.general.observations.is_empty());
-    assert_eq!(
-        snapshot.pools.general.retention_floor_mono_ns,
-        Some(item.observed_mono_ns)
-    );
+    // A full pool evicts everything at its oldest instant. When that instant
+    // is the candidate's own, the candidate goes too, so nothing is stored
+    // and the full pool stays as it was.
+    let full = snapshot.clone();
+    let mut sibling = item.clone();
+    sibling.observation_id = Uuid::new_v4().to_string();
+    sibling.correlation = None;
+    assert!(!snapshot.reduce(sibling).unwrap());
+    assert_eq!(snapshot, full);
+    assert_eq!(snapshot.pools.general.observations.len(), 64);
+    assert!(snapshot.pools.general.retention_floor_mono_ns.is_none());
     assert!(snapshot.pools.requests.retention_floor_mono_ns.is_none());
 }
 
