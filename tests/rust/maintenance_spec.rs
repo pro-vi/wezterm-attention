@@ -1678,3 +1678,6 @@ mod row_agreement;
 
 #[path = "maintenance_spec/unreadable_state.rs"]
 mod unreadable_state;
+
+#[path = "maintenance_spec/diagnostic_context.rs"]
+mod diagnostic_context;

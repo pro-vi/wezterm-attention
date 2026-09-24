@@ -1696,18 +1696,26 @@ fn assemble_bindings(
     let probed_once = processes.map(ProbeOncePerAssembly::new);
     let processes = probed_once.as_ref().map(|probe| probe as &dyn ProcessProbe);
     let read_record = |path: &Path, kind: Option<&str>, identity: &RecordIdentity| {
-        if !typed {
-            return read_record(path, kind, identity);
-        }
-        match read_record_typed(path, kind, identity) {
-            RecordRead::Present(value) => Ok(Some(value)),
-            RecordRead::Missing => Ok(None),
-            RecordRead::Unavailable(mut error) => {
-                error.diagnostic.message = "selected state record I/O is unavailable".into();
-                Err(error)
+        let read = if !typed {
+            read_record(path, kind, identity)
+        } else {
+            match read_record_typed(path, kind, identity) {
+                RecordRead::Present(value) => Ok(Some(value)),
+                RecordRead::Missing => Ok(None),
+                RecordRead::Unavailable(mut error) => {
+                    error.diagnostic.message = "selected state record I/O is unavailable".into();
+                    Err(error)
+                }
+                RecordRead::Invalid(error) | RecordRead::Unsupported(error) => Err(error),
             }
-            RecordRead::Invalid(error) | RecordRead::Unsupported(error) => Err(error),
-        }
+        };
+        read.map_err(|mut error| {
+            error
+                .diagnostic
+                .context
+                .insert("path".into(), Value::String(state_relative(root, path)));
+            error
+        })
     };
     files.sort();
     let mut rows = Vec::new();
@@ -1718,10 +1726,10 @@ fn assemble_bindings(
         let Some((path_realm, path_incarnation, path_pane, path_launch, path_binding)) =
             path_identity(root, &path)
         else {
-            diagnostics.push(diagnostic(
-                "record_invalid",
-                "binding path has the wrong shape",
-            ));
+            let mut item = diagnostic("record_invalid", "binding path has the wrong shape");
+            item.context
+                .insert("path".into(), Value::String(state_relative(root, &path)));
+            diagnostics.push(item);
             continue;
         };
         let path_address = PaneAddress {
@@ -1850,6 +1858,18 @@ fn assemble_bindings(
                     "probe_unavailable",
                     "selected binding presence is unavailable",
                 ));
+            }
+            // One socket failure is reported once per pane it leaves unknown;
+            // the address says which.
+            for item in &mut diagnostics[before_presence..] {
+                for (field, value) in [
+                    ("realm_id", &address.realm_id),
+                    ("incarnation_id", &address.incarnation_id),
+                    ("pane_id", &address.pane_id),
+                ] {
+                    item.context
+                        .insert(field.into(), Value::String(value.clone()));
+                }
             }
             presence_cache.insert(presence_key, observed.clone());
             observed
@@ -2161,61 +2181,11 @@ pub fn read_tab_publications(root: &Path) -> Result<(Vec<TabPublication>, Vec<Di
             continue;
         };
         let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("json") {
-            continue;
-        }
-        match entry.file_type() {
-            Ok(kind) if kind.is_symlink() => {
-                diagnostics.push(diagnostic("record_invalid", "tab publication is a symlink"));
-                continue;
-            }
-            Ok(kind) if !kind.is_file() => continue,
-            Ok(_) => {}
-            Err(_) => {
-                diagnostics.push(diagnostic(
-                    "probe_unavailable",
-                    "tab publication entry type is unavailable",
-                ));
-                continue;
-            }
-        }
-        let stem = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("");
-        let (incarnation, id) = match stem.split_once('-') {
-            Some((incarnation, id)) if hex64(incarnation) => (Some(incarnation), id),
-            None => (None, stem),
-            _ => (None, ""),
-        };
-        let window_id = canonical_decimal(id, limits.canonical_decimal_max_digits)
-            .then(|| id.parse::<u64>().ok())
-            .flatten();
-        let Some(window_id) = window_id else {
-            diagnostics.push(diagnostic(
-                "record_invalid",
-                "tab publication is not named by a window ID",
-            ));
-            continue;
-        };
-        let stamp = FileStamp::regular_file(&path).ok().flatten();
-        match read_record_typed(&path, None, &RecordIdentity::unscoped()) {
-            RecordRead::Present(value) => {
-                match tab_publication(&value, window_id, incarnation, limits) {
-                    Ok(mut window) => {
-                        window.relative_path = Path::new("tabs").join(format!("{stem}.json"));
-                        window.stamp = stamp;
-                        windows.push(window);
-                    }
-                    Err(error) => diagnostics.push(error.diagnostic),
-                }
-            }
-            // Published and removed between the listing and the read. The window
-            // it described is gone or is about to publish again.
-            RecordRead::Missing => {}
-            RecordRead::Unavailable(error)
-            | RecordRead::Invalid(error)
-            | RecordRead::Unsupported(error) => diagnostics.push(error.diagnostic),
+        let before = diagnostics.len();
+        read_tab_publication(&path, &entry, limits, &mut windows, &mut diagnostics);
+        for item in &mut diagnostics[before..] {
+            item.context
+                .insert("path".into(), Value::String(state_relative(root, &path)));
         }
     }
     windows.sort_by(|a, b| {
@@ -2224,6 +2194,73 @@ pub fn read_tab_publications(root: &Path) -> Result<(Vec<TabPublication>, Vec<Di
             .then_with(|| a.source.cmp(&b.source))
     });
     Ok((windows, diagnostics))
+}
+
+/// One entry of `tabs/`: a publication, a diagnostic, or nothing for a file
+/// that is not a tab order.
+fn read_tab_publication(
+    path: &Path,
+    entry: &fs::DirEntry,
+    limits: &crate::protocol::Limits,
+    windows: &mut Vec<TabPublication>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if path.extension().and_then(|value| value.to_str()) != Some("json") {
+        return;
+    }
+    match entry.file_type() {
+        Ok(kind) if kind.is_symlink() => {
+            diagnostics.push(diagnostic("record_invalid", "tab publication is a symlink"));
+            return;
+        }
+        Ok(kind) if !kind.is_file() => return,
+        Ok(_) => {}
+        Err(_) => {
+            diagnostics.push(diagnostic(
+                "probe_unavailable",
+                "tab publication entry type is unavailable",
+            ));
+            return;
+        }
+    }
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("");
+    let (incarnation, id) = match stem.split_once('-') {
+        Some((incarnation, id)) if hex64(incarnation) => (Some(incarnation), id),
+        None => (None, stem),
+        _ => (None, ""),
+    };
+    let window_id = canonical_decimal(id, limits.canonical_decimal_max_digits)
+        .then(|| id.parse::<u64>().ok())
+        .flatten();
+    let Some(window_id) = window_id else {
+        diagnostics.push(diagnostic(
+            "record_invalid",
+            "tab publication is not named by a window ID",
+        ));
+        return;
+    };
+    let stamp = FileStamp::regular_file(path).ok().flatten();
+    match read_record_typed(path, None, &RecordIdentity::unscoped()) {
+        RecordRead::Present(value) => {
+            match tab_publication(&value, window_id, incarnation, limits) {
+                Ok(mut window) => {
+                    window.relative_path = Path::new("tabs").join(format!("{stem}.json"));
+                    window.stamp = stamp;
+                    windows.push(window);
+                }
+                Err(error) => diagnostics.push(error.diagnostic),
+            }
+        }
+        // Published and removed between the listing and the read. The window
+        // it described is gone or is about to publish again.
+        RecordRead::Missing => {}
+        RecordRead::Unavailable(error)
+        | RecordRead::Invalid(error)
+        | RecordRead::Unsupported(error) => diagnostics.push(error.diagnostic),
+    }
 }
 
 /// Digits with no leading zero, the way every ID this project writes is spelled.
