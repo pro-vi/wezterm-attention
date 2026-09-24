@@ -13,7 +13,9 @@ use crate::identity::{PaneAddress, canonical_pane_id};
 use crate::protocol::{
     AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, manifest, sha256_hex,
 };
-use crate::query::{FileStamp, pane_presence, read_bindings_with_ports, read_tab_publications};
+use crate::query::{
+    FileStamp, collect_state_files, pane_presence, read_bindings_with_ports, read_tab_publications,
+};
 use crate::records::{
     CommitPlan, RecordIdentity, Replacement, commit_nested_with, launch_path, pane_path,
     read_record, remove_file_durable, with_lock,
@@ -60,21 +62,21 @@ fn diagnostic(code: &str, message: &str) -> Diagnostic {
     AttentionError::new(code, message).diagnostic
 }
 
-fn collect_json(path: &Path, output: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(path) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if file_type.is_dir() && !file_type.is_symlink() {
-            collect_json(&path, output);
-        } else if path.extension().and_then(|extension| extension.to_str()) == Some("json") {
-            output.push(path);
-        }
-    }
+/// Every JSON file below `path`, with a diagnostic for each directory that
+/// could not be read.
+fn collect_json(
+    root: &Path,
+    path: &Path,
+    output: &mut Vec<PathBuf>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    collect_state_files(
+        root,
+        path,
+        &|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"),
+        output,
+        diagnostics,
+    );
 }
 
 fn collect_json_complete(path: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
@@ -154,9 +156,9 @@ fn collect_json_complete_at(
     Ok(())
 }
 
-fn binding_files(root: &Path) -> Vec<PathBuf> {
+fn binding_files(root: &Path, diagnostics: &mut Vec<Diagnostic>) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    collect_json(&root.join("v2/realms"), &mut files);
+    collect_json(root, &root.join("v2/realms"), &mut files, diagnostics);
     files.retain(|path| path.file_name().and_then(|name| name.to_str()) == Some("binding.json"));
     files.sort();
     files
@@ -230,10 +232,10 @@ fn binding_selection(
 
 fn audit_state(root: &Path) -> (Vec<Value>, Vec<Diagnostic>) {
     let mut files = Vec::new();
-    collect_json(&root.join("v2"), &mut files);
+    let mut diagnostics = Vec::new();
+    collect_json(root, &root.join("v2"), &mut files, &mut diagnostics);
     files.sort();
     let mut records = Vec::new();
-    let mut diagnostics = Vec::new();
     for path in files {
         let Some(kind) = state_kind(&path) else {
             diagnostics.push(diagnostic(
@@ -302,8 +304,14 @@ pub fn doctor(
 ) -> Result<(Value, Vec<Diagnostic>)> {
     let mut diagnostics = Vec::new();
     let mut probes = Vec::new();
+    let (audited_records, audit_diagnostics) = audit_state(root);
+    let unreadable = audit_diagnostics
+        .iter()
+        .any(|item| item.code == "state_permissions");
     let permission_status = if !root.exists() {
         "healthy"
+    } else if unreadable {
+        "finding"
     } else {
         match fs::metadata(root) {
             Ok(metadata) if metadata.permissions().mode() & 0o077 == 0 => "healthy",
@@ -324,7 +332,6 @@ pub fn doctor(
         }
     };
     probes.push(json!({"name":"permissions","status":permission_status}));
-    let (audited_records, audit_diagnostics) = audit_state(root);
     let (rows, binding_diagnostics) = read_bindings_with_ports(root, panes, processes)?;
     let mut state_diagnostics = audit_diagnostics;
     state_diagnostics.extend(binding_diagnostics);
@@ -1264,9 +1271,9 @@ pub fn sweep(
     let now = clock.unix_ns20()?;
     ns20(&observation, "record_invalid")?;
     ns20(&now, "record_invalid")?;
-    let files = binding_files(root);
     let mut details = Vec::new();
     let mut diagnostics = Vec::new();
+    let files = binding_files(root, &mut diagnostics);
     collect_projection_orphans(root, realm_filter, apply, &mut details, &mut diagnostics);
     let mut ended: BTreeMap<String, Vec<(String, PathBuf, bool)>> = BTreeMap::new();
     let mut presence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();

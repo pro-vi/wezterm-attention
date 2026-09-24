@@ -764,6 +764,9 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 }
                 Err(error) => return Err((Box::new(error), args.json, "bindings".to_owned())),
             };
+            // A socket answer reports an unreadable directory as a diagnostic,
+            // and any diagnostic already makes it incomplete.
+            let mut walked_every_directory = true;
             let (scope, mut rows, diagnostics, timing) = if let Some(socket) = &args.socket {
                 let (scope, rows, diagnostics, timing) =
                     match wezterm_attention::query::read_bindings_for_socket_timed(
@@ -781,10 +784,10 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     };
                 (Some(scope), rows, diagnostics, timing)
             } else {
-                let (rows, diagnostics, timing) =
-                    read_bindings_timed(&root, Some(&panes), Some(&processes))
-                        .map_err(|error| (Box::new(error), args.json, "bindings".to_owned()))?;
-                (None, rows, diagnostics, timing)
+                let answer = read_bindings_timed(&root, Some(&panes), Some(&processes))
+                    .map_err(|error| (Box::new(error), args.json, "bindings".to_owned()))?;
+                walked_every_directory = answer.walked_every_directory;
+                (None, answer.rows, answer.diagnostics, answer.timing)
             };
             if let Some(realm) = args.realm {
                 rows.retain(|row| row.address.realm_id == realm);
@@ -832,7 +835,8 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             // pane's presence unknown; a realm-wide answer reports its
             // diagnostics through the two counts instead, because on a machine
             // where panes outlive mux incarnations they never run out, and a
-            // flag that is always false says nothing about the rows.
+            // flag that is always false says nothing about the rows. A
+            // directory that could not be read may hold rows, so it does.
             emit(
                 &Response {
                     schema: 1,
@@ -843,7 +847,9 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                         "findings"
                     }
                     .to_owned(),
-                    complete: !truncated && (!socket_mode || diagnostics.is_empty()),
+                    complete: !truncated
+                        && walked_every_directory
+                        && (!socket_mode || diagnostics.is_empty()),
                     result,
                     diagnostics: shown_diagnostics,
                 },

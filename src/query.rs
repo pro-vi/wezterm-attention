@@ -1204,21 +1204,74 @@ fn collect_selected_binding_files(
     }
 }
 
-fn collect_binding_files(path: &Path, output: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(path) else {
-        return;
+fn collect_binding_files(
+    root: &Path,
+    output: &mut Vec<PathBuf>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    collect_state_files(
+        root,
+        &root.join("v2/realms"),
+        &|path| path.file_name().and_then(|name| name.to_str()) == Some("binding.json"),
+        output,
+        diagnostics,
+    );
+}
+
+/// Every file below `path` that `wanted` accepts, without following a symlink.
+///
+/// A directory or entry that cannot be read is reported, not skipped: whatever
+/// is below it is missing from the answer, and an answer that looks complete
+/// hides that. The diagnostic names the path relative to the state root. A
+/// starting directory that does not exist is an empty store, and one removed
+/// mid-walk was removed by its owner.
+pub(crate) fn collect_state_files(
+    root: &Path,
+    path: &Path,
+    wanted: &dyn Fn(&Path) -> bool,
+    output: &mut Vec<PathBuf>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(_) => {
+            diagnostics.push(unreadable_state(root, path));
+            return;
+        }
     };
-    for entry in entries.flatten() {
-        let candidate = entry.path();
-        let Ok(file_type) = entry.file_type() else {
+    for entry in entries {
+        let Ok(entry) = entry else {
+            diagnostics.push(unreadable_state(root, path));
             continue;
         };
-        if file_type.is_dir() && !file_type.is_symlink() {
-            collect_binding_files(&candidate, output);
-        } else if candidate.file_name().and_then(|name| name.to_str()) == Some("binding.json") {
-            output.push(candidate);
+        let candidate = entry.path();
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => {
+                collect_state_files(root, &candidate, wanted, output, diagnostics)
+            }
+            Ok(_) if wanted(&candidate) => output.push(candidate),
+            Ok(_) => {}
+            Err(_) => diagnostics.push(unreadable_state(root, &candidate)),
         }
     }
+}
+
+/// The diagnostic for a state path a walk could not read.
+pub(crate) fn unreadable_state(root: &Path, path: &Path) -> Diagnostic {
+    let mut item = diagnostic("state_permissions", "state directory could not be read");
+    item.context
+        .insert("path".into(), Value::String(state_relative(root, path)));
+    item
+}
+
+/// A state path as the diagnostic context names it: relative to the state
+/// root, so a diagnostic never carries the local home directory.
+pub(crate) fn state_relative(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn string(record: &Value, field: &str) -> Option<String> {
@@ -1408,7 +1461,7 @@ fn session_live_elsewhere(
     processes: Option<&dyn ProcessProbe>,
 ) -> bool {
     let mut files = Vec::new();
-    collect_binding_files(&root.join("v2/realms"), &mut files);
+    collect_binding_files(root, &mut files, &mut Vec::new());
     for path in files {
         let Some((realm_id, incarnation_id, pane_id, launch_id, binding_id)) =
             path_identity(root, &path)
@@ -1494,8 +1547,20 @@ pub fn read_bindings_with_ports(
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
 ) -> Result<(Vec<BindingRow>, Vec<Diagnostic>)> {
-    let (rows, diagnostics, _) = read_bindings_timed(root, panes, processes)?;
-    Ok((rows, diagnostics))
+    let answer = read_bindings_timed(root, panes, processes)?;
+    Ok((answer.rows, answer.diagnostics))
+}
+
+/// A realm-wide bindings answer as the CLI reports it.
+#[derive(Debug)]
+pub struct RealmBindings {
+    pub rows: Vec<BindingRow>,
+    pub diagnostics: Vec<Diagnostic>,
+    pub timing: BindingTiming,
+    /// False when a directory in the state tree could not be read, so rows
+    /// below it may be missing. An unreadable binding record is not counted:
+    /// it is reported, and it is not a row.
+    pub walked_every_directory: bool,
 }
 
 /// The realm-wide query with where its time went; the CLI prints the timing,
@@ -1504,12 +1569,21 @@ pub fn read_bindings_timed(
     root: &Path,
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
-) -> Result<(Vec<BindingRow>, Vec<Diagnostic>, BindingTiming)> {
+) -> Result<RealmBindings> {
     let started = Instant::now();
     let mut files = Vec::new();
-    collect_binding_files(&root.join("v2/realms"), &mut files);
-    let (rows, diagnostics, spawns) = assemble_bindings(root, files, panes, processes, false)?;
-    Ok((rows, diagnostics, BindingTiming::from_wall(started, spawns)))
+    let mut diagnostics = Vec::new();
+    collect_binding_files(root, &mut files, &mut diagnostics);
+    let walked_every_directory = diagnostics.is_empty();
+    let (rows, mut read_diagnostics, spawns) =
+        assemble_bindings(root, files, panes, processes, false)?;
+    diagnostics.append(&mut read_diagnostics);
+    Ok(RealmBindings {
+        rows,
+        diagnostics,
+        timing: BindingTiming::from_wall(started, spawns),
+        walked_every_directory,
+    })
 }
 
 /// One pane listing per socket, rather than one per bound pane.
