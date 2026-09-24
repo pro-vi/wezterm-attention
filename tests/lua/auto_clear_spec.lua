@@ -3468,6 +3468,18 @@ test("lifecycle facts reach the cached reader without changing the badge", funct
   local view = assert(reloaded.get_attention_view(pane))
   assert(view.type == "notify" and view.lifecycle.availability == "available")
   assert(#view.lifecycle.observations == 2)
+  -- A consumer dates a pane's last request from these fields and keys an idle
+  -- stretch by the binding: the prompt-cache countdown in the bootstrap
+  -- WezTerm config. It reads them without error handling beyond "absent means
+  -- nothing to show", so a rename switches it off silently; this is where
+  -- that becomes loud.
+  assert(view.provider == samples.binding.provider and view.binding_id == snapshot.binding_id)
+  assert(view.activity_type == "notify")
+  for _, item in ipairs(view.lifecycle.observations) do
+    assert(item.actor.kind == "lead" or item.actor.kind == "child")
+    assert(type(item.written_at_unix_ns) == "string" and item.written_at_unix_ns:match("^%d+$"),
+      "written_at_unix_ns must stay a decimal string: nanoseconds do not fit a Lua number")
+  end
   view.lifecycle.observations[1].actor.kind = "mutated"
   assert(reloaded.get_attention_view(pane).lifecycle.observations[1].actor.kind == "lead")
   local ack = decode_json(encode_json(samples.acknowledgement))
