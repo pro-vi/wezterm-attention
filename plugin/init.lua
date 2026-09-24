@@ -467,16 +467,61 @@ end
 
 local applied = false
 
+-- What each option may be. `false` stands for the literal false, which some
+-- options take to mean "off".
+local option_kinds = {
+  dir = { "string" }, renderer = { "string" }, format_tab_title = { "boolean" },
+  title_formatter = { "function" }, on_view_change = { "function" },
+  colors = { "table" }, indicators = { "table" }, priority = { "table" }, auto_clear = { "table" },
+  stale_after_ms = { "table", false }, review_key = { "table", false },
+  request_redraw = { "boolean" }, auto_poll = { "boolean" }, show_provider = { "boolean" },
+  show_directory = { "boolean" }, settled_title_fallback = { "boolean" },
+  integration_root = { "string" },
+}
+-- Names people have used for an option that exists under another name.
+local option_renames = { acknowledge_types = "auto_clear" }
+
+--- The options as given, less any the plugin cannot use: an unknown name, or
+--- a value of the wrong kind, is named once in the log and left out, so the
+--- default applies instead of a typo silently changing nothing or a wrong
+--- kind failing the whole config.
+local function usable_options(opts)
+  local usable = {}
+  for key, value in pairs(opts) do
+    local kinds = option_kinds[key]
+    if not kinds then
+      local rename = option_renames[key]
+      report_warning_once("option:" .. tostring(key), "unknown option " .. tostring(key)
+        .. (rename and (" is ignored; the option is " .. rename) or " is ignored"))
+    else
+      local accepted = false
+      for _, kind in ipairs(kinds) do
+        if (kind == false and value == false) or type(value) == kind then accepted = true end
+      end
+      if accepted then
+        usable[key] = value
+      else
+        local names = {}
+        for index, kind in ipairs(kinds) do names[index] = kind == false and "false" or ("a " .. kind) end
+        report_warning_once("option:" .. key, "option " .. key .. " must be " .. table.concat(names, " or ")
+          .. ", not " .. type(value) .. "; the default is used")
+      end
+    end
+  end
+  if usable.renderer ~= nil and usable.renderer ~= "tab" and usable.renderer ~= "manual" then
+    report_warning_once("option:renderer", 'option renderer must be "tab" or "manual", not "'
+      .. usable.renderer .. '"; the default "tab" is used')
+    usable.renderer = nil
+  end
+  return usable
+end
+
 function M.apply_to_config(config, opts)
   if applied then return end
   applied = true
 
-  opts = opts or {}
-  if opts.on_view_change ~= nil and type(opts.on_view_change) ~= "function" then
-    report_error_once("on-view-change-option", "on_view_change must be a function")
-  else
-    M._on_view_change = opts.on_view_change
-  end
+  opts = usable_options(opts or {})
+  M._on_view_change = opts.on_view_change
 
   -- Merge options with defaults
   local dir = opts.dir or defaults.dir

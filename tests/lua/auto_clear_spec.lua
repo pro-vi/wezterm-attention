@@ -4516,6 +4516,23 @@ local function load_with_environment(environment)
   return instance
 end
 
+test("an unknown option or a value of the wrong kind is named, and the default used", function()
+  local before = #(handlers["format-tab-title"] or {})
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  local ok, failure = pcall(instance.apply_to_config, {}, { auto_poll = false, dir = test_dir,
+    review_key = false, integration_root = writer_root,
+    acknowledge_types = { "stop" }, renderer = "tabs", colors = "red", show_provider = "yes" })
+  assert(ok, "a wrong option must not break the config: " .. tostring(failure))
+  local warnings = table.concat(drain_warnings(), "\n")
+  assert(warnings:find("acknowledge_types", 1, true) and warnings:find("auto_clear", 1, true),
+    "a misnamed option must be named with the real one: " .. warnings)
+  assert(warnings:find("renderer", 1, true) and warnings:find("tabs", 1, true), "bad renderer: " .. warnings)
+  assert(warnings:find("colors", 1, true) and warnings:find("show_provider", 1, true), warnings)
+  assert(#handlers["format-tab-title"] == before + 1,
+    "an unrecognised renderer falls back to the default tab renderer")
+  assert(instance._active_colors.stop == "#12271c" and instance._active_show_provider == false)
+end)
+
 test("the state root and tabs directory are created private to the user", function()
   local root = test_dir .. "/private-root"
   local instance = dofile(repo_root .. "/plugin/init.lua")
