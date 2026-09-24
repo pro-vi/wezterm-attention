@@ -1261,7 +1261,8 @@ fn session_binding_files(root: &Path, provider: &str, session: &str) -> Option<V
         &RecordIdentity::unscoped(),
     )
     .ok()??;
-    let entries = match fs::read_dir(session_dir(root, provider, session)) {
+    let dir = session_dir(root, provider, session);
+    let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
         Err(_) => return None,
@@ -1274,7 +1275,7 @@ fn session_binding_files(root: &Path, provider: &str, session: &str) -> Option<V
         if name.starts_with('.') {
             continue;
         }
-        let path = session_dir(root, provider, session).join(name);
+        let path = dir.join(name);
         let record =
             read_record(&path, Some("session_binding"), &RecordIdentity::unscoped()).ok()??;
         let address = record_address(&record)?;
