@@ -855,7 +855,8 @@ test("a source change republishes unchanged order without changing content time"
   local publication = decode_json(assert(read_path(file)))
   assert(publication.schema == 2 and publication.source.socket_path == "/test/gui.sock")
   assert(publication.published_at_ms == legacy.published_at_ms)
-  assert(path_exists(tab_publication_path(9793)), "legacy publications are not guessed away")
+  assert(not path_exists(tab_publication_path(9793)),
+    "this process's own legacy file for the window goes once the sourced one is written")
   local foreign = test_dir .. "/tabs/" .. string.rep("b",64) .. "-9793.json"
   local out = assert(io.open(foreign,"w")); out:write("foreign"); out:close()
   local polling = window_double({window_id=9799,tabs={},focused=false})
@@ -865,6 +866,22 @@ test("a source change republishes unchanged order without changing content time"
   os.remove(foreign)
   wezterm.run_child_process = previous
   internal.reset_tab_source()
+end)
+
+test("a legacy tab order this process never wrote survives its window's sourced one", function()
+  local previous = wezterm.run_child_process
+  internal.reset_tab_source()
+  local foreign = tab_publication_path(9796)
+  local out = assert(io.open(foreign, "w")); out:write("from an exited GUI"); out:close()
+  wezterm.run_child_process = function(args) return true, tab_source_response(args[4]), "" end
+  internal.acquire_tab_source("/test/gui.sock")
+  local drawn = gui_tab({ window_id = 9796, tab_id = 9797, tab_index = 0, panes = { 9798 } })
+  format_tab_title(drawn, { drawn })
+  wezterm.run_child_process = previous
+  internal.reset_tab_source()
+  assert(path_exists(test_dir .. "/tabs/" .. string.rep("a", 64) .. "-9796.json"))
+  assert(read_path(foreign) == "from an exited GUI", "a file this process did not write is sweep's")
+  os.remove(foreign)
 end)
 
 test("a window publishes its drawn order once every one of its tabs is drawn", function()

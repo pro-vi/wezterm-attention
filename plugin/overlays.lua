@@ -122,6 +122,8 @@ return function(context)
   --- no file work. Keyed by path, because that is what a write would replace.
   local published_tab_lists = {}
   local drawn_tab_lists = {}
+  --- The one path each window's order was last written to by this process.
+  local published_path_by_window = {}
 
   --- One encoding per drawn tab. The formatter is called once per tab, so
   --- without this every tab's text would be escaped again on every one of those
@@ -176,6 +178,22 @@ return function(context)
     if not replace_file(path, body, "publish-tabs") then return false end
     published_tab_lists[path] = { list = list, window_id = tostring(window_id), window_key = window_key }
     drawn_tab_lists[window_key] = { list = list, written_at = written_at }
+    -- The first draw can come before the source identity is known, so a
+    -- window's first file is often the unsourced one. Once the same window is
+    -- written under a source, that earlier file describes the same window
+    -- again, and `attention tabs` would list the window twice.
+    local superseded = published_path_by_window[window_key]
+    published_path_by_window[window_key] = path
+    if superseded and superseded ~= path and published_tab_lists[superseded] then
+      published_tab_lists[superseded] = nil
+      local removed, err = os.remove(superseded)
+      local still_there = not removed and io.open(superseded, "r")
+      if still_there then
+        still_there:close()
+        report_error_once("supersede-tabs:" .. superseded,
+          "cannot remove superseded tab order " .. superseded .. ": " .. tostring(err))
+      end
+    end
     return true
   end
 
@@ -193,6 +211,7 @@ return function(context)
       if window_id and not live[window_id] then
         published_tab_lists[path] = nil
         drawn_tab_lists[publication.window_key] = nil
+        published_path_by_window[publication.window_key] = nil
         local removed, err = os.remove(path)
         if not removed then
           -- A file already gone is the wanted state; only a file that stays is
