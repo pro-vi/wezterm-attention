@@ -1358,11 +1358,7 @@ pub fn apply_mark_activity(
     Ok(mutation.result)
 }
 
-pub fn apply_mark_review(
-    env: &BTreeMap<String, String>,
-    source: &str,
-    clear: bool,
-) -> Result<LifecycleResult> {
+pub fn apply_mark_review(env: &BTreeMap<String, String>, source: &str) -> Result<LifecycleResult> {
     safe_mark_source(source)?;
     let root = state_root(env)?;
     let (address, _) = pane_address(env)?;
@@ -1390,23 +1386,13 @@ pub fn apply_mark_review(
                     "current launch does not match claim",
                 ));
             }
-            let existing = read_record(
+            // Replaced whatever is there, but never over a review this
+            // version cannot read.
+            read_record(
                 &review_path,
                 Some("review"),
                 &RecordIdentity::review(&address, &owner_key),
             )?;
-            if clear {
-                return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::new(if existing.is_some() {
-                        Disposition::Applied
-                    } else {
-                        Disposition::Skipped
-                    })),
-                    replacements: Vec::new(),
-                    removals: vec![review_path.clone()],
-                    private_dirs: Vec::new(),
-                });
-            }
             let event_id = Uuid::new_v4().to_string();
             let record = json!({
                 "kind": "review",

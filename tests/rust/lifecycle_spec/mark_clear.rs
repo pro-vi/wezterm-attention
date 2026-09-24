@@ -48,7 +48,7 @@ fn bound() -> Setup {
 fn mark_clear_withdraws_the_sources_review_and_activity() {
     let setup = bound();
     mark(&setup, "thinking", "build", "00000000000000000300");
-    apply_mark_review(&setup.env, "build", false).unwrap();
+    apply_mark_review(&setup.env, "build").unwrap();
     assert!(review_path(&setup, "build").exists());
     let cleared = apply_mark_clear(&setup.env, "build", "00000000000000000400").unwrap();
     assert_eq!(cleared.disposition, "applied");
@@ -93,13 +93,12 @@ fn the_user_source_is_reserved_for_the_plugin() {
             "00000000012345678900",
         )
         .unwrap_err(),
-        apply_mark_review(&setup.env, "user", false).unwrap_err(),
-        apply_mark_review(&setup.env, "user", true).unwrap_err(),
+        apply_mark_review(&setup.env, "user").unwrap_err(),
         apply_mark_clear(&setup.env, "user", "00000000000000000300").unwrap_err(),
     ] {
         assert_eq!(error.diagnostic.code, "bad_usage");
     }
-    apply_mark_review(&setup.env, "pi-bus", false).expect("pi-bus stays usable");
+    apply_mark_review(&setup.env, "pi-bus").expect("pi-bus stays usable");
 }
 
 #[test]

@@ -156,8 +156,7 @@ fn a_live_socket_whose_metadata_changed_keeps_an_old_panes_tree() {
     for presence in [Presence::Present, Presence::Unseen, Presence::Unavailable] {
         let setup = Setup::new();
         setup.claim_and_bind();
-        wezterm_attention::lifecycle::apply_mark_review(&setup.env, "build", false)
-            .expect("mark review");
+        wezterm_attention::lifecycle::apply_mark_review(&setup.env, "build").expect("mark review");
         end_long_ago(&setup);
         let pane = pane_dir(&setup);
         change_socket_metadata(&setup);
@@ -275,8 +274,7 @@ fn a_live_mux_with_a_full_accept_queue_keeps_an_old_panes_tree() {
     for presence in [Presence::Present, Presence::Unseen, Presence::Unavailable] {
         let setup = Setup::new();
         setup.claim_and_bind();
-        wezterm_attention::lifecycle::apply_mark_review(&setup.env, "build", false)
-            .expect("mark review");
+        wezterm_attention::lifecycle::apply_mark_review(&setup.env, "build").expect("mark review");
         end_long_ago(&setup);
         let pane = pane_dir(&setup);
         let (_queued, _) = fill_accept_queue(&setup.env["WEZTERM_UNIX_SOCKET"]);

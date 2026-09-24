@@ -69,7 +69,7 @@ fn inspect_is_scoped_read_only_and_keeps_raw_activity_after_acknowledgement() {
         &event("claude", "Stop", "facts", json!({})),
         "00000000000000000400",
     );
-    apply_mark_review(&setup.env, "fixture-owner", false).unwrap();
+    apply_mark_review(&setup.env, "fixture-owner").unwrap();
     setup.apply(
         &event("claude", "SessionEnd", "facts", json!({"reason":"other"})),
         "00000000000000000500",

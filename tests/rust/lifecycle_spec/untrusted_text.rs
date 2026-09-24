@@ -71,7 +71,7 @@ fn c1_controls_are_refused_by_every_writer_text_check() {
         )
         .expect_err("a C1 label is refused");
         assert_eq!(mark.diagnostic.code, "bad_usage");
-        let review = apply_mark_review(&setup.env, &format!("owner{control}"), false)
+        let review = apply_mark_review(&setup.env, &format!("owner{control}"))
             .expect_err("a C1 source is refused");
         assert_eq!(review.diagnostic.code, "bad_usage");
 

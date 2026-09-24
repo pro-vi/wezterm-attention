@@ -1046,11 +1046,9 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     .map_err(|error| (Box::new(error), args.json, "mark".to_owned()))
             };
             let result = match args.state.as_str() {
-                "review" => wezterm_attention::lifecycle::apply_mark_review(
-                    &environment,
-                    &args.source,
-                    false,
-                ),
+                "review" => {
+                    wezterm_attention::lifecycle::apply_mark_review(&environment, &args.source)
+                }
                 "clear" => wezterm_attention::lifecycle::apply_mark_clear(
                     &environment,
                     &args.source,

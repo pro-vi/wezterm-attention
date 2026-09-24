@@ -681,8 +681,7 @@ fn a_gone_socket_leaves_doctor_and_sweep_complete() {
 fn a_pane_where_reviews_were_marked_and_cleared_is_removed_once_old() {
     let setup = Setup::new();
     setup.claim_and_bind();
-    wezterm_attention::lifecycle::apply_mark_review(&setup.env, "build", false)
-        .expect("mark review");
+    wezterm_attention::lifecycle::apply_mark_review(&setup.env, "build").expect("mark review");
     wezterm_attention::lifecycle::apply_mark_clear(&setup.env, "build", "00000000000000000250")
         .expect("mark clear");
     let lock = pane_dir(&setup).join("reviews").join(format!(

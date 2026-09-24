@@ -59,7 +59,7 @@ fn a_failed_claude_turn_asks_for_the_user_and_keeps_its_observation() {
 #[test]
 fn an_interrupted_codex_turn_clears_its_activity_and_keeps_its_observation() {
     let setup = bound("codex", "interrupted");
-    apply_mark_review(&setup.env, "pi-bus", false).expect("review from another writer");
+    apply_mark_review(&setup.env, "pi-bus").expect("review from another writer");
     let interrupt = event(
         "codex",
         "Interrupt",
