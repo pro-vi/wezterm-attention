@@ -630,12 +630,13 @@ impl PaneLister for WeztermPaneLister {
     }
 }
 
-/// Whether the socket file at `socket_path` refuses a connection, which says
-/// nothing listens on that file: its server has exited. WezTerm judges a GUI
-/// socket dead by the same test. A listener that exists but is slow, busy or
-/// unreadable to this user does not refuse, and neither does a path this
-/// check cannot name; only `ECONNREFUSED` counts. The connect does not block,
-/// so a listener with a full backlog cannot stall a read.
+/// Whether the socket file at `socket_path` refuses a connection now. That
+/// never shows its server exited: macOS refuses a connection to a live
+/// listener whose accept queue is full, and WezTerm stops accepting on its
+/// first accept error while the server and its panes run on. It says only
+/// that nothing will answer there. A path this check cannot name does not
+/// count, and only `ECONNREFUSED` does. The connect does not block, so a
+/// listener with a full backlog cannot stall a read.
 pub(crate) fn listener_refuses(socket_path: &str) -> bool {
     let bytes = socket_path.as_bytes();
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };

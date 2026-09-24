@@ -223,6 +223,7 @@
       "realm_unavailable",
       "incarnation_changed",
       "socket_gone",
+      "socket_refused",
       "record_invalid",
       "future_schema",
       "binding_conflict",

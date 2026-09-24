@@ -244,27 +244,32 @@ stay on disk:
 Collecting any of these would be a new deletion, and would need the same
 evidence rule the others have.
 
-## A mux server whose socket was removed or replaced keeps its records
+## A mux server whose socket was removed, replaced or refuses keeps its records
 
 Sweep reclaims the panes of a server it can show has exited. A GUI that quit is
-one: either its socket file is still there and nothing listens on it, or the
-file is gone and the socket was the GUI's own `gui-sock-<pid>` and no process
-with that pid exists. So the records of GUI-local panes are reclaimed by the
-two-observation rule, and after the retention age their pane trees go too.
+one: its socket is its own `gui-sock-<pid>`, and no process with that pid exists,
+whether its socket file was left behind or not. So the records of GUI-local
+panes are reclaimed by the two-observation rule, and after the retention age
+their pane trees go too.
 
-A server whose socket file no longer exists, or whose path now holds a
-different socket, is another matter. The server may still run with its socket
-file deleted, or with another server bound over the same path (WezTerm removes
-a socket file in its way before binding), and a `chmod` or `touch` on a live
-socket changes its identity too. Only one thing outside the server tells a
+A server whose socket file no longer exists, whose path now holds a different
+socket, or whose socket refuses connections, is another matter. It may still
+run with its socket file deleted, or with another server bound over the same
+path (WezTerm removes a socket file in its way before binding), and a `chmod`
+or `touch` on a live socket changes its identity too. A refusal does not show
+it gone either: macOS refuses a connection to a live listener whose accept
+queue is full, which a server that stopped accepting fills with each listing
+that timed out, and WezTerm stops accepting after its first accept error while
+the server and its panes run on. Only one thing outside the server tells a
 stopped one from a running one: the process listing, when it read every process
 of this user and none carries that socket and pane id. When it cannot say that,
 the records are kept: sweep neither ends those bindings nor removes those pane
-trees, readers report the panes `unavailable` with a `socket_gone` or
-`incarnation_changed` diagnostic, and `doctor` and `sweep` report the whole
-kept history once per code, listing each incarnation with its `path` and
-`pane_count`. That is a finding, not an unanswered probe, so `sweep` and
-`doctor` still give a complete answer and exit 0 however much of it there is.
+trees, readers report the panes `unavailable` with a `socket_gone`,
+`incarnation_changed` or `socket_refused` diagnostic, and `doctor` and `sweep`
+report the whole kept history once per code, listing each incarnation with its
+`path` and `pane_count`. That is a finding, not an unanswered probe, so `sweep`
+and `doctor` still give a complete answer and exit 0 however much of it there
+is.
 
 The listing rarely says it. macOS hides the environment of its own system
 binaries, Apple's `/bin/zsh` and `/bin/bash` among them, and every Mac runs some
@@ -272,13 +277,6 @@ of them as the user, so there the listing never reads every process. On Linux,
 one process of the user that has made itself non-dumpable is enough to leave
 the listing incomplete, and ssh-agent does that by default, so Linux usually
 behaves the same.
-
-A refused connection is read as a server that exited, because a running
-WezTerm keeps listening on its socket for its whole life. One case breaks that:
-on macOS a server that has stopped accepting connections while it still runs,
-with its accept queue full, also refuses. If that holds at two sweeps a minute
-apart, sweep ends its bindings, and pane trees go only after the retention age
-and two more sightings.
 
 Once you know such a server is gone, remove its records yourself: the `path`
 each incarnation carries in that diagnostic is relative to the state root, as
