@@ -2232,22 +2232,20 @@ mod projection_collection_tests {
         }
     }
 
-    /// Collection enumerates the flat files, then takes the pane's claim lock
-    /// and checks each file is still the one it enumerated. Calling the two
-    /// steps in turn puts a replacement exactly between them, which a test
-    /// racing a sweep thread against a sleep could only hope to do.
-    #[test]
-    fn a_marker_replaced_after_enumeration_is_refused_not_collected() {
-        let root = Root(
-            std::env::temp_dir().join(format!("attention-collect-{}", Uuid::new_v4().simple())),
-        );
-        let address = PaneAddress {
-            realm_id: "a".repeat(64),
+    fn address(realm: char) -> PaneAddress {
+        PaneAddress {
+            realm_id: realm.to_string().repeat(64),
             incarnation_id: "b".repeat(64),
             pane_id: "42".to_owned(),
-        };
+        }
+    }
+
+    /// Writes a claim for `address`, with `schema` in place of the current
+    /// record schema when they differ.
+    fn claim(root: &Path, address: &PaneAddress, schema: u64) {
+        let path = pane_path(root, address).join("claim.json");
         crate::records::atomic_replace(
-            &pane_path(&root.0, &address).join("claim.json"),
+            &path,
             &json!({
                 "kind":"claim","schema":manifest().expect("manifest").record_schema,
                 "address":address,"launch_id":"00000000-0000-4000-8000-000000000701",
@@ -2256,11 +2254,45 @@ mod projection_collection_tests {
             }),
         )
         .expect("claim");
+        let mut value: Value =
+            serde_json::from_slice(&fs::read(&path).expect("claim")).expect("claim JSON");
+        value["schema"] = json!(schema);
+        fs::write(&path, serde_json::to_vec(&value).expect("JSON")).expect("rewrite claim");
+    }
+
+    fn current_schema() -> u64 {
+        manifest().expect("manifest").record_schema
+    }
+
+    /// A state root holding pane 42's claim at realm `a` and its three flat
+    /// files, enumerated as collection first sees them.
+    fn enumerated() -> (Root, PaneAddress, BTreeMap<String, Vec<FlatFile>>) {
+        let root = Root(
+            std::env::temp_dir().join(format!("attention-collect-{}", Uuid::new_v4().simple())),
+        );
+        let address = address('a');
+        claim(&root.0, &address, current_schema());
         for name in ["42", "42.agents", "42.ack"] {
             fs::write(root.0.join(name), "stop\n").expect("flat file");
         }
         let (files, malformed) = enumerate_flat_candidates(&root.0).expect("enumerate");
         assert!(malformed.is_empty());
+        (root, address, files)
+    }
+
+    fn assert_nothing_collected(root: &Path) {
+        for name in ["42", "42.agents", "42.ack"] {
+            assert!(root.join(name).exists(), "{name} was collected");
+        }
+    }
+
+    /// Collection enumerates the flat files, then takes the pane's claim lock
+    /// and checks each file is still the one it enumerated. Calling the two
+    /// steps in turn puts a replacement exactly between them, which a test
+    /// racing a sweep thread against a sleep could only hope to do.
+    #[test]
+    fn a_marker_replaced_after_enumeration_is_refused_not_collected() {
+        let (root, address, files) = enumerated();
         let next = root.0.join("42.agents.next");
         fs::write(&next, "thinking\n").expect("replacement");
         fs::rename(&next, root.0.join("42.agents")).expect("replace agents");
@@ -2278,5 +2310,30 @@ mod projection_collection_tests {
             "thinking\n"
         );
         assert!(root.0.join("42.ack").exists());
+    }
+
+    /// Collection decided the markers belong to one claimed pane. A claim for
+    /// the same pane id that appears before the lock and cannot be read makes
+    /// them unattributable, and the check under the lock sees it.
+    #[test]
+    fn a_claim_that_turns_unreadable_before_the_lock_stops_collection() {
+        let (root, owner, files) = enumerated();
+        claim(&root.0, &address('c'), 999);
+        let error = apply_projection_collection(&root.0, &owner, "42", &files["42"])
+            .expect_err("unattributable markers are refused");
+        assert_eq!(error.diagnostic.code, "record_invalid");
+        assert_nothing_collected(&root.0);
+    }
+
+    /// A second claim for the same pane id at another address, appearing
+    /// before the lock, makes the markers ambiguous.
+    #[test]
+    fn a_second_owner_that_appears_before_the_lock_stops_collection() {
+        let (root, owner, files) = enumerated();
+        claim(&root.0, &address('c'), current_schema());
+        let error = apply_projection_collection(&root.0, &owner, "42", &files["42"])
+            .expect_err("ambiguous markers are refused");
+        assert_eq!(error.diagnostic.code, "binding_conflict");
+        assert_nothing_collected(&root.0);
     }
 }

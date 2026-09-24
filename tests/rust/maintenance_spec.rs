@@ -1655,3 +1655,6 @@ mod pane_retention;
 
 #[path = "maintenance_spec/binding_retention.rs"]
 mod binding_retention;
+
+#[path = "maintenance_spec/destructive_guards.rs"]
+mod destructive_guards;
