@@ -5421,6 +5421,7 @@ test("a dir option the writer would refuse is named, and the default used", func
     { "~/.local/state/wezterm-attention", "not an absolute path" },
     { "relative/state", "not an absolute path" },
     { test_dir .. "/bad\27name", "control character" },
+    { test_dir .. "/bad\233name", "UTF-8" },
     { "/" .. string.rep("d", 4096), "4096 bytes" },
   }
   for _, case in ipairs(cases) do
@@ -5538,6 +5539,16 @@ test("the default state root follows the same order as the writer", function()
     cases[#cases + 1] = { env = { XDG_STATE_HOME = unsafe }, root = home_default }
     cases[#cases + 1] = { env = { WEZTERM_ATTENTION_DIR = unsafe }, root = home_default, warned = true }
   end
+  -- The writer reads its environment as text, so bytes that are not UTF-8,
+  -- a lone or cut-short sequence or an overlong form, name no root it can use;
+  -- it refuses the one that would decide the root, and the log says so here.
+  for _, broken in ipairs({ test_dir .. "/x\233y", test_dir .. "/x\226\130", test_dir .. "/x\192\175y" }) do
+    cases[#cases + 1] = { env = { XDG_STATE_HOME = broken }, root = home_default,
+      warned = "XDG_STATE_HOME" }
+    cases[#cases + 1] = { env = { WEZTERM_ATTENTION_DIR = broken }, root = home_default, warned = true }
+  end
+  cases[#cases + 1] = { env = { XDG_STATE_HOME = test_dir .. "/état" },
+    root = test_dir .. "/état/wezterm-attention" }
   cases[#cases + 1] = { env = { XDG_STATE_HOME = path_of(limit) },
     root = path_of(limit) .. "/wezterm-attention" }
   cases[#cases + 1] = { env = { WEZTERM_ATTENTION_DIR = path_of(limit) }, root = path_of(limit) }
@@ -5557,8 +5568,10 @@ test("the default state root follows the same order as the writer", function()
       "case " .. index .. ": expected " .. case.root .. ", got " .. tostring(instance._active_dir))
     local warnings = drain_warnings()
     if case.warned then
-      assert(#warnings == 1 and warnings[1]:find("WEZTERM_ATTENTION_DIR", 1, true),
-        "a relative WEZTERM_ATTENTION_DIR must be named once in the log")
+      local name = case.warned == true and "WEZTERM_ATTENTION_DIR" or case.warned
+      assert(#warnings == 1 and warnings[1]:find(name, 1, true)
+          and not warnings[1]:find("[\128-\255]"),
+        "case " .. index .. ": " .. name .. " must be named once in the log, without its bytes")
     else
       assert(#warnings == 0, "case " .. index .. " warned: " .. tostring(warnings[1]))
     end

@@ -233,6 +233,7 @@ return function(context)
   --- format-tab-title.
 
   return {
+    well_formed_utf8 = well_formed_utf8,
     display_text = display_text,
     normalized_pane_title = normalized_pane_title,
     sample_settled_title = sample_settled_title,

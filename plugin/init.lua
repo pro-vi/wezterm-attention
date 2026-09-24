@@ -15,12 +15,23 @@ end
 --- which loads only after the root is resolved.
 local path_max_bytes = 4096
 
---- A root the writer would take as well: at most its path bound in bytes, and
---- no control character, C0, DEL or C1.
+--- titles.lua's UTF-8 repair, which returns well-formed text unchanged. It
+--- is set once that module has loaded, and the default state root is
+--- resolved only after that.
+local well_formed_utf8
+
+--- A root the writer would take as well: at most its path bound in bytes,
+--- UTF-8, since the writer reads its environment as text, and no control
+--- character, C0, DEL or C1.
 local function safe_root_text(path)
-  return #path <= path_max_bytes
+  return #path <= path_max_bytes and well_formed_utf8(path) == path
     and not path:find("[%z\1-\31\127]") and not path:find("\194[\128-\159]")
 end
+
+--- Why a root the writer would refuse is refused, for the log, which must
+--- not repeat the bytes that made it so.
+local unsafe_root_problem = "longer than " .. path_max_bytes
+  .. " bytes, not UTF-8, or holds a control character"
 
 --- The state root, resolved in the order the attention CLI and the Pi
 --- extension use, so a producer, the writer and this reader agree on one
@@ -28,16 +39,16 @@ end
 --- then ~/.local/state/wezterm-attention. An empty value counts as unset, and a
 --- relative XDG_STATE_HOME is ignored as the XDG spec says, as is one the
 --- writer would refuse. A WEZTERM_ATTENTION_DIR that is relative or that the
---- writer would refuse is an error to the CLI; here it is ignored, and the
---- second return says so for the log.
+--- writer would refuse, and an XDG_STATE_HOME that is not UTF-8, are errors
+--- to the CLI; here they are ignored, and the second return says so for the
+--- log.
 local function resolve_state_root()
   local note
   local explicit = os.getenv("WEZTERM_ATTENTION_DIR")
   if explicit and explicit ~= "" then
     -- Checked first so that the log never repeats a control character.
     if not safe_root_text(explicit) then
-      note = "WEZTERM_ATTENTION_DIR is longer than " .. path_max_bytes
-        .. " bytes or holds a control character, so it is ignored"
+      note = "WEZTERM_ATTENTION_DIR is " .. unsafe_root_problem .. ", so it is ignored"
     elseif not is_absolute_path(explicit) then
       note = "WEZTERM_ATTENTION_DIR is not an absolute path, so it is ignored: " .. explicit
     else
@@ -45,18 +56,19 @@ local function resolve_state_root()
     end
   end
   local state_home = os.getenv("XDG_STATE_HOME")
-  if state_home and state_home ~= "" and is_absolute_path(state_home)
-      and safe_root_text(state_home) then
-    return (state_home:gsub("(.)/+$", "%1")) .. "/wezterm-attention", note
+  if state_home and state_home ~= "" then
+    if well_formed_utf8(state_home) ~= state_home then
+      note = (note and note .. "; " or "") .. "XDG_STATE_HOME is not UTF-8, so it is ignored"
+    elseif is_absolute_path(state_home) and safe_root_text(state_home) then
+      return (state_home:gsub("(.)/+$", "%1")) .. "/wezterm-attention", note
+    end
   end
   return home .. "/.local/state/wezterm-attention", note
 end
 
-local default_dir, default_dir_note = resolve_state_root()
-
 local defaults = {
-  -- Where marker files are written (one file per pane ID)
-  dir = default_dir,
+  -- `dir`, where marker files are written (one file per pane ID), is set
+  -- once titles.lua has loaded, below.
 
   -- Render mode: "tab" | "manual"
   --   tab:    plugin owns format-tab-title (default)
@@ -384,6 +396,9 @@ local titles_api = titles_factory({
   is_safe_text = is_safe_text,
   drawn_pane_key = drawn_pane_key,
 })
+well_formed_utf8 = titles_api.well_formed_utf8
+local default_dir_note
+defaults.dir, default_dir_note = resolve_state_root()
 local normalized_pane_title = titles_api.normalized_pane_title
 local sample_settled_title = titles_api.sample_settled_title
 local settled_title_state = titles_api.settled_title_state
@@ -595,7 +610,7 @@ local function usable_options(opts)
     local problem
     -- Checked first so that the log never repeats a control character.
     if not safe_root_text(usable.dir) then
-      problem = "longer than " .. path_max_bytes .. " bytes or holds a control character"
+      problem = unsafe_root_problem
     elseif not is_absolute_path(usable.dir) then
       problem = "not an absolute path: " .. usable.dir
     end
