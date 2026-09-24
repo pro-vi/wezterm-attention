@@ -1201,13 +1201,15 @@ fn every_active_lifecycle_row_reaches_the_production_writer() {
                 .find(|item| item.body.kind() == case["kind"].as_str().unwrap())
                 .unwrap();
             assert_eq!(observation.source_event, name);
-            if row["id"] == "H18" && name == "PreToolUse" {
+            // A case with an agent id is a subagent's event.
+            let from_child = case["patch"].get("agent_id").is_some();
+            if from_child && name == "PreToolUse" {
                 assert!(
                     !directory.join("activity.json").exists(),
                     "child work cannot become lead activity"
                 );
             }
-            if row["id"] == "H18" && name == "PermissionRequest" {
+            if from_child && name == "PermissionRequest" {
                 let activity: Value =
                     serde_json::from_slice(&fs::read(directory.join("activity.json")).unwrap())
                         .unwrap();

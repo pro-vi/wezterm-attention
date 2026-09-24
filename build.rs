@@ -1,7 +1,6 @@
 // Records which commit the binary was built from, so an installed
-// `attention` can say so through `--version`. A fix once landed while every
-// hook on the machine kept running a binary built minutes before it, and
-// nothing on either side could show that.
+// `attention` can say so through `--version`: without it, nothing shows
+// whether the hooks on a machine run a binary built before a fix landed.
 //
 // Only `git` and the standard library are used, and a missing or failing
 // `git` never fails the build: the version then says `unknown`.

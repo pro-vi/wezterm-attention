@@ -300,11 +300,13 @@ fn reader_confidence(current: bool, presence: &str) -> ReaderConfidence {
 }
 
 /// Whether a row takes part in the provider-session conflict check. Only live
-/// claims compete: a binding that has ended, or whose pane is verified absent,
-/// is history. A session resumed in a new pane leaves one behind every time,
-/// and calling that a conflict hides the pane the session actually runs in.
-fn competes(ended: bool, presence: &str) -> bool {
-    !ended && presence != "verified_absent"
+/// claims compete: a binding that has ended, whose pane is verified absent, or
+/// whose server is gone (a new server owns its socket path, or the path is
+/// gone) is history. A session resumed in a new pane, or under a restarted
+/// mux, leaves one behind every time, and calling that a conflict hides the
+/// pane the session actually runs in.
+fn competes(ended: bool, server_gone: bool, presence: &str) -> bool {
+    !ended && !server_gone && presence != "verified_absent"
 }
 
 impl PaneFacts {
@@ -352,7 +354,7 @@ pub fn read_pane_facts(root: &Path, scope: &PaneScope) -> Result<PaneFacts> {
         scope,
         &FileRecords,
         &crate::wezterm::SystemClock,
-        Some(&crate::wezterm::ExistingWeztermPaneLister),
+        Some(&crate::wezterm::WeztermPaneLister),
         Some(&crate::wezterm::SystemProcessProbe),
     )
 }
@@ -766,8 +768,10 @@ fn read_pane_facts_once(
     // would not have matched, so the row is the pane's current one.
     let confidence = reader_confidence(true, &presence);
     let ended = end.availability == A::Present;
+    // The socket was checked above to carry this incarnation, so its server
+    // is the one that owns the socket.
     let conflicted = binding.record.as_ref().is_some_and(|record| {
-        competes(ended, &presence)
+        competes(ended, false, &presence)
             && session_live_elsewhere(
                 root,
                 address,
@@ -1129,14 +1133,21 @@ pub fn read_bindings_for_socket_timed(
     let mut files = Vec::new();
     let mut diagnostics = Vec::new();
     collect_selected_binding_files(&selected, &mut files, &mut diagnostics, true);
-    let (rows, mut read_diagnostics, spawns) = assemble_bindings(
-        root,
-        files,
-        &BindingFilter::default(),
-        panes,
-        processes,
-        true,
-    )?;
+    // Whether a row's provider session is live at another pane address is a
+    // fact about the row, and the other address may be under any server, as
+    // inspect finds it. The rest of the store is walked for those rivals only:
+    // what it cannot read there is not part of this server's answer.
+    let mut elsewhere = Vec::new();
+    collect_binding_files(root, &mut elsewhere, &mut Vec::new());
+    elsewhere.retain(|path| !path.starts_with(&selected) && path_identity(root, path).is_some());
+    files.extend(elsewhere);
+    let filter = BindingFilter {
+        realm_id: Some(scope.realm_id.clone()),
+        incarnation_id: Some(scope.incarnation_id.clone()),
+        provider: None,
+    };
+    let (rows, mut read_diagnostics, spawns) =
+        assemble_bindings(root, files, &filter, panes, processes, true)?;
     diagnostics.append(&mut read_diagnostics);
     let after = socket_identity(socket)?;
     if after.0 != scope.realm_id || after.1 != scope.incarnation_id {
@@ -1389,11 +1400,12 @@ fn record_spent<T>(spent: &Mutex<Duration>, call: impl FnOnce() -> T) -> T {
 pub(crate) enum PaneEvidence {
     /// `present`, `verified_absent` or `unavailable`, as a reader reports it.
     Observed(String),
-    /// The server that held this incarnation's panes is gone: the realm's
+    /// The server that held this incarnation's panes may be gone: the realm's
     /// socket path no longer exists (`vanished`), or a different server now
     /// owns it. A reader reports this as unavailable, with the diagnostic.
-    /// Sweep counts it as one sighting of absence, and only its
-    /// two-observation rule turns sightings into an ended binding.
+    /// Sweep counts a new owner as one sighting of absence, and a vanished
+    /// path only when the process probe finds no process carrying the pane;
+    /// only its two-observation rule turns sightings into an ended binding.
     IncarnationEnded {
         diagnostic: Diagnostic,
         socket_path: String,
@@ -1409,11 +1421,23 @@ pub(crate) fn pane_presence(
     processes: Option<&dyn ProcessProbe>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> String {
+    reader_presence(root, address, panes, processes, diagnostics).0
+}
+
+/// A pane's presence as a reader reports it, and whether the server that
+/// held its incarnation is gone, which the report alone does not say.
+fn reader_presence(
+    root: &Path,
+    address: &PaneAddress,
+    panes: Option<&dyn PaneLister>,
+    processes: Option<&dyn ProcessProbe>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> (String, bool) {
     match pane_evidence(root, address, panes, processes, diagnostics) {
-        PaneEvidence::Observed(presence) => presence,
+        PaneEvidence::Observed(presence) => (presence, false),
         PaneEvidence::IncarnationEnded { diagnostic, .. } => {
             diagnostics.push(diagnostic);
-            "unavailable".to_owned()
+            ("unavailable".to_owned(), true)
         }
     }
 }
@@ -1546,9 +1570,12 @@ fn session_live_elsewhere(
         {
             continue;
         }
+        let (presence, server_gone) =
+            reader_presence(root, &other, panes, processes, &mut Vec::new());
         if competes(
             binding_ended(&path, &binding, &identity),
-            &pane_presence(root, &other, panes, processes, &mut Vec::new()),
+            server_gone,
+            &presence,
         ) {
             return true;
         }
@@ -1691,15 +1718,17 @@ pub fn read_bindings_timed(
 /// list, and each miss used to spawn a fresh `wezterm cli list` subprocess --
 /// about 20 ms per bound pane on top of a 5 ms floor, paid on every call.
 /// The answers are memoised for the lifetime of one assembly and no longer, so
-/// a later call still observes panes that opened or closed in between.
-struct ListOncePerSocket<'a> {
+/// a later call still observes panes that opened or closed in between. A sweep
+/// preview shares one across its steps; an apply does not, for the reason
+/// given at [`ProbeOncePerAssembly`].
+pub(crate) struct ListOncePerSocket<'a> {
     inner: &'a dyn PaneLister,
     listed: Mutex<BTreeMap<String, Result<Vec<crate::wezterm::PaneRow>>>>,
     spent: Mutex<Duration>,
 }
 
 impl<'a> ListOncePerSocket<'a> {
-    fn new(inner: &'a dyn PaneLister) -> Self {
+    pub(crate) fn new(inner: &'a dyn PaneLister) -> Self {
         Self {
             inner,
             listed: Mutex::new(BTreeMap::new()),
@@ -1762,15 +1791,15 @@ impl PaneLister for ListOncePerSocket<'_> {
 /// One process listing per assembly, rather than one per absent pane.
 ///
 /// A bound pane missing from the mux listing is looked for among live
-/// processes, and each look used to spawn its own `ps` over every process on
-/// the machine -- about 70 ms each, so a store holding forty ended panes cost
-/// three seconds on every call. The listing is taken on the first miss and
-/// kept for the lifetime of one assembly and no longer. A listing that failed
-/// is kept the same way, and answers every later miss as unavailable: asking
-/// the probe pane by pane would run the failed listing once per pane, under
-/// a fresh deadline each time. Doctor shares one across its checks. Sweep does
-/// not use this: it deletes on the answer, so it keeps a fresh look per
-/// decision.
+/// processes, and one look reads the environment of every process this user
+/// runs, which takes tens of milliseconds; a look per pane made a store with
+/// many ended panes slow on every call. The listing is taken on the first
+/// miss, or when asked whether the probe is available, and kept for the
+/// lifetime of one assembly and no longer. A listing that failed is kept the
+/// same way, and answers every later miss as unavailable: asking the probe
+/// pane by pane would run the failed listing once per pane. Doctor shares one
+/// across its checks, and a sweep preview across its steps. A sweep apply does
+/// not use this: it acts on the answer, so it keeps a fresh look per decision.
 pub(crate) struct ProbeOncePerAssembly<'a> {
     inner: &'a dyn ProcessProbe,
     listed: Mutex<Option<ProcessListing>>,
@@ -1792,8 +1821,19 @@ impl<'a> ProbeOncePerAssembly<'a> {
 }
 
 impl ProcessProbe for ProbeOncePerAssembly<'_> {
+    /// Answered from the kept listing when the probe offers one, so asking
+    /// costs no second listing.
     fn available(&self) -> bool {
-        self.inner.available()
+        let Ok(mut listed) = self.listed.lock() else {
+            return self.inner.available();
+        };
+        match listed
+            .get_or_insert_with(|| record_spent(&self.spent, || self.inner.pane_processes()))
+        {
+            ProcessListing::Listed(_) => true,
+            ProcessListing::Failed => false,
+            ProcessListing::NotOffered => self.inner.available(),
+        }
     }
 
     fn presence(&self, socket_path: &str, pane_id: &str) -> Presence {
@@ -1814,25 +1854,41 @@ impl ProcessProbe for ProbeOncePerAssembly<'_> {
     }
 }
 
-/// Which rows a realm-wide bindings query returns. Applied before any socket
-/// is asked, so a realm ruled out costs no `wezterm cli list`.
+/// Which rows a bindings query returns. Applied before any socket is asked,
+/// so a realm ruled out costs no `wezterm cli list`. `incarnation_id` is set
+/// by the socket-scoped query, which returns one server's rows.
 #[derive(Clone, Debug, Default)]
 pub struct BindingFilter {
     pub realm_id: Option<String>,
+    pub incarnation_id: Option<String>,
     pub provider: Option<String>,
 }
 
 impl BindingFilter {
+    /// Whether a binding at this realm and incarnation can be returned,
+    /// whatever its provider.
+    fn admits_path(&self, realm_id: &str, incarnation_id: &str) -> bool {
+        self.realm_id
+            .as_deref()
+            .is_none_or(|realm| realm == realm_id)
+            && self
+                .incarnation_id
+                .as_deref()
+                .is_none_or(|incarnation| incarnation == incarnation_id)
+    }
+
     fn admits(&self, binding: &Value) -> bool {
         let address = binding.get("address");
-        self.realm_id.as_deref().is_none_or(|realm| {
+        let field = |name: &str| {
             address
-                .and_then(|value| value.get("realm_id"))
+                .and_then(|value| value.get(name))
                 .and_then(Value::as_str)
-                == Some(realm)
-        }) && self.provider.as_deref().is_none_or(|provider| {
-            binding.get("provider").and_then(Value::as_str) == Some(provider)
-        })
+                .unwrap_or_default()
+        };
+        self.admits_path(field("realm_id"), field("incarnation_id"))
+            && self.provider.as_deref().is_none_or(|provider| {
+                binding.get("provider").and_then(Value::as_str) == Some(provider)
+            })
     }
 }
 
@@ -1886,10 +1942,7 @@ fn assemble_bindings(
             diagnostics.push(item);
             continue;
         };
-        let ruled_out = filter
-            .realm_id
-            .as_deref()
-            .is_some_and(|realm| realm != path_realm);
+        let ruled_out = !filter.admits_path(&path_realm, &path_incarnation);
         let path_address = PaneAddress {
             realm_id: path_realm,
             incarnation_id: path_incarnation,
@@ -1902,8 +1955,8 @@ fn assemble_bindings(
         ) {
             Ok(Some(binding)) => read.push((path, binding)),
             Ok(None) => {}
-            // A realm the filter rules out is not part of the answer, and
-            // neither are its unreadable records.
+            // A realm or server the filter rules out is not part of the
+            // answer, and neither are its unreadable records.
             Err(_) if ruled_out => {}
             Err(error) => diagnostics.push(error.diagnostic),
         }
@@ -1934,8 +1987,9 @@ fn assemble_bindings(
         );
     }
     let mut admitted_rows = Vec::new();
+    let mut servers_gone = Vec::new();
     let mut ignored = Vec::new();
-    let mut presence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
+    let mut presence_cache: BTreeMap<(String, String, String), (String, bool)> = BTreeMap::new();
     let mut claim_cache: BTreeMap<PathBuf, (Option<Value>, Option<String>)> = BTreeMap::new();
     for (path, binding, admitted) in assessed {
         let diagnostics = if admitted {
@@ -2042,12 +2096,12 @@ fn assemble_bindings(
             address.incarnation_id.clone(),
             address.pane_id.clone(),
         );
-        let presence = if let Some(cached) = presence_cache.get(&presence_key) {
+        let (presence, server_gone) = if let Some(cached) = presence_cache.get(&presence_key) {
             cached.clone()
         } else {
             let before_presence = diagnostics.len();
-            let observed = pane_presence(root, &address, panes, processes, diagnostics);
-            if typed && observed == "unavailable" && diagnostics.len() == before_presence {
+            let observed = reader_presence(root, &address, panes, processes, diagnostics);
+            if typed && observed.0 == "unavailable" && diagnostics.len() == before_presence {
                 diagnostics.push(diagnostic(
                     "probe_unavailable",
                     "selected binding presence is unavailable",
@@ -2094,10 +2148,15 @@ fn assemble_bindings(
             start_source: string(&binding, "start_source"),
         });
         admitted_rows.push(admitted);
+        servers_gone.push(server_gone);
     }
     let mut duplicates: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
     for (index, row) in rows.iter().enumerate() {
-        if !competes(row.binding_phase == "ended", &row.pane_presence) {
+        if !competes(
+            row.binding_phase == "ended",
+            servers_gone[index],
+            &row.pane_presence,
+        ) {
             continue;
         }
         duplicates
@@ -2116,6 +2175,11 @@ fn assemble_bindings(
         if addresses.len() > 1 {
             for index in indices {
                 rows[*index].binding_health = BindingHealth::Conflicted.as_str().to_owned();
+            }
+            // Rows outside the filter that conflict only with each other are
+            // not part of this answer.
+            if !indices.iter().any(|index| admitted_rows[*index]) {
+                continue;
             }
             diagnostics.push(diagnostic(
                 "binding_conflict",
@@ -2686,9 +2750,9 @@ mod process_probe_tests {
 
     /// A listing that failed is not retried pane by pane: the system probe
     /// answers a per-pane question by taking the same listing again, so with
-    /// a hundred absent panes one stalled `ps` would become a hundred, each
-    /// under its own deadline. Every pane is unavailable instead, and the
-    /// call stays within one listing's deadline.
+    /// a hundred absent panes one failed listing would be taken a hundred
+    /// times. Every pane is unavailable instead, and the listing is taken
+    /// once.
     #[test]
     fn a_failed_listing_answers_every_pane_as_unavailable_without_asking_again() {
         let probe = CountingProbe::new(Listing::Fails);

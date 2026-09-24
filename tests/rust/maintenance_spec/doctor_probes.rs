@@ -4,15 +4,25 @@ use super::*;
 use std::sync::atomic::AtomicUsize;
 use wezterm_attention::wezterm::{PaneProcessSet, ProcessListing};
 
-/// Offers one listing of every process, and counts how it is asked.
-struct CountingListing {
-    listings: AtomicUsize,
-    single_looks: AtomicUsize,
+/// Offers one listing of every process, and counts how it is asked. Like the
+/// system probe, it answers whether it is available by taking a listing.
+pub(super) struct CountingListing {
+    pub(super) listings: AtomicUsize,
+    pub(super) single_looks: AtomicUsize,
+}
+
+impl CountingListing {
+    pub(super) fn new() -> Self {
+        Self {
+            listings: AtomicUsize::new(0),
+            single_looks: AtomicUsize::new(0),
+        }
+    }
 }
 
 impl ProcessProbe for CountingListing {
     fn available(&self) -> bool {
-        true
+        !matches!(self.pane_processes(), ProcessListing::Failed)
     }
 
     fn presence(&self, _socket_path: &str, _pane_id: &str) -> Presence {
@@ -52,10 +62,7 @@ fn doctor_takes_one_process_listing_however_many_claims() {
     setup.claim_and_bind();
     claim_more_panes(&setup, &["43", "44", "45"]);
     setup.panes.set(Vec::new());
-    let probe = CountingListing {
-        listings: AtomicUsize::new(0),
-        single_looks: AtomicUsize::new(0),
-    };
+    let probe = CountingListing::new();
     wezterm_attention::maintenance::doctor_with_environment(
         &setup.root(),
         &setup.env,

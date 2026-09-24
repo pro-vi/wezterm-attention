@@ -1,8 +1,11 @@
 //! `bindings` lists a row and `inspect` reads it in depth; a consumer moves
-//! from one to the other, so the row's assessment must read the same in both.
+//! from one to the other, so the row's assessment must read the same in both,
+//! and in `bindings --socket`, which lists one server's rows.
 
 use super::*;
-use wezterm_attention::query::{BindingHealth, PaneFacts, ReaderConfidence, ScopeRelation};
+use wezterm_attention::query::{
+    BindingHealth, PaneFacts, ReaderConfidence, ScopeRelation, read_bindings_for_socket_with_ports,
+};
 
 fn current_scope(setup: &Setup, session: &str) -> PaneScope {
     let launch_id = setup.env["WEZTERM_ATTENTION_LAUNCH_ID"].clone();
@@ -26,16 +29,38 @@ fn inspect(setup: &Setup, scope: &PaneScope) -> PaneFacts {
     .expect("inspect")
 }
 
-/// The bindings row for `scope`, and inspect's answer, must carry the same
-/// health and confidence. Returns inspect's answer for further checks.
+/// The bindings row for `scope`, the `bindings --socket` row for it, and
+/// inspect's answer must carry the same health and confidence. Returns
+/// inspect's answer for further checks.
 fn assert_agree(setup: &Setup, scope: &PaneScope) -> PaneFacts {
     let (rows, _) =
         read_bindings_with_ports(&setup.root(), Some(&setup.panes), Some(&setup.processes))
             .expect("bindings");
+    let scoped = |row: &&wezterm_attention::query::BindingRow| {
+        row.address == *scope.address() && Some(row.binding_id.as_str()) == scope.binding_id()
+    };
     let row = rows
         .iter()
-        .find(|row| Some(row.binding_id.as_str()) == scope.binding_id())
+        .find(scoped)
         .expect("bindings row for the scope");
+    let (_, socket_rows, _) = read_bindings_for_socket_with_ports(
+        &setup.root(),
+        &setup.env["WEZTERM_UNIX_SOCKET"],
+        Some(&setup.panes),
+        Some(&setup.processes),
+    )
+    .expect("bindings --socket");
+    let socket_row = socket_rows
+        .iter()
+        .find(scoped)
+        .expect("bindings --socket row for the scope");
+    for field in ["binding_health", "reader_confidence", "pane_presence"] {
+        assert_eq!(
+            serde_json::to_value(socket_row).expect("socket row")[field],
+            serde_json::to_value(row).expect("row")[field],
+            "{field} differs between bindings and bindings --socket"
+        );
+    }
     let facts = inspect(setup, scope);
     assert_eq!(
         serde_json::to_value(facts.binding_health).expect("health"),
@@ -138,6 +163,42 @@ fn a_conflicted_row_reads_conflicted_through_inspect() {
     setup.processes.set(Presence::Absent);
     let facts = assert_agree(&setup, &current_scope(&setup, "session-a"));
     assert_eq!(facts.binding_health, BindingHealth::Valid);
+}
+
+/// A rival binding of the same provider session under another server is a
+/// conflict for the row, and `bindings --socket` sees it although the rival is
+/// not one of that server's rows.
+#[test]
+fn a_rival_under_another_server_reads_conflicted_through_every_answer() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let (_second, _) =
+        super::realm_filters::bind_on_another_socket(&setup, "second.sock", "session-a");
+    let facts = assert_agree(&setup, &current_scope(&setup, "session-a"));
+    assert_eq!(facts.binding_health, BindingHealth::Conflicted);
+}
+
+/// After the mux server restarts, a session resumed under the new server
+/// leaves its binding under the old one. That server is gone, so the old
+/// binding is history, not a rival, in every answer.
+#[test]
+fn a_binding_under_a_server_that_is_gone_does_not_conflict() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let socket = PathBuf::from(&setup.env["WEZTERM_UNIX_SOCKET"]);
+    fs::remove_file(&socket).expect("remove socket");
+    let _new_server = UnixListener::bind(&socket).expect("a new server on the same path");
+    setup.claim_and_bind();
+    let (rows, _) =
+        read_bindings_with_ports(&setup.root(), Some(&setup.panes), Some(&setup.processes))
+            .expect("bindings");
+    assert_eq!(rows.len(), 2, "one binding under each server: {rows:?}");
+    let facts = assert_agree(&setup, &current_scope(&setup, "session-a"));
+    assert_eq!(facts.binding_health, BindingHealth::Valid);
+    assert!(
+        rows.iter().all(|row| row.binding_health == "valid"),
+        "{rows:?}"
+    );
 }
 
 /// A scope whose launch is no longer the pane's claim is stale, and a stale

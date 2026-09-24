@@ -38,7 +38,7 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - `get_attention_view(pane)`, with bounded lifecycle observations and request evidence, and the `on_view_change` callback. See `docs/consumer-guide.md`.
 - Opt-in delivery of the exact prompt or reply text to consumer executables: `--consumer … --include-prompt` or `--include-reply`.
 - The drawn tab order, published to `tabs/` and read with `attention tabs`.
-- `attention sweep`, which previews by default and, with `--apply`, ends bindings whose panes are verified gone, removes a closed pane's whole tree once its binding ended more than 30 days ago and its absence is confirmed again, and collects leftover files. A mux server that is gone counts as a sighting of absence for its panes.
+- `attention sweep`, which previews by default and, with `--apply`, ends bindings whose panes are verified gone, removes a closed pane's whole tree once its binding ended more than 30 days ago and its absence is confirmed again, and collects leftover files. A mux server that is gone counts as a sighting of absence for its panes: a new server owns its socket, or the socket file is gone and the process probe finds no process carrying the pane. A failed process probe is never a sighting.
 - A `doctor` probe named `environment`, which checks inside a pane that the pane's socket has a server identity hooks can find.
 - `result.timing_ms` on `inspect` as on `bindings`, and `result.diagnostic_count` / `total_diagnostic_count` on `tabs`. Query diagnostics name the record path or pane they are about.
 - Options `show_directory`, `settled_title_fallback`, `show_provider`, `on_view_change` and `integration_root`; `attention.doctor(window)` in the Lua API.
@@ -47,6 +47,7 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 
 - A prompt tints the pane `thinking` straight away, instead of waiting for the first tool call.
 - `thinking` from v2 records animates like the v1 spinner.
+- The tab text published in `tabs/*.json` always shows the spinner's first frame, so a spinning tab does not rewrite that file every second. The bar on screen still animates.
 - A Claude turn that ends on an API error (`StopFailure`) shows `notify` instead of staying on `thinking` until its 30-minute timeout. A Codex `Interrupt` clears the activity.
 - A sub-agent waiting for permission raises `notify` on its pane.
 - Forked Claude and Codex sessions (`SessionStart` with source `fork`) are bound.

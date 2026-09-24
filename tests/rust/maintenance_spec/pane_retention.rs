@@ -9,6 +9,7 @@ use super::*;
 const OP_1: &str = "00000000-0000-4000-8000-000000000911";
 const OP_2: &str = "00000000-0000-4000-8000-000000000912";
 const OP_3: &str = "00000000-0000-4000-8000-000000000913";
+const OP_4: &str = "00000000-0000-4000-8000-000000000914";
 
 fn pane_dir(setup: &Setup) -> PathBuf {
     pane_path(&setup.root(), &pane_address(&setup.env).expect("address").0)
@@ -27,17 +28,17 @@ fn end_reason(binding_dir: &Path) -> Option<Value> {
     Some(serde_json::from_slice::<Value>(&end).expect("end JSON")["reason"].clone())
 }
 
-/// The server that owned the pane is gone and its socket file with it. Nothing
-/// can list the pane again, and that counts as absence -- observed twice, a
-/// minute apart, before the binding ends.
+/// The server that owned the pane is gone and its socket file with it, and no
+/// process carries the socket and pane id. Nothing can list the pane again,
+/// and that counts as absence -- observed twice, a minute apart, before the
+/// binding ends.
 #[test]
 fn a_binding_on_a_vanished_socket_ends_after_two_observations() {
     let setup = Setup::new();
     setup.claim_and_bind();
     let binding_dir = setup.binding_dir();
     fs::remove_file(&setup.env["WEZTERM_UNIX_SOCKET"]).expect("remove socket");
-    // The socket alone is the evidence; the process probe cannot say.
-    setup.processes.set(Presence::Unavailable);
+    setup.processes.set(Presence::Absent);
     setup.clock.set_monotonic(1_000);
     let (first, _) = setup.run_sweep(true, Some(OP_1));
     assert_eq!(
@@ -94,7 +95,82 @@ fn a_process_still_on_a_vanished_socket_is_not_absence() {
     assert!(!pane.join("absence-probe.json").exists());
 }
 
-/// Readers report a vanished socket as they always did, and write nothing.
+/// A vanished socket alone does not show the server gone: it may still run
+/// with its socket file deleted. Without a process probe that answers "no
+/// process carries this pane" -- the probe failed, or there is none -- the
+/// pane is unavailable, however many sweeps see the socket missing.
+#[test]
+fn a_vanished_socket_without_a_process_answer_never_ends_a_binding() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let binding_dir = setup.binding_dir();
+    let pane = pane_dir(&setup);
+    fs::remove_file(&setup.env["WEZTERM_UNIX_SOCKET"]).expect("remove socket");
+    setup.processes.set(Presence::Unavailable);
+    let probes: [Option<&dyn ProcessProbe>; 2] = [Some(&setup.processes), None];
+    for (step, (operation, processes)) in [OP_1, OP_2, OP_3, OP_4]
+        .into_iter()
+        .zip(probes.into_iter().cycle())
+        .enumerate()
+    {
+        setup
+            .clock
+            .set_monotonic(1_000 + step as u64 * ABSENCE_INTERVAL_NS as u64);
+        let (result, diagnostics) = sweep(
+            &setup.root(),
+            None,
+            true,
+            Some(operation),
+            &setup.clock,
+            &setup.panes,
+            processes,
+        )
+        .expect("sweep");
+        assert_eq!(actions(&result.details, "absence"), [&json!("unavailable")]);
+        assert!(diagnostics.iter().any(|d| d.code == "probe_unavailable"));
+    }
+    assert_eq!(end_reason(&binding_dir), None);
+    assert!(!pane.join("absence-probe.json").exists());
+}
+
+/// The same holds for removing an old pane's tree: two applies a minute apart
+/// with the socket gone and no process answer keep every record.
+#[test]
+fn a_vanished_socket_without_a_process_answer_keeps_an_old_panes_tree() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    end_long_ago(&setup);
+    let pane = pane_dir(&setup);
+    fs::remove_file(&setup.env["WEZTERM_UNIX_SOCKET"]).expect("remove socket");
+    setup.processes.set(Presence::Unavailable);
+    let probes: [Option<&dyn ProcessProbe>; 2] = [Some(&setup.processes), None];
+    for processes in probes {
+        let before = tree_bytes(&setup.root());
+        for (step, operation) in [OP_1, OP_2].into_iter().enumerate() {
+            setup
+                .clock
+                .set_monotonic(1_000 + step as u64 * ABSENCE_INTERVAL_NS as u64);
+            let (result, _) = sweep(
+                &setup.root(),
+                None,
+                true,
+                Some(operation),
+                &setup.clock,
+                &setup.panes,
+                processes,
+            )
+            .expect("sweep");
+            assert_eq!(
+                actions(&result.details, "pane_retention"),
+                [&json!("unavailable")]
+            );
+        }
+        assert!(pane.join("claim.json").exists(), "the pane tree is kept");
+        assert_eq!(tree_bytes(&setup.root()), before);
+    }
+}
+
+/// Readers report a vanished socket as unavailable, and write nothing.
 #[test]
 fn readers_report_a_vanished_socket_as_unavailable_and_change_nothing() {
     let setup = Setup::new();
@@ -199,6 +275,49 @@ fn a_closed_panes_tree_is_removed_only_by_apply_after_two_observations() {
     assert_eq!(panes.asked_under_lock.load(Ordering::SeqCst), 0);
 }
 
+/// A preview decides nothing, so every step it takes is answered from one
+/// pane listing per socket and one process listing: here the tab order and
+/// the old pane's retention both ask about pane 42. An apply takes a fresh
+/// look for each decision.
+#[test]
+fn a_preview_lists_each_socket_and_the_processes_once() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    end_long_ago(&setup);
+    let (address, _) = pane_address(&setup.env).expect("address");
+    let marker = format!("v2:{}:{}:42", address.realm_id, address.incarnation_id);
+    write_tab_order(&setup.root(), 7, &[&marker]);
+    let count = |apply: bool, operation: Option<&str>| {
+        let panes = LockCheckingPanes::for_setup(&setup);
+        let processes = super::doctor_probes::CountingListing::new();
+        let (result, _) = sweep(
+            &setup.root(),
+            None,
+            apply,
+            operation,
+            &setup.clock,
+            &panes,
+            Some(&processes),
+        )
+        .expect("sweep");
+        assert_eq!(
+            actions(&result.details, "pane_retention"),
+            [&json!("first_absence")]
+        );
+        (
+            panes.asked.load(Ordering::SeqCst),
+            processes.listings.load(Ordering::SeqCst)
+                + processes.single_looks.load(Ordering::SeqCst),
+        )
+    };
+    assert_eq!(count(false, None), (1, 1), "a preview lists once");
+    assert_eq!(
+        count(true, Some(OP_1)),
+        (2, 2),
+        "an apply looks per decision"
+    );
+}
+
 #[test]
 fn a_present_pane_is_never_pruned_however_old_its_binding() {
     let setup = Setup::new();
@@ -293,6 +412,37 @@ fn an_unknown_file_keeps_the_pane_tree() {
         "{diagnostics:?}"
     );
     assert!(!actions(&result.details, "pane_retention").contains(&&json!("prune")));
+}
+
+/// Alt+B moves a review aside to `<review>.<session>.clear` while it clears
+/// it. One left by a crash is the remains of a write, like a temporary file,
+/// and does not keep an old pane's tree.
+#[test]
+fn a_review_left_mid_clear_does_not_keep_the_pane_tree() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    end_long_ago(&setup);
+    setup.panes.set(Vec::new());
+    setup.processes.set(Presence::Absent);
+    let reviews = pane_dir(&setup).join("reviews");
+    fs::create_dir_all(&reviews).expect("reviews");
+    fs::write(
+        reviews.join(format!("{}.json.table0x600003a0c0c0.clear", "a".repeat(64))),
+        "{}",
+    )
+    .expect("review left mid-clear");
+    setup.clock.set_monotonic(1_000);
+    setup.run_sweep(true, Some(OP_1));
+    setup
+        .clock
+        .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
+    let (result, diagnostics) = setup.run_sweep(true, Some(OP_2));
+    assert_eq!(
+        actions(&result.details, "pane_retention"),
+        [&json!("prune")],
+        "{diagnostics:?}"
+    );
+    assert!(!pane_dir(&setup).exists());
 }
 
 /// The monotonic clock restarts at boot. A probe taken before a restart reads

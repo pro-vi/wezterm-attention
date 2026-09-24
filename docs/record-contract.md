@@ -153,9 +153,11 @@ presence, reader confidence, and binding health. It never returns a resume comma
 their own argv from the closed provider and session ID fields.
 
 `conflicted` health and the `binding_conflict` diagnostic mean two live claims on one provider
-session at different pane addresses. A binding that has ended, or whose pane is verified absent, is
-history and is left out of that comparison: resuming a session in a new pane leaves one behind every
-time, and marking the live row conflicted would hide the pane the session now runs in.
+session at different pane addresses. A binding that has ended, whose pane is verified absent, or
+whose mux server is gone (a new server owns its socket path, or the socket path no longer exists)
+is history and is left out of that comparison: resuming a session in a new pane, or after the mux
+restarts, leaves one behind every time, and marking the live row conflicted would hide the pane
+the session now runs in. Such a row still reports `pane_presence` `unavailable`.
 
 JSON responses contain `schema`, `command`, `status`, `complete`, `result`, and `diagnostics`.
 `bindings` also reports where its time went, in `result.timing_ms`: `pane_list` (inside `wezterm cli list`), `process_list` (inside the process probe) and `records` (the rest: finding and reading the records). It is on every answer, without a flag or threshold, so a slow call names its phase.
@@ -183,17 +185,20 @@ records in its file and version scope even when a pane has no binding.
 
 Destructive absence needs two sightings of absence under different operation IDs at least 60
 monotonic seconds apart. A sighting is a pane-list negative plus an identity-scoped process
-negative for the full socket path and pane ID. For sweep, a pane whose mux server is gone (its
-socket path no longer exists, or a different server now owns it) is also one sighting for the old
-incarnation, unless a running process still carries that socket and pane id. A probe recorded at a
+negative for the full socket path and pane ID. For sweep, a pane whose mux server is gone is also
+one sighting for the old incarnation: a different server now owns its socket path, or its socket
+path no longer exists and the process probe answers that no running process carries that socket
+and pane id. A socket path that is gone while the process probe failed, or with no probe, is
+unavailable, not absent: the server may still run with its socket file removed. A probe recorded at a
 monotonic time later than the current clock, as after a reboot, restarts the count; that can only
 delay an end. Readers such as `bindings` still report such a pane `unavailable`, not absent.
 Process-probe failure is unavailable evidence, not absence. One failed process listing answers
 every pane of that query as unavailable; it is not retried pane by pane, so a query waits on at
 most one pane listing per mux socket and one process listing. A realm-wide `bindings` asks its
 sockets in parallel, so it waits about as long as the slowest one, bounded by the per-listing
-deadline. Sweep probes a pane before taking that pane's locks, so hooks are not held up behind a
-slow mux.
+deadline. A sweep preview and `doctor` do the same. A sweep apply looks again for each pane it
+decides on, and probes it before taking that pane's locks, so hooks are not held up behind a slow
+mux.
 
 The process probe reads environments, never command-line arguments. On macOS it reads each of
 this user's processes' environment with `KERN_PROCARGS2`; on Linux it reads `/proc/<pid>/environ`
@@ -208,7 +213,8 @@ whole tree, but only after two new sightings of absence under different operatio
 seconds apart; sightings from before that binding ended do not count. A tree holding any file sweep does not recognise is kept. Each step appears as a `pane_retention` detail, with action
 `first_absence`, `too_soon`, `replay_first`, `clear_absence`, `present`, `unavailable`, `prune` or
 `keep`; the preview says `keep` wherever apply would keep. Temporary files left by an interrupted
-write no longer hold a binding or pane tree back from retention.
+write, and a review that Alt+B had moved aside to `<review>.json.<session>.clear` when it was
+interrupted, do not hold a binding or pane tree back from retention.
 
 A retention floor advances only across complete monotonic-timestamp groups that were already
 ineligible under the prior floor. An eligible member blocks the whole equal-timestamp group.

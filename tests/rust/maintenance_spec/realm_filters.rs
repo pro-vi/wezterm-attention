@@ -8,7 +8,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::Instant;
 
 /// Claims pane 42 on a second socket and binds `session` there.
-fn bind_on_another_socket(setup: &Setup, name: &str, session: &str) -> (UnixListener, String) {
+pub(super) fn bind_on_another_socket(
+    setup: &Setup,
+    name: &str,
+    session: &str,
+) -> (UnixListener, String) {
     let socket = setup._scratch.0.join(name);
     let listener = UnixListener::bind(&socket).expect("bind second socket");
     let mut env = setup.env.clone();

@@ -101,3 +101,18 @@ fn sweep_reports_a_directory_it_could_not_read() {
         "{diagnostics:?}"
     );
 }
+
+/// An apply that could not read a binding record has not swept that binding.
+/// It counts the step as failed, which makes the answer incomplete; the
+/// preview decides nothing and counts none.
+#[test]
+fn an_apply_that_could_not_read_a_binding_counts_a_failed_step() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let _hidden = Unreadable::new(setup.binding_dir().join("binding.json"));
+    let (preview, _) = setup.run_sweep(false, None);
+    assert_eq!(preview.failed_steps, 0);
+    let (applied, diagnostics) =
+        setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000921"));
+    assert_eq!(applied.failed_steps, 1, "{diagnostics:?}");
+}

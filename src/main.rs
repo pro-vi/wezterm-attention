@@ -337,7 +337,7 @@ fn emit<T: Serialize>(response: &Response<T>, as_json: bool, quiet: bool) {
     } else {
         // The status word alone cannot say what to fix, and every
         // diagnostic points here. Its reasons go to stderr, so a script
-        // that reads the word from stdout reads the same thing as before.
+        // that reads stdout reads only the word.
         print_out(&response.status);
         for diagnostic in &response.diagnostics {
             let message = diagnostic
@@ -828,7 +828,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     match wezterm_attention::query::read_bindings_for_socket_timed(
                         &root,
                         socket,
-                        Some(&wezterm_attention::wezterm::ExistingWeztermPaneLister),
+                        Some(&WeztermPaneLister),
                         Some(&processes),
                     ) {
                         Ok(result) => result,
@@ -844,6 +844,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 // provider left out costs no pane listing.
                 let filter = wezterm_attention::query::BindingFilter {
                     realm_id: args.realm.clone(),
+                    incarnation_id: None,
                     provider: args.provider.clone(),
                 };
                 let answer = read_bindings_timed(&root, &filter, Some(&panes), Some(&processes))
@@ -1098,7 +1099,10 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 .any(|item| item.code == "probe_unavailable");
             // A report in which no probe had anything of the user's to look at
             // found nothing wrong, but it did not find anything right either.
-            // The versions probe reads only this binary's own manifest.
+            // The versions probe is left out because it never says
+            // unobserved: besides the schemas of the state records, it
+            // compares this binary's embedded manifest with the one on disk,
+            // and there is always an embedded one.
             let nothing_observed = result["probes"].as_array().is_some_and(|probes| {
                 probes
                     .iter()
@@ -1172,8 +1176,10 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             } else {
                 diagnostics.iter().take(50).cloned().collect()
             };
-            // A probe that did not answer leaves some pane's fate undecided.
+            // A probe that did not answer leaves some pane's fate undecided,
+            // and an apply step that failed left its work undone.
             let complete = !unavailable
+                && result.failed_steps == 0
                 && result.details.len() == total_details
                 && shown_diagnostics.len() == diagnostics.len();
             emit(
