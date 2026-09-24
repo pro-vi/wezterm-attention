@@ -260,3 +260,38 @@ fn a_notify_stays_while_any_child_still_waits() {
         assert_eq!(shown(&setup, provider), "thinking", "{provider}");
     }
 }
+
+// A child blocked on an approval prompt emits nothing until the user answers,
+// so its presence is never refreshed. The wait is still real after the
+// presence lifetime has passed: only the child's next event, a prompt or the
+// end of the lead's turn ends it.
+#[test]
+fn a_waiting_childs_notify_outlasts_its_presence_lifetime() {
+    for (provider, agent_type, tool) in PROVIDERS {
+        let mut setup = bound(provider, "parent");
+        setup.apply(
+            &child(provider, "PermissionRequest", "child-a", agent_type),
+            "00000000000000000400",
+        );
+        for (unix, observation) in [
+            ("00000000611345678900", "00000000000000000500"),
+            ("00000000613345678900", "00000000000000000550"),
+            ("00000086412345678900", "00000000000000000600"),
+        ] {
+            setup.clock = FixedClock {
+                monotonic: "00000000000000000100",
+                unix,
+            };
+            let held = setup.apply(&lead(provider, "PreToolUse", tool), observation);
+            assert_eq!(held.disposition, "ignored", "{provider} at {unix}");
+            assert_eq!(shown(&setup, provider), "notify", "{provider} at {unix}");
+        }
+
+        setup.apply(
+            &child(provider, "PreToolUse", "child-a", agent_type),
+            "00000000000000000700",
+        );
+        setup.apply(&lead(provider, "PreToolUse", tool), "00000000000000000750");
+        assert_eq!(shown(&setup, provider), "thinking", "{provider}");
+    }
+}
