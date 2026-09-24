@@ -1575,6 +1575,35 @@ fn collect_projection_orphans(
     failed
 }
 
+/// An apply's pane lister: a listing that failed answers every later ask
+/// about that socket for the rest of the run, and one that answered is taken
+/// fresh each time. A failed listing leaves a pane undecided and so removes
+/// nothing, while each ask against a mux that accepts and never answers
+/// waits out the listing deadline; asking once per pane made an apply's wait
+/// grow with the panes on that socket.
+struct FailedListingOncePerSocket<'a> {
+    inner: &'a dyn PaneLister,
+    failed: std::sync::Mutex<BTreeMap<String, AttentionError>>,
+}
+
+impl PaneLister for FailedListingOncePerSocket<'_> {
+    fn list(&self, socket_path: &str) -> Result<Vec<crate::wezterm::PaneRow>> {
+        if let Some(error) = self
+            .failed
+            .lock()
+            .ok()
+            .and_then(|failed| failed.get(socket_path).cloned())
+        {
+            return Err(error);
+        }
+        let answer = self.inner.list(socket_path);
+        if let (Err(error), Ok(mut failed)) = (&answer, self.failed.lock()) {
+            failed.insert(socket_path.to_owned(), error.clone());
+        }
+        answer
+    }
+}
+
 /// What one sweep run decides with, for the steps that take it whole.
 struct SweepRun<'a> {
     root: &'a Path,
@@ -1896,12 +1925,19 @@ pub fn sweep(
     ns20(&now, "record_invalid")?;
     // A preview decides nothing, so one pane listing per socket and one
     // process listing answer all its steps. An apply acts on each answer and
-    // takes a fresh look for each decision.
+    // takes a fresh look for each decision, except where a socket's listing
+    // already failed.
     let listed_once = (!apply).then(|| ListOncePerSocket::new(panes));
+    let failed_once = apply.then(|| FailedListingOncePerSocket {
+        inner: panes,
+        failed: std::sync::Mutex::new(BTreeMap::new()),
+    });
     let probed_once = processes.filter(|_| !apply).map(ProbeOncePerAssembly::new);
-    let panes = listed_once
-        .as_ref()
-        .map_or(panes, |lister| lister as &dyn PaneLister);
+    let panes = match (&listed_once, &failed_once) {
+        (Some(lister), _) => lister as &dyn PaneLister,
+        (None, Some(lister)) => lister as &dyn PaneLister,
+        (None, None) => panes,
+    };
     let processes = probed_once
         .as_ref()
         .map(|probe| probe as &dyn ProcessProbe)

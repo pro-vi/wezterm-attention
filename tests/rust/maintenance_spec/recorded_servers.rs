@@ -451,6 +451,49 @@ fn a_failed_listing_leaves_a_tab_order_undecided_as_it_does_a_binding() {
     }
 }
 
+/// A pane lister that never answers, counting how often it is asked.
+struct CountedUnansweredPanes(std::sync::atomic::AtomicUsize);
+
+impl PaneLister for CountedUnansweredPanes {
+    fn list(&self, socket_path: &str) -> wezterm_attention::protocol::Result<Vec<PaneRow>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        UnansweredPanes.list(socket_path)
+    }
+}
+
+/// A failed listing decides nothing, so an apply gives it to every later pane
+/// of the same socket instead of waiting out another listing deadline per
+/// pane against a mux that does not answer.
+#[test]
+fn an_apply_asks_an_unanswered_socket_once() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    bind_panes(&setup, 3);
+    let panes = CountedUnansweredPanes(std::sync::atomic::AtomicUsize::new(0));
+    let (result, diagnostics) = sweep(
+        &setup.root(),
+        None,
+        true,
+        Some(OP_1),
+        &setup.clock,
+        &panes,
+        Some(&setup.processes),
+    )
+    .expect("sweep");
+    assert_eq!(actions(&result.details, "absence").len(), 4);
+    assert!(
+        actions(&result.details, "absence")
+            .iter()
+            .all(|action| **action == json!("unavailable"))
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|item| item.code == "probe_unavailable")
+    );
+    assert_eq!(panes.0.load(Ordering::SeqCst), 1);
+}
+
 /// A missing `gui-sock-<pid>` socket whose GUI process has exited: the GUI's
 /// local panes ended with it, so the pane is absent, and the binding ends
 /// after two sightings although the process listing could not read every

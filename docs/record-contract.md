@@ -248,7 +248,9 @@ most one pane listing per mux socket and one process listing. A realm-wide `bind
 sockets in parallel, so it waits about as long as the slowest one, bounded by the per-listing
 deadline. A sweep preview and `doctor` do the same. A sweep apply looks again for each pane it
 decides on, and probes it before taking that pane's locks, so hooks are not held up behind a slow
-mux.
+mux. A pane listing that failed during an apply is not asked again: every later pane of that
+socket in the same run reads the same failure, so a mux that never answers costs one listing
+deadline, not one per pane.
 
 The process probe reads environments, never command-line arguments. On macOS it reads each of
 this user's processes' environment with `KERN_PROCARGS2`; on Linux it reads `/proc/<pid>/environ`
