@@ -116,3 +116,33 @@ fn an_apply_that_could_not_read_a_binding_counts_a_failed_step() {
         setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000921"));
     assert_eq!(applied.failed_steps, 1, "{diagnostics:?}");
 }
+
+/// Scoped to one server or realm-wide, a directory that could not be read is
+/// reported the same way: `state_permissions`, naming the directory relative
+/// to the state root.
+#[test]
+fn a_socket_scoped_listing_names_the_directory_it_could_not_read() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let root = setup.root();
+    let hidden = hide_bindings(&setup);
+    let expected = json!(hidden.0.strip_prefix(&root).unwrap().to_str().unwrap());
+    let (_, _, diagnostics) = wezterm_attention::query::read_bindings_for_socket_with_ports(
+        &root,
+        &setup.env["WEZTERM_UNIX_SOCKET"],
+        Some(&setup.panes),
+        Some(&setup.processes),
+    )
+    .expect("socket bindings");
+    let (_, realm_wide) =
+        read_bindings_with_ports(&root, Some(&setup.panes), Some(&setup.processes))
+            .expect("bindings");
+    for (mode, diagnostics) in [("socket", &diagnostics), ("realm-wide", &realm_wide)] {
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == "state_permissions" && d.context.get("path") == Some(&expected)),
+            "{mode}: {diagnostics:?}"
+        );
+    }
+}

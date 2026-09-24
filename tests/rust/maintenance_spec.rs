@@ -959,11 +959,15 @@ fn a_session_resumed_in_a_new_pane_conflicts_only_while_both_panes_live() {
             .expect("bindings with both panes live");
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|row| row.binding_health == "conflicted"));
-    assert!(
-        diagnostics
-            .iter()
-            .any(|item| item.code == "binding_conflict")
-    );
+    let conflict = diagnostics
+        .iter()
+        .find(|item| item.code == "binding_conflict")
+        .expect("conflict diagnostic");
+    // The diagnostic names the session and every address that holds it, so
+    // a reader that dropped `binding_health` can still find the rows.
+    assert_eq!(conflict.context["provider"], "claude");
+    assert_eq!(conflict.context["provider_session_id"], "session-a");
+    assert_eq!(conflict.context["addresses"], json!([address, resumed]));
 
     // The old pane is gone. One live claim remains, so it is not a conflict.
     setup.panes.set(vec![PaneRow {

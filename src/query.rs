@@ -1132,7 +1132,7 @@ pub fn read_bindings_for_socket_timed(
         .join(&scope.incarnation_id);
     let mut files = Vec::new();
     let mut diagnostics = Vec::new();
-    collect_selected_binding_files(&selected, &mut files, &mut diagnostics, true);
+    collect_selected_binding_files(root, &selected, &mut files, &mut diagnostics, true);
     // Whether a row's provider session is live at another pane address is a
     // fact about the row, and the other address may be under any server, as
     // inspect finds it. The rest of the store is walked for those rivals only:
@@ -1166,7 +1166,10 @@ pub fn read_bindings_for_socket_timed(
     ))
 }
 
+/// The binding records below one server's incarnation. A directory or entry
+/// that cannot be read is reported as the realm-wide walk reports it.
 fn collect_selected_binding_files(
+    root: &Path,
     path: &Path,
     output: &mut Vec<PathBuf>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -1176,46 +1179,43 @@ fn collect_selected_binding_files(
         Ok(entries) => entries,
         Err(error) if missing_ok && error.kind() == std::io::ErrorKind::NotFound => return,
         Err(_) => {
-            diagnostics.push(diagnostic(
-                "record_invalid",
-                "selected binding directory could not be enumerated",
-            ));
+            diagnostics.push(unreadable_state(root, path));
             return;
         }
+    };
+    let symlink = |message: &str, path: &Path| {
+        let mut item = diagnostic("record_invalid", message);
+        item.context
+            .insert("path".into(), Value::String(state_relative(root, path)));
+        item
     };
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
             Err(_) => {
-                diagnostics.push(diagnostic(
-                    "record_invalid",
-                    "selected binding directory entry could not be read",
-                ));
+                diagnostics.push(unreadable_state(root, path));
                 continue;
             }
         };
         match entry.file_type() {
             Ok(kind) if entry.file_name() == "binding.json" => {
                 if kind.is_symlink() {
-                    diagnostics.push(diagnostic(
-                        "record_invalid",
+                    diagnostics.push(symlink(
                         "selected binding record is a symlink",
+                        &entry.path(),
                     ));
                 } else {
                     output.push(entry.path());
                 }
             }
             Ok(kind) if kind.is_dir() => {
-                collect_selected_binding_files(&entry.path(), output, diagnostics, false)
+                collect_selected_binding_files(root, &entry.path(), output, diagnostics, false)
             }
-            Ok(kind) if kind.is_symlink() => diagnostics.push(diagnostic(
-                "record_invalid",
+            Ok(kind) if kind.is_symlink() => diagnostics.push(symlink(
                 "selected binding directory contains a symlink that was not traversed",
+                &entry.path(),
             )),
-            Err(_) => diagnostics.push(diagnostic(
-                "record_invalid",
-                "selected binding entry type is unavailable",
-            )),
+            Err(_) => diagnostics.push(unreadable_state(root, &entry.path())),
             _ => {}
         }
     }
@@ -2176,7 +2176,11 @@ fn assemble_bindings(
             .iter()
             .map(|index| {
                 let address = &rows[*index].address;
-                (&address.realm_id, &address.incarnation_id, &address.pane_id)
+                (
+                    address.realm_id.clone(),
+                    address.incarnation_id.clone(),
+                    address.pane_id.clone(),
+                )
             })
             .collect();
         if addresses.len() > 1 {
@@ -2188,10 +2192,33 @@ fn assemble_bindings(
             if !indices.iter().any(|index| admitted_rows[*index]) {
                 continue;
             }
-            diagnostics.push(diagnostic(
+            let mut item = diagnostic(
                 "binding_conflict",
                 "provider session is bound to multiple pane addresses",
-            ));
+            );
+            let first = &rows[indices[0]];
+            item.context
+                .insert("provider".into(), Value::String(first.provider.clone()));
+            item.context.insert(
+                "provider_session_id".into(),
+                Value::String(first.provider_session_id.clone()),
+            );
+            item.context.insert(
+                "addresses".into(),
+                Value::Array(
+                    addresses
+                        .iter()
+                        .map(|(realm_id, incarnation_id, pane_id)| {
+                            serde_json::json!({
+                                "realm_id": realm_id,
+                                "incarnation_id": incarnation_id,
+                                "pane_id": pane_id,
+                            })
+                        })
+                        .collect(),
+                ),
+            );
+            diagnostics.push(item);
         }
     }
     let mut admitted_rows = admitted_rows.into_iter();

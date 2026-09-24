@@ -1300,8 +1300,21 @@ fn collect_tab_orders(
                 let presence = match presence_cache.get(key) {
                     Some(cached) => cached.clone(),
                     None => {
+                        let before = diagnostics.len();
                         let observed =
                             pane_presence(root, address, Some(panes), processes, diagnostics);
+                        // Named by the file that asked and the pane it asked
+                        // about, as a bindings answer names its panes.
+                        for item in &mut diagnostics[before..] {
+                            item.context.insert("path".into(), json!(relative));
+                            for (field, value) in [
+                                ("realm_id", &address.realm_id),
+                                ("incarnation_id", &address.incarnation_id),
+                                ("pane_id", &address.pane_id),
+                            ] {
+                                item.context.insert(field.into(), json!(value));
+                            }
+                        }
                         presence_cache.insert(key.clone(), observed.clone());
                         observed
                     }
