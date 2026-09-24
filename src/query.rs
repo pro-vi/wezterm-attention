@@ -454,15 +454,11 @@ fn read_pane_facts_once(
     // reader applies. True when it is shown to have exited, so the pane is
     // absent and the records are still the latest word about it.
     let check_socket = || -> std::result::Result<bool, Diagnostic> {
-        match recorded_server(socket, &address.realm_id, &address.incarnation_id) {
-            RecordedServer::Current => Ok(false),
-            RecordedServer::Replaced(_)
-                if replaced_server_pane_gone(socket, &address.pane_id, processes) =>
-            {
-                Ok(true)
-            }
-            RecordedServer::Replaced(diagnostic) => Err(diagnostic),
-            RecordedServer::Unreadable(error) => Err(error.diagnostic),
+        match server_state(socket, address, processes) {
+            ServerState::Current => Ok(false),
+            ServerState::Exited => Ok(true),
+            ServerState::Kept(diagnostic) => Err(diagnostic),
+            ServerState::Unreadable(error) => Err(error.diagnostic),
         }
     };
     let server_exited = match check_socket() {
@@ -1528,11 +1524,61 @@ pub(crate) fn kept_history_code(code: &str) -> bool {
 pub(crate) enum RecordedServer {
     /// The socket still carries the incarnation.
     Current,
-    /// It no longer does. The diagnostic says how: `socket_gone` or
-    /// `incarnation_changed`.
-    Replaced(Diagnostic),
+    /// It no longer does, for the reason given.
+    Replaced(SocketChange),
     /// Its identity could not be read.
     Unreadable(AttentionError),
+}
+
+/// How a recorded socket stopped carrying its incarnation.
+pub(crate) enum SocketChange {
+    /// The socket file is gone.
+    Gone,
+    /// The path holds another identity.
+    IdentityChanged,
+}
+
+impl SocketChange {
+    /// What a reader reports of it when nothing shows the server gone.
+    fn diagnostic(&self) -> Diagnostic {
+        match self {
+            Self::Gone => diagnostic("socket_gone", "mux socket no longer exists"),
+            Self::IdentityChanged => {
+                diagnostic("incarnation_changed", "realm socket identity changed")
+            }
+        }
+    }
+}
+
+/// The server behind a pane's recorded incarnation, by the rule every reader
+/// applies.
+enum ServerState {
+    /// Its socket still carries the incarnation.
+    Current,
+    /// It no longer does, and the pane is shown gone with it.
+    Exited,
+    /// It no longer does and nothing shows the server gone, so its records
+    /// are kept history; the diagnostic says what became of the socket.
+    Kept(Diagnostic),
+    /// The socket's identity could not be read.
+    Unreadable(AttentionError),
+}
+
+fn server_state(
+    socket_path: &str,
+    address: &PaneAddress,
+    processes: Option<&dyn ProcessProbe>,
+) -> ServerState {
+    match recorded_server(socket_path, &address.realm_id, &address.incarnation_id) {
+        RecordedServer::Current => ServerState::Current,
+        RecordedServer::Replaced(_)
+            if replaced_server_pane_gone(socket_path, &address.pane_id, processes) =>
+        {
+            ServerState::Exited
+        }
+        RecordedServer::Replaced(change) => ServerState::Kept(change.diagnostic()),
+        RecordedServer::Unreadable(error) => ServerState::Unreadable(error),
+    }
 }
 
 pub(crate) fn recorded_server(
@@ -1544,22 +1590,19 @@ pub(crate) fn recorded_server(
         Ok((realm, incarnation, _)) if realm == realm_id && incarnation == incarnation_id => {
             RecordedServer::Current
         }
-        Ok(_) => RecordedServer::Replaced(diagnostic(
-            "incarnation_changed",
-            "realm socket identity changed",
-        )),
+        Ok(_) => RecordedServer::Replaced(SocketChange::IdentityChanged),
         // Only a path that is not there at all. A socket that exists and
         // cannot be read says nothing about the server.
         Err(_)
             if fs::symlink_metadata(socket_path)
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
         {
-            RecordedServer::Replaced(diagnostic("socket_gone", "mux socket no longer exists"))
+            RecordedServer::Replaced(SocketChange::Gone)
         }
         // Something other than this user's socket now holds the path.
-        Err(error) if error.diagnostic.code == "realm_unavailable" => RecordedServer::Replaced(
-            diagnostic("incarnation_changed", "realm socket identity changed"),
-        ),
+        Err(error) if error.diagnostic.code == "realm_unavailable" => {
+            RecordedServer::Replaced(SocketChange::IdentityChanged)
+        }
         Err(error) => RecordedServer::Unreadable(error),
     }
 }
@@ -1644,15 +1687,11 @@ pub(crate) fn pane_evidence(
     let Some(socket_path) = realm.get("socket_path").and_then(Value::as_str) else {
         return unavailable();
     };
-    match recorded_server(socket_path, &address.realm_id, &address.incarnation_id) {
-        RecordedServer::Current => {}
-        RecordedServer::Replaced(_)
-            if replaced_server_pane_gone(socket_path, &address.pane_id, processes) =>
-        {
-            return PaneEvidence::Observed("verified_absent".to_owned());
-        }
-        RecordedServer::Replaced(diagnostic) => return PaneEvidence::ServerGone { diagnostic },
-        RecordedServer::Unreadable(error) => {
+    match server_state(socket_path, address, processes) {
+        ServerState::Current => {}
+        ServerState::Exited => return PaneEvidence::Observed("verified_absent".to_owned()),
+        ServerState::Kept(diagnostic) => return PaneEvidence::ServerGone { diagnostic },
+        ServerState::Unreadable(error) => {
             diagnostics.push(error.diagnostic);
             return unavailable();
         }
@@ -2524,10 +2563,10 @@ fn observe_tab_source(
             &source.realm_id,
             &source.incarnation_id,
         ) {
-            RecordedServer::Replaced(diagnostic) if diagnostic.code == "socket_gone" => {
-                Err(WindowCheckReason::SocketGone)
+            RecordedServer::Replaced(SocketChange::Gone) => Err(WindowCheckReason::SocketGone),
+            RecordedServer::Replaced(SocketChange::IdentityChanged) => {
+                Err(WindowCheckReason::SourceChanged)
             }
-            RecordedServer::Replaced(_) => Err(WindowCheckReason::SourceChanged),
             RecordedServer::Current | RecordedServer::Unreadable(_) => {
                 Err(WindowCheckReason::ProbeUnavailable)
             }
