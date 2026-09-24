@@ -573,6 +573,17 @@ return function()
       end
     end
 
+    --- The ids of `windows`, GUI or mux, as a set of decimal strings. A window
+    --- whose id cannot be read is left out.
+    local function window_keys(windows)
+      local keys = {}
+      for _, window in ipairs(windows) do
+        local ok, id = pcall(window.window_id, window)
+        if ok and id ~= nil then keys[tostring(id)] = true end
+      end
+      return keys
+    end
+
     local function gui_window_keys(opts)
       local inventory = opts and opts.gui_windows
       if inventory == nil and wezterm.gui then inventory = wezterm.gui.gui_windows end
@@ -582,12 +593,7 @@ return function()
         inventory = windows
       end
       if type(inventory) ~= "table" then return nil end
-      local keys = {}
-      for _, gui_window in ipairs(inventory) do
-        local ok, id = pcall(gui_window.window_id, gui_window)
-        if ok and id ~= nil then keys[tostring(id)] = true end
-      end
-      return keys
+      return window_keys(inventory)
     end
 
     --- Mux windows that exist, by id as a decimal string, whether or not a GUI
@@ -597,12 +603,7 @@ return function()
       if not mux or type(mux.all_windows) ~= "function" then return nil end
       local ok, windows = pcall(mux.all_windows)
       if not ok or type(windows) ~= "table" then return nil end
-      local keys = {}
-      for _, mux_window in ipairs(windows) do
-        local id_ok, id = pcall(mux_window.window_id, mux_window)
-        if id_ok and id ~= nil then keys[tostring(id)] = true end
-      end
-      return keys
+      return window_keys(windows)
     end
 
     --- Windows that are still open. A workspace switch makes the GUI window
@@ -610,15 +611,13 @@ return function()
     --- gui_windows() while it still exists, with its tabs, to be shown again.
     --- Only a window gone from both has closed. Without the mux listing it is
     --- the GUI inventory alone, so a window another workspace shows counts as
-    --- closed.
-    local function open_window_keys(opts)
-      local live = gui_window_keys(opts)
+    --- closed. `live` is the GUI inventory the caller took; it is not changed.
+    local function open_window_keys(live)
       if not live then return nil end
-      local existing = mux_window_keys()
-      if existing then
-        for key in pairs(existing) do live[key] = true end
-      end
-      return live
+      local open = {}
+      for key in pairs(live) do open[key] = true end
+      for key in pairs(mux_window_keys() or {}) do open[key] = true end
+      return open
     end
 
     local function prune_closed_publish_windows(current_window_key, opts, dir)
@@ -627,8 +626,7 @@ return function()
       -- The callback's window is authoritative even if WezTerm's inventory is
       -- between insertion and publication for a newly created GUI window.
       live[current_window_key] = true
-      local open = open_window_keys(opts) or live
-      open[current_window_key] = true
+      local open = open_window_keys(live)
       withdraw_closed_tab_orders(dir, open)
       for window_key in pairs(seen_marker_ids_by_window) do
         if not open[window_key] then seen_marker_ids_by_window[window_key] = nil end
@@ -960,7 +958,7 @@ return function()
         end
       end
       callback_views_by_window[window_key] = next_views
-      local live = open_window_keys(opts)
+      local live = open_window_keys(gui_window_keys(opts))
       if live then
         live[window_key] = true
         for other, states in pairs(callback_views_by_window) do
