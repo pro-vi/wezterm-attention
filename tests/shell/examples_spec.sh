@@ -40,6 +40,8 @@ wezterm.on = function(name, handler)
   handlers[name] = handler
   return register(name, handler)
 end
+-- wezterm-mux-server reads the same config, and its Lua has no gui module.
+if os.getenv("ATTENTION_EXAMPLE_NO_GUI") then wezterm.gui = nil end
 local ok, config = pcall(dofile, root .. "/examples/wezterm.lua")
 result:write("loaded=", tostring(ok), "\n")
 if not ok then result:write("error=", tostring(config), "\n"); result:close(); error(config) end
@@ -55,11 +57,11 @@ return config
 EOF
 
 # Loads the example once; the key table goes to keys, the wrapper's report to
-# result.
+# result. Arguments are extra environment assignments.
 load_example() {
   rm -f "$scratch/result" "$scratch/fsmonitor-ran"
   env -i HOME="$scratch/home" PATH=/usr/bin:/bin ATTENTION_EXAMPLE_ROOT="$root" \
-    ATTENTION_EXAMPLE_RESULT="$scratch/result" ATTENTION_EXAMPLE_REPO="$scratch/repo" \
+    ATTENTION_EXAMPLE_RESULT="$scratch/result" ATTENTION_EXAMPLE_REPO="$scratch/repo" "$@" \
     "$wezterm" --config-file "$scratch/config/wezterm.lua" show-keys --lua \
     > "$scratch/keys" 2> "$scratch/stderr"
 }
@@ -81,6 +83,8 @@ name="the example config loads with follow-up.lua beside it"
 check grep -q '^loaded=true$' "$scratch/result"
 name="the example keeps the plugin's Alt+B binding"
 check grep -q "^    { key = 'b', mods = 'ALT', " "$scratch/keys"
+name="the example adds its copy-mode search keys in the GUI"
+check grep -q "^      { key = '/', mods = 'NONE', action = act.CopyMode 'EditPattern' }," "$scratch/keys"
 name="the status bar reads the repository without running its fsmonitor hook"
 check sh -c 'grep -q "^update_status=true" "$1" && grep -q "^status=.*+1" "$1" && [ ! -e "$2" ]' _ \
   "$scratch/result" "$scratch/fsmonitor-ran"
@@ -91,5 +95,9 @@ load_example
 name="the status bar shortens a long non-ASCII branch name on a character boundary"
 check sh -c 'grep -q "^update_status=true" "$1" && grep -q "^status=.* feature/修复登录页\.\. " "$1"' _ \
   "$scratch/result"
+
+load_example ATTENTION_EXAMPLE_NO_GUI=1
+name="the example config loads where WezTerm has no gui module, as in the mux server"
+check grep -q '^loaded=true$' "$scratch/result"
 
 [ "$failures" -eq 0 ]
