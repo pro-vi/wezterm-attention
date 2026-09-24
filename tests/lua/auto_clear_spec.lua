@@ -2390,6 +2390,71 @@ test("a long or control-character tab text is published within the tab reader's 
   assert(formatted:find("red[31mbell", 1, true), "the formatter's text must still be published")
 end)
 
+--- The rule `attention tabs` applies to a published tab text: the file is
+--- read as JSON, which Rust decodes only from well-formed UTF-8 (no overlong
+--- form, no surrogate, nothing past U+10FFFF), and the text must hold at most
+--- 256 bytes and no character `char::is_control` is true for.
+local function tab_reader_accepts(text)
+  if #text > 256 then return false end
+  local index, length = 1, #text
+  while index <= length do
+    local lead = text:byte(index)
+    local size, low, high, code
+    if lead < 0x80 then size, code = 1, lead
+    elseif lead >= 0xC2 and lead <= 0xDF then size, low, high, code = 2, 0x80, 0xBF, lead - 0xC0
+    elseif lead == 0xE0 then size, low, high, code = 3, 0xA0, 0xBF, 0
+    elseif lead == 0xED then size, low, high, code = 3, 0x80, 0x9F, 0xD
+    elseif lead >= 0xE1 and lead <= 0xEF then size, low, high, code = 3, 0x80, 0xBF, lead - 0xE0
+    elseif lead == 0xF0 then size, low, high, code = 4, 0x90, 0xBF, 0
+    elseif lead == 0xF4 then size, low, high, code = 4, 0x80, 0x8F, 4
+    elseif lead >= 0xF1 and lead <= 0xF3 then size, low, high, code = 4, 0x80, 0xBF, lead - 0xF0
+    else return false end
+    for offset = 1, size - 1 do
+      local byte = text:byte(index + offset)
+      local first = offset == 1
+      if not byte or byte < (first and low or 0x80) or byte > (first and high or 0xBF) then
+        return false
+      end
+      code = code * 0x40 + (byte - 0x80)
+    end
+    if code < 0x20 or (code >= 0x7F and code <= 0x9F) then return false end
+    index = index + size
+  end
+  return true
+end
+
+test("a formatter's broken UTF-8 is published as text the tab reader accepts", function()
+  local R = "\239\191\189" -- U+FFFD, one per ill-formed part, as Rust's lossy decoding
+  local cases = {
+    { "a CJK title cut inside a character", ("中文标题"):sub(1, 4), "中" .. R },
+    { "a lone continuation byte", "ab\128cd", "ab" .. R .. "cd" },
+    { "an overlong slash", "a\192\175b", "a" .. R .. R .. "b" },
+    { "an encoded surrogate", "a\237\160\128b", "a" .. R .. R .. R .. "b" },
+    { "a code point past U+10FFFF", "a\244\144\128\128b", "a" .. R .. R .. R .. R .. "b" },
+    { "a byte UTF-8 never uses", "a\255b", "a" .. R .. "b" },
+    { "a four-byte character cut at the end", "a\240\159\142", "a" .. R },
+    { "a C1 control spelled around an ESC", "a\194\27\128b", "a" .. R .. R .. "b" },
+    { "well-formed text", "中文 é 🎉 plain", "中文 é 🎉 plain" },
+  }
+  local current
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    title_formatter = function() return current end })
+  local formatter = handlers["format-tab-title"][#handlers["format-tab-title"]]
+  for index, case in ipairs(cases) do
+    current = case[2]
+    local window_id = 9869 + index * 3
+    local drawn = as_userdata({ tab_id = window_id + 1, window_id = window_id, tab_index = 0,
+      is_active = false, active_pane = gui_pane(window_id + 2), panes = { gui_pane(window_id + 2) } })
+    formatter(drawn, { drawn })
+    local published = assert(read_tab_publication(window_id), case[1] .. ": nothing published")
+    local text = published.tabs[1].text
+    assert(tab_reader_accepts(text), case[1] .. ": the tab reader would refuse the window")
+    assert(text:find(case[3], 1, true), case[1] .. ": expected the formatter's text as "
+      .. case[3] .. ", got " .. text)
+  end
+end)
+
 test("a tab with no name, directory or settled title shows the pane's current title", function()
   local bare = tab(17681, 17682, false)
   bare.active_pane.title = "vim\27]0;x"

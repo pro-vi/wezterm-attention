@@ -6,18 +6,68 @@ return function(context)
   local marker_id_by_local = context.marker_id_by_local
   local settled_title_state = {}
 
+  --- The second byte each UTF-8 lead byte allows, where it is narrower than
+  --- any continuation byte: these ranges refuse overlong forms, surrogates and
+  --- code points past U+10FFFF.
+  local second_byte_range = {
+    [0xE0] = { 0xA0, 0xBF }, [0xED] = { 0x80, 0x9F },
+    [0xF0] = { 0x90, 0xBF }, [0xF4] = { 0x80, 0x8F },
+  }
+
+  --- `text` with every ill-formed UTF-8 sequence replaced by U+FFFD, one per
+  --- maximal ill-formed part, as Rust's `String::from_utf8_lossy` does. A
+  --- formatter can return bytes cut inside a character, and a reader that
+  --- decodes the published file as JSON refuses the whole file over them.
+  local function well_formed_utf8(text)
+    local start = text:find("[\128-\255]")
+    if not start then return text end
+    local parts, from, length = {}, 1, #text
+    while start do
+      local lead = text:byte(start)
+      local size = lead >= 0xC2 and lead <= 0xDF and 2
+        or lead >= 0xE0 and lead <= 0xEF and 3
+        or lead >= 0xF0 and lead <= 0xF4 and 4
+        or 1
+      local range = second_byte_range[lead]
+      local good = 0
+      if size > 1 then
+        good = 1
+        for offset = 1, size - 1 do
+          local byte = text:byte(start + offset)
+          local low, high = 0x80, 0xBF
+          if offset == 1 and range then low, high = range[1], range[2] end
+          if not byte or byte < low or byte > high then break end
+          good = good + 1
+        end
+      end
+      if good == size then
+        start = text:find("[\128-\255]", start + size)
+      else
+        parts[#parts + 1] = text:sub(from, start - 1)
+        parts[#parts + 1] = "\239\191\189"
+        from = start + math.max(good, 1)
+        start = text:find("[\128-\255]", from)
+      end
+    end
+    if from == 1 then return text end
+    parts[#parts + 1] = text:sub(from, length)
+    return table.concat(parts)
+  end
+
   --- Text from a source the plugin does not control -- a directory name a
   --- program chose through OSC 7, a title, a tab name any process in any pane
-  --- can set -- made safe to draw and to publish: every control character
-  --- removed, C0, DEL and C1 alike, then cut to `max_bytes` on a character
-  --- boundary. WezTerm applies escape sequences in a formatter's text, so an
-  --- ESC left in would restyle the bar.
+  --- can set, a formatter's return -- made safe to draw and to publish:
+  --- ill-formed UTF-8 replaced, every control character removed, C0, DEL and
+  --- C1 alike, then cut to `max_bytes` on a character boundary. WezTerm
+  --- applies escape sequences in a formatter's text, so an ESC left in would
+  --- restyle the bar.
   local function display_text(value, max_bytes)
     if type(value) ~= "string" then return nil end
-    local text = value:gsub("[%z\1-\31\127]", "")
-    -- Repeated because removing one pair can join its neighbours into another.
-    local removed
-    repeat text, removed = text:gsub("\194[\128-\159]", "") until removed == 0
+    -- Well-formed first, so that removing a control character cannot join
+    -- two stray bytes into a C1 control. In well-formed text every removal
+    -- takes whole characters, so one pass leaves none behind.
+    local text = well_formed_utf8(value):gsub("[%z\1-\31\127]", "")
+    text = text:gsub("\194[\128-\159]", "")
     if #text > max_bytes then
       local cut = max_bytes
       -- A continuation byte just past the cut means the cut splits a
