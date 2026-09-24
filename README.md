@@ -108,33 +108,67 @@ end))
 
 ## Custom tab titles
 
-In `tab` mode, pass a `title_formatter` to control the base title without losing indicators:
+The plugin draws each tab as ` <number>: <indicator><base title> `, with ` · <provider>` before the closing space when `show_provider = true`. The number is left out when `config.show_tab_index_in_tab_bar = false`.
+
+The default base title is the first of these that is not empty:
+
+1. The tab's own title, as set by `tab:set_title()` or `wezterm cli set-tab-title`.
+2. The last component of the pane's current directory. `show_directory = false` skips it.
+3. The pane's title, once it has stayed the same for two polls. `settled_title_fallback = false` skips it, and the poll then samples no titles at all.
+4. The pane's title as it is now.
+
+Text from the first two sources, and the title from the last, has control characters removed and is cut to 256 bytes on a character boundary; a title with a control character in it is never used as the settled title.
+
+In `tab` mode, pass a `title_formatter` to replace the base title without losing indicators:
 
 ```lua
 attention.apply_to_config(config, {
   title_formatter = function(tab, ctx)
-    -- ctx.default_title = "dir / pane_title"
-    -- ctx.attention = { indicator, type, color }
+    -- ctx.default_title: the base title from the rule above
+    -- ctx.server_title, ctx.directory, ctx.settled_title: its sources, nil when empty
+    -- ctx.attention: { indicator, type, color, subagents, source, provider, review, binding_health }
     local pane = tab.active_pane
     return pane.title  -- just the pane title, no directory
   end,
 })
 ```
 
+`ctx.attention[1]`, `[2]` and `[3]` are the indicator, type and color, for formatters written against the positional form.
+
 ## Configure
 
-All options are optional — defaults work out of the box:
+All options are optional — defaults work out of the box. An unknown option, or a value of the wrong type, is named once in the WezTerm log and the default is used instead:
 
 ```lua
 attention.apply_to_config(config, {
-  -- Render mode: "tab" | "manual"
+  -- Render mode: "tab" | "manual". Any other value logs and means "tab".
   renderer = "tab",
 
-  -- Where marker files live (one file per pane ID)
-  dir = os.getenv("HOME") .. "/.local/state/wezterm-attention",
+  -- The state directory. The default is the first that applies:
+  -- $WEZTERM_ATTENTION_DIR when set, non-empty and absolute; else
+  -- $XDG_STATE_HOME/wezterm-attention when XDG_STATE_HOME is set, non-empty and
+  -- absolute; else ~/.local/state/wezterm-attention. The attention command and
+  -- the Pi extension resolve it the same way.
+  dir = nil,
+
+  -- Where the attention command was built, when it is not the checkout
+  -- WezTerm loaded the plugin from. See Install.
+  integration_root = nil,
 
   -- Custom base title (tab mode only; plugin adds indicators + colors around it)
   title_formatter = nil,  -- function(tab, ctx) -> string
+
+  -- Base-title sources; see Custom tab titles.
+  show_directory = true,
+  settled_title_fallback = true,
+
+  -- Append " · Claude", " · Codex" or " · Pi" when the tab's indicator comes
+  -- from a pane with a provider binding.
+  show_provider = false,
+
+  -- Called after each poll with what changed in a window's pane views.
+  -- See docs/consumer-guide.md, "GUI view callback".
+  on_view_change = nil,  -- function(change)
 
   -- Tab background tints per attention type
   colors = {
@@ -165,8 +199,13 @@ attention.apply_to_config(config, {
   -- on that embedded TTL — false only turns off this type-based cleanup.
   stale_after_ms = { thinking = 30 * 60 * 1000 },
 
-  -- Review toggle keybind (false to disable)
+  -- Review toggle keybind (false to disable). Added to config.keys, so assign
+  -- config.keys before calling apply_to_config.
   review_key = { key = "b", mods = "ALT" },
+
+  -- Register the plugin's own update-status poller. See
+  -- "Existing update-status handler?" below.
+  auto_poll = true,
 
   -- Ask WezTerm to rebuild the tab bar when a pane's attention changes.
   -- Set false only if your own code already repaints titles every tick
@@ -235,8 +274,13 @@ writes, acknowledges and removes nothing for that pane, and the pane contributes
 no indicator to its tab. Guessing from the local id would be worse than doing
 nothing, because that number names some other pane's marker file.
 
-Panes in the GUI's own `local` domain need none of this — there `pane:pane_id()`
-and `$WEZTERM_PANE` are the same number whether it is published or not.
+Panes in the GUI's own domains need none of this: the `local` domain, every exec
+domain, every serial port and every WSL domain. There `pane:pane_id()` and
+`$WEZTERM_PANE` are the same number. Any program that prints to the terminal can set a
+user variable, so on these panes the pane's own id wins: a published `WEZTERM_PANE`
+that disagrees with it is ignored, and a `WEZTERM_ATTENTION` identity naming another
+pane makes the pane invalid (logged once as `record_invalid`) rather than borrowing
+that pane's state.
 
 ### Subagent activity: the `.agents` sidecar
 
@@ -317,7 +361,7 @@ on exactly those panes. As a sidecar it coexists:
 
 Which one wins is the configured `priority` order, with the flag standing in for
 `review`: by default `notify > stop > review > thinking`. The flag is never
-acknowledged — `acknowledge_types` does not include `review` — so a flagged pane
+acknowledged — `auto_clear` does not include `review` — so a flagged pane
 comes back to `◆` once its `stop` or `notify` has been seen, and stays there
 until you clear it.
 
@@ -394,8 +438,9 @@ The plugin exposes functions for use in your own WezTerm Lua code:
 ```lua
 local attention = wezterm.plugin.require("https://github.com/pro-vi/wezterm-attention")
 
--- The id a pane's markers are named after: its published WEZTERM_PANE user
--- var, else its pane id when the pane is in the "local" domain, else nil.
+-- The id a pane's markers are named after: in one of the GUI's own domains
+-- (local, exec, serial, WSL) its pane id; elsewhere the server pane id it
+-- published (WEZTERM_ATTENTION, else WEZTERM_PANE); nil when it published neither.
 local marker_id = attention.pane_marker_id(pane)
 
 -- Read cached attention state:
@@ -414,18 +459,23 @@ local state, frame, source, reserved, subagents, review = attention.get_attentio
 -- I/O. Nested returned values do not share mutable state with the plugin cache.
 local view = attention.get_attention_view(pane)
 
--- Clear a v1 marker programmatically. This removes the flat marker file and the
--- sidecars beside it; it does not clear a v2 activity record or acknowledge a
--- v2 event, even when the id resolves to a pane the v2 reader knows.
+-- Clear a v1 flat marker programmatically. This removes the flat marker file and
+-- the sidecars beside it; it does not clear a v2 activity record or acknowledge
+-- a v2 record's event, even when the id resolves to a pane with v2 records. An
+-- id that is not a pane id does nothing.
 attention.remove_marker(marker_id)
+
+-- Check the GUI-side identity publication of every pane in a window. Returns a
+-- list of diagnostics, empty when every pane is identified. File, socket,
+-- process, permission and version checks belong to `attention doctor`.
+local diagnostics = attention.doctor(window)
 
 -- Poll markers manually (for auto_poll = false)
 attention.poll(window, { active_pane = pane })
 
 -- Wrap a title function with attention decoration (for renderer = "manual")
 wezterm.on("format-tab-title", attention.wrap_title_formatter(function(tab, ctx)
-  -- ctx.default_title is "dir / title"
-  -- ctx.attention is { indicator, type, color }
+  -- ctx is the same table title_formatter receives; see Custom tab titles
   return ctx.default_title
 end))
 ```
@@ -512,20 +562,23 @@ Do not register `SubagentStart`. Child attribution needs matching native `agent_
 
 ## The drawn tab order
 
-A WezTerm window attached to a mux server mirrors the server's tabs under numbers of its own, and those are the numbers the tab bar prints. They are not the order of `wezterm cli list`: a consumer of this project measured one 29-tab window on 2026-09-19 and found 22 of the 29 numbers differing. Nothing outside the GUI process can see the drawn order, so the tab bar publishes it — one file per window, under the state directory:
+A WezTerm window attached to a mux server mirrors the server's tabs under numbers of its own, and those are the numbers the tab bar prints. They are not the order of `wezterm cli list`: a consumer of this project measured one 29-tab window on 2026-09-19 and found 22 of the 29 numbers differing. Nothing outside the GUI process can see the drawn order, so the tab bar publishes it — one file per window, under the state directory, named by the incarnation of the GUI's own mux socket and the window id:
 
 ```text
-$WEZTERM_ATTENTION_DIR/tabs/<window id>.json
+<state directory>/tabs/<incarnation id>-<window id>.json
 ```
 
 ```json
-{ "schema": 1,
+{ "schema": 2,
   "window_id": 0,
   "published_at_ms": 1789884000123,
+  "source": { "socket_path": "/…/gui-sock-4946", "realm_id": "…", "incarnation_id": "…" },
   "tabs": [ { "number": 11, "text": " 11: ✓ braid ", "marker_ids": ["16"] } ] }
 ```
 
-`number` is the number the bar printed, `text` is the whole string it drew, and `marker_ids` are the IDs the plugin already uses for those panes — already translated out of the window's local numbering, because only the window could translate them. A v1 pane is a canonical decimal marker id; a v2 pane is `v2:<realm_id>:<incarnation_id>:<pane_id>` once a poll has identified it. The file is written when a window's composed list changes and at no other time, so `published_at_ms` says when the bar last drew something different.
+`source` names the GUI that drew the window, because a window id means something only inside one GUI process. The plugin learns that identity by asking the `attention` command shortly after startup. Until then, and always when the command is not built, it writes a schema-1 file at `tabs/<window id>.json` with no `source`, and removes it once a sourced file for the same window is written.
+
+`number` is the number the bar printed, `text` is the whole string it drew (control characters removed, cut to 256 bytes, and a spinner always shown at its first frame so the file does not change every second), and `marker_ids` are the IDs the plugin already uses for those panes — already translated out of the window's local numbering, because only the window could translate them. A pane on v1 flat markers is a canonical decimal marker id; a pane with v2 records is `v2:<realm_id>:<incarnation_id>:<pane_id>` once a poll has identified it. The file is written when a window's composed list changes and at no other time, so `published_at_ms` says when the bar last drew something different.
 
 Read it with `attention tabs`, which returns every window in the same JSON envelope as `bindings`. **It is honest about when it was written, not guaranteed current**: nothing refreshes it while the bar is idle, and no consumer should act on a number it has not checked. Use it to describe tabs and to resolve "the second `api` tab"; to act on one, ask the GUI, where `mux_window:tabs_with_info()` returns the drawn order live.
 
@@ -552,7 +605,7 @@ The Lua implementation is split by responsibility under `plugin/`: protocol vali
 
 **Markers not showing?**
 - If the window is attached to a mux server (`wezterm connect`, a unix domain), check the pane publishes its id: `wezterm cli list --format json` shows the server-side pane id, and the pane must emit that number as the `WEZTERM_PANE` user var. See [Publishing the pane id](#publishing-the-pane-id). Without it the plugin deliberately does nothing for that pane.
-- Check the directory exists: `ls ~/.local/state/wezterm-attention/` (or your configured `dir`)
+- Check the directory exists: `ls ~/.local/state/wezterm-attention/`, or `$XDG_STATE_HOME/wezterm-attention` when `XDG_STATE_HOME` is set, or your configured `dir` (see [Configure](#configure) for the order)
 - Verify `WEZTERM_PANE` is set: `echo $WEZTERM_PANE` (should print a number inside WezTerm)
 - Check file contents: `cat ~/.local/state/wezterm-attention/$WEZTERM_PANE` (should be valid JSON)
 - A `+N` with no glyph beside it is the [subagent count](#subagent-activity-the-agents-sidecar) for a pane whose own marker is gone or already acknowledged. `cat ~/.local/state/wezterm-attention/$WEZTERM_PANE.agents` shows the entries; ones older than ten minutes are not counted.
