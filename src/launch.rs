@@ -82,14 +82,75 @@ fn manifests(
     ))
 }
 
+/// Claim the pane for a launch from the shell running in it, at stdin's tty.
+///
+/// The claiming terminal is checked against the pane before anything is
+/// written; see [`confirm_pane_tty`].
 pub fn claim_launch(
     env: &BTreeMap<String, String>,
     ports: &RuntimePorts<'_>,
 ) -> Result<ApplyResult> {
     let tty_path = ports.tty.current_path()?;
+    confirm_pane_tty(env, ports, &tty_path)?;
     claim_launch_at_tty(env, ports, &tty_path)
 }
 
+/// Refuse a claim from a terminal that is not the pane's own.
+///
+/// `WEZTERM_PANE` and `WEZTERM_UNIX_SOCKET` are inherited, so tmux, screen or
+/// an editor's terminal started inside a pane carries them while running on
+/// a terminal of its own. A claim from there takes over the pane's claim, and
+/// the agent that held it then has its events refused as stale. When the mux
+/// lists the pane with a tty, that tty decides. When it does not list the
+/// pane at all, the pane is not in that mux, so the variables are left over
+/// from somewhere else. When no tty can be compared -- the listing failed, or
+/// the row has none -- a claim inside tmux or screen is refused, since there
+/// the variables are known to be inherited, and any other claim proceeds.
+///
+/// One listing at most, under the listing's own deadline.
+fn confirm_pane_tty(
+    env: &BTreeMap<String, String>,
+    ports: &RuntimePorts<'_>,
+    tty_path: &str,
+) -> Result<()> {
+    let (Some(socket), Some(pane_id)) = (env.get("WEZTERM_UNIX_SOCKET"), env.get("WEZTERM_PANE"))
+    else {
+        // The claim fails on the missing identity itself, with its own reason.
+        return Ok(());
+    };
+    let pane_tty = match ports.panes.list(socket) {
+        Ok(rows) => match rows.into_iter().find(|row| row.pane_id == *pane_id) {
+            Some(row) => row.tty_name,
+            None => {
+                return Err(AttentionError::new(
+                    "unsafe_tty",
+                    "the mux does not list this pane; WEZTERM_PANE was inherited from elsewhere",
+                ));
+            }
+        },
+        Err(_) => None,
+    };
+    match pane_tty {
+        Some(pane_tty) if pane_tty == tty_path => Ok(()),
+        Some(_) => Err(AttentionError::new(
+            "unsafe_tty",
+            "this terminal is not the pane's terminal; WEZTERM_PANE was inherited",
+        )),
+        None if ["TMUX", "STY"]
+            .iter()
+            .any(|name| env.get(*name).is_some_and(|value| !value.is_empty())) =>
+        {
+            Err(AttentionError::new(
+                "unsafe_tty",
+                "inside tmux or screen, and the pane's terminal could not be confirmed",
+            ))
+        }
+        None => Ok(()),
+    }
+}
+
+/// Claim the pane at `tty_path`, which the caller has already confirmed is
+/// the pane's own terminal.
 pub fn claim_launch_at_tty(
     env: &BTreeMap<String, String>,
     ports: &RuntimePorts<'_>,

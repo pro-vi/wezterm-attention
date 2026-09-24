@@ -107,6 +107,14 @@ impl Clock for BlockingClock<'_> {
 #[derive(Default)]
 struct FakePanes(Vec<PaneRow>);
 
+/// The mux's view of the pane `setup` claims from: pane 42 on `FakeTty`'s tty.
+fn this_pane() -> FakePanes {
+    FakePanes(vec![PaneRow {
+        pane_id: "42".into(),
+        tty_name: Some(FakeTty::new().path),
+    }])
+}
+
 impl PaneLister for FakePanes {
     fn list(&self, _socket_path: &str) -> wezterm_attention::protocol::Result<Vec<PaneRow>> {
         Ok(self.0.clone())
@@ -513,8 +521,7 @@ fn realm_publish_skips_only_the_row_without_a_tty() {
     let (_scratch, _listener, environment) = setup();
     let clock = FixedClock("00000000000000000100");
     let tty = FakeTty::new();
-    let no_panes = FakePanes::default();
-    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &no_panes))
+    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect("claim succeeds");
     let panes = FakePanes(vec![
         PaneRow {
@@ -621,8 +628,7 @@ fn claim_is_private_durable_and_published() {
     let (_scratch, _listener, environment) = setup();
     let clock = FixedClock("00000000000000000100");
     let tty = FakeTty::new();
-    let panes = FakePanes::default();
-    let result = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &panes))
+    let result = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect("claim succeeds");
     let (address, _) = pane_address(&environment).expect("pane address");
     let claim =
@@ -701,8 +707,7 @@ fn claim_mints_a_launch_id_when_the_shell_has_none() {
     environment.remove("WEZTERM_ATTENTION_LAUNCH_ID");
     let clock = FixedClock("00000000000000000100");
     let tty = FakeTty::new();
-    let panes = FakePanes::default();
-    let result = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &panes))
+    let result = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect("claim succeeds");
     Uuid::parse_str(&result.launch_id).expect("Rust minted a UUID");
     assert_eq!(result.publication, "published");
@@ -714,8 +719,7 @@ fn committed_claim_reports_pending_when_tty_publication_fails() {
     environment.remove("WEZTERM_ATTENTION_LAUNCH_ID");
     let clock = FixedClock("00000000000000000100");
     let tty = FailingWriteTty(FakeTty::new());
-    let panes = FakePanes::default();
-    let result = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &panes))
+    let result = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect("durable claim is still successful");
     assert_eq!(result.publication, "pending");
     assert_eq!(
@@ -737,9 +741,8 @@ fn committed_claim_reports_pending_when_tty_publication_fails() {
 fn duplicate_claim_republishes_without_rewrite() {
     let (_scratch, _listener, environment) = setup();
     let tty = FakeTty::new();
-    let panes = FakePanes::default();
     let first_clock = FixedClock("00000000000000000100");
-    wezterm_attention::claim_launch(&environment, &ports(&first_clock, &tty, &panes))
+    wezterm_attention::claim_launch(&environment, &ports(&first_clock, &tty, &this_pane()))
         .expect("first claim");
     let (address, _) = pane_address(&environment).expect("pane address");
     let claim =
@@ -750,8 +753,9 @@ fn duplicate_claim_republishes_without_rewrite() {
         .modified()
         .expect("modified time");
     let second_clock = FixedClock("00000000000000000200");
-    let result = wezterm_attention::claim_launch(&environment, &ports(&second_clock, &tty, &panes))
-        .expect("duplicate claim");
+    let result =
+        wezterm_attention::claim_launch(&environment, &ports(&second_clock, &tty, &this_pane()))
+            .expect("duplicate claim");
     assert_eq!(result.disposition, "confirmed");
     assert_eq!(fs::read(&claim).expect("claim bytes"), before);
     assert_eq!(
@@ -777,7 +781,6 @@ fn delayed_older_claim_loses() {
         "00000000-0000-4000-8000-000000000103".to_owned(),
     );
     let tty = FakeTty::new();
-    let panes = FakePanes::default();
     let entered = Barrier::new(2);
     let release = Barrier::new(2);
     let older_clock = BlockingClock {
@@ -786,13 +789,19 @@ fn delayed_older_claim_loses() {
     };
     let result = thread::scope(|scope| {
         let older = scope.spawn(|| {
-            wezterm_attention::claim_launch(&older_environment, &ports(&older_clock, &tty, &panes))
-                .expect("older claim")
+            wezterm_attention::claim_launch(
+                &older_environment,
+                &ports(&older_clock, &tty, &this_pane()),
+            )
+            .expect("older claim")
         });
         entered.wait();
         let newer_clock = FixedClock("00000000000000000200");
-        wezterm_attention::claim_launch(&newer_environment, &ports(&newer_clock, &tty, &panes))
-            .expect("newer claim");
+        wezterm_attention::claim_launch(
+            &newer_environment,
+            &ports(&newer_clock, &tty, &this_pane()),
+        )
+        .expect("newer claim");
         release.wait();
         older.join().expect("older claimant")
     });
@@ -841,8 +850,7 @@ fn socket_rebirth_before_commit_is_rejected_without_a_claim_write() {
         replacement: Mutex::new(None),
     };
     let clock = FixedClock("00000000000000000100");
-    let panes = FakePanes::default();
-    let error = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &panes))
+    let error = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect_err("socket rebirth must reject claim");
     assert_eq!(error.diagnostic.code, "incarnation_changed");
     let old_claim =
@@ -1171,8 +1179,7 @@ fn claimed_pane_has_no_bindings_yet() {
     let (_scratch, _listener, environment) = setup();
     let clock = FixedClock("00000000000000000100");
     let tty = FakeTty::new();
-    let panes = FakePanes::default();
-    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &panes))
+    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect("claim succeeds");
     let (rows, diagnostics) =
         read_bindings(&state_root(&environment).expect("state root")).expect("bindings query");
@@ -1206,8 +1213,7 @@ fn bindings_query_returns_all_identity_axes_and_rejects_path_mismatch() {
     let (_scratch, _listener, environment) = setup();
     let clock = FixedClock("00000000000000000100");
     let tty = FakeTty::new();
-    let panes = FakePanes::default();
-    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &panes))
+    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect("claim succeeds");
     let root = state_root(&environment).expect("state root");
     let (address, _) = pane_address(&environment).expect("pane address");
@@ -1257,8 +1263,7 @@ fn bindings_query_rejects_foreign_end_pointer_and_claim_records() {
     let (_scratch, _listener, environment) = setup();
     let clock = FixedClock("00000000000000000100");
     let tty = FakeTty::new();
-    let panes = FakePanes::default();
-    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &panes))
+    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect("claim succeeds");
     let root = state_root(&environment).expect("state root");
     let (address, _) = pane_address(&environment).expect("pane address");
@@ -1316,8 +1321,7 @@ fn bindings_query_probes_presence_once_per_pane() {
     let (_scratch, _listener, environment) = setup();
     let clock = FixedClock("00000000000000000100");
     let tty = FakeTty::new();
-    let empty_panes = FakePanes::default();
-    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &empty_panes))
+    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect("claim succeeds");
     let root = state_root(&environment).expect("state root");
     let (address, _) = pane_address(&environment).expect("pane address");
@@ -1347,8 +1351,7 @@ fn missing_incarnation_manifest_fails_presence_closed() {
     let (_scratch, _listener, environment) = setup();
     let clock = FixedClock("00000000000000000100");
     let tty = FakeTty::new();
-    let empty_panes = FakePanes::default();
-    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &empty_panes))
+    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect("claim succeeds");
     let root = state_root(&environment).expect("state root");
     let (address, _) = pane_address(&environment).expect("pane address");
@@ -1478,4 +1481,84 @@ fn the_process_probe_is_available_exactly_when_its_listing_is() {
     let probe = SystemProcessProbe;
     assert!(matches!(probe.pane_processes(), ProcessListing::Listed(_)));
     assert!(probe.available());
+}
+
+struct UnavailablePanes;
+
+impl PaneLister for UnavailablePanes {
+    fn list(&self, _socket_path: &str) -> wezterm_attention::protocol::Result<Vec<PaneRow>> {
+        Err(wezterm_attention::protocol::AttentionError::new(
+            "realm_unavailable",
+            "test listing failure",
+        ))
+    }
+}
+
+fn claim_file(environment: &BTreeMap<String, String>) -> PathBuf {
+    let (address, _) = pane_address(environment).expect("pane address");
+    pane_path(&state_root(environment).expect("state root"), &address).join("claim.json")
+}
+
+#[test]
+fn a_claim_from_a_terminal_other_than_the_pane_s_own_is_refused() {
+    let (_scratch, _listener, environment) = setup();
+    let clock = FixedClock("00000000000000000100");
+    let tty = FakeTty::new();
+    let elsewhere = FakePanes(vec![PaneRow {
+        pane_id: "42".into(),
+        tty_name: Some("/dev/ttys001".into()),
+    }]);
+    let error = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &elsewhere))
+        .expect_err("an inherited pane id must not claim from another terminal");
+    assert_eq!(error.diagnostic.code, "unsafe_tty");
+    let unlisted = FakePanes(vec![PaneRow {
+        pane_id: "7".into(),
+        tty_name: Some(tty.path.clone()),
+    }]);
+    let error = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &unlisted))
+        .expect_err("a pane its mux does not list must not be claimed");
+    assert_eq!(error.diagnostic.code, "unsafe_tty");
+    assert!(!claim_file(&environment).exists());
+    assert!(tty.writes.lock().expect("writes lock").is_empty());
+}
+
+#[test]
+fn a_claim_takes_one_pane_listing() {
+    let (_scratch, _listener, environment) = setup();
+    let clock = FixedClock("00000000000000000100");
+    let tty = FakeTty::new();
+    let panes = CountingPanes {
+        calls: AtomicUsize::new(0),
+    };
+    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &panes))
+        .expect("the pane's own terminal claims");
+    assert_eq!(panes.calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn without_a_listing_a_claim_inside_tmux_or_screen_is_refused_and_others_proceed() {
+    let clock = FixedClock("00000000000000000100");
+    let tty = FakeTty::new();
+    for (name, value, refused) in [
+        ("TMUX", "/tmp/tmux-501/default,1,0", true),
+        ("STY", "1234.pts-0.host", true),
+        ("TMUX", "", false),
+        ("UNRELATED", "value", false),
+    ] {
+        let (_scratch, _listener, mut environment) = setup();
+        environment.insert(name.into(), value.into());
+        let result =
+            wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &UnavailablePanes));
+        if refused {
+            assert_eq!(
+                result.expect_err("refused").diagnostic.code,
+                "unsafe_tty",
+                "{name}={value}"
+            );
+            assert!(!claim_file(&environment).exists());
+        } else {
+            result.expect("proceeds as before when nothing says the pane was inherited");
+            assert!(claim_file(&environment).exists());
+        }
+    }
 }
