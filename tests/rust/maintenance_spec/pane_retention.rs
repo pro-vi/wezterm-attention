@@ -414,6 +414,37 @@ fn an_unknown_file_keeps_the_pane_tree() {
     assert!(!actions(&result.details, "pane_retention").contains(&&json!("prune")));
 }
 
+/// Alt+B moves a review aside to `<review>.<session>.clear` while it clears
+/// it. One left by a crash is the remains of a write, like a temporary file,
+/// and does not keep an old pane's tree.
+#[test]
+fn a_review_left_mid_clear_does_not_keep_the_pane_tree() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    end_long_ago(&setup);
+    setup.panes.set(Vec::new());
+    setup.processes.set(Presence::Absent);
+    let reviews = pane_dir(&setup).join("reviews");
+    fs::create_dir_all(&reviews).expect("reviews");
+    fs::write(
+        reviews.join(format!("{}.json.table0x600003a0c0c0.clear", "a".repeat(64))),
+        "{}",
+    )
+    .expect("review left mid-clear");
+    setup.clock.set_monotonic(1_000);
+    setup.run_sweep(true, Some(OP_1));
+    setup
+        .clock
+        .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
+    let (result, diagnostics) = setup.run_sweep(true, Some(OP_2));
+    assert_eq!(
+        actions(&result.details, "pane_retention"),
+        [&json!("prune")],
+        "{diagnostics:?}"
+    );
+    assert!(!pane_dir(&setup).exists());
+}
+
 /// The monotonic clock restarts at boot. A probe taken before a restart reads
 /// as later than now; it cannot be measured against, so the count starts
 /// again rather than waiting for the new clock to pass the old one.

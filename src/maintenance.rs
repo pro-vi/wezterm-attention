@@ -1649,10 +1649,13 @@ fn pane_tree_prunable(root: &Path, directory: &Path, diagnostics: &mut Vec<Diagn
     true
 }
 
-/// A temporary file an interrupted atomic write left beside a record: the
-/// writer here names it `.<record>.<uuid>`, the plugin `<record>.<session>.tmp`.
+/// A file an interrupted write left beside a record: the writer here names
+/// its temporary `.<record>.<uuid>`, the plugin `<record>.<session>.tmp`, and
+/// the plugin's review clear moves the review aside to
+/// `<record>.<session>.clear` before it removes it.
 fn write_leftover(name: &str) -> bool {
-    name.contains(".json.") && (name.starts_with('.') || name.ends_with(".tmp"))
+    name.contains(".json.")
+        && (name.starts_with('.') || name.ends_with(".tmp") || name.ends_with(".clear"))
 }
 
 #[allow(clippy::too_many_arguments)]

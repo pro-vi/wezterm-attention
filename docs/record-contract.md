@@ -213,7 +213,8 @@ whole tree, but only after two new sightings of absence under different operatio
 seconds apart; sightings from before that binding ended do not count. A tree holding any file sweep does not recognise is kept. Each step appears as a `pane_retention` detail, with action
 `first_absence`, `too_soon`, `replay_first`, `clear_absence`, `present`, `unavailable`, `prune` or
 `keep`; the preview says `keep` wherever apply would keep. Temporary files left by an interrupted
-write no longer hold a binding or pane tree back from retention.
+write, and a review that Alt+B had moved aside to `<review>.json.<session>.clear` when it was
+interrupted, do not hold a binding or pane tree back from retention.
 
 A retention floor advances only across complete monotonic-timestamp groups that were already
 ineligible under the prior floor. An eligible member blocks the whole equal-timestamp group.
