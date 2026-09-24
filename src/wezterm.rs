@@ -398,11 +398,6 @@ fn ttyname(fd: libc::c_int) -> Option<Result<String>> {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WeztermPaneLister;
 
-/// The same lister as [`WeztermPaneLister`]. It was once the only one that
-/// refused to start a server; every listing refuses now, and the name stays
-/// for the callers that use it.
-pub struct ExistingWeztermPaneLister;
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemProcessProbe;
 
@@ -578,12 +573,6 @@ pub fn parse_pane_rows(bytes: &[u8]) -> Result<Vec<PaneRow>> {
 impl PaneLister for WeztermPaneLister {
     fn list(&self, socket_path: &str) -> Result<Vec<PaneRow>> {
         parse_pane_rows(&list_wezterm_inventory(socket_path)?)
-    }
-}
-
-impl PaneLister for ExistingWeztermPaneLister {
-    fn list(&self, socket_path: &str) -> Result<Vec<PaneRow>> {
-        WeztermPaneLister.list(socket_path)
     }
 }
 

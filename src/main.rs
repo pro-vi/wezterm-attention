@@ -828,7 +828,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     match wezterm_attention::query::read_bindings_for_socket_timed(
                         &root,
                         socket,
-                        Some(&wezterm_attention::wezterm::ExistingWeztermPaneLister),
+                        Some(&WeztermPaneLister),
                         Some(&processes),
                     ) {
                         Ok(result) => result,

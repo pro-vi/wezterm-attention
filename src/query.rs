@@ -354,7 +354,7 @@ pub fn read_pane_facts(root: &Path, scope: &PaneScope) -> Result<PaneFacts> {
         scope,
         &FileRecords,
         &crate::wezterm::SystemClock,
-        Some(&crate::wezterm::ExistingWeztermPaneLister),
+        Some(&crate::wezterm::WeztermPaneLister),
         Some(&crate::wezterm::SystemProcessProbe),
     )
 }
