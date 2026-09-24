@@ -594,7 +594,13 @@ fn installer_creates_libexec_in_a_fresh_checkout() {
     let cargo = tools.join("cargo");
     fs::write(
         &cargo,
-        "#!/bin/sh\nset -eu\nmkdir -p target/release\nprintf '#!/bin/sh\\nexit 0\\n' > target/release/attention\nchmod 755 target/release/attention\n",
+        concat!(
+            "#!/bin/sh\nset -eu\nmkdir -p target/release\n",
+            "printf '#!/bin/sh\\nexit 0\\n' > target/release/attention\n",
+            "chmod 755 target/release/attention\n",
+            // The installer copies the binary cargo reports building.
+            "printf '{\"reason\":\"compiler-artifact\",\"target\":{\"kind\":[\"bin\"],\"name\":\"attention\"},\"executable\":\"%s/target/release/attention\"}\\n' \"$PWD\"\n",
+        ),
     )
     .expect("write cargo stand-in");
     fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).expect("chmod cargo");
