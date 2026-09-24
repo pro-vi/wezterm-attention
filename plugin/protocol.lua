@@ -590,9 +590,18 @@ return function(context)
     return parsed
   end
 
+  -- Every wire field is fixed-width, so the writer's value is a few hundred
+  -- bytes. A user var is whatever the pane last printed, though, and it is read
+  -- on every poll; this bound stops a printed megabyte from being scanned each
+  -- time while leaving room for any whitespace a JSON encoder might add.
+  local wire_max_bytes = 4096
+
   local function parse_wire_json(content)
     if type(content) ~= "string" or content == "" then
       return nil, invalid("WEZTERM_ATTENTION must be non-empty JSON")
+    end
+    if #content > wire_max_bytes then
+      return nil, invalid("WEZTERM_ATTENTION is longer than any identity")
     end
     if json_contains_null_literal(content) then
       return nil, invalid("WEZTERM_ATTENTION contains unsupported null")

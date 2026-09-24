@@ -1653,6 +1653,16 @@ test("a local pane's own id outranks a WEZTERM_PANE that disagrees with it", fun
     "a client domain's pane still goes by what it published")
 end)
 
+test("a pane's published identity is bounded before it is read", function()
+  local wire = encode_json(protocol_fixture.wire_sample)
+  local padded = wire:sub(1, -2) .. string.rep(" ", 5000) .. "}"
+  local _, problem = internal.parse_wire_json(padded)
+  assert(problem and problem.code == "record_invalid", "an oversized WEZTERM_ATTENTION was parsed")
+  assert(internal.parse_wire_json(wire), "the writer's own value still parses")
+  assert(attention.pane_marker_id(mux_pane(7014, { domain = "unix",
+    published = string.rep("9", 21) })) == nil, "a pane id wider than any WezTerm id is not one")
+end)
+
 test("a v2 identity naming another pane is refused in a local pane", function()
   local wire = decode_json(encode_json(protocol_fixture.wire_sample))
   local foreign = internal.resolve_pane_read(mux_pane(4299, { attention = wire }))

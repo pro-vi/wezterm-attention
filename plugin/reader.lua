@@ -114,7 +114,8 @@ return function(context)
 
   local function canonical_pane_id(value)
     if type(value) ~= "string" then return nil end
-    if not value:match("^%d+$") then return nil end
+    local max_digits = protocol and protocol.limits.pane_id_max_digits or 20
+    if #value > max_digits or not value:match("^%d+$") then return nil end
     if #value > 1 and value:sub(1, 1) == "0" then return nil end
     return value
   end
