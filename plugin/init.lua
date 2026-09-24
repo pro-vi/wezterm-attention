@@ -589,6 +589,22 @@ local function usable_options(opts)
       .. usable.renderer .. '"; the default "tab" is used')
     usable.renderer = nil
   end
+  -- Exported to every pane, where the attention command refuses a root it
+  -- would not write to; the same rule as for WEZTERM_ATTENTION_DIR.
+  if usable.dir ~= nil then
+    local problem
+    -- Checked first so that the log never repeats a control character.
+    if not safe_root_text(usable.dir) then
+      problem = "longer than " .. path_max_bytes .. " bytes or holds a control character"
+    elseif not is_absolute_path(usable.dir) then
+      problem = "not an absolute path: " .. usable.dir
+    end
+    if problem then
+      report_warning_once("option:dir", "option dir is " .. problem
+        .. ", so the attention command would refuse it; the default is used")
+      usable.dir = nil
+    end
+  end
   return usable
 end
 

@@ -5246,6 +5246,38 @@ test("an unknown option or a value of the wrong kind is named, and the default u
   assert(instance._active_colors.stop == "#12271c" and instance._active_show_provider == false)
 end)
 
+test("a dir option the writer would refuse is named, and the default used", function()
+  local cases = {
+    { "~/.local/state/wezterm-attention", "not an absolute path" },
+    { "relative/state", "not an absolute path" },
+    { test_dir .. "/bad\27name", "control character" },
+    { "/" .. string.rep("d", 4096), "4096 bytes" },
+  }
+  for _, case in ipairs(cases) do
+    local commands = {}
+    local real_execute = os.execute
+    os.execute = function(command) commands[#commands + 1] = command; return 0 end
+    local config = {}
+    local ok, failure = pcall(function()
+      dofile(repo_root .. "/plugin/init.lua").apply_to_config(config, { auto_poll = false,
+        review_key = false, renderer = "manual", integration_root = writer_root, dir = case[1] })
+    end)
+    os.execute = real_execute
+    assert(ok, failure)
+    local warnings = drain_warnings()
+    local named = false
+    for _, message in ipairs(warnings) do
+      if message:find("option dir", 1, true) and message:find(case[2], 1, true)
+          and not message:find("\27", 1, true) then named = true end
+    end
+    assert(named, "the warning names the rule for " .. case[2] .. ": " .. table.concat(warnings, "\n"))
+    local exported = config.set_environment_variables.WEZTERM_ATTENTION_DIR
+    assert(exported ~= case[1] and exported:sub(1, 1) == "/", "the refused dir must not reach panes")
+    assert(#commands == 1 and not commands[1]:find(case[1], 1, true),
+      "the refused dir must not be created")
+  end
+end)
+
 test("the state root and tabs directory are created private to the user", function()
   local root = test_dir .. "/private-root"
   local instance = dofile(repo_root .. "/plugin/init.lua")
