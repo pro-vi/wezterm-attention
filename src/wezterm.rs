@@ -43,7 +43,7 @@ pub struct ExistingWeztermWindowLister;
 
 impl GuiWindowLister for ExistingWeztermWindowLister {
     fn list_windows(&self, socket_path: &str) -> Result<BTreeSet<u64>> {
-        parse_gui_window_ids(&list_wezterm_inventory(socket_path, true)?)
+        parse_gui_window_ids(&list_wezterm_inventory(socket_path)?)
     }
 }
 
@@ -137,6 +137,27 @@ impl PaneProcessSet {
         Self { pairs }
     }
 
+    /// Add the pairs one process's environment holds, given as `NAME=value`
+    /// entries.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+    fn add_environment<'a>(&mut self, entries: impl Iterator<Item = &'a [u8]>) {
+        let mut sockets = Vec::new();
+        let mut panes = Vec::new();
+        for entry in entries {
+            if let Some(value) = entry.strip_prefix(b"WEZTERM_UNIX_SOCKET=") {
+                sockets.extend(std::str::from_utf8(value).ok());
+            } else if let Some(value) = entry.strip_prefix(b"WEZTERM_PANE=") {
+                panes.extend(std::str::from_utf8(value).ok());
+            }
+        }
+        for socket in &sockets {
+            for pane in &panes {
+                self.pairs
+                    .insert(((*socket).to_owned(), (*pane).to_owned()));
+            }
+        }
+    }
+
     /// Never `Unavailable`: a set that exists came from a listing that was read.
     pub fn presence(&self, socket_path: &str, pane_id: &str) -> Presence {
         if self
@@ -200,18 +221,43 @@ pub struct SystemTtyWriter;
 
 const TTY_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
 
-fn write_tty_with_deadline(file: &mut File, data: &[u8]) -> std::io::Result<()> {
-    let deadline = Instant::now() + TTY_WRITE_TIMEOUT;
+fn write_tty_with_deadline(file: &mut impl Write, data: &[u8]) -> std::io::Result<()> {
     let mut written = 0;
-    while written < data.len() {
-        match file.write(&data[written..]) {
+    let result = write_before(file, data, &mut written, Instant::now() + TTY_WRITE_TIMEOUT);
+    if result.is_err() {
+        let closing = cut_sequence_closing(data, written);
+        if !closing.is_empty() {
+            // Best effort, under a deadline of its own: a tty still stalled
+            // takes nothing, and the sequence stays open as it would have.
+            let mut closed = 0;
+            let _ = write_before(
+                file,
+                closing,
+                &mut closed,
+                Instant::now() + TTY_WRITE_TIMEOUT,
+            );
+        }
+    }
+    result
+}
+
+/// Write `data[*written..]` until it is all written or `deadline` passes,
+/// counting progress in `written` either way.
+fn write_before(
+    file: &mut impl Write,
+    data: &[u8],
+    written: &mut usize,
+    deadline: Instant,
+) -> std::io::Result<()> {
+    while *written < data.len() {
+        match file.write(&data[*written..]) {
             Ok(0) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WriteZero,
                     "tty write made no progress",
                 ));
             }
-            Ok(count) => written += count,
+            Ok(count) => *written += count,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 let now = Instant::now();
@@ -227,6 +273,31 @@ fn write_tty_with_deadline(file: &mut File, data: &[u8]) -> std::io::Result<()> 
         }
     }
     Ok(())
+}
+
+/// What to write after the first `written` bytes of a publication so the
+/// terminal closes the sequence the cut left open without applying it.
+///
+/// A terminal applies an OSC when anything ends it -- BEL, ST, and in
+/// WezTerm's parser also CAN, SUB or the next ESC, such as the colour codes
+/// of the next prompt. Ended as it stands, a cut publication is applied
+/// truncated, and a base64 value cut at a four-character boundary decodes to
+/// a valid shorter value: pane 1234 would publish as pane 123. So a byte
+/// that is not base64 goes first, which makes the whole sequence fail to
+/// parse, and then BEL ends it. A cut right after ESC is completed as ST,
+/// which does nothing. A cut between sequences needs nothing.
+fn cut_sequence_closing(data: &[u8], written: usize) -> &'static [u8] {
+    let sent = &data[..written.min(data.len())];
+    let Some(start) = sent.iter().rposition(|byte| *byte == 0x1b) else {
+        return b"";
+    };
+    if sent[start..].contains(&0x07) {
+        b""
+    } else if start + 1 == sent.len() {
+        b"\\"
+    } else {
+        b"!\x07"
+    }
 }
 
 impl SystemTtyWriter {
@@ -298,23 +369,38 @@ impl TtyWriter for SystemTtyWriter {
 }
 
 fn tty_name_for_fd(fd: libc::c_int) -> Result<String> {
-    let mut buffer = vec![0_i8; 4096];
-    let result = unsafe { libc::ttyname_r(fd, buffer.as_mut_ptr(), buffer.len()) };
-    if result != 0 {
-        return Err(AttentionError::new("unsafe_tty", "stdin is not a terminal"));
-    }
-    let bytes = buffer
-        .iter()
-        .take_while(|byte| **byte != 0)
-        .map(|byte| *byte as u8)
-        .collect::<Vec<_>>();
-    String::from_utf8(bytes).map_err(|_| AttentionError::new("unsafe_tty", "tty path is not UTF-8"))
+    ttyname(fd).ok_or_else(|| AttentionError::new("unsafe_tty", "stdin is not a terminal"))?
 }
 
+/// The terminal path behind `fd`, or `None` when it is not a terminal.
+///
+/// The buffer is bytes and only its pointer is cast, because `c_char` is `i8`
+/// on some targets and `u8` on others (aarch64 Linux among them).
+fn ttyname(fd: libc::c_int) -> Option<Result<String>> {
+    let mut buffer = vec![0_u8; 4096];
+    let result =
+        unsafe { libc::ttyname_r(fd, buffer.as_mut_ptr().cast::<libc::c_char>(), buffer.len()) };
+    if result != 0 {
+        return None;
+    }
+    let length = buffer
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(buffer.len());
+    buffer.truncate(length);
+    Some(
+        String::from_utf8(buffer)
+            .map_err(|_| AttentionError::new("unsafe_tty", "tty path is not UTF-8")),
+    )
+}
+
+/// Lists a mux's panes through `wezterm cli list`. It never starts a server.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WeztermPaneLister;
 
-/// Explicit read-only transport; an unavailable server must not be started.
+/// The same lister as [`WeztermPaneLister`]. It was once the only one that
+/// refused to start a server; every listing refuses now, and the name stays
+/// for the callers that use it.
 pub struct ExistingWeztermPaneLister;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -326,51 +412,138 @@ fn is_executable(path: &Path) -> bool {
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
+fn named_wezterm(path: &Path) -> bool {
+    path.file_name() == Some(OsStr::new("wezterm"))
+}
+
+/// The id of the named group, when this system has one.
+fn group_id(name: &str) -> Option<libc::gid_t> {
+    let name = std::ffi::CString::new(name).ok()?;
+    let mut size = 4096;
+    while size <= 1 << 20 {
+        let mut group: libc::group = unsafe { std::mem::zeroed() };
+        let mut buffer = vec![0_u8; size];
+        let mut found: *mut libc::group = std::ptr::null_mut();
+        let status = unsafe {
+            libc::getgrnam_r(
+                name.as_ptr(),
+                &mut group,
+                buffer.as_mut_ptr().cast::<libc::c_char>(),
+                buffer.len(),
+                &mut found,
+            )
+        };
+        if status == libc::ERANGE {
+            size *= 4;
+            continue;
+        }
+        return (status == 0 && !found.is_null()).then_some(group.gr_gid);
+    }
+    None
+}
+
+/// One directory or file on the way from a candidate up to `/`.
+#[derive(Clone, Copy, Debug)]
+struct Ancestor {
+    owner: libc::uid_t,
+    group: libc::gid_t,
+    mode: u32,
+    is_dir: bool,
+}
+
+/// Whether a candidate that did not come from PATH may be run.
+///
+/// Every directory from the file up to `/` must be owned by root or by this
+/// user and writable by nobody else, so no other account could have put the
+/// file there. The one relaxation is a root-owned directory whose group is
+/// `admin` or `wheel`: macOS ships `/Applications` as root:admin 0775, and an
+/// administrator can already replace anything on the machine.
 fn is_trusted_fallback(path: &Path) -> bool {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if !named_wezterm(path) {
+        return false;
+    }
     let Ok(canonical) = fs::canonicalize(path) else {
         return false;
     };
-    if !is_executable(&canonical) {
+    if !named_wezterm(&canonical) || !is_executable(&canonical) {
         return false;
     }
-    let current_uid = unsafe { libc::geteuid() };
+    let mut ancestry = Vec::new();
     for component in canonical.ancestors() {
         let Ok(metadata) = fs::metadata(component) else {
             return false;
         };
-        if !matches!(metadata.uid(), 0) && metadata.uid() != current_uid {
-            return false;
-        }
-        if metadata.permissions().mode() & 0o022 != 0 {
-            return false;
-        }
+        ancestry.push(Ancestor {
+            owner: metadata.uid(),
+            group: metadata.gid(),
+            mode: metadata.permissions().mode(),
+            is_dir: metadata.is_dir(),
+        });
     }
-    true
+    let administrators = [group_id("admin"), group_id("wheel")]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    ancestry_is_trusted(&ancestry, unsafe { libc::geteuid() }, &administrators)
 }
 
+fn ancestry_is_trusted(
+    ancestry: &[Ancestor],
+    current_uid: libc::uid_t,
+    administrators: &[libc::gid_t],
+) -> bool {
+    ancestry.iter().all(|ancestor| {
+        let owned = ancestor.owner == 0 || ancestor.owner == current_uid;
+        let administered =
+            ancestor.owner == 0 && ancestor.is_dir && administrators.contains(&ancestor.group);
+        owned && ancestor.mode & 0o002 == 0 && (ancestor.mode & 0o020 == 0 || administered)
+    })
+}
+
+/// Find the `wezterm` CLI.
+///
+/// Candidates, in order: `wezterm` in each absolute PATH entry; `wezterm` in
+/// `executable_dir` (WezTerm's `WEZTERM_EXECUTABLE_DIR`); `wezterm` beside
+/// `executable` (WezTerm's `WEZTERM_EXECUTABLE`); then `fallbacks`. Every
+/// candidate after PATH must pass the ownership check above.
+///
+/// Only a file named exactly `wezterm` is ever returned. WezTerm sets
+/// `WEZTERM_EXECUTABLE` in each pane to the GUI or the mux server, never to
+/// the CLI; the GUI rejects `cli ... list`, and the mux server runs it as a
+/// program after binding the default socket in place of a live server's, so
+/// that variable only says which directory to look in. A relative PATH entry
+/// names whatever directory the caller happens to be in, so it is skipped.
 pub fn resolve_wezterm_executable(
     path_value: Option<&OsStr>,
-    configured: Option<&OsStr>,
+    executable_dir: Option<&OsStr>,
+    executable: Option<&OsStr>,
     fallbacks: &[PathBuf],
 ) -> Result<PathBuf> {
     if let Some(paths) = path_value {
         for directory in env::split_paths(&paths) {
             let candidate = directory.join("wezterm");
-            if is_executable(&candidate) {
+            if directory.is_absolute() && is_executable(&candidate) {
                 return Ok(candidate);
             }
         }
     }
-    if let Some(configured) = configured {
-        let candidate = PathBuf::from(configured);
-        if is_executable(&candidate) {
+    let beside_running = [
+        executable_dir.map(PathBuf::from),
+        executable
+            .map(Path::new)
+            .and_then(Path::parent)
+            .map(Path::to_path_buf),
+    ];
+    let installed = beside_running
+        .into_iter()
+        .flatten()
+        .filter(|directory| directory.is_absolute())
+        .map(|directory| directory.join("wezterm"))
+        .chain(fallbacks.iter().cloned());
+    for candidate in installed {
+        if is_trusted_fallback(&candidate) {
             return Ok(candidate);
-        }
-    }
-    for candidate in fallbacks {
-        if is_trusted_fallback(candidate) {
-            return Ok(candidate.clone());
         }
     }
     Err(AttentionError::new(
@@ -382,6 +555,7 @@ pub fn resolve_wezterm_executable(
 pub fn wezterm_executable() -> Result<PathBuf> {
     resolve_wezterm_executable(
         env::var_os("PATH").as_deref(),
+        env::var_os("WEZTERM_EXECUTABLE_DIR").as_deref(),
         env::var_os("WEZTERM_EXECUTABLE").as_deref(),
         &[PathBuf::from(
             "/Applications/WezTerm.app/Contents/MacOS/wezterm",
@@ -403,119 +577,195 @@ pub fn parse_pane_rows(bytes: &[u8]) -> Result<Vec<PaneRow>> {
 
 impl PaneLister for WeztermPaneLister {
     fn list(&self, socket_path: &str) -> Result<Vec<PaneRow>> {
-        list_wezterm_panes(socket_path, false)
+        parse_pane_rows(&list_wezterm_inventory(socket_path)?)
     }
 }
 
 impl PaneLister for ExistingWeztermPaneLister {
     fn list(&self, socket_path: &str) -> Result<Vec<PaneRow>> {
-        list_wezterm_panes(socket_path, true)
+        WeztermPaneLister.list(socket_path)
     }
 }
 
-fn list_wezterm_panes(socket_path: &str, no_auto_start: bool) -> Result<Vec<PaneRow>> {
-    parse_pane_rows(&list_wezterm_inventory(socket_path, no_auto_start)?)
-}
+/// How long any one child this crate runs may take, output included.
+const CHILD_DEADLINE: Duration = Duration::from_secs(5);
 
-fn list_wezterm_inventory(socket_path: &str, no_auto_start: bool) -> Result<Vec<u8>> {
+fn list_wezterm_inventory(socket_path: &str) -> Result<Vec<u8>> {
     let executable = wezterm_executable()?;
-    let mut command = Command::new(executable);
-    command.args(["--skip-config", "cli", "--prefer-mux"]);
-    if no_auto_start {
-        command.arg("--no-auto-start");
-    }
-    let mut child = command
-        .args(["list", "--format", "json"])
+    let maximum = manifest()?.limits.max_json_bytes;
+    let mut command = Command::new(&executable);
+    // `--no-auto-start` on every call: without it a leftover socket with no
+    // server behind it makes the CLI retry for seconds and then start a mux
+    // server, so reading state would create a mux.
+    command
+        .args([
+            "--skip-config",
+            "cli",
+            "--prefer-mux",
+            "--no-auto-start",
+            "list",
+            "--format",
+            "json",
+        ])
         .env_clear()
-        .env("WEZTERM_UNIX_SOCKET", socket_path)
+        .env("WEZTERM_UNIX_SOCKET", socket_path);
+    run_bounded(&mut command, maximum, CHILD_DEADLINE).map_err(|failure| {
+        let code = match failure {
+            RunFailure::TooLarge => "record_invalid",
+            _ => "realm_unavailable",
+        };
+        AttentionError::new(
+            code,
+            format!(
+                "wezterm cli list via {} {}",
+                shown_path(&executable),
+                failure.describe()
+            ),
+        )
+    })
+}
+
+/// A path as a diagnostic prints it: control characters become `?`, so a
+/// path cannot restyle the terminal that reads the message.
+fn shown_path(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                '?'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+/// Why a bounded child run returned no output.
+#[derive(Clone, Copy, Debug)]
+enum RunFailure {
+    NotStarted,
+    TimedOut(Duration),
+    Exited(std::process::ExitStatus),
+    Unreadable,
+    TooLarge,
+}
+
+impl RunFailure {
+    fn describe(self) -> String {
+        use std::os::unix::process::ExitStatusExt;
+        match self {
+            Self::NotStarted => "could not be started".to_owned(),
+            Self::TimedOut(limit) => format!("timed out after {} ms", limit.as_millis()),
+            Self::Exited(status) => match (status.code(), status.signal()) {
+                (Some(code), _) => format!("exited with status {code}"),
+                (None, Some(signal)) => format!("was killed by signal {signal}"),
+                (None, None) => "exited abnormally".to_owned(),
+            },
+            Self::Unreadable => "output could not be read".to_owned(),
+            Self::TooLarge => "output exceeded its bound".to_owned(),
+        }
+    }
+}
+
+/// Run `command` with no stdin and no stderr, and return its stdout if it
+/// exits successfully within `limit` having written at most `maximum` bytes.
+///
+/// The child leads its own process group, and the whole group is killed when
+/// the deadline passes. Killing the child alone is not enough: a descendant
+/// that inherited stdout keeps the pipe open after the child is gone, and a
+/// reader waiting for end of file would wait as long as that descendant
+/// lives. The reader is never joined for the same reason; it only reports
+/// back through a channel.
+fn run_bounded(
+    command: &mut Command,
+    maximum: usize,
+    limit: Duration,
+) -> std::result::Result<Vec<u8>, RunFailure> {
+    use std::os::unix::process::CommandExt;
+    use std::sync::mpsc::{TryRecvError, channel};
+    let deadline = Instant::now() + limit;
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .process_group(0)
         .spawn()
-        .map_err(|_| AttentionError::new("realm_unavailable", "wezterm cli list failed"))?;
-    let stdout = child.stdout.take().ok_or_else(|| {
-        AttentionError::new(
-            "realm_unavailable",
-            "wezterm cli list stdout is unavailable",
-        )
-    })?;
-    let maximum = manifest()?.limits.max_json_bytes;
-    let reader = thread::spawn(move || {
+        .map_err(|_| RunFailure::NotStarted)?;
+    let Some(stdout) = child.stdout.take() else {
+        kill_group(&mut child);
+        return Err(RunFailure::Unreadable);
+    };
+    let (sender, receiver) = channel();
+    thread::spawn(move || {
         let mut bytes = Vec::new();
-        stdout
-            .take((maximum + 1) as u64)
+        let read = stdout
+            .take(maximum as u64 + 1)
             .read_to_end(&mut bytes)
-            .map(|_| bytes)
+            .map(|_| bytes);
+        let _ = sender.send(read);
     });
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = reader.join();
-                return Err(AttentionError::new(
-                    "realm_unavailable",
-                    "wezterm cli list timed out",
-                ));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = reader.join();
-                return Err(AttentionError::new(
-                    "realm_unavailable",
-                    "wezterm cli list failed",
-                ));
+    let mut output = None;
+    let mut status = None;
+    loop {
+        if output.is_none() {
+            match receiver.try_recv() {
+                Ok(Ok(bytes)) if bytes.len() > maximum => {
+                    kill_group(&mut child);
+                    return Err(RunFailure::TooLarge);
+                }
+                Ok(Ok(bytes)) => output = Some(bytes),
+                Ok(Err(_)) | Err(TryRecvError::Disconnected) => {
+                    kill_group(&mut child);
+                    return Err(RunFailure::Unreadable);
+                }
+                Err(TryRecvError::Empty) => {}
             }
         }
-    };
-    let bytes = reader
-        .join()
-        .map_err(|_| AttentionError::new("realm_unavailable", "wezterm cli list reader failed"))?
-        .map_err(|_| {
-            AttentionError::new("realm_unavailable", "wezterm cli list could not be read")
-        })?;
-    if bytes.len() > maximum {
-        return Err(AttentionError::new(
-            "record_invalid",
-            "wezterm cli list exceeded its JSON bound",
-        ));
-    }
-    if !status.success() {
-        return Err(AttentionError::new(
-            "realm_unavailable",
-            "wezterm cli list failed",
-        ));
-    }
-    Ok(bytes)
-}
-
-impl ProcessProbe for SystemProcessProbe {
-    fn available(&self) -> bool {
-        let child = Command::new("/bin/ps")
-            .args(["-axo", "pid="])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-        let Ok(mut child) = child else {
-            return false;
-        };
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
+        if status.is_none() {
             match child.try_wait() {
-                Ok(Some(status)) => return status.success(),
-                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return false;
+                Ok(exited) => status = exited,
+                Err(_) => {
+                    kill_group(&mut child);
+                    return Err(RunFailure::Unreadable);
                 }
             }
         }
+        match status {
+            Some(exited) if !exited.success() => {
+                kill_group(&mut child);
+                return Err(RunFailure::Exited(exited));
+            }
+            Some(_) if output.is_some() => return output.ok_or(RunFailure::Unreadable),
+            _ => {}
+        }
+        if Instant::now() >= deadline {
+            kill_group(&mut child);
+            return Err(RunFailure::TimedOut(limit));
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Kill every process in the group `child` leads, then reap `child`.
+///
+/// The group id is the child's pid, and it stays reserved while any member
+/// lives, so this reaches a descendant even after the child was reaped.
+fn kill_group(child: &mut std::process::Child) {
+    if let Ok(group) = libc::pid_t::try_from(child.id()) {
+        unsafe {
+            libc::killpg(group, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+impl ProcessProbe for SystemProcessProbe {
+    /// The same listing a presence question takes, so a probe reported
+    /// healthy is one whose answers can be read.
+    fn available(&self) -> bool {
+        !matches!(self.pane_processes(), ProcessListing::Failed)
     }
 
     fn presence(&self, socket_path: &str, pane_id: &str) -> Presence {
@@ -526,50 +776,151 @@ impl ProcessProbe for SystemProcessProbe {
     }
 
     fn pane_processes(&self) -> ProcessListing {
-        let Ok(mut child) = Command::new("/bin/ps")
-            .args(["eww", "-axo", "command="])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
-            return ProcessListing::Failed;
-        };
-        let Some(stdout) = child.stdout.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return ProcessListing::Failed;
-        };
-        let reader = thread::spawn(move || {
-            let mut bytes = Vec::new();
-            stdout
-                .take(8 * 1024 * 1024 + 1)
-                .read_to_end(&mut bytes)
-                .map(|_| bytes)
-        });
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break None;
-                }
-            }
-        };
-        let output = reader.join().ok().and_then(std::result::Result::ok);
-        let (Some(status), Some(output)) = (status, output) else {
-            return ProcessListing::Failed;
-        };
-        if !status.success() || output.len() > 8 * 1024 * 1024 {
-            return ProcessListing::Failed;
+        match own_pane_processes() {
+            Some(processes) => ProcessListing::Listed(processes),
+            None => ProcessListing::Failed,
         }
-        ProcessListing::Listed(PaneProcessSet::from_process_listing(
-            &String::from_utf8_lossy(&output),
-        ))
     }
+}
+
+/// The pairs in the environments of this user's processes, read from the
+/// kernel rather than from `ps`.
+///
+/// `ps eww` prints each process's arguments and environment as one line, so
+/// `WEZTERM_PANE=` text in any process's arguments -- any user's -- read as
+/// an environment, and on procps-ng the BSD flags it needs fail outright.
+/// The kernel hands over the environment block alone. Reading this process's
+/// own block is required: a listing that could not read even that one would
+/// report every pane absent for want of permission, not for want of a pane.
+#[cfg(target_os = "macos")]
+fn own_pane_processes() -> Option<PaneProcessSet> {
+    /// `PROC_UID_ONLY` from `<libproc.h>`: processes whose effective uid is
+    /// the one given.
+    const PROC_UID_ONLY: u32 = 4;
+    let uid = unsafe { libc::geteuid() };
+    let pid_size = std::mem::size_of::<libc::pid_t>();
+    let needed = unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, std::ptr::null_mut(), 0) };
+    let needed = usize::try_from(needed).ok().filter(|bytes| *bytes > 0)?;
+    // Room for processes started between the two calls.
+    let mut pids = vec![0 as libc::pid_t; needed / pid_size + 256];
+    let capacity = libc::c_int::try_from(pids.len() * pid_size).ok()?;
+    let filled =
+        unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, pids.as_mut_ptr().cast(), capacity) };
+    pids.truncate(usize::try_from(filled).ok()? / pid_size);
+    let mut argument_bytes: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    let mut name = [libc::CTL_KERN, libc::KERN_ARGMAX];
+    if unsafe {
+        libc::sysctl(
+            name.as_mut_ptr(),
+            2,
+            (&mut argument_bytes as *mut libc::c_int).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+    let mut buffer = vec![0_u8; usize::try_from(argument_bytes).ok()?];
+    let own = libc::pid_t::try_from(std::process::id()).ok()?;
+    let mut read_own = false;
+    let mut processes = PaneProcessSet::default();
+    for pid in pids.into_iter().filter(|pid| *pid > 0) {
+        let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+        let mut size = buffer.len();
+        // A process that exited, or that the kernel will not describe to
+        // this user, is simply not listed.
+        if unsafe {
+            libc::sysctl(
+                name.as_mut_ptr(),
+                3,
+                buffer.as_mut_ptr().cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        } != 0
+        {
+            continue;
+        }
+        read_own |= pid == own;
+        processes.add_environment(procargs_environment(&buffer[..size.min(buffer.len())]));
+    }
+    read_own.then_some(processes)
+}
+
+#[cfg(target_os = "linux")]
+fn own_pane_processes() -> Option<PaneProcessSet> {
+    use std::os::unix::fs::MetadataExt;
+    let uid = unsafe { libc::geteuid() };
+    let own = std::process::id().to_string();
+    let mut read_own = false;
+    let mut processes = PaneProcessSet::default();
+    for entry in fs::read_dir("/proc").ok()?.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .filter(|name| name.bytes().all(|b| b.is_ascii_digit()))
+        else {
+            continue;
+        };
+        // `/proc/<pid>` belongs to the process's effective uid.
+        if entry.metadata().ok().map(|metadata| metadata.uid()) != Some(uid) {
+            continue;
+        }
+        let Ok(environment) = fs::read(entry.path().join("environ")) else {
+            continue;
+        };
+        read_own |= pid == own;
+        processes.add_environment(environment.split(|byte| *byte == 0));
+    }
+    read_own.then_some(processes)
+}
+
+/// Elsewhere only `ps` offers environments, and it prints them after the
+/// arguments on one line, so lines are kept only for this user's processes.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn own_pane_processes() -> Option<PaneProcessSet> {
+    let ps = ["/bin/ps", "/usr/bin/ps"]
+        .into_iter()
+        .map(Path::new)
+        .find(|path| is_executable(path))?;
+    let mut command = Command::new(ps);
+    command.args(["axeww", "-o", "uid=,command="]);
+    let output = run_bounded(&mut command, 8 * 1024 * 1024, CHILD_DEADLINE).ok()?;
+    let uid = unsafe { libc::geteuid() }.to_string();
+    let listing = String::from_utf8_lossy(&output)
+        .lines()
+        .filter_map(|line| {
+            let (owner, rest) = line.trim_start().split_once(' ')?;
+            (owner == uid).then_some(rest)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(PaneProcessSet::from_process_listing(&listing))
+}
+
+/// The environment strings in a `KERN_PROCARGS2` buffer.
+///
+/// The buffer holds `argc`, the executable path, NUL padding, `argc`
+/// argument strings, then the environment strings, ended by an empty string
+/// or by the end of the buffer.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn procargs_environment(buffer: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let count = buffer
+        .get(..4)
+        .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+        .map(i32::from_ne_bytes)
+        .and_then(|count| usize::try_from(count).ok());
+    let mut strings = buffer.get(4..).unwrap_or_default().split(|byte| *byte == 0);
+    let arguments_known = count.is_some() && strings.next().is_some();
+    let mut rest = strings.skip_while(|string| string.is_empty());
+    for _ in 0..count.unwrap_or(0) {
+        rest.next();
+    }
+    rest.take_while(move |string| arguments_known && !string.is_empty())
 }
 
 /// The values `name` takes on one process line, where `name` ends in `=`.
@@ -680,27 +1031,189 @@ pub fn file_from_fd(fd: libc::c_int) -> File {
 
 pub fn tty_path_from_fd(fd: libc::c_int) -> Result<String> {
     let file = file_from_fd(fd);
-    let raw = file.as_raw_fd();
-    let mut buffer = vec![0_i8; 4096];
-    let result = unsafe { libc::ttyname_r(raw, buffer.as_mut_ptr(), buffer.len()) };
+    let name = ttyname(file.as_raw_fd());
     std::mem::forget(file);
-    if result != 0 {
-        return Err(AttentionError::new("unsafe_tty", "descriptor is not a tty"));
-    }
-    let bytes = buffer
-        .iter()
-        .take_while(|byte| **byte != 0)
-        .map(|byte| *byte as u8)
-        .collect();
-    String::from_utf8(bytes).map_err(|_| AttentionError::new("unsafe_tty", "tty path is not UTF-8"))
+    name.ok_or_else(|| AttentionError::new("unsafe_tty", "descriptor is not a tty"))?
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs::OpenOptions;
 
-    use super::{PaneProcessSet, Presence, SystemTtyWriter, tty_path_from_fd};
+    use super::{
+        Ancestor, PaneProcessSet, Presence, SystemTtyWriter, ancestry_is_trusted, tty_path_from_fd,
+    };
     use crate::identity::tty_fingerprint;
+
+    const USER: libc::uid_t = 501;
+    const ADMIN: libc::gid_t = 80;
+    const STAFF: libc::gid_t = 20;
+
+    fn directory(owner: libc::uid_t, group: libc::gid_t, mode: u32) -> Ancestor {
+        Ancestor {
+            owner,
+            group,
+            mode: 0o040000 | mode,
+            is_dir: true,
+        }
+    }
+
+    fn file(owner: libc::uid_t, group: libc::gid_t, mode: u32) -> Ancestor {
+        Ancestor {
+            owner,
+            group,
+            mode: 0o100000 | mode,
+            is_dir: false,
+        }
+    }
+
+    #[test]
+    fn an_application_below_a_root_admin_group_writable_directory_is_trusted() {
+        // /Applications/WezTerm.app/Contents/MacOS/wezterm on a stock Mac.
+        let ancestry = [
+            file(USER, ADMIN, 0o755),
+            directory(USER, ADMIN, 0o755),
+            directory(USER, ADMIN, 0o755),
+            directory(USER, ADMIN, 0o755),
+            directory(0, ADMIN, 0o775),
+            directory(0, 0, 0o755),
+        ];
+        assert!(ancestry_is_trusted(&ancestry, USER, &[ADMIN, 0]));
+    }
+
+    #[test]
+    fn group_write_is_trusted_only_on_a_root_directory_of_an_administrator_group() {
+        let root = directory(0, 0, 0o755);
+        for (label, ancestor) in [
+            ("root directory, ordinary group", directory(0, STAFF, 0o775)),
+            ("user directory, admin group", directory(USER, ADMIN, 0o775)),
+            ("root file, admin group", file(0, ADMIN, 0o775)),
+            (
+                "root admin directory writable by other",
+                directory(0, ADMIN, 0o777),
+            ),
+            ("sticky world-writable directory", directory(0, 0, 0o1777)),
+            ("another account's directory", directory(502, STAFF, 0o755)),
+        ] {
+            assert!(
+                !ancestry_is_trusted(&[ancestor, root], USER, &[ADMIN, 0]),
+                "{label} must not be trusted"
+            );
+        }
+        assert!(ancestry_is_trusted(
+            &[directory(USER, STAFF, 0o700), root],
+            USER,
+            &[ADMIN, 0]
+        ));
+    }
+
+    /// A terminal that takes `accepted` bytes, then takes nothing until
+    /// `stalled_until`, then takes everything.
+    struct StallingTerminal {
+        accepted: usize,
+        stalled_until: std::time::Instant,
+        received: Vec<u8>,
+    }
+
+    impl std::io::Write for StallingTerminal {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            let room = if std::time::Instant::now() >= self.stalled_until {
+                data.len()
+            } else {
+                self.accepted.saturating_sub(self.received.len())
+            };
+            if room == 0 {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            let count = room.min(data.len());
+            self.received.extend_from_slice(&data[..count]);
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_write_cut_short_by_a_stall_closes_its_sequence_once_the_stall_clears() {
+        let data = super::osc("WEZTERM_PANE", "1234");
+        let started = std::time::Instant::now();
+        let mut terminal = StallingTerminal {
+            accepted: 34,
+            stalled_until: started
+                + super::TTY_WRITE_TIMEOUT
+                + std::time::Duration::from_millis(100),
+            received: Vec::new(),
+        };
+        let result = super::write_tty_with_deadline(&mut terminal, &data);
+        assert!(result.is_err(), "the write stalled past its deadline");
+        assert_eq!(terminal.received, [&data[..34], b"!\x07"].concat());
+        assert!(
+            started.elapsed()
+                < super::TTY_WRITE_TIMEOUT * 2 + std::time::Duration::from_millis(100)
+        );
+
+        let mut stalled = StallingTerminal {
+            accepted: 34,
+            stalled_until: started + std::time::Duration::from_secs(60),
+            received: Vec::new(),
+        };
+        assert!(super::write_tty_with_deadline(&mut stalled, &data).is_err());
+        assert_eq!(
+            stalled.received,
+            &data[..34],
+            "nothing more lands on a tty still stalled"
+        );
+    }
+
+    #[test]
+    fn a_cut_publication_is_closed_so_that_it_cannot_apply() {
+        let data = [
+            super::osc("WEZTERM_PANE", "1234"),
+            super::osc("WEZTERM_ATTENTION", "{}"),
+        ]
+        .concat();
+        let first_end = data.iter().position(|byte| *byte == 0x07).unwrap() + 1;
+        // Cut inside the first value, at a base64 boundary ("MTIz" is "123").
+        let value_start = data
+            .windows(4)
+            .position(|window| window == b"MTIz")
+            .unwrap();
+        assert_eq!(
+            super::cut_sequence_closing(&data, value_start + 4),
+            b"!\x07"
+        );
+        assert_eq!(super::cut_sequence_closing(&data, 1), b"\\");
+        assert_eq!(super::cut_sequence_closing(&data, first_end), b"");
+        assert_eq!(super::cut_sequence_closing(&data, first_end + 1), b"\\");
+        assert_eq!(super::cut_sequence_closing(&data, first_end + 5), b"!\x07");
+        assert_eq!(super::cut_sequence_closing(&data, 0), b"");
+        assert_eq!(super::cut_sequence_closing(&data, data.len()), b"");
+    }
+
+    #[test]
+    fn only_the_environment_part_of_a_process_argument_block_is_read() {
+        let mut buffer = 2_i32.to_ne_bytes().to_vec();
+        buffer.extend_from_slice(
+            b"/bin/sh\0\0\0\0sh\0WEZTERM_PANE=9 WEZTERM_UNIX_SOCKET=/argv.sock\0\
+              HOME=/h\0WEZTERM_UNIX_SOCKET=/env.sock\0WEZTERM_PANE=7\0\0executable_path=/bin/sh\0",
+        );
+        let environment = super::procargs_environment(&buffer).collect::<Vec<_>>();
+        assert_eq!(
+            environment,
+            [
+                &b"HOME=/h"[..],
+                b"WEZTERM_UNIX_SOCKET=/env.sock",
+                b"WEZTERM_PANE=7"
+            ]
+        );
+        let mut processes = PaneProcessSet::default();
+        processes.add_environment(environment.into_iter());
+        assert_eq!(processes.presence("/env.sock", "7"), Presence::Present);
+        assert_eq!(processes.presence("/argv.sock", "9"), Presence::Absent);
+        assert_eq!(super::procargs_environment(&[1, 0]).count(), 0);
+    }
 
     #[test]
     fn a_socket_path_with_an_interior_space_is_read_whole() {

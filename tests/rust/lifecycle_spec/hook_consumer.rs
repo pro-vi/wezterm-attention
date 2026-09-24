@@ -713,7 +713,7 @@ fn malformed_consumer_arguments_fail_before_native_application() {
         ("/missing", vec!["--consumer-timeout-ms", "0"]),
     ] {
         let output = hook(&setup, "claude", &payload, &[PathBuf::from(path)], &extra);
-        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(output.status.code(), Some(0));
         assert!(output.stdout.is_empty());
         assert!(
             !setup

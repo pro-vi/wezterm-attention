@@ -1,4 +1,4 @@
-use std::io::{IsTerminal, Read};
+use std::io::{IsTerminal, Read, Write};
 use std::process::ExitCode;
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
@@ -182,7 +182,7 @@ impl BindingField {
 
 fn bindings_help() -> String {
     format!(
-        "Example: attention bindings --all --fields address,provider,current\nFields: {}\ncomplete is false when rows were dropped (any mode) or a probe did not answer (--socket).\nDropped diagnostics are counted: result.diagnostic_count of result.total_diagnostic_count.\nresult.timing_ms says where the call's time went: pane_list (wezterm cli list), process_list (the process probe), records (the file walk).\nIf truncated, narrow with --provider, raise --limit (maximum 1000), or explicitly use --all.\n--socket queries prevent WezTerm auto-start; --realm selects a recorded realm ID.",
+        "Example: attention bindings --all --fields address,provider,current\nFields: {}\ncomplete is false when --limit truncated the rows, or with --socket when a probe did not answer. Exit 0 when complete, 1 when not, 2 for a usage error.\nDropped diagnostics are counted: result.diagnostic_count of result.total_diagnostic_count.\nresult.timing_ms says where the call's time went: pane_list (wezterm cli list), process_list (the process probe), records (the file walk).\nIf truncated, narrow with --provider, raise --limit (maximum 1000), or explicitly use --all.\n--socket queries prevent WezTerm auto-start; --realm selects a recorded realm ID.",
         BindingField::value_variants()
             .iter()
             .map(|field| field.name())
@@ -303,22 +303,73 @@ fn query_json(command: &str) -> bool {
     )
 }
 
+/// `value` as one line of JSON that is safe to print to a terminal.
+fn printable_json<T: Serialize>(value: &T) -> String {
+    wezterm_attention::protocol::printable_json(value).expect("response serializes")
+}
+
+/// Print one line to stdout.
+///
+/// A reader that closed the pipe early, as `| head` does, already has what it
+/// wanted, so a broken pipe is not an error; `println!` would panic there and
+/// exit 101. Any other write failure is reported on stderr.
+fn print_out(text: &str) {
+    let mut stdout = std::io::stdout().lock();
+    if let Err(error) = writeln!(stdout, "{text}").and_then(|()| stdout.flush())
+        && error.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        print_err(&format!("attention: stdout: {error}"));
+    }
+}
+
+/// Print one line to stderr. A closed stderr leaves nowhere to say so, and a
+/// hook must still exit with its own code, so a failure here is dropped.
+fn print_err(text: &str) {
+    let _ = writeln!(std::io::stderr().lock(), "{text}");
+}
+
 fn emit<T: Serialize>(response: &Response<T>, as_json: bool, quiet: bool) {
     if quiet {
         return;
     }
     if as_json || query_json(&response.command) {
-        println!(
-            "{}",
-            serde_json::to_string(response).expect("response serializes")
-        );
+        print_out(&printable_json(response));
     } else {
-        println!("{}", response.status);
+        // The status word alone cannot say what to fix, and every
+        // diagnostic points here. Its reasons go to stderr, so a script
+        // that reads the word from stdout reads the same thing as before.
+        print_out(&response.status);
+        for diagnostic in &response.diagnostics {
+            let message = diagnostic
+                .message
+                .chars()
+                .map(|character| {
+                    if character.is_control() {
+                        '?'
+                    } else {
+                        character
+                    }
+                })
+                .collect::<String>();
+            print_err(&format!("attention: {}: {message}", diagnostic.code));
+        }
     }
 }
 
+/// The exit code a query answer earns: 0 when it is complete, 1 when it is
+/// not. Diagnostics beside a complete answer do not change it; `status` and
+/// the diagnostics say what they are.
+fn query_exit(complete: bool) -> ExitCode {
+    if complete {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+/// An error answers nothing, so its envelope is never complete.
 fn emit_error(error: &AttentionError, as_json: bool, command: &str) -> ExitCode {
-    emit_error_with_complete(error, as_json, command, true)
+    emit_error_with_complete(error, as_json, command, false)
 }
 
 fn emit_error_with_complete(
@@ -345,18 +396,28 @@ fn emit_error_with_complete(
             result: serde_json::json!({}),
             diagnostics: vec![error.diagnostic.clone()],
         };
-        println!(
-            "{}",
-            serde_json::to_string(&response).expect("response serializes")
-        );
+        print_out(&printable_json(&response));
     } else {
-        eprintln!(
+        print_err(&format!(
             "attention: {}: {}",
             error.diagnostic.code, error.diagnostic.message
-        );
-        eprintln!("help: {}", error.diagnostic.help);
+        ));
+        print_err(&format!("help: {}", error.diagnostic.help));
     }
-    ExitCode::from(error.exit_code as u8)
+    // 2 is kept for a command line that could not be used; every other
+    // failure, whatever the error's own code, is 1. A hook command never
+    // exits 2, because Claude Code and Codex read 2 as "block".
+    ExitCode::from(if error.exit_code == 2 && !is_hook_command(command) {
+        2
+    } else {
+        1
+    })
+}
+
+/// `attention hooks ...`, which provider hook registrations, the shell
+/// integration and the plugin run.
+fn is_hook_command(command: &str) -> bool {
+    command == "hooks" || command.starts_with("hooks ")
 }
 
 fn emit_hook_error(error: &AttentionError, debug: bool, strict: bool, command: &str) -> ExitCode {
@@ -370,22 +431,19 @@ fn emit_hook_error(error: &AttentionError, debug: bool, strict: bool, command: &
                 "unavailable"
             }
             .to_owned(),
-            complete: true,
+            complete: false,
             result: serde_json::json!({}),
             diagnostics: vec![error.diagnostic.clone()],
         };
-        eprintln!(
-            "{}",
-            serde_json::to_string(&response).expect("response serializes")
-        );
+        print_err(&printable_json(&response));
     } else {
-        eprintln!(
+        print_err(&format!(
             "attention: {}: {}",
             error.diagnostic.code, error.diagnostic.message
-        );
+        ));
     }
     if strict {
-        ExitCode::from(error.exit_code as u8)
+        ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
     }
@@ -401,7 +459,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
     match cli.command {
         None => {
             let mut command = Cli::command();
-            println!("{}", command.render_help());
+            print_out(&command.render_help().to_string());
             Ok(ExitCode::SUCCESS)
         }
         Some(Command::Hooks { command: None }) => {
@@ -409,7 +467,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             let hooks = command
                 .find_subcommand_mut("hooks")
                 .expect("hooks subcommand is declared");
-            println!("{}", hooks.render_help());
+            print_out(&hooks.render_help().to_string());
             Ok(ExitCode::SUCCESS)
         }
         Some(Command::Claim) => Err((
@@ -463,12 +521,12 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     false,
                 );
             } else {
-                println!("{}", result.launch_id);
+                print_out(&result.launch_id);
                 if let Some(diagnostic) = &result.publication_diagnostic {
-                    eprintln!(
+                    print_err(&format!(
                         "attention: publication pending: {}: {}",
                         diagnostic.code, diagnostic.message
-                    );
+                    ));
                 }
             }
             Ok(ExitCode::SUCCESS)
@@ -554,7 +612,9 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 args.consumer_timeout_ms,
             ) {
                 Ok(timeout) => timeout,
-                Err(error) => return Ok(emit_hook_error(&error, args.debug, true, &command)),
+                Err(error) => {
+                    return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
+                }
             };
             let observation = match clock.monotonic_ns20() {
                 Ok(observation) => observation,
@@ -648,18 +708,14 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 };
                 let result = serde_json::json!({"native": outcome.result.as_ref().ok(), "admission": outcome.admission, "persistence": outcome.persistence, "consumers": consumers});
                 // Prompt/reply bodies and child output never enter this diagnostic projection.
-                eprintln!(
-                    "{}",
-                    serde_json::to_string(&Response {
-                        schema: 1,
-                        command,
-                        status: if failed { "findings" } else { "ok" }.into(),
-                        complete: true,
-                        result,
-                        diagnostics
-                    })
-                    .expect("diagnostic serializes")
-                );
+                print_err(&printable_json(&Response {
+                    schema: 1,
+                    command,
+                    status: if failed { "findings" } else { "ok" }.into(),
+                    complete: true,
+                    result,
+                    diagnostics,
+                }));
                 return Ok(if args.strict && failed {
                     ExitCode::from(1)
                 } else {
@@ -690,12 +746,12 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     diagnostics: result.diagnostic.iter().cloned().collect(),
                     result,
                 };
-                eprintln!(
-                    "{}",
-                    serde_json::to_string(&response).expect("response serializes")
-                );
+                print_err(&printable_json(&response));
             } else if let Some(diagnostic) = &result.diagnostic {
-                eprintln!("attention: {}: {}", diagnostic.code, diagnostic.message);
+                print_err(&format!(
+                    "attention: {}: {}",
+                    diagnostic.code, diagnostic.message
+                ));
             }
             Ok(if args.strict && failed {
                 ExitCode::from(1)
@@ -764,6 +820,9 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 }
                 Err(error) => return Err((Box::new(error), args.json, "bindings".to_owned())),
             };
+            // A socket answer reports an unreadable directory as a diagnostic,
+            // and any diagnostic already makes it incomplete.
+            let mut walked_every_directory = true;
             let (scope, mut rows, diagnostics, timing) = if let Some(socket) = &args.socket {
                 let (scope, rows, diagnostics, timing) =
                     match wezterm_attention::query::read_bindings_for_socket_timed(
@@ -781,10 +840,16 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     };
                 (Some(scope), rows, diagnostics, timing)
             } else {
-                let (rows, diagnostics, timing) =
-                    read_bindings_timed(&root, Some(&panes), Some(&processes))
-                        .map_err(|error| (Box::new(error), args.json, "bindings".to_owned()))?;
-                (None, rows, diagnostics, timing)
+                // The filters apply before any socket is asked, so a realm or
+                // provider left out costs no pane listing.
+                let filter = wezterm_attention::query::BindingFilter {
+                    realm_id: args.realm.clone(),
+                    provider: args.provider.clone(),
+                };
+                let answer = read_bindings_timed(&root, &filter, Some(&panes), Some(&processes))
+                    .map_err(|error| (Box::new(error), args.json, "bindings".to_owned()))?;
+                walked_every_directory = answer.walked_every_directory;
+                (None, answer.rows, answer.diagnostics, answer.timing)
             };
             if let Some(realm) = args.realm {
                 rows.retain(|row| row.address.realm_id == realm);
@@ -832,7 +897,10 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             // pane's presence unknown; a realm-wide answer reports its
             // diagnostics through the two counts instead, because on a machine
             // where panes outlive mux incarnations they never run out, and a
-            // flag that is always false says nothing about the rows.
+            // flag that is always false says nothing about the rows. A
+            // directory that could not be read may hold rows, so it does.
+            let complete =
+                !truncated && walked_every_directory && (!socket_mode || diagnostics.is_empty());
             emit(
                 &Response {
                     schema: 1,
@@ -843,27 +911,14 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                         "findings"
                     }
                     .to_owned(),
-                    complete: !truncated && (!socket_mode || diagnostics.is_empty()),
+                    complete,
                     result,
                     diagnostics: shown_diagnostics,
                 },
                 args.json,
                 false,
             );
-            Ok(if diagnostics.is_empty() {
-                ExitCode::SUCCESS
-            } else if socket_mode
-                && diagnostics.iter().any(|item| {
-                    matches!(
-                        item.code.as_str(),
-                        "probe_unavailable" | "realm_unavailable"
-                    )
-                })
-            {
-                ExitCode::from(3)
-            } else {
-                ExitCode::from(1)
-            })
+            Ok(query_exit(complete))
         }
         Some(Command::TabSource(args)) => {
             let source = wezterm_attention::query::read_tab_source(&args.socket)
@@ -910,11 +965,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 args.json,
                 false,
             );
-            Ok(if diagnostics.is_empty() {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            })
+            Ok(query_exit(diagnostics.is_empty()))
         }
         Some(Command::Inspect(args)) => {
             let maximum = wezterm_attention::protocol::manifest()
@@ -1048,25 +1099,21 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             } else {
                 "findings"
             };
+            // A probe that did not answer leaves part of the report unknown.
+            let complete = !unavailable && diagnostics.len() <= 50;
             emit(
                 &Response {
                     schema: 1,
                     command: "doctor".to_owned(),
                     status: status.to_owned(),
-                    complete: diagnostics.len() <= 50,
+                    complete,
                     result,
                     diagnostics: diagnostics.iter().take(50).cloned().collect(),
                 },
                 args.json,
                 false,
             );
-            Ok(if unavailable {
-                ExitCode::from(3)
-            } else if diagnostics.is_empty() {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            })
+            Ok(query_exit(complete))
         }
         Some(Command::Sweep(args)) => {
             if args.operation_id.is_some() && !args.apply {
@@ -1110,26 +1157,23 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             } else {
                 diagnostics.iter().take(50).cloned().collect()
             };
+            // A probe that did not answer leaves some pane's fate undecided.
+            let complete = !unavailable
+                && result.details.len() == total_details
+                && shown_diagnostics.len() == diagnostics.len();
             emit(
                 &Response {
                     schema: 1,
                     command: "sweep".to_owned(),
                     status: status.to_owned(),
-                    complete: result.details.len() == total_details
-                        && shown_diagnostics.len() == diagnostics.len(),
+                    complete,
                     result,
                     diagnostics: shown_diagnostics,
                 },
                 args.json,
                 false,
             );
-            Ok(if unavailable {
-                ExitCode::from(3)
-            } else if diagnostics.is_empty() {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            })
+            Ok(query_exit(complete))
         }
     }
 }
@@ -1146,23 +1190,38 @@ fn main() -> ExitCode {
                 let _ = error.print();
                 return ExitCode::SUCCESS;
             }
-            let command = match (
-                arguments.get(1).and_then(|arg| arg.to_str()),
-                arguments.get(2).and_then(|arg| arg.to_str()),
-            ) {
-                (Some("hooks"), Some("describe")) => "hooks describe",
-                (Some(command), _) => command,
-                _ => "attention",
+            let first = arguments.get(1).and_then(|arg| arg.to_str());
+            let second = arguments.get(2).and_then(|arg| arg.to_str());
+            let command = match (first, second) {
+                (Some("hooks"), Some(sub @ ("describe" | "claim" | "publish" | "event"))) => {
+                    format!("hooks {sub}")
+                }
+                (Some(command), _) => command.to_owned(),
+                _ => "attention".to_owned(),
             };
-            if query_json(command)
+            // A provider runs `hooks event` (and would run a misspelling of
+            // it), and reads exit 2 as "block": a prompt is dropped, a tool is
+            // denied, a Stop hook loops on the error text. So a command line
+            // it cannot parse exits like any other hook failure: 1 under
+            // --strict, 0 otherwise, with the reason on stderr.
+            if first == Some("hooks") && !matches!(second, Some("describe" | "claim" | "publish")) {
+                let _ = error.print();
+                let strict = arguments.iter().any(|argument| argument == "--strict");
+                return ExitCode::from(u8::from(strict || second != Some("event")));
+            }
+            if query_json(&command)
                 || arguments
                     .iter()
                     .skip(1)
                     .any(|argument| argument == "--json")
             {
-                return emit_error(&AttentionError::usage(error.to_string()), true, command);
+                return emit_error(&AttentionError::usage(error.to_string()), true, &command);
             }
-            let exit_code = error.exit_code();
+            let exit_code = if is_hook_command(&command) {
+                1
+            } else {
+                error.exit_code()
+            };
             let _ = error.print();
             return ExitCode::from(exit_code as u8);
         }

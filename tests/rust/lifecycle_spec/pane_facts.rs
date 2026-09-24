@@ -372,7 +372,7 @@ fn inspector_cli_validates_scope_before_io_and_uses_public_shapes() {
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
     let run = |scope: &Value| {
         let mut child = rust_command(&setup)
-            .env("WEZTERM_EXECUTABLE", &fake)
+            .env("PATH", fake.parent().unwrap())
             .args(["inspect", "--scope", "-", "--json"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

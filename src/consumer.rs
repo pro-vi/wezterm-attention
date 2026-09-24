@@ -81,7 +81,7 @@ pub fn validate_consumers(
     for executable in executables {
         if !Path::new(executable).is_absolute()
             || executable.len() > maximum
-            || executable.chars().any(|c| c < ' ' || c == '\u{7f}')
+            || executable.chars().any(char::is_control)
         {
             return Err(AttentionError::usage(
                 "--consumer requires an absolute executable path",
@@ -279,4 +279,24 @@ pub fn dispatch(executable: &str, bytes: &[u8], timeout: Duration) -> DeliveryOu
 fn terminate_child(child: &mut std::process::Child) -> Option<i32> {
     let _ = child.kill();
     child.wait().ok().and_then(|status| status.code())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_consumers;
+
+    #[test]
+    fn a_consumer_path_with_any_control_character_is_refused() {
+        for path in [
+            "/bin/\u{1b}x",
+            "/bin/\u{7f}x",
+            "/bin/\u{85}x",
+            "/bin/\u{9b}x",
+        ] {
+            let error = validate_consumers(&[path.to_owned()], Some(100))
+                .expect_err("control characters are refused");
+            assert_eq!(error.diagnostic.code, "bad_usage", "{path:?}");
+        }
+        assert!(validate_consumers(&["/bin/caf\u{e9}".to_owned()], Some(100)).is_ok());
+    }
 }

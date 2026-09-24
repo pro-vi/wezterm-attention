@@ -11,6 +11,111 @@ use uuid::Uuid;
 
 #[path = "support/executables.rs"]
 mod executables;
+#[path = "support/trusted_scratch.rs"]
+mod trusted_scratch;
+
+/// The build script itself, included so the identity it computes can be
+/// checked against scratch repositories without a nested cargo build.
+#[allow(dead_code)]
+mod build_script {
+    include!("../../build.rs");
+
+    use super::Scratch;
+    use std::fs;
+
+    #[test]
+    fn the_build_identity_names_only_this_checkout_and_watches_only_files_that_exist() {
+        let scratch = Scratch::new();
+        let git = |directory: &Path, args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(directory)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+        };
+        let crate_files = |directory: &Path| {
+            for (path, text) in [
+                ("src/main.rs", "fn main() {}\n"),
+                ("protocol/v2.json", "{}\n"),
+                ("build.rs", "fn main() {}\n"),
+                ("Cargo.toml", "[package]\n"),
+                ("Cargo.lock", "\n"),
+                ("docs/notes.md", "notes\n"),
+            ] {
+                let path = directory.join(path);
+                fs::create_dir_all(path.parent().expect("parent")).expect("create directory");
+                fs::write(path, text).expect("write crate file");
+            }
+        };
+        let every_watched_path_exists = |identity: &BuildIdentity| {
+            for path in &identity.watched {
+                assert!(
+                    path.exists(),
+                    "watching a missing path rebuilds every time: {path:?}"
+                );
+            }
+        };
+        let is_commit =
+            |build: &str| build.len() == 12 && build.bytes().all(|b| b.is_ascii_hexdigit());
+
+        let repository = scratch.0.join("repository");
+        crate_files(&repository);
+        git(&repository, &["init", "-q", "-b", "main"]);
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "-q", "-m", "initial"]);
+        let clean = build_identity(&repository);
+        assert!(is_commit(&clean.build), "{}", clean.build);
+        every_watched_path_exists(&clean);
+        assert!(clean.watched.contains(&repository.join("src")));
+
+        fs::write(repository.join("docs/notes.md"), "edited\n").expect("edit a document");
+        assert_eq!(build_identity(&repository).build, clean.build);
+        fs::write(repository.join("src/main.rs"), "fn main() { }\n").expect("edit a source");
+        assert_eq!(
+            build_identity(&repository).build,
+            format!("{}-dirty", clean.build)
+        );
+        git(
+            &repository,
+            &["checkout", "-q", "--", "src/main.rs", "docs/notes.md"],
+        );
+
+        let vendored = repository.join("vendor/attention");
+        crate_files(&vendored);
+        let copy = build_identity(&vendored);
+        assert_eq!(copy.build, "unknown", "a vendored copy names no commit");
+        assert_eq!(copy.watched.len(), BINARY_INPUTS.len());
+
+        let linked = scratch.0.join("linked");
+        let linked_path = linked.to_str().expect("UTF-8 scratch path");
+        git(
+            &repository,
+            &["worktree", "add", "-q", "-b", "linked", linked_path],
+        );
+        git(&repository, &["pack-refs", "--all"]);
+        for checkout in [&repository, &linked] {
+            let identity = build_identity(checkout);
+            assert_eq!(identity.build, clean.build, "{checkout:?}");
+            every_watched_path_exists(&identity);
+            assert!(
+                identity
+                    .watched
+                    .iter()
+                    .any(|path| path.ends_with("logs/HEAD")),
+                "a commit on a packed ref still moves a watched file: {:?}",
+                identity.watched
+            );
+        }
+    }
+}
 
 struct Scratch(PathBuf);
 
@@ -237,9 +342,10 @@ fn rust_cli_help_errors_and_empty_hook_input_keep_the_documented_shape() {
         .env_clear()
         .output()
         .expect("run JSON error");
-    assert_eq!(operational.status.code(), Some(3));
+    assert_eq!(operational.status.code(), Some(1));
     let envelope: Value = serde_json::from_slice(&operational.stdout).expect("JSON envelope");
     assert_eq!(envelope["status"], "unavailable");
+    assert_eq!(envelope["complete"], false);
 
     let hook_help = Command::new(binary)
         .args(["hooks", "event", "--help"])
@@ -257,7 +363,7 @@ fn rust_cli_help_errors_and_empty_hook_input_keep_the_documented_shape() {
         .output()
         .expect("run empty hook");
     assert!(started.elapsed() < Duration::from_secs(2));
-    assert_eq!(empty.status.code(), Some(2));
+    assert_eq!(empty.status.code(), Some(1));
 
     let malformed = Command::new(binary)
         .args(["bindings", "--json", "--limit", "nope"])
@@ -269,7 +375,7 @@ fn rust_cli_help_errors_and_empty_hook_input_keep_the_documented_shape() {
     let envelope: Value = serde_json::from_slice(&malformed.stdout).expect("usage JSON envelope");
     assert_eq!(envelope["command"], "bindings");
     assert_eq!(envelope["status"], "usage_error");
-    assert_eq!(envelope["complete"], true);
+    assert_eq!(envelope["complete"], false);
 }
 
 #[test]
@@ -290,12 +396,12 @@ fn query_defaults_errors_and_help_support_agent_composition() {
     assert!(default.stderr.is_empty());
     let description: Value = serde_json::from_slice(&default.stdout).unwrap();
     assert_eq!(description["command"], "hooks describe");
-    for args in [
-        vec!["hooks", "describe", "--provider", "unsupported"],
-        vec!["bindings", "--provider", "unsupported"],
+    for (args, exit) in [
+        (vec!["hooks", "describe", "--provider", "unsupported"], 1),
+        (vec!["bindings", "--provider", "unsupported"], 2),
     ] {
         let output = run(&args);
-        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(output.status.code(), Some(exit));
         let error: Value = serde_json::from_slice(&output.stdout).unwrap();
         let message = error["diagnostics"][0]["message"].as_str().unwrap();
         for provider in &wezterm_attention::protocol::manifest()
@@ -343,7 +449,7 @@ fn query_defaults_errors_and_help_support_agent_composition() {
         assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-private-content"));
     }
     let malformed = run(&["hooks", "describe"]);
-    assert_eq!(malformed.status.code(), Some(2));
+    assert_eq!(malformed.status.code(), Some(1));
     let error: Value = serde_json::from_slice(&malformed.stdout).unwrap();
     assert_eq!(error["command"], "hooks describe");
     assert_eq!(
@@ -380,7 +486,7 @@ fn installed_shim_names_the_install_command_when_the_rust_binary_is_missing() {
         .arg("doctor")
         .output()
         .expect("run shim without Rust binary");
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(1));
     assert_eq!(output.stdout, b"");
     assert_eq!(
         String::from_utf8(output.stderr).expect("stderr"),
@@ -857,7 +963,7 @@ fn tabs_cli_checks_exact_source_without_autostart_or_global_failure() {
         let output = Command::new(env!("CARGO_BIN_EXE_attention"))
             .env_clear()
             .env("WEZTERM_ATTENTION_DIR", &state)
-            .env("WEZTERM_EXECUTABLE", &executable)
+            .env("PATH", &scratch.0)
             .env("WEZTERM_UNIX_SOCKET", "/wrong/caller.sock")
             .env("UNRELATED_TEST_VALUE", "must-not-cross")
             .arg("tabs")
@@ -1114,7 +1220,7 @@ return config
     let checked = Command::new(env!("CARGO_BIN_EXE_attention"))
         .env_clear()
         .env("WEZTERM_ATTENTION_DIR", &snapshots)
-        .env("WEZTERM_EXECUTABLE", &wezterm)
+        .env("PATH", wezterm.parent().expect("wezterm directory"))
         .arg("tabs")
         .output()
         .unwrap();
@@ -1160,5 +1266,300 @@ fn a_state_root_that_has_published_no_tab_order_answers_completely() {
     assert!(
         !state.join("tabs").exists(),
         "a read command creates no state directory"
+    );
+}
+
+#[test]
+fn a_variable_that_is_not_utf8_is_skipped_instead_of_stopping_every_command() {
+    use std::os::unix::ffi::OsStrExt;
+    let scratch = Scratch::new();
+    let state = scratch.0.join("state");
+    fs::create_dir_all(&state).expect("create state root");
+    let unreadable = std::ffi::OsStr::from_bytes(b"latin-1 \xe9t\xe9");
+    let tabs = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .arg("tabs")
+        .env_clear()
+        .env("WEZTERM_ATTENTION_DIR", &state)
+        .env("SOME_LOCALE_VALUE", unreadable)
+        .output()
+        .expect("run tabs");
+    assert_eq!(tabs.status.code(), Some(0), "{tabs:?}");
+    let envelope: Value = serde_json::from_slice(&tabs.stdout).expect("tabs JSON");
+    assert_eq!(envelope["complete"], true);
+
+    let hook = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .args(["hooks", "event", "claude", "Stop"])
+        .env_clear()
+        .env("WEZTERM_ATTENTION_DIR", &state)
+        .env("SOME_LOCALE_VALUE", unreadable)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run hook");
+    assert_eq!(hook.status.code(), Some(0), "{hook:?}");
+    assert!(!String::from_utf8_lossy(&hook.stderr).contains("panicked"));
+}
+
+/// Run `hooks publish --socket` for a disposable socket with only `extra` in
+/// the environment besides the state root, and return the output and how
+/// long it took.
+fn publish_socket_with(extra: &[(&str, &Path)]) -> (std::process::Output, Duration) {
+    let scratch = Scratch::new();
+    let socket = scratch.0.join("mux.sock");
+    let _listener = UnixListener::bind(&socket).expect("bind disposable socket");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_attention"));
+    command
+        .args(["hooks", "publish", "--json", "--socket"])
+        .arg(&socket)
+        .env_clear()
+        .env("HOME", &scratch.0)
+        .env("WEZTERM_ATTENTION_DIR", scratch.0.join("state"))
+        .env("PATH", "/usr/bin:/bin");
+    for (name, value) in extra {
+        command.env(name, value);
+    }
+    let started = Instant::now();
+    let output = command.output().expect("run hooks publish");
+    (output, started.elapsed())
+}
+
+#[test]
+fn a_pane_listing_runs_the_cli_beside_the_mux_server_and_never_starts_a_server() {
+    let installed = trusted_scratch::TrustedScratch::new();
+    let server_ran = installed.0.join("server-ran");
+    let arguments = installed.0.join("arguments");
+    let server = installed.executable(
+        "wezterm-mux-server",
+        &format!("printf ran > '{}'", server_ran.display()),
+    );
+    installed.executable(
+        "wezterm",
+        &format!(
+            "printf '%s' \"$*\" > '{}'\nprintf '[]'",
+            arguments.display()
+        ),
+    );
+    let (output, _) = publish_socket_with(&[("WEZTERM_EXECUTABLE", &server)]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(!server_ran.exists(), "the mux server must never be run");
+    assert_eq!(
+        fs::read_to_string(&arguments).expect("the CLI ran"),
+        "--skip-config cli --prefer-mux --no-auto-start list --format json"
+    );
+}
+
+#[test]
+fn a_failed_pane_listing_names_the_executable_and_how_it_failed() {
+    let installed = trusted_scratch::TrustedScratch::new();
+    let cli = installed.executable("wezterm", "exit 7");
+    let (output, _) = publish_socket_with(&[("WEZTERM_EXECUTABLE_DIR", &installed.0)]);
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("error envelope");
+    let message = envelope["diagnostics"][0]["message"]
+        .as_str()
+        .expect("message");
+    assert_eq!(envelope["diagnostics"][0]["code"], "realm_unavailable");
+    assert_eq!(
+        message,
+        format!(
+            "wezterm cli list via {} exited with status 7",
+            cli.display()
+        )
+    );
+}
+
+#[test]
+fn a_descendant_holding_the_listing_output_open_is_killed_at_the_deadline() {
+    let installed = trusted_scratch::TrustedScratch::new();
+    let holder = installed.0.join("holder");
+    let cli = installed.executable(
+        "wezterm",
+        &format!(
+            "/bin/sleep 30 &\nprintf '%s' $! > '{}'\nexit 0",
+            holder.display()
+        ),
+    );
+    let (output, elapsed) = publish_socket_with(&[("WEZTERM_EXECUTABLE_DIR", &installed.0)]);
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the listing deadline did not bound a held pipe: {elapsed:?}"
+    );
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("error envelope");
+    assert_eq!(
+        envelope["diagnostics"][0]["message"],
+        format!(
+            "wezterm cli list via {} timed out after 5000 ms",
+            cli.display()
+        )
+    );
+    let pid = fs::read_to_string(&holder).expect("holder pid");
+    let alive = Command::new("/bin/kill")
+        .args(["-0", pid.trim()])
+        .stderr(Stdio::null())
+        .status()
+        .expect("probe holder");
+    assert!(!alive.success(), "the descendant outlived the deadline");
+}
+
+#[test]
+fn a_reader_that_closes_stdout_early_does_not_make_the_cli_panic() {
+    let mut ends = [0; 2];
+    assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
+    unsafe { libc::close(ends[0]) };
+    let closed = unsafe { Stdio::from_raw_fd(ends[1]) };
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .args(["hooks", "describe", "--provider", "claude"])
+        .env_clear()
+        .stdout(closed)
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run with a closed stdout");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[test]
+fn printed_json_escapes_c1_control_characters_and_keeps_their_value() {
+    let argument = "--unknown\u{9b}31m";
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .args(["bindings", argument])
+        .env_clear()
+        .output()
+        .expect("run with a C1 character in an argument");
+    assert!(
+        !output.stdout.windows(2).any(|pair| pair == [0xc2, 0x9b]),
+        "raw C1 reached stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let text = String::from_utf8(output.stdout).expect("UTF-8 JSON");
+    assert!(text.contains("\\u009b"), "{text}");
+    let envelope: Value = serde_json::from_str(&text).expect("still valid JSON");
+    let message = envelope["diagnostics"][0]["message"]
+        .as_str()
+        .expect("message");
+    assert!(message.contains(argument), "{message}");
+}
+
+#[test]
+fn a_query_that_could_not_run_is_incomplete_and_exits_one() {
+    let scratch = Scratch::new();
+    let run = |args: &[&str], root: &str| {
+        Command::new(env!("CARGO_BIN_EXE_attention"))
+            .args(args)
+            .env_clear()
+            .env("HOME", &scratch.0)
+            .env("WEZTERM_ATTENTION_DIR", root)
+            .output()
+            .expect("run query")
+    };
+    for (args, root) in [
+        (vec!["tabs"], "relative/state"),
+        (vec!["bindings", "--all"], "relative/state"),
+        (
+            vec!["bindings", "--socket", "/missing.sock"],
+            "/unused/state",
+        ),
+    ] {
+        let output = run(&args, root);
+        let envelope: Value = serde_json::from_slice(&output.stdout).expect("error envelope");
+        assert_eq!(envelope["complete"], false, "{args:?}: {envelope}");
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {envelope}");
+    }
+}
+
+#[test]
+fn doctor_findings_beside_a_complete_report_exit_zero() {
+    let scratch = Scratch::new();
+    let state = scratch.0.join("state");
+    fs::create_dir_all(&state).expect("create state root");
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o755)).expect("shared state root");
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .args(["doctor", "--json"])
+        .env_clear()
+        .env("HOME", &scratch.0)
+        .env("WEZTERM_ATTENTION_DIR", &state)
+        .output()
+        .expect("run doctor");
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("doctor JSON");
+    assert_eq!(envelope["status"], "findings", "{envelope}");
+    assert_eq!(envelope["complete"], true, "{envelope}");
+    assert_eq!(output.status.code(), Some(0), "{envelope}");
+}
+
+#[test]
+fn a_hook_command_never_exits_two_and_says_why_on_stderr() {
+    let scratch = Scratch::new();
+    let run = |args: &[&str], stdin: &[u8]| {
+        use std::io::Write;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_attention"))
+            .args(args)
+            .env_clear()
+            .env("HOME", &scratch.0)
+            .env("WEZTERM_ATTENTION_DIR", scratch.0.join("state"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run hook command");
+        let _ = child.stdin.take().expect("stdin").write_all(stdin);
+        child.wait_with_output().expect("hook output")
+    };
+    let event = ["hooks", "event", "claude", "Stop"];
+    let payload = br#"{"hook_event_name":"Stop","session_id":"s"}"#.as_slice();
+    for (extra, stdin, label) in [
+        (vec!["--no-such-flag"], payload, "unknown flag"),
+        (vec!["--consumer", "relative"], payload, "relative consumer"),
+        (
+            vec!["--consumer", "/bin/true", "--consumer-timeout-ms", "0"],
+            payload,
+            "zero consumer timeout",
+        ),
+        (vec![], b"".as_slice(), "empty stdin"),
+        (vec![], b"{".as_slice(), "invalid JSON"),
+    ] {
+        for strict in [false, true] {
+            let mut args = event.to_vec();
+            args.extend(&extra);
+            if strict {
+                args.push("--strict");
+            }
+            let output = run(&args, stdin);
+            assert_eq!(
+                output.status.code(),
+                Some(i32::from(strict)),
+                "{label}, strict={strict}: {output:?}"
+            );
+            assert!(output.stdout.is_empty(), "{label}: {output:?}");
+            assert!(!output.stderr.is_empty(), "{label}: no reason given");
+        }
+    }
+    for (args, expected) in [
+        (vec!["hooks", "event", "claude"], 0),
+        (vec!["hooks", "event", "claude", "--strict"], 1),
+        (vec!["hooks", "evnet", "claude", "Stop"], 1),
+        (vec!["hooks", "claim", "--no-such-flag"], 1),
+        (vec!["hooks", "publish", "--json", "--quiet"], 1),
+        (vec!["hooks", "describe", "--provider", "unsupported"], 1),
+    ] {
+        let output = run(&args, b"");
+        assert_eq!(output.status.code(), Some(expected), "{args:?}: {output:?}");
+    }
+}
+
+#[test]
+fn doctor_in_text_mode_gives_its_reasons_on_stderr() {
+    let scratch = Scratch::new();
+    let state = scratch.0.join("state");
+    fs::create_dir_all(&state).expect("create state root");
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o755)).expect("shared state root");
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .arg("doctor")
+        .env_clear()
+        .env("HOME", &scratch.0)
+        .env("WEZTERM_ATTENTION_DIR", &state)
+        .output()
+        .expect("run doctor");
+    assert_eq!(output.stdout, b"findings\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "attention: state_permissions: state directory is accessible to other users\n"
     );
 }

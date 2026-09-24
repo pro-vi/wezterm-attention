@@ -2507,7 +2507,7 @@ fn hooks_event_debug_uses_stderr_and_lifecycle_errors_are_non_strict() {
         &["hooks", "event", "claude", "PreToolUse", "--strict"],
         &payload,
     );
-    assert_eq!(strict.status.code(), Some(3));
+    assert_eq!(strict.status.code(), Some(1));
 }
 
 #[test]
