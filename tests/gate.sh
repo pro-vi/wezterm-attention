@@ -7,6 +7,9 @@ cd "$root"
 # External programs are found on PATH. Override any of them with
 # ATTENTION_TEST_NODE, ATTENTION_TEST_WEZTERM, ATTENTION_TEST_PYTHON3 or
 # ATTENTION_TEST_CODEX when the one you want is not the first on PATH.
+# ATTENTION_TEST_BASH names one more bash to drive the bash integration with,
+# and ATTENTION_TEST_BASH_PREEXEC a local bash-preexec.sh to use instead of
+# downloading the pinned one.
 #
 # Two integration tests drive a real Codex checkout, which this repository
 # cannot supply. Set ATTENTION_CODEX_SOURCE to one to run them; without it they
@@ -31,7 +34,7 @@ WEZTERM_ATTENTION_TTY_INPUT_GUARD="$root/tests/python/tty_input_guard.py" cargo 
 python3 -m py_compile tests/fixtures/v2/check.py \
   tests/fixtures/consumer-migration/bridge_reader.py \
   tests/fixtures/consumer-migration/check.py tests/python/provider_contact_hook.py \
-  tests/python/measure.py tests/python/measure_spec.py
+  tests/python/measure.py tests/python/measure_spec.py tests/python/interactive_shell.py
 python3 -m unittest tests/python/measure_spec.py
 python3 tests/fixtures/v2/check.py
 python3 tests/fixtures/consumer-migration/check.py
@@ -67,6 +70,34 @@ node tests/fixtures/lifecycle/check-coverage.mjs
 # Test-only runtimes are isolated from the checkout and live installations.
 gate_scratch=$(mktemp -d "${TMPDIR:-/tmp}/attention-lifecycle-gate.XXXXXX")
 trap 'rm -rf "$gate_scratch"' EXIT HUP INT TERM
+
+# The bash integration has to work beside bash-preexec, which owns the DEBUG
+# trap wherever it is loaded; WezTerm's own shell integration carries a copy.
+# Pinned by commit and checked by hash, because the file is sourced.
+bash_preexec=${ATTENTION_TEST_BASH_PREEXEC:-}
+if [ -z "$bash_preexec" ]; then
+  bash_preexec="$gate_scratch/bash-preexec.sh"
+  curl -fsSL -o "$bash_preexec" \
+    https://raw.githubusercontent.com/rcaloras/bash-preexec/d866eeefdb8dfce075cbd4e37dc73c4deb4b0bd2/bash-preexec.sh
+  if command -v sha256sum >/dev/null 2>&1; then
+    bash_preexec_digest=$(sha256sum "$bash_preexec")
+  else
+    bash_preexec_digest=$(shasum -a 256 "$bash_preexec")
+  fi
+  if [ "${bash_preexec_digest%% *}" != 33de4e70ee84981d46e7d8a0e3105f1dd9affc9c4178594446cd96e7ef3b2752 ]; then
+    printf 'gate: the downloaded bash-preexec.sh does not match its pinned hash\n' >&2
+    exit 1
+  fi
+fi
+# The bash on PATH, and /bin/bash when that is a different one: bash 3.2 on
+# macOS. ATTENTION_TEST_BASH adds one more.
+set -- "$(command -v bash)"
+if [ -x /bin/bash ] && [ "$1" != /bin/bash ]; then set -- "$@" /bin/bash; fi
+if [ -n "${ATTENTION_TEST_BASH:-}" ]; then set -- "$@" "$ATTENTION_TEST_BASH"; fi
+for bash_shell in "$@"; do
+  sh tests/shell/bash_integration_spec.sh "$bash_shell" "$bash_preexec"
+done
+
 pi_baseline=${ATTENTION_PI_BASELINE_ROOT:-}
 if [ -z "$pi_baseline" ]; then
   npm install --prefix "$gate_scratch/pi" --ignore-scripts --no-audit --no-fund \
