@@ -1189,10 +1189,19 @@ fn every_active_lifecycle_row_reaches_the_production_writer() {
                 .find(|item| item.body.kind() == case["kind"].as_str().unwrap())
                 .unwrap();
             assert_eq!(observation.source_event, name);
-            if row["id"] == "H18" {
+            if row["id"] == "H18" && name == "PreToolUse" {
                 assert!(
                     !directory.join("activity.json").exists(),
                     "child work cannot become lead activity"
+                );
+            }
+            if row["id"] == "H18" && name == "PermissionRequest" {
+                let activity: Value =
+                    serde_json::from_slice(&fs::read(directory.join("activity.json")).unwrap())
+                        .unwrap();
+                assert_eq!(
+                    activity["type"], "notify",
+                    "a child waiting for permission waits for the user"
                 );
             }
             if case["patch"]["notification_type"] == "elicitation_url_dialog" {

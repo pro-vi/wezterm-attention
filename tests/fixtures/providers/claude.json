@@ -19,7 +19,7 @@
     { "id": "child_prompt_observation", "event": "UserPromptSubmit", "patch": { "agent_id": "child-a", "agent_type": "Explore" }, "expected": "observation" },
     { "id": "no_launch_non_start_is_stale", "event": "PreToolUse", "patch": { "tool_name": "Bash" }, "expected": "activity", "activity_type": "thinking", "lifecycle_diagnostic": "claim_stale" },
     { "id": "child_tool_activity", "event": "PreToolUse", "patch": { "tool_name": "Bash", "agent_id": "child-a", "agent_type": "Explore" }, "expected": "child_active" },
-    { "id": "child_permission_activity", "event": "PermissionRequest", "patch": { "tool_name": "Bash", "agent_id": "child-a", "agent_type": "Explore" }, "expected": "child_active" },
+    { "id": "child_permission_notifies", "event": "PermissionRequest", "patch": { "tool_name": "Bash", "agent_id": "child-a", "agent_type": "Explore" }, "expected": "activity", "activity_type": "notify" },
     { "id": "root_permission_activity", "event": "PermissionRequest", "patch": { "tool_name": "Bash" }, "expected": "activity", "activity_type": "notify" },
     { "id": "root_notification_activity", "event": "Notification", "patch": { "notification_type": "permission_prompt" }, "expected": "activity", "activity_type": "notify" },
     { "id": "idle_notification_is_inert", "event": "Notification", "patch": { "notification_type": "idle_prompt" }, "expected": "ignored" },

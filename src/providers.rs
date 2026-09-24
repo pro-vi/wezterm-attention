@@ -452,16 +452,16 @@ fn parse_claude_or_codex(
         event.child_source = Some("subagent_stop".to_owned());
         return event;
     }
-    if matches!(event_name, "PreToolUse" | "PermissionRequest") && event.agent_id.is_some() {
+    if event_name == "PreToolUse" && event.agent_id.is_some() {
         event.action = ProviderAction::ChildActive;
-        event.child_source = Some(
-            if event_name == "PreToolUse" {
-                "tool"
-            } else {
-                "permission"
-            }
-            .to_owned(),
-        );
+        event.child_source = Some("tool".to_owned());
+        return event;
+    }
+    // A child blocked on a permission prompt waits for the user as the lead
+    // would, and Codex has no Notification hook to say so another way.
+    if event_name == "PermissionRequest" && event.agent_id.is_some() {
+        event.action = ProviderAction::Activity;
+        event.activity_type = Some("notify".to_owned());
         return event;
     }
     if event.agent_id.is_some() {

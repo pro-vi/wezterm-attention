@@ -96,3 +96,37 @@ fn an_interrupted_codex_turn_clears_its_activity_and_keeps_its_observation() {
     setup.apply(&next, "00000000000000000500");
     assert_eq!(read(directory.join("activity.json"))["type"], "thinking");
 }
+
+// A sub-agent blocked on a permission prompt is waiting for the user just as
+// the lead would be. Codex has no Notification hook, so this is the only
+// signal that the tab needs attention.
+#[test]
+fn a_child_waiting_for_permission_asks_for_the_user() {
+    for (provider, agent_type) in [("claude", "Explore"), ("codex", "worker")] {
+        let setup = bound(provider, "parent");
+        let request = event(
+            provider,
+            "PermissionRequest",
+            "parent",
+            json!({"tool_name":"Bash","agent_id":"child-a","agent_type":agent_type}),
+        );
+        assert_eq!(request.action, ProviderAction::Activity, "{provider}");
+        assert_eq!(
+            setup.apply(&request, "00000000000000000400").disposition,
+            "applied",
+            "{provider}"
+        );
+        let directory = setup.binding_dir(provider, "parent");
+        assert_eq!(
+            read(directory.join("activity.json"))["type"],
+            "notify",
+            "{provider}"
+        );
+        let raw = fs::read_to_string(directory.join("lifecycle.json")).unwrap();
+        assert!(raw.contains("approval_requested"), "{provider}: {raw}");
+        assert!(
+            raw.contains("child-a"),
+            "{provider}: the actor stays the child"
+        );
+    }
+}

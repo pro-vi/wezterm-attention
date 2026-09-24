@@ -23,6 +23,7 @@
     { "id": "human_input_tool_notifies", "event": "PreToolUse", "patch": { "tool_name": "request_user_input" }, "expected": "activity", "activity_type": "notify" },
     { "id": "child_tool_activity", "event": "PreToolUse", "patch": { "tool_name": "shell", "agent_id": "child-a", "agent_type": "worker" }, "expected": "child_active" },
     { "id": "root_permission_activity", "event": "PermissionRequest", "patch": { "tool_name": "shell" }, "expected": "activity", "activity_type": "notify" },
+    { "id": "child_permission_notifies", "event": "PermissionRequest", "patch": { "tool_name": "shell", "agent_id": "child-a", "agent_type": "worker" }, "expected": "activity", "activity_type": "notify" },
     { "id": "root_interrupt_clears", "event": "Interrupt", "patch": {}, "expected": "clear" },
     { "id": "root_stop_activity_and_clear", "event": "Stop", "patch": { "stop_hook_active": false }, "expected": "parent_stop", "activity_type": "stop" },
     { "id": "child_stop_fence", "event": "SubagentStop", "patch": { "agent_id": "child-a", "agent_type": "worker", "stop_hook_active": false }, "expected": "child_stopped" },
