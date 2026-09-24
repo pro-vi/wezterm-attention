@@ -643,7 +643,8 @@ return function()
       if not socket and unpublished then
         report_warning_once("unpublished-domain:" .. domain, "panes on domain " .. domain
           .. " have not published their identity, and there is no socket on this machine to "
-          .. "republish it through; they show no attention until their shell prints a prompt")
+          .. "republish it through; they show no attention until something in the pane "
+          .. "publishes it, as the shell integration does at each prompt")
       end
       if not socket or not root or not M._active_writer_installed then return false end
       local schedule = publish_schedule_by_realm[socket]
