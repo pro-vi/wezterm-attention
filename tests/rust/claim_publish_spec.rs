@@ -1615,3 +1615,81 @@ fn a_complete_realm_wide_answer_exits_zero_beside_its_diagnostics() {
     assert_eq!(envelope["result"]["rows"].as_array().map(Vec::len), Some(1));
     assert_eq!(output.status.code(), Some(0), "{envelope}");
 }
+
+/// macOS only: after the queue is filled, freeing part of it lets a pty
+/// there take part of a publication. A Linux pty frees room in whole buffer
+/// blocks, so the same steps take all of it and no cut can be staged; the
+/// cut itself is covered on every platform by the writer's unit tests.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_publication_cut_short_by_a_stalled_tty_is_closed_once_the_tty_drains() {
+    let (_scratch, _listener, environment) = setup();
+    let (address, _) = pane_address(&environment).expect("pane address");
+    let mut master = 0;
+    let mut slave = 0;
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    let filled = fill_tty_output_queue(slave);
+    let tty_path = tty_path_from_fd(slave).expect("tty path");
+    let fingerprint =
+        wezterm_attention::identity::tty_fingerprint(&tty_path).expect("tty fingerprint");
+    let data = publication_bytes(&address, Some("00000000-0000-4000-8000-000000000101"))
+        .expect("publication");
+    // Free less room than the publication needs, so it starts and stalls.
+    let mut room = vec![0_u8; data.len() / 2];
+    let freed = unsafe { libc::read(master, room.as_mut_ptr().cast(), room.len()) };
+    assert!(freed > 0);
+    let drained = thread::spawn(move || {
+        // Stay stalled past the write deadline, then drain everything.
+        thread::sleep(Duration::from_millis(400));
+        let flags = unsafe { libc::fcntl(master, libc::F_GETFL) };
+        unsafe { libc::fcntl(master, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        let mut received = Vec::new();
+        let until = Instant::now() + Duration::from_millis(600);
+        let mut block = [0_u8; 4096];
+        while Instant::now() < until {
+            let count = unsafe { libc::read(master, block.as_mut_ptr().cast(), block.len()) };
+            if count > 0 {
+                received.extend_from_slice(&block[..count as usize]);
+            } else {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        received
+    });
+    let result = SystemTtyWriter.write(&tty_path, &data, &fingerprint);
+    let received = drained.join().expect("drain");
+    unsafe {
+        libc::close(master);
+        libc::close(slave);
+    }
+    assert!(
+        result.is_err(),
+        "the publication did not fit, so it is incomplete"
+    );
+    let published = received
+        .iter()
+        .position(|byte| *byte == 0x1b)
+        .map(|start| &received[start..])
+        .expect("the publication started");
+    assert!(
+        published.len() < data.len() && data.starts_with(&published[..published.len() - 2]),
+        "filled {filled}, received {} publication bytes",
+        published.len()
+    );
+    assert!(
+        published.ends_with(b"!\x07"),
+        "the cut sequence must end unparseable: {:?}",
+        String::from_utf8_lossy(&published[published.len().saturating_sub(8)..])
+    );
+}

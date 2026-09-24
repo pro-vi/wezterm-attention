@@ -221,18 +221,43 @@ pub struct SystemTtyWriter;
 
 const TTY_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
 
-fn write_tty_with_deadline(file: &mut File, data: &[u8]) -> std::io::Result<()> {
-    let deadline = Instant::now() + TTY_WRITE_TIMEOUT;
+fn write_tty_with_deadline(file: &mut impl Write, data: &[u8]) -> std::io::Result<()> {
     let mut written = 0;
-    while written < data.len() {
-        match file.write(&data[written..]) {
+    let result = write_before(file, data, &mut written, Instant::now() + TTY_WRITE_TIMEOUT);
+    if result.is_err() {
+        let closing = cut_sequence_closing(data, written);
+        if !closing.is_empty() {
+            // Best effort, under a deadline of its own: a tty still stalled
+            // takes nothing, and the sequence stays open as it would have.
+            let mut closed = 0;
+            let _ = write_before(
+                file,
+                closing,
+                &mut closed,
+                Instant::now() + TTY_WRITE_TIMEOUT,
+            );
+        }
+    }
+    result
+}
+
+/// Write `data[*written..]` until it is all written or `deadline` passes,
+/// counting progress in `written` either way.
+fn write_before(
+    file: &mut impl Write,
+    data: &[u8],
+    written: &mut usize,
+    deadline: Instant,
+) -> std::io::Result<()> {
+    while *written < data.len() {
+        match file.write(&data[*written..]) {
             Ok(0) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WriteZero,
                     "tty write made no progress",
                 ));
             }
-            Ok(count) => written += count,
+            Ok(count) => *written += count,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 let now = Instant::now();
@@ -248,6 +273,31 @@ fn write_tty_with_deadline(file: &mut File, data: &[u8]) -> std::io::Result<()> 
         }
     }
     Ok(())
+}
+
+/// What to write after the first `written` bytes of a publication so the
+/// terminal closes the sequence the cut left open without applying it.
+///
+/// A terminal applies an OSC when anything ends it -- BEL, ST, and in
+/// WezTerm's parser also CAN, SUB or the next ESC, such as the colour codes
+/// of the next prompt. Ended as it stands, a cut publication is applied
+/// truncated, and a base64 value cut at a four-character boundary decodes to
+/// a valid shorter value: pane 1234 would publish as pane 123. So a byte
+/// that is not base64 goes first, which makes the whole sequence fail to
+/// parse, and then BEL ends it. A cut right after ESC is completed as ST,
+/// which does nothing. A cut between sequences needs nothing.
+fn cut_sequence_closing(data: &[u8], written: usize) -> &'static [u8] {
+    let sent = &data[..written.min(data.len())];
+    let Some(start) = sent.iter().rposition(|byte| *byte == 0x1b) else {
+        return b"";
+    };
+    if sent[start..].contains(&0x07) {
+        b""
+    } else if start + 1 == sent.len() {
+        b"\\"
+    } else {
+        b"!\x07"
+    }
 }
 
 impl SystemTtyWriter {
@@ -1055,6 +1105,91 @@ mod tests {
             USER,
             &[ADMIN, 0]
         ));
+    }
+
+    /// A terminal that takes `accepted` bytes, then takes nothing until
+    /// `stalled_until`, then takes everything.
+    struct StallingTerminal {
+        accepted: usize,
+        stalled_until: std::time::Instant,
+        received: Vec<u8>,
+    }
+
+    impl std::io::Write for StallingTerminal {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            let room = if std::time::Instant::now() >= self.stalled_until {
+                data.len()
+            } else {
+                self.accepted.saturating_sub(self.received.len())
+            };
+            if room == 0 {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            let count = room.min(data.len());
+            self.received.extend_from_slice(&data[..count]);
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_write_cut_short_by_a_stall_closes_its_sequence_once_the_stall_clears() {
+        let data = super::osc("WEZTERM_PANE", "1234");
+        let started = std::time::Instant::now();
+        let mut terminal = StallingTerminal {
+            accepted: 34,
+            stalled_until: started
+                + super::TTY_WRITE_TIMEOUT
+                + std::time::Duration::from_millis(100),
+            received: Vec::new(),
+        };
+        let result = super::write_tty_with_deadline(&mut terminal, &data);
+        assert!(result.is_err(), "the write stalled past its deadline");
+        assert_eq!(terminal.received, [&data[..34], b"!\x07"].concat());
+        assert!(
+            started.elapsed()
+                < super::TTY_WRITE_TIMEOUT * 2 + std::time::Duration::from_millis(100)
+        );
+
+        let mut stalled = StallingTerminal {
+            accepted: 34,
+            stalled_until: started + std::time::Duration::from_secs(60),
+            received: Vec::new(),
+        };
+        assert!(super::write_tty_with_deadline(&mut stalled, &data).is_err());
+        assert_eq!(
+            stalled.received,
+            &data[..34],
+            "nothing more lands on a tty still stalled"
+        );
+    }
+
+    #[test]
+    fn a_cut_publication_is_closed_so_that_it_cannot_apply() {
+        let data = [
+            super::osc("WEZTERM_PANE", "1234"),
+            super::osc("WEZTERM_ATTENTION", "{}"),
+        ]
+        .concat();
+        let first_end = data.iter().position(|byte| *byte == 0x07).unwrap() + 1;
+        // Cut inside the first value, at a base64 boundary ("MTIz" is "123").
+        let value_start = data
+            .windows(4)
+            .position(|window| window == b"MTIz")
+            .unwrap();
+        assert_eq!(
+            super::cut_sequence_closing(&data, value_start + 4),
+            b"!\x07"
+        );
+        assert_eq!(super::cut_sequence_closing(&data, 1), b"\\");
+        assert_eq!(super::cut_sequence_closing(&data, first_end), b"");
+        assert_eq!(super::cut_sequence_closing(&data, first_end + 1), b"\\");
+        assert_eq!(super::cut_sequence_closing(&data, first_end + 5), b"!\x07");
+        assert_eq!(super::cut_sequence_closing(&data, 0), b"");
+        assert_eq!(super::cut_sequence_closing(&data, data.len()), b"");
     }
 
     #[test]
