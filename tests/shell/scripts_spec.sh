@@ -47,7 +47,7 @@ fi
 # A checkout that has not built its binary yet.
 mkdir -p "$scratch/unbuilt/bin"
 cp "$root/bin/attention" "$scratch/unbuilt/bin/attention"
-missing='attention: Rust binary is missing; run scripts/install-cli.sh and retry.'
+missing="attention: Rust binary is missing; run $(cd -P "$scratch/unbuilt" && pwd -P)/scripts/install-cli.sh and retry."
 hook_ok=1
 for arguments in "hooks event claude Stop" "hooks claim" "hooks publish --quiet"; do
   # shellcheck disable=SC2086
@@ -62,7 +62,7 @@ else
   fail "a hook run without the binary exits 0, or 1 under --strict, and says why (last status $status)"
 fi
 run "$scratch/unbuilt/bin/attention" doctor
-if [ "$status" -eq 3 ] && grep -qxF "$missing" "$scratch/out"; then
+if [ "$status" -eq 1 ] && grep -qxF "$missing" "$scratch/out"; then
   pass "any other command without the binary still fails"
 else
   fail "any other command without the binary still fails (status $status)"

@@ -1204,7 +1204,7 @@ fn binding_record(
         "start_source": "startup",
         "observed_mono_ns": "00000000000000000300",
         "written_at_unix_ns": "00000000001000000000",
-        "writer_version": "2.0.0"
+        "writer_version": "1.0.0"
     })
 }
 

@@ -15,7 +15,7 @@
       "schema": 3,
       "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "socket_path": "/tmp/attention-v2/socket",
-      "writer_version": "2.0.0"
+      "writer_version": "1.0.0"
     },
     "incarnation": {
       "kind": "incarnation",
@@ -26,7 +26,7 @@
       "socket_device": "16777234",
       "socket_inode": "1234567",
       "socket_ctime_ns": "01788401900000000000",
-      "writer_version": "2.0.0",
+      "writer_version": "1.0.0",
       "server_pid": "43210"
     },
     "claim": {
@@ -63,7 +63,7 @@
       "start_source": "startup",
       "observed_mono_ns": "00000000002000000000",
       "written_at_unix_ns": "00000000010000000000",
-      "writer_version": "2.0.0"
+      "writer_version": "1.0.0"
     },
     "current_binding": {
       "kind": "current_binding",
@@ -220,7 +220,7 @@
     { "id": "wire_unknown_field", "parser": "wire", "patch": { "extra": true }, "expected": "record_invalid" },
     { "id": "wire_unknown_null_field", "parser": "wire_json", "raw": "{\"wire\":2,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\"},\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"unknown\":null}", "expected": "record_invalid" },
     { "id": "realm_valid", "parser": "record", "sample": "realm", "expected": "valid" },
-    { "id": "record_unknown_null_field", "parser": "record_json", "raw": "{\"kind\":\"realm\",\"schema\":3,\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"socket_path\":\"/tmp/attention-v2/socket\",\"writer_version\":\"2.0.0\",\"unknown\":null}", "expected": "record_invalid" },
+    { "id": "record_unknown_null_field", "parser": "record_json", "raw": "{\"kind\":\"realm\",\"schema\":3,\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"socket_path\":\"/tmp/attention-v2/socket\",\"writer_version\":\"1.0.0\",\"unknown\":null}", "expected": "record_invalid" },
     { "id": "incarnation_valid", "parser": "record", "sample": "incarnation", "expected": "valid" },
     { "id": "claim_valid", "parser": "record", "sample": "claim", "expected": "valid" },
     { "id": "binding_valid", "parser": "record", "sample": "binding", "expected": "valid" },

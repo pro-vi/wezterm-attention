@@ -303,6 +303,18 @@ fn bash_automatic_claim_preserves_debug_trap_and_keeps_pending_publication_id() 
 }
 
 #[test]
+fn every_copy_of_the_product_version_agrees() {
+    // The crate, the Pi package and the manifest each carry the version by
+    // hand, and the manifest's copy is written into every record.
+    let read = |path: &str| -> Value {
+        serde_json::from_str(&fs::read_to_string(repo_file(path)).expect("read")).expect("JSON")
+    };
+    let crate_version = env!("CARGO_PKG_VERSION");
+    assert_eq!(read("package.json")["version"], crate_version);
+    assert_eq!(read("protocol/v2.json")["writer_version"], crate_version);
+}
+
+#[test]
 fn the_binary_names_the_commit_it_was_built_from() {
     let output = Command::new(env!("CARGO_BIN_EXE_attention"))
         .arg("--version")
@@ -491,7 +503,10 @@ fn installed_shim_names_the_install_command_when_the_rust_binary_is_missing() {
     assert_eq!(output.stdout, b"");
     assert_eq!(
         String::from_utf8(output.stderr).expect("stderr"),
-        "attention: Rust binary is missing; run scripts/install-cli.sh and retry.\n"
+        format!(
+            "attention: Rust binary is missing; run {}/scripts/install-cli.sh and retry.\n",
+            scratch.0.canonicalize().expect("canonical scratch").display()
+        )
     );
 }
 
@@ -653,7 +668,7 @@ fn json_publication_and_binding_output_report_bounded_completeness() {
                 "binding_id":binding_id,"event_id":format!("00000000-0000-4000-8000-00000000070{index}"),
                 "provider":"claude","provider_session_id":format!("session-{index}"),
                 "start_source":"startup","observed_mono_ns":format!("0000000000000000070{index}"),
-                "written_at_unix_ns":"00000000001000000000","writer_version":"2.0.0"
+                "written_at_unix_ns":"00000000001000000000","writer_version":"1.0.0"
             }))
             .expect("binding JSON"),
         )

@@ -22,7 +22,7 @@ esac
 ROOT=$(CDPATH= cd -P -- "$script_dir/.." && pwd -P)
 
 if [ ! -x "$ROOT/libexec/attention-rs" ]; then
-  printf '%s\n' 'attention: Rust binary is missing; run scripts/install-cli.sh and retry.' >&2
+  printf 'attention: Rust binary is missing; run %s/scripts/install-cli.sh and retry.\n' "$ROOT" >&2
   # Provider hooks are registered globally and run wherever the agent runs. A
   # hook that cannot run here says so and exits 0, or 1 under --strict, as a
   # hook event with no pane identity does.
