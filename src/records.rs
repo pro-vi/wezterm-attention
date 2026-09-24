@@ -11,7 +11,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::identity::PaneAddress;
-use crate::protocol::{AttentionError, Result, manifest, validate_record};
+use crate::protocol::{AttentionError, Result, free_of_control, manifest, validate_record};
 
 #[derive(Clone, Debug, Default)]
 pub struct RecordIdentity {
@@ -366,9 +366,7 @@ pub fn state_root(env: &BTreeMap<String, String>) -> Result<PathBuf> {
 fn absolute_path(value: &str, name: &str) -> Result<PathBuf> {
     if value.is_empty()
         || value.len() > manifest()?.limits.path_max_bytes
-        || value
-            .chars()
-            .any(|character| character < ' ' || character == '\u{7f}')
+        || !free_of_control(value)
         || !Path::new(value).is_absolute()
     {
         return Err(AttentionError::new(

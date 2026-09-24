@@ -381,13 +381,10 @@ pub fn parse_manifest(source: &str) -> Result<Manifest> {
                 || hooks.iter().any(|(name, declaration)| {
                     name.is_empty()
                         || name.len() > parsed.limits.safe_label_max_bytes
-                        || name.chars().any(|c| c < ' ' || c == '\u{7f}')
+                        || !free_of_control(name)
                         || declaration.native_event.is_empty()
                         || declaration.native_event.len() > parsed.limits.safe_label_max_bytes
-                        || declaration
-                            .native_event
-                            .chars()
-                            .any(|c| c < ' ' || c == '\u{7f}')
+                        || !free_of_control(&declaration.native_event)
                 })
         })
     {
@@ -406,7 +403,7 @@ pub fn parse_manifest(source: &str) -> Result<Manifest> {
             tools.iter().any(|(name, class)| {
                 name.is_empty()
                     || name.len() > parsed.limits.safe_label_max_bytes
-                    || name.chars().any(|c| c < ' ' || c == '\u{7f}')
+                    || !free_of_control(name)
                     || (class.tool_class == ToolClass::Question) != class.question_mode.is_some()
             })
         })
@@ -452,14 +449,19 @@ pub fn manifest() -> Result<&'static Manifest> {
     }
 }
 
+/// Whether text holds no control character: C0 (U+0000-U+001F), DEL and C1
+/// (U+0080-U+009F). C1 matters as much as C0 because a terminal reads U+009B
+/// as CSI and U+009D as OSC, so a stored C1 byte printed raw can retitle a
+/// window, clear the screen or write the clipboard. Every text check in the
+/// writer, the plugin and the independent checker uses this one rule.
+pub fn free_of_control(text: &str) -> bool {
+    !text.chars().any(char::is_control)
+}
+
 fn safe_text(value: &Value, maximum: usize) -> bool {
-    value.as_str().is_some_and(|text| {
-        !text.is_empty()
-            && text.len() <= maximum
-            && !text
-                .chars()
-                .any(|character| character < ' ' || character == '\u{7f}')
-    })
+    value
+        .as_str()
+        .is_some_and(|text| !text.is_empty() && text.len() <= maximum && free_of_control(text))
 }
 
 fn hex64(value: &Value) -> bool {
@@ -801,6 +803,24 @@ pub fn eligible_subagent_presence(
     (now <= written + ttl, None)
 }
 
+/// Serialize a document for a terminal to show. serde_json escapes C0 and
+/// leaves C1 raw, so a C1 character that entered a record through another
+/// writer would reach the terminal as a control sequence. JSON structure is
+/// ASCII, so every C1 character in the text sits inside a string and its
+/// `\u00XX` escape decodes to the same value.
+pub fn printable_json<T: Serialize + ?Sized>(value: &T) -> serde_json::Result<String> {
+    let text = serde_json::to_string(value)?;
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if ('\u{80}'..='\u{9f}').contains(&character) {
+            escaped.push_str(&format!("\\u{:04x}", u32::from(character)));
+        } else {
+            escaped.push(character);
+        }
+    }
+    Ok(escaped)
+}
+
 pub fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -839,5 +859,30 @@ mod consumer_manifest_tests {
         invalid["tool_classification"]["codex"]["request_permissions"]["question_mode"] =
             Value::from("blocking");
         assert!(parse_manifest(&invalid.to_string()).is_err());
+    }
+
+    #[test]
+    fn manifest_names_refuse_c1_controls() {
+        let baseline: Value = serde_json::from_str(EMBEDDED_MANIFEST).unwrap();
+        let mut hook = baseline.clone();
+        hook["native_hooks"]["claude"]["Stop"]["native_event"] = Value::from("Stop\u{9b}");
+        assert!(parse_manifest(&hook.to_string()).is_err());
+        let mut tool = baseline;
+        let class = tool["tool_classification"]["codex"]["request_permissions"].clone();
+        tool["tool_classification"]["codex"]["request\u{85}permissions"] = class;
+        assert!(parse_manifest(&tool.to_string()).is_err());
+        assert!(free_of_control("caf\u{e9}\u{a0}"));
+    }
+
+    #[test]
+    fn printable_json_escapes_c1_and_keeps_the_value() {
+        let value = serde_json::json!({"cwd": "/tmp/a\u{9b}2J\u{85}b\u{a0}c", "n": 1});
+        let text = printable_json(&value).unwrap();
+        assert!(!text.chars().any(char::is_control));
+        assert!(text.contains("\\u009b2J\\u0085b"));
+        assert!(text.contains('\u{a0}'));
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), value);
+        let plain = serde_json::json!({"cwd": "/tmp/plain"});
+        assert_eq!(printable_json(&plain).unwrap(), plain.to_string());
     }
 }

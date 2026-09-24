@@ -8,7 +8,7 @@ use crate::observations::{
     Actor, AttemptOutcome, ElicitationMode, LifecycleObservation, NativeCorrelation, NoticeSubtype,
     ObservationBody, QuestionMode, ResultSurface, SelectionAction, classify_tool,
 };
-use crate::protocol::{AttentionError, Diagnostic, manifest};
+use crate::protocol::{AttentionError, Diagnostic, free_of_control, manifest};
 
 // Which agents exist is a contract fact — the manifest declares the same set
 // as `enums.providers`, and `parse_manifest` checks the two agree.
@@ -197,12 +197,7 @@ fn safe_label(value: &Value, field: &str) -> std::result::Result<String, Diagnos
         )
         .diagnostic);
     };
-    if text.is_empty()
-        || text.len() > maximum
-        || text
-            .chars()
-            .any(|character| character < ' ' || character == '\u{7f}')
-    {
+    if text.is_empty() || text.len() > maximum || !free_of_control(text) {
         return Err(AttentionError::new(
             "record_invalid",
             format!("{field} is missing or too long"),
@@ -243,9 +238,7 @@ fn optional_path(payload: &Value, field: &str) -> std::result::Result<Option<Str
         .path_max_bytes;
     if path.is_empty()
         || path.len() > maximum
-        || path
-            .chars()
-            .any(|character| character < ' ' || character == '\u{7f}')
+        || !free_of_control(path)
         || !Path::new(path).is_absolute()
     {
         return Err(
@@ -270,9 +263,7 @@ fn environment_path(
             .map_err(|error| error.diagnostic)?
             .limits
             .path_max_bytes
-        || value
-            .chars()
-            .any(|character| character < ' ' || character == '\u{7f}')
+        || !free_of_control(value)
         || !Path::new(value).is_absolute()
     {
         return Err(

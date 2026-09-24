@@ -18,7 +18,7 @@ use crate::lifecycle::outcome::{
     AdmittedHook, BindingTarget, HookPersistence, HookScope, Persistence,
 };
 use crate::observations::{LifecycleSnapshot, ObservationPools};
-use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, manifest};
+use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, free_of_control, manifest};
 use crate::providers::{ProviderAction, ProviderEvent};
 use crate::records::{
     CommitPlan, PreparedRecordWrite, RecordIdentity, RecordRead, Replacement, commit_nested_with,
@@ -1004,12 +1004,7 @@ fn apply_observed_outputs_with(
 }
 
 fn safe_mark_text(value: &str, field: &str, maximum: usize) -> Result<()> {
-    if value.is_empty()
-        || value.len() > maximum
-        || value
-            .chars()
-            .any(|character| character < ' ' || character == '\u{7f}')
-    {
+    if value.is_empty() || value.len() > maximum || !free_of_control(value) {
         return Err(AttentionError::usage(format!("{field} is invalid")));
     }
     Ok(())

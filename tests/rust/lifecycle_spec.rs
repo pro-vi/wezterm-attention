@@ -33,6 +33,9 @@ mod pane_facts;
 #[path = "lifecycle_spec/consumer_recipes.rs"]
 mod consumer_recipes;
 
+#[path = "lifecycle_spec/untrusted_text.rs"]
+mod untrusted_text;
+
 struct Scratch(PathBuf);
 
 #[test]
