@@ -14,8 +14,9 @@ owners remain separate.
 The state root is `WEZTERM_ATTENTION_DIR` when it is set and non-empty, else
 `$XDG_STATE_HOME/wezterm-attention` when `XDG_STATE_HOME` is set, non-empty and absolute, else
 `$HOME/.local/state/wezterm-attention`. The Rust writer, the plugin and the Pi extension use this
-one order. A relative `WEZTERM_ATTENTION_DIR` is an error to the writer; the plugin and Pi ignore it
-with a warning and fall through to the next rule.
+one order. A relative `WEZTERM_ATTENTION_DIR`, or one longer than 4096 bytes or holding a control
+character, is an error to the writer; the plugin and Pi ignore it with a warning and fall through
+to the next rule. An `XDG_STATE_HOME` that breaks the same rule is skipped by all three, silently.
 
 A text field is safe only when it contains no control character: nothing in U+0000–U+001F, U+007F
 or U+0080–U+009F (Rust's `char::is_control`). The Rust writer, `plugin/protocol.lua` and the

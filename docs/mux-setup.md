@@ -78,6 +78,11 @@ terminal it fails with `unsafe_tty: stdin is not a terminal` and the helper leav
 helper returns that failure and the `&&` stops the agent from starting, which is what the `&&` is
 for.
 
+After any command line other than one holding only `wezterm_attention_claim`, the zsh prompt hook
+unsets `WEZTERM_ATTENTION_LAUNCH_ID`, so a program started after the agent exits does not inherit
+its identity. Claiming on one line and starting the agent on the next still works: the line that
+held only the claim keeps the ID for the next one.
+
 The danger is a wrapper that calls the helper and launches the agent regardless of its status. There
 the agent runs with no identity, every callback from that run is discarded, and nothing in the
 agent's own output says so.

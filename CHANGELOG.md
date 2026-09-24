@@ -48,6 +48,10 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - A prompt tints the pane `thinking` straight away, instead of waiting for the first tool call.
 - `thinking` from v2 records animates like the v1 spinner.
 - The tab text published in `tabs/*.json` always shows the spinner's first frame, so a spinning tab does not rewrite that file every second. The bar on screen still animates.
+- Tab text is repaired before it is drawn or published: ill-formed UTF-8 from a title formatter becomes U+FFFD, and control characters are removed, so every window stays readable through `attention tabs`.
+- In zsh, the prompt hook drops `WEZTERM_ATTENTION_LAUNCH_ID` once a claimed agent has exited, as bash already did.
+- Alt+B clear-all never loses a review: a review written while the clear ran is kept, and a review a crash left moved aside is put back on the next poll.
+- The plugin removes a tab-order file it superseded only while the file still holds the bytes this process wrote.
 - A Claude turn that ends on an API error (`StopFailure`) shows `notify` instead of staying on `thinking` until its 30-minute timeout. A Codex `Interrupt` clears the activity.
 - A sub-agent waiting for permission raises `notify` on its pane.
 - Forked Claude and Codex sessions (`SessionStart` with source `fork`) are bound.
