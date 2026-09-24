@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -410,9 +410,20 @@ pub fn mkdir_private(path: &Path) -> Result<()> {
         })?;
     }
     for directory in missing.iter().rev() {
-        fs::create_dir(directory).map_err(|_| {
-            AttentionError::new("state_permissions", "state directory could not be created")
-        })?;
+        // Created private rather than chmod-ed afterwards, so it is never
+        // briefly open to the umask. Another writer creating the same
+        // directory first, as two claims after a mux restart do, is success.
+        match DirBuilder::new().mode(0o700).create(directory) {
+            Ok(()) => {}
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AlreadyExists && directory.is_dir() => {}
+            Err(_) => {
+                return Err(AttentionError::new(
+                    "state_permissions",
+                    "state directory could not be created",
+                ));
+            }
+        }
         fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).map_err(|_| {
             AttentionError::new(
                 "state_permissions",
@@ -897,6 +908,38 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{PreparedRecordWrite, state_root, sync_parent_directory_with};
+
+    #[test]
+    fn concurrent_writers_creating_one_directory_all_succeed() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Barrier};
+        let root = std::env::temp_dir().join(format!("attention-mkdir-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        for round in 0..40 {
+            let target = root.join(format!("{round}/panes/42/launches"));
+            let barrier = Arc::new(Barrier::new(8));
+            let writers: Vec<_> = (0..8)
+                .map(|_| {
+                    let (target, barrier) = (target.clone(), barrier.clone());
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        super::mkdir_private(&target)
+                    })
+                })
+                .collect();
+            for writer in writers {
+                writer
+                    .join()
+                    .unwrap()
+                    .expect("a racing writer still succeeds");
+            }
+            for directory in [root.join(round.to_string()), target] {
+                let mode = std::fs::metadata(directory).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o700);
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn state_root_skips_empty_and_relative_locations_it_may_ignore() {
