@@ -300,11 +300,13 @@ fn reader_confidence(current: bool, presence: &str) -> ReaderConfidence {
 }
 
 /// Whether a row takes part in the provider-session conflict check. Only live
-/// claims compete: a binding that has ended, or whose pane is verified absent,
-/// is history. A session resumed in a new pane leaves one behind every time,
-/// and calling that a conflict hides the pane the session actually runs in.
-fn competes(ended: bool, presence: &str) -> bool {
-    !ended && presence != "verified_absent"
+/// claims compete: a binding that has ended, whose pane is verified absent, or
+/// whose server is gone (a new server owns its socket path, or the path is
+/// gone) is history. A session resumed in a new pane, or under a restarted
+/// mux, leaves one behind every time, and calling that a conflict hides the
+/// pane the session actually runs in.
+fn competes(ended: bool, server_gone: bool, presence: &str) -> bool {
+    !ended && !server_gone && presence != "verified_absent"
 }
 
 impl PaneFacts {
@@ -766,8 +768,10 @@ fn read_pane_facts_once(
     // would not have matched, so the row is the pane's current one.
     let confidence = reader_confidence(true, &presence);
     let ended = end.availability == A::Present;
+    // The socket was checked above to carry this incarnation, so its server
+    // is the one that owns the socket.
     let conflicted = binding.record.as_ref().is_some_and(|record| {
-        competes(ended, &presence)
+        competes(ended, false, &presence)
             && session_live_elsewhere(
                 root,
                 address,
@@ -1417,11 +1421,23 @@ pub(crate) fn pane_presence(
     processes: Option<&dyn ProcessProbe>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> String {
+    reader_presence(root, address, panes, processes, diagnostics).0
+}
+
+/// A pane's presence as a reader reports it, and whether the server that
+/// held its incarnation is gone, which the report alone does not say.
+fn reader_presence(
+    root: &Path,
+    address: &PaneAddress,
+    panes: Option<&dyn PaneLister>,
+    processes: Option<&dyn ProcessProbe>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> (String, bool) {
     match pane_evidence(root, address, panes, processes, diagnostics) {
-        PaneEvidence::Observed(presence) => presence,
+        PaneEvidence::Observed(presence) => (presence, false),
         PaneEvidence::IncarnationEnded { diagnostic, .. } => {
             diagnostics.push(diagnostic);
-            "unavailable".to_owned()
+            ("unavailable".to_owned(), true)
         }
     }
 }
@@ -1554,9 +1570,12 @@ fn session_live_elsewhere(
         {
             continue;
         }
+        let (presence, server_gone) =
+            reader_presence(root, &other, panes, processes, &mut Vec::new());
         if competes(
             binding_ended(&path, &binding, &identity),
-            &pane_presence(root, &other, panes, processes, &mut Vec::new()),
+            server_gone,
+            &presence,
         ) {
             return true;
         }
@@ -1955,8 +1974,9 @@ fn assemble_bindings(
         );
     }
     let mut admitted_rows = Vec::new();
+    let mut servers_gone = Vec::new();
     let mut ignored = Vec::new();
-    let mut presence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
+    let mut presence_cache: BTreeMap<(String, String, String), (String, bool)> = BTreeMap::new();
     let mut claim_cache: BTreeMap<PathBuf, (Option<Value>, Option<String>)> = BTreeMap::new();
     for (path, binding, admitted) in assessed {
         let diagnostics = if admitted {
@@ -2063,12 +2083,12 @@ fn assemble_bindings(
             address.incarnation_id.clone(),
             address.pane_id.clone(),
         );
-        let presence = if let Some(cached) = presence_cache.get(&presence_key) {
+        let (presence, server_gone) = if let Some(cached) = presence_cache.get(&presence_key) {
             cached.clone()
         } else {
             let before_presence = diagnostics.len();
-            let observed = pane_presence(root, &address, panes, processes, diagnostics);
-            if typed && observed == "unavailable" && diagnostics.len() == before_presence {
+            let observed = reader_presence(root, &address, panes, processes, diagnostics);
+            if typed && observed.0 == "unavailable" && diagnostics.len() == before_presence {
                 diagnostics.push(diagnostic(
                     "probe_unavailable",
                     "selected binding presence is unavailable",
@@ -2115,10 +2135,15 @@ fn assemble_bindings(
             start_source: string(&binding, "start_source"),
         });
         admitted_rows.push(admitted);
+        servers_gone.push(server_gone);
     }
     let mut duplicates: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
     for (index, row) in rows.iter().enumerate() {
-        if !competes(row.binding_phase == "ended", &row.pane_presence) {
+        if !competes(
+            row.binding_phase == "ended",
+            servers_gone[index],
+            &row.pane_presence,
+        ) {
             continue;
         }
         duplicates

@@ -153,9 +153,11 @@ presence, reader confidence, and binding health. It never returns a resume comma
 their own argv from the closed provider and session ID fields.
 
 `conflicted` health and the `binding_conflict` diagnostic mean two live claims on one provider
-session at different pane addresses. A binding that has ended, or whose pane is verified absent, is
-history and is left out of that comparison: resuming a session in a new pane leaves one behind every
-time, and marking the live row conflicted would hide the pane the session now runs in.
+session at different pane addresses. A binding that has ended, whose pane is verified absent, or
+whose mux server is gone (a new server owns its socket path, or the socket path no longer exists)
+is history and is left out of that comparison: resuming a session in a new pane, or after the mux
+restarts, leaves one behind every time, and marking the live row conflicted would hide the pane
+the session now runs in. Such a row still reports `pane_presence` `unavailable`.
 
 JSON responses contain `schema`, `command`, `status`, `complete`, `result`, and `diagnostics`.
 `bindings` also reports where its time went, in `result.timing_ms`: `pane_list` (inside `wezterm cli list`), `process_list` (inside the process probe) and `records` (the rest: finding and reading the records). It is on every answer, without a flag or threshold, so a slow call names its phase.
