@@ -350,12 +350,22 @@ pub struct CommitPlan<T> {
     pub private_dirs: Vec<PathBuf>,
 }
 
+/// The plugin and the Pi extension resolve the same root in the same order.
+/// An empty WEZTERM_ATTENTION_DIR counts as unset; any other value must be a
+/// safe absolute path. XDG_STATE_HOME is used only when it is one, because the
+/// XDG spec says a relative or empty value is to be ignored.
 pub fn state_root(env: &BTreeMap<String, String>) -> Result<PathBuf> {
-    if let Some(path) = env.get("WEZTERM_ATTENTION_DIR") {
+    if let Some(path) = env
+        .get("WEZTERM_ATTENTION_DIR")
+        .filter(|path| !path.is_empty())
+    {
         return absolute_path(path, "WEZTERM_ATTENTION_DIR");
     }
-    if let Some(path) = env.get("XDG_STATE_HOME") {
-        return Ok(absolute_path(path, "XDG_STATE_HOME")?.join("wezterm-attention"));
+    if let Some(path) = env
+        .get("XDG_STATE_HOME")
+        .and_then(|path| absolute_path(path, "XDG_STATE_HOME").ok())
+    {
+        return Ok(path.join("wezterm-attention"));
     }
     let home = env
         .get("HOME")
@@ -884,7 +894,44 @@ mod tests {
     use std::io;
     use std::path::Path;
 
-    use super::{PreparedRecordWrite, sync_parent_directory_with};
+    use std::collections::BTreeMap;
+
+    use super::{PreparedRecordWrite, state_root, sync_parent_directory_with};
+
+    #[test]
+    fn state_root_skips_empty_and_relative_locations_it_may_ignore() {
+        let env = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect()
+        };
+        let home = [("HOME", "/home/a")];
+        let fallback = Path::new("/home/a/.local/state/wezterm-attention");
+        assert_eq!(state_root(&env(&home)).unwrap(), fallback);
+        for ignored in ["", "relative/state"] {
+            let mut pairs = home.to_vec();
+            pairs.push(("XDG_STATE_HOME", ignored));
+            assert_eq!(state_root(&env(&pairs)).unwrap(), fallback, "{ignored:?}");
+        }
+        let mut pairs = home.to_vec();
+        pairs.push(("XDG_STATE_HOME", "/xdg"));
+        assert_eq!(
+            state_root(&env(&pairs)).unwrap(),
+            Path::new("/xdg/wezterm-attention")
+        );
+        pairs.push(("WEZTERM_ATTENTION_DIR", ""));
+        assert_eq!(
+            state_root(&env(&pairs)).unwrap(),
+            Path::new("/xdg/wezterm-attention")
+        );
+        pairs.pop();
+        pairs.push(("WEZTERM_ATTENTION_DIR", "/explicit"));
+        assert_eq!(state_root(&env(&pairs)).unwrap(), Path::new("/explicit"));
+        pairs.pop();
+        pairs.push(("WEZTERM_ATTENTION_DIR", "relative"));
+        assert!(state_root(&env(&pairs)).is_err());
+    }
 
     #[test]
     fn prepared_record_freezes_validated_bytes_before_filesystem_effects() {
