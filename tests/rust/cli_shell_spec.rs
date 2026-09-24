@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 #[path = "support/executables.rs"]
 mod executables;
+#[path = "support/trusted_scratch.rs"]
+mod trusted_scratch;
 
 struct Scratch(PathBuf);
 
@@ -857,7 +859,7 @@ fn tabs_cli_checks_exact_source_without_autostart_or_global_failure() {
         let output = Command::new(env!("CARGO_BIN_EXE_attention"))
             .env_clear()
             .env("WEZTERM_ATTENTION_DIR", &state)
-            .env("WEZTERM_EXECUTABLE", &executable)
+            .env("PATH", &scratch.0)
             .env("WEZTERM_UNIX_SOCKET", "/wrong/caller.sock")
             .env("UNRELATED_TEST_VALUE", "must-not-cross")
             .arg("tabs")
@@ -1114,7 +1116,7 @@ return config
     let checked = Command::new(env!("CARGO_BIN_EXE_attention"))
         .env_clear()
         .env("WEZTERM_ATTENTION_DIR", &snapshots)
-        .env("WEZTERM_EXECUTABLE", &wezterm)
+        .env("PATH", wezterm.parent().expect("wezterm directory"))
         .arg("tabs")
         .output()
         .unwrap();
@@ -1191,4 +1193,104 @@ fn a_variable_that_is_not_utf8_is_skipped_instead_of_stopping_every_command() {
         .expect("run hook");
     assert_eq!(hook.status.code(), Some(0), "{hook:?}");
     assert!(!String::from_utf8_lossy(&hook.stderr).contains("panicked"));
+}
+
+/// Run `hooks publish --socket` for a disposable socket with only `extra` in
+/// the environment besides the state root, and return the output and how
+/// long it took.
+fn publish_socket_with(extra: &[(&str, &Path)]) -> (std::process::Output, Duration) {
+    let scratch = Scratch::new();
+    let socket = scratch.0.join("mux.sock");
+    let _listener = UnixListener::bind(&socket).expect("bind disposable socket");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_attention"));
+    command
+        .args(["hooks", "publish", "--json", "--socket"])
+        .arg(&socket)
+        .env_clear()
+        .env("HOME", &scratch.0)
+        .env("WEZTERM_ATTENTION_DIR", scratch.0.join("state"))
+        .env("PATH", "/usr/bin:/bin");
+    for (name, value) in extra {
+        command.env(name, value);
+    }
+    let started = Instant::now();
+    let output = command.output().expect("run hooks publish");
+    (output, started.elapsed())
+}
+
+#[test]
+fn a_pane_listing_runs_the_cli_beside_the_mux_server_and_never_starts_a_server() {
+    let installed = trusted_scratch::TrustedScratch::new();
+    let server_ran = installed.0.join("server-ran");
+    let arguments = installed.0.join("arguments");
+    let server = installed.executable(
+        "wezterm-mux-server",
+        &format!("printf ran > '{}'", server_ran.display()),
+    );
+    installed.executable(
+        "wezterm",
+        &format!(
+            "printf '%s' \"$*\" > '{}'\nprintf '[]'",
+            arguments.display()
+        ),
+    );
+    let (output, _) = publish_socket_with(&[("WEZTERM_EXECUTABLE", &server)]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(!server_ran.exists(), "the mux server must never be run");
+    assert_eq!(
+        fs::read_to_string(&arguments).expect("the CLI ran"),
+        "--skip-config cli --prefer-mux --no-auto-start list --format json"
+    );
+}
+
+#[test]
+fn a_failed_pane_listing_names_the_executable_and_how_it_failed() {
+    let installed = trusted_scratch::TrustedScratch::new();
+    let cli = installed.executable("wezterm", "exit 7");
+    let (output, _) = publish_socket_with(&[("WEZTERM_EXECUTABLE_DIR", &installed.0)]);
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("error envelope");
+    let message = envelope["diagnostics"][0]["message"]
+        .as_str()
+        .expect("message");
+    assert_eq!(envelope["diagnostics"][0]["code"], "realm_unavailable");
+    assert_eq!(
+        message,
+        format!(
+            "wezterm cli list via {} exited with status 7",
+            cli.display()
+        )
+    );
+}
+
+#[test]
+fn a_descendant_holding_the_listing_output_open_is_killed_at_the_deadline() {
+    let installed = trusted_scratch::TrustedScratch::new();
+    let holder = installed.0.join("holder");
+    let cli = installed.executable(
+        "wezterm",
+        &format!(
+            "/bin/sleep 30 &\nprintf '%s' $! > '{}'\nexit 0",
+            holder.display()
+        ),
+    );
+    let (output, elapsed) = publish_socket_with(&[("WEZTERM_EXECUTABLE_DIR", &installed.0)]);
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the listing deadline did not bound a held pipe: {elapsed:?}"
+    );
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("error envelope");
+    assert_eq!(
+        envelope["diagnostics"][0]["message"],
+        format!(
+            "wezterm cli list via {} timed out after 5000 ms",
+            cli.display()
+        )
+    );
+    let pid = fs::read_to_string(&holder).expect("holder pid");
+    let alive = Command::new("/bin/kill")
+        .args(["-0", pid.trim()])
+        .stderr(Stdio::null())
+        .status()
+        .expect("probe holder");
+    assert!(!alive.success(), "the descendant outlived the deadline");
 }

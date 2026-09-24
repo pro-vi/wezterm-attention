@@ -43,7 +43,7 @@ pub struct ExistingWeztermWindowLister;
 
 impl GuiWindowLister for ExistingWeztermWindowLister {
     fn list_windows(&self, socket_path: &str) -> Result<BTreeSet<u64>> {
-        parse_gui_window_ids(&list_wezterm_inventory(socket_path, true)?)
+        parse_gui_window_ids(&list_wezterm_inventory(socket_path)?)
     }
 }
 
@@ -323,10 +323,13 @@ fn ttyname(fd: libc::c_int) -> Option<Result<String>> {
     )
 }
 
+/// Lists a mux's panes through `wezterm cli list`. It never starts a server.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WeztermPaneLister;
 
-/// Explicit read-only transport; an unavailable server must not be started.
+/// The same lister as [`WeztermPaneLister`]. It was once the only one that
+/// refused to start a server; every listing refuses now, and the name stays
+/// for the callers that use it.
 pub struct ExistingWeztermPaneLister;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -503,94 +506,188 @@ pub fn parse_pane_rows(bytes: &[u8]) -> Result<Vec<PaneRow>> {
 
 impl PaneLister for WeztermPaneLister {
     fn list(&self, socket_path: &str) -> Result<Vec<PaneRow>> {
-        list_wezterm_panes(socket_path, false)
+        parse_pane_rows(&list_wezterm_inventory(socket_path)?)
     }
 }
 
 impl PaneLister for ExistingWeztermPaneLister {
     fn list(&self, socket_path: &str) -> Result<Vec<PaneRow>> {
-        list_wezterm_panes(socket_path, true)
+        WeztermPaneLister.list(socket_path)
     }
 }
 
-fn list_wezterm_panes(socket_path: &str, no_auto_start: bool) -> Result<Vec<PaneRow>> {
-    parse_pane_rows(&list_wezterm_inventory(socket_path, no_auto_start)?)
-}
+/// How long any one child this crate runs may take, output included.
+const CHILD_DEADLINE: Duration = Duration::from_secs(5);
 
-fn list_wezterm_inventory(socket_path: &str, no_auto_start: bool) -> Result<Vec<u8>> {
+fn list_wezterm_inventory(socket_path: &str) -> Result<Vec<u8>> {
     let executable = wezterm_executable()?;
-    let mut command = Command::new(executable);
-    command.args(["--skip-config", "cli", "--prefer-mux"]);
-    if no_auto_start {
-        command.arg("--no-auto-start");
-    }
-    let mut child = command
-        .args(["list", "--format", "json"])
+    let maximum = manifest()?.limits.max_json_bytes;
+    let mut command = Command::new(&executable);
+    // `--no-auto-start` on every call: without it a leftover socket with no
+    // server behind it makes the CLI retry for seconds and then start a mux
+    // server, so reading state would create a mux.
+    command
+        .args([
+            "--skip-config",
+            "cli",
+            "--prefer-mux",
+            "--no-auto-start",
+            "list",
+            "--format",
+            "json",
+        ])
         .env_clear()
-        .env("WEZTERM_UNIX_SOCKET", socket_path)
+        .env("WEZTERM_UNIX_SOCKET", socket_path);
+    run_bounded(&mut command, maximum, CHILD_DEADLINE).map_err(|failure| {
+        let code = match failure {
+            RunFailure::TooLarge => "record_invalid",
+            _ => "realm_unavailable",
+        };
+        AttentionError::new(
+            code,
+            format!(
+                "wezterm cli list via {} {}",
+                shown_path(&executable),
+                failure.describe()
+            ),
+        )
+    })
+}
+
+/// A path as a diagnostic prints it: control characters become `?`, so a
+/// path cannot restyle the terminal that reads the message.
+fn shown_path(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                '?'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+/// Why a bounded child run returned no output.
+#[derive(Clone, Copy, Debug)]
+enum RunFailure {
+    NotStarted,
+    TimedOut(Duration),
+    Exited(std::process::ExitStatus),
+    Unreadable,
+    TooLarge,
+}
+
+impl RunFailure {
+    fn describe(self) -> String {
+        use std::os::unix::process::ExitStatusExt;
+        match self {
+            Self::NotStarted => "could not be started".to_owned(),
+            Self::TimedOut(limit) => format!("timed out after {} ms", limit.as_millis()),
+            Self::Exited(status) => match (status.code(), status.signal()) {
+                (Some(code), _) => format!("exited with status {code}"),
+                (None, Some(signal)) => format!("was killed by signal {signal}"),
+                (None, None) => "exited abnormally".to_owned(),
+            },
+            Self::Unreadable => "output could not be read".to_owned(),
+            Self::TooLarge => "output exceeded its bound".to_owned(),
+        }
+    }
+}
+
+/// Run `command` with no stdin and no stderr, and return its stdout if it
+/// exits successfully within `limit` having written at most `maximum` bytes.
+///
+/// The child leads its own process group, and the whole group is killed when
+/// the deadline passes. Killing the child alone is not enough: a descendant
+/// that inherited stdout keeps the pipe open after the child is gone, and a
+/// reader waiting for end of file would wait as long as that descendant
+/// lives. The reader is never joined for the same reason; it only reports
+/// back through a channel.
+fn run_bounded(
+    command: &mut Command,
+    maximum: usize,
+    limit: Duration,
+) -> std::result::Result<Vec<u8>, RunFailure> {
+    use std::os::unix::process::CommandExt;
+    use std::sync::mpsc::{TryRecvError, channel};
+    let deadline = Instant::now() + limit;
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .process_group(0)
         .spawn()
-        .map_err(|_| AttentionError::new("realm_unavailable", "wezterm cli list failed"))?;
-    let stdout = child.stdout.take().ok_or_else(|| {
-        AttentionError::new(
-            "realm_unavailable",
-            "wezterm cli list stdout is unavailable",
-        )
-    })?;
-    let maximum = manifest()?.limits.max_json_bytes;
-    let reader = thread::spawn(move || {
+        .map_err(|_| RunFailure::NotStarted)?;
+    let Some(stdout) = child.stdout.take() else {
+        kill_group(&mut child);
+        return Err(RunFailure::Unreadable);
+    };
+    let (sender, receiver) = channel();
+    thread::spawn(move || {
         let mut bytes = Vec::new();
-        stdout
-            .take((maximum + 1) as u64)
+        let read = stdout
+            .take(maximum as u64 + 1)
             .read_to_end(&mut bytes)
-            .map(|_| bytes)
+            .map(|_| bytes);
+        let _ = sender.send(read);
     });
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = reader.join();
-                return Err(AttentionError::new(
-                    "realm_unavailable",
-                    "wezterm cli list timed out",
-                ));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = reader.join();
-                return Err(AttentionError::new(
-                    "realm_unavailable",
-                    "wezterm cli list failed",
-                ));
+    let mut output = None;
+    let mut status = None;
+    loop {
+        if output.is_none() {
+            match receiver.try_recv() {
+                Ok(Ok(bytes)) if bytes.len() > maximum => {
+                    kill_group(&mut child);
+                    return Err(RunFailure::TooLarge);
+                }
+                Ok(Ok(bytes)) => output = Some(bytes),
+                Ok(Err(_)) | Err(TryRecvError::Disconnected) => {
+                    kill_group(&mut child);
+                    return Err(RunFailure::Unreadable);
+                }
+                Err(TryRecvError::Empty) => {}
             }
         }
-    };
-    let bytes = reader
-        .join()
-        .map_err(|_| AttentionError::new("realm_unavailable", "wezterm cli list reader failed"))?
-        .map_err(|_| {
-            AttentionError::new("realm_unavailable", "wezterm cli list could not be read")
-        })?;
-    if bytes.len() > maximum {
-        return Err(AttentionError::new(
-            "record_invalid",
-            "wezterm cli list exceeded its JSON bound",
-        ));
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(exited) => status = exited,
+                Err(_) => {
+                    kill_group(&mut child);
+                    return Err(RunFailure::Unreadable);
+                }
+            }
+        }
+        match status {
+            Some(exited) if !exited.success() => {
+                kill_group(&mut child);
+                return Err(RunFailure::Exited(exited));
+            }
+            Some(_) if output.is_some() => return output.ok_or(RunFailure::Unreadable),
+            _ => {}
+        }
+        if Instant::now() >= deadline {
+            kill_group(&mut child);
+            return Err(RunFailure::TimedOut(limit));
+        }
+        thread::sleep(Duration::from_millis(5));
     }
-    if !status.success() {
-        return Err(AttentionError::new(
-            "realm_unavailable",
-            "wezterm cli list failed",
-        ));
+}
+
+/// Kill every process in the group `child` leads, then reap `child`.
+///
+/// The group id is the child's pid, and it stays reserved while any member
+/// lives, so this reaches a descendant even after the child was reaped.
+fn kill_group(child: &mut std::process::Child) {
+    if let Ok(group) = libc::pid_t::try_from(child.id()) {
+        unsafe {
+            libc::killpg(group, libc::SIGKILL);
+        }
     }
-    Ok(bytes)
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 impl ProcessProbe for SystemProcessProbe {
