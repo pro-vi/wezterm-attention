@@ -1672,3 +1672,6 @@ fn a_present_row_from_an_incomplete_bindings_answer_inspects_completely() {
 
 #[path = "maintenance_spec/tab_orders.rs"]
 mod tab_orders;
+
+#[path = "maintenance_spec/row_agreement.rs"]
+mod row_agreement;

@@ -159,6 +159,17 @@ impl RecordFacet {
                 | RecordAvailability::Unsupported
         )
     }
+    /// The diagnostic code of a failed read, or None when the read did not fail.
+    fn failure_code(&self) -> Option<&str> {
+        if !self.failed() {
+            return None;
+        }
+        Some(
+            self.diagnostics
+                .first()
+                .map_or("record_invalid", |diagnostic| diagnostic.code.as_str()),
+        )
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -238,11 +249,71 @@ pub enum BindingHealth {
     Conflicted,
 }
 
+impl BindingHealth {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Invalid => "invalid",
+            Self::FutureSchema => "future_schema",
+            Self::Conflicted => "conflicted",
+        }
+    }
+}
+
+impl ReaderConfidence {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::Unconfirmed => "unconfirmed",
+        }
+    }
+}
+
+/// A binding's health, one rule for `bindings` and `inspect` so a row reads
+/// the same through both. It rests only on the records that make the row: the
+/// binding record, its end record, the pane's claim and the launch's
+/// current-binding pointer, the first failed read deciding, and on whether the
+/// provider session is live at another pane address, which outranks them. An
+/// unreadable review, activity or child record is a diagnostic about that
+/// record, not about the binding.
+fn binding_health(failed_reads: [Option<&str>; 4], conflicted: bool) -> BindingHealth {
+    if conflicted {
+        return BindingHealth::Conflicted;
+    }
+    match failed_reads.into_iter().flatten().next() {
+        None => BindingHealth::Valid,
+        Some("future_schema") => BindingHealth::FutureSchema,
+        Some(_) => BindingHealth::Invalid,
+    }
+}
+
+/// A reader can act on a row when it is the pane's current binding and the
+/// pane was seen. The same rule for `bindings` and `inspect`.
+fn reader_confidence(current: bool, presence: &str) -> ReaderConfidence {
+    if current && presence == "present" {
+        ReaderConfidence::Confirmed
+    } else {
+        ReaderConfidence::Unconfirmed
+    }
+}
+
+/// Whether a row takes part in the provider-session conflict check. Only live
+/// claims compete: a binding that has ended, or whose pane is verified absent,
+/// is history. A session resumed in a new pane leaves one behind every time,
+/// and calling that a conflict hides the pane the session actually runs in.
+fn competes(ended: bool, presence: &str) -> bool {
+    !ended && presence != "verified_absent"
+}
+
 impl PaneFacts {
+    /// An answer with no row: the scope did not match, or a record that makes
+    /// the row could not be read. `failed` is that read's diagnostic code, if
+    /// one failed, and decides health by the rule a bindings row follows.
     fn unavailable(
         scope: &PaneScope,
         relation: ScopeRelation,
         diagnostics: Vec<Diagnostic>,
+        failed: Option<&str>,
     ) -> Self {
         Self {
             scope: scope.clone(),
@@ -250,11 +321,7 @@ impl PaneFacts {
             binding: None,
             pane_presence: PanePresence::Unavailable,
             reader_confidence: ReaderConfidence::Unconfirmed,
-            binding_health: if diagnostics.iter().any(|d| d.code == "future_schema") {
-                BindingHealth::FutureSchema
-            } else {
-                BindingHealth::Invalid
-            },
+            binding_health: binding_health([failed, None, None, None], false),
             activity: RecordFacet::empty(RecordAvailability::Unavailable),
             binding_end: RecordFacet::empty(RecordAvailability::Unavailable),
             children: EvidenceCollection::empty(RecordAvailability::Unavailable),
@@ -331,6 +398,7 @@ pub fn read_pane_facts_with_ports(
             scope,
             ScopeRelation::Unavailable,
             diagnostics,
+            None,
         ));
     };
     let check_socket = || -> Result<()> {
@@ -352,6 +420,7 @@ pub fn read_pane_facts_with_ports(
             scope,
             ScopeRelation::Unavailable,
             vec![error.diagnostic],
+            None,
         ));
     }
     let pane = pane_path(root, address);
@@ -374,8 +443,9 @@ pub fn read_pane_facts_with_ports(
                     "claim is absent",
                 )]
             } else {
-                claim.diagnostics
+                claim.diagnostics.clone()
             },
+            claim.failure_code(),
         ));
     }
     if claim.record.as_ref().and_then(|r| r["launch_id"].as_str()) != Some(&scope.launch_id) {
@@ -387,6 +457,7 @@ pub fn read_pane_facts_with_ports(
                 "claim",
                 "requested launch is no longer current",
             )],
+            None,
         ));
     }
     let pointer = RecordFacet::read(
@@ -400,7 +471,8 @@ pub fn read_pane_facts_with_ports(
         return Ok(PaneFacts::unavailable(
             scope,
             ScopeRelation::Unavailable,
-            pointer.diagnostics,
+            pointer.diagnostics.clone(),
+            pointer.failure_code(),
         ));
     }
     let selected = pointer
@@ -420,6 +492,7 @@ pub fn read_pane_facts_with_ports(
                 "binding_selection",
                 "requested binding is no longer current",
             )],
+            None,
         ));
     }
     let selected_root = selected
@@ -448,10 +521,12 @@ pub fn read_pane_facts_with_ports(
                 "selected binding record is absent",
             ));
         }
+        let failed = binding.failure_code().unwrap_or("record_invalid");
         return Ok(PaneFacts::unavailable(
             scope,
             ScopeRelation::Matched,
             diagnostics,
+            Some(failed),
         ));
     }
     let now = match clock.unix_ns20() {
@@ -640,7 +715,6 @@ pub fn read_pane_facts_with_ports(
     ] {
         diagnostics.extend(items.clone());
     }
-    let base_diagnostics = diagnostics.len();
     diagnostics.extend(lifecycle.diagnostics.clone());
     let before_presence = diagnostics.len();
     let presence = presence_at_socket(socket, &address.pane_id, panes, processes, &mut diagnostics);
@@ -648,42 +722,32 @@ pub fn read_pane_facts_with_ports(
         item.context
             .insert("facet".into(), Value::String("pane_presence".into()));
     }
-    let base_unavailable = now.is_none()
-        || [&binding, &activity, &clear, &end, &ack]
-            .iter()
-            .any(|facet| facet.availability == A::Unavailable)
-        || children.availability == A::Unavailable
-        || review.availability == A::Unavailable;
-    let confidence = if presence == "present" && !base_unavailable {
-        "confirmed"
-    } else {
-        "unconfirmed"
-    };
-    let health = if diagnostics[..base_diagnostics]
-        .iter()
-        .any(|d| d.code == "future_schema")
-    {
-        "future_schema"
-    } else if base_diagnostics == 0 {
-        "valid"
-    } else {
-        "invalid"
-    };
+    // The claim names this launch and the pointer this binding, or the scope
+    // would not have matched, so the row is the pane's current one.
+    let confidence = reader_confidence(true, &presence);
+    let ended = end.availability == A::Present;
+    let conflicted = binding.record.as_ref().is_some_and(|record| {
+        competes(ended, &presence)
+            && session_live_elsewhere(
+                root,
+                address,
+                &string(record, "provider").unwrap_or_default(),
+                &string(record, "provider_session_id").unwrap_or_default(),
+                panes,
+                processes,
+            )
+    });
+    let health = binding_health([None, end.failure_code(), None, None], conflicted);
     let row = binding.record.as_ref().map(|record| BindingRow {
         address: address.clone(),
         launch_id: scope.launch_id.clone(),
         binding_id: selected.unwrap().into(),
         provider: string(record, "provider").unwrap(),
         provider_session_id: string(record, "provider_session_id").unwrap(),
-        binding_phase: if end.availability == A::Present {
-            "ended"
-        } else {
-            "active"
-        }
-        .into(),
+        binding_phase: if ended { "ended" } else { "active" }.into(),
         pane_presence: presence.clone(),
-        reader_confidence: confidence.into(),
-        binding_health: health.into(),
+        reader_confidence: confidence.as_str().into(),
+        binding_health: health.as_str().into(),
         current: true,
         expected_session_match: string(record, "expected_session_id")
             .map(|v| Some(v) == string(record, "provider_session_id")),
@@ -717,13 +781,21 @@ pub fn read_pane_facts_with_ports(
             scope,
             ScopeRelation::Unavailable,
             vec![error.diagnostic],
+            None,
         ));
     }
     if after_claim.failed() || after_pointer.failed() {
         return Ok(PaneFacts::unavailable(
             scope,
             ScopeRelation::Unavailable,
-            [after_claim.diagnostics, after_pointer.diagnostics].concat(),
+            [
+                after_claim.diagnostics.clone(),
+                after_pointer.diagnostics.clone(),
+            ]
+            .concat(),
+            after_claim
+                .failure_code()
+                .or_else(|| after_pointer.failure_code()),
         ));
     }
     if claim.record != after_claim.record || pointer.record != after_pointer.record {
@@ -735,6 +807,7 @@ pub fn read_pane_facts_with_ports(
                 "scope",
                 "scope changed or became unavailable during inspection",
             )],
+            None,
         ));
     }
     Ok(PaneFacts {
@@ -746,16 +819,8 @@ pub fn read_pane_facts_with_ports(
             "verified_absent" => PanePresence::VerifiedAbsent,
             _ => PanePresence::Unavailable,
         },
-        reader_confidence: if confidence == "confirmed" {
-            ReaderConfidence::Confirmed
-        } else {
-            ReaderConfidence::Unconfirmed
-        },
-        binding_health: match health {
-            "valid" => BindingHealth::Valid,
-            "future_schema" => BindingHealth::FutureSchema,
-            _ => BindingHealth::Invalid,
-        },
+        reader_confidence: confidence,
+        binding_health: health,
         activity,
         binding_end: end,
         children,
@@ -1280,6 +1345,69 @@ pub(crate) fn pane_presence(
     )
 }
 
+/// Whether another pane address holds a binding of this provider session that
+/// competes with the inspected one, by the rule `bindings` applies across its
+/// rows. Only same-session bindings have their end read and their pane probed,
+/// so a store with no rival costs a walk of binding records and no subprocess.
+fn session_live_elsewhere(
+    root: &Path,
+    address: &PaneAddress,
+    provider: &str,
+    session: &str,
+    panes: Option<&dyn PaneLister>,
+    processes: Option<&dyn ProcessProbe>,
+) -> bool {
+    let mut files = Vec::new();
+    collect_binding_files(&root.join("v2/realms"), &mut files);
+    for path in files {
+        let Some((realm_id, incarnation_id, pane_id, launch_id, binding_id)) =
+            path_identity(root, &path)
+        else {
+            continue;
+        };
+        let other = PaneAddress {
+            realm_id,
+            incarnation_id,
+            pane_id,
+        };
+        if other == *address {
+            continue;
+        }
+        let identity = RecordIdentity::binding(&other, &launch_id, &binding_id);
+        let Ok(Some(binding)) = read_record(&path, Some("binding"), &identity) else {
+            continue;
+        };
+        if string(&binding, "provider").as_deref() != Some(provider)
+            || string(&binding, "provider_session_id").as_deref() != Some(session)
+        {
+            continue;
+        }
+        if competes(
+            binding_ended(&path, &binding, &identity),
+            &pane_presence(root, &other, panes, processes, &mut Vec::new()),
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the end record beside a binding ends it. An end older than the
+/// binding belongs to an earlier binding of the same id; an unreadable one
+/// ends nothing.
+fn binding_ended(binding_path: &Path, binding: &Value, identity: &RecordIdentity) -> bool {
+    let order = string(binding, "observed_mono_ns").unwrap_or_default();
+    binding_path
+        .parent()
+        .and_then(|dir| {
+            read_record(&dir.join("end.json"), Some("binding_end"), identity)
+                .ok()
+                .flatten()
+        })
+        .and_then(|end| string(&end, "observed_mono_ns"))
+        .is_some_and(|ended| ended >= order)
+}
+
 fn presence_at_socket(
     socket_path: &str,
     pane_id: &str,
@@ -1602,11 +1730,12 @@ fn assemble_bindings(
             presence_cache.insert(presence_key, observed.clone());
             observed
         };
-        let binding_health = end_health
-            .map(str::to_owned)
-            .or(claim_health)
-            .or_else(|| pointer_health.map(str::to_owned))
-            .unwrap_or_else(|| "valid".to_owned());
+        let binding_health = binding_health(
+            [None, end_health, claim_health.as_deref(), pointer_health],
+            false,
+        )
+        .as_str()
+        .to_owned();
         rows.push(BindingRow {
             address,
             launch_id,
@@ -1615,12 +1744,7 @@ fn assemble_bindings(
             provider_session_id: string(&binding, "provider_session_id").unwrap_or_default(),
             binding_phase: if ended { "ended" } else { "active" }.to_owned(),
             pane_presence: presence.clone(),
-            reader_confidence: if current && presence == "present" {
-                "confirmed"
-            } else {
-                "unconfirmed"
-            }
-            .to_owned(),
+            reader_confidence: reader_confidence(current, &presence).as_str().to_owned(),
             binding_health,
             current,
             expected_session_match,
@@ -1632,13 +1756,9 @@ fn assemble_bindings(
             start_source: string(&binding, "start_source"),
         });
     }
-    // Only live claims compete. A binding that has ended, or whose pane is
-    // verified absent, is history: a session resumed in a new pane leaves one
-    // behind every time, and calling that a conflict hides the pane the session
-    // actually runs in.
     let mut duplicates: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
     for (index, row) in rows.iter().enumerate() {
-        if row.binding_phase == "ended" || row.pane_presence == "verified_absent" {
+        if !competes(row.binding_phase == "ended", &row.pane_presence) {
             continue;
         }
         duplicates
@@ -1656,7 +1776,7 @@ fn assemble_bindings(
             .collect();
         if addresses.len() > 1 {
             for index in indices {
-                rows[*index].binding_health = "conflicted".to_owned();
+                rows[*index].binding_health = BindingHealth::Conflicted.as_str().to_owned();
             }
             diagnostics.push(diagnostic(
                 "binding_conflict",
