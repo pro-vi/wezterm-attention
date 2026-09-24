@@ -14,8 +14,8 @@ use crate::protocol::{
     AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, manifest, sha256_hex,
 };
 use crate::query::{
-    FileStamp, PaneEvidence, ProbeOncePerAssembly, collect_state_files, pane_evidence,
-    pane_presence, read_bindings_with_ports, read_tab_publications,
+    FileStamp, ListOncePerSocket, PaneEvidence, ProbeOncePerAssembly, collect_state_files,
+    pane_evidence, pane_presence, read_bindings_with_ports, read_tab_publications,
 };
 use crate::records::{
     CommitPlan, RecordIdentity, Replacement, commit_nested_with, launch_path, pane_path,
@@ -1693,6 +1693,18 @@ pub fn sweep(
     let now = clock.unix_ns20()?;
     ns20(&observation, "record_invalid")?;
     ns20(&now, "record_invalid")?;
+    // A preview decides nothing, so one pane listing per socket and one
+    // process listing answer all its steps. An apply acts on each answer and
+    // takes a fresh look for each decision.
+    let listed_once = (!apply).then(|| ListOncePerSocket::new(panes));
+    let probed_once = processes.filter(|_| !apply).map(ProbeOncePerAssembly::new);
+    let panes = listed_once
+        .as_ref()
+        .map_or(panes, |lister| lister as &dyn PaneLister);
+    let processes = probed_once
+        .as_ref()
+        .map(|probe| probe as &dyn ProcessProbe)
+        .or(processes);
     let mut details = Vec::new();
     let mut diagnostics = Vec::new();
     let files = binding_files(root, &mut diagnostics);

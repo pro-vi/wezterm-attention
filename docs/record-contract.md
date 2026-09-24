@@ -196,8 +196,9 @@ Process-probe failure is unavailable evidence, not absence. One failed process l
 every pane of that query as unavailable; it is not retried pane by pane, so a query waits on at
 most one pane listing per mux socket and one process listing. A realm-wide `bindings` asks its
 sockets in parallel, so it waits about as long as the slowest one, bounded by the per-listing
-deadline. Sweep probes a pane before taking that pane's locks, so hooks are not held up behind a
-slow mux.
+deadline. A sweep preview and `doctor` do the same. A sweep apply looks again for each pane it
+decides on, and probes it before taking that pane's locks, so hooks are not held up behind a slow
+mux.
 
 The process probe reads environments, never command-line arguments. On macOS it reads each of
 this user's processes' environment with `KERN_PROCARGS2`; on Linux it reads `/proc/<pid>/environ`

@@ -275,6 +275,49 @@ fn a_closed_panes_tree_is_removed_only_by_apply_after_two_observations() {
     assert_eq!(panes.asked_under_lock.load(Ordering::SeqCst), 0);
 }
 
+/// A preview decides nothing, so every step it takes is answered from one
+/// pane listing per socket and one process listing: here the tab order and
+/// the old pane's retention both ask about pane 42. An apply takes a fresh
+/// look for each decision.
+#[test]
+fn a_preview_lists_each_socket_and_the_processes_once() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    end_long_ago(&setup);
+    let (address, _) = pane_address(&setup.env).expect("address");
+    let marker = format!("v2:{}:{}:42", address.realm_id, address.incarnation_id);
+    write_tab_order(&setup.root(), 7, &[&marker]);
+    let count = |apply: bool, operation: Option<&str>| {
+        let panes = LockCheckingPanes::for_setup(&setup);
+        let processes = super::doctor_probes::CountingListing::new();
+        let (result, _) = sweep(
+            &setup.root(),
+            None,
+            apply,
+            operation,
+            &setup.clock,
+            &panes,
+            Some(&processes),
+        )
+        .expect("sweep");
+        assert_eq!(
+            actions(&result.details, "pane_retention"),
+            [&json!("first_absence")]
+        );
+        (
+            panes.asked.load(Ordering::SeqCst),
+            processes.listings.load(Ordering::SeqCst)
+                + processes.single_looks.load(Ordering::SeqCst),
+        )
+    };
+    assert_eq!(count(false, None), (1, 1), "a preview lists once");
+    assert_eq!(
+        count(true, Some(OP_1)),
+        (2, 2),
+        "an apply looks per decision"
+    );
+}
+
 #[test]
 fn a_present_pane_is_never_pruned_however_old_its_binding() {
     let setup = Setup::new();

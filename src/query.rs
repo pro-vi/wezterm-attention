@@ -1718,15 +1718,17 @@ pub fn read_bindings_timed(
 /// list, and each miss used to spawn a fresh `wezterm cli list` subprocess --
 /// about 20 ms per bound pane on top of a 5 ms floor, paid on every call.
 /// The answers are memoised for the lifetime of one assembly and no longer, so
-/// a later call still observes panes that opened or closed in between.
-struct ListOncePerSocket<'a> {
+/// a later call still observes panes that opened or closed in between. A sweep
+/// preview shares one across its steps; an apply does not, for the reason
+/// given at [`ProbeOncePerAssembly`].
+pub(crate) struct ListOncePerSocket<'a> {
     inner: &'a dyn PaneLister,
     listed: Mutex<BTreeMap<String, Result<Vec<crate::wezterm::PaneRow>>>>,
     spent: Mutex<Duration>,
 }
 
 impl<'a> ListOncePerSocket<'a> {
-    fn new(inner: &'a dyn PaneLister) -> Self {
+    pub(crate) fn new(inner: &'a dyn PaneLister) -> Self {
         Self {
             inner,
             listed: Mutex::new(BTreeMap::new()),
@@ -1789,15 +1791,15 @@ impl PaneLister for ListOncePerSocket<'_> {
 /// One process listing per assembly, rather than one per absent pane.
 ///
 /// A bound pane missing from the mux listing is looked for among live
-/// processes, and each look used to spawn its own `ps` over every process on
-/// the machine -- about 70 ms each, so a store holding forty ended panes cost
-/// three seconds on every call. The listing is taken on the first miss and
-/// kept for the lifetime of one assembly and no longer. A listing that failed
-/// is kept the same way, and answers every later miss as unavailable: asking
-/// the probe pane by pane would run the failed listing once per pane, under
-/// a fresh deadline each time. Doctor shares one across its checks. Sweep does
-/// not use this: it deletes on the answer, so it keeps a fresh look per
-/// decision.
+/// processes, and one look reads the environment of every process this user
+/// runs, which takes tens of milliseconds; a look per pane made a store with
+/// many ended panes slow on every call. The listing is taken on the first
+/// miss, or when asked whether the probe is available, and kept for the
+/// lifetime of one assembly and no longer. A listing that failed is kept the
+/// same way, and answers every later miss as unavailable: asking the probe
+/// pane by pane would run the failed listing once per pane. Doctor shares one
+/// across its checks, and a sweep preview across its steps. A sweep apply does
+/// not use this: it acts on the answer, so it keeps a fresh look per decision.
 pub(crate) struct ProbeOncePerAssembly<'a> {
     inner: &'a dyn ProcessProbe,
     listed: Mutex<Option<ProcessListing>>,
@@ -1819,8 +1821,19 @@ impl<'a> ProbeOncePerAssembly<'a> {
 }
 
 impl ProcessProbe for ProbeOncePerAssembly<'_> {
+    /// Answered from the kept listing when the probe offers one, so asking
+    /// costs no second listing.
     fn available(&self) -> bool {
-        self.inner.available()
+        let Ok(mut listed) = self.listed.lock() else {
+            return self.inner.available();
+        };
+        match listed
+            .get_or_insert_with(|| record_spent(&self.spent, || self.inner.pane_processes()))
+        {
+            ProcessListing::Listed(_) => true,
+            ProcessListing::Failed => false,
+            ProcessListing::NotOffered => self.inner.available(),
+        }
     }
 
     fn presence(&self, socket_path: &str, pane_id: &str) -> Presence {
