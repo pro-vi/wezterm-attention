@@ -76,27 +76,23 @@ use std::env;
 use std::path::PathBuf;
 
 use crate::protocol::Result;
-use crate::records::state_root;
-
-/// What [`environment`] gives `WEZTERM_ATTENTION_DIR` when its value is not
-/// UTF-8. No path holds a NUL, so the state root refuses it as it refuses a
-/// relative value, where dropping the variable would send every write to the
-/// default root without a word.
-const UNUSABLE_STATE_DIR: &str = "\0";
+use crate::records::{NOT_UTF8, STATE_ROOT_VARIABLES, state_root};
 
 /// The process environment, keeping only variables whose name and value are
 /// both UTF-8. `env::vars` panics on the first variable that is not, which
 /// would stop every command -- hooks included -- before it could run; no
-/// variable this crate reads is expected to hold anything but text. The one
-/// that names the state root is kept as a value the root refuses.
+/// variable this crate reads is expected to hold anything but text. The two
+/// that can name the state root are kept as [`NOT_UTF8`], which the root
+/// refuses, where dropping one would send every write to another root
+/// without a word.
 pub fn environment() -> BTreeMap<String, String> {
     env::vars_os()
         .filter_map(|(name, value)| {
             let name = name.into_string().ok()?;
             match value.into_string() {
                 Ok(value) => Some((name, value)),
-                Err(_) if name == "WEZTERM_ATTENTION_DIR" => {
-                    Some((name, UNUSABLE_STATE_DIR.to_owned()))
+                Err(_) if STATE_ROOT_VARIABLES.contains(&name.as_str()) => {
+                    Some((name, NOT_UTF8.to_owned()))
                 }
                 Err(_) => None,
             }

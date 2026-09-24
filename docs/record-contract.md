@@ -16,7 +16,10 @@ The state root is `WEZTERM_ATTENTION_DIR` when it is set and non-empty, else
 `$HOME/.local/state/wezterm-attention`. The Rust writer, the plugin and the Pi extension use this
 one order. A relative `WEZTERM_ATTENTION_DIR`, or one longer than 4096 bytes, holding a control
 character or not UTF-8, is an error to the writer; the plugin and Pi ignore it with a warning and fall through
-to the next rule. An `XDG_STATE_HOME` that breaks the same rule is skipped by all three, silently.
+to the next rule. An `XDG_STATE_HOME` that breaks the same rule is skipped by all three, silently,
+except that one which is not UTF-8 is an error to the writer when it decides the root, as such a
+`WEZTERM_ATTENTION_DIR` is: the writer cannot name that directory, and skipping it would write
+where the plugin does not read.
 
 A text field is safe only when it contains no control character: nothing in U+0000–U+001F, U+007F
 or U+0080–U+009F (Rust's `char::is_control`). The Rust writer, `plugin/protocol.lua` and the

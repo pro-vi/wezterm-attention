@@ -888,6 +888,46 @@ fn a_state_directory_that_is_not_utf8_is_refused() {
         (output.status.code(), response["diagnostics"].clone())
     };
     let refused = run(&not_utf8);
-    assert_eq!(refused, run(std::ffi::OsStr::new("relative")));
+    let relative = run(std::ffi::OsStr::new("relative"));
+    assert_eq!(refused.0, relative.0);
+    assert_eq!(refused.1[0]["code"], relative.1[0]["code"]);
     assert_eq!(refused.1[0]["code"], "record_invalid", "{refused:?}");
+    assert_eq!(
+        refused.1[0]["message"], "WEZTERM_ATTENTION_DIR is not UTF-8",
+        "{refused:?}"
+    );
+}
+
+/// An `XDG_STATE_HOME` that is not UTF-8 is refused the same way when it is
+/// what decides the root, rather than skipped for the root under `HOME`,
+/// which the plugin would not read. A `WEZTERM_ATTENTION_DIR` that decides
+/// the root makes it irrelevant.
+#[test]
+fn a_state_home_that_is_not_utf8_is_refused_where_it_decides_the_root() {
+    use std::os::unix::ffi::OsStrExt;
+    let setup = Setup::new();
+    let not_utf8 = std::ffi::OsStr::from_bytes(b"/tmp/state-\xe9").to_owned();
+    let run = |state_dir: Option<&str>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_attention"));
+        command
+            .env_clear()
+            .env("HOME", &setup.env["HOME"])
+            .env("XDG_STATE_HOME", &not_utf8)
+            .args(["bindings", "--json"]);
+        if let Some(state_dir) = state_dir {
+            command.env("WEZTERM_ATTENTION_DIR", state_dir);
+        }
+        let output = command.output().expect("run attention");
+        let response: Value = serde_json::from_slice(&output.stdout).expect("JSON envelope");
+        (output.status.code(), response["diagnostics"].clone())
+    };
+    let refused = run(None);
+    assert_eq!(refused.0, Some(1), "{refused:?}");
+    assert_eq!(refused.1[0]["code"], "record_invalid", "{refused:?}");
+    assert_eq!(
+        refused.1[0]["message"], "XDG_STATE_HOME is not UTF-8",
+        "{refused:?}"
+    );
+    let decided = run(Some(&setup.env["WEZTERM_ATTENTION_DIR"]));
+    assert_eq!(decided.0, Some(0), "{decided:?}");
 }

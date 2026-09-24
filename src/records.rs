@@ -350,11 +350,32 @@ pub struct CommitPlan<T> {
     pub private_dirs: Vec<PathBuf>,
 }
 
+/// The variables that can name the state root, in the order they decide it.
+pub(crate) const STATE_ROOT_VARIABLES: [&str; 2] = ["WEZTERM_ATTENTION_DIR", "XDG_STATE_HOME"];
+
+/// What [`crate::environment`] gives a state-root variable whose value is not
+/// UTF-8. The environment is handed on as text, and a value it cannot hold
+/// still has to decide the root, as it does for the plugin, which reads the
+/// raw bytes; no path holds a NUL, so this can stand for nothing else.
+pub(crate) const NOT_UTF8: &str = "\0";
+
 /// The plugin and the Pi extension resolve the same root in the same order.
 /// An empty WEZTERM_ATTENTION_DIR counts as unset; any other value must be a
 /// safe absolute path. XDG_STATE_HOME is used only when it is one, because the
-/// XDG spec says a relative or empty value is to be ignored.
+/// XDG spec says a relative or empty value is to be ignored. Either one that
+/// is not UTF-8 is refused where it decides the root: this writer cannot name
+/// that directory, and another root would hide every record from the plugin.
 pub fn state_root(env: &BTreeMap<String, String>) -> Result<PathBuf> {
+    if let Some(name) = STATE_ROOT_VARIABLES
+        .into_iter()
+        .find(|name| env.get(*name).is_some_and(|value| !value.is_empty()))
+        && env[name] == NOT_UTF8
+    {
+        return Err(AttentionError::new(
+            "record_invalid",
+            format!("{name} is not UTF-8"),
+        ));
+    }
     if let Some(path) = env
         .get("WEZTERM_ATTENTION_DIR")
         .filter(|path| !path.is_empty())
