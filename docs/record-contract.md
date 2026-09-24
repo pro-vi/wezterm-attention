@@ -108,11 +108,11 @@ The flat format remains permanently supported input: third-party writers and
 Pi's fallback may still create `<root>/<pane_id>` and `<pane_id>.agents`, and
 the Lua reader keeps accepting them. Writer-owned leftovers from development builds that
 projected v2 records into those names are collected with `attention sweep --json` to preview,
-then `attention sweep --apply --operation-id "$(uuidgen | tr A-Z a-z)"`.
-The operation id must be a canonical lowercase UUID, new for every run. A run
-that reuses an earlier run's id is treated as a replay of that run: it ends no
-binding and advances no retention floor, and no diagnostic says so, because the
-absence rule needs two observations under different ids. Collection follows a unique
+then `attention sweep --apply`. Each apply makes up a fresh operation id and
+reports it in `result.operation_id`. `--operation-id` (a canonical lowercase UUID)
+exists to retry an interrupted run: a run under an id already used is treated as a
+replay of that run, so it ends no binding and advances no retention floor, because
+the absence rule needs two observations under different ids. Collection follows a unique
 v2 claim for that scalar pane id; it does not ask whether a live writer of v1 flat markers currently
 occupies the same number, so preview the stems before applying. `.review` is user
 state and is never collected that way.
@@ -127,8 +127,8 @@ removes every valid review claim in the active tab through each pane's full addr
 activity records unchanged. Panes on v1 flat markers keep their shipped `.ack` and `.review` behavior.
 
 Acknowledgement records are Lua-owned. Rust validates them during reads and never creates or
-removes one on a read. An acknowledgement inside a binding directory is removed only with that
-directory, when `attention sweep --apply` retention prunes the binding.
+removes one on a read. An acknowledgement is removed only with the directory that holds it, when
+`attention sweep --apply` retention prunes its binding or its whole pane tree.
 
 An acknowledged activity is no longer displayed, so it is not treated as visible when the next
 activity is committed: repeating the same semantic activity after its acknowledgement publishes a
@@ -181,10 +181,34 @@ A current binding is selected by the pane's current claim and then that launch's
 inside a historical launch cannot make its binding current or confirmed. Doctor validates v2
 records in its file and version scope even when a pane has no binding.
 
-Destructive absence needs two pane-list negatives under different operation IDs at least 60
-monotonic seconds apart, plus an identity-scoped process negative for the full socket path and pane
-ID. Process-probe failure is unavailable evidence, not absence. One failed process listing answers every pane of that query as unavailable; it is not retried pane by pane, so a query waits on at most one pane listing per mux socket and one process listing. A realm-wide `bindings` lists every socket it knows, so each unresponsive socket adds its own listing deadline and there is no overall one. Process environments are never
-printed or persisted.
+Destructive absence needs two sightings of absence under different operation IDs at least 60
+monotonic seconds apart. A sighting is a pane-list negative plus an identity-scoped process
+negative for the full socket path and pane ID. For sweep, a pane whose mux server is gone (its
+socket path no longer exists, or a different server now owns it) is also one sighting for the old
+incarnation, unless a running process still carries that socket and pane id. A probe recorded at a
+monotonic time later than the current clock, as after a reboot, restarts the count; that can only
+delay an end. Readers such as `bindings` still report such a pane `unavailable`, not absent.
+Process-probe failure is unavailable evidence, not absence. One failed process listing answers
+every pane of that query as unavailable; it is not retried pane by pane, so a query waits on at
+most one pane listing per mux socket and one process listing. A realm-wide `bindings` asks its
+sockets in parallel, so it waits about as long as the slowest one, bounded by the per-listing
+deadline. Sweep probes a pane before taking that pane's locks, so hooks are not held up behind a
+slow mux.
+
+The process probe reads environments, never command-line arguments. On macOS it reads each of
+this user's processes' environment with `KERN_PROCARGS2`; on Linux it reads `/proc/<pid>/environ`
+for processes this user owns; elsewhere it runs `ps axeww -o uid=,command=` from `/bin` or
+`/usr/bin` and keeps this user's lines. If it cannot read its own process's environment, the whole
+listing counts as failed, so a permission problem never reads as every pane absent. macOS hides
+the environment of its own system binaries, such as `/bin/zsh` and `/bin/bash`, from both `ps` and
+`sysctl`. Process environments are never printed or persisted.
+
+Once a pane's current binding ended more than 30 days ago, `sweep --apply` removes the pane's
+whole tree, but only after two new sightings of absence under different operation ids at least 60
+seconds apart; sightings from before that binding ended do not count. A tree holding any file sweep does not recognise is kept. Each step appears as a `pane_retention` detail, with action
+`first_absence`, `too_soon`, `replay_first`, `clear_absence`, `present`, `unavailable`, `prune` or
+`keep`; the preview says `keep` wherever apply would keep. Temporary files left by an interrupted
+write no longer hold a binding or pane tree back from retention.
 
 A retention floor advances only across complete monotonic-timestamp groups that were already
 ineligible under the prior floor. An eligible member blocks the whole equal-timestamp group.
