@@ -10,6 +10,18 @@ os.remove(test_dir)
 assert(os.execute("mkdir -p " .. shell_quote(test_dir)) == 0)
 
 local logged_errors = {}
+-- Warnings are captured apart from errors: an unexpected error fails a test,
+-- a warning is only what a test chooses to assert.
+local logged_warnings = {}
+
+local function drain_warnings()
+  local drained = {}
+  for i, message in ipairs(logged_warnings) do
+    drained[i] = message
+    logged_warnings[i] = nil
+  end
+  return drained
+end
 
 local function drain_errors()
   local drained = {}
@@ -66,13 +78,35 @@ local function decode_json(content)
           b = "\b", f = "\f", n = "\n", r = "\r", t = "\t",
         }
         if escaped == "u" then
-          local hex = content:sub(index + 2, index + 5)
-          assert(hex:match("^[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]$"),
-            "invalid JSON unicode escape")
-          local code = tonumber(hex, 16)
-          assert(code < 128, "test JSON decoder only accepts ASCII unicode escapes")
-          parts[#parts + 1] = string.char(code)
+          local function hex_at(at)
+            local hex = content:sub(at, at + 3)
+            assert(hex:match("^[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]$"),
+              "invalid JSON unicode escape")
+            return tonumber(hex, 16)
+          end
+          local code = hex_at(index + 2)
           index = index + 6
+          if code >= 0xD800 and code <= 0xDBFF then
+            assert(content:sub(index, index + 1) == "\\u", "unpaired JSON surrogate")
+            local low = hex_at(index + 2)
+            assert(low >= 0xDC00 and low <= 0xDFFF, "unpaired JSON surrogate")
+            code = 0x10000 + (code - 0xD800) * 0x400 + (low - 0xDC00)
+            index = index + 6
+          end
+          assert(code < 0xD800 or code > 0xDFFF, "unpaired JSON surrogate")
+          -- UTF-8, as serde_json and WezTerm's decoder produce it.
+          if code < 0x80 then
+            parts[#parts + 1] = string.char(code)
+          elseif code < 0x800 then
+            parts[#parts + 1] = string.char(0xC0 + math.floor(code / 0x40), 0x80 + code % 0x40)
+          elseif code < 0x10000 then
+            parts[#parts + 1] = string.char(0xE0 + math.floor(code / 0x1000),
+              0x80 + math.floor(code / 0x40) % 0x40, 0x80 + code % 0x40)
+          else
+            parts[#parts + 1] = string.char(0xF0 + math.floor(code / 0x40000),
+              0x80 + math.floor(code / 0x1000) % 0x40,
+              0x80 + math.floor(code / 0x40) % 0x40, 0x80 + code % 0x40)
+          end
         else
           assert(simple[escaped], "invalid JSON escape")
           parts[#parts + 1] = simple[escaped]
@@ -192,6 +226,9 @@ local wezterm = {
   log_error = function(message)
     table.insert(logged_errors, message)
   end,
+  log_warn = function(message)
+    table.insert(logged_warnings, message)
+  end,
   on = function(event, callback)
     handlers[event] = handlers[event] or {}
     table.insert(handlers[event], callback)
@@ -200,11 +237,20 @@ local wezterm = {
 
 package.preload.wezterm = function() return wezterm end
 
+--- An integration root with the writer installed. Publication and tab source
+--- identity run only once the writer is there, so the tests about them name
+--- this root rather than depend on whether this checkout has been built.
+local writer_root = test_dir .. "/writer-root"
+assert(os.execute("mkdir -p " .. shell_quote(writer_root .. "/libexec") .. " "
+  .. shell_quote(writer_root .. "/bin")) == 0)
+assert(io.open(writer_root .. "/libexec/attention-rs", "w")):close()
+
 local attention = dofile(repo_root .. "/plugin/init.lua")
 attention.apply_to_config({}, {
   auto_poll = false,
   dir = test_dir,
   review_key = false,
+  integration_root = writer_root,
 })
 
 local format_tab_title = assert(
@@ -486,7 +532,10 @@ local function window_double(spec)
     action_calls      = 0,
   }
 
-  local mux_window = { tabs = function() return mux_tabs end }
+  local mux_window = {
+    tabs = function() return mux_tabs end,
+    window_id = function() return assigned_window_id end,
+  }
   mux_windows_by_id[assigned_window_id] = mux_window
 
   function w.mux_window()
@@ -560,6 +609,7 @@ local failed = 0
 
 local function test(name, callback)
   drain_errors()
+  drain_warnings()
   for key in pairs(mux_windows_by_id) do mux_windows_by_id[key] = nil end
   local ok, err = pcall(callback)
   if ok and #logged_errors > 0 then
@@ -619,6 +669,26 @@ test("time-derived frames preserve the public get_attention return shape", funct
 
   assert(state == "thinking", "the first return remains the marker type")
   assert(frame == 3, "the second return remains the derived frame, got " .. tostring(frame))
+end)
+
+test("a marker that is not an object, or whose frame is not a count, cannot break a poll", function()
+  for index, content in ipairs({ "5", "true", '"thinking"', "[1]" }) do
+    local id = 7190 + index
+    local out = assert(io.open(test_dir .. "/" .. id, "w")); out:write(content); out:close()
+    poll({ id })
+    assert(attention.get_attention(id) == nil, content .. " is not a marker")
+  end
+  for index, frame in ipairs({ '"2"', "1.5", "-1" }) do
+    local id = 7195 + index
+    local out = assert(io.open(test_dir .. "/" .. id, "w"))
+    out:write('{"type":"thinking","frame":' .. frame .. "}"); out:close()
+    poll({ id })
+    local atype, shown = attention.get_attention(id)
+    assert(atype == "thinking" and type(shown) == "number"
+      and shown == math.floor(shown) and shown >= 0, "frame " .. frame .. " reached the renderer")
+    local rendered = format_tab_title(tab(id, id + 100, false))
+    assert(type(rendered) == "table", "the thinking tab must still render")
+  end
 end)
 
 test("Lua accepts the publication ID marker shape published by Pi", function()
@@ -805,7 +875,8 @@ test("a source change republishes unchanged order without changing content time"
   local publication = decode_json(assert(read_path(file)))
   assert(publication.schema == 2 and publication.source.socket_path == "/test/gui.sock")
   assert(publication.published_at_ms == legacy.published_at_ms)
-  assert(path_exists(tab_publication_path(9793)), "legacy publications are not guessed away")
+  assert(not path_exists(tab_publication_path(9793)),
+    "this process's own legacy file for the window goes once the sourced one is written")
   local foreign = test_dir .. "/tabs/" .. string.rep("b",64) .. "-9793.json"
   local out = assert(io.open(foreign,"w")); out:write("foreign"); out:close()
   local polling = window_double({window_id=9799,tabs={},focused=false})
@@ -815,6 +886,22 @@ test("a source change republishes unchanged order without changing content time"
   os.remove(foreign)
   wezterm.run_child_process = previous
   internal.reset_tab_source()
+end)
+
+test("a legacy tab order this process never wrote survives its window's sourced one", function()
+  local previous = wezterm.run_child_process
+  internal.reset_tab_source()
+  local foreign = tab_publication_path(9796)
+  local out = assert(io.open(foreign, "w")); out:write("from an exited GUI"); out:close()
+  wezterm.run_child_process = function(args) return true, tab_source_response(args[4]), "" end
+  internal.acquire_tab_source("/test/gui.sock")
+  local drawn = gui_tab({ window_id = 9796, tab_id = 9797, tab_index = 0, panes = { 9798 } })
+  format_tab_title(drawn, { drawn })
+  wezterm.run_child_process = previous
+  internal.reset_tab_source()
+  assert(path_exists(test_dir .. "/tabs/" .. string.rep("a", 64) .. "-9796.json"))
+  assert(read_path(foreign) == "from an exited GUI", "a file this process did not write is sweep's")
+  os.remove(foreign)
 end)
 
 test("a window publishes its drawn order once every one of its tabs is drawn", function()
@@ -930,6 +1017,8 @@ local function publish_window(window_id, tab_id, pane_id)
 end
 
 local function poll_with_inventory(polling_window_id, live_window_ids)
+  -- A window that closed is gone from the mux as well as from the GUI.
+  for id in pairs(mux_windows_by_id) do mux_windows_by_id[id] = nil end
   local live = {}
   for index, id in ipairs(live_window_ids) do
     live[index] = window_double({ window_id = id, tabs = {}, focused = false })
@@ -1180,6 +1269,22 @@ test("public removal clears canonical marker and acknowledgement sidecar", funct
   assert(attention.get_attention(944) == nil, "public removal should clear cache")
 end)
 
+test("public removal and direct reads refuse an id that is not a pane id", function()
+  local outside = test_dir .. "/outside"
+  assert(os.execute("mkdir -p " .. shell_quote(outside)) == 0)
+  local victim = test_dir .. "/victim"
+  for _, suffix in ipairs({ "", ".ack", ".review", ".agents" }) do
+    local out = assert(io.open(victim .. suffix, "w")); out:write('{"type":"stop"}'); out:close()
+  end
+  attention.remove_marker("../victim", { dir = outside })
+  attention.get_attention("../victim", { dir = outside })
+  for _, suffix in ipairs({ "", ".ack", ".review", ".agents" }) do
+    assert(path_exists(victim .. suffix), "a ../ id reached " .. victim .. suffix)
+  end
+  assert(attention.get_attention("../victim", { dir = outside }) == nil)
+  for _, suffix in ipairs({ "", ".ack", ".review", ".agents" }) do os.remove(victim .. suffix) end
+end)
+
 test("public removal without opts uses the configured marker directory", function()
   local configured_dir = test_dir .. "/configured"
   assert(os.execute("mkdir -p " .. shell_quote(configured_dir)) == 0)
@@ -1373,6 +1478,56 @@ test("animation redraws once per wall-clock bucket, not once per poll", function
   attention.poll(w, { now_ms = 2000 })
   assert(#w.actions == 2, "the next bucket is a new indicator, so one new redraw")
   assert(select(2, attention.get_attention(871)) == 2, "the frame should come from the new bucket")
+end)
+
+test("a v2 thinking pane animates the way a v1 one does", function()
+  materialize_state_case(protocol_fixture.state_case)
+  local samples = protocol_fixture.record_samples
+  local pane_root = test_dir .. "/v2/realms/" .. samples.claim.address.realm_id
+    .. "/incarnations/" .. samples.claim.address.incarnation_id .. "/panes/42"
+  local activity_path = pane_root .. "/launches/" .. samples.claim.launch_id
+    .. "/bindings/" .. samples.binding.binding_id .. "/activity.json"
+  local activity = decode_json(encode_json(samples.activity))
+  activity.type = "thinking"
+  write_json_path(activity_path, activity)
+  -- The fixture's review flag outranks thinking; this is about the spinner.
+  assert(os.execute("rm -f " .. shell_quote(pane_root) .. "/reviews/*.json") == 0)
+  local window = window_double({ tabs = { { { id = 4261, domain = "unix",
+    attention = protocol_fixture.wire_sample } } }, focused = false })
+  local key = internal.address_cache_key(protocol_fixture.wire_sample.address)
+  local frames = {}
+  for second = 1, 2 do
+    attention.poll(window, { now_ms = second * 1000, now_unix_ns = protocol_fixture.state_case.now_unix_ns,
+      call_after = function() end })
+    frames[second] = internal.attention_cache[key].frame
+  end
+  materialize_state_case(protocol_fixture.state_case)
+  assert(frames[1] == 1 and frames[2] == 2,
+    "a thinking view must carry the wall-clock frame, got " .. tostring(frames[1]) .. ", " .. tostring(frames[2]))
+end)
+
+test("the spinner's frame does not rewrite the published tab order", function()
+  write_marker(9870, "thinking")
+  local drawn_tab = gui_tab({ window_id = 9871, tab_id = 9872, tab_index = 0, panes = { 9870 } })
+  local path = tab_publication_path(9871)
+  local real_open, writes = io.open, 0
+  io.open = function(target, mode)
+    if mode == "w" and target:sub(1, #path) == path then writes = writes + 1 end
+    return real_open(target, mode)
+  end
+  local drawn, published = {}, {}
+  local ok, failure = pcall(function()
+    for second = 1, 4 do
+      attention.poll(window_double({ tabs = { { 9870 } }, focused = false }), { now_ms = second * 1000 })
+      drawn[second] = rendered_text(format_tab_title(drawn_tab, { drawn_tab }))
+      published[second] = read_tab_publication(9871).tabs[1].text
+    end
+  end)
+  io.open = real_open
+  assert(ok, failure)
+  assert(drawn[1] ~= drawn[2], "the bar itself still animates")
+  assert(published[1] == published[4], "the published text must not follow the frame")
+  assert(writes == 1, "four seconds of spinning wrote the tab order " .. writes .. " times")
 end)
 
 test("redraw-induced polls terminate inside the current frame bucket", function()
@@ -1594,6 +1749,127 @@ test("GUI doctor reports unpublished mux panes without filesystem probes", funct
   }))
   assert(#diagnostics == 1 and diagnostics[1].code == "identity_unpublished",
     "GUI doctor must report the user-var half the CLI cannot observe")
+end)
+
+test("a local pane's own id outranks a WEZTERM_PANE that disagrees with it", function()
+  -- Printed by something in the pane -- a catted file, a remote prompt -- not
+  -- by the pane's own shell, which reads the same id WezTerm numbered it with.
+  assert(attention.pane_marker_id(mux_pane(7010, { published = 7011 })) == "7010",
+    "a local pane must not answer to another pane's marker")
+  assert(attention.pane_marker_id(mux_pane(7012, { published = 7012 })) == "7012")
+  assert(attention.pane_marker_id(mux_pane(7013, { domain = "unix", published = 7011 })) == "7011",
+    "a client domain's pane still goes by what it published")
+end)
+
+test("a pane's published identity is bounded before it is read", function()
+  local wire = encode_json(protocol_fixture.wire_sample)
+  local padded = wire:sub(1, -2) .. string.rep(" ", 5000) .. "}"
+  local _, problem = internal.parse_wire_json(padded)
+  assert(problem and problem.code == "record_invalid", "an oversized WEZTERM_ATTENTION was parsed")
+  assert(internal.parse_wire_json(wire), "the writer's own value still parses")
+  assert(attention.pane_marker_id(mux_pane(7014, { domain = "unix",
+    published = string.rep("9", 21) })) == nil, "a pane id wider than any WezTerm id is not one")
+end)
+
+test("a v2 identity naming another pane is refused in a local pane", function()
+  local wire = decode_json(encode_json(protocol_fixture.wire_sample))
+  local foreign = internal.resolve_pane_read(mux_pane(4299, { attention = wire }))
+  assert(foreign.kind == "invalid", "a local pane printed pane 42's identity and was believed")
+  local own = internal.resolve_pane_read(mux_pane(tonumber(wire.address.pane_id), { attention = wire }))
+  assert(own.kind == "v2", "a local pane's own identity is still read")
+end)
+
+test("exec, WSL and serial domains are local, so their panes need no published id", function()
+  local config = { serial_ports = { { name = "serial-dev" } } }
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config(config, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root })
+  -- Set after apply_to_config, the way a config may.
+  config.exec_domains = { { name = "exec-dev" } }
+  for _, domain in ipairs({ "exec-dev", "serial-dev", "WSL:Ubuntu" }) do
+    assert(instance.pane_marker_id(mux_pane(7020, { domain = domain, published = 7021 })) == "7020",
+      domain .. " is a local domain, so its pane id names its markers")
+  end
+  assert(instance.pane_marker_id(mux_pane(7022, { domain = "SSHMUX:host" })) == nil,
+    "a client domain's unpublished pane still has no marker id")
+
+  local listed = dofile(repo_root .. "/plugin/init.lua")
+  listed.apply_to_config({ wsl_domains = { { name = "my-wsl" } } }, { auto_poll = false,
+    dir = test_dir, review_key = false, renderer = "manual", integration_root = writer_root })
+  assert(listed.pane_marker_id(mux_pane(7023, { domain = "my-wsl" })) == "7023")
+  assert(listed.pane_marker_id(mux_pane(7024, { domain = "WSL:Ubuntu" })) == nil,
+    "an explicit wsl_domains list replaces the default WSL:<distro> domains")
+end)
+
+--- Poll an unpublished pane of `domain` twice under `config`, with the given
+--- platform and environment, and return the sockets republication was sent to.
+local function republished_sockets(config, domain, triple, environment)
+  local spawned = {}
+  local real_background, real_triple, real_getenv =
+    wezterm.background_child_process, wezterm.target_triple, os.getenv
+  wezterm.background_child_process = function(argv) spawned[#spawned + 1] = argv; return true end
+  wezterm.target_triple = triple
+  os.getenv = function(name)
+    if environment[name] ~= nil then return environment[name] end
+    return real_getenv(name)
+  end
+  local ok, failure = pcall(function()
+    local instance = dofile(repo_root .. "/plugin/init.lua")
+    instance.apply_to_config(config.at_load or {}, { auto_poll = false, dir = test_dir,
+      review_key = false, renderer = "manual", integration_root = writer_root })
+    if config.after_load then config.after_load(config.at_load) end
+    local window = window_double({ tabs = { { { id = 9981, domain = domain } } }, focused = false })
+    instance.poll(window, { call_after = function() end })
+    instance.poll(window, { call_after = function() end })
+  end)
+  wezterm.background_child_process, wezterm.target_triple, os.getenv =
+    real_background, real_triple, real_getenv
+  assert(ok, failure)
+  local sockets = {}
+  for _, argv in ipairs(spawned) do
+    for index, value in ipairs(argv) do
+      if value == "--socket" then sockets[#sockets + 1] = argv[index + 1] end
+    end
+  end
+  return sockets
+end
+
+test("the implicit unix domain republishes through WezTerm's default socket", function()
+  local mac = republished_sockets({}, "unix", "aarch64-apple-darwin", {})
+  assert(#mac == 1 and mac[1] == test_dir .. "/.local/share/wezterm/sock",
+    "macOS keeps the socket under ~/.local/share/wezterm, got " .. tostring(mac[1]))
+  local linux = republished_sockets({}, "unix", "x86_64-unknown-linux-gnu",
+    { XDG_RUNTIME_DIR = "/run/user/1000/" })
+  assert(#linux == 1 and linux[1] == "/run/user/1000/wezterm/sock",
+    "Linux uses $XDG_RUNTIME_DIR/wezterm, got " .. tostring(linux[1]))
+  local relative = republished_sockets({}, "unix", "x86_64-unknown-linux-gnu",
+    { XDG_RUNTIME_DIR = "run/user" })
+  assert(#relative == 1 and relative[1] == test_dir .. "/.local/share/wezterm/sock",
+    "a relative XDG_RUNTIME_DIR is not a runtime directory, got " .. tostring(relative[1]))
+end)
+
+test("a unix domain listed without a socket path, even after apply_to_config, republishes", function()
+  local late = republished_sockets({ at_load = {}, after_load = function(config)
+    config.unix_domains = { { name = "dev-mux" }, { name = "pinned", socket_path = "/tmp/pinned.sock" } }
+  end }, "dev-mux", "aarch64-apple-darwin", {})
+  assert(#late == 1 and late[1] == test_dir .. "/.local/share/wezterm/sock",
+    "a domain with no socket_path uses the default one, got " .. tostring(late[1]))
+  local listed = republished_sockets({ at_load = { unix_domains = { { name = "dev-mux" } } } },
+    "unix", "aarch64-apple-darwin", {})
+  assert(#listed == 0, "a config that lists its own unix domains has no implicit \"unix\"")
+end)
+
+test("a pane with no socket to republish through is named once in the log", function()
+  local proxied = republished_sockets({ at_load = { unix_domains = { { name = "remote-mux",
+    proxy_command = { "ssh", "host", "wezterm", "cli", "proxy" } } } } },
+    "remote-mux", "aarch64-apple-darwin", {})
+  assert(#proxied == 0, "a proxied domain's mux is not the one behind a local socket")
+  local warnings = drain_warnings()
+  assert(#warnings == 1 and warnings[1]:find("remote-mux", 1, true),
+    "the unpublished domain must be named once, got " .. #warnings)
+  republished_sockets({}, "SSHMUX:host", "aarch64-apple-darwin", {})
+  warnings = drain_warnings()
+  assert(#warnings == 1 and warnings[1]:find("SSHMUX:host", 1, true))
 end)
 
 -- ── U3: a closed pane versus a detached domain ──────────────────────────────
@@ -1968,7 +2244,7 @@ test("static pane title settles on the second poll and clears on change", functi
   attention.poll(first)
   local before_settle = format_tab_title(tab(17631, 17632, false))
   assert(not before_settle:find("stable-title", 1, true),
-    "one raw pane-title sample must not enter the formatter")
+    "one title sample must not settle")
   attention.poll(first)
   local settled = format_tab_title(tab(17631, 17632, false))
   assert(settled:find("stable-title", 1, true),
@@ -2044,6 +2320,51 @@ test("invalid pane title cannot destroy a higher base source", function()
   local rendered = format_tab_title(title_tab)
   assert(rendered:find("server-safe", 1, true),
     "an invalid fallback sample must not affect the server-owned title")
+end)
+
+local function has_control(text)
+  return text:find("[%z\1-\31\127]") ~= nil or text:find("\194[\128-\159]") ~= nil
+end
+
+test("a directory name cannot carry escape sequences into the tab bar", function()
+  local escaped = tab(17671, 17672, false)
+  -- ESC [ 42 m, then CSI spelled as the single C1 character U+009B.
+  escaped.active_pane.current_working_dir = { file_path = "/tmp/evil\27[42m\194\1550mname" }
+  local rendered = rendered_text(format_tab_title(escaped))
+  assert(not has_control(rendered), "a control character reached the tab bar")
+  assert(rendered:find("evil[42m0mname", 1, true), "the rest of the name must still show, got " .. rendered)
+end)
+
+test("a long or control-character tab text is published within the tab reader's bounds", function()
+  local long_name = string.rep("\195\169", 200) -- 400 bytes of "é"
+  local named = as_userdata({ tab_id = 9861, window_id = 9860, tab_index = 0, is_active = false,
+    active_pane = gui_pane(9862), panes = { gui_pane(9862) }, tab_title = long_name })
+  format_tab_title(named, { named })
+  local text = assert(read_tab_publication(9860)).tabs[1].text
+  assert(#text <= 256, "published text is " .. #text .. " bytes")
+  assert(text:sub(-2) == "\195\169", "the cut must fall between characters")
+
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    title_formatter = function() return "red\27[31m\7bell" end })
+  local formatter = handlers["format-tab-title"][#handlers["format-tab-title"]]
+  local plain = as_userdata({ tab_id = 9864, window_id = 9863, tab_index = 0, is_active = false,
+    active_pane = gui_pane(9865), panes = { gui_pane(9865) } })
+  formatter(plain, { plain })
+  local formatted = assert(read_tab_publication(9863)).tabs[1].text
+  assert(not has_control(formatted), "a formatter's control character was published")
+  assert(formatted:find("red[31mbell", 1, true), "the formatter's text must still be published")
+end)
+
+test("a tab with no name, directory or settled title shows the pane's current title", function()
+  local bare = tab(17681, 17682, false)
+  bare.active_pane.title = "vim\27]0;x"
+  local rendered = rendered_text(format_tab_title(bare))
+  assert(rendered:find("vim]0;x", 1, true), "the current title must fill an empty base, got " .. rendered)
+  local context
+  attention.wrap_title_formatter(function(_, ctx) context = ctx; return ctx.default_title end)(bare)
+  assert(context.default_title == "vim]0;x" and context.settled_title == nil,
+    "default_title carries the current title without claiming it settled")
 end)
 
 test("a change in the subagent count alone requests a redraw", function()
@@ -2288,6 +2609,28 @@ test("Lua accepts and rejects every shared protocol fixture row", function()
   end
 end)
 
+test("text checks refuse C1 controls the way Rust's char::is_control does", function()
+  local api = dofile(repo_root .. "/plugin/protocol.lua")({
+    wezterm = wezterm, protocol_path = repo_root .. "/protocol/v2.json" })
+  -- U+0080, U+0085 (NEL) and U+009F, the first, a middle and the last C1.
+  for _, text in ipairs({ "a\194\128b", "tty\194\133", "\194\159" }) do
+    assert(not api.is_safe_text(text, 256), "C1 text passed: " .. text:gsub("[\128-\255]", "?"))
+  end
+  -- Neighbours that are not control characters: U+00A0, U+00E9 and U+2028.
+  for _, text in ipairs({ "a\194\160b", "caf\195\169", "a\226\128\168b" }) do
+    assert(api.is_safe_text(text, 256), "non-control text refused")
+  end
+  local claim = internal.deep_copy(protocol_fixture.record_samples.claim)
+  claim.tty_path = "/dev/tty\194\133"
+  local parsed, problem = api.parse_v2_record(claim, "claim")
+  assert(not parsed and problem.code == "record_invalid", "a C1 path must make the record invalid")
+  -- The escaped spelling decodes to the same character, so it fails the same way.
+  claim.tty_path = "/dev/ttyNEL"
+  local raw = encode_json(claim):gsub("NEL", "\\u0085")
+  parsed, problem = api.parse_v2_record_json(raw, "claim")
+  assert(not parsed and problem.code == "record_invalid", "an escaped C1 must make the record invalid")
+end)
+
 test("Lua and Python fixture semantics cover exact wall-age boundaries", function()
   local results = fixtures.fixture_eligibility_cases(protocol_fixture)
   assert(#results == #protocol_fixture.eligibility_cases, "every eligibility row must run")
@@ -2404,6 +2747,33 @@ test("activity TTL uses written Unix time while event order stays monotonic", fu
   assert(internal.compare_ns20(older_order, newer_order) == -1,
     "newer observed_mono_ns wins even if its written_at_unix_ns is earlier")
   write_json_path(activity_path, samples.activity)
+end)
+
+test("a record written after the poll's clock sample is fresh, not clock skew", function()
+  materialize_state_case(protocol_fixture.state_case)
+  local samples = protocol_fixture.record_samples
+  local activity_path = test_dir .. "/v2/realms/" .. samples.claim.address.realm_id
+    .. "/incarnations/" .. samples.claim.address.incarnation_id
+    .. "/panes/42/launches/" .. samples.claim.launch_id
+    .. "/bindings/" .. samples.binding.binding_id .. "/activity.json"
+  local activity = decode_json(encode_json(samples.activity))
+  activity.ttl_ms = 600000
+  activity.written_at_unix_ns = "00000000610000000005"
+  write_json_path(activity_path, activity)
+  local clock = { "00000000610000000000", "00000000610000000009" }
+  local sampled = 0
+  local window = window_double({ tabs = { { { id = 4271, domain = "unix",
+    attention = protocol_fixture.wire_sample } } }, focused = false })
+  attention.poll(window, { call_after = function() end, utc_now = function()
+    sampled = sampled + 1
+    return clock[math.min(sampled, #clock)]
+  end })
+  local view = internal.attention_cache[internal.address_cache_key(protocol_fixture.wire_sample.address)]
+  write_json_path(activity_path, samples.activity)
+  assert(view.activity_type == "notify", "an activity written a moment after the sample was dropped")
+  for _, item in ipairs(view.diagnostics) do
+    assert(item.code ~= "clock_skew", "a later write is not a clock that is ahead")
+  end
 end)
 
 test("an activity clear watermark hides older activity and permits newer activity", function()
@@ -3097,6 +3467,80 @@ test("Alt+B uses full v2 addresses and clear-all preserves activity", function()
     "clearing a masked review claim must preserve unrelated activity bytes")
 end)
 
+test("Alt+B refuses to flag a pane whose published launch is not its claim's", function()
+  local wire = materialize_v2_fixture(81)
+  local pane_root = test_dir .. "/v2/realms/" .. wire.address.realm_id
+    .. "/incarnations/" .. wire.address.incarnation_id .. "/panes/81"
+  assert(os.execute("rm -f " .. shell_quote(pane_root) .. "/reviews/*.json") == 0)
+  -- The claim names the fixture's launch; the pane still shows an older one.
+  wire.launch_id = "00000000-0000-4000-8000-000000000999"
+  local review = dofile(repo_root .. "/plugin/init.lua")
+  local config = {}
+  review.apply_to_config(config, { auto_poll = false, dir = test_dir, integration_root = writer_root })
+  local toggle = assert(config.keys[#config.keys].action)
+  local spec = { id = 9081, domain = "unix", attention = wire }
+  toggle(window_double({ tabs = { { spec } }, focused = true, active_pane_id = spec }), pane_from_entry(spec))
+  assert(not path_exists(pane_root .. "/reviews/" .. internal.sha256("user") .. ".json"),
+    "a review under a stale claim is one no reader shows")
+  local errors = drain_errors()
+  assert(#errors == 1 and errors[1]:find("claim", 1, true), "the refusal must say why, got " .. #errors)
+end)
+
+test("Alt+B clear-all leaves a review that was replaced after it looked", function()
+  local wire = materialize_v2_fixture(82)
+  local samples = protocol_fixture.record_samples
+  local pane_root = test_dir .. "/v2/realms/" .. wire.address.realm_id
+    .. "/incarnations/" .. wire.address.incarnation_id .. "/panes/82"
+  local path = pane_root .. "/reviews/" .. samples.review.owner_key .. ".json"
+  assert(path_exists(path), "precondition: the fixture carries a review")
+  local newer = decode_json(encode_json(samples.review))
+  newer.address = decode_json(encode_json(wire.address))
+  newer.event_id = "00000000-0000-4000-8000-000000000082"
+  local review = dofile(repo_root .. "/plugin/init.lua")
+  local config = {}
+  review.apply_to_config(config, { auto_poll = false, dir = test_dir, integration_root = writer_root })
+  local toggle = assert(config.keys[#config.keys].action)
+  local spec = { id = 9082, domain = "unix", attention = wire }
+  -- The writer replaces the review between the plugin's check and its removal.
+  local real_remove, real_rename, raced = os.remove, os.rename, false
+  local function race(target)
+    if target == path and not raced then raced = true; write_json_path(path, newer) end
+  end
+  os.remove = function(target) race(target); return real_remove(target) end
+  os.rename = function(from, to) race(from); return real_rename(from, to) end
+  local ok, failure = pcall(toggle, window_double({ tabs = { { spec } }, focused = true,
+    active_pane_id = spec }), pane_from_entry(spec))
+  os.remove, os.rename = real_remove, real_rename
+  assert(ok, failure)
+  assert(raced, "precondition: the clear reached the review")
+  local left = read_path(path)
+  assert(left and decode_json(left).event_id == newer.event_id,
+    "a review the user never saw must not be cleared")
+  materialize_v2_fixture(82)
+end)
+
+test("a stop hidden behind a higher-ranked review flag is not acknowledged, v1 or v2", function()
+  local wire = materialize_v2_fixture(83)
+  local samples = protocol_fixture.record_samples
+  local ack_path = test_dir .. "/v2/realms/" .. wire.address.realm_id .. "/incarnations/"
+    .. wire.address.incarnation_id .. "/panes/83/launches/" .. wire.launch_id
+    .. "/bindings/" .. samples.binding.binding_id .. "/ack.json"
+  local ack_before = assert(read_path(ack_path))
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root,
+    priority = { "thinking", "stop", "notify", "review" } })
+  local v2_pane = { id = 83, domain = "unix", attention = wire }
+  instance.poll(window_double({ tabs = { { v2_pane } }, focused = true, active_pane_id = v2_pane }),
+    { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+  assert(read_path(ack_path) == ack_before, "the v2 pane showed its review flag, not the notify")
+
+  write_marker(7301, "stop")
+  write_review_flag_file(7301)
+  instance.poll(window_double({ tabs = { { 7301 } }, focused = true, active_pane_id = 7301 }))
+  assert(not acknowledgement_exists(7301), "the v1 pane showed its review flag, not the stop")
+end)
+
 test("v2 user actions never replace future acknowledgement or review records", function()
   local wire = materialize_v2_fixture(71)
   local samples = protocol_fixture.record_samples
@@ -3138,7 +3582,7 @@ test("v2 user actions never replace future acknowledgement or review records", f
   drain_errors()
 end)
 
-test("unpublished mux pane schedules one realm publish from the resolved plugin root", function()
+test("unpublished mux pane schedules one realm publish from the integration root", function()
   local spawned = {}
   local original_background = wezterm.background_child_process
   wezterm.background_child_process = function(argv)
@@ -3153,6 +3597,7 @@ test("unpublished mux pane schedules one realm publish from the resolved plugin 
     auto_poll = false,
     dir = test_dir,
     review_key = false,
+    integration_root = writer_root,
   })
   local pane = { id = 9901, domain = "u2-test" }
   local window = window_double({ tabs = { { pane } }, focused = false })
@@ -3160,12 +3605,11 @@ test("unpublished mux pane schedules one realm publish from the resolved plugin 
   reloaded.poll(window, { call_after = function() end })
   wezterm.background_child_process = original_background
 
-  local expected_root = assert(internal.protocol_path:match("^(.*)/protocol/v2%.json$"))
   assert(#spawned == 1, "one realm should schedule one background publication")
   assert(spawned[1][1] == "env"
       and spawned[1][2] == "WEZTERM_ATTENTION_DIR=" .. test_dir
-      and spawned[1][3] == expected_root .. "/bin/attention",
-    "publication must use the resolved checkout command")
+      and spawned[1][3] == writer_root .. "/bin/attention",
+    "publication must use the integration root's command")
   assert(table.concat(spawned[1], " "):find(
     "hooks publish --socket /tmp/attention-u2-test.sock --quiet", 1, true),
     "publication must use the nested quiet realm command")
@@ -3184,7 +3628,8 @@ test("unpublished mux panes retry on the bounded schedule and stop when resolved
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({
     unix_domains = { { name = "retry-test", socket_path = "/tmp/attention-retry.sock" } },
-  }, { auto_poll = false, dir = test_dir, review_key = false })
+  }, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local call_after = function(delay, callback)
     scheduled[#scheduled + 1] = { delay = delay, callback = callback }
   end
@@ -3230,7 +3675,8 @@ test("a pane-count change restarts stabilization without doubling the schedule",
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({
     unix_domains = { { name = "stable-test", socket_path = "/tmp/attention-stable.sock" } },
-  }, { auto_poll = false, dir = test_dir, review_key = false })
+  }, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local call_after = function() end
   reloaded.poll(window_double({
     tabs = { { { id = 9921, domain = "stable-test" } } }, focused = false,
@@ -3257,7 +3703,8 @@ test("unequal pane counts in alternating windows start one realm publication", f
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({
     unix_domains = { { name = "window-stable", socket_path = "/tmp/attention-window-stable.sock" } },
-  }, { auto_poll = false, dir = test_dir, review_key = false })
+  }, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local first = window_double({
     window_id = 811,
     tabs = { { { id = 9923, domain = "window-stable" } } },
@@ -3290,7 +3737,8 @@ test("a resolved window cannot cancel another window's unpublished realm", funct
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({
     unix_domains = { { name = "mixed-window", socket_path = "/tmp/attention-mixed-window.sock" } },
-  }, { auto_poll = false, dir = test_dir, review_key = false })
+  }, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local unpublished = window_double({
     window_id = 813,
     tabs = { { { id = 9926, domain = "mixed-window" } } },
@@ -3324,7 +3772,8 @@ test("a window leaving a realm cancels its stale publication retry", function()
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({
     unix_domains = { { name = "departed-realm", socket_path = "/tmp/attention-departed.sock" } },
-  }, { auto_poll = false, dir = test_dir, review_key = false })
+  }, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local remote = window_double({
     window_id = 816,
     tabs = { { { id = 9928, domain = "departed-realm" } } }, focused = false,
@@ -3359,7 +3808,8 @@ test("closing an unpublished window cancels its stale publication retry", functi
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({
     unix_domains = { { name = "closed-realm", socket_path = "/tmp/attention-closed.sock" } },
-  }, { auto_poll = false, dir = test_dir, review_key = false })
+  }, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local closing = window_double({
     window_id = 817,
     tabs = { { { id = 9930, domain = "closed-realm" } } }, focused = false,
@@ -3399,7 +3849,8 @@ test("a failed publish logs once and keeps its retry schedule", function()
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({
     unix_domains = { { name = "failure-test", socket_path = "/tmp/attention-failure.sock" } },
-  }, { auto_poll = false, dir = test_dir, review_key = false })
+  }, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local call_after = function(delay, callback)
     scheduled[#scheduled + 1] = { delay = delay, callback = callback }
   end
@@ -3717,6 +4168,63 @@ test("twenty full lifecycle panes keep polling and getter work bounded", functio
   io.write(string.format("lifecycle workload: 20 panes, 2 polls, 128 observations each; CPU %.2f ms; 40 snapshot reads; 0 writes\n", cpu_ms))
 end)
 
+test("an unchanged record is not parsed again, and a changed one is", function()
+  local file = assert(io.open(repo_root .. "/tests/fixtures/lifecycle/observations.json", "r"))
+  local fixture = decode_json(file:read("*a")); file:close()
+  local id = 11101
+  local wire = materialize_v2_fixture(id)
+  local snapshot = decode_json(encode_json(fixture.cases[2].value))
+  snapshot.address, snapshot.launch_id = wire.address, wire.launch_id
+  snapshot.binding_id, snapshot.provider = protocol_fixture.record_samples.binding.binding_id, "claude"
+  -- The harness encoder writes an empty table as {}, which is not an
+  -- observation array, so both pools always hold something.
+  snapshot.pools.requests.observations, snapshot.pools.general.observations = {}, {}
+  for member = 1, 2 do
+    for _, pool in ipairs({ "requests", "general" }) do
+      local item = decode_json(encode_json(fixture.cases[2].value.pools.general.observations[1]))
+      item.observation_id = string.format("00000000-0000-4000-8000-%012d", member + (pool == "requests" and 100 or 200))
+      item.observed_mono_ns = string.format("%020d", member)
+      item.correlation = { tool_call_id = pool .. member }
+      if pool == "requests" then item.tool_name, item.tool_class, item.question_mode = "AskUserQuestion", "question", "blocking" end
+      snapshot.pools[pool].observations[member] = item
+    end
+  end
+  local binding_dir = test_dir .. "/v2/realms/" .. wire.address.realm_id .. "/incarnations/"
+    .. wire.address.incarnation_id .. "/panes/" .. id .. "/launches/" .. wire.launch_id
+    .. "/bindings/" .. snapshot.binding_id
+  write_json_path(binding_dir .. "/lifecycle.json", snapshot)
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root })
+  local pane = { id = id, domain = "unix", attention = wire }
+  local window = window_double({ tabs = { { pane } }, focused = false })
+  local options = { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end }
+  local real_parse, parses = wezterm.json_parse, 0
+  wezterm.json_parse = function(content) parses = parses + 1; return real_parse(content) end
+  local ok, failure = pcall(function()
+    instance.poll(window, options)
+    local first = assert(instance.get_attention_view(mux_pane(id, pane)))
+    assert(first.lifecycle.availability == "available" and #first.lifecycle.observations == 4,
+      "precondition: the snapshot is valid")
+    parses = 0
+    instance.poll(window, options)
+    assert(parses == 0, "an unchanged tree was parsed again: " .. parses .. " parses")
+    local second = assert(instance.get_attention_view(mux_pane(id, pane)))
+    assert(#second.lifecycle.observations == #first.lifecycle.observations
+      and second.lifecycle.availability == "available", "the reused lifecycle must be the same facts")
+
+    snapshot.pools.general.observations[2] = nil
+    write_json_path(binding_dir .. "/lifecycle.json", snapshot)
+    instance.poll(window, options)
+    assert(parses > 0, "a changed lifecycle.json must be parsed")
+    local third = assert(instance.get_attention_view(mux_pane(id, pane)))
+    assert(#third.lifecycle.observations < #first.lifecycle.observations,
+      "the changed snapshot's facts must replace the old ones")
+  end)
+  wezterm.json_parse = real_parse
+  assert(ok, failure)
+end)
+
 test("consumer manifest classification agrees with Rust and rejects incompatible metadata", function()
   local load = dofile(repo_root .. "/plugin/protocol.lua")
   local api = load({ wezterm = wezterm, protocol_path = repo_root .. "/protocol/v2.json" })
@@ -3819,13 +4327,53 @@ test("GUI callback has per-window baselines and detached lifecycle updates", fun
   assert(messages[#messages].view.lifecycle.diagnostics[1].code=="probe_unavailable")
   instance.poll(w1,options); assert(messages[#messages].view.lifecycle.availability=="available")
   local count=#messages
-  options.gui_windows={w2}; instance.poll(w2,options)
+  options.gui_windows={w2}; mux_windows_by_id[13011]=nil; instance.poll(w2,options)
   assert(#messages==count+1 and messages[#messages].kind=="scope_lost" and messages[#messages].window_id==13011)
   instance.poll(w2,options); assert(#messages==count+1,"closing one window cannot reset another")
   local fresh=dofile(repo_root.."/plugin/init.lua")
   fresh.apply_to_config({}, {auto_poll=false,dir=test_dir,review_key=false,on_view_change=function(message) assert(message.kind=="initial") end})
   fresh.poll(w2,options)
   assert(#drain_errors()==0,"lifecycle read diagnostics belong to the lifecycle facet")
+end)
+
+test("a workspace switch hides a window without losing its views or its tab order", function()
+  local wire = materialize_v2_fixture(13041, string.rep("f", 64))
+  local messages, instance = {}, dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root,
+    on_view_change = function(message) messages[#messages + 1] = message end })
+  local shown = window_double({ window_id = 13041, focused = false,
+    tabs = { { { id = 13041, domain = "mux", attention = wire } } } })
+  local other = window_double({ window_id = 13042, focused = false, tabs = { { 13043 } } })
+  local options = { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end }
+  options.gui_windows = { shown }
+  instance.poll(shown, options)
+  assert(#messages == 1 and messages[1].kind == "initial")
+
+  -- WezTerm reuses the GUI window for the other workspace's mux window; the
+  -- first one leaves gui_windows() and stays in the mux.
+  options.gui_windows = { other }
+  instance.poll(other, options)
+  for _, message in ipairs(messages) do
+    assert(message.kind ~= "scope_lost", "a hidden window's views were reported lost")
+  end
+  options.gui_windows = { shown }
+  instance.poll(shown, options)
+  assert(#messages == 1, "switching back must not replay the unchanged view as initial")
+
+  mux_windows_by_id[13041] = nil
+  options.gui_windows = { other }
+  instance.poll(other, options)
+  assert(messages[#messages].kind == "scope_lost" and messages[#messages].window_id == 13041,
+    "a window gone from the mux is a scope that was lost")
+
+  publish_window(13044, 13045, 13046)
+  window_double({ window_id = 13044, tabs = {}, focused = false })
+  attention.poll(other, { gui_windows = { other } })
+  assert(path_exists(tab_publication_path(13044)), "a hidden window keeps its tab order")
+  mux_windows_by_id[13044] = nil
+  attention.poll(other, { gui_windows = { other } })
+  assert(not path_exists(tab_publication_path(13044)), "a closed window's tab order is withdrawn")
 end)
 
 test("GUI callback preserves binding targets through unavailable reads and replacements", function()
@@ -3884,6 +4432,31 @@ test("GUI callback exceptions do not corrupt future polls and title opt-out does
   local other=materialize_v2_fixture(13004,string.rep("e",64))
   pane.get_user_vars=function()return {WEZTERM_ATTENTION=encode_json(other)}end
   instance.poll(window,options);assert(calls==3,"scope loss and new initial still deliver after exceptions")
+end)
+
+test("an on_view_change error is logged with its text, once per distinct error", function()
+  local failures = { "first failure", "first failure", "second failure" }
+  local calls = 0
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root, on_view_change = function()
+      calls = calls + 1
+      error(failures[calls] or "later failure", 0)
+    end })
+  local options = { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end }
+  for index = 1, 3 do
+    local wire = materialize_v2_fixture(13070 + index, string.rep("9", 64))
+    instance.poll(window_double({ window_id = 13080 + index, focused = false,
+      tabs = { { { id = 13070 + index, domain = "mux", attention = wire } } } }), options)
+  end
+  local logged = {}
+  for _, message in ipairs(drain_errors()) do
+    if message:find("on_view_change", 1, true) then logged[#logged + 1] = message end
+  end
+  assert(calls == 3, "every delivery must run, got " .. calls)
+  assert(#logged == 2 and logged[1]:find("first failure", 1, true)
+      and logged[2]:find("second failure", 1, true),
+    "expected one line per distinct error with its text, got " .. #logged)
 end)
 
 test("C1 scalar lookup refuses two full pane addresses", function()
@@ -3992,7 +4565,7 @@ test("C9 a retry needs a new live observation when inventory fails", function()
   local old=wezterm.background_child_process
   wezterm.background_child_process=function(argv) spawned[#spawned+1]=argv; return true end
   local instance=dofile(repo_root .. "/plugin/init.lua")
-  instance.apply_to_config({unix_domains={{name="lost-window",socket_path="/tmp/attention-lost-window.sock"}}},{auto_poll=false,dir=test_dir,review_key=false})
+  instance.apply_to_config({unix_domains={{name="lost-window",socket_path="/tmp/attention-lost-window.sock"}}},{auto_poll=false,dir=test_dir,review_key=false,integration_root=writer_root})
   local window=window_double({window_id=9002,tabs={{{id=12004,domain="lost-window"}}},focused=false})
   local opts={gui_windows=function()error("inventory unavailable")end,call_after=function(_,f)scheduled[#scheduled+1]=f end}
   instance.poll(window,opts); instance.poll(window,opts)
@@ -4018,9 +4591,184 @@ test("a missing protocol module logs once and keeps the v1 reader available", fu
   write_marker("9951", "stop", "missing-module-v1")
   local atype = fallback.get_attention("9951", { dir = test_dir, now_ms = 1000 })
   assert(atype == "stop", "the missing v2 module must not disable v1 rendering")
+  local sample = fallback._internal.sample_settled_title
+  for _, title in ipairs({ "bell\7", "next\194\133line" }) do
+    sample("fallback-title", "launch", title, nil)
+    assert(sample("fallback-title", "launch", title, nil) == nil,
+      "the fallback text check must refuse control characters too")
+  end
   local errors = drain_errors()
   assert(#errors == 1 and errors[1]:find("protocol", 1, true),
     "the missing module must produce one named log line")
+end)
+
+--- Load a fresh copy of the plugin with the given process environment, which
+--- the plugin reads when it loads.
+local function load_with_environment(environment)
+  local real_getenv = os.getenv
+  os.getenv = function(name)
+    if environment[name] ~= nil then return environment[name] or nil end
+    if name == "WEZTERM_ATTENTION_DIR" or name == "XDG_STATE_HOME" then return nil end
+    return real_getenv(name)
+  end
+  local ok, instance = pcall(dofile, repo_root .. "/plugin/init.lua")
+  os.getenv = real_getenv
+  assert(ok, instance)
+  return instance
+end
+
+test("an unknown option or a value of the wrong kind is named, and the default used", function()
+  local before = #(handlers["format-tab-title"] or {})
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  local ok, failure = pcall(instance.apply_to_config, {}, { auto_poll = false, dir = test_dir,
+    review_key = false, integration_root = writer_root,
+    acknowledge_types = { "stop" }, renderer = "tabs", colors = "red", show_provider = "yes" })
+  assert(ok, "a wrong option must not break the config: " .. tostring(failure))
+  local warnings = table.concat(drain_warnings(), "\n")
+  assert(warnings:find("acknowledge_types", 1, true) and warnings:find("auto_clear", 1, true),
+    "a misnamed option must be named with the real one: " .. warnings)
+  assert(warnings:find("renderer", 1, true) and warnings:find("tabs", 1, true), "bad renderer: " .. warnings)
+  assert(warnings:find("colors", 1, true) and warnings:find("show_provider", 1, true), warnings)
+  assert(#handlers["format-tab-title"] == before + 1,
+    "an unrecognised renderer falls back to the default tab renderer")
+  assert(instance._active_colors.stop == "#12271c" and instance._active_show_provider == false)
+end)
+
+test("the state root and tabs directory are created private to the user", function()
+  local root = test_dir .. "/private-root"
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, review_key = false, renderer = "manual", dir = root })
+  for _, path in ipairs({ root, root .. "/tabs" }) do
+    local listing = assert(io.popen("ls -ld " .. shell_quote(path)))
+    local mode = (listing:read("*l") or ""):sub(1, 10)
+    listing:close()
+    assert(mode == "drwx------", path .. " was created " .. mode)
+  end
+end)
+
+test("on Windows the directories are made with cmd.exe's mkdir", function()
+  local commands = {}
+  local real_execute, real_config = os.execute, package.config
+  package.config = "\\\n;\n?\n!\n-\n"
+  os.execute = function(command) commands[#commands + 1] = command; return 0 end
+  local ok, failure = pcall(function()
+    local instance = dofile(repo_root .. "/plugin/init.lua")
+    instance.apply_to_config({}, { auto_poll = false, review_key = false, renderer = "manual",
+      dir = "C:/Users/someone/state" })
+  end)
+  os.execute, package.config = real_execute, real_config
+  assert(ok, failure)
+  assert(#commands == 1, "one directory command, got " .. #commands)
+  assert(not commands[1]:find("-p", 1, true) and not commands[1]:find("umask", 1, true),
+    "a POSIX command reached cmd.exe: " .. commands[1])
+  assert(commands[1]:find('mkdir "C:\\Users\\someone\\state\\tabs"', 1, true),
+    "the tabs directory must be named in Windows form: " .. commands[1])
+end)
+
+test("the default state root follows the same order as the writer", function()
+  local home_default = test_dir .. "/.local/state/wezterm-attention"
+  local cases = {
+    { env = { WEZTERM_ATTENTION_DIR = test_dir .. "/explicit", XDG_STATE_HOME = test_dir .. "/xdg" },
+      root = test_dir .. "/explicit" },
+    { env = { WEZTERM_ATTENTION_DIR = "", XDG_STATE_HOME = test_dir .. "/xdg" },
+      root = test_dir .. "/xdg/wezterm-attention" },
+    { env = { XDG_STATE_HOME = test_dir .. "/xdg/" }, root = test_dir .. "/xdg/wezterm-attention" },
+    { env = { XDG_STATE_HOME = "relative/state" }, root = home_default },
+    { env = { XDG_STATE_HOME = "" }, root = home_default },
+    { env = {}, root = home_default },
+    { env = { WEZTERM_ATTENTION_DIR = "relative/dir" }, root = home_default, warned = true },
+  }
+  for index, case in ipairs(cases) do
+    local instance = load_with_environment(case.env)
+    instance.apply_to_config({}, { auto_poll = false, review_key = false, renderer = "manual",
+      integration_root = writer_root })
+    assert(instance._active_dir == case.root,
+      "case " .. index .. ": expected " .. case.root .. ", got " .. tostring(instance._active_dir))
+    local warnings = drain_warnings()
+    if case.warned then
+      assert(#warnings == 1 and warnings[1]:find("WEZTERM_ATTENTION_DIR", 1, true),
+        "a relative WEZTERM_ATTENTION_DIR must be named once in the log")
+    else
+      assert(#warnings == 0, "case " .. index .. " warned: " .. tostring(warnings[1]))
+    end
+  end
+end)
+
+test("loading without a module path fails with directions, and an explicit path loads", function()
+  local chunk = assert(loadfile(repo_root .. "/plugin/init.lua"))
+  -- WezTerm's Lua has no debug library, so dofile gives the plugin no way to
+  -- find its own directory. The harness has one; hide it.
+  local saved_debug = rawget(_G, "debug")
+  _G.debug = nil
+  local ok, failure = pcall(chunk)
+  local explicit_ok, explicit = pcall(chunk, "wezterm-attention", repo_root .. "/plugin/init.lua")
+  _G.debug = saved_debug
+  assert(not ok and tostring(failure):find("wezterm.plugin.require", 1, true)
+      and tostring(failure):find("loadfile", 1, true),
+    "the failure must say how to load the plugin, got: " .. tostring(failure))
+  assert(explicit_ok and type(explicit.apply_to_config) == "function",
+    "a module path passed by the caller must be enough: " .. tostring(explicit))
+end)
+
+--- A copy of the plugin in its own directory with no writer built, the layout
+--- `wezterm.plugin.require` produces before anyone runs install-cli.sh.
+local function unbuilt_plugin_copy()
+  local root = test_dir .. "/unbuilt-copy"
+  assert(os.execute("rm -rf " .. shell_quote(root) .. " && mkdir -p " .. shell_quote(root)
+    .. " && cp -R " .. shell_quote(repo_root .. "/plugin") .. " " .. shell_quote(repo_root .. "/protocol")
+    .. " " .. shell_quote(repo_root .. "/bin") .. " " .. shell_quote(root)) == 0)
+  return root
+end
+
+test("a discovered root without the writer is named once and starts no process", function()
+  local root = unbuilt_plugin_copy()
+  local started = 0
+  local real_run, real_background = wezterm.run_child_process, wezterm.background_child_process
+  wezterm.run_child_process = function() started = started + 1; return false, "", "" end
+  wezterm.background_child_process = function() started = started + 1; return true end
+  local ok, failure = pcall(function()
+    local instance = dofile(root .. "/plugin/init.lua")
+    local config = { unix_domains = { { name = "unbuilt", socket_path = "/tmp/attention-unbuilt.sock" } } }
+    instance.apply_to_config(config, { auto_poll = false, dir = test_dir, review_key = false })
+    local warnings = drain_warnings()
+    assert(#warnings == 1 and warnings[1]:find(root .. "/libexec/attention-rs", 1, true)
+        and warnings[1]:find("integration_root", 1, true),
+      "the missing writer must be named once with the way out: " .. tostring(warnings[1]))
+    assert(config.set_environment_variables.WEZTERM_ATTENTION_ROOT == nil,
+      "a root without its writer is not exported")
+    instance._internal.acquire_tab_source("/test/unbuilt.sock")
+    local window = window_double({ tabs = { { { id = 9971, domain = "unbuilt" } } }, focused = false })
+    instance.poll(window, { call_after = function() end })
+    instance.poll(window, { call_after = function() end })
+  end)
+  wezterm.run_child_process, wezterm.background_child_process = real_run, real_background
+  assert(ok, failure)
+  assert(started == 0, "a root with no writer must start no process, started " .. started)
+end)
+
+test("an explicit integration root is the one whose command runs", function()
+  local argv
+  local real_run = wezterm.run_child_process
+  wezterm.run_child_process = function(args) argv = args; return true, tab_source_response(args[4]), "" end
+  local ok, failure = pcall(function()
+    local instance = dofile(repo_root .. "/plugin/init.lua")
+    instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+      renderer = "manual", integration_root = writer_root })
+    instance._internal.acquire_tab_source("/test/explicit.sock")
+    assert(argv and argv[1] == writer_root .. "/bin/attention",
+      "tab source must run the integration root's command, ran " .. tostring(argv and argv[1]))
+    assert(#drain_warnings() == 0, "a root with its writer is not worth a warning")
+
+    local missing = test_dir .. "/explicit-without-writer"
+    local unbuilt = dofile(repo_root .. "/plugin/init.lua")
+    unbuilt.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+      renderer = "manual", integration_root = missing })
+    local warnings = drain_warnings()
+    assert(#warnings == 1 and warnings[1]:find(missing .. "/libexec/attention-rs", 1, true),
+      "an explicit root without its writer must be named: " .. tostring(warnings[1]))
+  end)
+  wezterm.run_child_process = real_run
+  assert(ok, failure)
 end)
 
 -- A producer reads WEZTERM_ATTENTION_ROOT as "write through the v2 writer", and
@@ -4385,7 +5133,8 @@ test("a domain seen through one readable tab is not a domain reported as publish
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({
     unix_domains = { { name = "partial-realm", socket_path = "/tmp/attention-partial.sock" } },
-  }, { auto_poll = false, dir = test_dir, review_key = false })
+  }, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local options = { call_after = function(delay, callback)
     scheduled[#scheduled + 1] = { delay = delay, callback = callback }
   end }
@@ -4521,13 +5270,13 @@ test("a pane that changes storage key keeps its files and gives up the old key",
 
   local window = 5000
   attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { { tab_id = 501, panes = { { id = 50, domain = "local" } } } } }))
+    tabs = { { tab_id = 501, panes = { { id = 50, domain = "unix", published = 50 } } } } }))
   assert(attention.get_attention(50) == "stop", "the v1 identity is cached under its scalar key")
 
   -- The same GUI pane, now publishing a full address.
   local wire = materialize_v2_fixture(5051)
   attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { { tab_id = 501, panes = { { id = 50, domain = "local", attention = wire } } } } }),
+    tabs = { { tab_id = 501, panes = { { id = 50, domain = "unix", attention = wire } } } } }),
     { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
   assert(marker_exists(50), "the pane is alive, so its files stay")
   assert(attention.get_attention(50) == nil,
@@ -4553,7 +5302,7 @@ test("a proven replacement survives uncertainty about something else", function(
       call_after = function() end }
 
     attention.poll(window_double({ window_id = window, focused = false,
-      tabs = { anchor_tab, { tab_id = 523, panes = { { id = pane_id, domain = "local" } } } } }),
+      tabs = { anchor_tab, { tab_id = 523, panes = { { id = pane_id, domain = "unix", published = pane_id } } } } }),
       options)
     assert(marker_exists(pane_id), "the pane starts under its scalar key")
 
@@ -4562,14 +5311,14 @@ test("a proven replacement survives uncertainty about something else", function(
     local wire = materialize_v2_fixture(pane_id + 400)
     attention.poll(window_double({ window_id = window, focused = false,
       tabs = { anchor_tab, unrelated,
-        { tab_id = 523, panes = { { id = pane_id, domain = "local", attention = wire } } } } }),
+        { tab_id = 523, panes = { { id = pane_id, domain = "unix", attention = wire } } } } }),
       options)
     assert(marker_exists(pane_id), "the pane is alive, so its files stay")
 
     -- Reconnected: same pane, new GUI-local id, everything readable.
     attention.poll(window_double({ window_id = window, focused = false,
       tabs = { anchor_tab,
-        { tab_id = 523, panes = { { id = pane_id + 1, domain = "local", attention = wire } } } } }),
+        { tab_id = 523, panes = { { id = pane_id + 1, domain = "unix", attention = wire } } } } }),
       options)
     return marker_exists(pane_id)
   end
@@ -4663,7 +5412,8 @@ test("an unreadable identity leaves a domain's publication unconcluded", functio
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({
     unix_domains = { { name = "invalid-realm", socket_path = "/tmp/attention-invalid.sock" } },
-  }, { auto_poll = false, dir = test_dir, review_key = false })
+  }, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local options = { call_after = function(delay, callback)
     scheduled[#scheduled + 1] = { delay = delay, callback = callback }
   end }
@@ -4697,7 +5447,8 @@ test("a domain nobody could see this tick keeps its retry", function()
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({
     unix_domains = { { name = "quiet-realm", socket_path = "/tmp/attention-quiet.sock" } },
-  }, { auto_poll = false, dir = test_dir, review_key = false })
+  }, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local options = { call_after = function(delay, callback)
     scheduled[#scheduled + 1] = { delay = delay, callback = callback }
   end }

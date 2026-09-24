@@ -6,6 +6,30 @@ return function(context)
   local marker_id_by_local = context.marker_id_by_local
   local settled_title_state = {}
 
+  --- Text from a source the plugin does not control -- a directory name a
+  --- program chose through OSC 7, a title, a tab name any process in any pane
+  --- can set -- made safe to draw and to publish: every control character
+  --- removed, C0, DEL and C1 alike, then cut to `max_bytes` on a character
+  --- boundary. WezTerm applies escape sequences in a formatter's text, so an
+  --- ESC left in would restyle the bar.
+  local function display_text(value, max_bytes)
+    if type(value) ~= "string" then return nil end
+    local text = value:gsub("[%z\1-\31\127]", "")
+    -- Repeated because removing one pair can join its neighbours into another.
+    local removed
+    repeat text, removed = text:gsub("\194[\128-\159]", "") until removed == 0
+    if #text > max_bytes then
+      local cut = max_bytes
+      -- A continuation byte just past the cut means the cut splits a
+      -- character; back up to that character's first byte.
+      while cut > 0 and text:byte(cut + 1) >= 0x80 and text:byte(cut + 1) < 0xC0 do
+        cut = cut - 1
+      end
+      text = text:sub(1, cut)
+    end
+    return text
+  end
+
   local function normalized_pane_title(value)
     if not is_safe_text(value, 256) then return nil end
     return value
@@ -56,25 +80,32 @@ return function(context)
     return state and state.settled or nil
   end
 
+  local function nonempty(value)
+    if value == "" then return nil end
+    return value
+  end
+
   local function title_sources(tab)
-    local server_title = type(tab.tab_title) == "string" and tab.tab_title ~= ""
-      and tab.tab_title or nil
+    local server_title = nonempty(display_text(tab.tab_title, 256))
     local pane = tab.active_pane
     local directory
     if M._active_show_directory ~= false then
       local cwd = pane and pane.current_working_dir
       if cwd then
         local path = cwd.file_path or cwd.path or tostring(cwd)
-        local dir_name = string.match(path, "([^/]+)/?$") or ""
-        if dir_name ~= "" then directory = dir_name end
+        directory = nonempty(display_text(string.match(path, "([^/]+)/?$"), 256))
       end
     end
     local settled_title = settled_title_for_tab(tab)
+    local base_title = server_title or directory or settled_title
+    -- Nothing else to go by: the title as it is right now, however often it
+    -- changes, rather than a tab with no name at all.
+    if not base_title then base_title = display_text(pane and pane.title, 256) or "" end
     return {
       server_title = server_title,
       directory = directory,
       settled_title = settled_title,
-      base_title = server_title or directory or settled_title or "",
+      base_title = base_title,
     }
   end
 
@@ -86,6 +117,7 @@ return function(context)
   --- format-tab-title.
 
   return {
+    display_text = display_text,
     normalized_pane_title = normalized_pane_title,
     sample_settled_title = sample_settled_title,
     settled_title_state = settled_title_state,

@@ -122,6 +122,8 @@ return function(context)
   --- no file work. Keyed by path, because that is what a write would replace.
   local published_tab_lists = {}
   local drawn_tab_lists = {}
+  --- The one path each window's order was last written to by this process.
+  local published_path_by_window = {}
 
   --- One encoding per drawn tab. The formatter is called once per tab, so
   --- without this every tab's text would be escaped again on every one of those
@@ -176,6 +178,22 @@ return function(context)
     if not replace_file(path, body, "publish-tabs") then return false end
     published_tab_lists[path] = { list = list, window_id = tostring(window_id), window_key = window_key }
     drawn_tab_lists[window_key] = { list = list, written_at = written_at }
+    -- The first draw can come before the source identity is known, so a
+    -- window's first file is often the unsourced one. Once the same window is
+    -- written under a source, that earlier file describes the same window
+    -- again, and `attention tabs` would list the window twice.
+    local superseded = published_path_by_window[window_key]
+    published_path_by_window[window_key] = path
+    if superseded and superseded ~= path and published_tab_lists[superseded] then
+      published_tab_lists[superseded] = nil
+      local removed, err = os.remove(superseded)
+      local still_there = not removed and io.open(superseded, "r")
+      if still_there then
+        still_there:close()
+        report_error_once("supersede-tabs:" .. superseded,
+          "cannot remove superseded tab order " .. superseded .. ": " .. tostring(err))
+      end
+    end
     return true
   end
 
@@ -193,6 +211,7 @@ return function(context)
       if window_id and not live[window_id] then
         published_tab_lists[path] = nil
         drawn_tab_lists[publication.window_key] = nil
+        published_path_by_window[publication.window_key] = nil
         local removed, err = os.remove(path)
         if not removed then
           -- A file already gone is the wanted state; only a file that stays is
@@ -239,6 +258,14 @@ return function(context)
     if reported_errors[key] then return end
     reported_errors[key] = true
     wezterm.log_error("wezterm-attention: " .. message)
+  end
+
+  --- The same, for a setup the plugin works around rather than a failure.
+  local function report_warning_once(key, message)
+    if reported_errors[key] then return end
+    reported_errors[key] = true
+    local log = type(wezterm.log_warn) == "function" and wezterm.log_warn or wezterm.log_error
+    log("wezterm-attention: " .. message)
   end
 
   local function clear_acknowledgement(dir, pane_id)
@@ -439,29 +466,42 @@ return function(context)
         { kind = "launch" }
     end
 
+    --- The pane's valid review files, and the record read from each.
     local function v2_review_paths(read, dir)
       local pattern = v2_pane_root(dir, read.address) .. "/reviews/*.json"
       local paths, glob_diagnostic = glob_paths(pattern)
       if not paths then
         report_error_once("review-enumerate:" .. read.cache_key,
           glob_diagnostic.code .. ": " .. glob_diagnostic.message)
-        return {}
+        return {}, {}
       end
-      local valid = {}
+      local valid, records = {}, {}
       for _, path in ipairs(paths) do
         local record, record_diagnostic = read_expected_record(
           path, "review", { address = read.address }, true)
         if record and path_stem(path) == record.owner_key then
           valid[#valid + 1] = path
+          records[path] = record
         else
           local item = record_diagnostic or identity_diagnostic("review", path)
           report_error_once("review-record:" .. path, item.code .. ": " .. item.message)
         end
       end
-      return valid
+      return valid, records
     end
 
     local function write_v2_user_review(read, dir)
+      -- A reader shows nothing for a pane whose claim is not the launch the pane
+      -- published, so a flag written now would light nothing; the writer refuses
+      -- its own marks in this state for the same reason.
+      local claim_path = v2_pane_root(dir, read.address) .. "/claim.json"
+      if not read_expected_record(claim_path, "claim",
+          { address = read.address, launch_id = read.launch_id }, true) then
+        report_error_once("review-claim:" .. read.cache_key .. ":" .. read.launch_id,
+          "cannot flag this pane for review: its claim is not the launch the pane published, "
+            .. "so the flag would not show")
+        return false
+      end
       local owner_id = "user"
       local owner_key = sha256(owner_id)
       local path = v2_pane_root(dir, read.address) .. "/reviews/" .. owner_key .. ".json"
@@ -475,15 +515,39 @@ return function(context)
       }, "review", { address = read.address })
     end
 
+    --- Remove the reviews this pane showed, and only those. A writer can
+    --- replace a review between the read above and the removal, and removing
+    --- by path would take the newer one, which the user never saw. So each
+    --- file is first moved aside, out of the reader's *.json pattern, and
+    --- read: the record that was shown is deleted, and anything else is put
+    --- back, unless a still newer write has taken the path since, which then
+    --- supersedes both.
     local function clear_v2_reviews(read, dir)
       local cleared = false
-      for _, path in ipairs(v2_review_paths(read, dir)) do
-        local removed, remove_err = os.remove(path)
-        if removed then
-          cleared = true
+      local paths, shown = v2_review_paths(read, dir)
+      for _, path in ipairs(paths) do
+        local taken = path .. "." .. publication_session .. ".clear"
+        local moved, move_err = os.rename(path, taken)
+        if not moved then
+          -- Already gone is the state a clear wants.
+          local still_there = io.open(path, "r")
+          if still_there then
+            still_there:close()
+            report_error_once("clear-v2-review:" .. path,
+              "failed to remove review claim " .. path .. ": " .. tostring(move_err))
+          end
         else
-          report_error_once("clear-v2-review:" .. path,
-            "failed to remove review claim " .. path .. ": " .. tostring(remove_err))
+          local record = read_expected_record(taken, "review", { address = read.address }, true)
+          local superseded = io.open(path, "r")
+          if superseded then superseded:close() end
+          if record and record.event_id == shown[path].event_id then
+            os.remove(taken)
+            cleared = true
+          elseif superseded then
+            os.remove(taken)
+          else
+            os.rename(taken, path)
+          end
         end
       end
       return cleared
@@ -502,8 +566,13 @@ return function(context)
     local function acknowledge_focused_v2_pane(read, opts)
       local dir = (opts and opts.dir) or M._active_dir or defaults.dir
       local acknowledge_set = M._active_acknowledge_set or { stop = true, notify = true }
-      local view = read_attention_view(read, opts and opts.now_unix_ns, { dir = dir })
-      if not (view.activity_type and acknowledge_set[view.activity_type] and view.event_id) then
+      local view = read_attention_view(read, opts and opts.now_unix_ns,
+        { dir = dir, resample_utc = opts and opts.resample_utc })
+      -- Only what the tab shows is seen: when the review flag outranks the
+      -- activity, the tab shows the flag, and the activity stays for later, as
+      -- a v1 marker does.
+      if not (view.activity_type and view.type == view.activity_type
+          and acknowledge_set[view.activity_type] and view.event_id) then
         attention_cache[read.cache_key] = view
         return "absent"
       end
@@ -557,6 +626,7 @@ return function(context)
     reported_errors = reported_errors,
     publication_session = publication_session,
     report_error_once = report_error_once,
+    report_warning_once = report_warning_once,
     next_publication_id = next_publication_id,
     json_string = json_string,
     json_value = json_value,
