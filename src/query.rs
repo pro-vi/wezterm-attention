@@ -333,6 +333,15 @@ impl PaneFacts {
             timing_ms: BindingTiming::default(),
         }
     }
+    /// An answer with no row because the scope's server could not be read
+    /// or may be gone, which `diagnostic` says, in the `scope` facet.
+    fn scope_unavailable(scope: &PaneScope, mut diagnostic: Diagnostic) -> Self {
+        diagnostic
+            .context
+            .insert("facet".into(), Value::String("scope".into()));
+        Self::unavailable(scope, ScopeRelation::Unavailable, vec![diagnostic], None)
+    }
+
     pub fn complete(&self) -> bool {
         self.scope_relation == ScopeRelation::Matched && self.diagnostics.is_empty()
     }
@@ -458,17 +467,7 @@ fn read_pane_facts_once(
     };
     let server_exited = match check_socket() {
         Ok(exited) => exited,
-        Err(mut diagnostic) => {
-            diagnostic
-                .context
-                .insert("facet".into(), Value::String("scope".into()));
-            return Ok(PaneFacts::unavailable(
-                scope,
-                ScopeRelation::Unavailable,
-                vec![diagnostic],
-                None,
-            ));
-        }
+        Err(diagnostic) => return Ok(PaneFacts::scope_unavailable(scope, diagnostic)),
     };
     let pane = pane_path(root, address);
     let launch = launch_path(root, address, &scope.launch_id);
@@ -769,16 +768,8 @@ fn read_pane_facts_once(
             PaneEvidence::Observed(presence) => presence,
             // A socket that refuses is answered as one that is gone or
             // replaced: the scope's server may no longer be the one there.
-            PaneEvidence::ServerGone { mut diagnostic } => {
-                diagnostic
-                    .context
-                    .insert("facet".into(), Value::String("scope".into()));
-                return Ok(PaneFacts::unavailable(
-                    scope,
-                    ScopeRelation::Unavailable,
-                    vec![diagnostic],
-                    None,
-                ));
+            PaneEvidence::ServerGone { diagnostic } => {
+                return Ok(PaneFacts::scope_unavailable(scope, diagnostic));
             }
         }
     };
@@ -839,16 +830,8 @@ fn read_pane_facts_once(
         &RecordIdentity::launch(address, &scope.launch_id),
         "binding_selection",
     );
-    if let Err(mut diagnostic) = check_socket() {
-        diagnostic
-            .context
-            .insert("facet".into(), Value::String("scope".into()));
-        return Ok(PaneFacts::unavailable(
-            scope,
-            ScopeRelation::Unavailable,
-            vec![diagnostic],
-            None,
-        ));
+    if let Err(diagnostic) = check_socket() {
+        return Ok(PaneFacts::scope_unavailable(scope, diagnostic));
     }
     if after_claim.failed() || after_pointer.failed() {
         return Ok(PaneFacts::unavailable(
