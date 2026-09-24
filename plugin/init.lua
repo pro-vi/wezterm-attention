@@ -379,6 +379,7 @@ local runtime_api = runtime_state.bind({
   resolve_pane_read = resolve_pane_read,
   read_attention_view = read_attention_view,
   pane_method = pane_method,
+  canonical_pane_id = canonical_pane_id,
   unix_domain_socket = reader_api.unix_domain_socket,
   refresh_domain_facts = reader_api.refresh_domain_facts,
   selected_v2_records_root = selected_v2_records_root,

@@ -780,6 +780,9 @@ return function()
     function M.get_attention(marker_id, opts)
       local id = tostring(marker_id)
       if opts and opts.dir then
+        -- The id becomes a path segment, and the read below can remove a stale
+        -- acknowledgement beside it.
+        if not context.canonical_pane_id(id) then return nil end
         local atype, frame, _, _, _, _, source = read_effective_marker(opts.dir, id)
         local now = (opts and opts.now_ms) or now_ms()
         local flagged = review_flagged(opts.dir, id) or atype == "review"
@@ -901,6 +904,9 @@ return function()
     function M.remove_marker(marker_id, opts)
       local dir = (opts and opts.dir) or M._active_dir or defaults.dir
       local id = tostring(marker_id)
+      -- The id becomes a path segment of four removals; "../x" would reach
+      -- outside the state directory.
+      if not context.canonical_pane_id(id) then return end
       remove_marker(dir, id)
       attention_cache[id] = nil
     end

@@ -1269,6 +1269,22 @@ test("public removal clears canonical marker and acknowledgement sidecar", funct
   assert(attention.get_attention(944) == nil, "public removal should clear cache")
 end)
 
+test("public removal and direct reads refuse an id that is not a pane id", function()
+  local outside = test_dir .. "/outside"
+  assert(os.execute("mkdir -p " .. shell_quote(outside)) == 0)
+  local victim = test_dir .. "/victim"
+  for _, suffix in ipairs({ "", ".ack", ".review", ".agents" }) do
+    local out = assert(io.open(victim .. suffix, "w")); out:write('{"type":"stop"}'); out:close()
+  end
+  attention.remove_marker("../victim", { dir = outside })
+  attention.get_attention("../victim", { dir = outside })
+  for _, suffix in ipairs({ "", ".ack", ".review", ".agents" }) do
+    assert(path_exists(victim .. suffix), "a ../ id reached " .. victim .. suffix)
+  end
+  assert(attention.get_attention("../victim", { dir = outside }) == nil)
+  for _, suffix in ipairs({ "", ".ack", ".review", ".agents" }) do os.remove(victim .. suffix) end
+end)
+
 test("public removal without opts uses the configured marker directory", function()
   local configured_dir = test_dir .. "/configured"
   assert(os.execute("mkdir -p " .. shell_quote(configured_dir)) == 0)
