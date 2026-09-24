@@ -2073,7 +2073,7 @@ fn apply_provider_event_inner(
         );
     }
     let event = &admitted;
-    match event.action {
+    let result = match event.action {
         ProviderAction::Observation => {
             apply_observation(&resolved, event, observation, &written_at)
         }
@@ -2093,7 +2093,15 @@ fn apply_provider_event_inner(
         ProviderAction::Review => apply_review_event(&resolved, event, false),
         ProviderAction::Clear => apply_clear_event(&resolved, event, observation, &written_at),
         ProviderAction::Ignored => unreachable!(),
-    }
+    };
+    // Metadata the parser dropped is reported unless the lifecycle has a
+    // finding of its own, which says more about what happened to the event.
+    result.map(|mut result| {
+        if result.diagnostic.is_none() {
+            result.diagnostic = event.diagnostic.clone();
+        }
+        result
+    })
 }
 
 #[cfg(test)]

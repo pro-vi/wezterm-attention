@@ -42,6 +42,9 @@ mod session_starts;
 #[path = "lifecycle_spec/turn_endings.rs"]
 mod turn_endings;
 
+#[path = "lifecycle_spec/metadata_fields.rs"]
+mod metadata_fields;
+
 struct Scratch(PathBuf);
 
 #[test]

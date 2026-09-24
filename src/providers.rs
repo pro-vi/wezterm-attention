@@ -214,10 +214,38 @@ fn optional_label(payload: &Value, field: &str) -> std::result::Result<Option<St
     }
 }
 
-fn optional_lenient_label(payload: &Value, field: &str) -> Option<String> {
-    payload
-        .get(field)
-        .and_then(|value| safe_label(value, field).ok())
+/// Optional metadata that fails its check is dropped, not fatal: the event
+/// still means what its name says. Each dropped field is remembered so one
+/// diagnostic can name them all.
+#[derive(Default)]
+struct DroppedFields(Vec<&'static str>);
+
+impl DroppedFields {
+    fn keep(
+        &mut self,
+        field: &'static str,
+        checked: std::result::Result<Option<String>, Diagnostic>,
+    ) -> Option<String> {
+        checked.unwrap_or_else(|_| {
+            self.0.push(field);
+            None
+        })
+    }
+
+    fn diagnostic(self) -> Option<Diagnostic> {
+        if self.0.is_empty() {
+            return None;
+        }
+        let mut diagnostic = AttentionError::new(
+            "record_invalid",
+            format!("optional fields were dropped: {}", self.0.join(", ")),
+        )
+        .diagnostic;
+        diagnostic
+            .context
+            .insert("dropped_fields".into(), serde_json::json!(self.0));
+        Some(diagnostic)
+    }
 }
 
 fn optional_path(payload: &Value, field: &str) -> std::result::Result<Option<String>, Diagnostic> {
@@ -275,6 +303,7 @@ fn environment_path(
 
 fn parse_provider_common(
     provider: Provider,
+    event_name: &str,
     payload: &Value,
     env: &BTreeMap<String, String>,
 ) -> std::result::Result<ProviderEvent, Diagnostic> {
@@ -299,6 +328,18 @@ fn parse_provider_common(
         )?),
         None => None,
     };
+    let mut dropped = DroppedFields::default();
+    let agent_type = dropped.keep("agent_type", optional_label(payload, "agent_type"));
+    let transcript_path = dropped.keep(transcript_field, optional_path(payload, transcript_field));
+    let cwd = dropped.keep("cwd", optional_path(payload, "cwd"));
+    let config_dir = dropped.keep(config_field, environment_path(env, config_field));
+    let model = dropped.keep("model", optional_label(payload, "model"));
+    // Only Pi's bus carries a badge label.
+    let label = if provider == Provider::Pi && event_name == "bus" {
+        dropped.keep("label", optional_label(payload, "label"))
+    } else {
+        None
+    };
     let event = ProviderEvent {
         source_event: String::new(),
         observation: None,
@@ -308,16 +349,19 @@ fn parse_provider_common(
         provider_session_id: Some(provider_session_id),
         start_source: None,
         activity_type: None,
-        label: None,
-        agent_id: optional_lenient_label(payload, "agent_id"),
-        agent_type: optional_lenient_label(payload, "agent_type"),
+        label,
+        // Checked before dispatch: a bad child identity ignores the event.
+        agent_id: payload
+            .get("agent_id")
+            .and_then(|value| safe_label(value, "agent_id").ok()),
+        agent_type,
         child_source: None,
-        transcript_path: optional_path(payload, transcript_field)?,
-        cwd: optional_path(payload, "cwd")?,
-        config_dir: environment_path(env, config_field)?,
-        model: optional_label(payload, "model")?,
+        transcript_path,
+        cwd,
+        config_dir,
+        model,
         expected_session_id,
-        diagnostic: None,
+        diagnostic: dropped.diagnostic(),
     };
     Ok(event)
 }
@@ -364,7 +408,7 @@ fn parse_claude_or_codex(
             "hook event name does not match the callback",
         );
     }
-    let mut event = match parse_provider_common(provider, payload, env) {
+    let mut event = match parse_provider_common(provider, event_name, payload, env) {
         Ok(event) => event,
         Err(diagnostic) => {
             let mut event =
@@ -586,7 +630,7 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
             "Pi event is not supported",
         );
     }
-    let mut event = match parse_provider_common(Provider::Pi, payload, env) {
+    let mut event = match parse_provider_common(Provider::Pi, event_name, payload, env) {
         Ok(event) => event,
         Err(diagnostic) => {
             let mut event =
@@ -594,22 +638,6 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
             event.diagnostic = Some(diagnostic);
             return event;
         }
-    };
-    let bus_label = if event_name == "bus" {
-        match optional_label(payload, "label") {
-            Ok(label) => label,
-            Err(diagnostic) => {
-                let mut ignored = ProviderEvent::ignored(
-                    Some(Provider::Pi),
-                    &diagnostic.code,
-                    &diagnostic.message,
-                );
-                ignored.diagnostic = Some(diagnostic);
-                return ignored;
-            }
-        }
-    } else {
-        None
     };
     match event_name {
         "input" | "session_before_compact" | "session_compact" => {
@@ -685,7 +713,6 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
             Some(state @ ("thinking" | "stop" | "notify")) => {
                 event.action = ProviderAction::Activity;
                 event.activity_type = Some(state.to_owned());
-                event.label = bus_label;
             }
             _ => {
                 return ProviderEvent::ignored(
