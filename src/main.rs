@@ -182,7 +182,7 @@ impl BindingField {
 
 fn bindings_help() -> String {
     format!(
-        "Example: attention bindings --all --fields address,provider,current\nFields: {}\ncomplete is false when --limit truncated the rows, or with --socket when a probe did not answer. Exit 0 when complete, 1 when not, 2 for a usage error.\nDropped diagnostics are counted: result.diagnostic_count of result.total_diagnostic_count.\nresult.timing_ms says where the call's time went: pane_list (wezterm cli list), process_list (the process probe), records (the file walk).\nIf truncated, narrow with --provider, raise --limit (maximum 1000), or explicitly use --all.\n--socket queries prevent WezTerm auto-start; --realm selects a recorded realm ID.",
+        "Example: attention bindings --all --fields address,provider,current\nFields: {}\ncomplete is false when --limit truncated the rows or a state directory could not be read, and with --socket on any diagnostic: a probe that did not answer, a selected record that could not be read, a binding_conflict. Exit 0 when complete, 1 when not, 2 for a usage error.\nDropped diagnostics are counted: result.diagnostic_count of result.total_diagnostic_count.\nresult.timing_ms says where the call's time went: pane_list (wezterm cli list), process_list (the process probe), records (the file walk).\nIf truncated, narrow with --provider, raise --limit (maximum 1000), or explicitly use --all.\n--socket queries prevent WezTerm auto-start; --realm selects a recorded realm ID.",
         BindingField::value_variants()
             .iter()
             .map(|field| field.name())

@@ -129,3 +129,42 @@ fn a_tab_order_rewritten_during_the_decision_is_kept() {
     assert_eq!(detail["action"], "keep");
     assert_eq!(detail["reason"], "changed");
 }
+
+/// A tab order naming a pane whose socket is gone is kept, as one naming an
+/// unanswered pane is, and what sweep found about that pane names the file
+/// and the pane it was looking at.
+#[test]
+fn a_tab_order_naming_a_pane_of_a_gone_socket_is_kept_and_named() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let root = setup.root();
+    let (address, _) = pane_address(&setup.env).expect("address");
+    let marker = format!("v2:{}:{}:42", address.realm_id, address.incarnation_id);
+    let path = write_tab_order(&root, 5, &[&marker]);
+    fs::remove_file(&setup.env["WEZTERM_UNIX_SOCKET"]).expect("remove socket");
+    for (apply, operation) in [
+        (false, None),
+        (true, Some("00000000-0000-4000-8000-000000000903")),
+    ] {
+        let (result, diagnostics) = setup.run_sweep(apply, operation);
+        assert!(path.exists());
+        let detail = result
+            .details
+            .iter()
+            .find(|detail| detail["kind"] == "tab_order_collection")
+            .expect("tab order detail");
+        assert_eq!(detail["action"], "keep");
+        assert!(
+            !diagnostics.iter().any(|d| d.code == "probe_unavailable"),
+            "{diagnostics:?}"
+        );
+        assert!(
+            diagnostics.iter().any(|d| d.code == "realm_unavailable"
+                && d.context.get("path") == Some(&json!("tabs/5.json"))
+                && d.context.get("pane_id") == Some(&json!("42"))
+                && d.context.get("realm_id") == Some(&json!(address.realm_id))
+                && d.context.get("incarnation_id") == Some(&json!(address.incarnation_id))),
+            "{diagnostics:?}"
+        );
+    }
+}

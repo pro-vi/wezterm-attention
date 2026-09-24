@@ -224,7 +224,8 @@ stay on disk:
   tab, or when every pane it names is verified absent through a listing of that
   pane's mux. An exited GUI's panes are usually still running in a mux server,
   or gone together with their socket, which a reader reports as unavailable
-  rather than absent. So the file stays until you remove it. It is safe to
+  rather than absent (a `realm_unavailable` diagnostic that names the file and
+  the pane). So the file stays until you remove it. It is safe to
   delete `tabs/<incarnation id>-<window id>.json` by hand once no GUI with that
   window is running.
 - **Temporary files from an interrupted write, outside a tree being removed.**
@@ -242,23 +243,25 @@ stay on disk:
 Collecting any of these would be a new deletion, and would need the same
 evidence rule the others have.
 
-## A running mux server whose socket file was deleted can lose its panes' records
+## On macOS, the records of a server whose socket is gone stay for good
 
 Sweep counts a pane as absent once for a server whose socket path no longer
-exists only when the process probe answers that no running process carries that
-socket and pane id. A failed probe is never a sighting. But macOS hides the
+exists only when the process probe read every process of this user and none
+carries that socket and pane id. Nothing else outside the server can tell a
+stopped server from a running one whose socket file was deleted. macOS hides the
 environment of its own system binaries, Apple's `/bin/zsh` and `/bin/bash`
-among them, so a pane where only such a shell runs carries nothing the probe can
-see. If the socket file of a mux server that is still running is deleted, those
-panes read as absent: two sweeps a minute apart end their bindings, and 30 days
-later two more let `sweep --apply` remove their trees. A pane where an agent
-runs is seen through the agent's own process, unless that is a system binary
-too.
+among them, and every Mac runs some of them as the user, so there the probe
+never reads every process and that sighting is never made. The panes of a mux
+server that exited with its socket, and those of a GUI that exited, keep their
+bindings and pane trees: `sweep` reports each such pane's absence as
+`unavailable`, with a `realm_unavailable` diagnostic ("mux socket no longer
+exists"), and deletes none of it. That is a finding, not an unanswered probe,
+so `sweep` and `doctor` still give a complete answer and exit 0.
 
-Nothing outside the server can tell a deleted socket file from a stopped
-server when every process in the pane hides its environment. Keeping every such
-pane's records for good would be the other choice, and would leave the records of
-every mux that exited on disk.
+On Linux, where every process of the user can be read, the same panes are
+reclaimed by the two-observation rule. On macOS, once you know the server is
+gone, you can remove its records yourself:
+`<state root>/v2/realms/<realm id>/incarnations/<incarnation id>`.
 
 ## After a reboot, pane retention can wait without bound
 

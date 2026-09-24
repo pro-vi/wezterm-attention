@@ -186,14 +186,23 @@ records in its file and version scope even when a pane has no binding.
 
 Destructive absence needs two sightings of absence under different operation IDs at least 60
 monotonic seconds apart. A sighting is a pane-list negative plus an identity-scoped process
-negative for the full socket path and pane ID. For sweep, a pane whose mux server is gone is also
-one sighting for the old incarnation: a different server now owns its socket path, or its socket
-path no longer exists and the process probe answers that no running process carries that socket
-and pane id. A socket path that is gone while the process probe failed, or with no probe, is
-unavailable, not absent: the server may still run with its socket file removed. A probe recorded at a
-monotonic time later than the current clock, as after a reboot, restarts the count; that can only
-delay an end. Readers such as `bindings` still report such a pane `unavailable`, not absent.
-Process-probe failure is unavailable evidence, not absence. One failed process listing answers
+negative for the full socket path and pane ID. There the mux answered and does not list the pane,
+which is what shows it gone; the process probe is asked only whether a process still carries the
+pane, so a process it could not read does not stop the sighting. Socket paths are compared after
+resolving their directory, because the realm record keeps the path resolved and a process keeps
+it as WezTerm was configured to spell it, through `/tmp` on macOS or a symlinked home; the socket
+file itself need not exist. For sweep, a pane whose mux server is gone is also one sighting for
+the old incarnation: a different server now owns its socket path, or its socket path no longer
+exists and the process probe read every process of this user and none carries that socket and
+pane id. A socket path that is gone while the process probe failed, could not read every
+process, or with no probe, is unavailable, not absent: the server may still run with its socket
+file removed. A probe recorded at a monotonic time later than the current clock, as after a
+reboot, restarts the count; that can only delay an end. Readers such as `bindings` still report
+such a pane `unavailable`, not absent, with a `realm_unavailable` diagnostic ("mux socket no
+longer exists"). A gone socket is a finding about the server, not a probe that did not answer, so
+it never makes `doctor` or `sweep` incomplete; sweep's absence and retention steps say
+`unavailable` for such a pane and add `probe_unavailable` only when the process probe itself
+failed or was not there. Process-probe failure is unavailable evidence, not absence. One failed process listing answers
 every pane of that query as unavailable; it is not retried pane by pane, so a query waits on at
 most one pane listing per mux socket and one process listing. A realm-wide `bindings` asks its
 sockets in parallel, so it waits about as long as the slowest one, bounded by the per-listing
@@ -205,17 +214,28 @@ The process probe reads environments, never command-line arguments. On macOS it 
 this user's processes' environment with `KERN_PROCARGS2`; on Linux it reads `/proc/<pid>/environ`
 for processes this user owns; elsewhere it runs `ps axeww -o uid=,command=` from `/bin` or
 `/usr/bin` and keeps this user's lines. If it cannot read its own process's environment, the whole
-listing counts as failed, so a permission problem never reads as every pane absent. macOS hides
-the environment of its own system binaries, such as `/bin/zsh` and `/bin/bash`, from both `ps` and
-`sysctl`. Process environments are never printed or persisted.
+listing counts as failed, so a permission problem never reads as every pane absent. A process
+it lists and cannot read makes the listing incomplete: macOS hides the environment of its own
+system binaries, such as `/bin/zsh` and `/bin/bash`, from both `ps` and `sysctl`, `KERN_PROCARGS2`
+can refuse a running process, and Linux can refuse `/proc/<pid>/environ`. An incomplete listing
+still shows a pane present by a process it read; it never shows a pane absent where it is the
+only evidence. On macOS a listing is in practice always incomplete, so there a server whose
+socket is gone never has its panes found absent; see
+[accepted limitations](accepted-limitations.md). The `ps` listing used elsewhere cannot tell
+which processes it did not read, and counts as complete. Process environments are never printed
+or persisted.
 
 Once a pane's current binding ended more than 30 days ago, `sweep --apply` removes the pane's
 whole tree, but only after two new sightings of absence under different operation ids at least 60
 seconds apart; sightings from before that binding ended do not count. A tree holding any file sweep does not recognise is kept. Each step appears as a `pane_retention` detail, with action
 `first_absence`, `too_soon`, `replay_first`, `clear_absence`, `present`, `unavailable`, `prune` or
 `keep`; the preview says `keep` wherever apply would keep. Temporary files left by an interrupted
-write, and a review that Alt+B had moved aside to `<review>.json.<session>.clear` when it was
-interrupted, do not hold a binding or pane tree back from retention.
+write, a review that Alt+B had moved aside to `<review>.json.<session>.clear` when it was
+interrupted, and the lock `reviews/.<owner key>.lock` that `mark review`, `mark clear` and Pi's
+review events leave beside the reviews, do not hold a binding or pane tree back from retention; a
+lock-like file of any other name or place does. Every removal sweep makes stays inside the state
+root: a target reached through a symlinked directory below the root is kept, with a
+`record_invalid` diagnostic, and so are subagent records below a symlinked directory.
 
 A retention floor advances only across complete monotonic-timestamp groups that were already
 ineligible under the prior floor. An eligible member blocks the whole equal-timestamp group.

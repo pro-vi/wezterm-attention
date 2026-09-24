@@ -243,3 +243,61 @@ fn pane_retention_keeps_a_pane_claimed_again_during_the_decision() {
     assert!(pane.join("claim.json").exists(), "{:?}", result.details);
     assert!(diagnostics.iter().any(|d| d.code == "record_invalid"));
 }
+
+/// Moves the state root's `v2/` outside it and leaves a symlink in its place.
+/// Returns where the records now are.
+fn move_v2_outside(setup: &Setup) -> PathBuf {
+    let root = setup.root();
+    let outside = setup._scratch.0.join("outside-v2");
+    fs::rename(root.join("v2"), &outside).expect("move v2 outside");
+    symlink(&outside, root.join("v2")).expect("link v2");
+    outside
+}
+
+/// A symlinked `v2/` puts every record below it outside the state root.
+/// Compaction reaches its children through it, and removes none of them.
+#[test]
+fn compaction_never_deletes_through_a_symlinked_state_directory() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let old = setup.seed_presence("old-child", 300, 1, "stopped");
+    let relative = old
+        .strip_prefix(setup.root().join("v2"))
+        .expect("child below v2")
+        .to_path_buf();
+    let outside = move_v2_outside(&setup);
+    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
+    let (result, diagnostics) = setup.run_sweep(true, Some(OP_1));
+    assert!(
+        outside.join(&relative).exists(),
+        "a record outside the state root survives: {:?}",
+        result.details
+    );
+    assert!(diagnostics.iter().any(|d| d.code == "record_invalid"));
+}
+
+/// The absence probe a present pane clears is removed only inside the root.
+#[test]
+fn an_absence_probe_is_never_cleared_through_a_symlinked_state_directory() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    setup.panes.set(Vec::new());
+    setup.processes.set(Presence::Absent);
+    setup.clock.set_monotonic(1_000);
+    setup.run_sweep(true, Some(OP_1));
+    let probe = pane_path(&setup.root(), &pane_address(&setup.env).expect("address").0)
+        .join("absence-probe.json");
+    assert!(probe.exists());
+    let relative = probe
+        .strip_prefix(setup.root().join("v2"))
+        .expect("probe below v2")
+        .to_path_buf();
+    let outside = move_v2_outside(&setup);
+    setup.panes.set(vec![PaneRow {
+        pane_id: "42".to_owned(),
+        tty_name: Some("/dev/ttys888".to_owned()),
+    }]);
+    let (_, diagnostics) = setup.run_sweep(true, Some(OP_2));
+    assert!(outside.join(&relative).exists(), "{diagnostics:?}");
+    assert!(diagnostics.iter().any(|d| d.code == "record_invalid"));
+}
