@@ -235,3 +235,43 @@ fn binding_retention_removes_the_entry_of_the_binding_it_removes() {
     assert!(!old_entry.exists());
     assert!(current_entry.exists());
 }
+
+/// A bind whose entry cannot be written leaves no binding behind, so an index
+/// marked complete still names every binding the store holds.
+#[test]
+fn a_bind_that_cannot_write_its_entry_leaves_no_binding() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    list_panes(&setup, &["42", "99"]);
+    let launch_id = "00000000-0000-4000-8000-000000000702";
+    // A directory at the entry's path makes the entry write fail.
+    let entry = entry_of(&setup, "99", "session-a", launch_id);
+    fs::create_dir_all(&entry).expect("block the entry");
+    let mut env = setup.env.clone();
+    env.insert("WEZTERM_PANE".to_owned(), "99".to_owned());
+    env.insert(
+        "WEZTERM_ATTENTION_LAUNCH_ID".to_owned(),
+        launch_id.to_owned(),
+    );
+    wezterm_attention::claim_launch(&env, &setup.ports()).expect("claim pane 99");
+    let payload = json!({
+        "session_id":"session-a",
+        "transcript_path":"/tmp/session-a.jsonl",
+        "cwd":"/tmp/project",
+        "hook_event_name":"SessionStart",
+        "source":"startup"
+    });
+    let event = parse_provider_event("claude", "SessionStart", &payload, &BTreeMap::new());
+    assert!(apply_provider_event(&event, &env, "00000000000000000300", &setup.ports()).is_err());
+    fs::remove_dir(&entry).expect("unblock the entry");
+
+    let (address, _) = pane_address(&env).expect("address");
+    let binding = launch_path(&setup.root(), &address, launch_id)
+        .join("bindings")
+        .join(binding_id("claude", "session-a", launch_id))
+        .join("binding.json");
+    assert!(!binding.exists(), "a binding the index does not name");
+    let indexed = answers(&setup);
+    fs::remove_file(session_index_path(&setup.root())).expect("unmark the index");
+    assert_eq!(answers(&setup), indexed);
+}
