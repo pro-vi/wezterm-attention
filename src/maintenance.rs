@@ -1643,9 +1643,6 @@ pub fn sweep(
     panes: &dyn PaneLister,
     processes: Option<&dyn ProcessProbe>,
 ) -> Result<(SweepResult, Vec<Diagnostic>)> {
-    if apply && operation_id.is_none() {
-        return Err(AttentionError::usage("--apply requires --operation-id"));
-    }
     let operation_id = operation_id
         .map(|value| {
             Uuid::parse_str(value)
@@ -1655,6 +1652,11 @@ pub fn sweep(
                 .ok_or_else(|| AttentionError::usage("operation id is not canonical"))
         })
         .transpose()?;
+    // An operation id lets a retried apply recognise its own earlier work, and
+    // a repeat under the same id changes nothing. An apply with nothing to
+    // retry gets a fresh id, so running it again is a new observation; the
+    // result reports the id it used.
+    let operation_id = operation_id.or_else(|| apply.then(|| Uuid::new_v4().to_string()));
     if let Some(realm) = realm_filter
         && (realm.len() != 64
             || !realm

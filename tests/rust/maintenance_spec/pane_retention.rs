@@ -325,3 +325,33 @@ fn a_probe_from_before_a_restart_starts_the_count_again() {
     assert_eq!(probe["observed_mono_ns"], "00000000000000005000");
     assert_eq!(probe["operation_id"], OP_1);
 }
+
+/// An operation id is how a retried apply recognises its own earlier work.
+/// A caller with nothing to retry need not invent one: each apply without an
+/// id gets a fresh one, so two runs a minute apart are two observations.
+#[test]
+fn an_apply_without_an_operation_id_uses_a_fresh_one() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let binding_dir = setup.binding_dir();
+    setup.panes.set(Vec::new());
+    setup.processes.set(Presence::Absent);
+    setup.clock.set_monotonic(1_000);
+    let (first, _) = setup.run_sweep(true, None);
+    setup
+        .clock
+        .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
+    let (second, _) = setup.run_sweep(true, None);
+    assert_eq!(actions(&second.details, "absence"), [&json!("end")]);
+    assert_eq!(end_reason(&binding_dir), Some(json!("sweep_absent")));
+    let ids: Vec<String> = [first.operation_id, second.operation_id]
+        .into_iter()
+        .map(|id| id.expect("an apply reports its operation id"))
+        .collect();
+    assert_ne!(ids[0], ids[1]);
+    for id in &ids {
+        assert_eq!(Uuid::parse_str(id).expect("UUID").to_string(), *id);
+    }
+    // A preview has no operation.
+    assert_eq!(setup.run_sweep(false, None).0.operation_id, None);
+}
