@@ -78,8 +78,14 @@ use std::path::PathBuf;
 use crate::protocol::Result;
 use crate::records::state_root;
 
+/// The process environment, keeping only variables whose name and value are
+/// both UTF-8. `env::vars` panics on the first variable that is not, which
+/// would stop every command -- hooks included -- before it could run; no
+/// variable this crate reads is expected to hold anything but text.
 pub fn environment() -> BTreeMap<String, String> {
-    env::vars().collect()
+    env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .collect()
 }
 
 pub fn state_root_from_environment() -> Result<PathBuf> {

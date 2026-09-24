@@ -1,5 +1,7 @@
 #[path = "support/executables.rs"]
 mod executables;
+#[path = "support/trusted_scratch.rs"]
+mod trusted_scratch;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -15,6 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use trusted_scratch::TrustedScratch;
 use uuid::Uuid;
 use wezterm_attention::identity::{length_prefixed_digest, pane_address};
 use wezterm_attention::protocol::{
@@ -27,8 +30,9 @@ use wezterm_attention::records::{
     state_root, with_lock,
 };
 use wezterm_attention::wezterm::{
-    Clock, PaneLister, PaneRow, RuntimePorts, SystemTtyWriter, TtyWriter, parse_pane_rows,
-    publication_bytes, resolve_wezterm_executable, tty_path_from_fd,
+    Clock, PaneLister, PaneRow, Presence, ProcessListing, ProcessProbe, RuntimePorts,
+    SystemProcessProbe, SystemTtyWriter, TtyWriter, parse_pane_rows, publication_bytes,
+    resolve_wezterm_executable, tty_path_from_fd,
 };
 
 struct Scratch {
@@ -102,6 +106,14 @@ impl Clock for BlockingClock<'_> {
 
 #[derive(Default)]
 struct FakePanes(Vec<PaneRow>);
+
+/// The mux's view of the pane `setup` claims from: pane 42 on `FakeTty`'s tty.
+fn this_pane() -> FakePanes {
+    FakePanes(vec![PaneRow {
+        pane_id: "42".into(),
+        tty_name: Some(FakeTty::new().path),
+    }])
+}
 
 impl PaneLister for FakePanes {
     fn list(&self, _socket_path: &str) -> wezterm_attention::protocol::Result<Vec<PaneRow>> {
@@ -509,8 +521,7 @@ fn realm_publish_skips_only_the_row_without_a_tty() {
     let (_scratch, _listener, environment) = setup();
     let clock = FixedClock("00000000000000000100");
     let tty = FakeTty::new();
-    let no_panes = FakePanes::default();
-    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &no_panes))
+    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect("claim succeeds");
     let panes = FakePanes(vec![
         PaneRow {
@@ -537,32 +548,79 @@ fn realm_publish_skips_only_the_row_without_a_tty() {
 
 #[test]
 fn executable_resolution_uses_the_explicit_fallback_when_path_is_empty() {
-    let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join(format!("fallback-{}", Uuid::new_v4().simple()));
-    fs::create_dir_all(&directory).expect("create trusted fallback directory");
-    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-        .expect("secure fallback directory");
-    let executable = directory.join("wezterm");
-    fs::write(&executable, "#!/bin/sh\nexit 0\n").expect("write fake executable");
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
-        .expect("make fake executable executable");
-    let resolved = resolve_wezterm_executable(None, None, std::slice::from_ref(&executable))
+    let scratch = TrustedScratch::new();
+    let executable = scratch.executable("wezterm", "exit 0");
+    let resolved = resolve_wezterm_executable(None, None, None, std::slice::from_ref(&executable))
         .expect("fallback resolves");
     assert_eq!(resolved, executable);
-    fs::remove_dir_all(directory).expect("remove fallback directory");
 }
 
 #[test]
 fn executable_resolution_rejects_a_fallback_below_a_group_writable_directory() {
-    let scratch = Scratch::new();
-    let executable = scratch.path.join("wezterm");
-    fs::write(&executable, "#!/bin/sh\nexit 0\n").expect("write fake executable");
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
-        .expect("make fake executable executable");
-    let error = resolve_wezterm_executable(None, None, &[executable])
-        .expect_err("a fallback below /tmp must not be trusted");
+    let scratch = TrustedScratch::new();
+    let shared = scratch.0.join("shared");
+    fs::create_dir(&shared).expect("create shared directory");
+    let executable = trusted_scratch::write_script(&shared.join("wezterm"), "exit 0");
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o700)).expect("private directory");
+    assert!(
+        resolve_wezterm_executable(None, None, None, std::slice::from_ref(&executable)).is_ok(),
+        "the same file in a private directory resolves, so the refusal below is the mode's"
+    );
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o770)).expect("group-writable");
+    let error = resolve_wezterm_executable(None, None, None, &[executable])
+        .expect_err("a fallback below a group-writable directory must not be trusted");
     assert_eq!(error.diagnostic.code, "realm_unavailable");
+}
+
+#[test]
+fn the_cli_beside_a_running_mux_server_is_used_and_the_server_itself_never_is() {
+    let scratch = TrustedScratch::new();
+    let server = scratch.executable("wezterm-mux-server", "exit 0");
+    let cli = scratch.executable("wezterm", "exit 0");
+    let empty_path = Scratch::new();
+    let path = empty_path.path.as_os_str();
+
+    let beside_executable =
+        resolve_wezterm_executable(Some(path), None, Some(server.as_os_str()), &[])
+            .expect("the CLI beside WEZTERM_EXECUTABLE resolves");
+    assert_eq!(beside_executable, cli);
+    let in_executable_dir =
+        resolve_wezterm_executable(Some(path), Some(scratch.0.as_os_str()), None, &[])
+            .expect("the CLI in WEZTERM_EXECUTABLE_DIR resolves");
+    assert_eq!(in_executable_dir, cli);
+
+    fs::remove_file(&cli).expect("remove the CLI");
+    let error = resolve_wezterm_executable(
+        Some(path),
+        Some(scratch.0.as_os_str()),
+        Some(server.as_os_str()),
+        std::slice::from_ref(&server),
+    )
+    .expect_err("a mux server is never run in place of the CLI");
+    assert_eq!(error.diagnostic.code, "realm_unavailable");
+}
+
+#[test]
+fn executable_resolution_skips_a_relative_path_entry() {
+    let scratch = TrustedScratch::new();
+    let cli = scratch.executable("wezterm", "exit 0");
+    let here = fs::canonicalize(std::env::current_dir().expect("current directory"))
+        .expect("canonical current directory");
+    let mut relative = PathBuf::new();
+    for _ in here.components().skip(1) {
+        relative.push("..");
+    }
+    relative.push(scratch.0.strip_prefix("/").expect("absolute scratch"));
+    assert!(
+        relative.is_relative() && relative.join("wezterm").exists(),
+        "the relative entry names the directory that holds a CLI"
+    );
+    let error = resolve_wezterm_executable(Some(relative.as_os_str()), None, None, &[])
+        .expect_err("a relative PATH entry is skipped");
+    assert_eq!(error.diagnostic.code, "realm_unavailable");
+    let absolute = resolve_wezterm_executable(Some(scratch.0.as_os_str()), None, None, &[])
+        .expect("the same directory as an absolute entry resolves");
+    assert_eq!(absolute, cli);
 }
 
 #[test]
@@ -570,8 +628,7 @@ fn claim_is_private_durable_and_published() {
     let (_scratch, _listener, environment) = setup();
     let clock = FixedClock("00000000000000000100");
     let tty = FakeTty::new();
-    let panes = FakePanes::default();
-    let result = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &panes))
+    let result = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect("claim succeeds");
     let (address, _) = pane_address(&environment).expect("pane address");
     let claim =
@@ -650,8 +707,7 @@ fn claim_mints_a_launch_id_when_the_shell_has_none() {
     environment.remove("WEZTERM_ATTENTION_LAUNCH_ID");
     let clock = FixedClock("00000000000000000100");
     let tty = FakeTty::new();
-    let panes = FakePanes::default();
-    let result = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &panes))
+    let result = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect("claim succeeds");
     Uuid::parse_str(&result.launch_id).expect("Rust minted a UUID");
     assert_eq!(result.publication, "published");
@@ -663,8 +719,7 @@ fn committed_claim_reports_pending_when_tty_publication_fails() {
     environment.remove("WEZTERM_ATTENTION_LAUNCH_ID");
     let clock = FixedClock("00000000000000000100");
     let tty = FailingWriteTty(FakeTty::new());
-    let panes = FakePanes::default();
-    let result = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &panes))
+    let result = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect("durable claim is still successful");
     assert_eq!(result.publication, "pending");
     assert_eq!(
@@ -686,9 +741,8 @@ fn committed_claim_reports_pending_when_tty_publication_fails() {
 fn duplicate_claim_republishes_without_rewrite() {
     let (_scratch, _listener, environment) = setup();
     let tty = FakeTty::new();
-    let panes = FakePanes::default();
     let first_clock = FixedClock("00000000000000000100");
-    wezterm_attention::claim_launch(&environment, &ports(&first_clock, &tty, &panes))
+    wezterm_attention::claim_launch(&environment, &ports(&first_clock, &tty, &this_pane()))
         .expect("first claim");
     let (address, _) = pane_address(&environment).expect("pane address");
     let claim =
@@ -699,8 +753,9 @@ fn duplicate_claim_republishes_without_rewrite() {
         .modified()
         .expect("modified time");
     let second_clock = FixedClock("00000000000000000200");
-    let result = wezterm_attention::claim_launch(&environment, &ports(&second_clock, &tty, &panes))
-        .expect("duplicate claim");
+    let result =
+        wezterm_attention::claim_launch(&environment, &ports(&second_clock, &tty, &this_pane()))
+            .expect("duplicate claim");
     assert_eq!(result.disposition, "confirmed");
     assert_eq!(fs::read(&claim).expect("claim bytes"), before);
     assert_eq!(
@@ -726,7 +781,6 @@ fn delayed_older_claim_loses() {
         "00000000-0000-4000-8000-000000000103".to_owned(),
     );
     let tty = FakeTty::new();
-    let panes = FakePanes::default();
     let entered = Barrier::new(2);
     let release = Barrier::new(2);
     let older_clock = BlockingClock {
@@ -735,13 +789,19 @@ fn delayed_older_claim_loses() {
     };
     let result = thread::scope(|scope| {
         let older = scope.spawn(|| {
-            wezterm_attention::claim_launch(&older_environment, &ports(&older_clock, &tty, &panes))
-                .expect("older claim")
+            wezterm_attention::claim_launch(
+                &older_environment,
+                &ports(&older_clock, &tty, &this_pane()),
+            )
+            .expect("older claim")
         });
         entered.wait();
         let newer_clock = FixedClock("00000000000000000200");
-        wezterm_attention::claim_launch(&newer_environment, &ports(&newer_clock, &tty, &panes))
-            .expect("newer claim");
+        wezterm_attention::claim_launch(
+            &newer_environment,
+            &ports(&newer_clock, &tty, &this_pane()),
+        )
+        .expect("newer claim");
         release.wait();
         older.join().expect("older claimant")
     });
@@ -790,8 +850,7 @@ fn socket_rebirth_before_commit_is_rejected_without_a_claim_write() {
         replacement: Mutex::new(None),
     };
     let clock = FixedClock("00000000000000000100");
-    let panes = FakePanes::default();
-    let error = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &panes))
+    let error = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect_err("socket rebirth must reject claim");
     assert_eq!(error.diagnostic.code, "incarnation_changed");
     let old_claim =
@@ -1120,8 +1179,7 @@ fn claimed_pane_has_no_bindings_yet() {
     let (_scratch, _listener, environment) = setup();
     let clock = FixedClock("00000000000000000100");
     let tty = FakeTty::new();
-    let panes = FakePanes::default();
-    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &panes))
+    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect("claim succeeds");
     let (rows, diagnostics) =
         read_bindings(&state_root(&environment).expect("state root")).expect("bindings query");
@@ -1155,8 +1213,7 @@ fn bindings_query_returns_all_identity_axes_and_rejects_path_mismatch() {
     let (_scratch, _listener, environment) = setup();
     let clock = FixedClock("00000000000000000100");
     let tty = FakeTty::new();
-    let panes = FakePanes::default();
-    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &panes))
+    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect("claim succeeds");
     let root = state_root(&environment).expect("state root");
     let (address, _) = pane_address(&environment).expect("pane address");
@@ -1206,8 +1263,7 @@ fn bindings_query_rejects_foreign_end_pointer_and_claim_records() {
     let (_scratch, _listener, environment) = setup();
     let clock = FixedClock("00000000000000000100");
     let tty = FakeTty::new();
-    let panes = FakePanes::default();
-    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &panes))
+    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect("claim succeeds");
     let root = state_root(&environment).expect("state root");
     let (address, _) = pane_address(&environment).expect("pane address");
@@ -1265,8 +1321,7 @@ fn bindings_query_probes_presence_once_per_pane() {
     let (_scratch, _listener, environment) = setup();
     let clock = FixedClock("00000000000000000100");
     let tty = FakeTty::new();
-    let empty_panes = FakePanes::default();
-    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &empty_panes))
+    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect("claim succeeds");
     let root = state_root(&environment).expect("state root");
     let (address, _) = pane_address(&environment).expect("pane address");
@@ -1296,8 +1351,7 @@ fn missing_incarnation_manifest_fails_presence_closed() {
     let (_scratch, _listener, environment) = setup();
     let clock = FixedClock("00000000000000000100");
     let tty = FakeTty::new();
-    let empty_panes = FakePanes::default();
-    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &empty_panes))
+    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect("claim succeeds");
     let root = state_root(&environment).expect("state root");
     let (address, _) = pane_address(&environment).expect("pane address");
@@ -1332,4 +1386,310 @@ fn missing_incarnation_manifest_fails_presence_closed() {
     assert_eq!(rows[0].pane_presence, "unavailable");
     assert_eq!(rows[0].reader_confidence, "unconfirmed");
     assert_eq!(panes.calls.load(Ordering::SeqCst), 0);
+}
+
+/// A child that lives until killed, with exactly `environment`.
+///
+/// It is this crate's own binary waiting on stdin for a hook payload. A
+/// system shell would not do: macOS withholds the environment of its own
+/// platform binaries from every reader, `ps` included.
+struct Waiting(std::process::Child);
+
+impl Waiting {
+    fn spawn(provider: &str, environment: &[(&str, &str)]) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_attention"));
+        command
+            .args(["hooks", "event", provider, "Stop"])
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        for (name, value) in environment {
+            command.env(name, value);
+        }
+        Self(command.spawn().expect("spawn waiting child"))
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Ask until `expected` comes back or two seconds pass, since a child just
+/// spawned may not have reached its own program yet.
+fn settled_presence(socket: &str, pane: &str, expected: Presence) -> Presence {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let presence = SystemProcessProbe.presence(socket, pane);
+        if presence == expected || Instant::now() >= deadline {
+            return presence;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn the_process_probe_finds_a_pane_in_a_live_process_environment() {
+    let socket = format!("/tmp/wa-probe-{}.sock", Uuid::new_v4().simple());
+    assert_eq!(
+        SystemProcessProbe.presence(&socket, "4242"),
+        Presence::Absent
+    );
+    let waiting = Waiting::spawn(
+        "claude",
+        &[("WEZTERM_UNIX_SOCKET", &socket), ("WEZTERM_PANE", "4242")],
+    );
+    assert_eq!(
+        settled_presence(&socket, "4242", Presence::Present),
+        Presence::Present
+    );
+    assert_eq!(
+        SystemProcessProbe.presence(&socket, "424"),
+        Presence::Absent
+    );
+    drop(waiting);
+    assert_eq!(
+        SystemProcessProbe.presence(&socket, "4242"),
+        Presence::Absent
+    );
+}
+
+#[test]
+fn pane_variables_in_a_process_arguments_are_not_its_environment() {
+    let socket = format!("/tmp/wa-probe-{}.sock", Uuid::new_v4().simple());
+    let text = format!("WEZTERM_PANE=4343 WEZTERM_UNIX_SOCKET={socket}");
+    let _waiting = Waiting::spawn(
+        &text,
+        &[("WEZTERM_UNIX_SOCKET", &socket), ("WEZTERM_PANE", "4444")],
+    );
+    assert_eq!(
+        settled_presence(&socket, "4444", Presence::Present),
+        Presence::Present,
+        "the listing read this process"
+    );
+    assert_eq!(
+        SystemProcessProbe.presence(&socket, "4343"),
+        Presence::Absent
+    );
+}
+
+#[test]
+fn the_process_probe_is_available_exactly_when_its_listing_is() {
+    let probe = SystemProcessProbe;
+    assert!(matches!(probe.pane_processes(), ProcessListing::Listed(_)));
+    assert!(probe.available());
+}
+
+struct UnavailablePanes;
+
+impl PaneLister for UnavailablePanes {
+    fn list(&self, _socket_path: &str) -> wezterm_attention::protocol::Result<Vec<PaneRow>> {
+        Err(wezterm_attention::protocol::AttentionError::new(
+            "realm_unavailable",
+            "test listing failure",
+        ))
+    }
+}
+
+fn claim_file(environment: &BTreeMap<String, String>) -> PathBuf {
+    let (address, _) = pane_address(environment).expect("pane address");
+    pane_path(&state_root(environment).expect("state root"), &address).join("claim.json")
+}
+
+#[test]
+fn a_claim_from_a_terminal_other_than_the_pane_s_own_is_refused() {
+    let (_scratch, _listener, environment) = setup();
+    let clock = FixedClock("00000000000000000100");
+    let tty = FakeTty::new();
+    let elsewhere = FakePanes(vec![PaneRow {
+        pane_id: "42".into(),
+        tty_name: Some("/dev/ttys001".into()),
+    }]);
+    let error = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &elsewhere))
+        .expect_err("an inherited pane id must not claim from another terminal");
+    assert_eq!(error.diagnostic.code, "unsafe_tty");
+    let unlisted = FakePanes(vec![PaneRow {
+        pane_id: "7".into(),
+        tty_name: Some(tty.path.clone()),
+    }]);
+    let error = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &unlisted))
+        .expect_err("a pane its mux does not list must not be claimed");
+    assert_eq!(error.diagnostic.code, "unsafe_tty");
+    assert!(!claim_file(&environment).exists());
+    assert!(tty.writes.lock().expect("writes lock").is_empty());
+}
+
+#[test]
+fn a_claim_takes_one_pane_listing() {
+    let (_scratch, _listener, environment) = setup();
+    let clock = FixedClock("00000000000000000100");
+    let tty = FakeTty::new();
+    let panes = CountingPanes {
+        calls: AtomicUsize::new(0),
+    };
+    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &panes))
+        .expect("the pane's own terminal claims");
+    assert_eq!(panes.calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn without_a_listing_a_claim_inside_tmux_or_screen_is_refused_and_others_proceed() {
+    let clock = FixedClock("00000000000000000100");
+    let tty = FakeTty::new();
+    for (name, value, refused) in [
+        ("TMUX", "/tmp/tmux-501/default,1,0", true),
+        ("STY", "1234.pts-0.host", true),
+        ("TMUX", "", false),
+        ("UNRELATED", "value", false),
+    ] {
+        let (_scratch, _listener, mut environment) = setup();
+        environment.insert(name.into(), value.into());
+        let result =
+            wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &UnavailablePanes));
+        if refused {
+            assert_eq!(
+                result.expect_err("refused").diagnostic.code,
+                "unsafe_tty",
+                "{name}={value}"
+            );
+            assert!(!claim_file(&environment).exists());
+        } else {
+            result.expect("proceeds as before when nothing says the pane was inherited");
+            assert!(claim_file(&environment).exists());
+        }
+    }
+}
+
+#[test]
+fn a_complete_realm_wide_answer_exits_zero_beside_its_diagnostics() {
+    let (scratch, _listener, environment) = setup();
+    let clock = FixedClock("00000000000000000100");
+    let tty = FakeTty::new();
+    wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
+        .expect("claim succeeds");
+    let root = state_root(&environment).expect("state root");
+    let (address, _) = pane_address(&environment).expect("pane address");
+    let launch_id = &environment["WEZTERM_ATTENTION_LAUNCH_ID"];
+    let binding_id = "c".repeat(64);
+    let launch = launch_path(&root, &address, launch_id);
+    atomic_replace(
+        &launch
+            .join("bindings")
+            .join(&binding_id)
+            .join("binding.json"),
+        &binding_record(&address, launch_id, &binding_id),
+    )
+    .expect("write binding");
+    // A binding filed under another id is refused with a diagnostic.
+    atomic_replace(
+        &launch
+            .join("bindings")
+            .join("d".repeat(64))
+            .join("binding.json"),
+        &binding_record(&address, launch_id, &binding_id),
+    )
+    .expect("write path-mismatched binding");
+    let bin = scratch.path.join("bin");
+    fs::create_dir(&bin).expect("create bin");
+    trusted_scratch::write_script(
+        &bin.join("wezterm"),
+        "printf '%s' '[{\"pane_id\":42,\"tty_name\":\"/dev/ttys999\"}]'",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .args(["bindings", "--all"])
+        .env_clear()
+        .env("HOME", &environment["HOME"])
+        .env(
+            "WEZTERM_ATTENTION_DIR",
+            &environment["WEZTERM_ATTENTION_DIR"],
+        )
+        .env("PATH", &bin)
+        .output()
+        .expect("run bindings");
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("bindings JSON");
+    assert_eq!(envelope["complete"], true, "{envelope}");
+    assert_eq!(envelope["status"], "findings");
+    assert_eq!(envelope["result"]["rows"].as_array().map(Vec::len), Some(1));
+    assert_eq!(output.status.code(), Some(0), "{envelope}");
+}
+
+/// macOS only: after the queue is filled, freeing part of it lets a pty
+/// there take part of a publication. A Linux pty frees room in whole buffer
+/// blocks, so the same steps take all of it and no cut can be staged; the
+/// cut itself is covered on every platform by the writer's unit tests.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_publication_cut_short_by_a_stalled_tty_is_closed_once_the_tty_drains() {
+    let (_scratch, _listener, environment) = setup();
+    let (address, _) = pane_address(&environment).expect("pane address");
+    let mut master = 0;
+    let mut slave = 0;
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    let filled = fill_tty_output_queue(slave);
+    let tty_path = tty_path_from_fd(slave).expect("tty path");
+    let fingerprint =
+        wezterm_attention::identity::tty_fingerprint(&tty_path).expect("tty fingerprint");
+    let data = publication_bytes(&address, Some("00000000-0000-4000-8000-000000000101"))
+        .expect("publication");
+    // Free less room than the publication needs, so it starts and stalls.
+    let mut room = vec![0_u8; data.len() / 2];
+    let freed = unsafe { libc::read(master, room.as_mut_ptr().cast(), room.len()) };
+    assert!(freed > 0);
+    let drained = thread::spawn(move || {
+        // Stay stalled past the write deadline, then drain everything.
+        thread::sleep(Duration::from_millis(400));
+        let flags = unsafe { libc::fcntl(master, libc::F_GETFL) };
+        unsafe { libc::fcntl(master, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        let mut received = Vec::new();
+        let until = Instant::now() + Duration::from_millis(600);
+        let mut block = [0_u8; 4096];
+        while Instant::now() < until {
+            let count = unsafe { libc::read(master, block.as_mut_ptr().cast(), block.len()) };
+            if count > 0 {
+                received.extend_from_slice(&block[..count as usize]);
+            } else {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        received
+    });
+    let result = SystemTtyWriter.write(&tty_path, &data, &fingerprint);
+    let received = drained.join().expect("drain");
+    unsafe {
+        libc::close(master);
+        libc::close(slave);
+    }
+    assert!(
+        result.is_err(),
+        "the publication did not fit, so it is incomplete"
+    );
+    let published = received
+        .iter()
+        .position(|byte| *byte == 0x1b)
+        .map(|start| &received[start..])
+        .expect("the publication started");
+    assert!(
+        published.len() < data.len() && data.starts_with(&published[..published.len() - 2]),
+        "filled {filled}, received {} publication bytes",
+        published.len()
+    );
+    assert!(
+        published.ends_with(b"!\x07"),
+        "the cut sequence must end unparseable: {:?}",
+        String::from_utf8_lossy(&published[published.len().saturating_sub(8)..])
+    );
 }
