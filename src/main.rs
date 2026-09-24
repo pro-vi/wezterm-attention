@@ -271,7 +271,7 @@ struct MarkArgs {
 
 #[derive(Clone, Debug, Args)]
 #[command(
-    after_help = "Preview is the default and removes nothing. Example: attention sweep --json\nLeftover <pane_id>, <pane_id>.agents, and <pane_id>.ack stems are always listed in projection_collection; --all-details includes the rest when complete is false.\nApply: attention sweep --apply --operation-id 00000000-0000-4000-8000-000000000001 --json\noperation-id must be a canonical lowercase UUID. macOS uuidgen is uppercase; lowercase it."
+    after_help = "Preview is the default and removes nothing. Example: attention sweep --json\nLeftover <pane_id>, <pane_id>.agents, and <pane_id>.ack stems are always listed in projection_collection; --all-details includes the rest when complete is false.\nApply: attention sweep --apply --json\nEach apply without --operation-id gets a fresh one, reported in result.operation_id.\nPass --operation-id only to replay that operation; it must be a canonical lowercase UUID."
 )]
 struct SweepArgs {
     #[arg(long)]
@@ -959,7 +959,11 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     // A window that could not be read is a window missing from
                     // the answer, so the answer is not the whole tab bar.
                     complete: diagnostics.is_empty(),
-                    result: serde_json::json!({ "windows": windows }),
+                    result: serde_json::json!({
+                        "windows": windows,
+                        "diagnostic_count": diagnostics.len().min(50),
+                        "total_diagnostic_count": diagnostics.len(),
+                    }),
                     diagnostics: diagnostics.iter().take(50).cloned().collect(),
                 },
                 args.json,
@@ -1092,8 +1096,19 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             let unavailable = diagnostics
                 .iter()
                 .any(|item| item.code == "probe_unavailable");
+            // A report in which no probe had anything of the user's to look at
+            // found nothing wrong, but it did not find anything right either.
+            // The versions probe reads only this binary's own manifest.
+            let nothing_observed = result["probes"].as_array().is_some_and(|probes| {
+                probes
+                    .iter()
+                    .filter(|probe| probe["name"] != "versions")
+                    .all(|probe| probe["status"] == "unobserved")
+            });
             let status = if unavailable {
                 "unavailable"
+            } else if diagnostics.is_empty() && nothing_observed {
+                "unobserved"
             } else if diagnostics.is_empty() {
                 "ok"
             } else {
