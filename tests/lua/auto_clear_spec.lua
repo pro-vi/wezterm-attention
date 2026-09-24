@@ -212,10 +212,10 @@ local wezterm = {
   },
   json_parse = decode_json,
   glob = function(pattern)
-    local directory = pattern:match("^(.*)/%*%.json$")
+    local directory, extension = pattern:match("^(.*)/%*%.(%w+)$")
     if not directory then return {} end
-    local pipe = io.popen(
-      "find " .. shell_quote(directory) .. " -maxdepth 1 -type f -name '*.json' -print 2>/dev/null")
+    local pipe = io.popen("find " .. shell_quote(directory)
+      .. " -maxdepth 1 -type f -name '*." .. extension .. "' -print 2>/dev/null")
     if not pipe then return {} end
     local paths = {}
     for path in pipe:lines() do paths[#paths + 1] = path end
@@ -624,7 +624,7 @@ local function test(name, callback)
   end
 end
 
--- ── U1: visible-attention projection ────────────────────────────────────────
+-- ── Visible-attention projection ────────────────────────────────────────────
 
 test("projection returns the highest-priority cached pane and ignores uncached ones", function()
   write_marker(711, "thinking")
@@ -705,7 +705,7 @@ test("Lua accepts the publication ID marker shape published by Pi", function()
     "Pi's publication ID and extra fields must not change the marker type")
 end)
 
--- ── U2: read-only rendering ─────────────────────────────────────────────────
+-- ── Read-only rendering ─────────────────────────────────────────────────────
 
 test("neither renderer clears a marker, even on the active tab", function()
   write_marker(101, "stop")
@@ -757,7 +757,7 @@ test("both renderers project the same attention for the same tab", function()
     "ctx.attention should still be indicator, type, color")
 end)
 
--- ── U2: publishing the drawn tab order ─────────────────────────────────────
+-- ── Publishing the drawn tab order ─────────────────────────────────────────
 
 --- WezTerm's format-tab-title argument is TabInformation userdata, not a table.
 --- `newproxy` is the luajit stand-in: `type()` is `"userdata"` and field reads
@@ -902,6 +902,40 @@ test("a legacy tab order this process never wrote survives its window's sourced 
   assert(path_exists(test_dir .. "/tabs/" .. string.rep("a", 64) .. "-9796.json"))
   assert(read_path(foreign) == "from an exited GUI", "a file this process did not write is sweep's")
   os.remove(foreign)
+end)
+
+test("a legacy tab order another process rewrote survives its window's sourced one", function()
+  local previous = wezterm.run_child_process
+  internal.reset_tab_source()
+  local drawn = gui_tab({ window_id = 9830, tab_id = 9831, tab_index = 0, panes = { 9832 } })
+  format_tab_title(drawn, { drawn })
+  local legacy = tab_publication_path(9830)
+  assert(path_exists(legacy), "the first draw publishes under the legacy name")
+  -- Window ids restart in every GUI process, so another one can own this name.
+  local out = assert(io.open(legacy, "w")); out:write("another GUI's window 9830"); out:close()
+  wezterm.run_child_process = function(args) return true, tab_source_response(args[4]), "" end
+  internal.acquire_tab_source("/test/gui.sock")
+  format_tab_title(drawn, { drawn })
+  wezterm.run_child_process = previous
+  internal.reset_tab_source()
+  assert(path_exists(test_dir .. "/tabs/" .. string.rep("a", 64) .. "-9830.json"))
+  assert(read_path(legacy) == "another GUI's window 9830",
+    "a file whose bytes are not the ones this process wrote is not this process's to remove")
+  os.remove(legacy)
+end)
+
+test("a closed window's tab order another process rewrote is not withdrawn", function()
+  internal.reset_tab_source()
+  local drawn = gui_tab({ window_id = 9833, tab_id = 9834, tab_index = 0, panes = { 9835 } })
+  format_tab_title(drawn, { drawn })
+  local legacy = tab_publication_path(9833)
+  assert(path_exists(legacy), "the draw publishes")
+  local out = assert(io.open(legacy, "w")); out:write("another GUI's window 9833"); out:close()
+  local polling = window_double({ window_id = 9836, tabs = {}, focused = false })
+  attention.poll(polling, { gui_windows = { polling } })
+  assert(read_path(legacy) == "another GUI's window 9833",
+    "a file whose bytes are not the ones this process wrote is not this process's to remove")
+  os.remove(legacy)
 end)
 
 test("a window publishes its drawn order once every one of its tabs is drawn", function()
@@ -1094,7 +1128,7 @@ test("a v2 pane publishes its cache key, not the local pane id", function()
       .. tostring(published.tabs[1].marker_ids[1]))
 end)
 
--- ── U2: focus-aware acknowledgement ─────────────────────────────────────────
+-- ── Focus-aware acknowledgement ─────────────────────────────────────────────
 
 test("a focused poll acknowledges only the active pane", function()
   write_marker(801, "notify", "rev-801")
@@ -1407,7 +1441,7 @@ test("a focused window with no active pane acknowledges nothing", function()
   assert(#w.actions == 0, "there is no pane to perform an action through")
 end)
 
--- ── U2: focus-safe redraw ───────────────────────────────────────────────────
+-- ── Focus-safe redraw ───────────────────────────────────────────────────────
 
 test("a focused visible change requests exactly one redraw through the active pane", function()
   write_marker(831, "thinking")
@@ -1580,7 +1614,7 @@ test("a failed redraw action leaves marker and cache truth intact", function()
   assert(#drain_errors() == 0, "a disabled window should not repeat the runtime error")
 end)
 
--- ── U2: window scoping and composition root ─────────────────────────────────
+-- ── Window scoping and composition root ─────────────────────────────────────
 
 test("polling one window never removes another window's cache entries", function()
   write_marker(901, "thinking")
@@ -1677,7 +1711,7 @@ test("review toggles redraw after a successful marker mutation", function()
     "the real flag rename failure should be logged, got " .. tostring(errors[1]))
 end)
 
--- ── U3: which id names the marker file ──────────────────────────────────────
+-- ── Which id names the marker file ──────────────────────────────────────────
 
 test("a published WEZTERM_PANE user var names the marker, not the local pane id", function()
   write_marker(7001, "notify")
@@ -1872,7 +1906,7 @@ test("a pane with no socket to republish through is named once in the log", func
   assert(#warnings == 1 and warnings[1]:find("SSHMUX:host", 1, true))
 end)
 
--- ── U3: a closed pane versus a detached domain ──────────────────────────────
+-- ── A closed pane versus a detached domain ──────────────────────────────────
 
 test("a detached domain keeps the markers of panes still running on the server", function()
   write_marker(7101, "notify")
@@ -1897,7 +1931,7 @@ test("a detached domain keeps the markers of panes still running on the server",
   assert(attention.get_attention(7101) == "notify", "and stay visible for the reattach")
 end)
 
--- ── U3: marker metadata on the public read ──────────────────────────────────
+-- ── Marker metadata on the public read ──────────────────────────────────────
 
 test("get_attention reports the marker's source and reserved tuple slot", function()
   local file = assert(io.open(test_dir .. "/7201", "w"))
@@ -1924,7 +1958,7 @@ test("get_attention reports the marker's source and reserved tuple slot", functi
     "a direct disk read should report the same source and reserved tuple slot")
 end)
 
--- ── U3: hosts that repaint their own titles ─────────────────────────────────
+-- ── Hosts that repaint their own titles ─────────────────────────────────────
 
 test("request_redraw = false performs no action when attention changes", function()
   local quiet = dofile(repo_root .. "/plugin/init.lua")
@@ -1946,7 +1980,7 @@ test("request_redraw = false performs no action when attention changes", functio
   assert(#w.actions == 0, "and none recorded")
 end)
 
--- ── U3: acknowledgement replaces its sidecar atomically ─────────────────────
+-- ── Acknowledgement replaces its sidecar atomically ─────────────────────────
 
 test("acknowledgement renames its sidecar into place without unlinking it first", function()
   write_marker(7401, "notify", "pub-b")
@@ -1987,7 +2021,7 @@ test("acknowledgement renames its sidecar into place without unlinking it first"
   assert(attention.get_attention(7401) == nil, "and the acknowledged marker should be suppressed")
 end)
 
--- ── U4: the subagent activity sidecar ───────────────────────────────────────
+-- ── The subagent activity sidecar ───────────────────────────────────────────
 
 --- One fixed clock for this section. Every poll below is handed it, so a
 --- subagent's liveness is decided by the entry's own last_ms and nothing else.
@@ -2356,6 +2390,71 @@ test("a long or control-character tab text is published within the tab reader's 
   assert(formatted:find("red[31mbell", 1, true), "the formatter's text must still be published")
 end)
 
+--- The rule `attention tabs` applies to a published tab text: the file is
+--- read as JSON, which Rust decodes only from well-formed UTF-8 (no overlong
+--- form, no surrogate, nothing past U+10FFFF), and the text must hold at most
+--- 256 bytes and no character `char::is_control` is true for.
+local function tab_reader_accepts(text)
+  if #text > 256 then return false end
+  local index, length = 1, #text
+  while index <= length do
+    local lead = text:byte(index)
+    local size, low, high, code
+    if lead < 0x80 then size, code = 1, lead
+    elseif lead >= 0xC2 and lead <= 0xDF then size, low, high, code = 2, 0x80, 0xBF, lead - 0xC0
+    elseif lead == 0xE0 then size, low, high, code = 3, 0xA0, 0xBF, 0
+    elseif lead == 0xED then size, low, high, code = 3, 0x80, 0x9F, 0xD
+    elseif lead >= 0xE1 and lead <= 0xEF then size, low, high, code = 3, 0x80, 0xBF, lead - 0xE0
+    elseif lead == 0xF0 then size, low, high, code = 4, 0x90, 0xBF, 0
+    elseif lead == 0xF4 then size, low, high, code = 4, 0x80, 0x8F, 4
+    elseif lead >= 0xF1 and lead <= 0xF3 then size, low, high, code = 4, 0x80, 0xBF, lead - 0xF0
+    else return false end
+    for offset = 1, size - 1 do
+      local byte = text:byte(index + offset)
+      local first = offset == 1
+      if not byte or byte < (first and low or 0x80) or byte > (first and high or 0xBF) then
+        return false
+      end
+      code = code * 0x40 + (byte - 0x80)
+    end
+    if code < 0x20 or (code >= 0x7F and code <= 0x9F) then return false end
+    index = index + size
+  end
+  return true
+end
+
+test("a formatter's broken UTF-8 is published as text the tab reader accepts", function()
+  local R = "\239\191\189" -- U+FFFD, one per ill-formed part, as Rust's lossy decoding
+  local cases = {
+    { "a CJK title cut inside a character", ("中文标题"):sub(1, 4), "中" .. R },
+    { "a lone continuation byte", "ab\128cd", "ab" .. R .. "cd" },
+    { "an overlong slash", "a\192\175b", "a" .. R .. R .. "b" },
+    { "an encoded surrogate", "a\237\160\128b", "a" .. R .. R .. R .. "b" },
+    { "a code point past U+10FFFF", "a\244\144\128\128b", "a" .. R .. R .. R .. R .. "b" },
+    { "a byte UTF-8 never uses", "a\255b", "a" .. R .. "b" },
+    { "a four-byte character cut at the end", "a\240\159\142", "a" .. R },
+    { "a C1 control spelled around an ESC", "a\194\27\128b", "a" .. R .. R .. "b" },
+    { "well-formed text", "中文 é 🎉 plain", "中文 é 🎉 plain" },
+  }
+  local current
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    title_formatter = function() return current end })
+  local formatter = handlers["format-tab-title"][#handlers["format-tab-title"]]
+  for index, case in ipairs(cases) do
+    current = case[2]
+    local window_id = 9869 + index * 3
+    local drawn = as_userdata({ tab_id = window_id + 1, window_id = window_id, tab_index = 0,
+      is_active = false, active_pane = gui_pane(window_id + 2), panes = { gui_pane(window_id + 2) } })
+    formatter(drawn, { drawn })
+    local published = assert(read_tab_publication(window_id), case[1] .. ": nothing published")
+    local text = published.tabs[1].text
+    assert(tab_reader_accepts(text), case[1] .. ": the tab reader would refuse the window")
+    assert(text:find(case[3], 1, true), case[1] .. ": expected the formatter's text as "
+      .. case[3] .. ", got " .. text)
+  end
+end)
+
 test("a tab with no name, directory or settled title shows the pane's current title", function()
   local bare = tab(17681, 17682, false)
   bare.active_pane.title = "vim\27]0;x"
@@ -2425,7 +2524,7 @@ test("a pane that vanishes between polls loses its subagent sidecar too", functi
   assert(attention.get_attention(7551) == nil, "and its cache entry")
 end)
 
--- ── U5: the manual review flag ──────────────────────────────────────────────
+-- ── The manual review flag ──────────────────────────────────────────────────
 
 test("the review flag outranks a thinking marker without replacing it", function()
   write_marker(7601, "thinking")
@@ -2592,7 +2691,7 @@ test("flagging a pane whose stop is already shown requests a redraw", function()
   assert(#w.actions == 2, "the flag arriving is itself a change, got " .. #w.actions)
 end)
 
--- ── Attention v2 U1: protocol, identity, and wall-age reader ────────────────
+-- ── Attention v2: protocol, identity, and wall-age reader ───────────────────
 
 test("Lua accepts and rejects every shared protocol fixture row", function()
   assert(internal.sha256("") ==
@@ -3114,7 +3213,7 @@ test("invalid child wall ages do not poison a valid sibling", function()
   assert(codes.record_invalid == true, "the malformed child must report record_invalid")
 end)
 
--- ── U1 review regressions ───────────────────────────────────────────────────
+-- ── Attention v2: reader, review, lifecycle and cleanup regressions ─────────
 
 test("cache recovery never crosses a launch identity boundary", function()
   materialize_state_case(protocol_fixture.state_case)
@@ -3517,6 +3616,114 @@ test("Alt+B clear-all leaves a review that was replaced after it looked", functi
   assert(left and decode_json(left).event_id == newer.event_id,
     "a review the user never saw must not be cleared")
   materialize_v2_fixture(82)
+end)
+
+test("Alt+B clear-all does not put a review back over one written after it looked", function()
+  local wire = materialize_v2_fixture(85)
+  local samples = protocol_fixture.record_samples
+  local pane_root = test_dir .. "/v2/realms/" .. wire.address.realm_id
+    .. "/incarnations/" .. wire.address.incarnation_id .. "/panes/85"
+  local path = pane_root .. "/reviews/" .. samples.review.owner_key .. ".json"
+  assert(path_exists(path), "precondition: the fixture carries a review")
+  local function version(event_id)
+    local record = decode_json(encode_json(samples.review))
+    record.address = decode_json(encode_json(wire.address))
+    record.event_id = event_id
+    return record
+  end
+  local unseen = version("00000000-0000-4000-8000-000000000851")
+  local newest = version("00000000-0000-4000-8000-000000000852")
+  local review = dofile(repo_root .. "/plugin/init.lua")
+  local config = {}
+  review.apply_to_config(config, { auto_poll = false, dir = test_dir, integration_root = writer_root })
+  local toggle = assert(config.keys[#config.keys].action)
+  local spec = { id = 9085, domain = "unix", attention = wire }
+  -- One writer replaces the review as the clear moves it aside, so what was
+  -- moved is not what the tab showed and has to go back. A second writer
+  -- lands just after the clear has looked at the path and found it empty.
+  local real_rename, real_open = os.rename, io.open
+  local moved, landed = false, false
+  os.rename = function(from, to)
+    if from == path and not moved then moved = true; write_json_path(path, unseen) end
+    return real_rename(from, to)
+  end
+  io.open = function(target, mode)
+    local file, err = real_open(target, mode)
+    if target == path and moved and not landed and not file then
+      landed = true
+      write_json_path(path, newest)
+    end
+    return file, err
+  end
+  local ok, failure = pcall(toggle, window_double({ tabs = { { spec } }, focused = true,
+    active_pane_id = spec }), pane_from_entry(spec))
+  os.rename, io.open = real_rename, real_open
+  assert(ok, failure)
+  assert(moved and landed, "precondition: both writes reached the clear")
+  local left = read_path(path)
+  assert(left and decode_json(left).event_id == newest.event_id,
+    "the review written last must survive the clear putting its own copy back")
+  materialize_v2_fixture(85)
+end)
+
+--- Move a pane's review aside under the name a clear gives it while it looks,
+--- as a GUI that died in the middle of Alt+B leaves it.
+local function leave_cleared_review(pane_id)
+  local wire = materialize_v2_fixture(pane_id)
+  local samples = protocol_fixture.record_samples
+  local path = test_dir .. "/v2/realms/" .. wire.address.realm_id
+    .. "/incarnations/" .. wire.address.incarnation_id .. "/panes/" .. pane_id
+    .. "/reviews/" .. samples.review.owner_key .. ".json"
+  local before = assert(read_path(path), "precondition: the fixture carries a review")
+  local leftover = path .. ".table0x10a2b3c4.clear"
+  assert(os.rename(path, leftover))
+  return wire, path, leftover, before
+end
+
+local function poll_v2_pane(instance, spec)
+  instance.poll(window_double({ tabs = { { spec } }, focused = false }),
+    { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+end
+
+test("a review a crashed clear left aside is put back on the pane's next read", function()
+  local wire, path, leftover, before = leave_cleared_review(86)
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root })
+  poll_v2_pane(instance, { id = 9086, domain = "unix", attention = wire })
+  assert(read_path(path) == before, "the flag the user set must come back byte for byte")
+  assert(not path_exists(leftover), "the review lives at one name only")
+  local key = internal.address_cache_key(wire.address)
+  assert(instance._internal.attention_cache[key].review == true,
+    "the same poll shows the restored flag")
+end)
+
+test("a review left aside while this process was already showing the pane is put back", function()
+  local wire = materialize_v2_fixture(87)
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root })
+  local spec = { id = 9087, domain = "unix", attention = wire }
+  poll_v2_pane(instance, spec)
+  local _, path, leftover, before = leave_cleared_review(87)
+  poll_v2_pane(instance, spec)
+  assert(read_path(path) == before, "another GUI's crashed clear must not lose the flag")
+  assert(not path_exists(leftover), "the review lives at one name only")
+end)
+
+test("a review left aside stays aside when a live review has taken its name", function()
+  local wire, path, leftover, before = leave_cleared_review(88)
+  local live = decode_json(before)
+  live.event_id = "00000000-0000-4000-8000-000000000881"
+  write_json_path(path, live)
+  local live_raw = read_path(path)
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root })
+  poll_v2_pane(instance, { id = 9088, domain = "unix", attention = wire })
+  assert(read_path(path) == live_raw, "the live review is not replaced")
+  assert(read_path(leftover) == before, "the older copy is sweep's, not the plugin's")
+  os.remove(leftover)
 end)
 
 test("a stop hidden behind a higher-ranked review flag is not acknowledged, v1 or v2", function()
@@ -4133,7 +4340,7 @@ test("twenty full lifecycle panes keep polling and getter work bounded", functio
   instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false })
   local window = window_double({ tabs = { entries }, focused = false })
   local old_open, old_popen = io.open, io.popen
-  local reads, writes, globs = 0, 0, 0
+  local reads, writes, globs, leftover_looks = 0, 0, 0, 0
   io.open = function(path, mode)
     if mode and mode:find("w", 1, true) then writes = writes + 1 end
     if path:match("/lifecycle%.json$") then reads = reads + 1 end
@@ -4145,6 +4352,10 @@ test("twenty full lifecycle panes keep polling and getter work bounded", functio
     for _ = 1, 2 do
       instance.poll(window, { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end,
         glob = function(pattern)
+          if pattern:match("/reviews/%*%.clear$") then
+            leftover_looks = leftover_looks + 1
+            return {}
+          end
           globs = globs + 1
           local directory = assert(pattern:match("^(.*)/%*%.json$"))
           assert(directory:match("/reviews$") or directory:match("/agents$"), "no historical directory walk")
@@ -4165,6 +4376,8 @@ test("twenty full lifecycle panes keep polling and getter work bounded", functio
   io.open, io.popen = old_open, old_popen
   assert(ok, failure)
   assert(reads == 40 and globs == 80 and writes == 0, "exactly one sidecar read per pane/poll and no writes")
+  assert(leftover_looks == 20, "a pane is searched for a clear's leftovers on its first poll only, got "
+    .. leftover_looks)
   io.write(string.format("lifecycle workload: 20 panes, 2 polls, 128 observations each; CPU %.2f ms; 40 snapshot reads; 0 writes\n", cpu_ms))
 end)
 
@@ -4459,7 +4672,7 @@ test("an on_view_change error is logged with its text, once per distinct error",
     "expected one line per distinct error with its text, got " .. #logged)
 end)
 
-test("C1 scalar lookup refuses two full pane addresses", function()
+test("scalar lookup refuses two full pane addresses", function()
   local a = materialize_v2_fixture(42, string.rep("a",64))
   local b = materialize_v2_fixture(42, string.rep("b",64))
   local instance = dofile(repo_root .. "/plugin/init.lua")
@@ -4471,7 +4684,7 @@ test("C1 scalar lookup refuses two full pane addresses", function()
   assert(instance.get_attention(42)==nil,"scalar lookup selected a realm")
 end)
 
-test("C1 shared full address survives one window dropping it", function()
+test("a shared full address survives one window dropping it", function()
   local a = materialize_v2_fixture(42, string.rep("e",64))
   local b = materialize_v2_fixture(43, string.rep("e",64))
   local instance = dofile(repo_root .. "/plugin/init.lua")
@@ -4487,7 +4700,7 @@ test("C1 shared full address survives one window dropping it", function()
   assert(instance.get_attention(43)=="notify")
 end)
 
-test("C1 first observation through Alt+B participates in scalar ambiguity", function()
+test("a first observation through Alt+B participates in scalar ambiguity", function()
   local a=materialize_v2_fixture(42,string.rep("a",64))
   local b=materialize_v2_fixture(42,string.rep("b",64))
   local instance=dofile(repo_root .. "/plugin/init.lua")
@@ -4506,7 +4719,7 @@ test("C1 first observation through Alt+B participates in scalar ambiguity", func
   assert(instance.get_attention(42)==nil,"a sibling poll must retain the overlay observation")
 end)
 
-test("C4 identity publication is not pane destruction", function()
+test("identity publication is not pane destruction", function()
   local id=12003
   write_marker(id,"thinking","upgrade-marker")
   write_acknowledgement_file(id,"publication\nupgrade-marker")
@@ -4525,7 +4738,7 @@ test("C4 identity publication is not pane destruction", function()
   end
 end)
 
-test("C1 C4 Alt+B replaces the same pane identity without deleting sidecars", function()
+test("Alt+B replaces the same pane identity without deleting sidecars", function()
   local id=12013
   write_marker(id,"thinking","overlay-upgrade")
   write_acknowledgement_file(id,"publication\noverlay-upgrade")
@@ -4546,7 +4759,7 @@ test("C1 C4 Alt+B replaces the same pane identity without deleting sidecars", fu
   end
 end)
 
-test("C5 every v2 record has a bounded file read", function()
+test("every v2 record has a bounded file read", function()
   local api=dofile(repo_root .. "/plugin/protocol.lua")({wezterm=wezterm,protocol_path=repo_root .. "/protocol/v2.json"})
   local original=io.open
   local requested
@@ -4560,7 +4773,7 @@ test("C5 every v2 record has a bounded file read", function()
   assert(requested==api.protocol.limits.max_json_bytes+1,"unbounded read: " .. tostring(requested))
 end)
 
-test("C9 a retry needs a new live observation when inventory fails", function()
+test("a retry needs a new live observation when inventory fails", function()
   local spawned,scheduled={},{}
   local old=wezterm.background_child_process
   wezterm.background_child_process=function(argv) spawned[#spawned+1]=argv; return true end
@@ -4678,10 +4891,33 @@ test("the default state root follows the same order as the writer", function()
     { env = {}, root = home_default },
     { env = { WEZTERM_ATTENTION_DIR = "relative/dir" }, root = home_default, warned = true },
   }
+  -- The writer takes a root only when it is at most the manifest's path bound
+  -- in bytes and holds no control character, C1 included.
+  local manifest = assert(io.open(repo_root .. "/protocol/v2.json", "r"))
+  local limit = decode_json(manifest:read("*a")).limits.path_max_bytes
+  manifest:close()
+  local function path_of(bytes) return ("/" .. string.rep("a", 7)):rep(bytes / 8) end
+  assert(#path_of(limit) == limit, "precondition: the bound is a multiple of 8")
+  for _, unsafe in ipairs({ test_dir .. "/x\1y", test_dir .. "/x\27[31my", test_dir .. "/x\194\133y",
+      test_dir .. "/x\127y", path_of(limit) .. "b" }) do
+    cases[#cases + 1] = { env = { XDG_STATE_HOME = unsafe }, root = home_default }
+    cases[#cases + 1] = { env = { WEZTERM_ATTENTION_DIR = unsafe }, root = home_default, warned = true }
+  end
+  cases[#cases + 1] = { env = { XDG_STATE_HOME = path_of(limit) },
+    root = path_of(limit) .. "/wezterm-attention" }
+  cases[#cases + 1] = { env = { WEZTERM_ATTENTION_DIR = path_of(limit) }, root = path_of(limit) }
+  local real_execute = os.execute
   for index, case in ipairs(cases) do
     local instance = load_with_environment(case.env)
-    instance.apply_to_config({}, { auto_poll = false, review_key = false, renderer = "manual",
-      integration_root = writer_root })
+    -- A root at the path bound is longer than this system lets mkdir create.
+    os.execute = function(command)
+      if #command > 1000 then return 0 end
+      return real_execute(command)
+    end
+    local ok, failure = pcall(instance.apply_to_config, {}, { auto_poll = false, review_key = false,
+      renderer = "manual", integration_root = writer_root })
+    os.execute = real_execute
+    assert(ok, failure)
     assert(instance._active_dir == case.root,
       "case " .. index .. ": expected " .. case.root .. ", got " .. tostring(instance._active_dir))
     local warnings = drain_warnings()

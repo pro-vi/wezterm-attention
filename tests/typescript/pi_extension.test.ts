@@ -580,7 +580,7 @@ test("missing pane: lifecycle write is a silent no-op that creates no file", asy
 });
 
 test('env: a unit-suffixed TTL ("30m") is rejected, not parsed as 30', async () => {
-	// F7: parseInt("30m") === 30 silently produced a 30ms TTL. Strict parse must
+	// parseInt("30m") === 30 silently produced a 30ms TTL. Strict parse must
 	// reject it and fall back to the 30-minute default.
 	const dir = freshDir("wez-ttl-");
 	process.env.WEZTERM_PANE = "42";
@@ -633,6 +633,40 @@ test("env: the default root is $XDG_STATE_HOME/wezterm-attention when that is ab
 	}
 	expect(existsSync(join(process.cwd(), "relative"))).toBe(false);
 	expect(notifications).toEqual([]);
+});
+
+test("env: a root the writer would refuse, too long or holding a control character, is skipped", async () => {
+	// The writer takes a root only when it is at most the manifest's path bound
+	// in bytes and holds no character Rust's char::is_control is true for.
+	const manifest = parseRecord(readFileSync(join(import.meta.dir, "../../protocol/v2.json"), "utf8"));
+	const limits = manifest.limits as Record<string, number>;
+	const limit = limits.path_max_bytes!;
+	const home = tempDir("wez-unsafe-home-");
+	const scratch = tempDir("wez-unsafe-root-");
+	const homeRoot = join(home, ".local", "state", "wezterm-attention");
+	process.env.HOME = home;
+	process.env.WEZTERM_PANE = "42";
+	const tooLong = "/" + "a".repeat(limit);
+	const unsafe = [join(scratch, "x\u0001y"), join(scratch, "x\u007fy"), join(scratch, "x\u0085y"), tooLong];
+	let expectedNotifications = 0;
+	for (const name of ["XDG_STATE_HOME", "WEZTERM_ATTENTION_DIR"]) {
+		for (const value of unsafe) {
+			process.env[name] = value;
+			const { lifecycle } = loadExt();
+			await lifecycle["agent_start"]!();
+			await lifecycle["session_shutdown"]!();
+			expect(readMarker(homeRoot).type).toBe("thinking");
+			rmSync(join(home, ".local"), { recursive: true, force: true });
+			delete process.env[name];
+			if (name === "WEZTERM_ATTENTION_DIR") expectedNotifications++;
+			expect(notifications).toHaveLength(expectedNotifications);
+		}
+	}
+	expect(readdirSync(scratch)).toEqual([]);
+	for (const message of notifications.map((entry) => entry.message)) {
+		expect(message).toContain("WEZTERM_ATTENTION_DIR");
+		expect(message).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+	}
 });
 
 test('env: TTL_MS="0" falls back to the default, not an instantly-stale marker', async () => {

@@ -21,6 +21,7 @@ return function()
     local v2_review_paths = context.v2_review_paths
     local write_v2_user_review = context.write_v2_user_review
     local clear_v2_reviews = context.clear_v2_reviews
+    local restore_cleared_reviews = context.restore_cleared_reviews
     local refresh_cached_v2 = context.refresh_cached_v2
     local acknowledge_focused_v2_pane = context.acknowledge_focused_v2_pane
     local read_effective_marker = context.read_effective_marker
@@ -554,8 +555,9 @@ return function()
     --- Windows that are still open. A workspace switch makes the GUI window
     --- show another workspace's mux window, so the one it showed leaves
     --- gui_windows() while it still exists, with its tabs, to be shown again.
-    --- Only a window gone from both has closed. Without the mux listing this is
-    --- the GUI inventory alone, as before.
+    --- Only a window gone from both has closed. Without the mux listing it is
+    --- the GUI inventory alone, so a window another workspace shows counts as
+    --- closed.
     local function open_window_keys(opts)
       local live = gui_window_keys(opts)
       if not live then return nil end
@@ -1143,12 +1145,16 @@ return function()
             evidence.identified_by_local[local_id] = key
             pane_ids[#pane_ids + 1] = key
             before[key] = attention_cache[key]
-            local view = read_attention_view(read, now_unix_ns, {
+            local read_opts = {
               dir = dir,
               glob = opts and opts.glob,
               previous_view = before[key],
               resample_utc = resample_utc,
-            })
+            }
+            local view = read_attention_view(read, now_unix_ns, read_opts)
+            if restore_cleared_reviews(read, dir, before[key], view, read_opts) then
+              view = read_attention_view(read, now_unix_ns, read_opts)
+            end
             -- A hook writes no frame, so a thinking view is animated from the
             -- wall clock, the same way a v1 marker without one is.
             if view.type == "thinking" and view.frame == nil then

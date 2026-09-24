@@ -11,22 +11,42 @@ local function is_absolute_path(path)
   return path:sub(1, 1) == "/" or path:match("^%a:[\\/]") ~= nil or path:sub(1, 2) == "\\\\"
 end
 
+--- The writer's bound on a root path, `path_max_bytes` in protocol/v2.json,
+--- which loads only after the root is resolved.
+local path_max_bytes = 4096
+
+--- A root the writer would take as well: at most its path bound in bytes, and
+--- no control character, C0, DEL or C1.
+local function safe_root_text(path)
+  return #path <= path_max_bytes
+    and not path:find("[%z\1-\31\127]") and not path:find("\194[\128-\159]")
+end
+
 --- The state root, resolved in the order the attention CLI and the Pi
 --- extension use, so a producer, the writer and this reader agree on one
 --- directory: WEZTERM_ATTENTION_DIR, then $XDG_STATE_HOME/wezterm-attention,
 --- then ~/.local/state/wezterm-attention. An empty value counts as unset, and a
---- relative XDG_STATE_HOME is ignored as the XDG spec says. A relative
---- WEZTERM_ATTENTION_DIR is an error to the CLI; here it is ignored, and the
+--- relative XDG_STATE_HOME is ignored as the XDG spec says, as is one the
+--- writer would refuse. A WEZTERM_ATTENTION_DIR that is relative or that the
+--- writer would refuse is an error to the CLI; here it is ignored, and the
 --- second return says so for the log.
 local function resolve_state_root()
   local note
   local explicit = os.getenv("WEZTERM_ATTENTION_DIR")
   if explicit and explicit ~= "" then
-    if is_absolute_path(explicit) then return explicit end
-    note = "WEZTERM_ATTENTION_DIR is not an absolute path, so it is ignored: " .. explicit
+    -- Checked first so that the log never repeats a control character.
+    if not safe_root_text(explicit) then
+      note = "WEZTERM_ATTENTION_DIR is longer than " .. path_max_bytes
+        .. " bytes or holds a control character, so it is ignored"
+    elseif not is_absolute_path(explicit) then
+      note = "WEZTERM_ATTENTION_DIR is not an absolute path, so it is ignored: " .. explicit
+    else
+      return explicit
+    end
   end
   local state_home = os.getenv("XDG_STATE_HOME")
-  if state_home and state_home ~= "" and is_absolute_path(state_home) then
+  if state_home and state_home ~= "" and is_absolute_path(state_home)
+      and safe_root_text(state_home) then
     return (state_home:gsub("(.)/+$", "%1")) .. "/wezterm-attention", note
   end
   return home .. "/.local/state/wezterm-attention", note
@@ -331,6 +351,7 @@ local selected_v2_records_root = v2_overlays.selected_v2_records_root
 local v2_review_paths = v2_overlays.v2_review_paths
 local write_v2_user_review = v2_overlays.write_v2_user_review
 local clear_v2_reviews = v2_overlays.clear_v2_reviews
+local restore_cleared_reviews = v2_overlays.restore_cleared_reviews
 local refresh_cached_v2 = v2_overlays.refresh_cached_v2
 local acknowledge_focused_v2_pane = v2_overlays.acknowledge_focused_v2_pane
 -- ── Internal helpers ────────────────────────────────────────────────────────
@@ -386,6 +407,7 @@ local runtime_api = runtime_state.bind({
   v2_review_paths = v2_review_paths,
   write_v2_user_review = write_v2_user_review,
   clear_v2_reviews = clear_v2_reviews,
+  restore_cleared_reviews = restore_cleared_reviews,
   refresh_cached_v2 = refresh_cached_v2,
   acknowledge_focused_v2_pane = acknowledge_focused_v2_pane,
   read_effective_marker = read_effective_marker,

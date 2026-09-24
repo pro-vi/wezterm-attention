@@ -91,6 +91,36 @@ return function(context)
     return true
   end
 
+  local function file_exists(path)
+    local file = io.open(path, "r")
+    if not file then return false end
+    file:close()
+    return true
+  end
+
+  --- Move `from` to `to` unless a file is already at `to`. A rename replaces
+  --- whatever it finds, so a write that lands at `to` after a caller looked
+  --- would be lost. A hard link is made only where no name is, and Windows'
+  --- rename already refuses an existing target. Returns "placed", "occupied"
+  --- (`from` is left where it was), or "failed" with an error text.
+  local function place_without_replacing(from, to)
+    if package.config:sub(1, 1) == "\\" then
+      local renamed, err = os.rename(from, to)
+      if renamed then return "placed" end
+      if file_exists(to) then return "occupied" end
+      return "failed", tostring(err)
+    end
+    local function quoted(value) return "'" .. value:gsub("'", [['\'']]) .. "'" end
+    -- LuaJIT answers with the exit status, Lua 5.2 and later with true.
+    local linked = os.execute("ln " .. quoted(from) .. " " .. quoted(to) .. " 2>/dev/null")
+    if linked == true or linked == 0 then
+      os.remove(from)
+      return "placed"
+    end
+    if file_exists(to) then return "occupied" end
+    return "failed", "ln could not link it"
+  end
+
   local function write_v2_record(path, record, kind, expected)
     local parsed, parse_diagnostic = parse_v2_record(record, kind)
     if not parsed or (expected and not record_matches(parsed, expected)) then
@@ -124,6 +154,25 @@ return function(context)
   local drawn_tab_lists = {}
   --- The one path each window's order was last written to by this process.
   local published_path_by_window = {}
+
+  --- Remove a tab order this process published, but only while the file still
+  --- holds the bytes this process wrote there. The unsourced name is shared by
+  --- every GUI process, because window ids restart in each one: a file another
+  --- process has rewritten since is that process's, and stays. Returns an error
+  --- text only for a file of ours that could not be removed.
+  local function remove_own_tab_order(path, body)
+    local file = io.open(path, "rb")
+    if not file then return nil end
+    local current = file:read("*a")
+    file:close()
+    if current ~= body then return nil end
+    local removed, err = os.remove(path)
+    if removed then return nil end
+    local still_there = io.open(path, "r")
+    if not still_there then return nil end
+    still_there:close()
+    return tostring(err)
+  end
 
   --- One encoding per drawn tab. The formatter is called once per tab, so
   --- without this every tab's text would be escaped again on every one of those
@@ -176,7 +225,9 @@ return function(context)
       ',"window_id":', integer(window_id), "}",
     })
     if not replace_file(path, body, "publish-tabs") then return false end
-    published_tab_lists[path] = { list = list, window_id = tostring(window_id), window_key = window_key }
+    published_tab_lists[path] = {
+      list = list, body = body .. "\n", window_id = tostring(window_id), window_key = window_key,
+    }
     drawn_tab_lists[window_key] = { list = list, written_at = written_at }
     -- The first draw can come before the source identity is known, so a
     -- window's first file is often the unsourced one. Once the same window is
@@ -184,14 +235,14 @@ return function(context)
     -- again, and `attention tabs` would list the window twice.
     local superseded = published_path_by_window[window_key]
     published_path_by_window[window_key] = path
-    if superseded and superseded ~= path and published_tab_lists[superseded] then
+    local superseded_publication = superseded and superseded ~= path
+      and published_tab_lists[superseded]
+    if superseded_publication then
       published_tab_lists[superseded] = nil
-      local removed, err = os.remove(superseded)
-      local still_there = not removed and io.open(superseded, "r")
-      if still_there then
-        still_there:close()
+      local err = remove_own_tab_order(superseded, superseded_publication.body)
+      if err then
         report_error_once("supersede-tabs:" .. superseded,
-          "cannot remove superseded tab order " .. superseded .. ": " .. tostring(err))
+          "cannot remove superseded tab order " .. superseded .. ": " .. err)
       end
     end
     return true
@@ -200,9 +251,9 @@ return function(context)
   --- Remove the tab orders this process published for windows no longer in
   --- `live`, a set keyed by window id as a decimal string. A closed window's
   --- bar never redraws, so nothing else would ever take its file back. Only a
-  --- file this process wrote is touched: another GUI process's file, or one
-  --- left behind by a process that has exited, is `attention sweep`'s to
-  --- collect. Forgetting the path is what lets a window that later reuses the
+  --- file this process wrote, still holding what it wrote, is touched: another
+  --- GUI process's file, or one left behind by a process that has exited, is
+  --- `attention sweep`'s to collect. Forgetting the path is what lets a window that later reuses the
   --- id publish again.
   local function withdraw_closed_tab_orders(dir, live)
     local prefix = dir .. "/tabs/"
@@ -212,16 +263,10 @@ return function(context)
         published_tab_lists[path] = nil
         drawn_tab_lists[publication.window_key] = nil
         published_path_by_window[publication.window_key] = nil
-        local removed, err = os.remove(path)
-        if not removed then
-          -- A file already gone is the wanted state; only a file that stays is
-          -- worth a line in the log.
-          local still_there = io.open(path, "r")
-          if still_there then
-            still_there:close()
-            report_error_once("withdraw-tabs:" .. path,
-              "cannot withdraw closed window's tab order " .. path .. ": " .. tostring(err))
-          end
+        local err = remove_own_tab_order(path, publication.body)
+        if err then
+          report_error_once("withdraw-tabs:" .. path,
+            "cannot withdraw closed window's tab order " .. path .. ": " .. err)
         end
       end
     end
@@ -515,6 +560,10 @@ return function(context)
       }, "review", { address = read.address })
     end
 
+    --- Panes where a clear left a review moved aside because it could not put
+    --- it back, keyed by cache key, so the next poll of the pane tries again.
+    local panes_with_cleared_leftovers = {}
+
     --- Remove the reviews this pane showed, and only those. A writer can
     --- replace a review between the read above and the removal, and removing
     --- by path would take the newer one, which the user never saw. So each
@@ -538,19 +587,66 @@ return function(context)
           end
         else
           local record = read_expected_record(taken, "review", { address = read.address }, true)
-          local superseded = io.open(path, "r")
-          if superseded then superseded:close() end
           if record and record.event_id == shown[path].event_id then
             os.remove(taken)
             cleared = true
-          elseif superseded then
+          elseif file_exists(path) then
             os.remove(taken)
           else
-            os.rename(taken, path)
+            local placed, place_err = place_without_replacing(taken, path)
+            if placed == "occupied" then
+              -- A write landed after the look above: newer still, as above.
+              os.remove(taken)
+            elseif placed == "failed" then
+              panes_with_cleared_leftovers[read.cache_key] = true
+              report_error_once("restore-v2-review:" .. path,
+                "cannot put back review " .. path .. " from " .. taken .. ": " .. place_err)
+            end
           end
         end
       end
       return cleared
+    end
+
+    --- Put back the reviews a clear moved aside and never finished with,
+    --- because its process died between the move and the removal. Each was a
+    --- flag the pane showed, so it goes back to its name when nothing has taken
+    --- that name since. Beside a live review it stays for `attention sweep`:
+    --- which of the two is newer is not known here.
+    ---
+    --- Looking costs a directory listing, so it is done only where a leftover
+    --- can be: on this process's first read of the pane (a GUI that died
+    --- mid-clear is replaced by a new process), when a review this process
+    --- showed has gone (another GUI's clear), and where this process's own
+    --- clear could not put one back. Returns true when a review was put back.
+    local function restore_cleared_reviews(read, dir, previous_view, view, opts)
+      local key = read.cache_key
+      local look = not previous_view or panes_with_cleared_leftovers[key]
+      if not look then
+        local shown = previous_view._records and previous_view._records.reviews or {}
+        local current = view._records and view._records.reviews or {}
+        for path in pairs(shown) do
+          if not current[path] then look = true; break end
+        end
+      end
+      if not look then return false end
+      panes_with_cleared_leftovers[key] = nil
+      local paths = glob_paths(v2_pane_root(dir, read.address) .. "/reviews/*.clear", opts)
+      if not paths then return false end
+      local restored = false
+      for _, leftover in ipairs(paths) do
+        local path = leftover:match("^(.*%.json)%.%w+%.clear$")
+        if path then
+          local placed, place_err = place_without_replacing(leftover, path)
+          if placed == "placed" then
+            restored = true
+          elseif placed == "failed" then
+            report_error_once("restore-v2-review:" .. path,
+              "cannot put back review " .. path .. " from " .. leftover .. ": " .. place_err)
+          end
+        end
+      end
+      return restored
     end
 
     local function refresh_cached_v2(read, dir, now_unix_ns)
@@ -616,6 +712,7 @@ return function(context)
       v2_review_paths = v2_review_paths,
       write_v2_user_review = write_v2_user_review,
       clear_v2_reviews = clear_v2_reviews,
+      restore_cleared_reviews = restore_cleared_reviews,
       refresh_cached_v2 = refresh_cached_v2,
       acknowledge_focused_v2_pane = acknowledge_focused_v2_pane,
     }

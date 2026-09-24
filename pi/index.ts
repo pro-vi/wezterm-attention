@@ -63,22 +63,36 @@ type WriterResult =
 	| { kind: "succeeded" }
 	| { kind: "failed"; message: string };
 
+// The writer's bound on a root path, `path_max_bytes` in protocol/v2.json.
+const PATH_MAX_BYTES = 4096;
+
+// A root the Rust writer would take as well: at most its path bound in UTF-8
+// bytes, and no character Rust's char::is_control is true for (C0, DEL, C1).
+function safeRootText(path: string): boolean {
+	return new TextEncoder().encode(path).length <= PATH_MAX_BYTES && !/[\u0000-\u001f\u007f-\u009f]/.test(path);
+}
+
 // The same state root the Rust writer and the WezTerm plugin resolve:
 // WEZTERM_ATTENTION_DIR, else $XDG_STATE_HOME/wezterm-attention, else
 // ~/.local/state/wezterm-attention. An empty or relative value is skipped, never
 // used: a relative root would scatter markers under the cwd and let clear's rm()
-// delete a cwd-relative file. The Rust writer refuses a relative
-// WEZTERM_ATTENTION_DIR outright; here, as in the plugin, it is reported and the
-// next rule applies. The final isAbsolute gate closes the HOME="" hole
-// (homedir() also returns "" for HOME=""), so don't drop it.
+// delete a cwd-relative file. So is a value the writer would refuse. The Rust
+// writer refuses such a WEZTERM_ATTENTION_DIR outright; here, as in the plugin,
+// it is reported and the next rule applies. The final isAbsolute gate closes the
+// HOME="" hole (homedir() also returns "" for HOME=""), so don't drop it.
 function markerDirectory(report: (message: string) => void): string | undefined {
 	const override = process.env.WEZTERM_ATTENTION_DIR;
 	if (override) {
-		if (isAbsolute(override)) return override;
-		report("wezterm-attention: ignoring WEZTERM_ATTENTION_DIR because it is not an absolute path");
+		// Checked first so that the report never repeats a control character.
+		if (!safeRootText(override)) {
+			report(
+				`wezterm-attention: ignoring WEZTERM_ATTENTION_DIR because it is longer than ${PATH_MAX_BYTES} bytes or holds a control character`,
+			);
+		} else if (isAbsolute(override)) return override;
+		else report("wezterm-attention: ignoring WEZTERM_ATTENTION_DIR because it is not an absolute path");
 	}
 	const stateHome = process.env.XDG_STATE_HOME;
-	if (stateHome && isAbsolute(stateHome)) return join(stateHome, "wezterm-attention");
+	if (stateHome && isAbsolute(stateHome) && safeRootText(stateHome)) return join(stateHome, "wezterm-attention");
 	const dir = join(process.env.HOME || homedir(), ".local", "state", "wezterm-attention");
 	return isAbsolute(dir) ? dir : undefined;
 }

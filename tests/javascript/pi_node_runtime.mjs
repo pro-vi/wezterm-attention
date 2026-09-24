@@ -55,7 +55,7 @@ try {
 		"hooks event pi session_shutdown",
 	]);
 	assert.equal(lines.filter((_, index) => index % 2 === 1).length, 3);
-	assert.equal(readFileSync(identityLog, "utf8"), "\n\n\n", "C3: absent launch identity must remain absent in the actual Node writer dispatch");
+	assert.equal(readFileSync(identityLog, "utf8"), "\n\n\n", "absent launch identity must remain absent in the actual Node writer dispatch");
 	console.log("Pi Node runtime dispatch: 3/3 writer calls passed");
 } finally {
 	delete process.env.WEZTERM_ATTENTION_ROOT;
