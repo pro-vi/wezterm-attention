@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -13,7 +13,7 @@ use crate::identity::{PaneAddress, canonical_pane_id};
 use crate::protocol::{
     AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, manifest, sha256_hex,
 };
-use crate::query::{pane_presence, read_bindings_with_ports, read_tab_publications};
+use crate::query::{FileStamp, pane_presence, read_bindings_with_ports, read_tab_publications};
 use crate::records::{
     CommitPlan, RecordIdentity, Replacement, commit_nested_with, launch_path, pane_path,
     read_record, remove_file_durable, with_lock,
@@ -858,39 +858,14 @@ fn flat_projection_stem(name: &str) -> Option<String> {
     canonical_pane_id(stem).ok()
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct FileIdentity {
-    dev: u64,
-    ino: u64,
-    nlink: u64,
-    size: u64,
-    mtime: i128,
-}
-
 struct FlatFile {
     path: PathBuf,
-    identity: FileIdentity,
+    identity: FileStamp,
 }
 
-fn regular_file_identity(path: &Path) -> Result<Option<FileIdentity>> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
-            Ok(Some(FileIdentity {
-                dev: metadata.dev(),
-                ino: metadata.ino(),
-                nlink: metadata.nlink(),
-                size: metadata.size(),
-                mtime: i128::from(metadata.mtime()) * 1_000_000_000
-                    + i128::from(metadata.mtime_nsec()),
-            }))
-        }
-        Ok(_) => Ok(None),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(AttentionError::new(
-            "state_permissions",
-            "flat marker could not be inspected",
-        )),
-    }
+fn regular_file_identity(path: &Path) -> Result<Option<FileStamp>> {
+    FileStamp::regular_file(path)
+        .map_err(|_| AttentionError::new("state_permissions", "flat marker could not be inspected"))
 }
 
 struct ClaimInventory {
@@ -1123,6 +1098,21 @@ fn collect_tab_orders(
                 "path": relative,
                 "action": "collect",
             }),
+            // The panes were probed after the file was read. One that changed
+            // since is a newer draw from a live bar, not the one judged here.
+            None if FileStamp::regular_file(&root.join(&relative))
+                .ok()
+                .flatten()
+                .is_none_or(|now| Some(now) != window.stamp) =>
+            {
+                json!({
+                    "kind": "tab_order_collection",
+                    "window_id": window.window_id,
+                    "path": relative,
+                    "action": "keep",
+                    "reason": "changed",
+                })
+            }
             None => match remove_file_durable(&root.join(&relative)) {
                 Ok(_) => json!({
                     "kind": "tab_order_collection",

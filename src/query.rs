@@ -1726,6 +1726,45 @@ pub struct TabPublication {
     pub source: Option<TabSource>,
     #[serde(skip)]
     pub(crate) relative_path: PathBuf,
+    /// The file as it stood before it was read, so a deletion decided from
+    /// these contents can refuse a file that has since been replaced.
+    #[serde(skip)]
+    pub(crate) stamp: Option<FileStamp>,
+}
+
+/// Enough of a regular file's metadata to tell that it was replaced or
+/// rewritten: a rename changes the inode, an in-place write the size or mtime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FileStamp {
+    dev: u64,
+    ino: u64,
+    nlink: u64,
+    size: u64,
+    mtime: i128,
+}
+
+impl FileStamp {
+    pub(crate) fn of(metadata: &fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            nlink: metadata.nlink(),
+            size: metadata.size(),
+            mtime: i128::from(metadata.mtime()) * 1_000_000_000 + i128::from(metadata.mtime_nsec()),
+        }
+    }
+
+    /// The stamp of the regular file at `path`, or None when nothing, or
+    /// something other than a regular file, is there now.
+    pub(crate) fn regular_file(path: &Path) -> std::io::Result<Option<Self>> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() => Ok(Some(Self::of(&metadata))),
+            Ok(_) => Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1915,11 +1954,13 @@ pub fn read_tab_publications(root: &Path) -> Result<(Vec<TabPublication>, Vec<Di
             ));
             continue;
         };
+        let stamp = FileStamp::regular_file(&path).ok().flatten();
         match read_record_typed(&path, None, &RecordIdentity::unscoped()) {
             RecordRead::Present(value) => {
                 match tab_publication(&value, window_id, incarnation, limits) {
                     Ok(mut window) => {
                         window.relative_path = Path::new("tabs").join(format!("{stem}.json"));
+                        window.stamp = stamp;
                         windows.push(window);
                     }
                     Err(error) => diagnostics.push(error.diagnostic),
@@ -2085,6 +2126,7 @@ fn tab_publication(
         tabs,
         source,
         relative_path: PathBuf::new(),
+        stamp: None,
     })
 }
 
