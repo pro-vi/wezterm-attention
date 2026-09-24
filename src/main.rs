@@ -767,12 +767,11 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     "bindings".to_owned(),
                 ));
             }
-            if args.realm.as_ref().is_some_and(|realm| {
-                realm.len() != 64
-                    || !realm
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            }) {
+            if args
+                .realm
+                .as_deref()
+                .is_some_and(|realm| !wezterm_attention::protocol::hex64_text(realm))
+            {
                 return Err((
                     Box::new(AttentionError::usage(
                         "--realm must be 64 lowercase hex characters",

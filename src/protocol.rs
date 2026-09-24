@@ -487,7 +487,7 @@ fn hex64(value: &Value) -> bool {
 }
 
 /// Whether `text` is 64 lowercase hex digits, the form every digest here takes.
-pub(crate) fn hex64_text(text: &str) -> bool {
+pub fn hex64_text(text: &str) -> bool {
     text.len() == 64
         && text
             .bytes()
