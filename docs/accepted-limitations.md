@@ -14,16 +14,16 @@ file is the maintained public account, and it is the one to read first.
 
 `Cargo.toml` denies `dbg_macro`, `todo`, `unimplemented`, `unsafe_op_in_unsafe_fn`
 and `unused_must_use`. It does not deny `clippy::unwrap_used` or
-`clippy::expect_used`, which fire at 23 sites in the library.
+`clippy::expect_used`, which fire at 25 sites in the library.
 
-Denying them today would mean adding 23 allow attributes, which announces an
+Denying them today would mean adding 25 allow attributes, which announces an
 intention while changing nothing. The sites need reading individually: some are
 genuinely infallible and want a comment, some want an error path. Until that pass
 happens, the table locks in the lints the crate already satisfies and says
 nothing about the ones it does not.
 
 To reproduce the count, run `cargo clippy --lib -- -W clippy::unwrap_used
--W clippy::expect_used`. Seventeen of the 23 are `expect` and six are `unwrap`;
+-W clippy::expect_used`. Nineteen of the 25 are `expect` and six are `unwrap`;
 `src/query.rs` holds eleven of them. Each site is one of three things, and they
 need separating before the lint can go on:
 
@@ -211,6 +211,56 @@ same class of limitation.
 The restat that refuses a replaced leftover compares device, inode, nlink, size,
 and mtime. Rename (Pi fallback) changes the inode and is refused.
 An in-place rewrite of equal size that restores mtime is not.
+
+## What sweep leaves behind
+
+`attention sweep --apply` deletes nothing that an earlier version did not
+already delete, apart from pane trees under the retention rule in the
+[record contract](record-contract.md#trust-boundary). That rule keeps sweep from
+removing state it cannot prove abandoned, and it means four kinds of leftover
+stay on disk:
+
+- **An exited GUI's tab-order files.** A file is removed only when it names no
+  tab, or when every pane it names is verified absent through a listing of that
+  pane's mux. An exited GUI's panes are usually still running in a mux server,
+  or gone together with their socket, which a reader reports as unavailable
+  rather than absent. So the file stays until you remove it. It is safe to
+  delete `tabs/<incarnation id>-<window id>.json` by hand once no GUI with that
+  window is running.
+- **Temporary files from an interrupted write, outside a tree being removed.**
+  They no longer stop a binding or pane tree from being pruned, and they go with
+  that tree when it is, but nothing collects one on its own.
+- **Subagent records below the retention floor.** A child record older than its
+  binding's floor is already ignored by every reader. It stays until its binding
+  or pane tree is removed.
+- **A half-removed binding directory in a live pane.** A crash while a binding
+  directory was being removed can leave part of it behind. While the pane is
+  live, retention does not touch its tree, so the remainder stays.
+
+Collecting any of these would be a new deletion, and would need the same
+evidence rule the others have.
+
+## `mark clear` in a pane with no binding removes only the review
+
+`attention mark clear --source NAME` withdraws the activity that source
+published by writing an activity-clear record for the pane's current binding.
+A pane where no provider binding exists has no binding to write it for, so
+there the command removes the source's review flag and nothing else, and
+reports `skipped` if there was none. An activity that `attention mark` wrote in
+such a pane stays until its TTL runs out or a newer activity replaces it. A
+launch-scoped clear record would fix this, and does not exist.
+
+## A printed identity is believed on a local pane if its pane id matches
+
+Any program that prints to a pane can set that pane's `WEZTERM_ATTENTION` user
+variable. On a pane in the GUI's own domains, the plugin refuses an identity
+whose pane id differs from the pane's own. It does not check the realm: an
+identity with the right pane id and another mux's realm and incarnation is
+still believed, so output from a different mux, for example through ssh, can
+make a local pane show that mux's records for the same pane id. The shell
+integration's next prompt republishes the correct identity. Closing this means
+comparing the published realm with the GUI's own socket identity, which the
+reader does not do today.
 
 ## The acknowledgement write has no compare-and-swap
 
