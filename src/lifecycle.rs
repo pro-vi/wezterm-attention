@@ -570,22 +570,28 @@ fn binding_mutation(
                 result
             };
             // The session index names every binding this writer keeps, in
-            // the commit that keeps it.
+            // the commit that keeps it. The entry is written first: a commit
+            // that stops after it leaves an entry whose binding is missing,
+            // which a reader takes as no record, never a binding the index
+            // does not name.
             if matches!(
                 result.disposition,
                 Disposition::Applied | Disposition::Replaced | Disposition::Confirmed
             ) {
-                replacements.push(Replacement::if_different(
-                    session_entry_path(
-                        &resolved.root,
-                        provider,
-                        session,
-                        &resolved.address,
-                        &resolved.launch_id,
-                        &binding_id,
+                replacements.insert(
+                    0,
+                    Replacement::if_different(
+                        session_entry_path(
+                            &resolved.root,
+                            provider,
+                            session,
+                            &resolved.address,
+                            &resolved.launch_id,
+                            &binding_id,
+                        ),
+                        session_entry(&resolved.address, &resolved.launch_id, &binding_id)?,
                     ),
-                    session_entry(&resolved.address, &resolved.launch_id, &binding_id)?,
-                ));
+                );
             }
             Ok(CommitPlan {
                 result: Mutation::plain(result),

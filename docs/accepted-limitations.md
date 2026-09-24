@@ -305,7 +305,8 @@ Every binding this version writes gets its entry in the same commit. A binding
 written without one -- by an older `attention` still running hooks after the
 store was marked, or by hand -- is not found as a rival, so a conflict with it
 is not reported, until an entry is written for it. `attention sweep --apply`
-writes a missing entry for every binding it reads. Realm-wide `bindings` walks
+without `--realm` writes a missing entry for every binding it reads; with
+`--realm` it writes none. Realm-wide `bindings` walks
 every binding and is not affected. Nothing is removed on the index's word.
 
 ## Removing a pane tree removes the lock files it holds
