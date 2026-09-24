@@ -65,6 +65,7 @@ env -u WEZTERM_ATTENTION_DIR -u WEZTERM_ATTENTION_ROOT -u WEZTERM_PANE \
 bun run typecheck
 node tests/javascript/pi_node_runtime.mjs
 sh tests/shell/run_wezterm_smoke.sh
+sh tests/shell/examples_spec.sh
 node tests/fixtures/lifecycle/check-coverage.mjs
 
 # Test-only runtimes are isolated from the checkout and live installations.
