@@ -97,6 +97,7 @@ if [ -n "${ATTENTION_TEST_BASH:-}" ]; then set -- "$@" "$ATTENTION_TEST_BASH"; f
 for bash_shell in "$@"; do
   sh tests/shell/bash_integration_spec.sh "$bash_shell" "$bash_preexec"
 done
+sh tests/shell/zsh_integration_spec.sh
 
 pi_baseline=${ATTENTION_PI_BASELINE_ROOT:-}
 if [ -z "$pi_baseline" ]; then
