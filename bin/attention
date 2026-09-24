@@ -23,8 +23,9 @@ ROOT=$(CDPATH= cd -P -- "$script_dir/.." && pwd -P)
 
 if [ ! -x "$ROOT/libexec/attention-rs" ]; then
   printf '%s\n' 'attention: Rust binary is missing; run scripts/install-cli.sh and retry.' >&2
-  # Provider hooks are registered globally and read exit 2 as "block", so a
-  # hook that cannot run reports it and lets the agent carry on.
+  # Provider hooks are registered globally and run wherever the agent runs. A
+  # hook that cannot run here says so and exits 0, or 1 under --strict, as a
+  # hook event with no pane identity does.
   if [ "${1:-}" = hooks ]; then
     for argument in "$@"; do
       [ "$argument" != --strict ] || exit 1
