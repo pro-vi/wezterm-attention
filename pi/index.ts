@@ -58,6 +58,9 @@ type WriterRequest =
 	| ({ kind: "clear" } & SessionFacts)
 	| ({ kind: "end"; reason: SessionShutdownEvent["reason"] } & SessionFacts);
 
+// Tells the user one warning; the extension passes a Pi UI notification.
+type Report = (message: string) => void;
+
 type WriterResult =
 	| { kind: "unconfigured" }
 	| { kind: "succeeded" }
@@ -93,7 +96,7 @@ function safeRootText(path: string): boolean {
 // that is not UTF-8; here, as in the plugin, it is reported and the next rule
 // applies. The final isAbsolute gate closes the HOME="" hole (homedir() also
 // returns "" for HOME=""), so don't drop it.
-function markerDirectory(report: (message: string) => void): string | undefined {
+function markerDirectory(report: Report): string | undefined {
 	const override = process.env.WEZTERM_ATTENTION_DIR;
 	if (override) {
 		// Checked first so that the report never repeats a control character.
@@ -216,7 +219,7 @@ async function publishPaneId(id: string): Promise<void> {
 	}
 }
 
-async function writeMarkerNow(report: (message: string) => void, state: AttentionState, label?: string): Promise<void> {
+async function writeMarkerNow(report: Report, state: AttentionState, label?: string): Promise<void> {
 	const id = paneId();
 	if (!id) return;
 	await publishPaneId(id);
@@ -253,7 +256,7 @@ async function writeMarkerNow(report: (message: string) => void, state: Attentio
 	}
 }
 
-async function clearMarkerNow(report: (message: string) => void): Promise<void> {
+async function clearMarkerNow(report: Report): Promise<void> {
 	const id = paneId();
 	if (!id) return;
 	const dir = markerDirectory(report);
@@ -265,11 +268,11 @@ async function clearMarkerNow(report: (message: string) => void): Promise<void> 
 	}
 }
 
-function mark(report: (message: string) => void, state: AttentionState, label?: string): Promise<void> {
+function mark(report: Report, state: AttentionState, label?: string): Promise<void> {
 	return enqueue(() => writeMarkerNow(report, state, label));
 }
 
-function clearMarker(report: (message: string) => void): Promise<void> {
+function clearMarker(report: Report): Promise<void> {
 	return enqueue(() => clearMarkerNow(report));
 }
 
@@ -396,7 +399,7 @@ async function invokeWriter(request: WriterRequest, transportId: string): Promis
 	});
 }
 
-async function applyLegacyFallback(request: WriterRequest, report: (message: string) => void): Promise<void> {
+async function applyLegacyFallback(request: WriterRequest, report: Report): Promise<void> {
 	switch (request.kind) {
 		case "tool_start":
 			await writeMarkerNow(report, "thinking");
@@ -422,7 +425,7 @@ async function applyLegacyFallback(request: WriterRequest, report: (message: str
 	}
 }
 
-function enqueueWriter(request: WriterRequest, reportFailure: (message: string) => void): Promise<void> {
+function enqueueWriter(request: WriterRequest, reportFailure: Report): Promise<void> {
 	const transportId = randomUUID();
 	return enqueue(async () => {
 		const result = await invokeWriter(request, transportId);
