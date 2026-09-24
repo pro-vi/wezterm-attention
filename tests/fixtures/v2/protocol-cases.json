@@ -229,6 +229,8 @@
     { "id": "activity_clear_valid", "parser": "record", "sample": "activity_clear", "expected": "valid" },
     { "id": "review_valid_without_clock", "parser": "record", "sample": "review", "expected": "valid" },
     { "id": "binding_end_valid", "parser": "record", "sample": "binding_end", "expected": "valid" },
+    { "id": "binding_end_names_its_binding_event", "parser": "record", "sample": "binding_end", "patch": { "binding_event_id": "00000000-0000-4000-8000-000000000003" }, "expected": "valid" },
+    { "id": "binding_end_binding_event_must_be_uuid", "parser": "record", "sample": "binding_end", "patch": { "binding_event_id": "not-a-uuid" }, "expected": "record_invalid" },
     { "id": "acknowledgement_valid", "parser": "record", "sample": "acknowledgement", "expected": "valid" },
     { "id": "absence_probe_valid", "parser": "record", "sample": "absence_probe", "expected": "valid" },
     { "id": "subagent_presence_valid", "parser": "record", "sample": "subagent_presence", "expected": "valid" },

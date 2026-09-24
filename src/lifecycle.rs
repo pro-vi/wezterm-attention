@@ -22,8 +22,8 @@ use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, free_of_c
 use crate::providers::{ProviderAction, ProviderEvent};
 use crate::records::{
     CommitPlan, PreparedRecordWrite, RecordIdentity, RecordRead, Replacement, commit_nested_with,
-    commit_triple_with, commit_with, launch_path, pane_path, read_record, read_record_typed,
-    state_root,
+    commit_triple_with, commit_with, ends_binding, launch_path, pane_path, read_record,
+    read_record_typed, state_root,
 };
 use crate::wezterm::RuntimePorts;
 
@@ -464,9 +464,9 @@ fn binding_mutation(
                     Some("binding_end"),
                     &RecordIdentity::binding(&resolved.address, &resolved.launch_id, current_id),
                 )?;
-                let current_ended = current_end.as_ref().is_some_and(|end| {
-                    end["observed_mono_ns"].as_str().unwrap_or("") >= current_order
-                });
+                let current_ended = current_end
+                    .as_ref()
+                    .is_some_and(|end| ends_binding(end, current));
                 let replace = match provider {
                     "claude" | "codex" => matches!(source, "resume" | "clear" | "fork"),
                     "pi" => matches!(source, "new" | "resume" | "fork"),
@@ -1797,9 +1797,7 @@ fn apply_end(
                 let order = existing["observed_mono_ns"].as_str().unwrap_or("");
                 let disposition = if observation < order {
                     Disposition::Ignored
-                } else if existing["reason"] == "session_end"
-                    && order >= binding["observed_mono_ns"].as_str().unwrap_or("")
-                {
+                } else if existing["reason"] == "session_end" && ends_binding(&existing, &binding) {
                     Disposition::Skipped
                 } else if observation == order {
                     Disposition::Conflict
@@ -1826,6 +1824,7 @@ fn apply_end(
                 "binding_id": binding_id,
                 "reason": "session_end",
                 "event_id": event_id,
+                "binding_event_id": binding["event_id"],
                 "observed_mono_ns": observation,
                 "written_at_unix_ns": written_at,
             });

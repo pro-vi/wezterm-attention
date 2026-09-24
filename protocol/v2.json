@@ -954,7 +954,7 @@
     },
     "binding_end": {
       "required": ["kind", "schema", "address", "launch_id", "binding_id", "reason", "event_id", "observed_mono_ns", "written_at_unix_ns"],
-      "optional": ["operation_id"],
+      "optional": ["operation_id", "binding_event_id"],
       "types": {
         "kind": "record_kind",
         "schema": "record_schema",
@@ -965,7 +965,8 @@
         "event_id": "uuid",
         "observed_mono_ns": "monotonic_ns20",
         "written_at_unix_ns": "unix_ns20",
-        "operation_id": "uuid"
+        "operation_id": "uuid",
+        "binding_event_id": "uuid"
       }
     },
     "acknowledgement": {

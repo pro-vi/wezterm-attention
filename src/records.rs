@@ -400,6 +400,32 @@ pub fn launch_path(root: &Path, address: &PaneAddress, launch_id: &str) -> PathB
     pane_path(root, address).join("launches").join(launch_id)
 }
 
+/// Whether an end record ends this binding record, the one rule every reader
+/// and writer applies.
+///
+/// An end ends the binding event it names in `binding_event_id`, whatever the
+/// clocks say: the monotonic clock restarts at boot, so an end sweep writes
+/// after a reboot carries a smaller stamp than a binding recorded before it.
+/// An end observed at or after the binding ends it too, which covers an end
+/// that names no event and one whose event raced a resumed start. Any other
+/// end belongs to an earlier binding of the same id, which a resume replaced.
+pub fn ends_binding(end: &Value, binding: &Value) -> bool {
+    let named = end
+        .get("binding_event_id")
+        .and_then(Value::as_str)
+        .is_some_and(|event| binding.get("event_id").and_then(Value::as_str) == Some(event));
+    let observed = |record: &Value| {
+        record
+            .get("observed_mono_ns")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    named
+        || observed(end)
+            .zip(observed(binding))
+            .is_some_and(|(end, binding)| end >= binding)
+}
+
 pub fn mkdir_private(path: &Path) -> Result<()> {
     let mut missing = Vec::new();
     let mut cursor = path;
@@ -907,7 +933,31 @@ mod tests {
 
     use std::collections::BTreeMap;
 
-    use super::{PreparedRecordWrite, state_root, sync_parent_directory_with};
+    use super::{PreparedRecordWrite, ends_binding, state_root, sync_parent_directory_with};
+
+    #[test]
+    fn an_end_ends_the_binding_it_names_or_one_it_was_observed_after() {
+        let binding = serde_json::json!({
+            "event_id": "00000000-0000-4000-8000-000000000001",
+            "observed_mono_ns": "00000000000000000500",
+        });
+        let end = |event: Option<&str>, observed: &str| {
+            let mut end = serde_json::json!({"observed_mono_ns": observed});
+            if let Some(event) = event {
+                end["binding_event_id"] = serde_json::json!(event);
+            }
+            end
+        };
+        let named = Some("00000000-0000-4000-8000-000000000001");
+        let other = Some("00000000-0000-4000-8000-000000000002");
+        // Written after a reboot: a smaller stamp, and the binding's own event.
+        assert!(ends_binding(&end(named, "00000000000000000100"), &binding));
+        assert!(ends_binding(&end(None, "00000000000000000500"), &binding));
+        assert!(ends_binding(&end(other, "00000000000000000600"), &binding));
+        // An earlier binding of the same id, which a resume replaced.
+        assert!(!ends_binding(&end(other, "00000000000000000100"), &binding));
+        assert!(!ends_binding(&end(None, "00000000000000000499"), &binding));
+    }
 
     #[test]
     fn concurrent_writers_creating_one_directory_all_succeed() {

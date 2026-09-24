@@ -284,9 +284,11 @@ in `<state root>/v2/realms/<realm id>/incarnations/<incarnation id>`.
 
 ## After a reboot, pane retention can wait without bound
 
-Absence sightings and binding ends are ordered by the monotonic clock, which
-restarts at boot. A sighting recorded before a reboot reads as later than now and
-restarts the count, which costs a minute. A binding end recorded before a reboot
+Absence sightings are ordered by the monotonic clock, which restarts at boot. A
+sighting recorded before a reboot reads as later than now and restarts the
+count, which costs a minute. An end sweep writes after a reboot names the
+binding event it ends, so it ends that binding whatever its stamp, and the
+pane's retention counts from it as usual. A binding end recorded before a reboot
 is worse: no sighting from the new boot can be shown to follow it until the new
 uptime passes the uptime at which the end was recorded, so retention of that
 pane's tree waits until then. A machine rebooted more often than that never

@@ -11,7 +11,7 @@ use crate::identity::PaneAddress;
 use crate::identity::socket_identity;
 use crate::observations::{LifecycleAvailability, LifecycleSnapshot, LifecycleView};
 use crate::protocol::{AttentionError, Diagnostic, Result};
-use crate::records::{FileRecords, RecordReader, launch_path, pane_path};
+use crate::records::{FileRecords, RecordReader, ends_binding, launch_path, pane_path};
 use crate::records::{RecordIdentity, RecordRead, read_record, read_record_typed};
 use crate::wezterm::Clock;
 use crate::wezterm::{GuiWindowLister, PaneLister, Presence, ProcessListing, ProcessProbe};
@@ -670,9 +670,7 @@ fn read_pane_facts_once(
         .record
         .as_ref()
         .zip(binding.record.as_ref())
-        .is_some_and(|(end, binding)| {
-            end["observed_mono_ns"].as_str() < binding["observed_mono_ns"].as_str()
-        })
+        .is_some_and(|(end, binding)| !ends_binding(end, binding))
     {
         end = RecordFacet::empty(A::Absent);
     }
@@ -1689,11 +1687,9 @@ fn realm_socket(root: &Path, address: &PaneAddress) -> Option<String> {
     (realm_id == address.realm_id && incarnation_id == address.incarnation_id).then_some(socket)
 }
 
-/// Whether the end record beside a binding ends it. An end older than the
-/// binding belongs to an earlier binding of the same id; an unreadable one
-/// ends nothing.
+/// Whether the end record beside a binding ends it, by [`ends_binding`]. An
+/// unreadable one ends nothing.
 fn binding_ended(binding_path: &Path, binding: &Value, identity: &RecordIdentity) -> bool {
-    let order = string(binding, "observed_mono_ns").unwrap_or_default();
     binding_path
         .parent()
         .and_then(|dir| {
@@ -1701,8 +1697,7 @@ fn binding_ended(binding_path: &Path, binding: &Value, identity: &RecordIdentity
                 .ok()
                 .flatten()
         })
-        .and_then(|end| string(&end, "observed_mono_ns"))
-        .is_some_and(|ended| ended >= order)
+        .is_some_and(|end| ends_binding(&end, binding))
 }
 
 /// A pane's presence under a socket that carried its incarnation when last
@@ -2190,11 +2185,7 @@ fn assemble_bindings(
                 .and_then(|value| string(value, "binding_id"))
                 .as_deref()
                 == Some(&binding_id);
-        let binding_order = string(&binding, "observed_mono_ns").unwrap_or_default();
-        let ended = end
-            .as_ref()
-            .and_then(|value| string(value, "observed_mono_ns"))
-            .is_some_and(|order| order >= binding_order);
+        let ended = end.as_ref().is_some_and(|end| ends_binding(end, &binding));
         let expected_session_match = string(&binding, "expected_session_id").map(|expected| {
             string(&binding, "provider_session_id").is_some_and(|actual| actual == expected)
         });

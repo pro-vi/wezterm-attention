@@ -1679,3 +1679,6 @@ mod destructive_guards;
 
 #[path = "maintenance_spec/recorded_servers.rs"]
 mod recorded_servers;
+
+#[path = "maintenance_spec/reboot_ends.rs"]
+mod reboot_ends;

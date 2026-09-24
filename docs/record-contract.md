@@ -64,6 +64,12 @@ Window checks are derived per query and never stored in publication files. Their
 retention-floor, and absence fences. `written_at_unix_ns` is required on activity, child presence,
 binding, and binding-end records. It supplies TTL and 30-day retention age.
 
+A binding-end record ends the binding event its `binding_event_id` names, and any binding it was
+observed at or after. The name is what orders an end across a reboot: the monotonic clock restarts
+at boot, so an end sweep writes after one carries a smaller stamp than a binding recorded before
+it. Both writers name the event; an end that names none is ordered by its stamp alone. Any other
+end belongs to an earlier binding of the same id, which a resume replaced, and ends nothing.
+
 Exact TTL equality remains eligible. The first ineligible instant is one nanosecond later. Missing,
 malformed, unavailable, or negative wall age fails closed: TTL-bearing state is omitted, retention
 does not prune it, and diagnostics report `record_invalid`, `probe_unavailable`, or `clock_skew`.

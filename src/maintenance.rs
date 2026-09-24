@@ -18,8 +18,8 @@ use crate::query::{
     pane_evidence, pane_presence, read_bindings_with_ports, read_tab_publications,
 };
 use crate::records::{
-    CommitPlan, RecordIdentity, Replacement, commit_nested_with, launch_path, pane_path,
-    read_record, remove_file_durable, with_lock,
+    CommitPlan, RecordIdentity, Replacement, commit_nested_with, ends_binding, launch_path,
+    pane_path, read_record, remove_file_durable, with_lock,
 };
 use crate::wezterm::{Clock, PaneLister, Presence, ProcessProbe};
 
@@ -1974,10 +1974,7 @@ pub fn sweep(
                 continue;
             }
         };
-        let ended_now = end.as_ref().is_some_and(|end| {
-            end["observed_mono_ns"].as_str().unwrap_or("")
-                >= binding["observed_mono_ns"].as_str().unwrap_or("")
-        });
+        let ended_now = end.as_ref().is_some_and(|end| ends_binding(end, &binding));
         if let Some(end) = &end
             && ended_now
             && !current
@@ -2236,7 +2233,7 @@ pub fn sweep(
                     Some("absence_probe"),
                     &RecordIdentity::pane(&address),
                 )?;
-                let action = absence_action(
+                let mut action = absence_action(
                     &fresh_presence,
                     locked_probe.as_ref(),
                     Some(operation),
@@ -2268,12 +2265,17 @@ pub fn sweep(
                 } else if action == "end" {
                     let locked_end =
                         read_record(&end_path, Some("binding_end"), &binding_identity)?;
-                    if locked_end.as_ref().is_none_or(|end| {
-                        end["observed_mono_ns"].as_str().unwrap_or("") < observation.as_str()
-                    }) {
+                    // An end that arrived since the look above already ends
+                    // this binding, and keeps its own reason.
+                    if locked_end
+                        .as_ref()
+                        .is_some_and(|end| ends_binding(end, &binding))
+                    {
+                        action = "already_ended";
+                    } else {
                         replacements.push(Replacement::always(
                             end_path.clone(),
-                            json!({"kind":"binding_end","schema":manifest()?.record_schema,"address":address,"launch_id":launch_id,"binding_id":binding_id,"reason":"sweep_absent","operation_id":operation,"event_id":Uuid::new_v4().to_string(),"observed_mono_ns":observation,"written_at_unix_ns":clock.unix_ns20()?}),
+                            json!({"kind":"binding_end","schema":manifest()?.record_schema,"address":address,"launch_id":launch_id,"binding_id":binding_id,"reason":"sweep_absent","operation_id":operation,"event_id":Uuid::new_v4().to_string(),"binding_event_id":binding["event_id"],"observed_mono_ns":observation,"written_at_unix_ns":clock.unix_ns20()?}),
                         ));
                     }
                 }
@@ -2435,10 +2437,9 @@ pub fn sweep(
                         Some("binding_end"),
                         &RecordIdentity::binding(&address, launch_id, binding_id),
                     )?;
-                    let end_is_current = end.as_ref().is_some_and(|end| {
-                        end["observed_mono_ns"].as_str().unwrap_or("")
-                            >= locked_binding["observed_mono_ns"].as_str().unwrap_or("")
-                    });
+                    let end_is_current = end
+                        .as_ref()
+                        .is_some_and(|end| ends_binding(end, &locked_binding));
                     let still_old = end
                         .as_ref()
                         .map(|end| {
