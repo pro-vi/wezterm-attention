@@ -2749,6 +2749,33 @@ test("activity TTL uses written Unix time while event order stays monotonic", fu
   write_json_path(activity_path, samples.activity)
 end)
 
+test("a record written after the poll's clock sample is fresh, not clock skew", function()
+  materialize_state_case(protocol_fixture.state_case)
+  local samples = protocol_fixture.record_samples
+  local activity_path = test_dir .. "/v2/realms/" .. samples.claim.address.realm_id
+    .. "/incarnations/" .. samples.claim.address.incarnation_id
+    .. "/panes/42/launches/" .. samples.claim.launch_id
+    .. "/bindings/" .. samples.binding.binding_id .. "/activity.json"
+  local activity = decode_json(encode_json(samples.activity))
+  activity.ttl_ms = 600000
+  activity.written_at_unix_ns = "00000000610000000005"
+  write_json_path(activity_path, activity)
+  local clock = { "00000000610000000000", "00000000610000000009" }
+  local sampled = 0
+  local window = window_double({ tabs = { { { id = 4271, domain = "unix",
+    attention = protocol_fixture.wire_sample } } }, focused = false })
+  attention.poll(window, { call_after = function() end, utc_now = function()
+    sampled = sampled + 1
+    return clock[math.min(sampled, #clock)]
+  end })
+  local view = internal.attention_cache[internal.address_cache_key(protocol_fixture.wire_sample.address)]
+  write_json_path(activity_path, samples.activity)
+  assert(view.activity_type == "notify", "an activity written a moment after the sample was dropped")
+  for _, item in ipairs(view.diagnostics) do
+    assert(item.code ~= "clock_skew", "a later write is not a clock that is ahead")
+  end
+end)
+
 test("an activity clear watermark hides older activity and permits newer activity", function()
   materialize_state_case(protocol_fixture.state_case)
   local samples = protocol_fixture.record_samples

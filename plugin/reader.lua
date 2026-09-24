@@ -333,7 +333,7 @@ return function(context)
     }
   end
 
-  local function read_attention_view(read, now_unix_ns, opts)
+  local function read_view_at(read, now_unix_ns, opts)
     local diagnostics = {}
     local previous = opts and opts.previous_view or nil
     local previous_records = {}
@@ -612,6 +612,33 @@ return function(context)
       next_wakeup_unix_ns = next_wakeup_unix_ns,
       _records = records,
     }
+  end
+
+  local function saw_clock_skew(view)
+    for _, list in ipairs({ view.diagnostics, view.lifecycle and view.lifecycle.diagnostics }) do
+      for _, item in ipairs(list or {}) do
+        if item.code == "clock_skew" then return true end
+      end
+    end
+    return false
+  end
+
+  --- Read a pane's view as of `now_unix_ns`. A poll samples UTC once and then
+  --- reads its panes, so a record written after the sample and before its
+  --- read carries a write time ahead of the sample, which reads as a clock
+  --- that is ahead. `opts.resample_utc`, when given, is asked once for the time
+  --- now; a later time means the record was simply newer than the sample, and
+  --- the pane is read again as of that time.
+  local function read_attention_view(read, now_unix_ns, opts)
+    local view = read_view_at(read, now_unix_ns, opts)
+    local resample = opts and opts.resample_utc
+    if not resample or not now_unix_ns or not saw_clock_skew(view) then return view end
+    local later = resample()
+    if type(later) ~= "string" or later <= now_unix_ns then return view end
+    local again = {}
+    for key, value in pairs(opts) do again[key] = value end
+    again.resample_utc = nil
+    return read_view_at(read, later, again)
   end
 
   --- The id under which this pane's markers are written, or nil when the pane

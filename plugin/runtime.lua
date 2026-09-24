@@ -1050,6 +1050,18 @@ return function()
       local saw_v2 = false
       local earliest_wakeup_unix_ns
 
+      --- The time now, for a read that saw a write time ahead of this poll's
+      --- sample. Nil when the caller fixed the poll's time.
+      local function resample_utc()
+        if opts and type(opts.utc_now) == "function" then
+          local ok, value = pcall(opts.utc_now)
+          return ok and format_unix_ns20(value) or nil
+        elseif opts and opts.now_unix_ns then
+          return nil
+        end
+        return (wezterm_now_unix_ns20())
+      end
+
       local function sample_utc_once()
         if utc_sampled then return poll_now_unix_ns, poll_utc_error end
         utc_sampled = true
@@ -1129,6 +1141,7 @@ return function()
               dir = dir,
               glob = opts and opts.glob,
               previous_view = before[key],
+              resample_utc = resample_utc,
             })
             -- A hook writes no frame, so a thinking view is animated from the
             -- wall clock, the same way a v1 marker without one is.
@@ -1394,6 +1407,7 @@ return function()
           acknowledge_focused_v2_pane(active_read, {
             dir = dir, now_unix_ns = poll_now_unix_ns,
             observed_event_id = candidate.event_id,
+            resample_utc = resample_utc,
           })
         end
       end
