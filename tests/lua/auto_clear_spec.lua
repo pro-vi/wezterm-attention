@@ -959,6 +959,49 @@ test("a window drawn while a failed source run waits for its retry is published 
   os.remove(sourced)
 end)
 
+test("a held tab order is published without a source once every retry has failed", function()
+  local previous, real_time = wezterm.run_child_process, os.time
+  internal.reset_tab_source()
+  local answer = false
+  local calls = 0
+  wezterm.run_child_process = function(args)
+    calls = calls + 1
+    if answer then return true, tab_source_response(args[4]), "" end
+    return false, "", "unused failure text"
+  end
+  local tab = gui_tab({window_id=9843,tab_id=9844,tab_index=0,panes={9845}})
+  local later = gui_tab({window_id=9846,tab_id=9847,tab_index=0,panes={9848}})
+  local sourced_later = test_dir .. "/tabs/" .. string.rep("a",64) .. "-9846.json"
+  local ok, failure = pcall(with_gui_socket, "/test/never-answers.sock", function()
+    format_tab_title(tab, {tab})
+    -- The first run, then one retry after each of the 2, 5, 10 and 30 s waits.
+    for run = 1, 5 do
+      assert(not path_exists(tab_publication_path(9843)), "held before run " .. run)
+      os.time = function() return real_time() + run * 60 end
+      internal.acquire_tab_source("/test/never-answers.sock")
+    end
+    assert(calls == 5, "every retry ran, got " .. calls)
+    local publication = assert(read_tab_publication(9843), "the held draw is published once no retry is left")
+    assert(publication.schema == 1 and publication.source == nil)
+    -- A later retry may still answer; a window drawn after it is published under the source.
+    answer = true
+    os.time = function() return real_time() + 600 end
+    internal.acquire_tab_source("/test/never-answers.sock")
+    assert(internal.tab_source(), "a later retry still answers")
+    format_tab_title(later, {later})
+  end)
+  os.time = real_time
+  wezterm.run_child_process = previous
+  internal.reset_tab_source()
+  assert(ok, failure)
+  assert(path_exists(sourced_later), "a window first drawn after the answer is published under the source")
+  local errors = drain_errors()
+  assert(#errors == 2 and errors[2]:find("without source identity", 1, true),
+    "the unsourced publication is logged once, got " .. #errors)
+  os.remove(tab_publication_path(9843))
+  os.remove(sourced_later)
+end)
+
 test("a held tab order is published without a source once no answer can come", function()
   local previous = wezterm.run_child_process
   internal.reset_tab_source()

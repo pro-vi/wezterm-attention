@@ -362,13 +362,22 @@ return function()
         and type(wezterm.run_child_process) == "function"
     end
 
+    --- Has the first run failed, and then the retry after each backoff wait?
+    --- Retries go on every thirty seconds, but a window held past this point
+    --- would stay out of `attention tabs` for as long as no answer comes.
+    local function retries_used_up(state)
+      return state.retry_index > #publish_backoff_seconds + 1
+    end
+
     --- What a tab order is published under now: "ready" with the source,
-    --- "unavailable" when no answer can come, and "pending" while one still
-    --- can. A failed run schedules its retry, so it is still "pending".
+    --- "unavailable" when no answer can come or none came through the whole
+    --- backoff, and "pending" while one still can. A failed run schedules
+    --- its retry, so until the backoff is used up it is still "pending".
     local function tab_source_status()
       local state = tab_source_state
       if state.source then return "ready", state.source end
-      if not can_acquire_tab_source(state.socket or os.getenv("WEZTERM_UNIX_SOCKET")) then
+      if retries_used_up(state)
+          or not can_acquire_tab_source(state.socket or os.getenv("WEZTERM_UNIX_SOCKET")) then
         return "unavailable"
       end
       return "pending"
@@ -418,6 +427,10 @@ return function()
         state.retry_index = state.retry_index + 1
         report_error_once("tab-source:" .. socket,
           "cannot identify the tab publisher's GUI socket yet; unpublished tab orders wait for a retry")
+        if retries_used_up(state) then
+          report_error_once("tab-source-used-up:" .. socket,
+            "no tab-source answer through the whole backoff; publishing tab orders without source identity")
+        end
       end
     end
 
