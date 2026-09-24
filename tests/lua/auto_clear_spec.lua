@@ -1643,6 +1643,117 @@ test("GUI doctor reports unpublished mux panes without filesystem probes", funct
     "GUI doctor must report the user-var half the CLI cannot observe")
 end)
 
+test("a local pane's own id outranks a WEZTERM_PANE that disagrees with it", function()
+  -- Printed by something in the pane -- a catted file, a remote prompt -- not
+  -- by the pane's own shell, which reads the same id WezTerm numbered it with.
+  assert(attention.pane_marker_id(mux_pane(7010, { published = 7011 })) == "7010",
+    "a local pane must not answer to another pane's marker")
+  assert(attention.pane_marker_id(mux_pane(7012, { published = 7012 })) == "7012")
+  assert(attention.pane_marker_id(mux_pane(7013, { domain = "unix", published = 7011 })) == "7011",
+    "a client domain's pane still goes by what it published")
+end)
+
+test("a v2 identity naming another pane is refused in a local pane", function()
+  local wire = decode_json(encode_json(protocol_fixture.wire_sample))
+  local foreign = internal.resolve_pane_read(mux_pane(4299, { attention = wire }))
+  assert(foreign.kind == "invalid", "a local pane printed pane 42's identity and was believed")
+  local own = internal.resolve_pane_read(mux_pane(tonumber(wire.address.pane_id), { attention = wire }))
+  assert(own.kind == "v2", "a local pane's own identity is still read")
+end)
+
+test("exec, WSL and serial domains are local, so their panes need no published id", function()
+  local config = { serial_ports = { { name = "serial-dev" } } }
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config(config, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root })
+  -- Set after apply_to_config, the way a config may.
+  config.exec_domains = { { name = "exec-dev" } }
+  for _, domain in ipairs({ "exec-dev", "serial-dev", "WSL:Ubuntu" }) do
+    assert(instance.pane_marker_id(mux_pane(7020, { domain = domain, published = 7021 })) == "7020",
+      domain .. " is a local domain, so its pane id names its markers")
+  end
+  assert(instance.pane_marker_id(mux_pane(7022, { domain = "SSHMUX:host" })) == nil,
+    "a client domain's unpublished pane still has no marker id")
+
+  local listed = dofile(repo_root .. "/plugin/init.lua")
+  listed.apply_to_config({ wsl_domains = { { name = "my-wsl" } } }, { auto_poll = false,
+    dir = test_dir, review_key = false, renderer = "manual", integration_root = writer_root })
+  assert(listed.pane_marker_id(mux_pane(7023, { domain = "my-wsl" })) == "7023")
+  assert(listed.pane_marker_id(mux_pane(7024, { domain = "WSL:Ubuntu" })) == nil,
+    "an explicit wsl_domains list replaces the default WSL:<distro> domains")
+end)
+
+--- Poll an unpublished pane of `domain` twice under `config`, with the given
+--- platform and environment, and return the sockets republication was sent to.
+local function republished_sockets(config, domain, triple, environment)
+  local spawned = {}
+  local real_background, real_triple, real_getenv =
+    wezterm.background_child_process, wezterm.target_triple, os.getenv
+  wezterm.background_child_process = function(argv) spawned[#spawned + 1] = argv; return true end
+  wezterm.target_triple = triple
+  os.getenv = function(name)
+    if environment[name] ~= nil then return environment[name] end
+    return real_getenv(name)
+  end
+  local ok, failure = pcall(function()
+    local instance = dofile(repo_root .. "/plugin/init.lua")
+    instance.apply_to_config(config.at_load or {}, { auto_poll = false, dir = test_dir,
+      review_key = false, renderer = "manual", integration_root = writer_root })
+    if config.after_load then config.after_load(config.at_load) end
+    local window = window_double({ tabs = { { { id = 9981, domain = domain } } }, focused = false })
+    instance.poll(window, { call_after = function() end })
+    instance.poll(window, { call_after = function() end })
+  end)
+  wezterm.background_child_process, wezterm.target_triple, os.getenv =
+    real_background, real_triple, real_getenv
+  assert(ok, failure)
+  local sockets = {}
+  for _, argv in ipairs(spawned) do
+    for index, value in ipairs(argv) do
+      if value == "--socket" then sockets[#sockets + 1] = argv[index + 1] end
+    end
+  end
+  return sockets
+end
+
+test("the implicit unix domain republishes through WezTerm's default socket", function()
+  local mac = republished_sockets({}, "unix", "aarch64-apple-darwin", {})
+  assert(#mac == 1 and mac[1] == test_dir .. "/.local/share/wezterm/sock",
+    "macOS keeps the socket under ~/.local/share/wezterm, got " .. tostring(mac[1]))
+  local linux = republished_sockets({}, "unix", "x86_64-unknown-linux-gnu",
+    { XDG_RUNTIME_DIR = "/run/user/1000/" })
+  assert(#linux == 1 and linux[1] == "/run/user/1000/wezterm/sock",
+    "Linux uses $XDG_RUNTIME_DIR/wezterm, got " .. tostring(linux[1]))
+  local relative = republished_sockets({}, "unix", "x86_64-unknown-linux-gnu",
+    { XDG_RUNTIME_DIR = "run/user" })
+  assert(#relative == 1 and relative[1] == test_dir .. "/.local/share/wezterm/sock",
+    "a relative XDG_RUNTIME_DIR is not a runtime directory, got " .. tostring(relative[1]))
+end)
+
+test("a unix domain listed without a socket path, even after apply_to_config, republishes", function()
+  local late = republished_sockets({ at_load = {}, after_load = function(config)
+    config.unix_domains = { { name = "dev-mux" }, { name = "pinned", socket_path = "/tmp/pinned.sock" } }
+  end }, "dev-mux", "aarch64-apple-darwin", {})
+  assert(#late == 1 and late[1] == test_dir .. "/.local/share/wezterm/sock",
+    "a domain with no socket_path uses the default one, got " .. tostring(late[1]))
+  local listed = republished_sockets({ at_load = { unix_domains = { { name = "dev-mux" } } } },
+    "unix", "aarch64-apple-darwin", {})
+  assert(#listed == 0, "a config that lists its own unix domains has no implicit \"unix\"")
+end)
+
+test("a pane with no socket to republish through is named once in the log", function()
+  local proxied = republished_sockets({ at_load = { unix_domains = { { name = "remote-mux",
+    proxy_command = { "ssh", "host", "wezterm", "cli", "proxy" } } } } },
+    "remote-mux", "aarch64-apple-darwin", {})
+  assert(#proxied == 0, "a proxied domain's mux is not the one behind a local socket")
+  local warnings = drain_warnings()
+  assert(#warnings == 1 and warnings[1]:find("remote-mux", 1, true),
+    "the unpublished domain must be named once, got " .. #warnings)
+  republished_sockets({}, "SSHMUX:host", "aarch64-apple-darwin", {})
+  warnings = drain_warnings()
+  assert(#warnings == 1 and warnings[1]:find("SSHMUX:host", 1, true))
+end)
+
 -- ── U3: a closed pane versus a detached domain ──────────────────────────────
 
 test("a detached domain keeps the markers of panes still running on the server", function()
@@ -4801,13 +4912,13 @@ test("a pane that changes storage key keeps its files and gives up the old key",
 
   local window = 5000
   attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { { tab_id = 501, panes = { { id = 50, domain = "local" } } } } }))
+    tabs = { { tab_id = 501, panes = { { id = 50, domain = "unix", published = 50 } } } } }))
   assert(attention.get_attention(50) == "stop", "the v1 identity is cached under its scalar key")
 
   -- The same GUI pane, now publishing a full address.
   local wire = materialize_v2_fixture(5051)
   attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { { tab_id = 501, panes = { { id = 50, domain = "local", attention = wire } } } } }),
+    tabs = { { tab_id = 501, panes = { { id = 50, domain = "unix", attention = wire } } } } }),
     { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
   assert(marker_exists(50), "the pane is alive, so its files stay")
   assert(attention.get_attention(50) == nil,
@@ -4833,7 +4944,7 @@ test("a proven replacement survives uncertainty about something else", function(
       call_after = function() end }
 
     attention.poll(window_double({ window_id = window, focused = false,
-      tabs = { anchor_tab, { tab_id = 523, panes = { { id = pane_id, domain = "local" } } } } }),
+      tabs = { anchor_tab, { tab_id = 523, panes = { { id = pane_id, domain = "unix", published = pane_id } } } } }),
       options)
     assert(marker_exists(pane_id), "the pane starts under its scalar key")
 
@@ -4842,14 +4953,14 @@ test("a proven replacement survives uncertainty about something else", function(
     local wire = materialize_v2_fixture(pane_id + 400)
     attention.poll(window_double({ window_id = window, focused = false,
       tabs = { anchor_tab, unrelated,
-        { tab_id = 523, panes = { { id = pane_id, domain = "local", attention = wire } } } } }),
+        { tab_id = 523, panes = { { id = pane_id, domain = "unix", attention = wire } } } } }),
       options)
     assert(marker_exists(pane_id), "the pane is alive, so its files stay")
 
     -- Reconnected: same pane, new GUI-local id, everything readable.
     attention.poll(window_double({ window_id = window, focused = false,
       tabs = { anchor_tab,
-        { tab_id = 523, panes = { { id = pane_id + 1, domain = "local", attention = wire } } } } }),
+        { tab_id = 523, panes = { { id = pane_id + 1, domain = "unix", attention = wire } } } } }),
       options)
     return marker_exists(pane_id)
   end

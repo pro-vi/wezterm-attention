@@ -13,6 +13,7 @@ return function()
     local protocol = context.protocol
     local diagnostic = context.diagnostic
     local report_error_once = context.report_error_once
+    local report_warning_once = context.report_warning_once
     local resolve_pane_read = context.resolve_pane_read
     local read_attention_view = context.read_attention_view
     local pane_method = context.pane_method
@@ -603,8 +604,13 @@ return function()
     --- from the tabs that happened to answer.
     local function update_publish_schedule(
         domain, window_key, pane_count, unpublished, opts, partial)
-      local socket = M._active_unix_domains and M._active_unix_domains[domain]
+      local socket = context.unix_domain_socket(domain)
       local root = M._active_integration_root
+      if not socket and unpublished then
+        report_warning_once("unpublished-domain:" .. domain, "panes on domain " .. domain
+          .. " have not published their identity, and there is no socket on this machine to "
+          .. "republish it through; they show no attention until their shell prints a prompt")
+      end
       if not socket or not root or not M._active_writer_installed then return false end
       local schedule = publish_schedule_by_realm[socket]
       if not schedule then
@@ -920,6 +926,7 @@ return function()
     --- told.
     function M.poll(window, opts)
       if delivering_views then return end
+      context.refresh_domain_facts()
       local dir = (opts and opts.dir) or M._active_dir or defaults.dir
       local mux_win = window:mux_window()
       if not mux_win then return end

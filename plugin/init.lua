@@ -277,6 +277,9 @@ local remove_marker = overlays_api.remove_marker
 local reader_factory = assert(load_plugin_module("reader"))
 local reader_api = reader_factory({
   M = M,
+  wezterm = wezterm,
+  defaults = defaults,
+  home_dir = home,
   deep_copy = deep_copy,
   classify_lifecycle_tool = protocol_api.classify_lifecycle_tool,
   protocol = protocol,
@@ -372,9 +375,12 @@ local runtime_api = runtime_state.bind({
   is_hex64 = is_hex64,
   diagnostic = diagnostic,
   report_error_once = report_error_once,
+  report_warning_once = report_warning_once,
   resolve_pane_read = resolve_pane_read,
   read_attention_view = read_attention_view,
   pane_method = pane_method,
+  unix_domain_socket = reader_api.unix_domain_socket,
+  refresh_domain_facts = reader_api.refresh_domain_facts,
   selected_v2_records_root = selected_v2_records_root,
   v2_review_paths = v2_review_paths,
   write_v2_user_review = write_v2_user_review,
@@ -510,14 +516,10 @@ function M.apply_to_config(config, opts)
     report_error_once("integration-root", "v2 integration root is unavailable")
   end
 
-  local unix_domains = {}
-  for _, domain in ipairs(config.unix_domains or {}) do
-    if type(domain) == "table" and type(domain.name) == "string"
-        and type(domain.socket_path) == "string" and domain.socket_path:sub(1, 1) == "/" then
-      unix_domains[domain.name] = domain.socket_path
-    end
-  end
-  M._active_unix_domains = unix_domains
+  -- Its domain lists are read when a poll first needs them, not now: a config
+  -- may set them after this call.
+  M._active_config = config
+  reader_api.refresh_domain_facts()
   local request_redraw = opts.request_redraw
   if request_redraw == nil then request_redraw = defaults.request_redraw end
   M._active_request_redraw = request_redraw ~= false

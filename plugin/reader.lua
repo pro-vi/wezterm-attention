@@ -19,6 +19,8 @@ return function(context)
   local age_exceeds_ms = context.age_exceeds_ms
   local eligible_subagent = context.eligible_subagent
   local deep_copy = context.deep_copy
+  local defaults = context.defaults
+  local wezterm = context.wezterm
 
   local function request_evidence(observations, provider)
     local groups, ordered = {}, {}
@@ -131,6 +133,106 @@ return function(context)
     return result
   end
 
+  -- ── Domains ─────────────────────────────────────────────────────────────────
+  -- WezTerm runs the "local" domain, every exec domain, every WSL domain and
+  -- every serial port as a LocalDomain: this GUI's own mux numbers the pane, and
+  -- a process inside reads that same number from $WEZTERM_PANE. There,
+  -- pane_id() is the truth. Every other domain is a client of some other mux,
+  -- whose panes this GUI renumbered, so only what the pane published says which
+  -- pane it is.
+  --
+  -- The domain lists are read from the config table when first needed after it
+  -- was handed to apply_to_config, not while apply_to_config runs: a config
+  -- that sets unix_domains or exec_domains after calling it is the same config.
+
+  local function trimmed_directory(path)
+    return (path:gsub("(.)/+$", "%1"))
+  end
+
+  --- Where WezTerm puts a unix domain's socket when the domain names none:
+  --- RUNTIME_DIR/sock, RUNTIME_DIR being $XDG_RUNTIME_DIR/wezterm where the
+  --- platform has a runtime directory (not macOS or Windows) and
+  --- ~/.local/share/wezterm otherwise. Nil on Windows, where no attention
+  --- writer runs.
+  local function default_unix_socket()
+    local triple = type(wezterm.target_triple) == "string" and wezterm.target_triple or ""
+    if triple:find("windows", 1, true) then return nil end
+    if not triple:find("darwin", 1, true) then
+      local runtime = os.getenv("XDG_RUNTIME_DIR")
+      if runtime and runtime:sub(1, 1) == "/" then
+        return trimmed_directory(runtime) .. "/wezterm/sock"
+      end
+    end
+    local home = context.home_dir
+    if type(home) ~= "string" or home:sub(1, 1) ~= "/" then return nil end
+    return trimmed_directory(home) .. "/.local/share/wezterm/sock"
+  end
+
+  local function names_of(list, into)
+    if type(list) ~= "table" then return end
+    for _, domain in ipairs(list) do
+      if type(domain) == "table" and type(domain.name) == "string" then
+        into[domain.name] = domain
+      end
+    end
+  end
+
+  local domain_facts
+  local function current_domain_facts()
+    if domain_facts then return domain_facts end
+    local facts = { locals = { ["local"] = true }, wsl_defaults = false, sockets = {} }
+    local config = M._active_config
+    local ok = type(config) ~= "table" or pcall(function()
+      local named = {}
+      names_of(config.exec_domains, named)
+      names_of(config.serial_ports, named)
+      -- Without a wsl_domains list WezTerm makes one "WSL:<distro>" domain per
+      -- installed distribution; with one, the list is all there is.
+      if type(config.wsl_domains) == "table" then
+        names_of(config.wsl_domains, named)
+      else
+        facts.wsl_defaults = true
+      end
+      for name in pairs(named) do facts.locals[name] = true end
+      -- An unset unix_domains is WezTerm's one implicit domain, "unix".
+      local unix_domains = config.unix_domains
+      if unix_domains == nil then unix_domains = { { name = "unix" } } end
+      local listed = {}
+      names_of(unix_domains, listed)
+      for name, domain in pairs(listed) do
+        -- A proxied domain reaches its mux through a command, often on another
+        -- host; the socket on this machine, if any, is a different mux.
+        if domain.proxy_command == nil then
+          if domain.socket_path == nil then
+            facts.sockets[name] = default_unix_socket()
+          elseif type(domain.socket_path) == "string" and domain.socket_path:sub(1, 1) == "/" then
+            facts.sockets[name] = domain.socket_path
+          end
+        end
+      end
+    end)
+    if not ok then facts = { locals = { ["local"] = true }, wsl_defaults = false, sockets = {} } end
+    domain_facts = facts
+    return facts
+  end
+
+  --- Forget what was read from the config, so the next question reads it again.
+  local function refresh_domain_facts()
+    domain_facts = nil
+  end
+
+  local function is_local_domain(name)
+    if type(name) ~= "string" then return false end
+    local facts = current_domain_facts()
+    return facts.locals[name] == true or (facts.wsl_defaults and name:sub(1, 4) == "WSL:")
+  end
+
+  --- The socket of the mux behind a unix domain, or nil when there is none on
+  --- this machine to publish through.
+  local function unix_domain_socket(name)
+    return current_domain_facts().sockets[name]
+  end
+
   local function resolve_pane_read(pane)
     if not pane then
       return { kind = "invalid", diagnostic = invalid("pane is unavailable") }
@@ -142,9 +244,21 @@ return function(context)
         diagnostic = diagnostic("probe_unavailable", "pane user variables are unavailable"),
       }
     end
+    local domain = pane_method(pane, "get_domain_name")
+    -- User vars are set by whatever the pane prints, and a local pane can print
+    -- another pane's identity: a catted file, the prompt of a shell on another
+    -- host. In a local domain the id is known, so a var naming a different pane
+    -- is not this pane's.
+    local local_id = is_local_domain(domain)
+      and canonical_pane_id(tostring(pane_method(pane, "pane_id"))) or nil
     if type(vars) == "table" and vars.WEZTERM_ATTENTION ~= nil then
       local wire, wire_diagnostic = parse_wire_json(vars.WEZTERM_ATTENTION)
       if not wire then return { kind = "invalid", diagnostic = wire_diagnostic } end
+      if local_id and wire.address.pane_id ~= local_id then
+        return { kind = "invalid", diagnostic = invalid(
+          "WEZTERM_ATTENTION names pane " .. wire.address.pane_id .. ", not this local pane",
+          { pane_id = local_id }) }
+      end
       return {
         kind = "v2",
         address = wire.address,
@@ -154,14 +268,10 @@ return function(context)
       }
     end
 
+    if local_id then return { kind = "v1", marker_id = local_id, cache_key = local_id } end
     local published = type(vars) == "table" and canonical_pane_id(vars.WEZTERM_PANE) or nil
     if published then
       return { kind = "v1", marker_id = published, cache_key = published }
-    end
-    local domain = pane_method(pane, "get_domain_name")
-    if domain == "local" then
-      local local_id = canonical_pane_id(tostring(pane_method(pane, "pane_id")))
-      if local_id then return { kind = "v1", marker_id = local_id, cache_key = local_id } end
     end
     return { kind = "unpublished", domain = domain or "?" }
   end
@@ -481,6 +591,9 @@ return function(context)
 
   return {
     lifecycle_facet = lifecycle_facet,
+    is_local_domain = is_local_domain,
+    unix_domain_socket = unix_domain_socket,
+    refresh_domain_facts = refresh_domain_facts,
     canonical_pane_id = canonical_pane_id,
     pane_call = pane_call,
     pane_method = pane_method,
