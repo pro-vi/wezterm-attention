@@ -1964,22 +1964,10 @@ fn delayed_pi_clear_cannot_remove_a_new_launch_review() {
                     .as_bytes(),
             )
             .expect("write delayed clear");
-        let lock_name = format!(
-            "n{}",
-            fs::canonicalize(launch.join(".lock"))
-                .expect("canonical lock path")
-                .display()
-        );
+        let lock = fs::canonicalize(launch.join(".lock")).expect("canonical lock path");
         let mut opened = false;
         for _ in 0..60 {
-            let output = Command::new("/usr/sbin/lsof")
-                .args(["-a", "-p", &child.id().to_string(), "-Fn"])
-                .output()
-                .expect("inspect delayed clear");
-            if String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .any(|line| line == lock_name)
-            {
+            if process_has_open(child.id(), &lock) {
                 opened = true;
                 break;
             }
@@ -2130,6 +2118,32 @@ fn fresh_manual_activity_is_fenced_by_an_existing_clear() {
     );
 }
 
+/// Whether process `pid` holds `path` open. Linux lists a process's
+/// descriptors under /proc; macOS has no /proc, so there lsof answers.
+fn process_has_open(pid: u32, path: &std::path::Path) -> bool {
+    let descriptors = PathBuf::from(format!("/proc/{pid}/fd"));
+    if descriptors.is_dir() {
+        return fs::read_dir(descriptors).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| fs::read_link(entry.path()).is_ok_and(|target| target == path))
+        });
+    }
+    let output = Command::new(executables::resolve("lsof"))
+        .args(["-a", "-p", &pid.to_string(), "-Fn"])
+        .output()
+        .expect("inspect open files");
+    let name = format!("n{}", path.display());
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line == name)
+}
+
+// macOS answers ttyname on an open /dev/tty with "/dev/tty" itself, a clone
+// device owned by root, which must not become a pane identity. Linux answers
+// with the real /dev/pts path, so the case this test guards does not arise
+// there, and util-linux script takes different arguments.
+#[cfg(target_os = "macos")]
 #[test]
 fn real_macos_controlling_tty_path_is_rejected_in_a_pty_child() {
     const CHILD: &str = "WEZTERM_ATTENTION_REAL_TTY_CHILD";
