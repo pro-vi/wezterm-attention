@@ -1694,3 +1694,6 @@ mod realm_filters;
 
 #[path = "maintenance_spec/doctor_probes.rs"]
 mod doctor_probes;
+
+#[path = "maintenance_spec/lock_scope.rs"]
+mod lock_scope;

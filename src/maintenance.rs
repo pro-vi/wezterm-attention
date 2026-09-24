@@ -1618,7 +1618,11 @@ pub fn sweep(
             continue;
         }
         let operation = operation_id.as_deref().expect("apply operation id");
-        let mut locked_diagnostics = Vec::new();
+        // A fresh look for the decision, taken before the locks: listing panes
+        // can take seconds, and a hook writer gives up on these locks after
+        // two. Under the locks only the records are checked again.
+        let fresh_presence =
+            pane_presence(root, &address, Some(panes), processes, &mut diagnostics);
         let applied = commit_nested_with(
             &launch.join(".lock"),
             &pane.join(".claim.lock"),
@@ -1643,20 +1647,13 @@ pub fn sweep(
                         private_dirs: Vec::new(),
                     });
                 }
-                let locked_presence = pane_presence(
-                    root,
-                    &address,
-                    Some(panes),
-                    processes,
-                    &mut locked_diagnostics,
-                );
                 let locked_probe = read_record(
                     &probe_path,
                     Some("absence_probe"),
                     &RecordIdentity::pane(&address),
                 )?;
                 let action = absence_action(
-                    &locked_presence,
+                    &fresh_presence,
                     locked_probe.as_ref(),
                     Some(operation),
                     &observation,
@@ -1694,7 +1691,6 @@ pub fn sweep(
             },
             |_| Ok(()),
         );
-        diagnostics.extend(locked_diagnostics);
         match applied {
             Ok((outcome, ())) => {
                 if let Some(diagnostic) = outcome.diagnostic {
