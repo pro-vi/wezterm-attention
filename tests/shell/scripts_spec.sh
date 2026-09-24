@@ -106,5 +106,32 @@ if [ "$status" -eq 0 ] && grep -q '^installed fresh build$' "$scratch/out"; then
 else
   fail "the installer copies the binary it built when CARGO_TARGET_DIR points elsewhere (status $status)"
 fi
+# A configured build target puts the binary under target/<triple>/release,
+# beside a stale one in target/release.
+printf '#!/bin/sh\necho stale build\n' > "$scratch/crate/target/release/attention"
+host=$(PATH="${cargo%/*}:/usr/bin:/bin" rustc -vV | sed -n 's/^host: //p')
+run PATH="${cargo%/*}:/usr/bin:/bin" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
+  RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_BUILD_TARGET="$host" \
+  sh "$scratch/crate/scripts/install-cli.sh"
+if [ -n "$host" ] && [ "$status" -eq 0 ] && grep -q '^installed fresh build$' "$scratch/out"; then
+  pass "the installer copies the binary it built when a build target is configured"
+else
+  fail "the installer copies the binary it built when a build target is configured (status $status)"
+fi
+
+# A crate whose build reports no attention binary installs nothing.
+mkdir -p "$scratch/other/scripts" "$scratch/other/src"
+cp "$root/scripts/install-cli.sh" "$scratch/other/scripts/install-cli.sh"
+printf '[package]\nname = "other"\nversion = "0.0.0"\nedition = "2021"\n' > "$scratch/other/Cargo.toml"
+printf 'fn main() {}\n' > "$scratch/other/build.rs"
+printf 'fn main() {}\n' > "$scratch/other/src/main.rs"
+run PATH="${cargo%/*}:/usr/bin:/bin" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
+  RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" sh "$scratch/other/scripts/install-cli.sh"
+if [ "$status" -eq 1 ] && [ ! -e "$scratch/other/libexec/attention-rs" ] \
+  && grep -q 'did not report where it wrote the attention binary' "$scratch/out"; then
+  pass "the installer refuses when cargo reports no attention binary"
+else
+  fail "the installer refuses when cargo reports no attention binary (status $status)"
+fi
 
 [ "$failures" -eq 0 ]

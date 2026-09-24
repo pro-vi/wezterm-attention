@@ -2,11 +2,20 @@
 
 # `source ~/.bashrc` after an edit sources this file again. A second copy of
 # the hooks would treat the first copy's DEBUG trap as someone else's and call
-# it from itself, which recurses until bash crashes, so a repeat is a no-op.
-[ -z "${_WEZTERM_ATTENTION_LOADED:-}" ] || return 0
+# it from itself, which recurses until bash crashes, so a repeat installs
+# nothing new. It only puts back this file's prompt command, which an rc file
+# that assigns PROMPT_COMMAND instead of appending to it has just removed;
+# without it nothing publishes and a claimed launch id is never unset.
+if [ -n "${_WEZTERM_ATTENTION_LOADED:-}" ]; then
+  _wezterm_attention_add_prompt_command
+  return 0
+fi
 _WEZTERM_ATTENTION_LOADED=1
 
 : "${WEZTERM_ATTENTION_COMMANDS:=claude codex pi}"
+# 1 while a hook runs the writer. The hooks set it only as a local, which bash
+# puts back however the function ends: Ctrl-C during a slow claim must not
+# leave it at 1 and switch the hooks off for the rest of the shell.
 _WEZTERM_ATTENTION_IN_HOOK=0
 
 # Sets _wezterm_attention_command_word to the first word of a simple command
@@ -55,8 +64,7 @@ wezterm_attention_preexec() {
   [ "${BASH_SUBSHELL:-0}" -eq 0 ] || return 0
   _wezterm_attention_supported_command "${1:-$BASH_COMMAND}" || return 0
   [ -n "${WEZTERM_ATTENTION_ROOT:-}" ] && [ -x "$WEZTERM_ATTENTION_ROOT/bin/attention" ] || return 0
-  _WEZTERM_ATTENTION_IN_HOOK=1
-  local selected_launch= claim_status=0
+  local _WEZTERM_ATTENTION_IN_HOOK=1 selected_launch= claim_status=0
   unset WEZTERM_ATTENTION_LAUNCH_ID
   selected_launch=$("$WEZTERM_ATTENTION_ROOT/bin/attention" hooks claim) || claim_status=$?
   if [ "$claim_status" -eq 0 ] && [ -n "$selected_launch" ]; then
@@ -64,7 +72,6 @@ wezterm_attention_preexec() {
   else
     unset WEZTERM_ATTENTION_LAUNCH_ID
   fi
-  _WEZTERM_ATTENTION_IN_HOOK=0
   return 0
 }
 
@@ -74,14 +81,13 @@ wezterm_attention_precmd() {
   # say so at every prompt.
   [ -n "${WEZTERM_PANE:-}" ] || return 0
   [ -n "${WEZTERM_ATTENTION_ROOT:-}" ] && [ -x "$WEZTERM_ATTENTION_ROOT/bin/attention" ] || return 0
-  _WEZTERM_ATTENTION_IN_HOOK=1
+  local _WEZTERM_ATTENTION_IN_HOOK=1
   "$WEZTERM_ATTENTION_ROOT/bin/attention" hooks publish --quiet || true
   # That publication recorded the claimed agent's return to this prompt, which
   # is the last use of its launch id here. Left exported, the id would pass to
   # the next program this shell starts, and an agent the claim did not detect
   # would read as a child of one that has already exited.
   unset WEZTERM_ATTENTION_LAUNCH_ID
-  _WEZTERM_ATTENTION_IN_HOOK=0
 }
 
 # Sets $? to $1. Its last argument also becomes $_ for the next command.
@@ -90,9 +96,15 @@ _wezterm_attention_set_status() {
 }
 
 _WEZTERM_ATTENTION_PREVIOUS_DEBUG=
+# How many names FUNCNAME holds in a function the shell itself calls, from
+# PROMPT_COMMAND or the DEBUG trap. That is 1, except that after Ctrl-C stops a
+# function inside a trap, bash 3.2 keeps the stopped functions' names on
+# FUNCNAME for the rest of the shell. The prompt command measures it again at
+# each prompt, so an interrupted claim does not stop every later one.
+_WEZTERM_ATTENTION_TOP_DEPTH=1
 _wezterm_attention_debug_dispatch() {
   local last_status=$? command_text=$1 last_argument=$2
-  [ "${#FUNCNAME[@]}" -eq 1 ] && wezterm_attention_preexec "$command_text"
+  [ "${#FUNCNAME[@]}" -eq "$_WEZTERM_ATTENTION_TOP_DEPTH" ] && wezterm_attention_preexec "$command_text"
   if [ -n "$_WEZTERM_ATTENTION_PREVIOUS_DEBUG" ]; then
     # The trap this one replaced sees the $? and $_ it would have seen alone.
     _wezterm_attention_set_status "$last_status" "$last_argument"
@@ -137,7 +149,14 @@ _WEZTERM_ATTENTION_PROMPT_INSTALL='_wezterm_attention_install_hooks "$(trap -p D
 # in the startup files be kept and called. The status of the command before the
 # prompt is handed on, so prompt commands after these still see it.
 _wezterm_attention_prompt_command() {
+  _WEZTERM_ATTENTION_TOP_DEPTH=${#FUNCNAME[@]}
   wezterm_attention_precmd
   return "$_WEZTERM_ATTENTION_LAST_STATUS"
 }
-PROMPT_COMMAND="_WEZTERM_ATTENTION_LAST_STATUS=\$?;eval \"\$_WEZTERM_ATTENTION_PROMPT_INSTALL\";_wezterm_attention_prompt_command${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+_wezterm_attention_add_prompt_command() {
+  case "${PROMPT_COMMAND[*]:-}" in
+    *_wezterm_attention_prompt_command*) return 0 ;;
+  esac
+  PROMPT_COMMAND="_WEZTERM_ATTENTION_LAST_STATUS=\$?;eval \"\$_WEZTERM_ATTENTION_PROMPT_INSTALL\";_wezterm_attention_prompt_command${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+}
+_wezterm_attention_add_prompt_command

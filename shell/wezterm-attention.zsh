@@ -4,6 +4,10 @@
 # cannot rotate the parent-shell launch id once per executed command. The v2
 # contract therefore uses its explicit manual fallback on zsh.
 
+# 1 while a hook runs the writer. The hooks set it only as a local, which zsh
+# puts back however the function ends: Ctrl-C during a slow claim or
+# publication must not leave it at 1 and switch the hooks off for the rest of
+# the shell.
 typeset -g _WEZTERM_ATTENTION_IN_HOOK=0
 # What the command line that just ran was: "" when none ran since the last
 # prompt (an empty line), "claim" when it held only the claim, else "other".
@@ -20,8 +24,7 @@ wezterm_attention_claim() {
     (( in_pane )) && return 1
     return 0
   fi
-  typeset -g _WEZTERM_ATTENTION_IN_HOOK=1
-  local selected_launch claim_status=0
+  local _WEZTERM_ATTENTION_IN_HOOK=1 selected_launch claim_status=0
   unset WEZTERM_ATTENTION_LAUNCH_ID
   if (( in_pane )); then
     selected_launch=$("$WEZTERM_ATTENTION_ROOT/bin/attention" hooks claim) || claim_status=$?
@@ -35,7 +38,6 @@ wezterm_attention_claim() {
     (( claim_status != 0 )) || claim_status=1
     (( in_pane )) || claim_status=0
   fi
-  typeset -g _WEZTERM_ATTENTION_IN_HOOK=0
   return $claim_status
 }
 
@@ -59,7 +61,7 @@ wezterm_attention_precmd() {
   # say so at every prompt.
   [[ -n "${WEZTERM_PANE:-}" ]] || return 0
   [[ -n "${WEZTERM_ATTENTION_ROOT:-}" && -x "$WEZTERM_ATTENTION_ROOT/bin/attention" ]] || return 0
-  typeset -g _WEZTERM_ATTENTION_IN_HOOK=1
+  local _WEZTERM_ATTENTION_IN_HOOK=1
   "$WEZTERM_ATTENTION_ROOT/bin/attention" hooks publish --quiet || true
   # After `wezterm_attention_claim && claude` this prompt is the agent's
   # return, the last use of its launch id here; left exported, the id would
@@ -68,7 +70,6 @@ wezterm_attention_precmd() {
   # only the claim is the other way to claim, with the agent on the next
   # line, and an empty line runs nothing: both keep the id.
   [[ $last_line == other ]] && unset WEZTERM_ATTENTION_LAUNCH_ID
-  typeset -g _WEZTERM_ATTENTION_IN_HOOK=0
 }
 
 autoload -Uz add-zsh-hook
