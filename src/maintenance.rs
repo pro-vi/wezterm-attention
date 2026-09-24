@@ -960,9 +960,12 @@ fn absence_action(
 }
 
 /// A pane's presence as the absence rule reads it. Beyond what a reader
-/// reports, a pane whose server is gone -- its socket path vanished, or a new
-/// server owns it -- is absent: one sighting, which the two-observation rule
-/// then weighs like any other.
+/// reports, a pane whose server is gone is absent: one sighting, which the
+/// two-observation rule then weighs like any other. A new server owning the
+/// socket path shows that. A socket path that vanished shows it only with the
+/// process probe answering that no process carries the socket and pane id:
+/// the server may still run with its socket file removed, so a probe that
+/// failed, or no probe, leaves the pane unavailable.
 fn absence_presence(
     root: &Path,
     address: &PaneAddress,
@@ -972,20 +975,20 @@ fn absence_presence(
 ) -> String {
     match pane_evidence(root, address, Some(panes), processes, diagnostics) {
         PaneEvidence::Observed(presence) => presence,
-        // A process still carrying the vanished socket and this pane id may
-        // belong to a server whose socket file was removed while it runs.
         PaneEvidence::IncarnationEnded {
             diagnostic,
             socket_path,
             vanished: true,
-        } if processes.is_some_and(|probe| {
-            probe.presence(&socket_path, &address.pane_id) == Presence::Present
-        }) =>
-        {
-            diagnostics.push(diagnostic);
-            "unavailable".to_owned()
-        }
-        PaneEvidence::IncarnationEnded { .. } => "verified_absent".to_owned(),
+        } => match processes.map(|probe| probe.presence(&socket_path, &address.pane_id)) {
+            Some(Presence::Absent) => "verified_absent".to_owned(),
+            _ => {
+                diagnostics.push(diagnostic);
+                "unavailable".to_owned()
+            }
+        },
+        PaneEvidence::IncarnationEnded {
+            vanished: false, ..
+        } => "verified_absent".to_owned(),
     }
 }
 
@@ -1677,8 +1680,9 @@ pub fn sweep(
     collect_projection_orphans(root, realm_filter, apply, &mut details, &mut diagnostics);
     let mut ended: BTreeMap<String, Vec<(String, PathBuf, bool)>> = BTreeMap::new();
     let mut presence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
-    // Kept apart from the readers' view above: here a vanished server counts
-    // as absence, which tab-order collection must not act on at first sight.
+    // Kept apart from the readers' view above: here a server that is gone
+    // counts as absence, which tab-order collection must not act on at first
+    // sight.
     let mut absence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
     if realm_filter.is_none() {
         collect_tab_orders(

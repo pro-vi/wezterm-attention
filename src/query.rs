@@ -1389,11 +1389,12 @@ fn record_spent<T>(spent: &Mutex<Duration>, call: impl FnOnce() -> T) -> T {
 pub(crate) enum PaneEvidence {
     /// `present`, `verified_absent` or `unavailable`, as a reader reports it.
     Observed(String),
-    /// The server that held this incarnation's panes is gone: the realm's
+    /// The server that held this incarnation's panes may be gone: the realm's
     /// socket path no longer exists (`vanished`), or a different server now
     /// owns it. A reader reports this as unavailable, with the diagnostic.
-    /// Sweep counts it as one sighting of absence, and only its
-    /// two-observation rule turns sightings into an ended binding.
+    /// Sweep counts a new owner as one sighting of absence, and a vanished
+    /// path only when the process probe finds no process carrying the pane;
+    /// only its two-observation rule turns sightings into an ended binding.
     IncarnationEnded {
         diagnostic: Diagnostic,
         socket_path: String,

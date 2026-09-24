@@ -183,9 +183,11 @@ records in its file and version scope even when a pane has no binding.
 
 Destructive absence needs two sightings of absence under different operation IDs at least 60
 monotonic seconds apart. A sighting is a pane-list negative plus an identity-scoped process
-negative for the full socket path and pane ID. For sweep, a pane whose mux server is gone (its
-socket path no longer exists, or a different server now owns it) is also one sighting for the old
-incarnation, unless a running process still carries that socket and pane id. A probe recorded at a
+negative for the full socket path and pane ID. For sweep, a pane whose mux server is gone is also
+one sighting for the old incarnation: a different server now owns its socket path, or its socket
+path no longer exists and the process probe answers that no running process carries that socket
+and pane id. A socket path that is gone while the process probe failed, or with no probe, is
+unavailable, not absent: the server may still run with its socket file removed. A probe recorded at a
 monotonic time later than the current clock, as after a reboot, restarts the count; that can only
 delay an end. Readers such as `bindings` still report such a pane `unavailable`, not absent.
 Process-probe failure is unavailable evidence, not absence. One failed process listing answers
