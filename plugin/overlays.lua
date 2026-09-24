@@ -151,8 +151,9 @@ return function(context)
   --- The composed list last written for each window, so an unchanged bar costs
   --- no file work. Keyed by path, because that is what a write would replace.
   local published_tab_lists = {}
-  local drawn_tab_lists = {}
-  --- The one path each window's order was last written to by this process.
+  --- The one path each window's order is written to by this process. It is
+  --- chosen at the window's first publication and kept for as long as the
+  --- window is open, so no window ever has two files of this process's.
   local published_path_by_window = {}
 
   --- Remove a tab order this process published, but only while the file still
@@ -202,23 +203,34 @@ return function(context)
   --- or the v2 cache key, already translated, so a reader never repeats that
   --- translation.
   ---
+  --- A window keeps the name of its first publication, source or none, for as
+  --- long as it is open here. Moving it to a sourced name later would leave
+  --- the unsourced file describing the same window, and that name is shared
+  --- with every other GUI process, so this one could not safely take it back.
+  --- The caller holds a window's first publication until the source is
+  --- answered, so the unsourced name is used only where no source will come.
+  ---
   --- Honest about when it was written, not guaranteed current: nothing
   --- refreshes `published_at_ms` while the bar draws the same thing. The write
-  --- happens when the composed list or its source changes. Attaching a source
-  --- preserves the content timestamp because the caller is publishing the same draw.
-  local function publish_tab_order(dir, window_id, tabs, source)
+  --- happens when the composed list changes. `drawn_at` is when the bar drew
+  --- it, for a caller that held the draw back; it defaults to now.
+  local function publish_tab_order(dir, window_id, tabs, source, drawn_at)
     local rows = {}
     for index, entry in ipairs(tabs) do rows[index] = encode_tab(entry) end
     local list = "[" .. table.concat(rows, ",") .. "]"
     local window_key = dir .. "/tabs/" .. integer(window_id)
-    local path = dir .. "/tabs/"
-      .. (source and (source.incarnation_id .. "-") or "") .. integer(window_id) .. ".json"
-    if published_tab_lists[path] and published_tab_lists[path].list == list then return false end
-    local previous = drawn_tab_lists[window_key]
-    local written_at = previous and previous.list == list and previous.written_at or now_ms()
+    local path = published_path_by_window[window_key]
+    local held = path and published_tab_lists[path]
+    if held then
+      if held.list == list then return false end
+      source = held.source or nil
+    else
+      path = dir .. "/tabs/"
+        .. (source and (source.incarnation_id .. "-") or "") .. integer(window_id) .. ".json"
+    end
     -- Keys in sorted order, as json_value writes them.
     local body = table.concat({
-      '{"published_at_ms":', integer(written_at),
+      '{"published_at_ms":', integer(drawn_at or now_ms()),
       ',"schema":', source and "2" or "1",
       source and (',"source":' .. json_value(source)) or "",
       ',"tabs":', list,
@@ -227,24 +239,9 @@ return function(context)
     if not replace_file(path, body, "publish-tabs") then return false end
     published_tab_lists[path] = {
       list = list, body = body .. "\n", window_id = tostring(window_id), window_key = window_key,
+      source = source or false,
     }
-    drawn_tab_lists[window_key] = { list = list, written_at = written_at }
-    -- The first draw can come before the source identity is known, so a
-    -- window's first file is often the unsourced one. Once the same window is
-    -- written under a source, that earlier file describes the same window
-    -- again, and `attention tabs` would list the window twice.
-    local superseded = published_path_by_window[window_key]
     published_path_by_window[window_key] = path
-    local superseded_publication = superseded and superseded ~= path
-      and published_tab_lists[superseded]
-    if superseded_publication then
-      published_tab_lists[superseded] = nil
-      local err = remove_own_tab_order(superseded, superseded_publication.body)
-      if err then
-        report_error_once("supersede-tabs:" .. superseded,
-          "cannot remove superseded tab order " .. superseded .. ": " .. err)
-      end
-    end
     return true
   end
 
@@ -261,7 +258,6 @@ return function(context)
       local window_id = path:sub(1, #prefix) == prefix and publication.window_id
       if window_id and not live[window_id] then
         published_tab_lists[path] = nil
-        drawn_tab_lists[publication.window_key] = nil
         published_path_by_window[publication.window_key] = nil
         local err = remove_own_tab_order(path, publication.body)
         if err then
@@ -560,9 +556,19 @@ return function(context)
       }, "review", { address = read.address })
     end
 
-    --- Panes where a clear left a review moved aside because it could not put
-    --- it back, keyed by cache key, so the next poll of the pane tries again.
-    local panes_with_cleared_leftovers = {}
+    --- When to look again for a pane's leftovers, in epoch milliseconds, keyed
+    --- by cache key: now for a pane where this process's own clear could not
+    --- put a review back, later for one where another GUI's may still be
+    --- running.
+    local leftover_look_due = {}
+    --- The leftovers this process's own clears could not put back. Nothing
+    --- else here is still working on them, so they need no waiting.
+    local own_leftovers = {}
+
+    --- Longer than any clear takes between moving a review aside and removing
+    --- it. A leftover younger than this may belong to a clear another GUI is
+    --- still running, and putting it back would undo what the user just did.
+    local abandoned_after_ms = 60 * 1000
 
     --- Remove the reviews this pane showed, and only those. A writer can
     --- replace a review between the read above and the removal, and removing
@@ -570,12 +576,14 @@ return function(context)
     --- file is first moved aside, out of the reader's *.json pattern, and
     --- read: the record that was shown is deleted, and anything else is put
     --- back, unless a still newer write has taken the path since, which then
-    --- supersedes both.
+    --- supersedes both. The aside name carries this process's session token
+    --- and the time it was moved, so another GUI can tell a clear that may
+    --- still be running from one that was abandoned.
     local function clear_v2_reviews(read, dir)
       local cleared = false
       local paths, shown = v2_review_paths(read, dir)
       for _, path in ipairs(paths) do
-        local taken = path .. "." .. publication_session .. ".clear"
+        local taken = path .. "." .. publication_session .. "." .. integer(now_ms()) .. ".clear"
         local moved, move_err = os.rename(path, taken)
         if not moved then
           -- Already gone is the state a clear wants.
@@ -598,7 +606,8 @@ return function(context)
               -- A write landed after the look above: newer still, as above.
               os.remove(taken)
             elseif placed == "failed" then
-              panes_with_cleared_leftovers[read.cache_key] = true
+              own_leftovers[taken] = true
+              leftover_look_due[read.cache_key] = 0
               report_error_once("restore-v2-review:" .. path,
                 "cannot put back review " .. path .. " from " .. taken .. ": " .. place_err)
             end
@@ -612,16 +621,22 @@ return function(context)
     --- because its process died between the move and the removal. Each was a
     --- flag the pane showed, so it goes back to its name when nothing has taken
     --- that name since. Beside a live review it stays for `attention sweep`:
-    --- which of the two is newer is not known here.
+    --- which of the two is newer is not known here. A leftover is put back
+    --- only when this process's own clear left it, or when the time in its
+    --- name is older than any clear takes; a younger one is looked at again
+    --- once it is that old. A name with no time in it is left for sweep.
     ---
     --- Looking costs a directory listing, so it is done only where a leftover
     --- can be: on this process's first read of the pane (a GUI that died
     --- mid-clear is replaced by a new process), when a review this process
-    --- showed has gone (another GUI's clear), and where this process's own
-    --- clear could not put one back. Returns true when a review was put back.
+    --- showed has gone (another GUI's clear), where this process's own clear
+    --- could not put one back, and where a leftover was too young to take.
+    --- Returns true when a review was put back.
     local function restore_cleared_reviews(read, dir, previous_view, view, opts)
       local key = read.cache_key
-      local look = not previous_view or panes_with_cleared_leftovers[key]
+      local now = (opts and opts.now_ms) or now_ms()
+      local due = leftover_look_due[key]
+      local look = not previous_view or (due ~= nil and now >= due)
       if not look then
         local shown = previous_view._records and previous_view._records.reviews or {}
         local current = view._records and view._records.reviews or {}
@@ -630,19 +645,29 @@ return function(context)
         end
       end
       if not look then return false end
-      panes_with_cleared_leftovers[key] = nil
+      leftover_look_due[key] = nil
       local paths = glob_paths(v2_pane_root(dir, read.address) .. "/reviews/*.clear", opts)
       if not paths then return false end
       local restored = false
       for _, leftover in ipairs(paths) do
-        local path = leftover:match("^(.*%.json)%.%w+%.clear$")
-        if path then
+        local path, moved_at = leftover:match("^(.*%.json)%.%w+%.(%d+)%.clear$")
+        moved_at = tonumber(moved_at)
+        local abandoned = moved_at and now - moved_at > abandoned_after_ms
+        if path and (own_leftovers[leftover] or abandoned) then
           local placed, place_err = place_without_replacing(leftover, path)
           if placed == "placed" then
             restored = true
-          elseif placed == "failed" then
+            own_leftovers[leftover] = nil
+          elseif placed == "occupied" then
+            own_leftovers[leftover] = nil
+          else
             report_error_once("restore-v2-review:" .. path,
               "cannot put back review " .. path .. " from " .. leftover .. ": " .. place_err)
+          end
+        elseif path and moved_at then
+          local again = moved_at + abandoned_after_ms + 1
+          if not leftover_look_due[key] or again < leftover_look_due[key] then
+            leftover_look_due[key] = again
           end
         end
       end

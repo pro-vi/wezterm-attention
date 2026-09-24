@@ -1,7 +1,7 @@
 return function(context)
   local M = context.M
   local defaults = context.defaults
-  local marker_id_by_local = context.marker_id_by_local
+  local drawn_pane_key = context.drawn_pane_key
   local attention_cache = context.attention_cache
   local title_sources = context.title_sources
   local display_text = context.display_text
@@ -9,19 +9,8 @@ return function(context)
   local function gui_tab_pane_ids(tab)
     local ids = {}
     for _, p in ipairs(tab.panes) do
-      local local_id = tostring(p.pane_id)
-      local mapped = marker_id_by_local[local_id]
-      if mapped then
-        ids[#ids + 1] = mapped
-      elseif mapped == nil then
-        -- No poll has walked this pane yet. The cache is empty for it either
-        -- way, and on a local pane the local id is the marker id, so the
-        -- untranslated id keeps single-machine setups rendering immediately.
-        ids[#ids + 1] = local_id
-      end
-      -- mapped == false: a mux-client pane that has not published its
-      -- $WEZTERM_PANE. Its local id names some other pane's markers, so it
-      -- contributes nothing rather than something wrong.
+      local key = drawn_pane_key(tostring(p.pane_id))
+      if key then ids[#ids + 1] = key end
     end
     return ids
   end

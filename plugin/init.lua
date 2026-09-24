@@ -295,6 +295,8 @@ local clear_review_flag = overlays_api.clear_review_flag
 local remove_expired_marker = overlays_api.remove_expired_marker
 local remove_marker = overlays_api.remove_marker
 local reader_factory = assert(load_plugin_module("reader"))
+-- Bound once the runtime below exists; the reader asks it per pane read.
+local own_mux_identity
 local reader_api = reader_factory({
   M = M,
   wezterm = wezterm,
@@ -319,6 +321,7 @@ local reader_api = reader_factory({
   identity_diagnostic = identity_diagnostic,
   age_exceeds_ms = age_exceeds_ms,
   eligible_subagent = eligible_subagent,
+  own_mux_identity = function() return own_mux_identity() end,
 })
 local canonical_pane_id = reader_api.canonical_pane_id
 local pane_call = reader_api.pane_call
@@ -356,13 +359,30 @@ local refresh_cached_v2 = v2_overlays.refresh_cached_v2
 local acknowledge_focused_v2_pane = v2_overlays.acknowledge_focused_v2_pane
 -- ── Internal helpers ────────────────────────────────────────────────────────
 
+--- The key a pane the GUI draws is cached under, from its GUI-local number:
+--- the one the last poll found for it, or nil when that poll found none (a
+--- mux-client pane that has not published its $WEZTERM_PANE). Before any poll
+--- has walked the pane, its own number where that is the marker id, in a
+--- local-family domain, so single-machine setups render at once; elsewhere
+--- the number names some other pane's markers, and the answer is nil.
+local function drawn_pane_key(local_id)
+  local mapped = marker_id_by_local[local_id]
+  if mapped ~= nil then return mapped or nil end
+  local mux = wezterm.mux
+  if not mux or type(mux.get_pane) ~= "function" then return nil end
+  local ok, pane = pcall(mux.get_pane, tonumber(local_id))
+  if not ok or not pane then return nil end
+  if not reader_api.is_local_domain(pane_method(pane, "get_domain_name")) then return nil end
+  return local_id
+end
+
 local titles_factory = assert(load_plugin_module("titles"))
 local titles_api = titles_factory({
   M = M,
   defaults = defaults,
   report_error_once = report_error_once,
   is_safe_text = is_safe_text,
-  marker_id_by_local = marker_id_by_local,
+  drawn_pane_key = drawn_pane_key,
 })
 local normalized_pane_title = titles_api.normalized_pane_title
 local sample_settled_title = titles_api.sample_settled_title
@@ -374,7 +394,7 @@ local format_factory = assert(load_plugin_module("format"))
 local format_api = format_factory({
   M = M,
   defaults = defaults,
-  marker_id_by_local = marker_id_by_local,
+  drawn_pane_key = drawn_pane_key,
   attention_cache = attention_cache,
   title_sources = title_sources,
   display_text = titles_api.display_text,
@@ -434,6 +454,7 @@ local runtime_api = runtime_state.bind({
   gui_tab_pane_ids = gui_tab_pane_ids,
   resolve_visible_attention = resolve_visible_attention,
 })
+own_mux_identity = runtime_api.own_mux_identity
 local same_cached_attention = runtime_api.same_cached_attention
 local tab_panes_containing_read = runtime_api.tab_panes_containing_read
 local review_outranks = runtime_api.review_outranks
@@ -451,10 +472,15 @@ local function formatter_tab_key(tab)
   return tostring(tab.tab_id or tab.tab_index or tab)
 end
 
+--- The user's base title, repaired the way every text the bar draws is: a
+--- formatter often returns a pane's title as the program set it, escape
+--- sequences and all, or cuts one by bytes inside a character, which WezTerm
+--- then refuses to draw at all. Not cut to a length: that is the bar's to do.
 local function call_title_formatter(base_fn, tab, ctx)
   local key = formatter_tab_key(tab)
   local ok, base = pcall(base_fn, tab, ctx)
   if ok and type(base) == "string" then
+    base = titles_api.display_text(base, math.huge)
     last_base_title_by_tab[key] = base
     return base
   end
@@ -486,6 +512,34 @@ function M.wrap_title_formatter(base_fn)
 end
 
 -- ── apply_to_config ─────────────────────────────────────────────────────────
+
+--- Tab orders drawn while this GUI is still asking who it is, by window id. A
+--- window keeps the name of its first file for as long as it is open, so a
+--- file written now would stay at the unsourced name every GUI shares.
+local held_tab_orders = {}
+
+local function publish_drawn_tab_order(dir, window_id, order)
+  local status, source = runtime_api.tab_source_status()
+  if status == "pending" then
+    held_tab_orders[window_id] = { dir = dir, order = order, drawn_at = now_ms() }
+    return
+  end
+  held_tab_orders[window_id] = nil
+  publish_tab_order(dir, window_id, order, source)
+end
+
+--- Ask who this GUI is, and publish what the bar drew meanwhile once there
+--- is an answer, or once it is known that none will come.
+local function settle_tab_source(socket)
+  runtime_api.acquire_tab_source(socket)
+  if next(held_tab_orders) == nil then return end
+  local status, source = runtime_api.tab_source_status()
+  if status == "pending" then return end
+  for window_id, held in pairs(held_tab_orders) do
+    held_tab_orders[window_id] = nil
+    publish_tab_order(held.dir, window_id, held.order, source, held.drawn_at)
+  end
+end
 
 local applied = false
 
@@ -534,6 +588,61 @@ local function usable_options(opts)
     report_warning_once("option:renderer", 'option renderer must be "tab" or "manual", not "'
       .. usable.renderer .. '"; the default "tab" is used')
     usable.renderer = nil
+  end
+  -- Exported to every pane, where the attention command refuses a root it
+  -- would not write to; the same rule as for WEZTERM_ATTENTION_DIR.
+  if usable.dir ~= nil then
+    local problem
+    -- Checked first so that the log never repeats a control character.
+    if not safe_root_text(usable.dir) then
+      problem = "longer than " .. path_max_bytes .. " bytes or holds a control character"
+    elseif not is_absolute_path(usable.dir) then
+      problem = "not an absolute path: " .. usable.dir
+    end
+    if problem then
+      report_warning_once("option:dir", "option dir is " .. problem
+        .. ", so the attention command would refuse it; the default is used")
+      usable.dir = nil
+    end
+  end
+  -- Values inside the option tables, each checked where it is used: a wrong
+  -- one is named and left out, so the default for that one entry applies.
+  local function usable_entries(name, value, rules)
+    if value == nil then return nil end
+    local kept = {}
+    for key, entry in pairs(value) do
+      local rule = rules[key]
+      if rule and not rule.check(entry) then
+        report_warning_once("option:" .. name .. "." .. tostring(key), "option " .. name .. "."
+          .. tostring(key) .. " must be " .. rule.kind .. ", not " .. type(entry) .. "; the default is used")
+      else
+        kept[key] = entry
+      end
+    end
+    return kept
+  end
+  local function is_string(entry) return type(entry) == "string" end
+  local text = { kind = "a string", check = is_string }
+  usable.indicators = usable_entries("indicators", usable.indicators, {
+    thinking_frames = { kind = "a non-empty list of strings", check = function(entry)
+      if type(entry) ~= "table" or #entry == 0 then return false end
+      local count = 0
+      for _, frame in pairs(entry) do
+        count = count + 1
+        if type(frame) ~= "string" then return false end
+      end
+      return count == #entry
+    end },
+    stop = text, notify = text, review = text,
+  })
+  usable.colors = usable_entries("colors", usable.colors,
+    { thinking = text, stop = text, notify = text, review = text })
+  local review_key = usable.review_key
+  if review_key and (type(review_key.key) ~= "string"
+      or (review_key.mods ~= nil and type(review_key.mods) ~= "string")) then
+    report_warning_once("option:review_key", 'option review_key must be a table like '
+      .. '{ key = "b", mods = "ALT" }, with key a string and mods a string or absent; the default is used')
+    usable.review_key = nil
   end
   return usable
 end
@@ -670,11 +779,14 @@ function M.apply_to_config(config, opts)
 
   -- ── Renderer: format-tab-title ────────────────────────────────────────
 
+  -- Whatever the renderer: a local pane's published identity is checked
+  -- against this answer as well as the bar publishing under it.
+  -- This callback may yield; pane-state polling has already finished in its own callback.
+  wezterm.on("update-status", function()
+    settle_tab_source(os.getenv("WEZTERM_UNIX_SOCKET"))
+  end)
+
   if renderer == "tab" then
-    -- This callback may yield; pane-state polling has already finished in its own callback.
-    wezterm.on("update-status", function()
-      runtime_api.acquire_tab_source(os.getenv("WEZTERM_UNIX_SOCKET"))
-    end)
     wezterm.on("format-tab-title", function(tab, tabs, panes, cfg, hover, max_width)
       -- Read-only. WezTerm may call this at any moment, including for a window
       -- the user is not looking at, so acknowledgement belongs in poll() where
@@ -708,7 +820,7 @@ function M.apply_to_config(config, opts)
         published = decorate_tab_title(tab, visible, base, show_index, visible.still_indicator)
       end
       local order, window_id = drawn_tab_order(tab, tabs, marker_ids, published)
-      if order then publish_tab_order(dir, window_id, order, runtime_api.tab_source()) end
+      if order then publish_drawn_tab_order(dir, window_id, order) end
 
       return rendered
     end)
@@ -834,7 +946,7 @@ end
 M._internal = {
   tab_source = runtime_api.tab_source,
   reset_tab_source = runtime_api.reset_tab_source,
-  acquire_tab_source = runtime_api.acquire_tab_source,
+  acquire_tab_source = settle_tab_source,
   parse_tab_source_response = runtime_api.parse_tab_source_response,
   lifecycle_facet = reader_api.lifecycle_facet,
   acknowledge_focused_pane = acknowledge_focused_pane,

@@ -251,6 +251,22 @@ return function(context)
     return current_domain_facts().sockets[name]
   end
 
+  --- Does `address` name this GUI's own mux? A local pane runs in it, so an
+  --- identity naming any other is output the pane printed, not its own:
+  --- "own", "other", or "unknown" while this GUI is still asking who it is
+  --- and its socket's realm does not settle it. "own" as well when this GUI
+  --- has nothing to check against.
+  local function own_mux_verdict(address)
+    local status, realm_id, incarnation_id = context.own_mux_identity()
+    if not realm_id then return "own" end
+    if address.realm_id == realm_id
+        and (incarnation_id == nil or address.incarnation_id == incarnation_id) then
+      return "own"
+    end
+    if status == "pending" then return "unknown" end
+    return "other"
+  end
+
   local function resolve_pane_read(pane)
     if not pane then
       return { kind = "invalid", diagnostic = invalid("pane is unavailable") }
@@ -275,6 +291,17 @@ return function(context)
       if local_id and wire.address.pane_id ~= local_id then
         return { kind = "invalid", diagnostic = invalid(
           "WEZTERM_ATTENTION names pane " .. wire.address.pane_id .. ", not this local pane",
+          { pane_id = local_id }) }
+      end
+      local verdict = local_id and own_mux_verdict(wire.address)
+      if verdict == "other" then
+        return { kind = "invalid", diagnostic = invalid(
+          "WEZTERM_ATTENTION names a pane of another mux, not this GUI's local pane",
+          { pane_id = local_id }) }
+      elseif verdict == "unknown" then
+        -- Not wrong yet, only not known: nothing to log, and nothing read.
+        return { kind = "invalid", deferred = true, diagnostic = diagnostic("probe_unavailable",
+          "this GUI's own mux identity is not known yet, so the pane's cannot be checked",
           { pane_id = local_id }) }
       end
       return {

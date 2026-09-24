@@ -3,7 +3,7 @@ return function(context)
   local defaults = context.defaults
   local report_error_once = context.report_error_once
   local is_safe_text = context.is_safe_text
-  local marker_id_by_local = context.marker_id_by_local
+  local drawn_pane_key = context.drawn_pane_key
   local settled_title_state = {}
 
   --- The second byte each UTF-8 lead byte allows, where it is narrower than
@@ -125,7 +125,7 @@ return function(context)
     if M._active_settled_title_fallback == false then return nil end
     local pane = tab.active_pane
     local local_id = pane and tostring(pane.pane_id) or nil
-    local key = local_id and marker_id_by_local[local_id] or local_id
+    local key = local_id and drawn_pane_key(local_id)
     local state = key and settled_title_state[key] or nil
     return state and state.settled or nil
   end
