@@ -327,8 +327,6 @@ pub fn doctor_with_environment(
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
 ) -> Result<(Value, Vec<Diagnostic>)> {
-    // One process listing answers every claim and every binding doctor asks
-    // about; a listing per claim cost seconds on a store with many claims.
     let probed_once = processes.map(ProbeOncePerAssembly::new);
     let processes = probed_once.as_ref().map(|probe| probe as &dyn ProcessProbe);
     let mut diagnostics = Vec::new();

@@ -2750,9 +2750,9 @@ mod process_probe_tests {
 
     /// A listing that failed is not retried pane by pane: the system probe
     /// answers a per-pane question by taking the same listing again, so with
-    /// a hundred absent panes one stalled `ps` would become a hundred, each
-    /// under its own deadline. Every pane is unavailable instead, and the
-    /// call stays within one listing's deadline.
+    /// a hundred absent panes one failed listing would be taken a hundred
+    /// times. Every pane is unavailable instead, and the listing is taken
+    /// once.
     #[test]
     fn a_failed_listing_answers_every_pane_as_unavailable_without_asking_again() {
         let probe = CountingProbe::new(Listing::Fails);
