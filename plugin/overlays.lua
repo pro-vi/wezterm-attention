@@ -190,10 +190,7 @@ return function(context)
     file:close()
     if current ~= body then return nil end
     local removed, err = os.remove(path)
-    if removed then return nil end
-    local still_there = io.open(path, "r")
-    if not still_there then return nil end
-    still_there:close()
+    if removed or not file_exists(path) then return nil end
     return tostring(err)
   end
 
@@ -350,9 +347,7 @@ return function(context)
 
   local function clear_acknowledgement(dir, pane_id)
     local path = acknowledgement_path(dir, pane_id)
-    local existing = io.open(path, "r")
-    if not existing then return true end
-    existing:close()
+    if not file_exists(path) then return true end
 
     local ok, err = os.remove(path)
     if ok then return true end
@@ -488,9 +483,7 @@ return function(context)
   local function clear_review_flag(dir, pane_id)
     os.remove(review_tmp_path(dir, pane_id))
     local path = review_path(dir, pane_id)
-    local existing = io.open(path, "r")
-    if not existing then return true end
-    existing:close()
+    if not file_exists(path) then return true end
 
     local ok, err = os.remove(path)
     if ok then return true end
@@ -626,9 +619,7 @@ return function(context)
         local moved, move_err = os.rename(path, taken)
         if not moved then
           -- Already gone is the state a clear wants.
-          local still_there = io.open(path, "r")
-          if still_there then
-            still_there:close()
+          if file_exists(path) then
             report_error_once("clear-v2-review:" .. path,
               "failed to remove review claim " .. path .. ": " .. tostring(move_err))
           end
