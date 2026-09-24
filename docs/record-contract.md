@@ -157,10 +157,11 @@ their own argv from the closed provider and session ID fields.
 
 `conflicted` health and the `binding_conflict` diagnostic mean two live claims on one provider
 session at different pane addresses. A binding that has ended, whose pane is verified absent, or
-whose mux server is gone (a new server owns its socket path, or the socket path no longer exists)
+whose mux server may be gone (its socket path no longer exists, or holds a different socket)
 is history and is left out of that comparison: resuming a session in a new pane, or after the mux
 restarts, leaves one behind every time, and marking the live row conflicted would hide the pane
-the session now runs in. Such a row still reports `pane_presence` `unavailable`.
+the session now runs in. A row of a server that may be gone still reports `pane_presence`
+`unavailable`.
 
 JSON responses contain `schema`, `command`, `status`, `complete`, `result`, and `diagnostics`.
 `bindings` also reports where its time went, in `result.timing_ms`: `pane_list` (inside `wezterm cli list`), `process_list` (inside the process probe) and `records` (the rest: finding and reading the records). It is on every answer, without a flag or threshold, so a slow call names its phase.
@@ -193,18 +194,40 @@ which is what shows it gone; the process probe is asked only whether a process s
 pane, so a process it could not read does not stop the sighting. Socket paths are compared after
 resolving their directory, because the realm record keeps the path resolved and a process keeps
 it as WezTerm was configured to spell it, through `/tmp` on macOS or a symlinked home; the socket
-file itself need not exist. For sweep, a pane whose mux server is gone is also one sighting for
-the old incarnation: a different server now owns its socket path, or its socket path no longer
-exists and the process probe read every process of this user and none carries that socket and
-pane id. A socket path that is gone while the process probe failed, could not read every
-process, or with no probe, is unavailable, not absent: the server may still run with its socket
-file removed. A probe recorded at a monotonic time later than the current clock, as after a
-reboot, restarts the count; that can only delay an end. Readers such as `bindings` still report
-such a pane `unavailable`, not absent, with a `realm_unavailable` diagnostic ("mux socket no
-longer exists"). A gone socket is a finding about the server, not a probe that did not answer, so
-it never makes `doctor` or `sweep` incomplete; sweep's absence and retention steps say
-`unavailable` for such a pane and add `probe_unavailable` only when the process probe itself
-failed or was not there. Process-probe failure is unavailable evidence, not absence. One failed process listing answers
+file itself need not exist.
+
+Every reader and sweep classify the server behind a recorded incarnation the same way, by
+whether the socket at the realm record's path still carries that incarnation (the digest of its
+resolved path, device, inode and change time) and what else can be shown:
+
+- **Live.** The socket still carries the incarnation and its pane listing answers. Presence is
+  decided per pane as above.
+- **Exited.** Any one of: the socket still carries the incarnation and refuses a connection, so
+  nothing listens on that file (a GUI that quit leaves its socket file behind, and WezTerm itself
+  treats a GUI socket that refuses as dead); the socket file is named `gui-sock-<pid>`, as a
+  WezTerm GUI names its own, and no process with that pid exists, since a GUI's local panes end
+  with it; or the process probe read every process of this user and none carries the socket and
+  pane id. A pane of an exited server reads `verified_absent`, and sweep counts it as one
+  sighting under the rule above. Nothing about it is a diagnostic.
+- **Gone, not proven.** The socket file no longer exists, or the path holds a different socket
+  (a new server bound it, or a `chmod` or `touch` changed its metadata, which the incarnation
+  includes), and none of the proofs above holds. The server may still run with its socket
+  removed or replaced, so every record is kept: sweep neither ends the binding nor removes the
+  pane tree, and lists no detail for it. Readers report the pane `unavailable` with a
+  `socket_gone` diagnostic ("mux socket no longer exists") or an `incarnation_changed` one
+  ("realm socket identity changed"). This is recorded history, not a probe that did not answer,
+  so it never makes `doctor` or `sweep` incomplete; they report it once per code for the run, in
+  one diagnostic whose `context.incarnations` lists each such incarnation with its `realm_id`,
+  `incarnation_id`, `path` (the incarnation's directory relative to the state root) and
+  `pane_count`, however many panes it holds.
+- **Did not answer.** The socket still carries the incarnation, does not refuse, and its pane
+  listing fails or times out. That is an unavailable probe in `doctor` and `sweep` alike: the
+  diagnostic is `realm_unavailable` with the listing's own message, and the report is incomplete.
+
+A probe recorded at a monotonic time later than the current clock, as after a reboot, restarts
+the count; that can only delay an end. Every other diagnostic of sweep's absence and retention
+steps carries the `realm_id`, `incarnation_id`, `pane_id` and `binding_id` it is about, and
+appears once per pane per run. Process-probe failure is unavailable evidence, not absence. One failed process listing answers
 every pane of that query as unavailable; it is not retried pane by pane, so a query waits on at
 most one pane listing per mux socket and one process listing. A realm-wide `bindings` asks its
 sockets in parallel, so it waits about as long as the slowest one, bounded by the per-listing
@@ -221,8 +244,8 @@ it lists and cannot read makes the listing incomplete: macOS hides the environme
 system binaries, such as `/bin/zsh` and `/bin/bash`, from both `ps` and `sysctl`, `KERN_PROCARGS2`
 can refuse a running process, and Linux can refuse `/proc/<pid>/environ`. An incomplete listing
 still shows a pane present by a process it read; it never shows a pane absent where it is the
-only evidence. On macOS a listing is in practice always incomplete, so there a server whose
-socket is gone never has its panes found absent; see
+only evidence. On macOS a listing is in practice always incomplete, so there it never shows the
+panes of a mux server whose socket is gone absent; see
 [accepted limitations](accepted-limitations.md). The `ps` listing used elsewhere cannot tell
 which processes it did not read, and counts as complete. Process environments are never printed
 or persisted.

@@ -145,7 +145,8 @@ impl ProcessProbe for FakeProcesses {
 
 struct Setup {
     _scratch: Scratch,
-    _socket: UnixListener,
+    /// The mux server's socket, listening until [`Setup::stop_listening`].
+    listener: Mutex<Option<UnixListener>>,
     env: BTreeMap<String, String>,
     clock: MutableClock,
     tty: FakeTty,
@@ -155,8 +156,13 @@ struct Setup {
 
 impl Setup {
     fn new() -> Self {
+        Self::with_socket_name("mux.sock")
+    }
+
+    /// The fixture with its mux socket at `<scratch>/<name>`.
+    fn with_socket_name(name: &str) -> Self {
         let scratch = Scratch::new();
-        let socket_path = scratch.0.join("mux.sock");
+        let socket_path = scratch.0.join(name);
         let socket = UnixListener::bind(&socket_path).expect("bind socket");
         let tty = FakeTty {
             path: "/dev/ttys888".to_owned(),
@@ -179,7 +185,7 @@ impl Setup {
         ]);
         Self {
             _scratch: scratch,
-            _socket: socket,
+            listener: Mutex::new(Some(socket)),
             env,
             clock: MutableClock {
                 monotonic: AtomicU64::new(100),
@@ -195,6 +201,12 @@ impl Setup {
                 queries: Mutex::new(Vec::new()),
             },
         }
+    }
+
+    /// Closes the mux socket and leaves its file behind, as a server that
+    /// exited without removing its socket does.
+    fn stop_listening(&self) {
+        self.listener.lock().expect("listener lock").take();
     }
 
     fn ports(&self) -> RuntimePorts<'_> {
@@ -1664,3 +1676,6 @@ mod binding_retention;
 
 #[path = "maintenance_spec/destructive_guards.rs"]
 mod destructive_guards;
+
+#[path = "maintenance_spec/recorded_servers.rs"]
+mod recorded_servers;

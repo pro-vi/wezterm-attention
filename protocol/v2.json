@@ -222,6 +222,7 @@
       "unsafe_tty",
       "realm_unavailable",
       "incarnation_changed",
+      "socket_gone",
       "record_invalid",
       "future_schema",
       "binding_conflict",

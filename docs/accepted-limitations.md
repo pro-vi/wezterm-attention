@@ -220,14 +220,15 @@ already delete, apart from pane trees under the retention rule in the
 removing state it cannot prove abandoned, and it means four kinds of leftover
 stay on disk:
 
-- **An exited GUI's tab-order files.** A file is removed only when it names no
-  tab, or when every pane it names is verified absent through a listing of that
-  pane's mux. An exited GUI's panes are usually still running in a mux server,
-  or gone together with their socket, which a reader reports as unavailable
-  rather than absent (a `realm_unavailable` diagnostic that names the file and
-  the pane). So the file stays until you remove it. It is safe to
-  delete `tabs/<incarnation id>-<window id>.json` by hand once no GUI with that
-  window is running.
+- **An exited GUI's tab-order files that name mux panes.** A file is removed
+  only when it names no tab, or when every pane it names is verified absent.
+  The GUI's own local panes are, once it has exited (see the next section), so
+  a file naming only those goes. A window attached to a mux server names that
+  server's panes, which are usually still running, or gone together with their
+  socket with nothing to show the server gone, which a reader reports as
+  unavailable rather than absent. So that file stays until you remove it. It
+  is safe to delete `tabs/<incarnation id>-<window id>.json` by hand once no
+  GUI with that window is running.
 - **Temporary files from an interrupted write, outside a tree being removed.**
   So is a review that Alt+B had moved aside to `<review>.json.<session>.clear`
   when it was interrupted. They do not stop a binding or pane tree from being
@@ -243,25 +244,38 @@ stay on disk:
 Collecting any of these would be a new deletion, and would need the same
 evidence rule the others have.
 
-## On macOS, the records of a server whose socket is gone stay for good
+## A mux server whose socket was removed or replaced keeps its records
 
-Sweep counts a pane as absent once for a server whose socket path no longer
-exists only when the process probe read every process of this user and none
-carries that socket and pane id. Nothing else outside the server can tell a
-stopped server from a running one whose socket file was deleted. macOS hides the
-environment of its own system binaries, Apple's `/bin/zsh` and `/bin/bash`
-among them, and every Mac runs some of them as the user, so there the probe
-never reads every process and that sighting is never made. The panes of a mux
-server that exited with its socket, and those of a GUI that exited, keep their
-bindings and pane trees: `sweep` reports each such pane's absence as
-`unavailable`, with a `realm_unavailable` diagnostic ("mux socket no longer
-exists"), and deletes none of it. That is a finding, not an unanswered probe,
-so `sweep` and `doctor` still give a complete answer and exit 0.
+Sweep reclaims the panes of a server it can show has exited. A GUI that quit is
+one: either its socket file is still there and nothing listens on it, or the
+file is gone and the socket was the GUI's own `gui-sock-<pid>` and no process
+with that pid exists. So the records of GUI-local panes are reclaimed by the
+two-observation rule, and after the retention age their pane trees go too.
 
-On Linux, where every process of the user can be read, the same panes are
-reclaimed by the two-observation rule. On macOS, once you know the server is
-gone, you can remove its records yourself:
-`<state root>/v2/realms/<realm id>/incarnations/<incarnation id>`.
+A server whose socket file no longer exists, or whose path now holds a
+different socket, is another matter. The server may still run with its socket
+file deleted, or with another server bound over the same path (WezTerm removes
+a socket file in its way before binding), and a `chmod` or `touch` on a live
+socket changes its identity too. Only one thing outside the server tells a
+stopped one from a running one: the process listing, when it read every process
+of this user and none carries that socket and pane id. When it cannot say that,
+the records are kept: sweep neither ends those bindings nor removes those pane
+trees, readers report the panes `unavailable` with a `socket_gone` or
+`incarnation_changed` diagnostic, and `doctor` and `sweep` report the whole
+kept history once per code, listing each incarnation with its `path` and
+`pane_count`. That is a finding, not an unanswered probe, so `sweep` and
+`doctor` still give a complete answer and exit 0 however much of it there is.
+
+The listing rarely says it. macOS hides the environment of its own system
+binaries, Apple's `/bin/zsh` and `/bin/bash` among them, and every Mac runs some
+of them as the user, so there the listing never reads every process. On Linux,
+one process of the user that has made itself non-dumpable is enough to leave
+the listing incomplete, and ssh-agent does that by default, so Linux usually
+behaves the same.
+
+Once you know such a server is gone, remove its records yourself: the `path`
+each incarnation carries in that diagnostic is relative to the state root, as
+in `<state root>/v2/realms/<realm id>/incarnations/<incarnation id>`.
 
 ## After a reboot, pane retention can wait without bound
 

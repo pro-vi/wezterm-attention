@@ -630,6 +630,70 @@ impl PaneLister for WeztermPaneLister {
     }
 }
 
+/// Whether the socket file at `socket_path` refuses a connection, which says
+/// nothing listens on that file: its server has exited. WezTerm judges a GUI
+/// socket dead by the same test. A listener that exists but is slow, busy or
+/// unreadable to this user does not refuse, and neither does a path this
+/// check cannot name; only `ECONNREFUSED` counts. The connect does not block,
+/// so a listener with a full backlog cannot stall a read.
+pub(crate) fn listener_refuses(socket_path: &str) -> bool {
+    let bytes = socket_path.as_bytes();
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.is_empty() || bytes.len() >= address.sun_path.len() || bytes.contains(&0) {
+        return false;
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as libc::c_char;
+    }
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        return false;
+    }
+    // Closed on every return.
+    let _socket = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+    let prepared = unsafe {
+        libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) == 0
+            && libc::fcntl(
+                fd,
+                libc::F_SETFL,
+                libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK,
+            ) == 0
+    };
+    if !prepared {
+        return false;
+    }
+    let connected = unsafe {
+        libc::connect(
+            fd,
+            (&address as *const libc::sockaddr_un).cast(),
+            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        )
+    };
+    connected != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECONNREFUSED)
+}
+
+/// Whether `socket_path` names a WezTerm GUI's own socket, `gui-sock-<pid>`,
+/// and that process has exited. A GUI's local panes end with the GUI, so
+/// none of them can still run. A pid that answers, or one this user may not
+/// signal, may be the GUI, or a process that took its number: neither shows
+/// the GUI gone.
+pub(crate) fn gui_process_exited(socket_path: &str) -> bool {
+    let Some(pid) = Path::new(socket_path)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .and_then(|name| name.strip_prefix("gui-sock-"))
+        .filter(|pid| {
+            !pid.is_empty() && !pid.starts_with('0') && pid.bytes().all(|b| b.is_ascii_digit())
+        })
+        .and_then(|pid| pid.parse::<libc::pid_t>().ok())
+    else {
+        return false;
+    };
+    let signalled = unsafe { libc::kill(pid, 0) };
+    signalled != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
 /// How long any one child this crate runs may take, output included.
 const CHILD_DEADLINE: Duration = Duration::from_secs(5);
 

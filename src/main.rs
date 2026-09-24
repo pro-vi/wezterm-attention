@@ -1094,9 +1094,14 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             let (result, diagnostics) =
                 wezterm_attention::maintenance::doctor(&root, Some(&panes), Some(&processes))
                     .map_err(|error| (Box::new(error), args.json, "doctor".to_owned()))?;
+            // A probe that did not answer, or a mux that did not list its
+            // panes, which its socket probe reports.
             let unavailable = diagnostics
                 .iter()
-                .any(|item| item.code == "probe_unavailable");
+                .any(|item| item.code == "probe_unavailable")
+                || result["probes"].as_array().is_some_and(|probes| {
+                    probes.iter().any(|probe| probe["status"] == "unavailable")
+                });
             // A report in which no probe had anything of the user's to look at
             // found nothing wrong, but it did not find anything right either.
             // The versions probe is left out because it never says
