@@ -167,7 +167,7 @@ pane's mux, and it never changes publication files.
 |---|---|
 | `present` | At least one pane was listed for this window in the publishing GUI's mux. |
 | `not_listed` | That inventory listed no panes for this window. An empty or transitional window is not ruled out. |
-| `unavailable` | The source is unrecorded, changed, gone, unavailable, or returned an invalid inventory; `reason` distinguishes these cases (`source_unrecorded`, `source_changed`, `socket_gone`, `probe_unavailable`, `inventory_invalid`). `socket_gone` means the GUI's socket file no longer exists. An inventory that failed is `probe_unavailable`, even when the socket refuses: a refusal does not show the GUI gone. |
+| `unavailable` | The source is unrecorded, changed, gone, unavailable, or returned an invalid inventory; `reason` distinguishes these cases (`source_unrecorded`, `source_changed`, `socket_gone`, `probe_unavailable`, `inventory_invalid`). `socket_gone` means the GUI is gone: its socket file no longer exists, or its inventory failed and its `gui-sock-<pid>` process no longer exists, as `bindings` reads that GUI's panes absent. Any other inventory that failed is `probe_unavailable`, even when the socket refuses: a refusal does not show the GUI gone. |
 
 `checked_at_ms` is the completion time of that check, not a freshness promise.
 The saved `published_at_ms`, text and order are unchanged. A successful check
