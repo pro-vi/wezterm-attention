@@ -22,10 +22,11 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - **`acknowledge_types` is not an option.** The option is `auto_clear`, as in 0.6; an earlier README named the wrong one. The plugin now logs `acknowledge_types` as unknown and names `auto_clear`.
 - **Read commands print JSON by default.** `bindings`, `tabs`, `inspect` and `hooks describe` return the JSON envelope on terminals and pipes alike. This affects only scripts written against untagged builds; 0.6 had no command.
 - **`attention mark clear --source NAME` also withdraws that source's activity**, when the activity the tab shows came from it, not only its review flag. The source name `user` is reserved for `Alt+B` and refused by every `mark` state.
-<!-- pending: query lane -->
-- **Query commands exit 0, 1 or 2 only.** `bindings`, `tabs`, `inspect`, `doctor` and `sweep` exit 0 when the answer is complete, 1 when it is incomplete or the command failed, and 2 for a command-line error. Diagnostics alone no longer change the exit code, and exit 3 is gone from these commands. Every error envelope has `complete=false`.
-<!-- pending: exec lane -->
-- **Hook commands never exit 2**, which Claude Code and Codex read as "block". They exit 0 with the reason on stderr, or 1 under `--strict`.
+- **Commands exit 0, 1 or 2, and never 3.** A query (`bindings`, `tabs`, `inspect`, `doctor`, `sweep`) exits 0 when its answer is complete and 1 when it is incomplete or failed; 2 is only for a command-line error of a non-hook command. Diagnostics alone no longer change the exit code, so a complete `bindings --all` with diagnostics exits 0, and a truncated one exits 1. Every other failure, including `mark`, `hooks claim` and `hooks publish`, exits 1, and so does `bin/attention` without the built binary for any non-hook command. Every error envelope has `complete=false`.
+- **Hook commands never exit 2**, which Claude Code and Codex read as "block". `hooks event` exits 0 with the reason on stderr, or 1 under `--strict`, even for a command line it cannot parse or a malformed `--consumer` option. A usage error of `hooks describe`, `hooks claim` or `hooks publish`, or an unknown `hooks` subcommand, exits 1.
+- **`sweep --apply` makes up its own operation id** and reports it in `result.operation_id`. Pass `--operation-id` only to retry an interrupted run; a reused id is a replay and ends nothing new.
+- **`doctor` reports `unobserved`, not `healthy`, for a probe that had nothing to check**, and lists those probes in `result.unobserved`. A report where every probe but `versions` was unobserved says `unobserved`.
+- **A shell claim from tmux, screen or another terminal inside a pane is refused** (`unsafe_tty`), so it can no longer take over the pane's claim.
 
 ### Added
 
@@ -37,7 +38,9 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - `get_attention_view(pane)`, with bounded lifecycle observations and request evidence, and the `on_view_change` callback. See `docs/consumer-guide.md`.
 - Opt-in delivery of the exact prompt or reply text to consumer executables: `--consumer … --include-prompt` or `--include-reply`.
 - The drawn tab order, published to `tabs/` and read with `attention tabs`.
-- `attention sweep`, which previews by default and, with `--apply --operation-id`, ends bindings whose panes are verified gone and collects leftover files.
+- `attention sweep`, which previews by default and, with `--apply`, ends bindings whose panes are verified gone, removes a closed pane's whole tree once its binding ended more than 30 days ago and its absence is confirmed again, and collects leftover files. A mux server that is gone counts as a sighting of absence for its panes.
+- A `doctor` probe named `environment`, which checks inside a pane that the pane's socket has a server identity hooks can find.
+- `result.timing_ms` on `inspect` as on `bindings`, and `result.diagnostic_count` / `total_diagnostic_count` on `tabs`. Query diagnostics name the record path or pane they are about.
 - Options `show_directory`, `settled_title_fallback`, `show_provider`, `on_view_change` and `integration_root`; `attention.doctor(window)` in the Lua API.
 
 ### Changed
@@ -52,8 +55,13 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - Exec, serial and WSL domains count as local, so their panes keep showing v1 flat markers by pane id, as in 0.6. On local panes the pane's own id wins over a user variable printed by terminal output.
 - After a reattach, the plugin also republishes through WezTerm's implicit `unix` domain and any unix domain without a `socket_path`.
 - The plugin creates the state directory and `tabs/` private (mode 0700).
-<!-- pending: exec lane -->
-- `attention` never runs `wezterm-gui` or `wezterm-mux-server` as the CLI, finds `wezterm` beside `$WEZTERM_EXECUTABLE` or in `/Applications/WezTerm.app`, and passes `--no-auto-start` to every `wezterm cli` call.
+- `attention` never runs `wezterm-gui` or `wezterm-mux-server` as the CLI. It finds `wezterm` on PATH, beside `$WEZTERM_EXECUTABLE`, or in `/Applications/WezTerm.app`, passes `--no-auto-start` to every `wezterm cli` call, and kills a call past its deadline with its whole process group. A failed pane listing names the executable and says how it failed, for example `timed out after 5000 ms`.
+- The process probe no longer runs `ps` on macOS or Linux: it reads this user's process environments directly, never their arguments. Linux (glibc, including aarch64) is supported; macOS and Linux are the tested platforms.
+- `inspect` computes `binding_health` and `reader_confidence` with the same rule as `bindings`, so it can now report `conflicted`.
+- Realm-wide `bindings` applies `--realm` and `--provider` before asking any socket, asks sockets in parallel, and reports an unreadable state directory as an incomplete answer.
+- Without `--json`, `doctor`, `sweep`, `mark` and `hooks publish` print each diagnostic on stderr as `attention: <code>: <message>`; stdout still carries only the status word.
+- JSON output escapes U+0080–U+009F. `attention --version` says `-dirty` only when source, protocol or build files differ from the commit.
+- Sweep checks a pane before taking its locks, so hooks are not held up behind a slow mux.
 
 ### Fixed
 
@@ -66,6 +74,12 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - Concurrent writers creating the same state directory no longer fail.
 - A Codex `Stop` with `last_assistant_message: null` reports the reply as `absent`, not `invalid`.
 - `examples/wezterm.lua` keeps `Alt+B`, loads without `follow-up.lua`, and runs git without repository hooks.
+- A query against a stale socket no longer starts a new mux server, and a missing `wezterm` on PATH no longer leads to running the mux server in its place.
+- On Linux, closed panes can be verified absent; the crate builds on aarch64 Linux.
+- A non-UTF-8 environment variable is skipped instead of stopping every command.
+- A closed stdout (`| head`) no longer makes a command panic.
+- A symlinked `tabs/` directory is refused, and sweep never deletes through it.
+- Temporaries left by an interrupted write no longer keep a binding or pane tree from retention.
 
 ### Upgrading from 0.6
 
