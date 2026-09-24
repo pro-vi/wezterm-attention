@@ -99,6 +99,7 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - Sweep's absence and retention diagnostics name the realm, incarnation, pane and binding, and each appears once per run.
 - A tab-order file naming a pane whose mux did not answer makes `sweep` incomplete (exit 1), as a binding's pane does.
 - The example status bar shortens a branch name by cell width, so a non-ASCII branch name no longer stops the right status updating.
+- `examples/wezterm.lua` loads in `wezterm-mux-server`, which reads the same file but has no `wezterm.gui`, so a mux server's panes get the attention environment and are claimed.
 - The gate's performance comparison measures the binaries cargo reports building; `scripts/build-attention.sh` holds the build step the installer and the gate share.
 - The lock that `mark review`, `mark clear` and Pi's review events leave in `reviews/` no longer keeps an old pane's tree from retention.
 - Sweep removes nothing through a symlinked directory below the state root: subagent compaction and a cleared absence probe are refused there, as binding and pane removals already were.
