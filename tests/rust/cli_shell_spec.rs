@@ -1492,6 +1492,55 @@ fn a_query_that_could_not_run_is_incomplete_and_exits_one() {
     }
 }
 
+/// An apply that set out to remove a file and could not has not done what it
+/// reports: its answer is incomplete, it exits 1, and the file is still
+/// there. The preview of the same state decides the same thing and removes
+/// nothing, so it stays complete.
+#[test]
+fn a_sweep_apply_whose_removal_failed_is_incomplete_and_exits_one() {
+    let scratch = Scratch::new();
+    let state = scratch.0.join("state");
+    let tabs = state.join("tabs");
+    fs::create_dir_all(&tabs).expect("create tabs directory");
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).expect("private state root");
+    // An order naming no tab is one sweep collects.
+    let order = tabs.join("10.json");
+    fs::write(
+        &order,
+        r#"{"published_at_ms":1,"schema":1,"tabs":[],"window_id":10}"#,
+    )
+    .expect("write tab order");
+    fs::set_permissions(&tabs, fs::Permissions::from_mode(0o500)).expect("read-only tabs");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_attention"))
+            .args(args)
+            .env_clear()
+            .env("HOME", &scratch.0)
+            .env("WEZTERM_ATTENTION_DIR", &state)
+            .output()
+            .expect("run sweep")
+    };
+    let preview = run(&["sweep", "--json"]);
+    let applied = run(&["sweep", "--apply", "--json"]);
+    fs::set_permissions(&tabs, fs::Permissions::from_mode(0o700)).expect("restore tabs");
+    let preview_envelope: Value = serde_json::from_slice(&preview.stdout).expect("preview JSON");
+    assert_eq!(preview_envelope["complete"], true, "{preview_envelope}");
+    assert_eq!(preview.status.code(), Some(0), "{preview_envelope}");
+    let envelope: Value = serde_json::from_slice(&applied.stdout).expect("sweep JSON");
+    assert_eq!(envelope["complete"], false, "{envelope}");
+    assert_eq!(applied.status.code(), Some(1), "{envelope}");
+    assert!(
+        !envelope["diagnostics"]
+            .as_array()
+            .expect("diagnostics")
+            .is_empty()
+    );
+    assert!(
+        order.exists(),
+        "the order sweep could not remove is still there"
+    );
+}
+
 #[test]
 fn doctor_findings_beside_a_complete_report_exit_zero() {
     let scratch = Scratch::new();

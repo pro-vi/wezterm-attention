@@ -1172,8 +1172,10 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             } else {
                 diagnostics.iter().take(50).cloned().collect()
             };
-            // A probe that did not answer leaves some pane's fate undecided.
+            // A probe that did not answer leaves some pane's fate undecided,
+            // and an apply step that failed left its work undone.
             let complete = !unavailable
+                && result.failed_steps == 0
                 && result.details.len() == total_details
                 && shown_diagnostics.len() == diagnostics.len();
             emit(

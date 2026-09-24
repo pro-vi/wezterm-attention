@@ -35,6 +35,11 @@ pub struct SweepResult {
     pub detail_count: usize,
     pub total_detail_count: usize,
     pub details: Vec<Value>,
+    /// How many steps an apply set out to take and could not: a record it
+    /// could not read to decide on, or a removal or write that failed. Any
+    /// makes the answer incomplete. A preview counts none.
+    #[serde(skip)]
+    pub failed_steps: usize,
 }
 
 pub fn limit_sweep_preview(details: Vec<Value>, all_details: bool) -> (Vec<Value>, usize) {
@@ -1202,6 +1207,7 @@ fn apply_projection_collection(
 /// file naming a v1 marker id is kept, because a bare pane id has no realm to
 /// ask; so is one whose panes could not be probed. A GUI source is not the pane
 /// realm a sweep selects, so a realm-filtered sweep leaves these files alone.
+/// Returns how many steps failed.
 fn collect_tab_orders(
     root: &Path,
     apply: bool,
@@ -1210,12 +1216,13 @@ fn collect_tab_orders(
     presence_cache: &mut BTreeMap<(String, String, String), String>,
     details: &mut Vec<Value>,
     diagnostics: &mut Vec<Diagnostic>,
-) {
+) -> usize {
+    let mut failed = 0;
     let (windows, read_diagnostics) = match read_tab_publications(root) {
         Ok(value) => value,
         Err(error) => {
             diagnostics.push(error.diagnostic);
-            return;
+            return 1;
         }
     };
     diagnostics.extend(read_diagnostics);
@@ -1296,12 +1303,14 @@ fn collect_tab_orders(
                 }),
                 Err(error) => {
                     diagnostics.push(error.diagnostic);
+                    failed += 1;
                     continue;
                 }
             },
         };
         details.push(detail);
     }
+    failed
 }
 
 /// The address a published `v2:<realm>:<incarnation>:<pane>` marker id names.
@@ -1318,25 +1327,27 @@ fn v2_marker_address(marker_id: &str) -> Option<PaneAddress> {
     })
 }
 
+/// Collects flat files a single claim owns. Returns how many steps failed.
 fn collect_projection_orphans(
     root: &Path,
     realm_filter: Option<&str>,
     apply: bool,
     details: &mut Vec<Value>,
     diagnostics: &mut Vec<Diagnostic>,
-) {
+) -> usize {
+    let mut failed = 0;
     let inventory = match inventory_claims(root) {
         Ok(inventory) => inventory,
         Err(error) => {
             diagnostics.push(error.diagnostic);
-            return;
+            return 1;
         }
     };
     let (files, malformed) = match enumerate_flat_candidates(root) {
         Ok(value) => value,
         Err(error) => {
             diagnostics.push(error.diagnostic);
-            return;
+            return 1;
         }
     };
     let mut stems: BTreeSet<String> = files.keys().cloned().collect();
@@ -1390,7 +1401,10 @@ fn collect_projection_orphans(
                     "paths": relative,
                 })),
                 Ok(false) => {}
-                Err(error) => diagnostics.push(error.diagnostic),
+                Err(error) => {
+                    diagnostics.push(error.diagnostic);
+                    failed += 1;
+                }
             }
         } else {
             details.push(json!({
@@ -1400,6 +1414,7 @@ fn collect_projection_orphans(
             }));
         }
     }
+    failed
 }
 
 /// What one sweep run decides with, for the steps that take it whole.
@@ -1433,6 +1448,7 @@ fn retention_probe(probe: Option<Value>, end: &Value, observation: &str) -> Opti
 /// absence is established by the same two-observation rule that ends a
 /// binding, counted afresh after the end, and nothing is removed without
 /// `--apply`. A tree holding anything sweep does not recognise is kept.
+/// Returns whether a step failed.
 fn pane_retention(
     run: &SweepRun<'_>,
     binding_path: &Path,
@@ -1441,17 +1457,17 @@ fn pane_retention(
     end: &Value,
     details: &mut Vec<Value>,
     diagnostics: &mut Vec<Diagnostic>,
-) -> Result<()> {
+) -> Result<bool> {
     let root = run.root;
     let launch_id = binding["launch_id"].as_str().unwrap_or("");
     let binding_id = binding["binding_id"].as_str().unwrap_or("");
     let written = end["written_at_unix_ns"].as_str().unwrap_or("");
     match wall_age_exceeds(run.now, written, RETENTION_AGE_NS) {
         Ok(true) => {}
-        Ok(false) => return Ok(()),
+        Ok(false) => return Ok(false),
         Err(error) => {
             diagnostics.push(error.diagnostic);
-            return Ok(());
+            return Ok(true);
         }
     }
     let pane = pane_path(root, address);
@@ -1461,7 +1477,7 @@ fn pane_retention(
         Ok(probe) => retention_probe(probe, end, run.observation),
         Err(error) => {
             diagnostics.push(error.diagnostic);
-            return Ok(());
+            return Ok(true);
         }
     };
     let presence = absence_presence(root, address, run.panes, run.processes, diagnostics);
@@ -1482,7 +1498,7 @@ fn pane_retention(
         } else {
             detail("keep")
         });
-        return Ok(());
+        return Ok(false);
     }
     let operation = run.operation_id.expect("apply operation id");
     let binding_identity = RecordIdentity::binding(address, launch_id, binding_id);
@@ -1573,10 +1589,13 @@ fn pane_retention(
             if action != "changed" {
                 details.push(detail(&action));
             }
+            Ok(false)
         }
-        Err(error) => diagnostics.push(error.diagnostic),
+        Err(error) => {
+            diagnostics.push(error.diagnostic);
+            Ok(true)
+        }
     }
-    Ok(())
 }
 
 /// Whether every entry under a pane directory is state sweep recognises, so
@@ -1677,7 +1696,9 @@ pub fn sweep(
     let mut details = Vec::new();
     let mut diagnostics = Vec::new();
     let files = binding_files(root, &mut diagnostics);
-    collect_projection_orphans(root, realm_filter, apply, &mut details, &mut diagnostics);
+    // A directory the walk could not read hides the bindings below it.
+    let mut failed = diagnostics.len();
+    failed += collect_projection_orphans(root, realm_filter, apply, &mut details, &mut diagnostics);
     let mut ended: BTreeMap<String, Vec<(String, PathBuf, bool)>> = BTreeMap::new();
     let mut presence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
     // Kept apart from the readers' view above: here a server that is gone
@@ -1685,7 +1706,7 @@ pub fn sweep(
     // sight.
     let mut absence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
     if realm_filter.is_none() {
-        collect_tab_orders(
+        failed += collect_tab_orders(
             root,
             apply,
             panes,
@@ -1700,6 +1721,7 @@ pub fn sweep(
             Ok(identity) => identity,
             Err(error) => {
                 diagnostics.push(error.diagnostic);
+                failed += 1;
                 continue;
             }
         };
@@ -1708,6 +1730,7 @@ pub fn sweep(
             Ok(None) => continue,
             Err(error) => {
                 diagnostics.push(error.diagnostic);
+                failed += 1;
                 continue;
             }
         };
@@ -1730,6 +1753,7 @@ pub fn sweep(
             }
             Err(error) => {
                 diagnostics.push(error.diagnostic);
+                failed += 1;
                 details.push(json!({"kind":"binding_selection","binding_id":binding_id,"action":"unavailable"}));
                 continue;
             }
@@ -1740,6 +1764,7 @@ pub fn sweep(
             Ok(end) => end,
             Err(error) => {
                 diagnostics.push(error.diagnostic);
+                failed += 1;
                 continue;
             }
         };
@@ -1761,7 +1786,10 @@ pub fn sweep(
                     binding_dir.to_path_buf(),
                     old,
                 )),
-                Err(error) => diagnostics.push(error.diagnostic),
+                Err(error) => {
+                    diagnostics.push(error.diagnostic);
+                    failed += 1;
+                }
             }
         }
         if current {
@@ -1849,7 +1877,10 @@ pub fn sweep(
                             details.push(json!({"kind":"subagent_compaction","binding_id":binding_id,"action":outcome.action,"floor_mono_ns":outcome.floor,"covered":outcome.covered,"deleted":outcome.deleted}));
                         }
                     }
-                    Err(error) => diagnostics.push(error.diagnostic),
+                    Err(error) => {
+                        diagnostics.push(error.diagnostic);
+                        failed += 1;
+                    }
                 }
             } else {
                 match compaction_plan(binding_dir, &address, launch_id, binding_id, &now, None) {
@@ -1885,7 +1916,7 @@ pub fn sweep(
                     panes,
                     processes,
                 };
-                pane_retention(
+                failed += usize::from(pane_retention(
                     &run,
                     binding_path,
                     &binding,
@@ -1893,7 +1924,7 @@ pub fn sweep(
                     end,
                     &mut details,
                     &mut diagnostics,
-                )?;
+                )?);
             }
             continue;
         }
@@ -1918,6 +1949,7 @@ pub fn sweep(
             Ok(probe) => probe,
             Err(error) => {
                 diagnostics.push(error.diagnostic);
+                failed += 1;
                 continue;
             }
         };
@@ -2026,7 +2058,10 @@ pub fn sweep(
                     }
                 }
             }
-            Err(error) => diagnostics.push(error.diagnostic),
+            Err(error) => {
+                diagnostics.push(error.diagnostic);
+                failed += 1;
+            }
         }
     }
     let cap_paths = binding_cap_paths_by_realm(&ended);
@@ -2069,6 +2104,7 @@ pub fn sweep(
             Ok(identity) => identity,
             Err(error) => {
                 diagnostics.push(error.diagnostic);
+                failed += 1;
                 continue;
             }
         };
@@ -2207,7 +2243,10 @@ pub fn sweep(
                     details.push(json!({"kind":"binding_retention","binding_id":binding_id_for_detail,"action":"prune"}));
                 }
             }
-            Err(error) => diagnostics.push(error.diagnostic),
+            Err(error) => {
+                diagnostics.push(error.diagnostic);
+                failed += 1;
+            }
         }
     }
     let detail_count = details.len();
@@ -2219,6 +2258,7 @@ pub fn sweep(
             detail_count,
             total_detail_count: detail_count,
             details,
+            failed_steps: if apply { failed } else { 0 },
         },
         diagnostics,
     ))
