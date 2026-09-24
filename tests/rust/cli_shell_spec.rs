@@ -1162,3 +1162,33 @@ fn a_state_root_that_has_published_no_tab_order_answers_completely() {
         "a read command creates no state directory"
     );
 }
+
+#[test]
+fn a_variable_that_is_not_utf8_is_skipped_instead_of_stopping_every_command() {
+    use std::os::unix::ffi::OsStrExt;
+    let scratch = Scratch::new();
+    let state = scratch.0.join("state");
+    fs::create_dir_all(&state).expect("create state root");
+    let unreadable = std::ffi::OsStr::from_bytes(b"latin-1 \xe9t\xe9");
+    let tabs = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .arg("tabs")
+        .env_clear()
+        .env("WEZTERM_ATTENTION_DIR", &state)
+        .env("SOME_LOCALE_VALUE", unreadable)
+        .output()
+        .expect("run tabs");
+    assert_eq!(tabs.status.code(), Some(0), "{tabs:?}");
+    let envelope: Value = serde_json::from_slice(&tabs.stdout).expect("tabs JSON");
+    assert_eq!(envelope["complete"], true);
+
+    let hook = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .args(["hooks", "event", "claude", "Stop"])
+        .env_clear()
+        .env("WEZTERM_ATTENTION_DIR", &state)
+        .env("SOME_LOCALE_VALUE", unreadable)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run hook");
+    assert_eq!(hook.status.code(), Some(0), "{hook:?}");
+    assert!(!String::from_utf8_lossy(&hook.stderr).contains("panicked"));
+}
