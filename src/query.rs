@@ -769,7 +769,13 @@ fn read_pane_facts_once(
     let presence = if server_exited {
         "verified_absent".to_owned()
     } else {
-        presence_at_socket(socket, address, panes, processes, &mut diagnostics)
+        match presence_at_socket(socket, address, panes, processes, &mut diagnostics) {
+            PaneEvidence::Observed(presence) => presence,
+            PaneEvidence::ServerGone { diagnostic } => {
+                diagnostics.push(diagnostic);
+                "unavailable".to_owned()
+            }
+        }
     };
     for item in &mut diagnostics[before_presence..] {
         item.context
@@ -1429,12 +1435,13 @@ pub(crate) enum PaneEvidence {
     /// `present`, `verified_absent` or `unavailable`, as a reader reports it.
     /// A pane whose server is shown to have exited reads `verified_absent`.
     Observed(String),
-    /// The realm's socket path no longer carries this incarnation: the file
-    /// is gone (`socket_gone`) or holds another identity
-    /// (`incarnation_changed`), and nothing shows the server gone with it. It
-    /// may still run with its socket removed or replaced, so its records are
-    /// kept. A reader reports the pane as unavailable, with the diagnostic,
-    /// which says what became of the socket: no probe failed to answer.
+    /// The realm's socket path no longer serves this incarnation: the file
+    /// is gone (`socket_gone`), holds another identity
+    /// (`incarnation_changed`), or refuses connections (`socket_refused`),
+    /// and nothing shows the server gone with it. It may still run with its
+    /// socket removed, replaced or not accepting, so its records are kept. A
+    /// reader reports the pane as unavailable, with the diagnostic, which
+    /// says what became of the socket: no probe failed to answer.
     ServerGone { diagnostic: Diagnostic },
 }
 
@@ -1583,13 +1590,7 @@ pub(crate) fn pane_evidence(
             return unavailable();
         }
     }
-    PaneEvidence::Observed(presence_at_socket(
-        socket_path,
-        address,
-        Some(panes),
-        processes,
-        diagnostics,
-    ))
+    presence_at_socket(socket_path, address, Some(panes), processes, diagnostics)
 }
 
 /// Whether another pane address holds a binding of this provider session that
@@ -1702,48 +1703,60 @@ fn presence_at_socket(
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
     diagnostics: &mut Vec<Diagnostic>,
-) -> String {
+) -> PaneEvidence {
     let pane_id = address.pane_id.as_str();
+    let observed = |presence: &str| PaneEvidence::Observed(presence.to_owned());
     let Some(panes) = panes else {
         diagnostics.push(diagnostic("probe_unavailable", "pane probe is unavailable"));
-        return "unavailable".into();
+        return observed("unavailable");
     };
-    match panes.list(socket_path) {
-        Ok(rows) if rows.iter().any(|row| row.pane_id == pane_id) => "present".to_owned(),
+    let listing = panes.list(socket_path);
+    let error = match listing {
+        Ok(rows) if rows.iter().any(|row| row.pane_id == pane_id) => return observed("present"),
         // The server answered and does not list the pane, which is what shows
         // it gone; the process listing is asked only whether a process still
         // carries it. One that could not read every process has still read
         // all it could, so a pair it did not see counts here as it does not
         // where the process listing is the only evidence.
-        Ok(_) => match processes.map(|probe| probe.presence(socket_path, pane_id)) {
-            Some(Presence::Present) => "present".to_owned(),
-            Some(Presence::Absent | Presence::Unseen) => "verified_absent".to_owned(),
-            _ => {
-                diagnostics.push(diagnostic(
-                    "probe_unavailable",
-                    "identity-scoped process probe is unavailable",
-                ));
-                "unavailable".to_owned()
-            }
-        },
-        // A socket file nobody listens on can never be listened on again, so
-        // its server has exited, as a GUI that quit leaves its socket file
-        // behind. The identity is read again after the refusal: a file put in
-        // its place meanwhile would have refused for its own server.
-        Err(_)
-            if crate::wezterm::listener_refuses(socket_path)
-                && matches!(
-                    recorded_server(socket_path, &address.realm_id, &address.incarnation_id),
-                    RecordedServer::Current
-                ) =>
-        {
-            "verified_absent".to_owned()
+        Ok(_) => {
+            return match processes.map(|probe| probe.presence(socket_path, pane_id)) {
+                Some(Presence::Present) => observed("present"),
+                Some(Presence::Absent | Presence::Unseen) => observed("verified_absent"),
+                _ => {
+                    diagnostics.push(diagnostic(
+                        "probe_unavailable",
+                        "identity-scoped process probe is unavailable",
+                    ));
+                    observed("unavailable")
+                }
+            };
         }
-        Err(error) => {
-            diagnostics.push(error.diagnostic);
-            "unavailable".to_owned()
-        }
+        Err(error) => error,
+    };
+    // The identity is read again after each look below: a file put in the
+    // socket's place meanwhile would answer for its own server.
+    let still_current = || {
+        matches!(
+            recorded_server(socket_path, &address.realm_id, &address.incarnation_id),
+            RecordedServer::Current
+        )
+    };
+    // A GUI that quit leaves its socket file behind, and its local panes
+    // ended with it.
+    if crate::wezterm::gui_process_exited(socket_path) && still_current() {
+        return observed("verified_absent");
     }
+    // A refusal says nothing listens now, not that the server exited: a
+    // live server whose accept queue is full refuses, and so does one whose
+    // listener stopped accepting while its panes run on. Its records are kept
+    // like those of a server whose socket is gone, and no probe failed.
+    if crate::wezterm::listener_refuses(socket_path) && still_current() {
+        return PaneEvidence::ServerGone {
+            diagnostic: diagnostic("socket_refused", "mux socket refuses connections"),
+        };
+    }
+    diagnostics.push(error.diagnostic);
+    observed("unavailable")
 }
 
 pub fn read_bindings_with_ports(
@@ -2455,11 +2468,6 @@ fn observe_tab_source(
     };
     matches()?;
     let inventory = lister.list_windows(&source.socket_path);
-    if inventory.is_err() && crate::wezterm::listener_refuses(&source.socket_path) {
-        // Nothing listens on the GUI's socket file: that GUI has exited.
-        matches()?;
-        return Err(WindowCheckReason::SocketGone);
-    }
     matches()?;
     inventory.map_err(|error| {
         if error.diagnostic.code == "record_invalid" {

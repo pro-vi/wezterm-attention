@@ -205,27 +205,30 @@ resolved path, device, inode and change time) and what else can be shown:
 
 - **Live.** The socket still carries the incarnation and its pane listing answers. Presence is
   decided per pane as above.
-- **Exited.** Any one of: the socket still carries the incarnation and refuses a connection, so
-  nothing listens on that file (a GUI that quit leaves its socket file behind, and WezTerm itself
-  treats a GUI socket that refuses as dead); the socket file is named `gui-sock-<pid>`, as a
-  WezTerm GUI names its own, and no process with that pid exists, since a GUI's local panes end
-  with it; or the process probe read every process of this user and none carries the socket and
-  pane id. A pane of an exited server reads `verified_absent`, and sweep counts it as one
-  sighting under the rule above. Nothing about it is a diagnostic.
-- **Gone, not proven.** The socket file no longer exists, or the path holds a different socket
-  (a new server bound it, or a `chmod` or `touch` changed its metadata, which the incarnation
-  includes), and none of the proofs above holds. The server may still run with its socket
-  removed or replaced, so every record is kept: sweep neither ends the binding nor removes the
-  pane tree, and lists no detail for it. Readers report the pane `unavailable` with a
-  `socket_gone` diagnostic ("mux socket no longer exists") or an `incarnation_changed` one
-  ("realm socket identity changed"). This is recorded history, not a probe that did not answer,
-  so it never makes `doctor` or `sweep` incomplete; they report it once per code for the run, in
-  one diagnostic whose `context.incarnations` lists each such incarnation with its `realm_id`,
-  `incarnation_id`, `path` (the incarnation's directory relative to the state root) and
-  `pane_count`, however many panes it holds.
+- **Exited.** Either the socket file is named `gui-sock-<pid>`, as a WezTerm GUI names its own,
+  and no process with that pid exists, since a GUI's local panes end with it (a GUI that quit
+  usually leaves that file behind; when the file still carries the incarnation, this is asked
+  only after its pane listing failed); or the process probe read every process of this user and
+  none carries the socket and pane id. A pane of an exited server reads `verified_absent`, and
+  sweep counts it as one sighting under the rule above. Nothing about it is a diagnostic.
+- **Gone, not proven.** The socket file no longer exists, the path holds a different socket (a
+  new server bound it, or a `chmod` or `touch` changed its metadata, which the incarnation
+  includes), or the socket still carries the incarnation, its pane listing failed and it refuses
+  a connection; and neither proof above holds. A refusal is not an exit: macOS refuses a
+  connection to a live listener whose accept queue is full, and WezTerm stops accepting on its
+  first accept error while the server and its panes run on. The server may still run, so every
+  record is kept: sweep neither ends the binding nor removes the pane tree, and lists no detail
+  for it. Readers report the pane `unavailable` with a `socket_gone` diagnostic ("mux socket no
+  longer exists"), an `incarnation_changed` one ("realm socket identity changed") or a
+  `socket_refused` one ("mux socket refuses connections"). This is recorded history, not a probe
+  that did not answer, so it never makes `doctor` or `sweep` incomplete; they report it once per
+  code for the run, in one diagnostic whose `context.incarnations` lists each such incarnation
+  with its `realm_id`, `incarnation_id`, `path` (the incarnation's directory relative to the
+  state root) and `pane_count`, however many panes it holds.
 - **Did not answer.** The socket still carries the incarnation, does not refuse, and its pane
   listing fails or times out. That is an unavailable probe in `doctor` and `sweep` alike: the
   diagnostic is `realm_unavailable` with the listing's own message, and the report is incomplete.
+  A tab-order file naming such a pane is kept, and leaves sweep incomplete the same way.
 
 A probe recorded at a monotonic time later than the current clock, as after a reboot, restarts
 the count; that can only delay an end. Every other diagnostic of sweep's absence and retention

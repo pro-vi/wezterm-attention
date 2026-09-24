@@ -1,9 +1,8 @@
 //! What the socket at a realm's recorded path says about the server that held
-//! an incarnation. A server shown to have exited -- nothing listens on its
-//! socket file, its GUI process is gone, or no process carries the pane --
-//! leaves its panes absent, and the two-observation rule reclaims them. A
-//! socket that is gone or replaced with nothing to show the server gone keeps
-//! every record, and doctor and sweep report that history once, however much
+//! an incarnation. A server shown to have exited -- its GUI process is gone,
+//! or no process carries the pane -- leaves its panes absent, and the
+//! two-observation rule reclaims them. A socket that is gone, replaced or
+//! refusing with nothing to show the server gone keeps every record, and doctor and sweep report that history once, however much
 //! of it there is. A mux that did not answer leaves them incomplete.
 
 use super::pane_retention::{OP_1, OP_2, actions, end_long_ago, end_reason, pane_dir, tree_bytes};
@@ -191,13 +190,116 @@ fn a_replaced_socket_with_no_process_left_on_the_pane_is_reclaimed() {
     assert_eq!(end_reason(&binding_dir), Some(json!("sweep_absent")));
 }
 
-/// A server that exited and left its socket file behind, as a GUI that quits
-/// does: nothing listens on the file, so its listing fails, and that failure
-/// is the server's exit, not a probe that did not answer. The pane reads
+/// The pid of a process that has exited.
+fn exited_pid() -> u32 {
+    let mut child = Command::new("/usr/bin/true").spawn().expect("spawn");
+    let pid = child.id();
+    child.wait().expect("wait");
+    pid
+}
+
+/// Connects to `socket` without accepting until a connection is refused, or
+/// until the queue will take no more, as a server that stopped accepting
+/// fills its own queue with each listing that timed out. Returns the queued
+/// connections, which must stay open, and whether the last one was refused.
+fn fill_accept_queue(socket: &str) -> (Vec<std::os::fd::OwnedFd>, bool) {
+    use std::os::fd::FromRawFd;
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in address.sun_path.iter_mut().zip(socket.as_bytes()) {
+        *slot = *byte as libc::c_char;
+    }
+    let mut queued = Vec::new();
+    for _ in 0..4096 {
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        assert!(fd >= 0, "socket");
+        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        unsafe {
+            libc::fcntl(
+                fd,
+                libc::F_SETFL,
+                libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK,
+            );
+        }
+        let connected = unsafe {
+            libc::connect(
+                fd,
+                (&address as *const libc::sockaddr_un).cast(),
+                std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+            )
+        };
+        if connected != 0 {
+            let refused =
+                std::io::Error::last_os_error().raw_os_error() == Some(libc::ECONNREFUSED);
+            return (queued, refused);
+        }
+        queued.push(owned);
+    }
+    (queued, false)
+}
+
+/// A live mux whose accept queue is full: its listing fails, and a new
+/// connection is refused on macOS although the server and its panes run on.
+/// Whatever the process probe says, two applies a minute apart end nothing.
+#[test]
+fn a_live_mux_with_a_full_accept_queue_ends_nothing() {
+    for presence in [Presence::Present, Presence::Unseen, Presence::Unavailable] {
+        let setup = Setup::new();
+        setup.claim_and_bind();
+        let binding_dir = setup.binding_dir();
+        let pane = pane_dir(&setup);
+        let (_queued, refused) = fill_accept_queue(&setup.env["WEZTERM_UNIX_SOCKET"]);
+        if cfg!(target_os = "macos") {
+            assert!(refused, "the full queue must refuse a connection");
+        }
+        setup.processes.set(presence);
+        let (runs, diagnostics) = two_applies(&setup, &UnansweredPanes);
+        assert_eq!(
+            end_reason(&binding_dir),
+            None,
+            "{presence:?}: {diagnostics:?}"
+        );
+        assert!(!pane.join("absence-probe.json").exists(), "{presence:?}");
+        for details in &runs {
+            assert!(
+                !actions(details, "absence").contains(&&json!("end")),
+                "{details:?}"
+            );
+        }
+    }
+}
+
+/// The same for an old pane's whole tree: it survives with its reviews.
+#[test]
+fn a_live_mux_with_a_full_accept_queue_keeps_an_old_panes_tree() {
+    for presence in [Presence::Present, Presence::Unseen, Presence::Unavailable] {
+        let setup = Setup::new();
+        setup.claim_and_bind();
+        wezterm_attention::lifecycle::apply_mark_review(&setup.env, "build", false)
+            .expect("mark review");
+        end_long_ago(&setup);
+        let pane = pane_dir(&setup);
+        let (_queued, _) = fill_accept_queue(&setup.env["WEZTERM_UNIX_SOCKET"]);
+        setup.processes.set(presence);
+        let before = tree_bytes(&setup.root());
+        let (runs, _) = two_applies(&setup, &UnansweredPanes);
+        for details in &runs {
+            assert!(
+                !actions(details, "pane_retention").contains(&&json!("prune")),
+                "{details:?}"
+            );
+        }
+        assert!(pane.join("reviews").exists(), "{presence:?}");
+        assert_eq!(tree_bytes(&setup.root()), before, "{presence:?}");
+    }
+}
+
+/// A GUI that quit and left its socket file behind: its `gui-sock-<pid>`
+/// process no longer exists, so its local panes ended with it. The pane reads
 /// absent, the binding ends after two sightings, and every answer is complete.
 #[test]
-fn a_socket_file_nobody_listens_on_is_a_server_that_exited() {
-    let setup = Setup::new();
+fn an_exited_guis_stale_socket_file_is_reclaimed() {
+    let setup = Setup::with_socket_name(&format!("gui-sock-{}", exited_pid()));
     setup.claim_and_bind();
     let binding_dir = setup.binding_dir();
     setup.stop_listening();
@@ -228,17 +330,79 @@ fn a_socket_file_nobody_listens_on_is_a_server_that_exited() {
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
 
-/// The same through the CLI, whose `wezterm cli list` fails against the
-/// abandoned socket: sweep is complete and exits 0.
+/// A GUI socket that refuses while its process still runs shows nothing gone:
+/// the records are kept, and reported as history.
 #[test]
-fn a_socket_file_nobody_listens_on_leaves_sweep_complete() {
+fn a_refusing_gui_socket_whose_process_runs_is_kept() {
+    let setup = Setup::with_socket_name(&format!("gui-sock-{}", std::process::id()));
+    setup.claim_and_bind();
+    let binding_dir = setup.binding_dir();
+    setup.stop_listening();
+    setup.processes.set(Presence::Unseen);
+    let (runs, diagnostics) = two_applies(&setup, &UnansweredPanes);
+    for details in &runs {
+        assert!(actions(details, "absence").is_empty(), "{details:?}");
+    }
+    assert_eq!(end_reason(&binding_dir), None);
+    assert_eq!(codes(&diagnostics), ["socket_refused", "socket_refused"]);
+}
+
+/// A mux socket that refuses, with nothing to show its server gone: every
+/// record is kept, and doctor and sweep report it once as history and stay
+/// complete.
+#[test]
+fn a_refusing_mux_socket_is_kept_as_history() {
     let setup = Setup::new();
     setup.claim_and_bind();
+    let binding_dir = setup.binding_dir();
+    let pane = pane_dir(&setup);
+    let (address, _) = pane_address(&setup.env).expect("address");
     setup.stop_listening();
-    for arguments in [&["sweep", "--json"][..], &["sweep", "--apply", "--json"]] {
+    setup.processes.set(Presence::Unseen);
+    let (runs, _) = two_applies(&setup, &UnansweredPanes);
+    for details in &runs {
+        assert!(actions(details, "absence").is_empty(), "{details:?}");
+    }
+    assert_eq!(end_reason(&binding_dir), None);
+    assert!(!pane.join("absence-probe.json").exists());
+    for arguments in [
+        &["doctor", "--json"][..],
+        &["sweep", "--json"],
+        &["sweep", "--apply", "--json"],
+    ] {
         let (code, response) = run_cli(&setup, "exit 3", arguments);
         assert_eq!(code, Some(0), "{arguments:?}: {response}");
         assert_eq!(response["complete"], true, "{arguments:?}: {response}");
+        let refused: Vec<&Value> = response["diagnostics"]
+            .as_array()
+            .expect("diagnostics")
+            .iter()
+            .filter(|item| item["code"] == "socket_refused")
+            .collect();
+        assert_eq!(refused.len(), 1, "{arguments:?}: {response}");
+        assert_eq!(
+            refused[0]["context"]["incarnations"][0]["incarnation_id"],
+            json!(address.incarnation_id),
+            "{arguments:?}: {response}"
+        );
+    }
+    assert_eq!(end_reason(&binding_dir), None);
+}
+
+/// A tab-order file naming a pane whose mux did not answer is kept, and its
+/// fate is undecided, so sweep is incomplete, as it is for a binding.
+#[test]
+fn a_tab_order_pane_whose_mux_does_not_answer_leaves_sweep_incomplete() {
+    let setup = Setup::new();
+    wezterm_attention::claim_launch(&setup.env, &setup.ports()).expect("claim");
+    let (address, _) = pane_address(&setup.env).expect("address");
+    let marker = format!("v2:{}:{}:42", address.realm_id, address.incarnation_id);
+    let path = write_tab_order(&setup.root(), 5, &[&marker]);
+    for arguments in [&["sweep", "--json"][..], &["sweep", "--apply", "--json"]] {
+        let (code, response) = run_cli(&setup, "exit 3", arguments);
+        assert_eq!(code, Some(1), "{arguments:?}: {response}");
+        assert_eq!(response["complete"], false, "{arguments:?}: {response}");
+        assert!(path.exists());
     }
 }
 
@@ -248,10 +412,7 @@ fn a_socket_file_nobody_listens_on_leaves_sweep_complete() {
 /// process.
 #[test]
 fn a_gone_gui_socket_whose_process_exited_is_reclaimed() {
-    let mut child = Command::new("/usr/bin/true").spawn().expect("spawn");
-    let pid = child.id();
-    child.wait().expect("wait");
-    let setup = Setup::with_socket_name(&format!("gui-sock-{pid}"));
+    let setup = Setup::with_socket_name(&format!("gui-sock-{}", exited_pid()));
     setup.claim_and_bind();
     let binding_dir = setup.binding_dir();
     fs::remove_file(&setup.env["WEZTERM_UNIX_SOCKET"]).expect("remove socket");
@@ -410,7 +571,7 @@ fn every_reader_calls_a_removed_socket_gone() {
 /// scope matches and the pane is absent.
 #[test]
 fn inspect_reads_a_pane_of_an_exited_server_as_absent() {
-    let setup = Setup::new();
+    let setup = Setup::with_socket_name(&format!("gui-sock-{}", exited_pid()));
     setup.claim_and_bind();
     setup.stop_listening();
     let launch_id = setup.env["WEZTERM_ATTENTION_LAUNCH_ID"].clone();

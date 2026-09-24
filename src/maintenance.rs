@@ -447,16 +447,18 @@ pub fn doctor_with_environment(
             .any(|item| item.code == "integration_version_mismatch");
     probes.push(json!({"name":"versions","status":if version_finding{"finding"}else{"healthy"}}));
     // A mux that did not answer leaves its panes unknown. A socket that is
-    // gone or replaced is a finding about the recorded history.
+    // gone, replaced or refusing is a finding about the recorded history.
     let socket_status = if state_diagnostics
         .iter()
         .any(|item| item.code == "realm_unavailable")
     {
         "unavailable"
-    } else if state_diagnostics
-        .iter()
-        .any(|item| matches!(item.code.as_str(), "socket_gone" | "incarnation_changed"))
-    {
+    } else if state_diagnostics.iter().any(|item| {
+        matches!(
+            item.code.as_str(),
+            "socket_gone" | "socket_refused" | "incarnation_changed"
+        )
+    }) {
         "finding"
     } else if realm_sockets.is_empty() {
         "unobserved"
@@ -1011,8 +1013,9 @@ fn absence_action(
 }
 
 /// What [`absence_presence`] says of a pane whose server's socket no longer
-/// carries its incarnation when nothing shows the server gone. The server may
-/// still run with its socket removed or replaced, so its records are kept.
+/// serves its incarnation when nothing shows the server gone. The server may
+/// still run with its socket removed, replaced or not accepting, so its
+/// records are kept.
 /// That is the state of the recorded history, not a probe that did not
 /// answer: sweep reports it once for the whole run and decides nothing on it.
 const SERVER_GONE: &str = "server_gone";
@@ -1054,10 +1057,10 @@ fn name_pane(items: &mut [Diagnostic], address: &PaneAddress, binding_id: &str) 
 }
 
 /// The diagnostics doctor and sweep report. Kept history, the panes whose
-/// server's socket is gone or replaced with nothing to show the server gone,
-/// is reported once per code for the run: one diagnostic naming each such
-/// incarnation, the directory that holds it and how many of its panes were
-/// looked at, so the amount of history never cuts the answer short. A
+/// server's socket is gone, replaced or refusing with nothing to show the
+/// server gone, is reported once per code for the run: one diagnostic naming
+/// each such incarnation, the directory that holds it and how many of its
+/// panes were looked at, so the amount of history never cuts the answer short. A
 /// diagnostic that names what it is about is said once however often it was
 /// found, as when an apply looks at a pane again before deciding.
 fn fold_kept_history(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
@@ -1073,9 +1076,11 @@ fn fold_kept_history(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         };
-        if matches!(item.code.as_str(), "socket_gone" | "incarnation_changed")
-            && let (Some(realm_id), Some(incarnation_id), Some(pane_id)) =
-                (field("realm_id"), field("incarnation_id"), field("pane_id"))
+        if matches!(
+            item.code.as_str(),
+            "socket_gone" | "socket_refused" | "incarnation_changed"
+        ) && let (Some(realm_id), Some(incarnation_id), Some(pane_id)) =
+            (field("realm_id"), field("incarnation_id"), field("pane_id"))
         {
             let position = folded.len();
             let (_, incarnations) = held.entry(item.code.clone()).or_insert_with(|| {
@@ -1364,6 +1369,18 @@ fn collect_tab_orders(
                         let before = diagnostics.len();
                         let observed =
                             pane_presence(root, address, Some(panes), processes, diagnostics);
+                        // A mux that did not answer leaves this file's fate
+                        // undecided, as it does a binding's.
+                        if observed == "unavailable"
+                            && diagnostics[before..]
+                                .iter()
+                                .any(|item| item.code == "realm_unavailable")
+                        {
+                            diagnostics.push(diagnostic(
+                                "probe_unavailable",
+                                "tab order pane presence cannot be established",
+                            ));
+                        }
                         // Named by the file that asked and the pane it asked
                         // about, as a bindings answer names its panes.
                         for item in &mut diagnostics[before..] {
