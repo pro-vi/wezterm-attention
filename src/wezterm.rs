@@ -733,20 +733,9 @@ fn list_wezterm_inventory(socket_path: &str) -> Result<Vec<u8>> {
     })
 }
 
-/// A path as a diagnostic prints it: control characters become `?`, so a
-/// path cannot restyle the terminal that reads the message.
+/// A path as a diagnostic prints it.
 fn shown_path(path: &Path) -> String {
-    path.display()
-        .to_string()
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                '?'
-            } else {
-                character
-            }
-        })
-        .collect()
+    crate::protocol::terminal_safe(&path.display().to_string())
 }
 
 /// Why a bounded child run returned no output.

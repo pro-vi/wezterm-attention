@@ -340,17 +340,7 @@ fn emit<T: Serialize>(response: &Response<T>, as_json: bool, quiet: bool) {
         // that reads stdout reads only the word.
         print_out(&response.status);
         for diagnostic in &response.diagnostics {
-            let message = diagnostic
-                .message
-                .chars()
-                .map(|character| {
-                    if character.is_control() {
-                        '?'
-                    } else {
-                        character
-                    }
-                })
-                .collect::<String>();
+            let message = wezterm_attention::protocol::terminal_safe(&diagnostic.message);
             print_err(&format!("attention: {}: {message}", diagnostic.code));
         }
     }

@@ -462,6 +462,20 @@ pub fn free_of_control(text: &str) -> bool {
     !text.chars().any(char::is_control)
 }
 
+/// `text` as a terminal may print it: every character [`free_of_control`]
+/// refuses becomes `?`, so a message cannot restyle the terminal reading it.
+pub fn terminal_safe(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_control() {
+                '?'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 fn safe_text(value: &Value, maximum: usize) -> bool {
     value
         .as_str()
