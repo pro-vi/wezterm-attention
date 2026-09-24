@@ -10,7 +10,7 @@ use super::*;
 use std::os::unix::fs::PermissionsExt;
 use wezterm_attention::protocol::{AttentionError, Diagnostic};
 use wezterm_attention::query::{
-    PanePresence, ScopeRelation, WindowCheck, WindowCheckReason,
+    BindingHealth, PanePresence, ScopeRelation, WindowCheck, WindowCheckReason,
     read_bindings_for_socket_with_ports, read_checked_tab_publications,
 };
 
@@ -358,13 +358,15 @@ fn a_refusing_mux_socket_is_kept_as_history() {
     let pane = pane_dir(&setup);
     let (address, _) = pane_address(&setup.env).expect("address");
     setup.stop_listening();
-    setup.processes.set(Presence::Unseen);
-    let (runs, _) = two_applies(&setup, &UnansweredPanes);
-    for details in &runs {
-        assert!(actions(details, "absence").is_empty(), "{details:?}");
+    for presence in [Presence::Present, Presence::Unseen, Presence::Unavailable] {
+        setup.processes.set(presence);
+        let (runs, _) = two_applies(&setup, &UnansweredPanes);
+        for details in &runs {
+            assert!(actions(details, "absence").is_empty(), "{details:?}");
+        }
+        assert_eq!(end_reason(&binding_dir), None, "{presence:?}");
+        assert!(!pane.join("absence-probe.json").exists(), "{presence:?}");
     }
-    assert_eq!(end_reason(&binding_dir), None);
-    assert!(!pane.join("absence-probe.json").exists());
     for arguments in [
         &["doctor", "--json"][..],
         &["sweep", "--json"],
@@ -636,4 +638,170 @@ fn sweep_names_each_pane_it_could_not_decide_once() {
             );
         }
     }
+}
+
+/// A pane listing that fails on the socket named here, and lists pane 42
+/// elsewhere.
+struct UnansweredAt(String);
+
+impl PaneLister for UnansweredAt {
+    fn list(&self, socket_path: &str) -> wezterm_attention::protocol::Result<Vec<PaneRow>> {
+        if socket_path == self.0 {
+            return UnansweredPanes.list(socket_path);
+        }
+        Ok(vec![PaneRow {
+            pane_id: "42".to_owned(),
+            tty_name: Some("/dev/ttys888".to_owned()),
+        }])
+    }
+}
+
+/// A refusing socket is read as a gone one is: when the process listing read
+/// every process and none carries the pane, the pane is absent, and two
+/// applies end its binding.
+#[test]
+fn a_refusing_socket_with_no_process_left_on_the_pane_is_reclaimed() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let binding_dir = setup.binding_dir();
+    setup.stop_listening();
+    setup.processes.set(Presence::Absent);
+    let (runs, diagnostics) = two_applies(&setup, &UnansweredPanes);
+    assert_eq!(actions(&runs[0], "absence"), [&json!("first_absence")]);
+    assert_eq!(actions(&runs[1], "absence"), [&json!("end")]);
+    assert_eq!(end_reason(&binding_dir), Some(json!("sweep_absent")));
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+/// `inspect` answers a scope whose socket refuses as it answers one whose
+/// socket is gone or replaced: the scope is unavailable, and the scope facet
+/// says why.
+#[test]
+fn inspect_answers_a_refusing_scope_as_a_gone_one() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    setup.stop_listening();
+    let launch_id = setup.env["WEZTERM_ATTENTION_LAUNCH_ID"].clone();
+    let scope = PaneScope::new(
+        pane_address(&setup.env).expect("address").0,
+        launch_id.clone(),
+        Some(binding_id("claude", "session-a", &launch_id)),
+    )
+    .expect("scope");
+    let facts = read_pane_facts_with_ports(
+        &setup.root(),
+        &scope,
+        &FileRecords,
+        &setup.clock,
+        Some(&UnansweredPanes),
+        Some(&setup.processes),
+    )
+    .expect("inspect");
+    assert_eq!(facts.scope_relation, ScopeRelation::Unavailable);
+    assert_eq!(codes(&facts.diagnostics), ["socket_refused"]);
+    assert_eq!(
+        facts.diagnostics[0].context.get("facet"),
+        Some(&json!("scope"))
+    );
+}
+
+/// The same session bound under a refusing server and a live one is not a
+/// conflict in `bindings`, and `inspect` of the refusing server's row does
+/// not call it one either.
+#[test]
+fn a_binding_under_a_refusing_socket_is_no_rival_in_inspect() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let (_live, _) =
+        super::realm_filters::bind_on_another_socket(&setup, "second.sock", "session-a");
+    let refusing = fs::canonicalize(&setup.env["WEZTERM_UNIX_SOCKET"])
+        .expect("socket")
+        .to_string_lossy()
+        .into_owned();
+    setup.stop_listening();
+    let panes = UnansweredAt(refusing);
+    let (rows, _) = read_bindings_with_ports(&setup.root(), Some(&panes), Some(&setup.processes))
+        .expect("bindings");
+    assert!(
+        rows.iter().all(|row| row.binding_health == "valid"),
+        "{rows:?}"
+    );
+    let launch_id = setup.env["WEZTERM_ATTENTION_LAUNCH_ID"].clone();
+    let scope = PaneScope::new(
+        pane_address(&setup.env).expect("address").0,
+        launch_id.clone(),
+        Some(binding_id("claude", "session-a", &launch_id)),
+    )
+    .expect("scope");
+    let facts = read_pane_facts_with_ports(
+        &setup.root(),
+        &scope,
+        &FileRecords,
+        &setup.clock,
+        Some(&panes),
+        Some(&setup.processes),
+    )
+    .expect("inspect");
+    assert_eq!(
+        facts.binding_health,
+        BindingHealth::Valid,
+        "{:?}",
+        facts.diagnostics
+    );
+}
+
+/// A GUI whose `gui-sock-<pid>` process is gone has exited, also when it left
+/// its socket file behind: `tabs` says so as `bindings` does. The same file
+/// refusing while its process runs is an inventory that did not answer.
+#[test]
+fn tabs_reads_an_exited_guis_stale_socket_as_gone() {
+    for (pid, reason) in [
+        (exited_pid(), WindowCheckReason::SocketGone),
+        (std::process::id(), WindowCheckReason::ProbeUnavailable),
+    ] {
+        let setup = Setup::with_socket_name(&format!("gui-sock-{pid}"));
+        let root = setup.root();
+        write_sourced_tab_order(&root, &setup.env["WEZTERM_UNIX_SOCKET"], 0);
+        setup.stop_listening();
+        let lister = WindowLister(|_: &str| {
+            Err(AttentionError::new(
+                "realm_unavailable",
+                "wezterm cli list via /fake/wezterm exited with status 3",
+            ))
+        });
+        let (windows, _) =
+            read_checked_tab_publications(&root, &lister, &setup.clock).expect("tabs");
+        assert!(
+            matches!(
+                windows[0].window_check,
+                WindowCheck::Unavailable { reason: found, .. } if found == reason
+            ),
+            "{pid}: {:?}",
+            windows[0].window_check
+        );
+    }
+}
+
+/// A `WEZTERM_ATTENTION_DIR` that is not UTF-8 names no root this command can
+/// use, and is refused as a relative one is, rather than ignored in favour of
+/// the default root.
+#[test]
+fn a_state_directory_that_is_not_utf8_is_refused() {
+    use std::os::unix::ffi::OsStrExt;
+    let setup = Setup::new();
+    let not_utf8 = std::ffi::OsStr::from_bytes(b"/tmp/state-\xe9").to_owned();
+    let run = |value: &std::ffi::OsStr| {
+        let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+            .env_clear()
+            .env("HOME", &setup.env["HOME"])
+            .env("WEZTERM_ATTENTION_DIR", value)
+            .args(["bindings", "--json"])
+            .output()
+            .expect("run attention");
+        let response: Value = serde_json::from_slice(&output.stdout).expect("JSON envelope");
+        (output.status.code(), response["diagnostics"].clone())
+    };
+    let refused = run(&not_utf8);
+    assert_eq!(refused, run(std::ffi::OsStr::new("relative")));
+    assert_eq!(refused.1[0]["code"], "record_invalid", "{refused:?}");
 }

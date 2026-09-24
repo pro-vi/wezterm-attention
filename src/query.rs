@@ -771,9 +771,18 @@ fn read_pane_facts_once(
     } else {
         match presence_at_socket(socket, address, panes, processes, &mut diagnostics) {
             PaneEvidence::Observed(presence) => presence,
-            PaneEvidence::ServerGone { diagnostic } => {
-                diagnostics.push(diagnostic);
-                "unavailable".to_owned()
+            // A socket that refuses is answered as one that is gone or
+            // replaced: the scope's server may no longer be the one there.
+            PaneEvidence::ServerGone { mut diagnostic } => {
+                diagnostic
+                    .context
+                    .insert("facet".into(), Value::String("scope".into()));
+                return Ok(PaneFacts::unavailable(
+                    scope,
+                    ScopeRelation::Unavailable,
+                    vec![diagnostic],
+                    None,
+                ));
             }
         }
     };
@@ -785,10 +794,11 @@ fn read_pane_facts_once(
     // would not have matched, so the row is the pane's current one.
     let confidence = reader_confidence(true, &presence);
     let ended = end.availability == A::Present;
-    // The socket was checked above to carry this incarnation, or its server
-    // to have exited, so no newer server owns this pane's socket.
+    // A scope whose server may be gone was answered above, so the one left
+    // here is live or shown exited, as `bindings` would say of this row.
+    let server_gone = false;
     let conflicted = binding.record.as_ref().is_some_and(|record| {
-        competes(ended, false, &presence)
+        competes(ended, server_gone, &presence)
             && session_live_elsewhere(
                 root,
                 address,
@@ -1748,9 +1758,13 @@ fn presence_at_socket(
     }
     // A refusal says nothing listens now, not that the server exited: a
     // live server whose accept queue is full refuses, and so does one whose
-    // listener stopped accepting while its panes run on. Its records are kept
-    // like those of a server whose socket is gone, and no probe failed.
+    // listener stopped accepting while its panes run on. It is read as a
+    // socket that is gone is: absent only on the same proof, and otherwise
+    // kept, with no probe failed.
     if crate::wezterm::listener_refuses(socket_path) && still_current() {
+        if replaced_server_pane_gone(socket_path, pane_id, processes) {
+            return observed("verified_absent");
+        }
         return PaneEvidence::ServerGone {
             diagnostic: diagnostic("socket_refused", "mux socket refuses connections"),
         };
@@ -2469,6 +2483,12 @@ fn observe_tab_source(
     matches()?;
     let inventory = lister.list_windows(&source.socket_path);
     matches()?;
+    // A GUI whose own process is gone has exited, as a pane's reader finds
+    // it, whether or not it left its socket file behind. A refusal alone
+    // shows nothing gone, and is an inventory that did not answer.
+    if inventory.is_err() && crate::wezterm::gui_process_exited(&source.socket_path) {
+        return Err(WindowCheckReason::SocketGone);
+    }
     inventory.map_err(|error| {
         if error.diagnostic.code == "record_invalid" {
             WindowCheckReason::InventoryInvalid

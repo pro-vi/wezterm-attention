@@ -14,8 +14,8 @@ owners remain separate.
 The state root is `WEZTERM_ATTENTION_DIR` when it is set and non-empty, else
 `$XDG_STATE_HOME/wezterm-attention` when `XDG_STATE_HOME` is set, non-empty and absolute, else
 `$HOME/.local/state/wezterm-attention`. The Rust writer, the plugin and the Pi extension use this
-one order. A relative `WEZTERM_ATTENTION_DIR`, or one longer than 4096 bytes or holding a control
-character, is an error to the writer; the plugin and Pi ignore it with a warning and fall through
+one order. A relative `WEZTERM_ATTENTION_DIR`, or one longer than 4096 bytes, holding a control
+character or not UTF-8, is an error to the writer; the plugin and Pi ignore it with a warning and fall through
 to the next rule. An `XDG_STATE_HOME` that breaks the same rule is skipped by all three, silently.
 
 A text field is safe only when it contains no control character: nothing in U+0000–U+001F, U+007F
@@ -214,7 +214,8 @@ resolved path, device, inode and change time) and what else can be shown:
 - **Gone, not proven.** The socket file no longer exists, the path holds a different socket (a
   new server bound it, or a `chmod` or `touch` changed its metadata, which the incarnation
   includes), or the socket still carries the incarnation, its pane listing failed and it refuses
-  a connection; and neither proof above holds. A refusal is not an exit: macOS refuses a
+  a connection; and neither proof above holds. A refusing socket is read exactly as a missing
+  one is, in every command, the process probe included. A refusal is not an exit: macOS refuses a
   connection to a live listener whose accept queue is full, and WezTerm stops accepting on its
   first accept error while the server and its panes run on. The server may still run, so every
   record is kept: sweep neither ends the binding nor removes the pane tree, and lists no detail
