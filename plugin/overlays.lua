@@ -151,8 +151,9 @@ return function(context)
   --- The composed list last written for each window, so an unchanged bar costs
   --- no file work. Keyed by path, because that is what a write would replace.
   local published_tab_lists = {}
-  local drawn_tab_lists = {}
-  --- The one path each window's order was last written to by this process.
+  --- The one path each window's order is written to by this process. It is
+  --- chosen at the window's first publication and kept for as long as the
+  --- window is open, so no window ever has two files of this process's.
   local published_path_by_window = {}
 
   --- Remove a tab order this process published, but only while the file still
@@ -202,23 +203,34 @@ return function(context)
   --- or the v2 cache key, already translated, so a reader never repeats that
   --- translation.
   ---
+  --- A window keeps the name of its first publication, source or none, for as
+  --- long as it is open here. Moving it to a sourced name later would leave
+  --- the unsourced file describing the same window, and that name is shared
+  --- with every other GUI process, so this one could not safely take it back.
+  --- The caller holds a window's first publication until the source is
+  --- answered, so the unsourced name is used only where no source will come.
+  ---
   --- Honest about when it was written, not guaranteed current: nothing
   --- refreshes `published_at_ms` while the bar draws the same thing. The write
-  --- happens when the composed list or its source changes. Attaching a source
-  --- preserves the content timestamp because the caller is publishing the same draw.
-  local function publish_tab_order(dir, window_id, tabs, source)
+  --- happens when the composed list changes. `drawn_at` is when the bar drew
+  --- it, for a caller that held the draw back; it defaults to now.
+  local function publish_tab_order(dir, window_id, tabs, source, drawn_at)
     local rows = {}
     for index, entry in ipairs(tabs) do rows[index] = encode_tab(entry) end
     local list = "[" .. table.concat(rows, ",") .. "]"
     local window_key = dir .. "/tabs/" .. integer(window_id)
-    local path = dir .. "/tabs/"
-      .. (source and (source.incarnation_id .. "-") or "") .. integer(window_id) .. ".json"
-    if published_tab_lists[path] and published_tab_lists[path].list == list then return false end
-    local previous = drawn_tab_lists[window_key]
-    local written_at = previous and previous.list == list and previous.written_at or now_ms()
+    local path = published_path_by_window[window_key]
+    local held = path and published_tab_lists[path]
+    if held then
+      if held.list == list then return false end
+      source = held.source or nil
+    else
+      path = dir .. "/tabs/"
+        .. (source and (source.incarnation_id .. "-") or "") .. integer(window_id) .. ".json"
+    end
     -- Keys in sorted order, as json_value writes them.
     local body = table.concat({
-      '{"published_at_ms":', integer(written_at),
+      '{"published_at_ms":', integer(drawn_at or now_ms()),
       ',"schema":', source and "2" or "1",
       source and (',"source":' .. json_value(source)) or "",
       ',"tabs":', list,
@@ -227,24 +239,9 @@ return function(context)
     if not replace_file(path, body, "publish-tabs") then return false end
     published_tab_lists[path] = {
       list = list, body = body .. "\n", window_id = tostring(window_id), window_key = window_key,
+      source = source or false,
     }
-    drawn_tab_lists[window_key] = { list = list, written_at = written_at }
-    -- The first draw can come before the source identity is known, so a
-    -- window's first file is often the unsourced one. Once the same window is
-    -- written under a source, that earlier file describes the same window
-    -- again, and `attention tabs` would list the window twice.
-    local superseded = published_path_by_window[window_key]
     published_path_by_window[window_key] = path
-    local superseded_publication = superseded and superseded ~= path
-      and published_tab_lists[superseded]
-    if superseded_publication then
-      published_tab_lists[superseded] = nil
-      local err = remove_own_tab_order(superseded, superseded_publication.body)
-      if err then
-        report_error_once("supersede-tabs:" .. superseded,
-          "cannot remove superseded tab order " .. superseded .. ": " .. err)
-      end
-    end
     return true
   end
 
@@ -261,7 +258,6 @@ return function(context)
       local window_id = path:sub(1, #prefix) == prefix and publication.window_id
       if window_id and not live[window_id] then
         published_tab_lists[path] = nil
-        drawn_tab_lists[publication.window_key] = nil
         published_path_by_window[publication.window_key] = nil
         local err = remove_own_tab_order(path, publication.body)
         if err then

@@ -351,13 +351,31 @@ return function()
       return source
     end
 
+    --- Can this GUI ask the attention command who it is? Without the writer
+    --- the shim can only fail, and the backoff would run it every thirty
+    --- seconds for as long as the GUI lives.
+    local function can_acquire_tab_source(socket)
+      return type(socket) == "string" and socket:sub(1, 1) == "/"
+        and M._active_integration_root ~= nil and M._active_writer_installed == true
+        and type(wezterm.run_child_process) == "function"
+    end
+
+    --- What a tab order is published under now: "ready" with the source,
+    --- "unavailable" when no answer can come or the last one failed, and
+    --- "pending" while an answer is still to come.
+    local function tab_source_status()
+      local state = tab_source_state
+      if state.source then return "ready", state.source end
+      if state.failed or not can_acquire_tab_source(
+          state.socket or os.getenv("WEZTERM_UNIX_SOCKET")) then
+        return "unavailable"
+      end
+      return "pending"
+    end
+
     local function acquire_tab_source(socket)
       local root = M._active_integration_root
-      -- Without the writer the shim can only fail, and the backoff would run it
-      -- every thirty seconds for as long as the GUI lives.
-      if type(socket) ~= "string" or socket:sub(1, 1) ~= "/" or not root
-          or not M._active_writer_installed
-          or type(wezterm.run_child_process) ~= "function" then return end
+      if not can_acquire_tab_source(socket) then return end
       if tab_source_state.socket ~= socket then
         tab_source_state = { socket = socket, retry_index = 1, retry_at = 0 }
       end
@@ -372,7 +390,9 @@ return function()
       local source = ok and success and parse_tab_source_response(stdout) or nil
       if source then
         state.source = source
+        state.failed = nil
       else
+        state.failed = true
         local delay = publish_backoff_seconds[math.min(state.retry_index, #publish_backoff_seconds)]
         state.retry_at = now_ms() + delay * 1000
         state.retry_index = state.retry_index + 1
@@ -1451,6 +1471,7 @@ return function()
 
     return {
       tab_source = function() return tab_source_state.source end,
+      tab_source_status = tab_source_status,
       reset_tab_source = reset_tab_source,
       acquire_tab_source = acquire_tab_source,
       parse_tab_source_response = parse_tab_source_response,

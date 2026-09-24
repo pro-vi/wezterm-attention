@@ -487,6 +487,34 @@ end
 
 -- ── apply_to_config ─────────────────────────────────────────────────────────
 
+--- Tab orders drawn while this GUI is still asking who it is, by window id. A
+--- window keeps the name of its first file for as long as it is open, so a
+--- file written now would stay at the unsourced name every GUI shares.
+local held_tab_orders = {}
+
+local function publish_drawn_tab_order(dir, window_id, order)
+  local status, source = runtime_api.tab_source_status()
+  if status == "pending" then
+    held_tab_orders[window_id] = { dir = dir, order = order, drawn_at = now_ms() }
+    return
+  end
+  held_tab_orders[window_id] = nil
+  publish_tab_order(dir, window_id, order, source)
+end
+
+--- Ask who this GUI is, and publish what the bar drew meanwhile once there
+--- is an answer, or once it is known that none will come.
+local function settle_tab_source(socket)
+  runtime_api.acquire_tab_source(socket)
+  if next(held_tab_orders) == nil then return end
+  local status, source = runtime_api.tab_source_status()
+  if status == "pending" then return end
+  for window_id, held in pairs(held_tab_orders) do
+    held_tab_orders[window_id] = nil
+    publish_tab_order(held.dir, window_id, held.order, source, held.drawn_at)
+  end
+end
+
 local applied = false
 
 -- What each option may be. `false` stands for the literal false, which some
@@ -673,7 +701,7 @@ function M.apply_to_config(config, opts)
   if renderer == "tab" then
     -- This callback may yield; pane-state polling has already finished in its own callback.
     wezterm.on("update-status", function()
-      runtime_api.acquire_tab_source(os.getenv("WEZTERM_UNIX_SOCKET"))
+      settle_tab_source(os.getenv("WEZTERM_UNIX_SOCKET"))
     end)
     wezterm.on("format-tab-title", function(tab, tabs, panes, cfg, hover, max_width)
       -- Read-only. WezTerm may call this at any moment, including for a window
@@ -708,7 +736,7 @@ function M.apply_to_config(config, opts)
         published = decorate_tab_title(tab, visible, base, show_index, visible.still_indicator)
       end
       local order, window_id = drawn_tab_order(tab, tabs, marker_ids, published)
-      if order then publish_tab_order(dir, window_id, order, runtime_api.tab_source()) end
+      if order then publish_drawn_tab_order(dir, window_id, order) end
 
       return rendered
     end)
@@ -834,7 +862,7 @@ end
 M._internal = {
   tab_source = runtime_api.tab_source,
   reset_tab_source = runtime_api.reset_tab_source,
-  acquire_tab_source = runtime_api.acquire_tab_source,
+  acquire_tab_source = settle_tab_source,
   parse_tab_source_response = runtime_api.parse_tab_source_response,
   lifecycle_facet = reader_api.lifecycle_facet,
   acknowledge_focused_pane = acknowledge_focused_pane,
