@@ -95,15 +95,17 @@ fn slow_sockets_are_asked_together() {
     let setup = Setup::new();
     setup.claim_and_bind();
     let (_second, _) = bind_on_another_socket(&setup, "second.sock", "session-b");
-    let (bin, log) = logging_wezterm(&setup, "1.5");
+    let (bin, log) = logging_wezterm(&setup, "2");
     let started = Instant::now();
     let response = run_bindings(&setup, &bin, &["--all", "--json"]);
     let elapsed = started.elapsed();
     assert_eq!(response["result"]["returned"], 2, "{response}");
     assert_eq!(fs::read_to_string(&log).expect("log").lines().count(), 2);
+    // One after the other they take at least 4 s. Together they take one
+    // listing's 2 s plus process start-up, which a loaded machine stretches.
     assert!(
-        elapsed < std::time::Duration::from_millis(2_700),
-        "two 1.5 s sockets took {elapsed:?}"
+        elapsed < std::time::Duration::from_millis(3_800),
+        "two 2 s sockets took {elapsed:?}"
     );
 }
 
