@@ -283,27 +283,25 @@ the same path and takes that one, so both can hold "the" lock at once. This can
 only happen on a pane whose binding ended more than 30 days ago and that sweep
 has since seen absent twice, where no writer is expected.
 
-## `mark clear` in a pane with no binding removes only the review
-
-`attention mark clear --source NAME` withdraws the activity that source
-published by writing an activity-clear record for the pane's current binding.
-A pane where no provider binding exists has no binding to write it for, so
-there the command removes the source's review flag and nothing else, and
-reports `skipped` if there was none. An activity that `attention mark` wrote in
-such a pane stays until its TTL runs out or a newer activity replaces it. A
-launch-scoped clear record would fix this, and does not exist.
-
-## A printed identity is believed on a local pane if its pane id matches
+## Before the GUI knows its own mux, a local pane's realm is checked by socket path only
 
 Any program that prints to a pane can set that pane's `WEZTERM_ATTENTION` user
 variable. On a pane in the GUI's own domains, the plugin refuses an identity
-whose pane id differs from the pane's own. It does not check the realm: an
-identity with the right pane id and another mux's realm and incarnation is
-still believed, so output from a different mux, for example through ssh, can
-make a local pane show that mux's records for the same pane id. The shell
-integration's next prompt republishes the correct identity. Closing this means
-comparing the published realm with the GUI's own socket identity, which the
-reader does not do today.
+whose pane id differs from the pane's own, and once the `attention tab-source`
+answer has arrived it also refuses an identity whose realm or incarnation is not
+the GUI's own mux. Until that answer arrives, shortly after startup, the realm is
+compared with a digest of the GUI's `WEZTERM_UNIX_SOCKET` as the plugin sees it:
+the incarnation cannot be checked yet, and the digest equals the writer's realm
+only when that path is already canonical. A mismatch in that window is held back,
+not refused, until the answer arrives.
+
+## bash-preexec loaded after the first prompt
+
+The bash integration decides at the first prompt whether bash-preexec is
+present. When bash-preexec is loaded later in the same shell, the integration's
+DEBUG trap is wrapped by bash-preexec's own and no command in that shell is
+claimed again. Load bash-preexec before this file, or start a new shell after
+loading it.
 
 ## The acknowledgement write has no compare-and-swap
 

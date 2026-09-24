@@ -48,7 +48,7 @@ supported command set can be changed before sourcing:
 export WEZTERM_ATTENTION_COMMANDS='claude codex pi'
 ```
 
-Sourcing the file a second time does nothing, so `source ~/.bashrc` after an edit is safe. When [bash-preexec](https://github.com/rcaloras/bash-preexec) is loaded (atuin and some prompt tools load it), the claim runs through its `preexec_functions`, once per command line, so `claude && codex` share one launch ID there; without it, each simple command gets its own. The integration keeps `$?` and `$_` intact for your later prompt commands and commands. After an agent returns to the prompt, the prompt hook records the return and unsets `WEZTERM_ATTENTION_LAUNCH_ID`.
+Sourcing the file a second time installs nothing new, so `source ~/.bashrc` after an edit is safe; if your rc file assigned `PROMPT_COMMAND` in the meantime, the second source puts the prompt hook back. When [bash-preexec](https://github.com/rcaloras/bash-preexec) is loaded (atuin and some prompt tools load it), the claim runs through its `preexec_functions`, once per command line, so `claude && codex` share one launch ID there; without it, each simple command gets its own. The integration keeps `$?` and `$_` intact for your later prompt commands and commands. After an agent returns to the prompt, the prompt hook records the return and unsets `WEZTERM_ATTENTION_LAUNCH_ID`.
 
 ## Zsh launch claims
 

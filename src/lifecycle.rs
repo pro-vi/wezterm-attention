@@ -947,14 +947,9 @@ fn apply_activity(
                     result.event_id = existing["event_id"].as_str().map(str::to_owned);
                     (result, Some(existing))
                 } else if held {
-                    (
-                        LifecycleResult::diagnosed(
-                            Disposition::Ignored,
-                            "binding_conflict",
-                            "a sub-agent is still waiting for permission",
-                        ),
-                        Some(existing),
-                    )
+                    // The notify stands for a sub-agent still waiting on the
+                    // user; the lead's next tool call is expected, not a conflict.
+                    (LifecycleResult::new(Disposition::Ignored), Some(existing))
                 } else {
                     let order = existing["observed_mono_ns"].as_str().unwrap_or("");
                     if observation < order {

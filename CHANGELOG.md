@@ -70,6 +70,15 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 
 ### Fixed
 
+- `attention mark clear --source NAME` also withdraws an activity that `attention mark` wrote before any provider session bound the launch. Another source's activity stays.
+- A sub-agent waiting for permission keeps the tab on `notify` while the lead keeps calling tools, for example Codex polling `wait_agent`. The notify ends when that sub-agent calls its next tool or stops, when the user prompts, or when the lead's turn ends.
+- Sourcing the bash integration again from an rc file that assigns `PROMPT_COMMAND` puts its prompt hook back.
+- Ctrl-C while a claim or prompt publication is running no longer stops the bash and zsh integrations for the rest of the shell.
+- `scripts/install-cli.sh` installs the binary cargo reports building, also when `CARGO_BUILD_TARGET` or `build.target` is set, and refuses with a message when cargo reports none.
+- A window's first tab order waits for the GUI's source answer, so `attention tabs` never lists a window twice and no GUI removes a file another GUI wrote.
+- Alt+B clear recovery restores only its own leftovers or ones older than a clear can take, so it never undoes another GUI's clear.
+- A local pane's published identity must belong to the GUI's own mux, so output from another mux cannot make a local pane show or acknowledge that mux's records.
+
 - Sourcing the bash integration twice no longer crashes the shell, and it works beside bash-preexec. It keeps `$?` and `$_` for later prompt commands and commands.
 - The shell integration stays quiet outside a WezTerm pane, and `wezterm_attention_claim && claude` starts the agent there.
 - `bin/attention` without the built binary exits 0 for hook commands (1 under `--strict`), and works through a symlinked `bin` directory.

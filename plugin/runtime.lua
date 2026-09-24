@@ -1169,7 +1169,7 @@ return function()
           end
 
           if read.kind == "invalid" and not read.deferred then
-            local item = read.diagnostic or invalid("pane identity is invalid")
+            local item = read.diagnostic or diagnostic("record_invalid", "pane identity is invalid")
             report_error_once("v2-identity:" .. local_id .. ":" .. item.code,
               item.code .. ": " .. item.message)
           elseif read.kind == "v2" then

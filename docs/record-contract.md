@@ -73,9 +73,11 @@ Pi's `agent_start` does, so the pane is tinted from the prompt rather than from 
 tool call and a turn that calls no tool still shows activity. The first `PreToolUse` of that turn
 repeats the same `thinking` and is skipped. A child actor cannot write lead state, so its prompt
 stays observation-only. The one exception is a child's `PermissionRequest`: a child blocked on a
-permission prompt waits for the user as the lead would, so it publishes lead `notify` activity. It
-does not refresh the child's presence record, and its observation still names the child as the
-actor.
+permission prompt waits for the user as the lead would, so it publishes lead `notify` activity and
+records the child's presence as waiting (`source: "permission"`); its observation still names the
+child as the actor. While that child waits, the lead's next `thinking` does not replace the visible
+`notify`. The wait ends at the child's next tool call, its `SubagentStop`, a parent clear, or its
+presence TTL; a user prompt or any lead activity other than `thinking` replaces the `notify` at once.
 
 A turn that ends without `Stop` still ends the activity. A lead Claude `StopFailure` (an API error
 ended the turn) publishes `notify`, because the user must act. A Codex `Interrupt` writes an
