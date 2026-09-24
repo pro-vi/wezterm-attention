@@ -179,10 +179,13 @@ attention.apply_to_config(config, {
 
 config.status_update_interval = 5000
 
--- The directory comes from the shell (OSC 7), so git runs in whatever repository
--- the pane reports. These options keep that repository's config from starting
--- programs: no fsmonitor hook, no external diff or text conversion, and no
--- optional index writes.
+-- The directory comes from the shell (OSC 7), which any program writing to the
+-- pane can set, so git runs in whatever repository the pane reports. These
+-- options stop three kinds of program that repository's config can start (the
+-- fsmonitor hook, an external diff and text conversion) and skip optional
+-- index writes. They do not stop a filter driver the repository assigns in
+-- .gitattributes: `git diff` and `git status` below run its clean command on
+-- changed files each time the status bar refreshes.
 local function git(cwd, ...)
   return pcall(wezterm.run_child_process, {
     "git", "-c", "core.fsmonitor=false", "--no-optional-locks", "-C", cwd, ...
