@@ -338,51 +338,138 @@ fn is_executable(path: &Path) -> bool {
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
+fn named_wezterm(path: &Path) -> bool {
+    path.file_name() == Some(OsStr::new("wezterm"))
+}
+
+/// The id of the named group, when this system has one.
+fn group_id(name: &str) -> Option<libc::gid_t> {
+    let name = std::ffi::CString::new(name).ok()?;
+    let mut size = 4096;
+    while size <= 1 << 20 {
+        let mut group: libc::group = unsafe { std::mem::zeroed() };
+        let mut buffer = vec![0_u8; size];
+        let mut found: *mut libc::group = std::ptr::null_mut();
+        let status = unsafe {
+            libc::getgrnam_r(
+                name.as_ptr(),
+                &mut group,
+                buffer.as_mut_ptr().cast::<libc::c_char>(),
+                buffer.len(),
+                &mut found,
+            )
+        };
+        if status == libc::ERANGE {
+            size *= 4;
+            continue;
+        }
+        return (status == 0 && !found.is_null()).then_some(group.gr_gid);
+    }
+    None
+}
+
+/// One directory or file on the way from a candidate up to `/`.
+#[derive(Clone, Copy, Debug)]
+struct Ancestor {
+    owner: libc::uid_t,
+    group: libc::gid_t,
+    mode: u32,
+    is_dir: bool,
+}
+
+/// Whether a candidate that did not come from PATH may be run.
+///
+/// Every directory from the file up to `/` must be owned by root or by this
+/// user and writable by nobody else, so no other account could have put the
+/// file there. The one relaxation is a root-owned directory whose group is
+/// `admin` or `wheel`: macOS ships `/Applications` as root:admin 0775, and an
+/// administrator can already replace anything on the machine.
 fn is_trusted_fallback(path: &Path) -> bool {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if !named_wezterm(path) {
+        return false;
+    }
     let Ok(canonical) = fs::canonicalize(path) else {
         return false;
     };
-    if !is_executable(&canonical) {
+    if !named_wezterm(&canonical) || !is_executable(&canonical) {
         return false;
     }
-    let current_uid = unsafe { libc::geteuid() };
+    let mut ancestry = Vec::new();
     for component in canonical.ancestors() {
         let Ok(metadata) = fs::metadata(component) else {
             return false;
         };
-        if !matches!(metadata.uid(), 0) && metadata.uid() != current_uid {
-            return false;
-        }
-        if metadata.permissions().mode() & 0o022 != 0 {
-            return false;
-        }
+        ancestry.push(Ancestor {
+            owner: metadata.uid(),
+            group: metadata.gid(),
+            mode: metadata.permissions().mode(),
+            is_dir: metadata.is_dir(),
+        });
     }
-    true
+    let administrators = [group_id("admin"), group_id("wheel")]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    ancestry_is_trusted(&ancestry, unsafe { libc::geteuid() }, &administrators)
 }
 
+fn ancestry_is_trusted(
+    ancestry: &[Ancestor],
+    current_uid: libc::uid_t,
+    administrators: &[libc::gid_t],
+) -> bool {
+    ancestry.iter().all(|ancestor| {
+        let owned = ancestor.owner == 0 || ancestor.owner == current_uid;
+        let administered =
+            ancestor.owner == 0 && ancestor.is_dir && administrators.contains(&ancestor.group);
+        owned && ancestor.mode & 0o002 == 0 && (ancestor.mode & 0o020 == 0 || administered)
+    })
+}
+
+/// Find the `wezterm` CLI.
+///
+/// Candidates, in order: `wezterm` in each absolute PATH entry; `wezterm` in
+/// `executable_dir` (WezTerm's `WEZTERM_EXECUTABLE_DIR`); `wezterm` beside
+/// `executable` (WezTerm's `WEZTERM_EXECUTABLE`); then `fallbacks`. Every
+/// candidate after PATH must pass the ownership check above.
+///
+/// Only a file named exactly `wezterm` is ever returned. WezTerm sets
+/// `WEZTERM_EXECUTABLE` in each pane to the GUI or the mux server, never to
+/// the CLI; the GUI rejects `cli ... list`, and the mux server runs it as a
+/// program after binding the default socket in place of a live server's, so
+/// that variable only says which directory to look in. A relative PATH entry
+/// names whatever directory the caller happens to be in, so it is skipped.
 pub fn resolve_wezterm_executable(
     path_value: Option<&OsStr>,
-    configured: Option<&OsStr>,
+    executable_dir: Option<&OsStr>,
+    executable: Option<&OsStr>,
     fallbacks: &[PathBuf],
 ) -> Result<PathBuf> {
     if let Some(paths) = path_value {
         for directory in env::split_paths(&paths) {
             let candidate = directory.join("wezterm");
-            if is_executable(&candidate) {
+            if directory.is_absolute() && is_executable(&candidate) {
                 return Ok(candidate);
             }
         }
     }
-    if let Some(configured) = configured {
-        let candidate = PathBuf::from(configured);
-        if is_executable(&candidate) {
+    let beside_running = [
+        executable_dir.map(PathBuf::from),
+        executable
+            .map(Path::new)
+            .and_then(Path::parent)
+            .map(Path::to_path_buf),
+    ];
+    let installed = beside_running
+        .into_iter()
+        .flatten()
+        .filter(|directory| directory.is_absolute())
+        .map(|directory| directory.join("wezterm"))
+        .chain(fallbacks.iter().cloned());
+    for candidate in installed {
+        if is_trusted_fallback(&candidate) {
             return Ok(candidate);
-        }
-    }
-    for candidate in fallbacks {
-        if is_trusted_fallback(candidate) {
-            return Ok(candidate.clone());
         }
     }
     Err(AttentionError::new(
@@ -394,6 +481,7 @@ pub fn resolve_wezterm_executable(
 pub fn wezterm_executable() -> Result<PathBuf> {
     resolve_wezterm_executable(
         env::var_os("PATH").as_deref(),
+        env::var_os("WEZTERM_EXECUTABLE_DIR").as_deref(),
         env::var_os("WEZTERM_EXECUTABLE").as_deref(),
         &[PathBuf::from(
             "/Applications/WezTerm.app/Contents/MacOS/wezterm",
@@ -701,8 +789,72 @@ pub fn tty_path_from_fd(fd: libc::c_int) -> Result<String> {
 mod tests {
     use std::fs::OpenOptions;
 
-    use super::{PaneProcessSet, Presence, SystemTtyWriter, tty_path_from_fd};
+    use super::{
+        Ancestor, PaneProcessSet, Presence, SystemTtyWriter, ancestry_is_trusted, tty_path_from_fd,
+    };
     use crate::identity::tty_fingerprint;
+
+    const USER: libc::uid_t = 501;
+    const ADMIN: libc::gid_t = 80;
+    const STAFF: libc::gid_t = 20;
+
+    fn directory(owner: libc::uid_t, group: libc::gid_t, mode: u32) -> Ancestor {
+        Ancestor {
+            owner,
+            group,
+            mode: 0o040000 | mode,
+            is_dir: true,
+        }
+    }
+
+    fn file(owner: libc::uid_t, group: libc::gid_t, mode: u32) -> Ancestor {
+        Ancestor {
+            owner,
+            group,
+            mode: 0o100000 | mode,
+            is_dir: false,
+        }
+    }
+
+    #[test]
+    fn an_application_below_a_root_admin_group_writable_directory_is_trusted() {
+        // /Applications/WezTerm.app/Contents/MacOS/wezterm on a stock Mac.
+        let ancestry = [
+            file(USER, ADMIN, 0o755),
+            directory(USER, ADMIN, 0o755),
+            directory(USER, ADMIN, 0o755),
+            directory(USER, ADMIN, 0o755),
+            directory(0, ADMIN, 0o775),
+            directory(0, 0, 0o755),
+        ];
+        assert!(ancestry_is_trusted(&ancestry, USER, &[ADMIN, 0]));
+    }
+
+    #[test]
+    fn group_write_is_trusted_only_on_a_root_directory_of_an_administrator_group() {
+        let root = directory(0, 0, 0o755);
+        for (label, ancestor) in [
+            ("root directory, ordinary group", directory(0, STAFF, 0o775)),
+            ("user directory, admin group", directory(USER, ADMIN, 0o775)),
+            ("root file, admin group", file(0, ADMIN, 0o775)),
+            (
+                "root admin directory writable by other",
+                directory(0, ADMIN, 0o777),
+            ),
+            ("sticky world-writable directory", directory(0, 0, 0o1777)),
+            ("another account's directory", directory(502, STAFF, 0o755)),
+        ] {
+            assert!(
+                !ancestry_is_trusted(&[ancestor, root], USER, &[ADMIN, 0]),
+                "{label} must not be trusted"
+            );
+        }
+        assert!(ancestry_is_trusted(
+            &[directory(USER, STAFF, 0o700), root],
+            USER,
+            &[ADMIN, 0]
+        ));
+    }
 
     #[test]
     fn a_socket_path_with_an_interior_space_is_read_whole() {

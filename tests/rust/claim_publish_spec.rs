@@ -1,5 +1,7 @@
 #[path = "support/executables.rs"]
 mod executables;
+#[path = "support/trusted_scratch.rs"]
+mod trusted_scratch;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -15,6 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use trusted_scratch::TrustedScratch;
 use uuid::Uuid;
 use wezterm_attention::identity::{length_prefixed_digest, pane_address};
 use wezterm_attention::protocol::{
@@ -537,32 +540,79 @@ fn realm_publish_skips_only_the_row_without_a_tty() {
 
 #[test]
 fn executable_resolution_uses_the_explicit_fallback_when_path_is_empty() {
-    let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join(format!("fallback-{}", Uuid::new_v4().simple()));
-    fs::create_dir_all(&directory).expect("create trusted fallback directory");
-    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-        .expect("secure fallback directory");
-    let executable = directory.join("wezterm");
-    fs::write(&executable, "#!/bin/sh\nexit 0\n").expect("write fake executable");
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
-        .expect("make fake executable executable");
-    let resolved = resolve_wezterm_executable(None, None, std::slice::from_ref(&executable))
+    let scratch = TrustedScratch::new();
+    let executable = scratch.executable("wezterm", "exit 0");
+    let resolved = resolve_wezterm_executable(None, None, None, std::slice::from_ref(&executable))
         .expect("fallback resolves");
     assert_eq!(resolved, executable);
-    fs::remove_dir_all(directory).expect("remove fallback directory");
 }
 
 #[test]
 fn executable_resolution_rejects_a_fallback_below_a_group_writable_directory() {
-    let scratch = Scratch::new();
-    let executable = scratch.path.join("wezterm");
-    fs::write(&executable, "#!/bin/sh\nexit 0\n").expect("write fake executable");
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
-        .expect("make fake executable executable");
-    let error = resolve_wezterm_executable(None, None, &[executable])
-        .expect_err("a fallback below /tmp must not be trusted");
+    let scratch = TrustedScratch::new();
+    let shared = scratch.0.join("shared");
+    fs::create_dir(&shared).expect("create shared directory");
+    let executable = trusted_scratch::write_script(&shared.join("wezterm"), "exit 0");
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o700)).expect("private directory");
+    assert!(
+        resolve_wezterm_executable(None, None, None, std::slice::from_ref(&executable)).is_ok(),
+        "the same file in a private directory resolves, so the refusal below is the mode's"
+    );
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o770)).expect("group-writable");
+    let error = resolve_wezterm_executable(None, None, None, &[executable])
+        .expect_err("a fallback below a group-writable directory must not be trusted");
     assert_eq!(error.diagnostic.code, "realm_unavailable");
+}
+
+#[test]
+fn the_cli_beside_a_running_mux_server_is_used_and_the_server_itself_never_is() {
+    let scratch = TrustedScratch::new();
+    let server = scratch.executable("wezterm-mux-server", "exit 0");
+    let cli = scratch.executable("wezterm", "exit 0");
+    let empty_path = Scratch::new();
+    let path = empty_path.path.as_os_str();
+
+    let beside_executable =
+        resolve_wezterm_executable(Some(path), None, Some(server.as_os_str()), &[])
+            .expect("the CLI beside WEZTERM_EXECUTABLE resolves");
+    assert_eq!(beside_executable, cli);
+    let in_executable_dir =
+        resolve_wezterm_executable(Some(path), Some(scratch.0.as_os_str()), None, &[])
+            .expect("the CLI in WEZTERM_EXECUTABLE_DIR resolves");
+    assert_eq!(in_executable_dir, cli);
+
+    fs::remove_file(&cli).expect("remove the CLI");
+    let error = resolve_wezterm_executable(
+        Some(path),
+        Some(scratch.0.as_os_str()),
+        Some(server.as_os_str()),
+        std::slice::from_ref(&server),
+    )
+    .expect_err("a mux server is never run in place of the CLI");
+    assert_eq!(error.diagnostic.code, "realm_unavailable");
+}
+
+#[test]
+fn executable_resolution_skips_a_relative_path_entry() {
+    let scratch = TrustedScratch::new();
+    let cli = scratch.executable("wezterm", "exit 0");
+    let here = fs::canonicalize(std::env::current_dir().expect("current directory"))
+        .expect("canonical current directory");
+    let mut relative = PathBuf::new();
+    for _ in here.components().skip(1) {
+        relative.push("..");
+    }
+    relative.push(scratch.0.strip_prefix("/").expect("absolute scratch"));
+    assert!(
+        relative.is_relative() && relative.join("wezterm").exists(),
+        "the relative entry names the directory that holds a CLI"
+    );
+    let error = resolve_wezterm_executable(Some(relative.as_os_str()), None, None, &[])
+        .expect_err("a relative PATH entry is skipped");
+    assert_eq!(error.diagnostic.code, "realm_unavailable");
+    let absolute = resolve_wezterm_executable(Some(scratch.0.as_os_str()), None, None, &[])
+        .expect("the same directory as an absolute entry resolves");
+    assert_eq!(absolute, cli);
 }
 
 #[test]
