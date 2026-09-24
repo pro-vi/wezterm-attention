@@ -228,9 +228,6 @@ return function(context)
     return title_sources(tab).base_title
   end
 
-  --- Marker IDs of one tab, translated from the local pane ids the GUI hands to
-  --- format-tab-title.
-
   return {
     well_formed_utf8 = well_formed_utf8,
     display_text = display_text,

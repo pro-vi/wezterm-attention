@@ -351,9 +351,7 @@ pane closes.
 It is a separate file because it is a separate claim. The marker file belongs to
 whatever process runs in the pane, and on a pane you actually want to flag there
 is almost always one there: an agent's `thinking`, or the `stop` it left behind.
-The flag used to be written into that file as `{"type":"review"}`, guarded so it
-would never overwrite a process marker — which meant `Alt+B` silently did nothing
-on exactly those panes. As a sidecar it coexists:
+As a sidecar it coexists:
 
 | Marker file | `.review` | Tab shows |
 |-------------|-----------|-----------|

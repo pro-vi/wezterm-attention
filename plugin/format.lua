@@ -77,8 +77,8 @@ return function(context)
       }
     end
 
-    -- The count rides inside the indicator's own trailing space, so "✓ " with two
-    -- subagents renders "✓+2 " and the tab gains one column, not four.
+    -- The count rides inside the indicator's own trailing space: "✓ " with two
+    -- subagents renders "✓+2 ", which adds only the "+2".
     local function with_count(glyph)
       if subagents > 0 then return glyph:gsub("%s+$", "") .. "+" .. subagents .. " " end
       return glyph

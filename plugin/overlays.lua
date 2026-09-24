@@ -650,11 +650,12 @@ return function(context)
     --- Put back the reviews a clear moved aside and never finished with,
     --- because its process died between the move and the removal. Each was a
     --- flag the pane showed, so it goes back to its name when nothing has taken
-    --- that name since. Beside a live review it stays for `attention sweep`:
-    --- which of the two is newer is not known here. A leftover is put back
+    --- that name since. Beside a live review it stays until its pane tree is
+    --- removed: which of the two is newer is not known here. A leftover is put back
     --- only when this process's own clear left it, or when the time in its
     --- name is older than any clear takes; a younger one is looked at again
-    --- once it is that old. A name with no time in it is left for sweep.
+    --- once it is that old. A name with no time in it stays until its pane
+    --- tree is removed.
     ---
     --- Looking costs a directory listing, so it is done only where a leftover
     --- can be: on this process's first read of the pane (a GUI that died

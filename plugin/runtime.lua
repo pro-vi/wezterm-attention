@@ -993,8 +993,8 @@ return function()
     function M.remove_marker(marker_id, opts)
       local dir = (opts and opts.dir) or M._active_dir or defaults.dir
       local id = tostring(marker_id)
-      -- The id becomes a path segment of four removals; "../x" would reach
-      -- outside the state directory.
+      -- The id becomes a segment of every path remove_marker deletes; "../x"
+      -- would reach outside the state directory.
       if not context.canonical_pane_id(id) then return end
       remove_marker(dir, id)
       attention_cache[id] = nil
