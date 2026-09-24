@@ -556,9 +556,19 @@ return function(context)
       }, "review", { address = read.address })
     end
 
-    --- Panes where a clear left a review moved aside because it could not put
-    --- it back, keyed by cache key, so the next poll of the pane tries again.
-    local panes_with_cleared_leftovers = {}
+    --- When to look again for a pane's leftovers, in epoch milliseconds, keyed
+    --- by cache key: now for a pane where this process's own clear could not
+    --- put a review back, later for one where another GUI's may still be
+    --- running.
+    local leftover_look_due = {}
+    --- The leftovers this process's own clears could not put back. Nothing
+    --- else here is still working on them, so they need no waiting.
+    local own_leftovers = {}
+
+    --- Longer than any clear takes between moving a review aside and removing
+    --- it. A leftover younger than this may belong to a clear another GUI is
+    --- still running, and putting it back would undo what the user just did.
+    local abandoned_after_ms = 60 * 1000
 
     --- Remove the reviews this pane showed, and only those. A writer can
     --- replace a review between the read above and the removal, and removing
@@ -566,12 +576,14 @@ return function(context)
     --- file is first moved aside, out of the reader's *.json pattern, and
     --- read: the record that was shown is deleted, and anything else is put
     --- back, unless a still newer write has taken the path since, which then
-    --- supersedes both.
+    --- supersedes both. The aside name carries this process's session token
+    --- and the time it was moved, so another GUI can tell a clear that may
+    --- still be running from one that was abandoned.
     local function clear_v2_reviews(read, dir)
       local cleared = false
       local paths, shown = v2_review_paths(read, dir)
       for _, path in ipairs(paths) do
-        local taken = path .. "." .. publication_session .. ".clear"
+        local taken = path .. "." .. publication_session .. "." .. integer(now_ms()) .. ".clear"
         local moved, move_err = os.rename(path, taken)
         if not moved then
           -- Already gone is the state a clear wants.
@@ -594,7 +606,8 @@ return function(context)
               -- A write landed after the look above: newer still, as above.
               os.remove(taken)
             elseif placed == "failed" then
-              panes_with_cleared_leftovers[read.cache_key] = true
+              own_leftovers[taken] = true
+              leftover_look_due[read.cache_key] = 0
               report_error_once("restore-v2-review:" .. path,
                 "cannot put back review " .. path .. " from " .. taken .. ": " .. place_err)
             end
@@ -608,16 +621,22 @@ return function(context)
     --- because its process died between the move and the removal. Each was a
     --- flag the pane showed, so it goes back to its name when nothing has taken
     --- that name since. Beside a live review it stays for `attention sweep`:
-    --- which of the two is newer is not known here.
+    --- which of the two is newer is not known here. A leftover is put back
+    --- only when this process's own clear left it, or when the time in its
+    --- name is older than any clear takes; a younger one is looked at again
+    --- once it is that old. A name with no time in it is left for sweep.
     ---
     --- Looking costs a directory listing, so it is done only where a leftover
     --- can be: on this process's first read of the pane (a GUI that died
     --- mid-clear is replaced by a new process), when a review this process
-    --- showed has gone (another GUI's clear), and where this process's own
-    --- clear could not put one back. Returns true when a review was put back.
+    --- showed has gone (another GUI's clear), where this process's own clear
+    --- could not put one back, and where a leftover was too young to take.
+    --- Returns true when a review was put back.
     local function restore_cleared_reviews(read, dir, previous_view, view, opts)
       local key = read.cache_key
-      local look = not previous_view or panes_with_cleared_leftovers[key]
+      local now = (opts and opts.now_ms) or now_ms()
+      local due = leftover_look_due[key]
+      local look = not previous_view or (due ~= nil and now >= due)
       if not look then
         local shown = previous_view._records and previous_view._records.reviews or {}
         local current = view._records and view._records.reviews or {}
@@ -626,19 +645,29 @@ return function(context)
         end
       end
       if not look then return false end
-      panes_with_cleared_leftovers[key] = nil
+      leftover_look_due[key] = nil
       local paths = glob_paths(v2_pane_root(dir, read.address) .. "/reviews/*.clear", opts)
       if not paths then return false end
       local restored = false
       for _, leftover in ipairs(paths) do
-        local path = leftover:match("^(.*%.json)%.%w+%.clear$")
-        if path then
+        local path, moved_at = leftover:match("^(.*%.json)%.%w+%.(%d+)%.clear$")
+        moved_at = tonumber(moved_at)
+        local abandoned = moved_at and now - moved_at > abandoned_after_ms
+        if path and (own_leftovers[leftover] or abandoned) then
           local placed, place_err = place_without_replacing(leftover, path)
           if placed == "placed" then
             restored = true
-          elseif placed == "failed" then
+            own_leftovers[leftover] = nil
+          elseif placed == "occupied" then
+            own_leftovers[leftover] = nil
+          else
             report_error_once("restore-v2-review:" .. path,
               "cannot put back review " .. path .. " from " .. leftover .. ": " .. place_err)
+          end
+        elseif path and moved_at then
+          local again = moved_at + abandoned_after_ms + 1
+          if not leftover_look_due[key] or again < leftover_look_due[key] then
+            leftover_look_due[key] = again
           end
         end
       end

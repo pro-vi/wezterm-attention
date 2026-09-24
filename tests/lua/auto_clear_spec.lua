@@ -3782,23 +3782,133 @@ test("Alt+B clear-all does not put a review back over one written after it looke
 end)
 
 --- Move a pane's review aside under the name a clear gives it while it looks,
---- as a GUI that died in the middle of Alt+B leaves it.
-local function leave_cleared_review(pane_id)
+--- as a GUI that died in the middle of Alt+B leaves it. The name carries the
+--- time the clear moved it, `moved_at_ms`, long ago unless a test says.
+local function leave_cleared_review(pane_id, moved_at_ms)
   local wire = materialize_v2_fixture(pane_id)
   local samples = protocol_fixture.record_samples
   local path = test_dir .. "/v2/realms/" .. wire.address.realm_id
     .. "/incarnations/" .. wire.address.incarnation_id .. "/panes/" .. pane_id
     .. "/reviews/" .. samples.review.owner_key .. ".json"
   local before = assert(read_path(path), "precondition: the fixture carries a review")
-  local leftover = path .. ".table0x10a2b3c4.clear"
+  local leftover = path .. ".table0x10a2b3c4." .. (moved_at_ms or 1000) .. ".clear"
   assert(os.rename(path, leftover))
   return wire, path, leftover, before
 end
 
-local function poll_v2_pane(instance, spec)
+local function poll_v2_pane(instance, spec, now_ms)
   instance.poll(window_double({ tabs = { { spec } }, focused = false }),
-    { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+    { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end,
+      now_ms = now_ms })
 end
+
+local function review_leftovers(path)
+  local found = {}
+  for _, candidate in ipairs(wezterm.glob(dirname(path) .. "/*.clear")) do
+    found[#found + 1] = candidate
+  end
+  return found
+end
+
+test("a clear still running in another GUI is not undone by this one's poll", function()
+  local wire = materialize_v2_fixture(89)
+  local samples = protocol_fixture.record_samples
+  local path = test_dir .. "/v2/realms/" .. wire.address.realm_id
+    .. "/incarnations/" .. wire.address.incarnation_id .. "/panes/89/reviews/"
+    .. samples.review.owner_key .. ".json"
+  assert(path_exists(path), "precondition: the fixture carries a review")
+  local clearing = dofile(repo_root .. "/plugin/init.lua")
+  local config = {}
+  clearing.apply_to_config(config, { auto_poll = false, dir = test_dir, renderer = "manual",
+    integration_root = writer_root })
+  local toggle = assert(config.keys[#config.keys].action)
+  local watching = dofile(repo_root .. "/plugin/init.lua")
+  watching.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root })
+  local spec = { id = 9089, domain = "unix", attention = wire }
+  poll_v2_pane(watching, spec)
+  local key = internal.address_cache_key(wire.address)
+  assert(watching._internal.attention_cache[key].review == true, "precondition: the other GUI shows it")
+  -- The other GUI polls while this one's clear is between moving the review
+  -- aside and removing it.
+  local real_rename, paused = os.rename, false
+  os.rename = function(from, to)
+    local moved, err = real_rename(from, to)
+    if from == path and to:match("%.clear$") and not paused then
+      paused = true
+      poll_v2_pane(watching, spec)
+    end
+    return moved, err
+  end
+  local ok, failure = pcall(toggle, window_double({ tabs = { { spec } }, focused = true,
+    active_pane_id = spec }), pane_from_entry(spec))
+  os.rename = real_rename
+  assert(ok, failure)
+  assert(paused, "precondition: the other GUI polled mid-clear")
+  assert(not path_exists(path), "the review the user cleared must stay cleared")
+  assert(#review_leftovers(path) == 0, "the clear leaves nothing aside")
+  materialize_v2_fixture(89)
+end)
+
+test("a review this process's own clear could not put back is put back on its next poll", function()
+  local wire = materialize_v2_fixture(79)
+  local samples = protocol_fixture.record_samples
+  local path = test_dir .. "/v2/realms/" .. wire.address.realm_id
+    .. "/incarnations/" .. wire.address.incarnation_id .. "/panes/79/reviews/"
+    .. samples.review.owner_key .. ".json"
+  local unseen = decode_json(encode_json(samples.review))
+  unseen.address = decode_json(encode_json(wire.address))
+  unseen.event_id = "00000000-0000-4000-8000-000000000791"
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  local config = {}
+  instance.apply_to_config(config, { auto_poll = false, dir = test_dir, renderer = "manual",
+    integration_root = writer_root })
+  local toggle = assert(config.keys[#config.keys].action)
+  local spec = { id = 9079, domain = "unix", attention = wire }
+  poll_v2_pane(instance, spec)
+  -- A writer replaces the review as the clear moves it aside, so it has to go
+  -- back, and the link that would put it back fails.
+  local real_rename, real_execute, replaced, refused = os.rename, os.execute, false, false
+  os.rename = function(from, to)
+    if from == path and not replaced then replaced = true; write_json_path(path, unseen) end
+    return real_rename(from, to)
+  end
+  os.execute = function(command)
+    if command:sub(1, 3) == "ln " and not refused then refused = true; return 1 end
+    return real_execute(command)
+  end
+  local ok, failure = pcall(toggle, window_double({ tabs = { { spec } }, focused = true,
+    active_pane_id = spec }), pane_from_entry(spec))
+  os.rename, os.execute = real_rename, real_execute
+  assert(ok, failure)
+  assert(replaced and refused, "precondition: the put-back was refused")
+  assert(not path_exists(path) and #review_leftovers(path) == 1, "precondition: left aside")
+  local errors = drain_errors()
+  assert(#errors == 1 and errors[1]:find("cannot put back review", 1, true))
+  poll_v2_pane(instance, spec)
+  local left = read_path(path)
+  assert(left and decode_json(left).event_id == unseen.event_id,
+    "the review the user never saw is put back without waiting")
+  assert(#review_leftovers(path) == 0, "the review lives at one name only")
+  materialize_v2_fixture(79)
+end)
+
+test("another GUI's leftover is put back only once it is older than a clear takes", function()
+  local moved_at = 1789884000000
+  local wire, path, leftover, before = leave_cleared_review(84, moved_at)
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root })
+  local spec = { id = 9084, domain = "unix", attention = wire }
+  poll_v2_pane(instance, spec, moved_at + 1000)
+  assert(not path_exists(path) and read_path(leftover) == before,
+    "a clear moved it a second ago and may still be running")
+  poll_v2_pane(instance, spec, moved_at + 2000)
+  assert(not path_exists(path), "still young")
+  poll_v2_pane(instance, spec, moved_at + 61000)
+  assert(read_path(path) == before, "abandoned: the flag the user set comes back")
+  assert(not path_exists(leftover), "the review lives at one name only")
+end)
 
 test("a review a crashed clear left aside is put back on the pane's next read", function()
   local wire, path, leftover, before = leave_cleared_review(86)

@@ -1170,6 +1170,7 @@ return function()
               glob = opts and opts.glob,
               previous_view = before[key],
               resample_utc = resample_utc,
+              now_ms = now,
             }
             local view = read_attention_view(read, now_unix_ns, read_opts)
             if restore_cleared_reviews(read, dir, before[key], view, read_opts) then
