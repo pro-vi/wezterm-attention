@@ -216,9 +216,8 @@ EOF
   fi
 done
 
-# Reading a long literal command character by character took seconds before
-# the command could start: in a UTF-8 locale each character read walks the
-# string from its start.
+# The scan runs before the command starts, one character at a time, so it
+# stops at the command word and leaves a long literal after it unread.
 long_status=0
 env -i HOME="$scratch/home" PATH=/usr/bin:/bin LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 \
   perl -e 'alarm shift; exec @ARGV or die "cannot run $ARGV[0]: $!\n"' 5 \
