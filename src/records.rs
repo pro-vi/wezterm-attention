@@ -368,7 +368,7 @@ pub struct CommitPlan<T> {
 pub(crate) const STATE_ROOT_VARIABLES: [&str; 2] = ["WEZTERM_ATTENTION_DIR", "XDG_STATE_HOME"];
 
 /// What [`crate::environment`] gives a state-root variable whose value is not
-/// UTF-8. The environment is handed on as text, and a value it cannot hold
+/// UTF-8 and could decide the root. The environment is handed on as text, and a value it cannot hold
 /// still has to decide the root, as it does for the plugin, which reads the
 /// raw bytes; no path holds a NUL, so this can stand for nothing else.
 pub(crate) const NOT_UTF8: &str = "\0";
