@@ -1169,54 +1169,6 @@ fn an_incomplete_claim_walk_does_not_grant_collection() {
     }
 }
 
-#[test]
-fn a_replaced_marker_is_refused_not_collected() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let root = setup.root();
-    plant_flat_files(&root, "42");
-    let (address, _) = pane_address(&setup.env).expect("address");
-    let lock = pane_path(&root, &address).join(".claim.lock");
-    let locked = Arc::new(Barrier::new(2));
-    let release = Arc::new(Barrier::new(2));
-    let (details, diagnostics) = std::thread::scope(|scope| {
-        let holder = scope.spawn(|| {
-            with_lock(&lock, std::time::Duration::from_secs(5), || {
-                locked.wait();
-                release.wait();
-                Ok(())
-            })
-            .expect("hold claim lock")
-        });
-        locked.wait();
-        let sweep =
-            scope.spawn(|| setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000805")));
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        let next = root.join("42.agents.next");
-        fs::write(&next, "thinking\n").expect("write replacement");
-        fs::rename(&next, root.join("42.agents")).expect("replace agents");
-        release.wait();
-        holder.join().expect("holder");
-        sweep.join().expect("sweep")
-    });
-    assert!(collection_details(&details.details).is_empty());
-    assert!(
-        diagnostics
-            .iter()
-            .any(|item| item.code == "record_invalid" && item.message.contains("changed")),
-        "{diagnostics:?}"
-    );
-    assert_eq!(
-        fs::read_to_string(root.join("42")).expect("marker"),
-        "stop\n"
-    );
-    assert_eq!(
-        fs::read_to_string(root.join("42.agents")).expect("agents"),
-        "thinking\n"
-    );
-    assert!(root.join("42.ack").exists());
-}
-
 fn write_tab_order(root: &Path, window_id: u64, marker_ids: &[&str]) -> PathBuf {
     let tabs = root.join("tabs");
     fs::create_dir_all(&tabs).expect("create tabs directory");

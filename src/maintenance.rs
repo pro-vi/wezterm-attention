@@ -2219,3 +2219,64 @@ pub fn sweep(
         diagnostics,
     ))
 }
+
+#[cfg(test)]
+mod projection_collection_tests {
+    use super::*;
+
+    struct Root(PathBuf);
+
+    impl Drop for Root {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Collection enumerates the flat files, then takes the pane's claim lock
+    /// and checks each file is still the one it enumerated. Calling the two
+    /// steps in turn puts a replacement exactly between them, which a test
+    /// racing a sweep thread against a sleep could only hope to do.
+    #[test]
+    fn a_marker_replaced_after_enumeration_is_refused_not_collected() {
+        let root = Root(
+            std::env::temp_dir().join(format!("attention-collect-{}", Uuid::new_v4().simple())),
+        );
+        let address = PaneAddress {
+            realm_id: "a".repeat(64),
+            incarnation_id: "b".repeat(64),
+            pane_id: "42".to_owned(),
+        };
+        crate::records::atomic_replace(
+            &pane_path(&root.0, &address).join("claim.json"),
+            &json!({
+                "kind":"claim","schema":manifest().expect("manifest").record_schema,
+                "address":address,"launch_id":"00000000-0000-4000-8000-000000000701",
+                "tty_path":"/dev/ttys888","tty_fingerprint":"f".repeat(64),
+                "observed_mono_ns":"00000000000000000100"
+            }),
+        )
+        .expect("claim");
+        for name in ["42", "42.agents", "42.ack"] {
+            fs::write(root.0.join(name), "stop\n").expect("flat file");
+        }
+        let (files, malformed) = enumerate_flat_candidates(&root.0).expect("enumerate");
+        assert!(malformed.is_empty());
+        let next = root.0.join("42.agents.next");
+        fs::write(&next, "thinking\n").expect("replacement");
+        fs::rename(&next, root.0.join("42.agents")).expect("replace agents");
+
+        let error = apply_projection_collection(&root.0, &address, "42", &files["42"])
+            .expect_err("a replaced file is refused");
+        assert_eq!(error.diagnostic.code, "record_invalid");
+        assert!(error.diagnostic.message.contains("changed"));
+        assert_eq!(
+            fs::read_to_string(root.0.join("42")).expect("marker"),
+            "stop\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.0.join("42.agents")).expect("agents"),
+            "thinking\n"
+        );
+        assert!(root.0.join("42.ack").exists());
+    }
+}
