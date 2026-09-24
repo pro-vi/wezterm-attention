@@ -3,7 +3,7 @@
 `protocol/v2.json` is the machine-readable authority. Writers must call `bin/attention`; examples
 and provider hooks must not construct v2 JSON themselves.
 
-This is an implementation contract, not an activation claim. `bin/attention` currently selects Rust, while the bootstrap Claude/Codex helpers inspected on 2026-09-08 still write the V1 compatibility files directly and the inspected zsh configuration does not establish a V2 launch claim.
+This is an implementation contract, not an activation claim. `bin/attention` selects the Rust writer, but a hook registered before it was installed keeps doing what it did: a helper that writes flat files keeps writing them, and a zsh configuration that never calls `wezterm_attention_claim` never establishes a launch claim.
 
 ## Identity and paths
 

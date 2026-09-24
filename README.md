@@ -144,7 +144,7 @@ attention.apply_to_config(config, {
 
 V2 producers call the Rust writer through `bin/attention`; they do not construct V2 record JSON. Use `attention mark` for custom activity and `attention hooks event PROVIDER EVENT` for provider callbacks after the shell has established a launch claim. See [Mux setup](docs/mux-setup.md) for the supported commands and activation boundary.
 
-The flat-file format below remains supported for existing V1 producers. Attention's writers do not emit it. The inspected bootstrap Claude/Codex helpers still use it; selecting the Rust binary does not migrate those registrations automatically.
+The flat-file format below remains supported for existing V1 producers. Attention's writers do not emit it. Installing the Rust binary does not change a hook you registered earlier that writes flat files; re-register it through `attention hooks event` (see [Claude Code hooks](#claude-code-hooks)).
 
 ### V1 flat-marker protocol
 
@@ -450,7 +450,7 @@ $WEZTERM_ATTENTION_DIR/tabs/<window id>.json
 
 `number` is the number the bar printed, `text` is the whole string it drew, and `marker_ids` are the IDs the plugin already uses for those panes — already translated out of the window's local numbering, because only the window could translate them. A v1 pane is a canonical decimal marker id; a v2 pane is `v2:<realm_id>:<incarnation_id>:<pane_id>` once a poll has identified it. The file is written when a window's composed list changes and at no other time, so `published_at_ms` says when the bar last drew something different.
 
-Read it with `attention tabs`, which returns every window in the same JSON envelope as `bindings`. **It is honest about when it was written, not guaranteed current**: nothing refreshes it while the bar is idle, and no consumer should act on a number it has not checked. Use it to describe tabs and to resolve "the second `bootstrap` tab"; to act on one, ask the GUI, where `mux_window:tabs_with_info()` returns the drawn order live.
+Read it with `attention tabs`, which returns every window in the same JSON envelope as `bindings`. **It is honest about when it was written, not guaranteed current**: nothing refreshes it while the bar is idle, and no consumer should act on a number it has not checked. Use it to describe tabs and to resolve "the second `api` tab"; to act on one, ask the GUI, where `mux_window:tabs_with_info()` returns the drawn order live.
 
 The publisher is the handler the plugin registers, so `renderer = "manual"` — where your own formatter draws the tabs and the plugin registers nothing — publishes nothing. `wrap_title_formatter` does not publish either: with both handlers registered, the same window would draw two different texts and each repaint would rewrite the file twice.
 
