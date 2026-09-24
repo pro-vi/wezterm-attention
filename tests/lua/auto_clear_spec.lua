@@ -2558,7 +2558,7 @@ test("a directory name cannot carry escape sequences into the tab bar", function
   escaped.active_pane.current_working_dir = { file_path = "/tmp/evil\27[42m\194\1550mname" }
   local rendered = rendered_text(format_tab_title(escaped))
   assert(not has_control(rendered), "a control character reached the tab bar")
-  assert(rendered:find("evil[42m0mname", 1, true), "the rest of the name must still show, got " .. rendered)
+  assert(rendered:find(": evilname ", 1, true), "the name must show without the sequences, got " .. rendered)
 end)
 
 test("a long or control-character tab text is published within the tab reader's bounds", function()
@@ -2579,7 +2579,8 @@ test("a long or control-character tab text is published within the tab reader's 
   formatter(plain, { plain })
   local formatted = assert(read_tab_publication(9863)).tabs[1].text
   assert(not has_control(formatted), "a formatter's control character was published")
-  assert(formatted:find("red[31mbell", 1, true), "the formatter's text must still be published")
+  assert(formatted:find(": redbell ", 1, true),
+    "the formatter's text must be published without the sequence, got " .. formatted)
 end)
 
 --- The rule `attention tabs` applies to a published tab text: the file is
@@ -2650,8 +2651,14 @@ end)
 test("what a formatter returns is drawn repaired, in both renderers", function()
   local R = "\239\191\189"
   local cases = {
-    { "a raw title with ESC and C1", "x\27[41mRED\194\1550m", "x[41mRED0m" },
+    { "a raw title with ESC and C1", "x\27[41mRED\194\1550m", ": xRED " },
     { "a CJK title cut by bytes", ("中文标题"):sub(1, 4), "中" .. R },
+    -- What wezterm.format returns for a red foreground, bold, and "build".
+    { "a styled wezterm.format result", "\27(B\27[0;1m\27[38:2::255:0:0mbuild\27(B\27[0m", ": build " },
+    { "an OSC ended by BEL and one ended by ST", "\27]0;t\7a\27]2;u\27\\b", ": ab " },
+    { "a device control string and a C1 OSC", "\27Pq#0\27\\c\194\157x\7d", ": cd " },
+    { "a CSI left open at the end", "build\27[38;2", ": build " },
+    { "an OSC left open at the end", "build\27]0;title", ": build " },
   }
   local current
   local instance = dofile(repo_root .. "/plugin/init.lua")
@@ -2678,10 +2685,10 @@ test("a tab with no name, directory or settled title shows the pane's current ti
   local bare = tab(17681, 17682, false)
   bare.active_pane.title = "vim\27]0;x"
   local rendered = rendered_text(format_tab_title(bare))
-  assert(rendered:find("vim]0;x", 1, true), "the current title must fill an empty base, got " .. rendered)
+  assert(rendered:find(": vim ", 1, true), "the current title must fill an empty base, got " .. rendered)
   local context
   attention.wrap_title_formatter(function(_, ctx) context = ctx; return ctx.default_title end)(bare)
-  assert(context.default_title == "vim]0;x" and context.settled_title == nil,
+  assert(context.default_title == "vim" and context.settled_title == nil,
     "default_title carries the current title without claiming it settled")
 end)
 
