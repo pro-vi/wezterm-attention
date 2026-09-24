@@ -156,6 +156,28 @@ return function(context)
   --- window is open, so no window ever has two files of this process's.
   local published_path_by_window = {}
 
+  --- The bytes of every tab order this GUI process has published, by path.
+  --- A config reload starts this module afresh, and `wezterm.GLOBAL` is what
+  --- WezTerm keeps across one, so this is how a reloaded plugin still knows
+  --- which files are its own. GLOBAL takes only UTF-8 text; a path or body it
+  --- refuses leaves that file unremembered, which only ever keeps a file.
+  local function remember_tab_order(path, body)
+    pcall(function()
+      local global = wezterm.GLOBAL
+      if global.wezterm_attention_tab_orders == nil then
+        global.wezterm_attention_tab_orders = {}
+      end
+      global.wezterm_attention_tab_orders[path] = body
+    end)
+  end
+
+  local function remembered_tab_order(path)
+    local ok, body = pcall(function()
+      return wezterm.GLOBAL.wezterm_attention_tab_orders[path]
+    end)
+    return ok and type(body) == "string" and body or nil
+  end
+
   --- Remove a tab order this process published, but only while the file still
   --- holds the bytes this process wrote there. The unsourced name is shared by
   --- every GUI process, because window ids restart in each one: a file another
@@ -204,11 +226,14 @@ return function(context)
   --- translation.
   ---
   --- A window keeps the name of its first publication, source or none, for as
-  --- long as it is open here. Moving it to a sourced name later would leave
-  --- the unsourced file describing the same window, and that name is shared
-  --- with every other GUI process, so this one could not safely take it back.
-  --- The caller holds a window's first publication until the source is
-  --- answered, so the unsourced name is used only where no source will come.
+  --- long as this module runs, so it has one file here. The caller holds a
+  --- window's first publication until the source is answered, so the
+  --- unsourced name is used only where no source will come. A config reload
+  --- starts the module afresh, and the plugin before it may have had no
+  --- writer to ask: a window it published unsourced gets its sourced name
+  --- now, and the unsourced file is removed while it still holds the bytes
+  --- this process wrote. That name is shared with every other GUI process,
+  --- because window ids restart in each, so a file rewritten since stays.
   ---
   --- Honest about when it was written, not guaranteed current: nothing
   --- refreshes `published_at_ms` while the bar draws the same thing. The write
@@ -242,6 +267,19 @@ return function(context)
       source = source or false,
     }
     published_path_by_window[window_key] = path
+    remember_tab_order(path, body .. "\n")
+    if source and not held then
+      local unsourced = window_key .. ".json"
+      local earlier = remembered_tab_order(unsourced)
+      if earlier then
+        remember_tab_order(unsourced, nil)
+        local err = remove_own_tab_order(unsourced, earlier)
+        if err then
+          report_error_once("replace-tabs:" .. unsourced,
+            "cannot remove the unsourced tab order " .. unsourced .. ": " .. err)
+        end
+      end
+    end
     return true
   end
 
@@ -259,6 +297,7 @@ return function(context)
       if window_id and not live[window_id] then
         published_tab_lists[path] = nil
         published_path_by_window[publication.window_key] = nil
+        remember_tab_order(path, nil)
         local err = remove_own_tab_order(path, publication.body)
         if err then
           report_error_once("withdraw-tabs:" .. path,

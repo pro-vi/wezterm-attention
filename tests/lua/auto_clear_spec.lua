@@ -199,6 +199,9 @@ local mux_pane
 
 local wezterm = {
   home_dir = test_dir,
+  -- WezTerm keeps this one table across config reloads, while every module
+  -- the plugin loads starts afresh; a reload here is a second dofile.
+  GLOBAL = {},
   mux = {
     all_windows = function()
       local all = {}
@@ -1064,6 +1067,53 @@ test("a window first published without a source keeps that one file after the so
   os.remove(legacy)
   os.remove(test_dir .. "/tabs/" .. string.rep("a", 64) .. "-9829.json")
   os.remove(test_dir .. "/9832")
+end)
+
+test("a config reload moves a window to its sourced tab order and removes its own unsourced one", function()
+  local previous = wezterm.run_child_process
+  -- Before the writer is installed the plugin has no source to wait for, so
+  -- its first draws publish under the unsourced name every GUI shares.
+  local bare_root = test_dir .. "/root-before-install"
+  assert(os.execute("mkdir -p " .. shell_quote(bare_root)) == 0)
+  local before = dofile(repo_root .. "/plugin/init.lua")
+  before.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = bare_root })
+  local draw_before = handlers["format-tab-title"][#handlers["format-tab-title"]]
+  drain_warnings()
+  local own = gui_tab({ window_id = 9870, tab_id = 9871, tab_index = 0, panes = { 9872 } })
+  local rewritten = gui_tab({ window_id = 9873, tab_id = 9874, tab_index = 0, panes = { 9875 } })
+  draw_before(own, { own })
+  draw_before(rewritten, { rewritten })
+  assert(path_exists(tab_publication_path(9870)) and path_exists(tab_publication_path(9873)),
+    "precondition: both windows are published unsourced")
+  -- Another GUI's window with the same id takes the shared name meanwhile.
+  local out = assert(io.open(tab_publication_path(9873), "w"))
+  out:write("another GUI's window 9873"); out:close()
+
+  wezterm.run_child_process = function(args) return true, tab_source_response(args[4]), "" end
+  local ok, failure = pcall(function()
+    local after = dofile(repo_root .. "/plugin/init.lua")
+    after.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+      integration_root = writer_root })
+    local draw_after = handlers["format-tab-title"][#handlers["format-tab-title"]]
+    after._internal.acquire_tab_source("/test/gui.sock")
+    draw_after(own, { own })
+    draw_after(rewritten, { rewritten })
+  end)
+  wezterm.run_child_process = previous
+  assert(ok, failure)
+  local sourced = function(window_id)
+    return test_dir .. "/tabs/" .. string.rep("a", 64) .. "-" .. window_id .. ".json"
+  end
+  assert(path_exists(sourced(9870)) and path_exists(sourced(9873)),
+    "after the reload both windows are published under the source")
+  assert(not path_exists(tab_publication_path(9870)),
+    "the unsourced file this GUI wrote before the reload is removed")
+  assert(read_path(tab_publication_path(9873)) == "another GUI's window 9873",
+    "a file another GUI rewrote is not this GUI's to remove")
+  for _, path in ipairs({ sourced(9870), sourced(9873), tab_publication_path(9873) }) do
+    os.remove(path)
+  end
 end)
 
 --- Every file under tabs/ that describes `window_id` with `pane_id` as its
