@@ -199,6 +199,9 @@ local mux_pane
 
 local wezterm = {
   home_dir = test_dir,
+  -- WezTerm keeps this one table across config reloads, while every module
+  -- the plugin loads starts afresh; a reload here is a second dofile.
+  GLOBAL = {},
   mux = {
     all_windows = function()
       local all = {}
@@ -1064,6 +1067,53 @@ test("a window first published without a source keeps that one file after the so
   os.remove(legacy)
   os.remove(test_dir .. "/tabs/" .. string.rep("a", 64) .. "-9829.json")
   os.remove(test_dir .. "/9832")
+end)
+
+test("a config reload moves a window to its sourced tab order and removes its own unsourced one", function()
+  local previous = wezterm.run_child_process
+  -- Before the writer is installed the plugin has no source to wait for, so
+  -- its first draws publish under the unsourced name every GUI shares.
+  local bare_root = test_dir .. "/root-before-install"
+  assert(os.execute("mkdir -p " .. shell_quote(bare_root)) == 0)
+  local before = dofile(repo_root .. "/plugin/init.lua")
+  before.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = bare_root })
+  local draw_before = handlers["format-tab-title"][#handlers["format-tab-title"]]
+  drain_warnings()
+  local own = gui_tab({ window_id = 9870, tab_id = 9871, tab_index = 0, panes = { 9872 } })
+  local rewritten = gui_tab({ window_id = 9873, tab_id = 9874, tab_index = 0, panes = { 9875 } })
+  draw_before(own, { own })
+  draw_before(rewritten, { rewritten })
+  assert(path_exists(tab_publication_path(9870)) and path_exists(tab_publication_path(9873)),
+    "precondition: both windows are published unsourced")
+  -- Another GUI's window with the same id takes the shared name meanwhile.
+  local out = assert(io.open(tab_publication_path(9873), "w"))
+  out:write("another GUI's window 9873"); out:close()
+
+  wezterm.run_child_process = function(args) return true, tab_source_response(args[4]), "" end
+  local ok, failure = pcall(function()
+    local after = dofile(repo_root .. "/plugin/init.lua")
+    after.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+      integration_root = writer_root })
+    local draw_after = handlers["format-tab-title"][#handlers["format-tab-title"]]
+    after._internal.acquire_tab_source("/test/gui.sock")
+    draw_after(own, { own })
+    draw_after(rewritten, { rewritten })
+  end)
+  wezterm.run_child_process = previous
+  assert(ok, failure)
+  local sourced = function(window_id)
+    return test_dir .. "/tabs/" .. string.rep("a", 64) .. "-" .. window_id .. ".json"
+  end
+  assert(path_exists(sourced(9870)) and path_exists(sourced(9873)),
+    "after the reload both windows are published under the source")
+  assert(not path_exists(tab_publication_path(9870)),
+    "the unsourced file this GUI wrote before the reload is removed")
+  assert(read_path(tab_publication_path(9873)) == "another GUI's window 9873",
+    "a file another GUI rewrote is not this GUI's to remove")
+  for _, path in ipairs({ sourced(9870), sourced(9873), tab_publication_path(9873) }) do
+    os.remove(path)
+  end
 end)
 
 --- Every file under tabs/ that describes `window_id` with `pane_id` as its
@@ -5371,6 +5421,7 @@ test("a dir option the writer would refuse is named, and the default used", func
     { "~/.local/state/wezterm-attention", "not an absolute path" },
     { "relative/state", "not an absolute path" },
     { test_dir .. "/bad\27name", "control character" },
+    { test_dir .. "/bad\233name", "UTF-8" },
     { "/" .. string.rep("d", 4096), "4096 bytes" },
   }
   for _, case in ipairs(cases) do
@@ -5488,6 +5539,16 @@ test("the default state root follows the same order as the writer", function()
     cases[#cases + 1] = { env = { XDG_STATE_HOME = unsafe }, root = home_default }
     cases[#cases + 1] = { env = { WEZTERM_ATTENTION_DIR = unsafe }, root = home_default, warned = true }
   end
+  -- The writer reads its environment as text, so bytes that are not UTF-8,
+  -- a lone or cut-short sequence or an overlong form, name no root it can use;
+  -- it refuses the one that would decide the root, and the log says so here.
+  for _, broken in ipairs({ test_dir .. "/x\233y", test_dir .. "/x\226\130", test_dir .. "/x\192\175y" }) do
+    cases[#cases + 1] = { env = { XDG_STATE_HOME = broken }, root = home_default,
+      warned = "XDG_STATE_HOME" }
+    cases[#cases + 1] = { env = { WEZTERM_ATTENTION_DIR = broken }, root = home_default, warned = true }
+  end
+  cases[#cases + 1] = { env = { XDG_STATE_HOME = test_dir .. "/état" },
+    root = test_dir .. "/état/wezterm-attention" }
   cases[#cases + 1] = { env = { XDG_STATE_HOME = path_of(limit) },
     root = path_of(limit) .. "/wezterm-attention" }
   cases[#cases + 1] = { env = { WEZTERM_ATTENTION_DIR = path_of(limit) }, root = path_of(limit) }
@@ -5507,8 +5568,10 @@ test("the default state root follows the same order as the writer", function()
       "case " .. index .. ": expected " .. case.root .. ", got " .. tostring(instance._active_dir))
     local warnings = drain_warnings()
     if case.warned then
-      assert(#warnings == 1 and warnings[1]:find("WEZTERM_ATTENTION_DIR", 1, true),
-        "a relative WEZTERM_ATTENTION_DIR must be named once in the log")
+      local name = case.warned == true and "WEZTERM_ATTENTION_DIR" or case.warned
+      assert(#warnings == 1 and warnings[1]:find(name, 1, true)
+          and not warnings[1]:find("[\128-\255]"),
+        "case " .. index .. ": " .. name .. " must be named once in the log, without its bytes")
     else
       assert(#warnings == 0, "case " .. index .. " warned: " .. tostring(warnings[1]))
     end

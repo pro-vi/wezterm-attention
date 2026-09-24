@@ -669,6 +669,31 @@ test("env: a root the writer would refuse, too long or holding a control charact
 	}
 });
 
+test("env: a root that is not UTF-8 is skipped and named, as the writer refuses it", async () => {
+	// Node decodes the environment as UTF-8 and puts U+FFFD where the bytes were
+	// not; the writer refuses a WEZTERM_ATTENTION_DIR or XDG_STATE_HOME like that.
+	const home = tempDir("wez-utf8-home-");
+	const scratch = tempDir("wez-utf8-root-");
+	const homeRoot = join(home, ".local", "state", "wezterm-attention");
+	process.env.HOME = home;
+	process.env.WEZTERM_PANE = "42";
+	for (const name of ["XDG_STATE_HOME", "WEZTERM_ATTENTION_DIR"]) {
+		process.env[name] = join(scratch, "x\uFFFDy");
+		const { lifecycle } = loadExt();
+		await lifecycle["agent_start"]!();
+		await lifecycle["session_shutdown"]!();
+		expect(readMarker(homeRoot).type).toBe("thinking");
+		rmSync(join(home, ".local"), { recursive: true, force: true });
+		delete process.env[name];
+	}
+	expect(readdirSync(scratch)).toEqual([]);
+	const messages = notifications.map((entry) => entry.message);
+	expect(messages).toHaveLength(2);
+	expect(messages[0]).toContain("XDG_STATE_HOME");
+	expect(messages[1]).toContain("WEZTERM_ATTENTION_DIR");
+	for (const message of messages) expect(message).not.toContain("\uFFFD");
+});
+
 test('env: TTL_MS="0" falls back to the default, not an instantly-stale marker', async () => {
 	// "0" is a plausible "disable the TTL" reading, and it passes the digits-only
 	// gate — only the `parsed > 0` range check rejects it. Without that check the

@@ -351,9 +351,7 @@ pane closes.
 It is a separate file because it is a separate claim. The marker file belongs to
 whatever process runs in the pane, and on a pane you actually want to flag there
 is almost always one there: an agent's `thinking`, or the `stop` it left behind.
-The flag used to be written into that file as `{"type":"review"}`, guarded so it
-would never overwrite a process marker — which meant `Alt+B` silently did nothing
-on exactly those panes. As a sidecar it coexists:
+As a sidecar it coexists:
 
 | Marker file | `.review` | Tab shows |
 |-------------|-----------|-----------|
@@ -589,7 +587,7 @@ A WezTerm window attached to a mux server mirrors the server's tabs under number
   "tabs": [ { "number": 11, "text": " 11: ✓ braid ", "marker_ids": ["16"] } ] }
 ```
 
-`source` names the GUI that drew the window, because a window id means something only inside one GUI process. The plugin learns that identity by asking the `attention` command shortly after startup. A window's first order is held until that answer arrives and then written under its source; when the command is not built, or no answer can come, it is written as a schema-1 file at `tabs/<window id>.json` with no `source`. A window keeps the one file it was first written to for as long as it is open.
+`source` names the GUI that drew the window, because a window id means something only inside one GUI process. The plugin learns that identity by asking the `attention` command shortly after startup. A window's first order is held until that answer arrives and then written under its source; when the command is not built, or no answer can come, it is written as a schema-1 file at `tabs/<window id>.json` with no `source`. A window keeps the one file it was first written to for as long as it is open, with one exception: after a config reload that finds the command built, a window first written without a `source` is written under its source, and the plugin removes the schema-1 file it wrote for that window unless another GUI has rewritten it since.
 
 `number` is the number the bar printed, `text` is the whole string it drew (escape sequences and control characters removed, cut to 256 bytes, and a spinner always shown at its first frame so the file does not change every second), and `marker_ids` are the IDs the plugin already uses for those panes — already translated out of the window's local numbering, because only the window could translate them. A pane on v1 flat markers is a canonical decimal marker id; a pane with v2 records is `v2:<realm_id>:<incarnation_id>:<pane_id>` once a poll has identified it. The file is written when a window's composed list changes and at no other time, so `published_at_ms` says when the bar last drew something different.
 

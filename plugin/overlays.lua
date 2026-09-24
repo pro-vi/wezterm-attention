@@ -156,6 +156,28 @@ return function(context)
   --- window is open, so no window ever has two files of this process's.
   local published_path_by_window = {}
 
+  --- The bytes of every tab order this GUI process has published, by path.
+  --- A config reload starts this module afresh, and `wezterm.GLOBAL` is what
+  --- WezTerm keeps across one, so this is how a reloaded plugin still knows
+  --- which files are its own. GLOBAL takes only UTF-8 text; a path or body it
+  --- refuses leaves that file unremembered, which only ever keeps a file.
+  local function remember_tab_order(path, body)
+    pcall(function()
+      local global = wezterm.GLOBAL
+      if global.wezterm_attention_tab_orders == nil then
+        global.wezterm_attention_tab_orders = {}
+      end
+      global.wezterm_attention_tab_orders[path] = body
+    end)
+  end
+
+  local function remembered_tab_order(path)
+    local ok, body = pcall(function()
+      return wezterm.GLOBAL.wezterm_attention_tab_orders[path]
+    end)
+    return ok and type(body) == "string" and body or nil
+  end
+
   --- Remove a tab order this process published, but only while the file still
   --- holds the bytes this process wrote there. The unsourced name is shared by
   --- every GUI process, because window ids restart in each one: a file another
@@ -168,10 +190,7 @@ return function(context)
     file:close()
     if current ~= body then return nil end
     local removed, err = os.remove(path)
-    if removed then return nil end
-    local still_there = io.open(path, "r")
-    if not still_there then return nil end
-    still_there:close()
+    if removed or not file_exists(path) then return nil end
     return tostring(err)
   end
 
@@ -204,11 +223,14 @@ return function(context)
   --- translation.
   ---
   --- A window keeps the name of its first publication, source or none, for as
-  --- long as it is open here. Moving it to a sourced name later would leave
-  --- the unsourced file describing the same window, and that name is shared
-  --- with every other GUI process, so this one could not safely take it back.
-  --- The caller holds a window's first publication until the source is
-  --- answered, so the unsourced name is used only where no source will come.
+  --- long as this module runs, so it has one file here. The caller holds a
+  --- window's first publication until the source is answered, so the
+  --- unsourced name is used only where no source will come. A config reload
+  --- starts the module afresh, and the plugin before it may have had no
+  --- writer to ask: a window it published unsourced gets its sourced name
+  --- now, and the unsourced file is removed while it still holds the bytes
+  --- this process wrote. That name is shared with every other GUI process,
+  --- because window ids restart in each, so a file rewritten since stays.
   ---
   --- Honest about when it was written, not guaranteed current: nothing
   --- refreshes `published_at_ms` while the bar draws the same thing. The write
@@ -242,6 +264,19 @@ return function(context)
       source = source or false,
     }
     published_path_by_window[window_key] = path
+    remember_tab_order(path, body .. "\n")
+    if source and not held then
+      local unsourced = window_key .. ".json"
+      local earlier = remembered_tab_order(unsourced)
+      if earlier then
+        remember_tab_order(unsourced, nil)
+        local err = remove_own_tab_order(unsourced, earlier)
+        if err then
+          report_error_once("replace-tabs:" .. unsourced,
+            "cannot remove the unsourced tab order " .. unsourced .. ": " .. err)
+        end
+      end
+    end
     return true
   end
 
@@ -259,6 +294,7 @@ return function(context)
       if window_id and not live[window_id] then
         published_tab_lists[path] = nil
         published_path_by_window[publication.window_key] = nil
+        remember_tab_order(path, nil)
         local err = remove_own_tab_order(path, publication.body)
         if err then
           report_error_once("withdraw-tabs:" .. path,
@@ -311,9 +347,7 @@ return function(context)
 
   local function clear_acknowledgement(dir, pane_id)
     local path = acknowledgement_path(dir, pane_id)
-    local existing = io.open(path, "r")
-    if not existing then return true end
-    existing:close()
+    if not file_exists(path) then return true end
 
     local ok, err = os.remove(path)
     if ok then return true end
@@ -449,9 +483,7 @@ return function(context)
   local function clear_review_flag(dir, pane_id)
     os.remove(review_tmp_path(dir, pane_id))
     local path = review_path(dir, pane_id)
-    local existing = io.open(path, "r")
-    if not existing then return true end
-    existing:close()
+    if not file_exists(path) then return true end
 
     local ok, err = os.remove(path)
     if ok then return true end
@@ -587,9 +619,7 @@ return function(context)
         local moved, move_err = os.rename(path, taken)
         if not moved then
           -- Already gone is the state a clear wants.
-          local still_there = io.open(path, "r")
-          if still_there then
-            still_there:close()
+          if file_exists(path) then
             report_error_once("clear-v2-review:" .. path,
               "failed to remove review claim " .. path .. ": " .. tostring(move_err))
           end
@@ -620,11 +650,12 @@ return function(context)
     --- Put back the reviews a clear moved aside and never finished with,
     --- because its process died between the move and the removal. Each was a
     --- flag the pane showed, so it goes back to its name when nothing has taken
-    --- that name since. Beside a live review it stays for `attention sweep`:
-    --- which of the two is newer is not known here. A leftover is put back
+    --- that name since. Beside a live review it stays until its pane tree is
+    --- removed: which of the two is newer is not known here. A leftover is put back
     --- only when this process's own clear left it, or when the time in its
     --- name is older than any clear takes; a younger one is looked at again
-    --- once it is that old. A name with no time in it is left for sweep.
+    --- once it is that old. A name with no time in it stays until its pane
+    --- tree is removed.
     ---
     --- Looking costs a directory listing, so it is done only where a leftover
     --- can be: on this process's first read of the pane (a GUI that died
