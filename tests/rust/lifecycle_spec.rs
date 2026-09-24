@@ -36,6 +36,9 @@ mod consumer_recipes;
 #[path = "lifecycle_spec/untrusted_text.rs"]
 mod untrusted_text;
 
+#[path = "lifecycle_spec/session_starts.rs"]
+mod session_starts;
+
 struct Scratch(PathBuf);
 
 #[test]

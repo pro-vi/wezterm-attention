@@ -468,7 +468,7 @@ fn binding_mutation(
                     end["observed_mono_ns"].as_str().unwrap_or("") >= current_order
                 });
                 let replace = match provider {
-                    "claude" | "codex" => matches!(source, "resume" | "clear"),
+                    "claude" | "codex" => matches!(source, "resume" | "clear" | "fork"),
                     "pi" => matches!(source, "new" | "resume" | "fork"),
                     _ => false,
                 };

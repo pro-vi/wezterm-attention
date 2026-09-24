@@ -12,6 +12,7 @@
     { "id": "self_claim_binding", "event": "SessionStart", "patch": { "source": "startup" }, "env": { "WEZTERM_ATTENTION_ENABLE_SELF_CLAIM": "1" }, "expected": "binding", "lifecycle_expected": "applied" },
     { "id": "resume_binding", "event": "SessionStart", "patch": { "source": "resume" }, "expected": "binding" },
     { "id": "clear_binding", "event": "SessionStart", "patch": { "source": "clear" }, "expected": "binding" },
+    { "id": "fork_binding", "event": "SessionStart", "patch": { "source": "fork" }, "expected": "binding" },
     { "id": "compact_confirmation", "event": "SessionStart", "patch": { "source": "compact" }, "expected": "binding" },
     { "id": "root_tool_activity", "event": "PreToolUse", "patch": { "tool_name": "Bash" }, "expected": "activity", "activity_type": "thinking" },
     { "id": "root_prompt_activity", "event": "UserPromptSubmit", "patch": {}, "expected": "activity", "activity_type": "thinking" },

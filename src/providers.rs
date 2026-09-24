@@ -462,7 +462,7 @@ fn parse_claude_or_codex(
                     "SessionStart source is not supported",
                 );
             };
-            if !["startup", "resume", "clear", "compact"].contains(&source) {
+            if !["startup", "resume", "clear", "compact", "fork"].contains(&source) {
                 return ProviderEvent::ignored(
                     Some(provider),
                     "integration_version_mismatch",
