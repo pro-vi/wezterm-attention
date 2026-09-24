@@ -2609,6 +2609,33 @@ test("a formatter's broken UTF-8 is published as text the tab reader accepts", f
   end
 end)
 
+test("what a formatter returns is drawn repaired, in both renderers", function()
+  local R = "\239\191\189"
+  local cases = {
+    { "a raw title with ESC and C1", "x\27[41mRED\194\1550m", "x[41mRED0m" },
+    { "a CJK title cut by bytes", ("中文标题"):sub(1, 4), "中" .. R },
+  }
+  local current
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    title_formatter = function() return current end })
+  local formatter = handlers["format-tab-title"][#handlers["format-tab-title"]]
+  local wrapped = instance.wrap_title_formatter(function() return current end)
+  for index, case in ipairs(cases) do
+    current = case[2]
+    local window_id = 9990 + index * 3
+    local drawn = as_userdata({ tab_id = window_id + 1, window_id = window_id, tab_index = 0,
+      is_active = false, active_pane = gui_pane(window_id + 2), panes = { gui_pane(window_id + 2) } })
+    for name, render in pairs({ tab = formatter, manual = wrapped }) do
+      local text = rendered_text(render(drawn, { drawn }))
+      assert(tab_reader_accepts(text), case[1] .. ": the " .. name .. " renderer drew "
+        .. text:gsub("[^\32-\126]", function(c) return string.format("\\%d", c:byte()) end))
+      assert(text:find(case[3], 1, true), case[1] .. ": the " .. name
+        .. " renderer must still draw the formatter's text, got " .. text)
+    end
+  end
+end)
+
 test("a tab with no name, directory or settled title shows the pane's current title", function()
   local bare = tab(17681, 17682, false)
   bare.active_pane.title = "vim\27]0;x"

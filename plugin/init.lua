@@ -472,10 +472,15 @@ local function formatter_tab_key(tab)
   return tostring(tab.tab_id or tab.tab_index or tab)
 end
 
+--- The user's base title, repaired the way every text the bar draws is: a
+--- formatter often returns a pane's title as the program set it, escape
+--- sequences and all, or cuts one by bytes inside a character, which WezTerm
+--- then refuses to draw at all. Not cut to a length: that is the bar's to do.
 local function call_title_formatter(base_fn, tab, ctx)
   local key = formatter_tab_key(tab)
   local ok, base = pcall(base_fn, tab, ctx)
   if ok and type(base) == "string" then
+    base = titles_api.display_text(base, math.huge)
     last_base_title_by_tab[key] = base
     return base
   end
