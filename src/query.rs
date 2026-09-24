@@ -1263,7 +1263,7 @@ fn collect_selected_binding_files(
     }
 }
 
-fn collect_binding_files(
+pub(crate) fn collect_binding_files(
     root: &Path,
     output: &mut Vec<PathBuf>,
     diagnostics: &mut Vec<Diagnostic>,

@@ -14,8 +14,9 @@ use crate::protocol::{
     AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, hex64_text, manifest, sha256_hex,
 };
 use crate::query::{
-    FileStamp, ListOncePerSocket, PaneEvidence, ProbeOncePerAssembly, collect_state_files,
-    pane_evidence, read_bindings_with_ports, read_tab_publications, record_address,
+    FileStamp, ListOncePerSocket, PaneEvidence, ProbeOncePerAssembly, collect_binding_files,
+    collect_state_files, pane_evidence, read_bindings_with_ports, read_tab_publications,
+    record_address,
 };
 use crate::records::{
     CommitPlan, RecordIdentity, Replacement, atomic_replace_if_different, binding_session_entry,
@@ -165,8 +166,7 @@ fn collect_json_complete_at(
 
 fn binding_files(root: &Path, diagnostics: &mut Vec<Diagnostic>) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    collect_json(root, &root.join("v2/realms"), &mut files, diagnostics);
-    files.retain(|path| path.file_name().and_then(|name| name.to_str()) == Some("binding.json"));
+    collect_binding_files(root, &mut files, diagnostics);
     files.sort();
     files
 }
