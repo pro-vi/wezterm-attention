@@ -316,6 +316,7 @@ local format_api = format_factory({
   marker_id_by_local = marker_id_by_local,
   attention_cache = attention_cache,
   title_sources = title_sources,
+  display_text = titles_api.display_text,
 })
 local gui_tab_pane_ids = format_api.gui_tab_pane_ids
 local resolve_visible_attention = format_api.resolve_visible_attention

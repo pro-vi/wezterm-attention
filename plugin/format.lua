@@ -4,6 +4,7 @@ return function(context)
   local marker_id_by_local = context.marker_id_by_local
   local attention_cache = context.attention_cache
   local title_sources = context.title_sources
+  local display_text = context.display_text
 
   local function gui_tab_pane_ids(tab)
     local ids = {}
@@ -198,8 +199,11 @@ return function(context)
       drawn = {}
       drawn_by_window[window_id] = drawn
     end
+    -- The published copy is read by `attention tabs`, which refuses a whole
+    -- window's file over one tab text longer than a label or holding a control
+    -- character. A user formatter can return either.
     drawn[tab_id] = {
-      number = tab.tab_index + 1, text = text, marker_ids = marker_ids,
+      number = tab.tab_index + 1, text = display_text(text, 256), marker_ids = marker_ids,
     }
     local order, present = {}, {}
     for index, entry in ipairs(tabs) do

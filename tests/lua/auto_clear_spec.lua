@@ -2068,6 +2068,40 @@ test("invalid pane title cannot destroy a higher base source", function()
     "an invalid fallback sample must not affect the server-owned title")
 end)
 
+local function has_control(text)
+  return text:find("[%z\1-\31\127]") ~= nil or text:find("\194[\128-\159]") ~= nil
+end
+
+test("a directory name cannot carry escape sequences into the tab bar", function()
+  local escaped = tab(17671, 17672, false)
+  -- ESC [ 42 m, then CSI spelled as the single C1 character U+009B.
+  escaped.active_pane.current_working_dir = { file_path = "/tmp/evil\27[42m\194\1550mname" }
+  local rendered = rendered_text(format_tab_title(escaped))
+  assert(not has_control(rendered), "a control character reached the tab bar")
+  assert(rendered:find("evil[42m0mname", 1, true), "the rest of the name must still show, got " .. rendered)
+end)
+
+test("a long or control-character tab text is published within the tab reader's bounds", function()
+  local long_name = string.rep("\195\169", 200) -- 400 bytes of "é"
+  local named = as_userdata({ tab_id = 9861, window_id = 9860, tab_index = 0, is_active = false,
+    active_pane = gui_pane(9862), panes = { gui_pane(9862) }, tab_title = long_name })
+  format_tab_title(named, { named })
+  local text = assert(read_tab_publication(9860)).tabs[1].text
+  assert(#text <= 256, "published text is " .. #text .. " bytes")
+  assert(text:sub(-2) == "\195\169", "the cut must fall between characters")
+
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    title_formatter = function() return "red\27[31m\7bell" end })
+  local formatter = handlers["format-tab-title"][#handlers["format-tab-title"]]
+  local plain = as_userdata({ tab_id = 9864, window_id = 9863, tab_index = 0, is_active = false,
+    active_pane = gui_pane(9865), panes = { gui_pane(9865) } })
+  formatter(plain, { plain })
+  local formatted = assert(read_tab_publication(9863)).tabs[1].text
+  assert(not has_control(formatted), "a formatter's control character was published")
+  assert(formatted:find("red[31mbell", 1, true), "the formatter's text must still be published")
+end)
+
 test("a change in the subagent count alone requests a redraw", function()
   write_marker(7531, "stop")
   write_subagents(7531, {
