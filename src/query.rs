@@ -1082,7 +1082,7 @@ pub struct BindingQueryScope {
 pub fn validate_socket_selector(socket: &str) -> Result<()> {
     if !Path::new(socket).is_absolute()
         || socket.len() > crate::protocol::manifest()?.limits.path_max_bytes
-        || socket.chars().any(|c| c < ' ' || c == '\u{7f}')
+        || socket.chars().any(char::is_control)
     {
         return Err(AttentionError::usage(
             "--socket must be an absolute path within the path bound",
@@ -2750,5 +2750,25 @@ mod published_marker_id_tests {
             "v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:016",
             20
         ));
+    }
+}
+
+#[cfg(test)]
+mod socket_selector_tests {
+    use super::validate_socket_selector;
+
+    /// A socket path is echoed back in answers and diagnostics, so a C1
+    /// control in it is refused like any C0 one.
+    #[test]
+    fn refuses_a_socket_path_with_any_control_character() {
+        assert!(validate_socket_selector("/tmp/mux.sock").is_ok());
+        for socket in [
+            "/tmp/a\u{1b}b",
+            "/tmp/a\u{7f}b",
+            "/tmp/a\u{85}b",
+            "/tmp/a\u{9b}b",
+        ] {
+            assert!(validate_socket_selector(socket).is_err(), "{socket:?}");
+        }
     }
 }
