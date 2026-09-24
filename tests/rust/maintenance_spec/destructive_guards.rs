@@ -297,7 +297,46 @@ fn an_absence_probe_is_never_cleared_through_a_symlinked_state_directory() {
         pane_id: "42".to_owned(),
         tty_name: Some("/dev/ttys888".to_owned()),
     }]);
-    let (_, diagnostics) = setup.run_sweep(true, Some(OP_2));
+    let (result, diagnostics) = setup.run_sweep(true, Some(OP_2));
     assert!(outside.join(&relative).exists(), "{diagnostics:?}");
     assert!(diagnostics.iter().any(|d| d.code == "record_invalid"));
+    assert_eq!(
+        super::pane_retention::actions(&result.details, "absence"),
+        [&json!("keep")]
+    );
+}
+
+/// Pane retention clears a retention probe the same way, and reports it the
+/// same way: kept, with a detail row and the diagnostic.
+#[test]
+fn a_retention_probe_is_never_cleared_through_a_symlinked_state_directory() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    super::pane_retention::end_long_ago(&setup);
+    setup.panes.set(Vec::new());
+    setup.processes.set(Presence::Absent);
+    setup.clock.set_monotonic(1_000);
+    let (first, _) = setup.run_sweep(true, Some(OP_1));
+    assert_eq!(
+        super::pane_retention::actions(&first.details, "pane_retention"),
+        [&json!("first_absence")]
+    );
+    let probe = pane_path(&setup.root(), &pane_address(&setup.env).expect("address").0)
+        .join("absence-probe.json");
+    let relative = probe
+        .strip_prefix(setup.root().join("v2"))
+        .expect("probe below v2")
+        .to_path_buf();
+    let outside = move_v2_outside(&setup);
+    setup.panes.set(vec![PaneRow {
+        pane_id: "42".to_owned(),
+        tty_name: Some("/dev/ttys888".to_owned()),
+    }]);
+    let (result, diagnostics) = setup.run_sweep(true, Some(OP_2));
+    assert!(outside.join(&relative).exists(), "{diagnostics:?}");
+    assert!(diagnostics.iter().any(|d| d.code == "record_invalid"));
+    assert_eq!(
+        super::pane_retention::actions(&result.details, "pane_retention"),
+        [&json!("keep")]
+    );
 }

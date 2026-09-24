@@ -2288,7 +2288,7 @@ pub fn sweep(
                     if !removal_confined(root, &probe_path) {
                         return Ok(CommitPlan {
                             result: AbsenceOutcome {
-                                action: "changed".to_owned(),
+                                action: "keep".to_owned(),
                                 diagnostic: Some(diagnostic(
                                     "record_invalid",
                                     "absence probe outside the state root is preserved",
@@ -2336,9 +2336,8 @@ pub fn sweep(
         );
         match applied {
             Ok((outcome, ())) => {
-                if let Some(diagnostic) = outcome.diagnostic {
-                    diagnostics.push(diagnostic);
-                } else {
+                diagnostics.extend(outcome.diagnostic);
+                if outcome.action != "changed" {
                     details.push(
                         json!({"kind":"absence","binding_id":binding_id,"action":outcome.action}),
                     );

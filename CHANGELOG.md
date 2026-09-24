@@ -100,6 +100,7 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - A tab-order file naming a pane whose mux did not answer makes `sweep` incomplete (exit 1), as a binding's pane does.
 - A tab-order file naming any pane whose absence sweep could not decide, including one whose pane listing was malformed or whose process probe did not answer, makes `sweep` incomplete, as the pane's binding does.
 - `sweep --apply` against a mux that accepts connections and never answers waits out one listing deadline for that socket, not two per pane.
+- An absence probe that sweep keeps because it is outside the state root is listed as an `absence` detail with action `keep`, as pane retention lists it, instead of leaving no detail.
 - A binding that sweep ended after a reboot reads as ended in `bindings`, `inspect` and later sweeps, which report `already_ended` rather than writing its end again, and its pane tree is then retained by the usual rule. A binding-end record names the binding event it ends in the new optional field `binding_event_id`, which orders it whatever the restarted monotonic clock says.
 - The example status bar shortens a branch name by cell width, so a non-ASCII branch name no longer stops the right status updating.
 - `examples/wezterm.lua` loads in `wezterm-mux-server`, which reads the same file but has no `wezterm.gui`, so a mux server's panes get the attention environment and are claimed.
