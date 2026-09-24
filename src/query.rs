@@ -1715,7 +1715,7 @@ fn session_key(binding: &Value) -> (String, String) {
     )
 }
 
-fn record_address(record: &Value) -> Option<PaneAddress> {
+pub(crate) fn record_address(record: &Value) -> Option<PaneAddress> {
     serde_json::from_value(record.get("address")?.clone()).ok()
 }
 

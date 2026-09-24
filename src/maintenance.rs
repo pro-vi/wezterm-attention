@@ -15,7 +15,7 @@ use crate::protocol::{
 };
 use crate::query::{
     FileStamp, ListOncePerSocket, PaneEvidence, ProbeOncePerAssembly, collect_state_files,
-    pane_evidence, read_bindings_with_ports, read_tab_publications,
+    pane_evidence, read_bindings_with_ports, read_tab_publications, record_address,
 };
 use crate::records::{
     CommitPlan, RecordIdentity, Replacement, atomic_replace_if_different, binding_session_entry,
@@ -216,10 +216,6 @@ fn state_kind(path: &Path) -> Option<&'static str> {
         "agents-floor.json" => Some("subagent_retention_floor"),
         _ => None,
     }
-}
-
-fn record_address(record: &Value) -> Option<PaneAddress> {
-    serde_json::from_value(record.get("address")?.clone()).ok()
 }
 
 fn binding_selection(
