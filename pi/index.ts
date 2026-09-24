@@ -63,13 +63,23 @@ type WriterResult =
 	| { kind: "succeeded" }
 	| { kind: "failed"; message: string };
 
-// Resolve the marker dir and require it absolute — closes two degenerate-env holes:
-// WEZTERM_ATTENTION_DIR="" would make clear's rm() delete a cwd-relative file, and
-// HOME="" resolves to a relative ".local/..." that scatters markers. `||` (not `??`)
-// so an empty override falls through to the HOME default; the isAbsolute gate is what
-// closes the HOME hole (homedir() also returns "" for HOME=""), so don't drop it.
-function markerDirectory(): string | undefined {
-	const dir = process.env.WEZTERM_ATTENTION_DIR || join(process.env.HOME || homedir(), ".local", "state", "wezterm-attention");
+// The same state root the Rust writer and the WezTerm plugin resolve:
+// WEZTERM_ATTENTION_DIR, else $XDG_STATE_HOME/wezterm-attention, else
+// ~/.local/state/wezterm-attention. An empty or relative value is skipped, never
+// used: a relative root would scatter markers under the cwd and let clear's rm()
+// delete a cwd-relative file. The Rust writer refuses a relative
+// WEZTERM_ATTENTION_DIR outright; here, as in the plugin, it is reported and the
+// next rule applies. The final isAbsolute gate closes the HOME="" hole
+// (homedir() also returns "" for HOME=""), so don't drop it.
+function markerDirectory(report: (message: string) => void): string | undefined {
+	const override = process.env.WEZTERM_ATTENTION_DIR;
+	if (override) {
+		if (isAbsolute(override)) return override;
+		report("wezterm-attention: ignoring WEZTERM_ATTENTION_DIR because it is not an absolute path");
+	}
+	const stateHome = process.env.XDG_STATE_HOME;
+	if (stateHome && isAbsolute(stateHome)) return join(stateHome, "wezterm-attention");
+	const dir = join(process.env.HOME || homedir(), ".local", "state", "wezterm-attention");
 	return isAbsolute(dir) ? dir : undefined;
 }
 
@@ -175,12 +185,12 @@ async function publishPaneId(id: string): Promise<void> {
 	}
 }
 
-async function writeMarkerNow(state: AttentionState, label?: string): Promise<void> {
+async function writeMarkerNow(report: (message: string) => void, state: AttentionState, label?: string): Promise<void> {
 	const id = paneId();
 	if (!id) return;
 	await publishPaneId(id);
 
-	const dir = markerDirectory();
+	const dir = markerDirectory(report);
 	if (!dir) return;
 	const path = join(dir, id);
 	const publicationId = randomUUID();
@@ -212,10 +222,10 @@ async function writeMarkerNow(state: AttentionState, label?: string): Promise<vo
 	}
 }
 
-async function clearMarkerNow(): Promise<void> {
+async function clearMarkerNow(report: (message: string) => void): Promise<void> {
 	const id = paneId();
 	if (!id) return;
-	const dir = markerDirectory();
+	const dir = markerDirectory(report);
 	if (!dir) return;
 	try {
 		await rm(join(dir, id), { force: true });
@@ -224,12 +234,12 @@ async function clearMarkerNow(): Promise<void> {
 	}
 }
 
-function mark(state: AttentionState, label?: string): Promise<void> {
-	return enqueue(() => writeMarkerNow(state, label));
+function mark(report: (message: string) => void, state: AttentionState, label?: string): Promise<void> {
+	return enqueue(() => writeMarkerNow(report, state, label));
 }
 
-function clearMarker(): Promise<void> {
-	return enqueue(() => clearMarkerNow());
+function clearMarker(report: (message: string) => void): Promise<void> {
+	return enqueue(() => clearMarkerNow(report));
 }
 
 function sessionFacts(ctx: ExtensionContext): SessionFacts | undefined {
@@ -302,6 +312,16 @@ function writerInvocation(request: WriterRequest): { event: string; payload: Rec
 	}
 }
 
+// The first line of the writer's stderr, for the warning that reports it. It
+// comes from another process and is shown in Pi's interface, so control
+// characters are dropped and the length is capped.
+const DIAGNOSTIC_BYTES = 4096;
+const DIAGNOSTIC_CHARACTERS = 200;
+function firstDiagnosticLine(stderr: Buffer): string {
+	const line = stderr.toString("utf8").split("\n", 1)[0] ?? "";
+	return line.replace(/\p{Cc}/gu, "").trim().slice(0, DIAGNOSTIC_CHARACTERS);
+}
+
 async function invokeWriter(request: WriterRequest, transportId: string): Promise<WriterResult> {
 	const target = writerExecutable();
 	if (target.kind !== "ready") return target;
@@ -309,6 +329,7 @@ async function invokeWriter(request: WriterRequest, transportId: string): Promis
 	return new Promise<WriterResult>((resolve) => {
 		let settled = false;
 		let diagnosticReceived = false;
+		let diagnostic = Buffer.alloc(0);
 		const finish = (result: WriterResult) => {
 			if (settled) return;
 			settled = true;
@@ -323,13 +344,19 @@ async function invokeWriter(request: WriterRequest, transportId: string): Promis
 			child.once("error", () => finish({ kind: "failed", message: "wezterm-attention: writer process could not start" }));
 			child.stderr.on("data", (chunk: Buffer | string) => {
 				if (chunk.length > 0) diagnosticReceived = true;
+				if (diagnostic.length < DIAGNOSTIC_BYTES) {
+					diagnostic = Buffer.concat([diagnostic, Buffer.from(chunk)]).subarray(0, DIAGNOSTIC_BYTES);
+				}
 			});
 			child.stderr.once("error", () => finish({ kind: "failed", message: "wezterm-attention: writer diagnostics failed" }));
-			child.once("close", (code) => finish(code === 0 && !diagnosticReceived
-				? { kind: "succeeded" }
-				: { kind: "failed", message: code === 0
+			child.once("close", (code) => {
+				if (code === 0 && !diagnosticReceived) return finish({ kind: "succeeded" });
+				const summary = code === 0
 					? "wezterm-attention: writer rejected the event"
-					: `wezterm-attention: writer exited with status ${code ?? "signal"}` }));
+					: `wezterm-attention: writer exited with status ${code ?? "signal"}`;
+				const line = firstDiagnosticLine(diagnostic);
+				finish({ kind: "failed", message: line ? `${summary}: ${line}` : summary });
+			});
 			child.stdin.once("error", () => finish({ kind: "failed", message: "wezterm-attention: writer input failed" }));
 			child.stdin.end(JSON.stringify({ ...invocation.payload, transport_id: transportId }));
 		} catch {
@@ -338,10 +365,10 @@ async function invokeWriter(request: WriterRequest, transportId: string): Promis
 	});
 }
 
-async function applyLegacyFallback(request: WriterRequest): Promise<void> {
+async function applyLegacyFallback(request: WriterRequest, report: (message: string) => void): Promise<void> {
 	switch (request.kind) {
 		case "tool_start":
-			await writeMarkerNow("thinking");
+			await writeMarkerNow(report, "thinking");
 			return;
 		case "tool_end":
 		case "input":
@@ -350,13 +377,13 @@ async function applyLegacyFallback(request: WriterRequest): Promise<void> {
 		case "compaction":
 			return;
 		case "activity":
-			await writeMarkerNow(request.state, request.label);
+			await writeMarkerNow(report, request.state, request.label);
 			return;
 		case "review":
-			await writeMarkerNow("review");
+			await writeMarkerNow(report, "review");
 			return;
 		case "clear":
-			await clearMarkerNow();
+			await clearMarkerNow(report);
 			return;
 		case "binding":
 		case "end":
@@ -368,7 +395,7 @@ function enqueueWriter(request: WriterRequest, reportFailure: (message: string) 
 	const transportId = randomUUID();
 	return enqueue(async () => {
 		const result = await invokeWriter(request, transportId);
-		if (result.kind === "unconfigured") await applyLegacyFallback(request);
+		if (result.kind === "unconfigured") await applyLegacyFallback(request, reportFailure);
 		else if (result.kind === "failed") reportFailure(result.message);
 	});
 }
@@ -539,7 +566,9 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 		if (!request) return;
 		if (!currentSession) {
 			if (process.env.WEZTERM_ATTENTION_ROOT === undefined) {
-				return request.state === "clear" ? clearMarker() : mark(request.state, request.label);
+				return request.state === "clear"
+					? clearMarker(reportWriterFailure)
+					: mark(reportWriterFailure, request.state, request.label);
 			}
 			reportWriterFailure("wezterm-attention: no Pi session is available for the configured writer");
 			return;
