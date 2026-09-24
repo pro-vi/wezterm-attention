@@ -769,6 +769,11 @@ pub fn reply_content(
     {
         return HookContent::Unsupported;
     }
+    // Codex declares this field nullable and sends null when a turn ends
+    // without final text; that is a turn with no reply, not a malformed one.
+    if payload.get("last_assistant_message") == Some(&Value::Null) {
+        return HookContent::Absent;
+    }
     text_content(payload, "last_assistant_message")
 }
 
