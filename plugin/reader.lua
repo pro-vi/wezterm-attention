@@ -76,6 +76,23 @@ return function(context)
     return ordered
   end
 
+  local latest_written = setmetatable({}, { __mode = "k" })
+
+  --- The latest write time of any observation in a snapshot, remembered per
+  --- snapshot table.
+  local function latest_written_unix_ns(snapshot)
+    local latest = latest_written[snapshot]
+    if latest then return latest end
+    latest = ""
+    for _, pool in pairs(snapshot.pools) do
+      for _, observation in ipairs(pool.observations) do
+        if observation.written_at_unix_ns > latest then latest = observation.written_at_unix_ns end
+      end
+    end
+    latest_written[snapshot] = latest
+    return latest
+  end
+
   local function lifecycle_facet(snapshot, status, problem, now_unix_ns)
     local availability = { valid = "available", missing = "absent", cached = "cached", unavailable = "unavailable", invalid = "invalid" }
     local facet = { availability = availability[status] or "absent", coverage = "bounded_window", observations = {}, requests = {}, retention_floors = {}, diagnostics = {} }
@@ -542,7 +559,23 @@ return function(context)
       end
     end
     records.lifecycle = snapshot
-    local lifecycle = lifecycle_facet(snapshot, snapshot_status, snapshot_problem, now_unix_ns)
+    -- The record reader hands back the previous snapshot table when the file's
+    -- bytes have not changed, and then the facet built from it last poll is
+    -- still the facet: copying and grouping every observation again would give
+    -- the same tables. Only the clock can change it, through the clock-skew
+    -- diagnostics, so it is reused only while neither poll saw any.
+    local lifecycle
+    local previous_lifecycle = previous and previous.lifecycle
+    if snapshot and snapshot_status == "valid" and previous_lifecycle
+        and previous_binding_records.lifecycle == snapshot
+        and previous_lifecycle.availability == "available"
+        and #previous_lifecycle.diagnostics == 0
+        and not (now_unix_ns and now_unix_ns < latest_written_unix_ns(snapshot)) then
+      lifecycle = previous_lifecycle
+      lifecycle.badge_acknowledgement = nil
+    else
+      lifecycle = lifecycle_facet(snapshot, snapshot_status, snapshot_problem, now_unix_ns)
+    end
     local raw_activity = records.activity
     if acknowledgement and raw_activity and same_target(acknowledgement.target, current_target)
       and same_target(raw_activity.target, current_target)

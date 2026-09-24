@@ -596,13 +596,13 @@ return function(context)
   -- time while leaving room for any whitespace a JSON encoder might add.
   local wire_max_bytes = 4096
 
-  local function parse_wire_json(content)
-    if type(content) ~= "string" or content == "" then
-      return nil, invalid("WEZTERM_ATTENTION must be non-empty JSON")
-    end
-    if #content > wire_max_bytes then
-      return nil, invalid("WEZTERM_ATTENTION is longer than any identity")
-    end
+  -- Every pane's user var is parsed on every poll, and it changes only when the
+  -- pane publishes again. The answer depends on nothing but the text, so it is
+  -- kept per text; the table is emptied when it grows past any plausible
+  -- number of panes rather than tracking which texts are still in use.
+  local parsed_wires, parsed_wire_count = {}, 0
+
+  local function parse_wire_text(content)
     if json_contains_null_literal(content) then
       return nil, invalid("WEZTERM_ATTENTION contains unsupported null")
     end
@@ -611,6 +611,22 @@ return function(context)
       return nil, invalid("WEZTERM_ATTENTION is not valid JSON", { detail = tostring(parse_err) })
     end
     return parse_wire_value(value)
+  end
+
+  local function parse_wire_json(content)
+    if type(content) ~= "string" or content == "" then
+      return nil, invalid("WEZTERM_ATTENTION must be non-empty JSON")
+    end
+    if #content > wire_max_bytes then
+      return nil, invalid("WEZTERM_ATTENTION is longer than any identity")
+    end
+    local known = parsed_wires[content]
+    if known then return known.wire, known.diagnostic end
+    local wire, wire_diagnostic = parse_wire_text(content)
+    if parsed_wire_count >= 1024 then parsed_wires, parsed_wire_count = {}, 0 end
+    parsed_wires[content] = { wire = wire, diagnostic = wire_diagnostic }
+    parsed_wire_count = parsed_wire_count + 1
+    return wire, wire_diagnostic
   end
 
   local function parse_v2_record(value, expected_kind)
@@ -780,7 +796,16 @@ return function(context)
     }, "/")
   end
 
-  local function read_record_file(path, expected_kind)
+  -- The bytes, and the kind they were parsed as, that each parsed record came
+  -- from. A poll reads every record of every pane again, and nearly all of them
+  -- are unchanged since the last poll; handing back the previous record for the
+  -- same bytes skips the parse and validation, which for a full lifecycle
+  -- snapshot is most of what a poll costs. Weak keys: a record nobody holds any
+  -- more takes its bytes with it.
+  local record_source_text = setmetatable({}, { __mode = "k" })
+  local record_source_kind = setmetatable({}, { __mode = "k" })
+
+  local function read_record_file(path, expected_kind, previous)
     local limits = protocol and protocol.limits
     if not limits then return nil, diagnostic("probe_unavailable", "protocol limits unavailable"), "unavailable" end
     local maximum = expected_kind == "lifecycle_snapshot" and limits.lifecycle_max_json_bytes or limits.max_json_bytes
@@ -795,8 +820,14 @@ return function(context)
         path = path, detail = message,
       }), "unavailable"
     end
+    if previous and record_source_text[previous] == content
+        and record_source_kind[previous] == expected_kind then
+      return previous, nil, "valid"
+    end
     local record, parse_diagnostic = parse_v2_record_json(content, expected_kind)
     if not record then return nil, parse_diagnostic, "invalid" end
+    record_source_text[record] = content
+    record_source_kind[record] = expected_kind
     return record, nil, "valid"
   end
 
@@ -812,8 +843,8 @@ return function(context)
     return invalid(kind .. " record interior identity does not match its path", { path = path })
   end
 
-  local function read_expected_record(path, kind, expected, required)
-    local record, read_diagnostic, status = read_record_file(path, kind)
+  local function read_expected_record(path, kind, expected, required, previous)
+    local record, read_diagnostic, status = read_record_file(path, kind, previous)
     if status == "missing" and not required then return nil, nil, status end
     if not record then
       return nil,
@@ -827,7 +858,7 @@ return function(context)
   end
 
   local function read_expected_record_cached(path, kind, expected, required, cached)
-    local record, read_diagnostic, status = read_expected_record(path, kind, expected, required)
+    local record, read_diagnostic, status = read_expected_record(path, kind, expected, required, cached)
     if record or status ~= "unavailable" or not cached then
       return record, read_diagnostic, status
     end

@@ -4009,6 +4009,63 @@ test("twenty full lifecycle panes keep polling and getter work bounded", functio
   io.write(string.format("lifecycle workload: 20 panes, 2 polls, 128 observations each; CPU %.2f ms; 40 snapshot reads; 0 writes\n", cpu_ms))
 end)
 
+test("an unchanged record is not parsed again, and a changed one is", function()
+  local file = assert(io.open(repo_root .. "/tests/fixtures/lifecycle/observations.json", "r"))
+  local fixture = decode_json(file:read("*a")); file:close()
+  local id = 11101
+  local wire = materialize_v2_fixture(id)
+  local snapshot = decode_json(encode_json(fixture.cases[2].value))
+  snapshot.address, snapshot.launch_id = wire.address, wire.launch_id
+  snapshot.binding_id, snapshot.provider = protocol_fixture.record_samples.binding.binding_id, "claude"
+  -- The harness encoder writes an empty table as {}, which is not an
+  -- observation array, so both pools always hold something.
+  snapshot.pools.requests.observations, snapshot.pools.general.observations = {}, {}
+  for member = 1, 2 do
+    for _, pool in ipairs({ "requests", "general" }) do
+      local item = decode_json(encode_json(fixture.cases[2].value.pools.general.observations[1]))
+      item.observation_id = string.format("00000000-0000-4000-8000-%012d", member + (pool == "requests" and 100 or 200))
+      item.observed_mono_ns = string.format("%020d", member)
+      item.correlation = { tool_call_id = pool .. member }
+      if pool == "requests" then item.tool_name, item.tool_class, item.question_mode = "AskUserQuestion", "question", "blocking" end
+      snapshot.pools[pool].observations[member] = item
+    end
+  end
+  local binding_dir = test_dir .. "/v2/realms/" .. wire.address.realm_id .. "/incarnations/"
+    .. wire.address.incarnation_id .. "/panes/" .. id .. "/launches/" .. wire.launch_id
+    .. "/bindings/" .. snapshot.binding_id
+  write_json_path(binding_dir .. "/lifecycle.json", snapshot)
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root })
+  local pane = { id = id, domain = "unix", attention = wire }
+  local window = window_double({ tabs = { { pane } }, focused = false })
+  local options = { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end }
+  local real_parse, parses = wezterm.json_parse, 0
+  wezterm.json_parse = function(content) parses = parses + 1; return real_parse(content) end
+  local ok, failure = pcall(function()
+    instance.poll(window, options)
+    local first = assert(instance.get_attention_view(mux_pane(id, pane)))
+    assert(first.lifecycle.availability == "available" and #first.lifecycle.observations == 4,
+      "precondition: the snapshot is valid")
+    parses = 0
+    instance.poll(window, options)
+    assert(parses == 0, "an unchanged tree was parsed again: " .. parses .. " parses")
+    local second = assert(instance.get_attention_view(mux_pane(id, pane)))
+    assert(#second.lifecycle.observations == #first.lifecycle.observations
+      and second.lifecycle.availability == "available", "the reused lifecycle must be the same facts")
+
+    snapshot.pools.general.observations[2] = nil
+    write_json_path(binding_dir .. "/lifecycle.json", snapshot)
+    instance.poll(window, options)
+    assert(parses > 0, "a changed lifecycle.json must be parsed")
+    local third = assert(instance.get_attention_view(mux_pane(id, pane)))
+    assert(#third.lifecycle.observations < #first.lifecycle.observations,
+      "the changed snapshot's facts must replace the old ones")
+  end)
+  wezterm.json_parse = real_parse
+  assert(ok, failure)
+end)
+
 test("consumer manifest classification agrees with Rust and rejects incompatible metadata", function()
   local load = dofile(repo_root .. "/plugin/protocol.lua")
   local api = load({ wezterm = wezterm, protocol_path = repo_root .. "/protocol/v2.json" })
