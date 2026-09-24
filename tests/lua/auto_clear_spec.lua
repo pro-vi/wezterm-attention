@@ -4149,6 +4149,37 @@ local function load_with_environment(environment)
   return instance
 end
 
+test("the state root and tabs directory are created private to the user", function()
+  local root = test_dir .. "/private-root"
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, review_key = false, renderer = "manual", dir = root })
+  for _, path in ipairs({ root, root .. "/tabs" }) do
+    local listing = assert(io.popen("ls -ld " .. shell_quote(path)))
+    local mode = (listing:read("*l") or ""):sub(1, 10)
+    listing:close()
+    assert(mode == "drwx------", path .. " was created " .. mode)
+  end
+end)
+
+test("on Windows the directories are made with cmd.exe's mkdir", function()
+  local commands = {}
+  local real_execute, real_config = os.execute, package.config
+  package.config = "\\\n;\n?\n!\n-\n"
+  os.execute = function(command) commands[#commands + 1] = command; return 0 end
+  local ok, failure = pcall(function()
+    local instance = dofile(repo_root .. "/plugin/init.lua")
+    instance.apply_to_config({}, { auto_poll = false, review_key = false, renderer = "manual",
+      dir = "C:/Users/someone/state" })
+  end)
+  os.execute, package.config = real_execute, real_config
+  assert(ok, failure)
+  assert(#commands == 1, "one directory command, got " .. #commands)
+  assert(not commands[1]:find("-p", 1, true) and not commands[1]:find("umask", 1, true),
+    "a POSIX command reached cmd.exe: " .. commands[1])
+  assert(commands[1]:find('mkdir "C:\\Users\\someone\\state\\tabs"', 1, true),
+    "the tabs directory must be named in Windows form: " .. commands[1])
+end)
+
 test("the default state root follows the same order as the writer", function()
   local home_default = test_dir .. "/.local/state/wezterm-attention"
   local cases = {

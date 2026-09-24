@@ -522,10 +522,21 @@ function M.apply_to_config(config, opts)
 
   -- Once, at config load. The Alt+B handler used to do this on the GUI thread
   -- on every press; the directory does not change between presses.
-  local quoted_dir = dir:gsub("'", [['\'']])
   -- `tabs/` holds one file per GUI window, so it is made with the state
   -- directory rather than on the tab formatter's own thread.
-  os.execute("mkdir -p '" .. quoted_dir .. "' '" .. quoted_dir .. "/tabs'")
+  if package.config:sub(1, 1) == "\\" then
+    -- cmd.exe has no -p: its mkdir makes the missing parents itself, and fails
+    -- on a directory that is already there.
+    local tabs_dir = (dir .. "/tabs"):gsub("/", "\\")
+    os.execute('if not exist "' .. tabs_dir .. '" mkdir "' .. tabs_dir .. '"')
+  else
+    -- Private from the first moment, not from the writer's first chmod: the
+    -- GUI's umask would otherwise leave the root and every file the plugin
+    -- writes readable by other users until an agent first claims a pane.
+    local quoted_dir = dir:gsub("'", [['\'']])
+    os.execute("umask 077; mkdir -p '" .. quoted_dir .. "/tabs' && chmod 700 '"
+      .. quoted_dir .. "' '" .. quoted_dir .. "/tabs'")
+  end
 
   -- Resolve renderer: support both new "renderer" and legacy "format_tab_title"
   local renderer = opts.renderer or defaults.renderer
