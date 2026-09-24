@@ -25,8 +25,9 @@ _WEZTERM_ATTENTION_IN_HOOK=0
 #
 # Bash walks the whole string for ${#input} and for every ${input:index:1}, so
 # the length is taken once and characters are read from a 256-character window
-# taken once per 256 characters. A leading assignment of n characters then
-# costs about n*n/256 for the windows plus n*256 for the reads, not n*n.
+# taken once per 256 characters, rather than walking n*n characters for a
+# leading assignment of n. What such an assignment costs is then bash's own
+# cost for each step of this loop: about a second for 50 KB on bash 3.2.
 _wezterm_attention_find_command_word() {
   _wezterm_attention_command_word=
   local input=$1 length=${#1} window= token= quote= character index escaped=0

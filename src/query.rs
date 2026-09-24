@@ -1663,8 +1663,9 @@ pub(crate) fn pane_evidence(
 /// Whether another pane address holds a binding of this provider session that
 /// competes with the inspected one, by the rule `bindings` applies across its
 /// rows. Only same-session bindings have their end read and their pane probed,
-/// and the session index names them, so a store with no rival costs one
-/// directory read and no subprocess.
+/// and once the session index is complete it names them, so a store with no
+/// rival costs one directory read and no subprocess; before that, a walk of
+/// binding records.
 fn session_live_elsewhere(
     root: &Path,
     address: &PaneAddress,

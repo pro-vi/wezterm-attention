@@ -1634,8 +1634,8 @@ fn session_entries_below(root: &Path, dir: &Path) -> Vec<PathBuf> {
 /// about that socket for the rest of the run, and one that answered is taken
 /// fresh each time. A failed listing leaves a pane undecided and so removes
 /// nothing, while each ask against a mux that accepts and never answers
-/// waits out the listing deadline; asking once per pane made an apply's wait
-/// grow with the panes on that socket.
+/// waits out the listing deadline; asking once per pane would make an apply's
+/// wait grow with the panes on that socket.
 struct FailedListingOncePerSocket<'a> {
     inner: &'a dyn PaneLister,
     failed: std::sync::Mutex<BTreeMap<String, AttentionError>>,
