@@ -401,8 +401,19 @@ fn emit_error_with_complete(
         print_err(&format!("help: {}", error.diagnostic.help));
     }
     // 2 is kept for a command line that could not be used; every other
-    // failure, whatever the error's own code, is 1.
-    ExitCode::from(if error.exit_code == 2 { 2 } else { 1 })
+    // failure, whatever the error's own code, is 1. A hook command never
+    // exits 2, because Claude Code and Codex read 2 as "block".
+    ExitCode::from(if error.exit_code == 2 && !is_hook_command(command) {
+        2
+    } else {
+        1
+    })
+}
+
+/// `attention hooks ...`, which provider hook registrations, the shell
+/// integration and the plugin run.
+fn is_hook_command(command: &str) -> bool {
+    command == "hooks" || command.starts_with("hooks ")
 }
 
 fn emit_hook_error(error: &AttentionError, debug: bool, strict: bool, command: &str) -> ExitCode {
@@ -428,7 +439,7 @@ fn emit_hook_error(error: &AttentionError, debug: bool, strict: bool, command: &
         ));
     }
     if strict {
-        ExitCode::from(error.exit_code as u8)
+        ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
     }
@@ -597,7 +608,9 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 args.consumer_timeout_ms,
             ) {
                 Ok(timeout) => timeout,
-                Err(error) => return Ok(emit_hook_error(&error, args.debug, true, &command)),
+                Err(error) => {
+                    return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
+                }
             };
             let observation = match clock.monotonic_ns20() {
                 Ok(observation) => observation,
@@ -1153,23 +1166,38 @@ fn main() -> ExitCode {
                 let _ = error.print();
                 return ExitCode::SUCCESS;
             }
-            let command = match (
-                arguments.get(1).and_then(|arg| arg.to_str()),
-                arguments.get(2).and_then(|arg| arg.to_str()),
-            ) {
-                (Some("hooks"), Some("describe")) => "hooks describe",
-                (Some(command), _) => command,
-                _ => "attention",
+            let first = arguments.get(1).and_then(|arg| arg.to_str());
+            let second = arguments.get(2).and_then(|arg| arg.to_str());
+            let command = match (first, second) {
+                (Some("hooks"), Some(sub @ ("describe" | "claim" | "publish" | "event"))) => {
+                    format!("hooks {sub}")
+                }
+                (Some(command), _) => command.to_owned(),
+                _ => "attention".to_owned(),
             };
-            if query_json(command)
+            // A provider runs `hooks event` (and would run a misspelling of
+            // it), and reads exit 2 as "block": a prompt is dropped, a tool is
+            // denied, a Stop hook loops on the error text. So a command line
+            // it cannot parse exits like any other hook failure: 1 under
+            // --strict, 0 otherwise, with the reason on stderr.
+            if first == Some("hooks") && !matches!(second, Some("describe" | "claim" | "publish")) {
+                let _ = error.print();
+                let strict = arguments.iter().any(|argument| argument == "--strict");
+                return ExitCode::from(u8::from(strict || second != Some("event")));
+            }
+            if query_json(&command)
                 || arguments
                     .iter()
                     .skip(1)
                     .any(|argument| argument == "--json")
             {
-                return emit_error(&AttentionError::usage(error.to_string()), true, command);
+                return emit_error(&AttentionError::usage(error.to_string()), true, &command);
             }
-            let exit_code = error.exit_code();
+            let exit_code = if is_hook_command(&command) {
+                1
+            } else {
+                error.exit_code()
+            };
             let _ = error.print();
             return ExitCode::from(exit_code as u8);
         }

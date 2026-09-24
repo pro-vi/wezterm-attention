@@ -260,7 +260,7 @@ fn rust_cli_help_errors_and_empty_hook_input_keep_the_documented_shape() {
         .output()
         .expect("run empty hook");
     assert!(started.elapsed() < Duration::from_secs(2));
-    assert_eq!(empty.status.code(), Some(2));
+    assert_eq!(empty.status.code(), Some(1));
 
     let malformed = Command::new(binary)
         .args(["bindings", "--json", "--limit", "nope"])
@@ -293,12 +293,12 @@ fn query_defaults_errors_and_help_support_agent_composition() {
     assert!(default.stderr.is_empty());
     let description: Value = serde_json::from_slice(&default.stdout).unwrap();
     assert_eq!(description["command"], "hooks describe");
-    for args in [
-        vec!["hooks", "describe", "--provider", "unsupported"],
-        vec!["bindings", "--provider", "unsupported"],
+    for (args, exit) in [
+        (vec!["hooks", "describe", "--provider", "unsupported"], 1),
+        (vec!["bindings", "--provider", "unsupported"], 2),
     ] {
         let output = run(&args);
-        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(output.status.code(), Some(exit));
         let error: Value = serde_json::from_slice(&output.stdout).unwrap();
         let message = error["diagnostics"][0]["message"].as_str().unwrap();
         for provider in &wezterm_attention::protocol::manifest()
@@ -346,7 +346,7 @@ fn query_defaults_errors_and_help_support_agent_composition() {
         assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-private-content"));
     }
     let malformed = run(&["hooks", "describe"]);
-    assert_eq!(malformed.status.code(), Some(2));
+    assert_eq!(malformed.status.code(), Some(1));
     let error: Value = serde_json::from_slice(&malformed.stdout).unwrap();
     assert_eq!(error["command"], "hooks describe");
     assert_eq!(
@@ -1379,4 +1379,64 @@ fn doctor_findings_beside_a_complete_report_exit_zero() {
     assert_eq!(envelope["status"], "findings", "{envelope}");
     assert_eq!(envelope["complete"], true, "{envelope}");
     assert_eq!(output.status.code(), Some(0), "{envelope}");
+}
+
+#[test]
+fn a_hook_command_never_exits_two_and_says_why_on_stderr() {
+    let scratch = Scratch::new();
+    let run = |args: &[&str], stdin: &[u8]| {
+        use std::io::Write;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_attention"))
+            .args(args)
+            .env_clear()
+            .env("HOME", &scratch.0)
+            .env("WEZTERM_ATTENTION_DIR", scratch.0.join("state"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run hook command");
+        let _ = child.stdin.take().expect("stdin").write_all(stdin);
+        child.wait_with_output().expect("hook output")
+    };
+    let event = ["hooks", "event", "claude", "Stop"];
+    let payload = br#"{"hook_event_name":"Stop","session_id":"s"}"#.as_slice();
+    for (extra, stdin, label) in [
+        (vec!["--no-such-flag"], payload, "unknown flag"),
+        (vec!["--consumer", "relative"], payload, "relative consumer"),
+        (
+            vec!["--consumer", "/bin/true", "--consumer-timeout-ms", "0"],
+            payload,
+            "zero consumer timeout",
+        ),
+        (vec![], b"".as_slice(), "empty stdin"),
+        (vec![], b"{".as_slice(), "invalid JSON"),
+    ] {
+        for strict in [false, true] {
+            let mut args = event.to_vec();
+            args.extend(&extra);
+            if strict {
+                args.push("--strict");
+            }
+            let output = run(&args, stdin);
+            assert_eq!(
+                output.status.code(),
+                Some(i32::from(strict)),
+                "{label}, strict={strict}: {output:?}"
+            );
+            assert!(output.stdout.is_empty(), "{label}: {output:?}");
+            assert!(!output.stderr.is_empty(), "{label}: no reason given");
+        }
+    }
+    for (args, expected) in [
+        (vec!["hooks", "event", "claude"], 0),
+        (vec!["hooks", "event", "claude", "--strict"], 1),
+        (vec!["hooks", "evnet", "claude", "Stop"], 1),
+        (vec!["hooks", "claim", "--no-such-flag"], 1),
+        (vec!["hooks", "publish", "--json", "--quiet"], 1),
+        (vec!["hooks", "describe", "--provider", "unsupported"], 1),
+    ] {
+        let output = run(&args, b"");
+        assert_eq!(output.status.code(), Some(expected), "{args:?}: {output:?}");
+    }
 }
