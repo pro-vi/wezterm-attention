@@ -62,14 +62,18 @@ wezterm_attention_precmd() {
   [[ -n "${WEZTERM_PANE:-}" ]] || return 0
   [[ -n "${WEZTERM_ATTENTION_ROOT:-}" && -x "$WEZTERM_ATTENTION_ROOT/bin/attention" ]] || return 0
   local _WEZTERM_ATTENTION_IN_HOOK=1
-  "$WEZTERM_ATTENTION_ROOT/bin/attention" hooks publish --quiet || true
   # After `wezterm_attention_claim && claude` this prompt is the agent's
   # return, the last use of its launch id here; left exported, the id would
   # pass to the next program this shell starts, and an agent the claim did
   # not start would read as a child of one that has exited. A line holding
   # only the claim is the other way to claim, with the agent on the next
-  # line, and an empty line runs nothing: both keep the id.
-  [[ $last_line == other ]] && unset WEZTERM_ATTENTION_LAUNCH_ID
+  # line, and an empty line runs nothing: both keep the id. The unset sits in
+  # `always` so that Ctrl-C during the publication does not skip it.
+  {
+    "$WEZTERM_ATTENTION_ROOT/bin/attention" hooks publish --quiet || true
+  } always {
+    [[ $last_line == other ]] && unset WEZTERM_ATTENTION_LAUNCH_ID
+  }
 }
 
 autoload -Uz add-zsh-hook

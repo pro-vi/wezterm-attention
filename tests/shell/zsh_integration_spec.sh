@@ -124,9 +124,13 @@ mkdir -p "$scratch/slow/bin" "$scratch/tools" "$scratch/zdot"
 cat > "$scratch/slow/bin/attention" <<EOF
 #!/bin/sh
 printf '%s|%s\n' "\$*" "\${WEZTERM_ATTENTION_LAUNCH_ID:-}" >> "$scratch/calls"
-# The first call named in slow-call hangs until it is interrupted, and records
-# it when it was not.
+# The first call named in slow-call after the number of them in slow-skip
+# hangs until it is interrupted, and records it when it was not.
 if [ "\$1 \$2" = "\$(cat "$scratch/slow-call")" ] && [ ! -e "$scratch/slowed" ]; then
+  echo x >> "$scratch/slow-seen"
+fi
+if [ "\$1 \$2" = "\$(cat "$scratch/slow-call")" ] && [ ! -e "$scratch/slowed" ] \
+  && [ "\$(wc -l < "$scratch/slow-seen")" -gt "\$(cat "$scratch/slow-skip")" ]; then
   : > "$scratch/slowed"
   printf 'writer-waiting\n' >&2
   sleep 10
@@ -150,7 +154,8 @@ printf '%s\n' "PS1='@P@ '" 'HISTFILE=/dev/null' \
   "source '$integration'" > "$scratch/zdot/.zshrc"
 for slow_call in "hooks claim" "hooks publish"; do
   printf '%s\n' "$slow_call" > "$scratch/slow-call"
-  rm -f "$scratch/calls" "$scratch/slowed" "$scratch/slow-finished"
+  printf '0\n' > "$scratch/slow-skip"
+  rm -f "$scratch/calls" "$scratch/slowed" "$scratch/slow-finished" "$scratch/slow-seen"
   : > "$scratch/calls"
   typed_status=0
   env -i HOME="$scratch" ZDOTDIR="$scratch/zdot" PATH=/usr/bin:/bin TERM=dumb WEZTERM_PANE=7 \
@@ -171,5 +176,29 @@ EOF
     failures=$((failures + 1))
   fi
 done
+
+# The publication at the agent's return is the second one: the first runs at
+# the shell's first prompt. Stopping it must still drop the agent's launch id,
+# or the next program would inherit it.
+printf '%s\n' "hooks publish" > "$scratch/slow-call"
+printf '1\n' > "$scratch/slow-skip"
+rm -f "$scratch/calls" "$scratch/slowed" "$scratch/slow-finished" "$scratch/slow-seen"
+: > "$scratch/calls"
+typed_status=0
+env -i HOME="$scratch" ZDOTDIR="$scratch/zdot" PATH=/usr/bin:/bin TERM=dumb WEZTERM_PANE=7 \
+  "$python" "$driver" --interrupt-on writer-waiting '@P@ ' 20 "$zsh_under_test" -i \
+  > "$scratch/out" 2>&1 <<'EOF' || typed_status=$?
+wezterm_attention_claim && claude
+show-launch
+exit
+EOF
+if [ "$typed_status" -eq 0 ] && [ -e "$scratch/slowed" ] && [ ! -e "$scratch/slow-finished" ] \
+  && grep -q "^claude-ran launch=$launch$" "$scratch/out" && grep -q '^child-launch=none$' "$scratch/out"; then
+  printf 'ok - %s\n' "an interrupted publication at the agent's return still drops its launch id"
+else
+  printf 'not ok - %s\n' "an interrupted publication at the agent's return still drops its launch id (status $typed_status)"
+  sed 's/^/#   /' "$scratch/out"
+  failures=$((failures + 1))
+fi
 
 [ "$failures" -eq 0 ]
