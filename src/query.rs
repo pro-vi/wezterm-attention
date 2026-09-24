@@ -1848,7 +1848,16 @@ pub fn read_tab_publications(root: &Path) -> Result<(Vec<TabPublication>, Vec<Di
     let limits = &crate::protocol::manifest()?.limits;
     let mut windows: Vec<TabPublication> = Vec::new();
     let mut diagnostics = Vec::new();
-    let entries = match fs::read_dir(root.join("tabs")) {
+    let directory = root.join("tabs");
+    // `read_dir` follows a symlink, and sweep deletes by the paths read here,
+    // so a linked directory would aim the collection outside the state root.
+    if fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(AttentionError::new(
+            "record_invalid",
+            "tab publication directory is a symlink",
+        ));
+    }
+    let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok((windows, diagnostics));
