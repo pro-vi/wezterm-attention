@@ -54,19 +54,85 @@ return function(context)
     return table.concat(parts)
   end
 
+  -- What follows an ESC byte, or the C1 character that stands for ESC and
+  -- that byte, to open a sequence with a body. Anything else after an ESC is
+  -- a short sequence: intermediate bytes, then one final byte.
+  local after_esc = { [0x5B] = "csi", [0x5D] = "osc", [0x50] = "string", [0x58] = "string",
+    [0x5E] = "string", [0x5F] = "string" }
+  local c1_opener = { [0x9B] = "csi", [0x9D] = "osc", [0x90] = "string", [0x98] = "string",
+    [0x9E] = "string", [0x9F] = "string" }
+
+  --- Where the sequence of `kind` whose body starts at `body` ends: the index
+  --- just past it, or past the text when it is never closed. A string runs to
+  --- ST (ESC \ or U+009C), an OSC to BEL as well; an ESC that is not ST ends
+  --- it and opens the next sequence.
+  local function sequence_end(text, kind, body)
+    local index = body
+    if kind == "csi" or kind == "short" then
+      local low = kind == "csi" and 0x3F or 0x2F
+      local byte = text:byte(index)
+      while byte and byte >= 0x20 and byte <= low do
+        index = index + 1
+        byte = text:byte(index)
+      end
+      local first_final = kind == "csi" and 0x40 or 0x30
+      if byte and byte >= first_final and byte <= 0x7E then index = index + 1 end
+      return index
+    end
+    while true do
+      local stop = text:find("[\7\27\194]", index)
+      if not stop then return #text + 1 end
+      local byte, next_byte = text:byte(stop), text:byte(stop + 1)
+      if byte == 7 and kind == "osc" then return stop + 1 end
+      if byte == 27 then return next_byte == 0x5C and stop + 2 or stop end
+      if byte == 194 and next_byte == 0x9C then return stop + 2 end
+      index = stop + 1
+    end
+  end
+
+  --- Remove every escape sequence whole, in one pass over well-formed text.
+  --- Removing only the ESC would leave the rest of the sequence to be drawn.
+  local function without_escape_sequences(text)
+    local start = text:find("[\27\194]")
+    if not start then return text end
+    local parts, from = {}, 1
+    while start do
+      local byte, next_byte = text:byte(start), text:byte(start + 1)
+      local kind, body
+      if byte == 27 then
+        kind = next_byte and after_esc[next_byte]
+        if kind then body = start + 2
+        elseif next_byte and next_byte >= 0x20 and next_byte <= 0x7E then kind, body = "short", start + 1 end
+      else
+        kind = next_byte and c1_opener[next_byte]
+        body = start + 2
+      end
+      if kind then
+        parts[#parts + 1] = text:sub(from, start - 1)
+        from = sequence_end(text, kind, body)
+        start = text:find("[\27\194]", from)
+      else
+        start = text:find("[\27\194]", start + 1)
+      end
+    end
+    parts[#parts + 1] = text:sub(from)
+    return table.concat(parts)
+  end
+
   --- Text from a source the plugin does not control -- a directory name a
   --- program chose through OSC 7, a title, a tab name any process in any pane
   --- can set, a formatter's return -- made safe to draw and to publish:
-  --- ill-formed UTF-8 replaced, every control character removed, C0, DEL and
-  --- C1 alike, then cut to `max_bytes` on a character boundary. WezTerm
-  --- applies escape sequences in a formatter's text, so an ESC left in would
-  --- restyle the bar.
+  --- ill-formed UTF-8 replaced, escape sequences removed whole, every other
+  --- control character removed, C0, DEL and C1 alike, then cut to `max_bytes`
+  --- on a character boundary. WezTerm applies escape sequences in a
+  --- formatter's text, so one left in would restyle the bar; style comes
+  --- from the plugin's colors instead.
   local function display_text(value, max_bytes)
     if type(value) ~= "string" then return nil end
     -- Well-formed first, so that removing a control character cannot join
     -- two stray bytes into a C1 control. In well-formed text every removal
     -- takes whole characters, so one pass leaves none behind.
-    local text = well_formed_utf8(value):gsub("[%z\1-\31\127]", "")
+    local text = without_escape_sequences(well_formed_utf8(value)):gsub("[%z\1-\31\127]", "")
     text = text:gsub("\194[\128-\159]", "")
     if #text > max_bytes then
       local cut = max_bytes

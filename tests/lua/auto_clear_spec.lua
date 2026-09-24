@@ -833,6 +833,14 @@ end
 test("tab source parsing refuses when the plugin manifest is unavailable", function()
   local degraded = dofile(repo_root .. "/plugin/runtime.lua")().bind({ M = {} })
   assert(degraded.parse_tab_source_response(tab_source_response("/test/gui.sock")) == nil)
+  -- No answer could be read, so a tab order drawn meanwhile is not held for one.
+  local writer = dofile(repo_root .. "/plugin/runtime.lua")().bind({
+    M = { _active_integration_root = writer_root, _active_writer_installed = true },
+    wezterm = { run_child_process = function() return true, tab_source_response("/test/gui.sock"), "" end },
+    now_ms = function() return os.time() * 1000 end, report_error_once = function() end,
+  })
+  writer.acquire_tab_source("/test/gui.sock")
+  assert(writer.tab_source_status() == "unavailable")
 end)
 
 test("tab source acquisition is single flight and rejects stale completion", function()
@@ -860,7 +868,7 @@ test("tab source acquisition is single flight and rejects stale completion", fun
   internal.reset_tab_source()
 end)
 
-test("failed source acquisition preserves legacy publication and backs off", function()
+test("a failed source acquisition backs off before it runs again", function()
   local previous = wezterm.run_child_process
   internal.reset_tab_source()
   local calls = 0
@@ -868,9 +876,6 @@ test("failed source acquisition preserves legacy publication and backs off", fun
   internal.acquire_tab_source("/test/failed.sock")
   internal.acquire_tab_source("/test/failed.sock")
   assert(calls == 1 and internal.tab_source() == nil, "retry waits for its backoff")
-  local tab = gui_tab({window_id=9790,tab_id=9791,tab_index=0,panes={9792}})
-  format_tab_title(tab, {tab})
-  assert(read_tab_publication(9790).schema == 1)
   assert(not internal.parse_tab_source_response(tab_source_response("/test/gui.sock"):gsub('"complete":true', '"complete":false')))
   assert(not internal.parse_tab_source_response(tab_source_response("/test/gui.sock"):gsub('"realm_id":"[a-f0-9]+"', '"realm_id":"' .. string.rep("0",64) .. '"')))
   assert(not internal.parse_tab_source_response('{}'))
@@ -921,24 +926,100 @@ test("a window drawn before its source is answered is published once, under the 
   internal.reset_tab_source()
 end)
 
-test("a held tab order is published without a source once no answer will come", function()
+test("a window drawn while a failed source run waits for its retry is published under the source", function()
+  local previous, real_time = wezterm.run_child_process, os.time
+  internal.reset_tab_source()
+  local calls = 0
+  wezterm.run_child_process = function(args)
+    calls = calls + 1
+    if calls == 1 then return false, "", "unused failure text" end
+    return true, tab_source_response(args[4]), ""
+  end
+  local tab = gui_tab({window_id=9837,tab_id=9838,tab_index=0,panes={9839}})
+  local sourced = test_dir .. "/tabs/" .. string.rep("a",64) .. "-9837.json"
+  local ok, failure = pcall(with_gui_socket, "/test/retried.sock", function()
+    format_tab_title(tab, {tab})
+    internal.acquire_tab_source("/test/retried.sock")
+    format_tab_title(tab, {tab})
+    assert(not path_exists(tab_publication_path(9837)), "held while the retry waits")
+    os.time = function() return real_time() + 60 end
+    internal.acquire_tab_source("/test/retried.sock")
+  end)
+  os.time = real_time
+  wezterm.run_child_process = previous
+  internal.reset_tab_source()
+  assert(ok, failure)
+  assert(calls == 2, "the retry ran, got " .. calls)
+  local publication = decode_json(assert(read_path(sourced), "the held draw is published under the source"))
+  assert(publication.schema == 2 and publication.source.socket_path == "/test/retried.sock")
+  assert(not path_exists(tab_publication_path(9837)), "the unsourced name was never written")
+  local errors = drain_errors()
+  assert(#errors == 1 and errors[1]:find("wait for a retry", 1, true),
+    "the failure is logged once, got " .. #errors)
+  os.remove(sourced)
+end)
+
+test("a held tab order is published without a source once every retry has failed", function()
+  local previous, real_time = wezterm.run_child_process, os.time
+  internal.reset_tab_source()
+  local answer = false
+  local calls = 0
+  wezterm.run_child_process = function(args)
+    calls = calls + 1
+    if answer then return true, tab_source_response(args[4]), "" end
+    return false, "", "unused failure text"
+  end
+  local tab = gui_tab({window_id=9843,tab_id=9844,tab_index=0,panes={9845}})
+  local later = gui_tab({window_id=9846,tab_id=9847,tab_index=0,panes={9848}})
+  local sourced_later = test_dir .. "/tabs/" .. string.rep("a",64) .. "-9846.json"
+  local ok, failure = pcall(with_gui_socket, "/test/never-answers.sock", function()
+    format_tab_title(tab, {tab})
+    -- The first run, then one retry after each of the 2, 5, 10 and 30 s waits.
+    for run = 1, 5 do
+      assert(not path_exists(tab_publication_path(9843)), "held before run " .. run)
+      os.time = function() return real_time() + run * 60 end
+      internal.acquire_tab_source("/test/never-answers.sock")
+    end
+    assert(calls == 5, "every retry ran, got " .. calls)
+    local publication = assert(read_tab_publication(9843), "the held draw is published once no retry is left")
+    assert(publication.schema == 1 and publication.source == nil)
+    -- A later retry may still answer; a window drawn after it is published under the source.
+    answer = true
+    os.time = function() return real_time() + 600 end
+    internal.acquire_tab_source("/test/never-answers.sock")
+    assert(internal.tab_source(), "a later retry still answers")
+    format_tab_title(later, {later})
+  end)
+  os.time = real_time
+  wezterm.run_child_process = previous
+  internal.reset_tab_source()
+  assert(ok, failure)
+  assert(path_exists(sourced_later), "a window first drawn after the answer is published under the source")
+  local errors = drain_errors()
+  assert(#errors == 2 and errors[2]:find("without source identity", 1, true),
+    "the unsourced publication is logged once, got " .. #errors)
+  os.remove(tab_publication_path(9843))
+  os.remove(sourced_later)
+end)
+
+test("a held tab order is published without a source once no answer can come", function()
   local previous = wezterm.run_child_process
   internal.reset_tab_source()
-  wezterm.run_child_process = function() return false, "", "unused failure text" end
-  local tab = gui_tab({window_id=9837,tab_id=9838,tab_index=0,panes={9839}})
-  with_gui_socket("/test/unanswered.sock", function()
+  wezterm.run_child_process = function() error("the tab source is not asked for in this case") end
+  local tab = gui_tab({window_id=9840,tab_id=9841,tab_index=0,panes={9842}})
+  local ok, failure = pcall(with_gui_socket, "/test/unanswered.sock", function()
     format_tab_title(tab, {tab})
-    assert(not path_exists(tab_publication_path(9837)), "held while the answer is to come")
+    assert(not path_exists(tab_publication_path(9840)), "held while the answer is to come")
+    -- Nothing can run the attention command any more, so no answer can come.
+    wezterm.run_child_process = nil
     internal.acquire_tab_source("/test/unanswered.sock")
   end)
   wezterm.run_child_process = previous
   internal.reset_tab_source()
-  local publication = assert(read_tab_publication(9837), "the held draw is published")
+  assert(ok, failure)
+  local publication = assert(read_tab_publication(9840), "the held draw is published")
   assert(publication.schema == 1 and publication.source == nil)
-  local errors = drain_errors()
-  assert(#errors == 1 and errors[1]:find("publishing without source identity", 1, true),
-    "the failure is logged once, got " .. #errors)
-  os.remove(tab_publication_path(9837))
+  os.remove(tab_publication_path(9840))
 end)
 
 test("a legacy tab order this process never wrote survives its window's sourced one", function()
@@ -2520,7 +2601,7 @@ test("a directory name cannot carry escape sequences into the tab bar", function
   escaped.active_pane.current_working_dir = { file_path = "/tmp/evil\27[42m\194\1550mname" }
   local rendered = rendered_text(format_tab_title(escaped))
   assert(not has_control(rendered), "a control character reached the tab bar")
-  assert(rendered:find("evil[42m0mname", 1, true), "the rest of the name must still show, got " .. rendered)
+  assert(rendered:find(": evilname ", 1, true), "the name must show without the sequences, got " .. rendered)
 end)
 
 test("a long or control-character tab text is published within the tab reader's bounds", function()
@@ -2541,7 +2622,8 @@ test("a long or control-character tab text is published within the tab reader's 
   formatter(plain, { plain })
   local formatted = assert(read_tab_publication(9863)).tabs[1].text
   assert(not has_control(formatted), "a formatter's control character was published")
-  assert(formatted:find("red[31mbell", 1, true), "the formatter's text must still be published")
+  assert(formatted:find(": redbell ", 1, true),
+    "the formatter's text must be published without the sequence, got " .. formatted)
 end)
 
 --- The rule `attention tabs` applies to a published tab text: the file is
@@ -2612,8 +2694,14 @@ end)
 test("what a formatter returns is drawn repaired, in both renderers", function()
   local R = "\239\191\189"
   local cases = {
-    { "a raw title with ESC and C1", "x\27[41mRED\194\1550m", "x[41mRED0m" },
+    { "a raw title with ESC and C1", "x\27[41mRED\194\1550m", ": xRED " },
     { "a CJK title cut by bytes", ("中文标题"):sub(1, 4), "中" .. R },
+    -- What wezterm.format returns for a red foreground, bold, and "build".
+    { "a styled wezterm.format result", "\27(B\27[0;1m\27[38:2::255:0:0mbuild\27(B\27[0m", ": build " },
+    { "an OSC ended by BEL and one ended by ST", "\27]0;t\7a\27]2;u\27\\b", ": ab " },
+    { "a device control string and a C1 OSC", "\27Pq#0\27\\c\194\157x\7d", ": cd " },
+    { "a CSI left open at the end", "build\27[38;2", ": build " },
+    { "an OSC left open at the end", "build\27]0;title", ": build " },
   }
   local current
   local instance = dofile(repo_root .. "/plugin/init.lua")
@@ -2640,10 +2728,10 @@ test("a tab with no name, directory or settled title shows the pane's current ti
   local bare = tab(17681, 17682, false)
   bare.active_pane.title = "vim\27]0;x"
   local rendered = rendered_text(format_tab_title(bare))
-  assert(rendered:find("vim]0;x", 1, true), "the current title must fill an empty base, got " .. rendered)
+  assert(rendered:find(": vim ", 1, true), "the current title must fill an empty base, got " .. rendered)
   local context
   attention.wrap_title_formatter(function(_, ctx) context = ctx; return ctx.default_title end)(bare)
-  assert(context.default_title == "vim]0;x" and context.settled_title == nil,
+  assert(context.default_title == "vim" and context.settled_title == nil,
     "default_title carries the current title without claiming it settled")
 end)
 
@@ -3788,8 +3876,13 @@ test("before a GUI knows its own mux, a local pane is checked against its socket
   local instance = dofile(repo_root .. "/plugin/init.lua")
   instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
     integration_root = writer_root })
-  local previous = wezterm.run_child_process
-  wezterm.run_child_process = function() return false, "", "unused failure text" end
+  local previous, real_time = wezterm.run_child_process, os.time
+  local calls = 0
+  wezterm.run_child_process = function()
+    calls = calls + 1
+    if calls == 1 then return false, "", "unused failure text" end
+    return true, own_source_response(socket, protocol_fixture.wire_sample.address.incarnation_id), ""
+  end
   local foreign = materialize_v2_fixture(56)
   local own = materialize_v2_fixture(57, internal.sha256(socket))
   local foreign_key = internal.address_cache_key(foreign.address)
@@ -3798,6 +3891,13 @@ test("before a GUI knows its own mux, a local pane is checked against its socket
     { id = 56, domain = "local", attention = foreign },
     { id = 57, domain = "local", attention = own },
   } }, focused = false })
+  local function refusals()
+    local count = 0
+    for _, message in ipairs(drain_errors()) do
+      if message:find("another mux", 1, true) then count = count + 1 end
+    end
+    return count
+  end
   local ok, failure = pcall(with_gui_socket, socket, function()
     instance.poll(window, { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
     assert(instance._internal.attention_cache[own_key] ~= nil, "a pane of the socket's realm is read at once")
@@ -3805,17 +3905,20 @@ test("before a GUI knows its own mux, a local pane is checked against its socket
     assert(#drain_errors() == 0, "nothing is wrong yet: the answer is still to come")
     instance._internal.acquire_tab_source(socket)
     instance.poll(window, { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+    assert(instance._internal.attention_cache[own_key] ~= nil, "still read while the retry waits")
+    assert(instance._internal.attention_cache[foreign_key] == nil, "another realm's is still not read")
+    assert(refusals() == 0, "a failed run with a retry to come refuses nothing")
+    os.time = function() return real_time() + 60 end
+    instance._internal.acquire_tab_source(socket)
+    instance.poll(window, { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
   end)
+  os.time = real_time
   wezterm.run_child_process = previous
   assert(ok, failure)
-  assert(instance._internal.attention_cache[own_key] ~= nil, "still read once no answer will come")
+  assert(calls == 2, "the retry ran, got " .. calls)
+  assert(instance._internal.attention_cache[own_key] ~= nil, "this GUI's own pane is read once answered")
   assert(instance._internal.attention_cache[foreign_key] == nil, "and another realm's is refused")
-  local errors = drain_errors()
-  local refused = false
-  for _, message in ipairs(errors) do
-    if message:find("another mux", 1, true) then refused = true end
-  end
-  assert(refused, "the refusal is logged once the answer is known not to come")
+  assert(refusals() == 1, "the refusal is logged once the answer names this GUI's mux")
 end)
 
 test("Alt+B uses full v2 addresses and clear-all preserves activity", function()

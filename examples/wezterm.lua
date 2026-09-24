@@ -243,7 +243,11 @@ wezterm.on('update-status', function(window, pane)
 
     if git_cache.is_repo then
       local branch = git_cache.branch
-      if #branch > 20 then branch = branch:sub(1, 18) .. ".." end
+      -- By cell width, on a character boundary: a cut by bytes can split a
+      -- character, and wezterm.format refuses text that is not UTF-8.
+      if wezterm.column_width(branch) > 20 then
+        branch = wezterm.truncate_right(branch, 18) .. ".."
+      end
       git_cells_prefix = {
         { Foreground = { Color = "#8BA4B8" } },
         { Text = " " .. branch .. " " },
