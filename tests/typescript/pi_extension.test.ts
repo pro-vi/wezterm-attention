@@ -694,6 +694,50 @@ test("env: a root that is not UTF-8 is skipped and named, as the writer refuses 
 	for (const message of messages) expect(message).not.toContain("\uFFFD");
 });
 
+test("env: a configured writer is never started with a root that is not UTF-8", async () => {
+	// The child is given the decoded text, U+FFFD encoded as valid UTF-8, so the
+	// writer would take it as a root that no reader resolves.
+	const root = tempDir("wez-utf8-writer-");
+	const log = join(root, "calls.log");
+	const scratch = tempDir("wez-utf8-writer-root-");
+	mkdirSync(join(root, "bin"));
+	writeFileSync(join(root, "bin", "attention"), '#!/bin/sh\nIFS= read -r payload || :\nprintf "%s\\n" "$*" >> "$WEZTERM_ATTENTION_TEST_LOG"\n');
+	chmodSync(join(root, "bin", "attention"), 0o755);
+	process.env.WEZTERM_ATTENTION_ROOT = root;
+	process.env.WEZTERM_ATTENTION_TEST_LOG = log;
+	process.env.WEZTERM_PANE = "42";
+	const broken = join(scratch, "x�y");
+	const cases: Array<{ dir?: string; stateHome?: string; refused?: string }> = [
+		{ dir: broken, refused: "WEZTERM_ATTENTION_DIR" },
+		{ stateHome: broken, refused: "XDG_STATE_HOME" },
+		{ dir: "", stateHome: broken, refused: "XDG_STATE_HOME" },
+		{ dir: scratch, stateHome: broken },
+	];
+	for (const { dir, stateHome, refused } of cases) {
+		delete process.env.WEZTERM_ATTENTION_DIR;
+		delete process.env.XDG_STATE_HOME;
+		if (dir !== undefined) process.env.WEZTERM_ATTENTION_DIR = dir;
+		if (stateHome !== undefined) process.env.XDG_STATE_HOME = stateHome;
+		rmSync(log, { force: true });
+		notifications.length = 0;
+		const { lifecycle } = loadExt();
+		await lifecycle["session_start"]!();
+		await lifecycle["session_shutdown"]!();
+		if (refused) {
+			expect(existsSync(log)).toBe(false);
+			expect(await reportedNotifications(1)).toHaveLength(1);
+			expect(notifications[0]?.message).toBe(`wezterm-attention: ${refused} is not UTF-8`);
+		} else {
+			expect(readFileSync(log, "utf8").trim().split("\n")).toEqual([
+				"hooks event pi session_start",
+				"hooks event pi session_shutdown",
+			]);
+			expect(notifications).toEqual([]);
+		}
+	}
+	expect(readdirSync(scratch)).toEqual([]);
+});
+
 test('env: TTL_MS="0" falls back to the default, not an instantly-stale marker', async () => {
 	// "0" is a plausible "disable the TTL" reading, and it passes the digits-only
 	// gate — only the `parsed > 0` range check rejects it. Without that check the
