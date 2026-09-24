@@ -568,7 +568,11 @@ return function(context)
       local acknowledge_set = M._active_acknowledge_set or { stop = true, notify = true }
       local view = read_attention_view(read, opts and opts.now_unix_ns,
         { dir = dir, resample_utc = opts and opts.resample_utc })
-      if not (view.activity_type and acknowledge_set[view.activity_type] and view.event_id) then
+      -- Only what the tab shows is seen: when the review flag outranks the
+      -- activity, the tab shows the flag, and the activity stays for later, as
+      -- a v1 marker does.
+      if not (view.activity_type and view.type == view.activity_type
+          and acknowledge_set[view.activity_type] and view.event_id) then
         attention_cache[read.cache_key] = view
         return "absent"
       end

@@ -3519,6 +3519,28 @@ test("Alt+B clear-all leaves a review that was replaced after it looked", functi
   materialize_v2_fixture(82)
 end)
 
+test("a stop hidden behind a higher-ranked review flag is not acknowledged, v1 or v2", function()
+  local wire = materialize_v2_fixture(83)
+  local samples = protocol_fixture.record_samples
+  local ack_path = test_dir .. "/v2/realms/" .. wire.address.realm_id .. "/incarnations/"
+    .. wire.address.incarnation_id .. "/panes/83/launches/" .. wire.launch_id
+    .. "/bindings/" .. samples.binding.binding_id .. "/ack.json"
+  local ack_before = assert(read_path(ack_path))
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root,
+    priority = { "thinking", "stop", "notify", "review" } })
+  local v2_pane = { id = 83, domain = "unix", attention = wire }
+  instance.poll(window_double({ tabs = { { v2_pane } }, focused = true, active_pane_id = v2_pane }),
+    { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+  assert(read_path(ack_path) == ack_before, "the v2 pane showed its review flag, not the notify")
+
+  write_marker(7301, "stop")
+  write_review_flag_file(7301)
+  instance.poll(window_double({ tabs = { { 7301 } }, focused = true, active_pane_id = 7301 }))
+  assert(not acknowledgement_exists(7301), "the v1 pane showed its review flag, not the stop")
+end)
+
 test("v2 user actions never replace future acknowledgement or review records", function()
   local wire = materialize_v2_fixture(71)
   local samples = protocol_fixture.record_samples
