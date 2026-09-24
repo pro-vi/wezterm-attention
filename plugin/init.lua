@@ -635,7 +635,11 @@ function M.apply_to_config(config, opts)
       -- bar publishes it. Only a window whose every tab has been drawn, and
       -- only when the drawn list or its source identity changes: an ordinary
       -- redraw with the same source touches no file.
-      local order, window_id = drawn_tab_order(tab, tabs, marker_ids, rendered)
+      local published = rendered
+      if visible.still_indicator ~= visible.indicator then
+        published = decorate_tab_title(tab, visible, base, show_index, visible.still_indicator)
+      end
+      local order, window_id = drawn_tab_order(tab, tabs, marker_ids, published)
       if order then publish_tab_order(dir, window_id, order, runtime_api.tab_source()) end
 
       return rendered

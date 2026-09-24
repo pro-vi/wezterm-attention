@@ -88,26 +88,33 @@ return function(context)
       }
     end
 
+    -- The count rides inside the indicator's own trailing space, so "✓ " with two
+    -- subagents renders "✓+2 " and the tab gains one column, not four.
+    local function with_count(glyph)
+      if subagents > 0 then return glyph:gsub("%s+$", "") .. "+" .. subagents .. " " end
+      return glyph
+    end
+
     local indicator = ""
+    -- What the bar draws for this state whatever the frame. The published copy
+    -- of the bar uses it, so a spinner does not rewrite that file every second.
+    local still_indicator
     if best_type == "thinking" then
       local frames = cfg_indicators.thinking_frames
       if frames and #frames > 0 then
         indicator = frames[((best_frame or 0) % #frames) + 1]
+        still_indicator = with_count(frames[1])
       end
     elseif cfg_indicators[best_type] then
       indicator = cfg_indicators[best_type]
     end
-
-    -- The count rides inside the indicator's own trailing space, so "✓ " with two
-    -- subagents renders "✓+2 " and the tab gains one column, not four.
-    if subagents > 0 then
-      indicator = indicator:gsub("%s+$", "") .. "+" .. subagents .. " "
-    end
+    indicator = with_count(indicator)
 
     local show_provider = M._active_show_provider == true
     local provider_display = { claude = "Claude", codex = "Codex", pi = "Pi" }
     return {
       indicator = indicator,
+      still_indicator = still_indicator or indicator,
       type = best_type,
       color = cfg_colors[best_type],
       subagents = subagents,
@@ -120,11 +127,12 @@ return function(context)
   end
 
 
-  local function decorate_tab_title(tab, visible, base, show_index)
+  --- `indicator` replaces the visible one when given.
+  local function decorate_tab_title(tab, visible, base, show_index, indicator)
     local index = ""
     if show_index ~= false then index = (tab.tab_index + 1) .. ": " end
     local suffix = visible.agent_suffix and (" · " .. visible.agent_suffix) or ""
-    local text = " " .. index .. visible.indicator .. base .. suffix .. " "
+    local text = " " .. index .. (indicator or visible.indicator) .. base .. suffix .. " "
     if visible.color then
       return {
         { Background = { Color = visible.color } },

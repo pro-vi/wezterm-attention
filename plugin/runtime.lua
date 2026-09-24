@@ -1071,6 +1071,11 @@ return function()
               glob = opts and opts.glob,
               previous_view = before[key],
             })
+            -- A hook writes no frame, so a thinking view is animated from the
+            -- wall clock, the same way a v1 marker without one is.
+            if view.type == "thinking" and view.frame == nil then
+              view.frame = frame_for_now(now, frame_count)
+            end
             attention_cache[key] = view
             evidence.panes[key].event_id = view.event_id
             for _, item in ipairs(view.diagnostics or {}) do

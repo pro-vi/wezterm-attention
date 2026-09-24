@@ -1422,6 +1422,56 @@ test("animation redraws once per wall-clock bucket, not once per poll", function
   assert(select(2, attention.get_attention(871)) == 2, "the frame should come from the new bucket")
 end)
 
+test("a v2 thinking pane animates the way a v1 one does", function()
+  materialize_state_case(protocol_fixture.state_case)
+  local samples = protocol_fixture.record_samples
+  local pane_root = test_dir .. "/v2/realms/" .. samples.claim.address.realm_id
+    .. "/incarnations/" .. samples.claim.address.incarnation_id .. "/panes/42"
+  local activity_path = pane_root .. "/launches/" .. samples.claim.launch_id
+    .. "/bindings/" .. samples.binding.binding_id .. "/activity.json"
+  local activity = decode_json(encode_json(samples.activity))
+  activity.type = "thinking"
+  write_json_path(activity_path, activity)
+  -- The fixture's review flag outranks thinking; this is about the spinner.
+  assert(os.execute("rm -f " .. shell_quote(pane_root) .. "/reviews/*.json") == 0)
+  local window = window_double({ tabs = { { { id = 4261, domain = "unix",
+    attention = protocol_fixture.wire_sample } } }, focused = false })
+  local key = internal.address_cache_key(protocol_fixture.wire_sample.address)
+  local frames = {}
+  for second = 1, 2 do
+    attention.poll(window, { now_ms = second * 1000, now_unix_ns = protocol_fixture.state_case.now_unix_ns,
+      call_after = function() end })
+    frames[second] = internal.attention_cache[key].frame
+  end
+  materialize_state_case(protocol_fixture.state_case)
+  assert(frames[1] == 1 and frames[2] == 2,
+    "a thinking view must carry the wall-clock frame, got " .. tostring(frames[1]) .. ", " .. tostring(frames[2]))
+end)
+
+test("the spinner's frame does not rewrite the published tab order", function()
+  write_marker(9870, "thinking")
+  local drawn_tab = gui_tab({ window_id = 9871, tab_id = 9872, tab_index = 0, panes = { 9870 } })
+  local path = tab_publication_path(9871)
+  local real_open, writes = io.open, 0
+  io.open = function(target, mode)
+    if mode == "w" and target:sub(1, #path) == path then writes = writes + 1 end
+    return real_open(target, mode)
+  end
+  local drawn, published = {}, {}
+  local ok, failure = pcall(function()
+    for second = 1, 4 do
+      attention.poll(window_double({ tabs = { { 9870 } }, focused = false }), { now_ms = second * 1000 })
+      drawn[second] = rendered_text(format_tab_title(drawn_tab, { drawn_tab }))
+      published[second] = read_tab_publication(9871).tabs[1].text
+    end
+  end)
+  io.open = real_open
+  assert(ok, failure)
+  assert(drawn[1] ~= drawn[2], "the bar itself still animates")
+  assert(published[1] == published[4], "the published text must not follow the frame")
+  assert(writes == 1, "four seconds of spinning wrote the tab order " .. writes .. " times")
+end)
+
 test("redraw-induced polls terminate inside the current frame bucket", function()
   write_marker(873, "thinking")
 
