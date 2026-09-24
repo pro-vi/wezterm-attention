@@ -209,7 +209,7 @@ Persistence reports four independent fields:
 |---|---|
 | `native_state` | All native record effects selected by `action`, excluding lifecycle output: binding/current pointer, activity, parent child-clear, child presence, binding end, review or clear/removal as applicable |
 | `activity` | The lead activity or activity-clear subset, when selected |
-| `compatibility` | Reserved. Always `not_requested`: writers no longer reconcile a V1 flat projection |
+| `compatibility` | Reserved. Always `not_requested`: writers no longer reconcile a v1 flat marker projection |
 | `lifecycle` | This callback's requested lifecycle observation |
 
 Each field is `not_requested`, `confirmed`, `rejected` or `unconfirmed`. Confirmed does not require new bytes when the required state already matches. Unconfirmed does not establish that no writes happened. A rejected or unconfirmed requested effect suppresses delivery. Lifecycle preparation/write failure can coexist with confirmed native effects. `observation_id` appears only when the native application confirms writing that observation; it is never a provider request ID or controller token. Optional correlation is omitted when absent.
@@ -282,7 +282,7 @@ attention.apply_to_config(config, {
 })
 ```
 
-Initial/updated messages contain `kind`, GUI-local `window_id`, full `scope` and detached `view`. Scope has address, launch and a launch or binding target. Scope-lost messages contain only `kind`, `window_id` and `previous_scope`. Window context is not source identity or control permission. Unpublished/V1 input never fabricates V2 scope.
+Initial/updated messages contain `kind`, GUI-local `window_id`, full `scope` and detached `view`. Scope has address, launch and a launch or binding target. Scope-lost messages contain only `kind`, `window_id` and `previous_scope`. Window context is not source identity or control permission. An unpublished pane, or one on v1 flat markers, never gets a fabricated v2 scope.
 
 Each window has its own baseline. A confirmed source replacement emits loss before initial; ending the same binding is an update. Fresh target selection can establish a degraded new binding view. Unavailable target selection retains the last established scope only as degraded context; it does not restore old facts. Lifecycle-only, confidence and floor changes count; spinner animation alone does not. Delivery follows cache refresh and configured acknowledgement, including in unfocused windows.
 

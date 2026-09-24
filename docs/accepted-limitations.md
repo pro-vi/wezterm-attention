@@ -167,11 +167,11 @@ a decoded fixture cannot express the difference.
 
 ## Cleaning up a pane's records asks the mux, and waits when it cannot answer
 
-A v1 pane's flat files are named by its pane id. Deciding that nobody writes
+A pane's v1 flat marker files are named by its pane id. Deciding that nobody writes
 them any more is not a question about one window. Before unlinking, the plugin
 walks the mux -- every window, every tab, every pane -- and collects the names
-in use. Attention's writers no longer project those names for v2 panes, so the
-walk's trigger population is v1-only absent panes.
+in use. Attention's writers no longer project those names for panes with v2 records,
+so the walk runs only for absent panes that used v1 flat markers.
 
 Two consequences are deliberate.
 
@@ -194,14 +194,14 @@ pane that moved without reconnecting: a failed lookup cannot tell a closed pane
 from one that came back under a new local id, so it would still fall through to
 the walk. It is worth adding after measuring a real callback, not before.
 
-## Sweep collection attributes leftover flats by claim, not by live v1 occupancy
+## Sweep collection attributes leftover flats by claim, not by live occupancy
 
 `attention sweep` collects `<id>`, `<id>.agents`, and `<id>.ack` when exactly one
-valid v2 claim names that scalar pane id. It does not ask the mux whether a v1
-pane currently occupies the same number. After pane ids reuse, a leftover claim
+valid v2 claim names that scalar pane id. It does not ask the mux whether a pane
+writing v1 flat markers currently occupies the same number. After pane ids reuse, a leftover claim
 from an old incarnation can name a live third-party or Pi-fallback marker.
-Preview (`attention sweep --json`) lists the stems; `--apply` is opt-in. Shared
-v2 addresses still refuse. `.review` is never collected.
+Preview (`attention sweep --json`) lists the stems; `--apply` is opt-in. A pane id shared
+by several v2 addresses still refuses. `.review` is never collected.
 
 Uniqueness is a snapshot under the selected owner's `.claim.lock`. Apply does
 not hold a tree-wide lock, so a second claim at another address can land in the
@@ -216,8 +216,8 @@ An in-place rewrite of equal size that restores mtime is not.
 
 `write_v2_record` in `plugin/overlays.lua` reads the existing record only to
 check that it is readable, then renames over it unconditionally. Two GUI writers
-acknowledging at the same moment can lose one dismissal. This predates the v2
-work and is not widened by it.
+acknowledging at the same moment can lose one dismissal. This predates v2 records
+and is not widened by them.
 
 The sequence needs two GUI processes on one binding:
 

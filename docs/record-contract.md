@@ -1,7 +1,7 @@
 # Record contract
 
-`protocol/v2.json` is the machine-readable authority. Writers must call `bin/attention`; examples
-and provider hooks must not construct v2 JSON themselves.
+This document describes the v2 records the `attention` command writes, and how they relate to the older v1 flat markers. "v1" and "v2" name those two formats, not releases of this project. `protocol/v2.json` is the machine-readable authority. Writers must call `bin/attention`; examples
+and provider hooks must not construct v2 record JSON themselves.
 
 This is an implementation contract, not an activation claim. `bin/attention` selects the Rust writer, but a hook registered before it was installed keeps doing what it did: a helper that writes flat files keeps writing them, and a zsh configuration that never calls `wezterm_attention_claim` never establishes a launch claim.
 
@@ -71,25 +71,25 @@ Prompt return is `hooks publish` from a bound pane. It republishes the pane iden
 
 ## Compatibility and precedence
 
-Attention's writers do not maintain flat v1 activity or `.agents` projections.
+Attention's writers do not maintain v1 flat marker or `.agents` projections.
 The flat format remains permanently supported input: third-party writers and
 Pi's fallback may still create `<root>/<pane_id>` and `<pane_id>.agents`, and
-the Lua reader keeps accepting them. Writer-owned leftovers from when v2 also
-projected those names are collected with `attention sweep --json` to preview,
+the Lua reader keeps accepting them. Writer-owned leftovers from development builds that
+projected v2 records into those names are collected with `attention sweep --json` to preview,
 then `attention sweep --apply --operation-id 00000000-0000-4000-8000-000000000001`.
 The operation id must be a canonical lowercase UUID. Collection follows a unique
-v2 claim for that scalar pane id; it does not ask whether a live v1 pane currently
+v2 claim for that scalar pane id; it does not ask whether a live writer of v1 flat markers currently
 occupies the same number, so preview the stems before applying. `.review` is user
 state and is never collected that way.
 
-A valid v2 claim selects v2. Invalid or future v2 is reported and never downgraded to plausible v1.
-V1 is read only when no v2 claim exists. The public Lua query remains six values:
+A valid v2 claim selects v2 records. An invalid or future-schema v2 record is reported and never downgraded to a plausible v1 flat marker.
+v1 flat markers are read only when no v2 claim exists, so in a pane with a published claim a flat marker written under the same pane id is not shown. The public Lua query remains six values:
 `type, frame, source, reserved, subagents, review`. Without an explicit legacy directory, `get_attention(id)` returns unavailable (`nil`) when the scalar ID is observed at multiple full pane addresses. `get_attention_view(pane)` selects the exact pane instead. The fourth return is reserved and always false; controller ownership is not an Attention fact.
 
-For a v2 pane, focusing the active pane writes an exact acknowledgement for the displayed activity
+For a pane with v2 records, focusing the active pane writes an exact acknowledgement for the displayed activity
 event. `Alt+B` writes the `user` owner claim under that pane's full address. Its clear-all action
 removes every valid review claim in the active tab through each pane's full address and leaves
-activity records unchanged. V1 panes keep their shipped `.ack` and `.review` behavior.
+activity records unchanged. Panes on v1 flat markers keep their shipped `.ack` and `.review` behavior.
 
 Acknowledgement records are Lua-owned. Rust validates and prunes them during reads and maintenance, but Rust never creates an acknowledgement.
 
@@ -132,7 +132,7 @@ authentication against another process running as the same user. State directori
 private, but a same-UID process can still forge cooperative records.
 
 A current binding is selected by the pane's current claim and then that launch's pointer. A pointer
-inside a historical launch cannot make its binding current or confirmed. Doctor validates v2 JSON
+inside a historical launch cannot make its binding current or confirmed. Doctor validates v2
 records in its file and version scope even when a pane has no binding.
 
 Destructive absence needs two pane-list negatives under different operation IDs at least 60
