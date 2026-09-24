@@ -39,11 +39,18 @@ def enum_set(manifest: dict[str, Any], name: str) -> set[str]:
     return set(manifest["enums"][name])
 
 
+def is_control(char: str) -> bool:
+    # C0, DEL and C1: the characters Rust's char::is_control rejects. A C1
+    # character such as U+009B is a terminal control sequence on its own.
+    code = ord(char)
+    return code < 32 or 127 <= code <= 159
+
+
 def is_safe_text(value: Any, maximum: int) -> bool:
     return (
         isinstance(value, str)
         and 0 < len(value.encode("utf-8")) <= maximum
-        and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+        and not any(is_control(char) for char in value)
     )
 
 

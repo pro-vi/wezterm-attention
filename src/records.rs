@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -11,7 +11,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::identity::PaneAddress;
-use crate::protocol::{AttentionError, Result, manifest, validate_record};
+use crate::protocol::{AttentionError, Result, free_of_control, manifest, validate_record};
 
 #[derive(Clone, Debug, Default)]
 pub struct RecordIdentity {
@@ -350,12 +350,22 @@ pub struct CommitPlan<T> {
     pub private_dirs: Vec<PathBuf>,
 }
 
+/// The plugin and the Pi extension resolve the same root in the same order.
+/// An empty WEZTERM_ATTENTION_DIR counts as unset; any other value must be a
+/// safe absolute path. XDG_STATE_HOME is used only when it is one, because the
+/// XDG spec says a relative or empty value is to be ignored.
 pub fn state_root(env: &BTreeMap<String, String>) -> Result<PathBuf> {
-    if let Some(path) = env.get("WEZTERM_ATTENTION_DIR") {
+    if let Some(path) = env
+        .get("WEZTERM_ATTENTION_DIR")
+        .filter(|path| !path.is_empty())
+    {
         return absolute_path(path, "WEZTERM_ATTENTION_DIR");
     }
-    if let Some(path) = env.get("XDG_STATE_HOME") {
-        return Ok(absolute_path(path, "XDG_STATE_HOME")?.join("wezterm-attention"));
+    if let Some(path) = env
+        .get("XDG_STATE_HOME")
+        .and_then(|path| absolute_path(path, "XDG_STATE_HOME").ok())
+    {
+        return Ok(path.join("wezterm-attention"));
     }
     let home = env
         .get("HOME")
@@ -366,9 +376,7 @@ pub fn state_root(env: &BTreeMap<String, String>) -> Result<PathBuf> {
 fn absolute_path(value: &str, name: &str) -> Result<PathBuf> {
     if value.is_empty()
         || value.len() > manifest()?.limits.path_max_bytes
-        || value
-            .chars()
-            .any(|character| character < ' ' || character == '\u{7f}')
+        || !free_of_control(value)
         || !Path::new(value).is_absolute()
     {
         return Err(AttentionError::new(
@@ -402,9 +410,20 @@ pub fn mkdir_private(path: &Path) -> Result<()> {
         })?;
     }
     for directory in missing.iter().rev() {
-        fs::create_dir(directory).map_err(|_| {
-            AttentionError::new("state_permissions", "state directory could not be created")
-        })?;
+        // Created private rather than chmod-ed afterwards, so it is never
+        // briefly open to the umask. Another writer creating the same
+        // directory first, as two claims after a mux restart do, is success.
+        match DirBuilder::new().mode(0o700).create(directory) {
+            Ok(()) => {}
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AlreadyExists && directory.is_dir() => {}
+            Err(_) => {
+                return Err(AttentionError::new(
+                    "state_permissions",
+                    "state directory could not be created",
+                ));
+            }
+        }
         fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).map_err(|_| {
             AttentionError::new(
                 "state_permissions",
@@ -886,7 +905,76 @@ mod tests {
     use std::io;
     use std::path::Path;
 
-    use super::{PreparedRecordWrite, sync_parent_directory_with};
+    use std::collections::BTreeMap;
+
+    use super::{PreparedRecordWrite, state_root, sync_parent_directory_with};
+
+    #[test]
+    fn concurrent_writers_creating_one_directory_all_succeed() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Barrier};
+        let root = std::env::temp_dir().join(format!("attention-mkdir-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        for round in 0..40 {
+            let target = root.join(format!("{round}/panes/42/launches"));
+            let barrier = Arc::new(Barrier::new(8));
+            let writers: Vec<_> = (0..8)
+                .map(|_| {
+                    let (target, barrier) = (target.clone(), barrier.clone());
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        super::mkdir_private(&target)
+                    })
+                })
+                .collect();
+            for writer in writers {
+                writer
+                    .join()
+                    .unwrap()
+                    .expect("a racing writer still succeeds");
+            }
+            for directory in [root.join(round.to_string()), target] {
+                let mode = std::fs::metadata(directory).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o700);
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn state_root_skips_empty_and_relative_locations_it_may_ignore() {
+        let env = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect()
+        };
+        let home = [("HOME", "/home/a")];
+        let fallback = Path::new("/home/a/.local/state/wezterm-attention");
+        assert_eq!(state_root(&env(&home)).unwrap(), fallback);
+        for ignored in ["", "relative/state"] {
+            let mut pairs = home.to_vec();
+            pairs.push(("XDG_STATE_HOME", ignored));
+            assert_eq!(state_root(&env(&pairs)).unwrap(), fallback, "{ignored:?}");
+        }
+        let mut pairs = home.to_vec();
+        pairs.push(("XDG_STATE_HOME", "/xdg"));
+        assert_eq!(
+            state_root(&env(&pairs)).unwrap(),
+            Path::new("/xdg/wezterm-attention")
+        );
+        pairs.push(("WEZTERM_ATTENTION_DIR", ""));
+        assert_eq!(
+            state_root(&env(&pairs)).unwrap(),
+            Path::new("/xdg/wezterm-attention")
+        );
+        pairs.pop();
+        pairs.push(("WEZTERM_ATTENTION_DIR", "/explicit"));
+        assert_eq!(state_root(&env(&pairs)).unwrap(), Path::new("/explicit"));
+        pairs.pop();
+        pairs.push(("WEZTERM_ATTENTION_DIR", "relative"));
+        assert!(state_root(&env(&pairs)).is_err());
+    }
 
     #[test]
     fn prepared_record_freezes_validated_bytes_before_filesystem_effects() {

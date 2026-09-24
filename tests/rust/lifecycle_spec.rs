@@ -33,6 +33,21 @@ mod pane_facts;
 #[path = "lifecycle_spec/consumer_recipes.rs"]
 mod consumer_recipes;
 
+#[path = "lifecycle_spec/untrusted_text.rs"]
+mod untrusted_text;
+
+#[path = "lifecycle_spec/session_starts.rs"]
+mod session_starts;
+
+#[path = "lifecycle_spec/turn_endings.rs"]
+mod turn_endings;
+
+#[path = "lifecycle_spec/metadata_fields.rs"]
+mod metadata_fields;
+
+#[path = "lifecycle_spec/mark_clear.rs"]
+mod mark_clear;
+
 struct Scratch(PathBuf);
 
 #[test]
@@ -524,17 +539,23 @@ fn same_key_order_conflict_and_equal_time_eviction() {
     let mut conflict = item.clone();
     conflict.source_version = Some("conflict".into());
     assert!(snapshot.reduce(conflict).is_err());
-    for _ in 0..64 {
+    for _ in 0..63 {
         let mut sibling = item.clone();
         sibling.observation_id = Uuid::new_v4().to_string();
         sibling.correlation = None;
-        snapshot.reduce(sibling).unwrap();
+        assert!(snapshot.reduce(sibling).unwrap());
     }
-    assert!(snapshot.pools.general.observations.is_empty());
-    assert_eq!(
-        snapshot.pools.general.retention_floor_mono_ns,
-        Some(item.observed_mono_ns)
-    );
+    // A full pool evicts everything at its oldest instant. When that instant
+    // is the candidate's own, the candidate goes too, so nothing is stored
+    // and the full pool stays as it was.
+    let full = snapshot.clone();
+    let mut sibling = item.clone();
+    sibling.observation_id = Uuid::new_v4().to_string();
+    sibling.correlation = None;
+    assert!(!snapshot.reduce(sibling).unwrap());
+    assert_eq!(snapshot, full);
+    assert_eq!(snapshot.pools.general.observations.len(), 64);
+    assert!(snapshot.pools.general.retention_floor_mono_ns.is_none());
     assert!(snapshot.pools.requests.retention_floor_mono_ns.is_none());
 }
 
@@ -1180,10 +1201,19 @@ fn every_active_lifecycle_row_reaches_the_production_writer() {
                 .find(|item| item.body.kind() == case["kind"].as_str().unwrap())
                 .unwrap();
             assert_eq!(observation.source_event, name);
-            if row["id"] == "H18" {
+            if row["id"] == "H18" && name == "PreToolUse" {
                 assert!(
                     !directory.join("activity.json").exists(),
                     "child work cannot become lead activity"
+                );
+            }
+            if row["id"] == "H18" && name == "PermissionRequest" {
+                let activity: Value =
+                    serde_json::from_slice(&fs::read(directory.join("activity.json")).unwrap())
+                        .unwrap();
+                assert_eq!(
+                    activity["type"], "notify",
+                    "a child waiting for permission waits for the user"
                 );
             }
             if case["patch"]["notification_type"] == "elicitation_url_dialog" {
@@ -1934,22 +1964,10 @@ fn delayed_pi_clear_cannot_remove_a_new_launch_review() {
                     .as_bytes(),
             )
             .expect("write delayed clear");
-        let lock_name = format!(
-            "n{}",
-            fs::canonicalize(launch.join(".lock"))
-                .expect("canonical lock path")
-                .display()
-        );
+        let lock = fs::canonicalize(launch.join(".lock")).expect("canonical lock path");
         let mut opened = false;
         for _ in 0..60 {
-            let output = Command::new("/usr/sbin/lsof")
-                .args(["-a", "-p", &child.id().to_string(), "-Fn"])
-                .output()
-                .expect("inspect delayed clear");
-            if String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .any(|line| line == lock_name)
-            {
+            if process_has_open(child.id(), &lock) {
                 opened = true;
                 break;
             }
@@ -2100,6 +2118,32 @@ fn fresh_manual_activity_is_fenced_by_an_existing_clear() {
     );
 }
 
+/// Whether process `pid` holds `path` open. Linux lists a process's
+/// descriptors under /proc; macOS has no /proc, so there lsof answers.
+fn process_has_open(pid: u32, path: &std::path::Path) -> bool {
+    let descriptors = PathBuf::from(format!("/proc/{pid}/fd"));
+    if descriptors.is_dir() {
+        return fs::read_dir(descriptors).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| fs::read_link(entry.path()).is_ok_and(|target| target == path))
+        });
+    }
+    let output = Command::new(executables::resolve("lsof"))
+        .args(["-a", "-p", &pid.to_string(), "-Fn"])
+        .output()
+        .expect("inspect open files");
+    let name = format!("n{}", path.display());
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line == name)
+}
+
+// macOS answers ttyname on an open /dev/tty with "/dev/tty" itself, a clone
+// device owned by root, which must not become a pane identity. Linux answers
+// with the real /dev/pts path, so the case this test guards does not arise
+// there, and util-linux script takes different arguments.
+#[cfg(target_os = "macos")]
 #[test]
 fn real_macos_controlling_tty_path_is_rejected_in_a_pty_child() {
     const CHILD: &str = "WEZTERM_ATTENTION_REAL_TTY_CHILD";
