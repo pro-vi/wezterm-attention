@@ -85,4 +85,11 @@ name="the status bar reads the repository without running its fsmonitor hook"
 check sh -c 'grep -q "^update_status=true" "$1" && grep -q "^status=.*+1" "$1" && [ ! -e "$2" ]' _ \
   "$scratch/result" "$scratch/fsmonitor-ran"
 
+# Past its cut, the branch name is CJK text: three bytes to each character.
+git -C "$scratch/repo" -c core.fsmonitor=false checkout -q -b "feature/修复登录页面的问题"
+load_example
+name="the status bar shortens a long non-ASCII branch name on a character boundary"
+check sh -c 'grep -q "^update_status=true" "$1" && grep -q "^status=.* feature/修复登录页\.\. " "$1"' _ \
+  "$scratch/result"
+
 [ "$failures" -eq 0 ]
