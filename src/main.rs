@@ -824,7 +824,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             // and any diagnostic already makes it incomplete.
             let mut walked_every_directory = true;
             let (scope, mut rows, diagnostics, timing) = if let Some(socket) = &args.socket {
-                let (scope, rows, diagnostics, timing) =
+                let (scope, mut rows, diagnostics, timing) =
                     match wezterm_attention::query::read_bindings_for_socket_timed(
                         &root,
                         socket,
@@ -838,6 +838,12 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                             ));
                         }
                     };
+                // After the answer, not in its filter: a row filtered out
+                // sends its diagnostics to the ignored ones, which would
+                // change what makes this answer incomplete.
+                if let Some(provider) = &args.provider {
+                    rows.retain(|row| &row.provider == provider);
+                }
                 (Some(scope), rows, diagnostics, timing)
             } else {
                 // The filters apply before any socket is asked, so a realm or
@@ -852,12 +858,6 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 walked_every_directory = answer.walked_every_directory;
                 (None, answer.rows, answer.diagnostics, answer.timing)
             };
-            if let Some(realm) = args.realm {
-                rows.retain(|row| row.address.realm_id == realm);
-            }
-            if let Some(provider) = args.provider {
-                rows.retain(|row| row.provider == provider);
-            }
             let scanned = rows.len();
             if !args.all {
                 rows.truncate(args.limit);
