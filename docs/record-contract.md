@@ -76,8 +76,11 @@ stays observation-only. The one exception is a child's `PermissionRequest`: a ch
 permission prompt waits for the user as the lead would, so it publishes lead `notify` activity and
 records the child's presence as waiting (`source: "permission"`); its observation still names the
 child as the actor. While that child waits, the lead's next `thinking` does not replace the visible
-`notify`. The wait ends at the child's next tool call, its `SubagentStop`, a parent clear, or its
-presence TTL; a user prompt or any lead activity other than `thinking` replaces the `notify` at once.
+`notify`. The wait has no time limit: it ends at the child's next tool call, its `SubagentStop`, a
+parent clear, or the retention floor, and never at the presence TTL, because a child blocked on a
+prompt sends nothing that would refresh its presence. A user prompt or any lead activity other than
+`thinking` replaces the `notify` at once. A child presence that cannot be read does not stop the
+`notify`; the event reports `partial` with that record's diagnostic.
 
 A turn that ends without `Stop` still ends the activity. A lead Claude `StopFailure` (an API error
 ended the turn) publishes `notify`, because the user must act. A Codex `Interrupt` writes an

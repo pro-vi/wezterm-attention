@@ -117,7 +117,7 @@ The default base title is the first of these that is not empty:
 3. The pane's title, once it has stayed the same for two polls. `settled_title_fallback = false` skips it, and the poll then samples no titles at all.
 4. The pane's title as it is now.
 
-Text from the first two sources, and the title from the last, has control characters removed and is cut to 256 bytes on a character boundary; a title with a control character in it is never used as the settled title.
+Text from the first two sources, and the title from the last, has escape sequences and control characters removed and is cut to 256 bytes on a character boundary; a title with a control character in it is never used as the settled title.
 
 In `tab` mode, pass a `title_formatter` to replace the base title without losing indicators:
 
@@ -156,7 +156,7 @@ attention.apply_to_config(config, {
   integration_root = nil,
 
   -- Custom base title (tab mode only; plugin adds indicators + colors around it)
-  title_formatter = nil,  -- function(tab, ctx) -> string
+  title_formatter = nil,  -- function(tab, ctx) -> string of plain text
 
   -- Base-title sources; see Custom tab titles.
   show_directory = true,
@@ -591,7 +591,7 @@ A WezTerm window attached to a mux server mirrors the server's tabs under number
 
 `source` names the GUI that drew the window, because a window id means something only inside one GUI process. The plugin learns that identity by asking the `attention` command shortly after startup. A window's first order is held until that answer arrives and then written under its source; when the command is not built, or no answer can come, it is written as a schema-1 file at `tabs/<window id>.json` with no `source`. A window keeps the one file it was first written to for as long as it is open.
 
-`number` is the number the bar printed, `text` is the whole string it drew (control characters removed, cut to 256 bytes, and a spinner always shown at its first frame so the file does not change every second), and `marker_ids` are the IDs the plugin already uses for those panes — already translated out of the window's local numbering, because only the window could translate them. A pane on v1 flat markers is a canonical decimal marker id; a pane with v2 records is `v2:<realm_id>:<incarnation_id>:<pane_id>` once a poll has identified it. The file is written when a window's composed list changes and at no other time, so `published_at_ms` says when the bar last drew something different.
+`number` is the number the bar printed, `text` is the whole string it drew (escape sequences and control characters removed, cut to 256 bytes, and a spinner always shown at its first frame so the file does not change every second), and `marker_ids` are the IDs the plugin already uses for those panes — already translated out of the window's local numbering, because only the window could translate them. A pane on v1 flat markers is a canonical decimal marker id; a pane with v2 records is `v2:<realm_id>:<incarnation_id>:<pane_id>` once a poll has identified it. The file is written when a window's composed list changes and at no other time, so `published_at_ms` says when the bar last drew something different.
 
 Read it with `attention tabs`, which returns every window in the same JSON envelope as `bindings`. **It is honest about when it was written, not guaranteed current**: nothing refreshes it while the bar is idle, and no consumer should act on a number it has not checked. Use it to describe tabs and to resolve "the second `api` tab"; to act on one, ask the GUI, where `mux_window:tabs_with_info()` returns the drawn order live.
 

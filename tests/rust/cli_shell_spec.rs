@@ -591,6 +591,11 @@ fn installer_creates_libexec_in_a_fresh_checkout() {
         scripts.join("install-cli.sh"),
     )
     .expect("copy installer");
+    fs::copy(
+        repo_file("scripts/build-attention.sh"),
+        scripts.join("build-attention.sh"),
+    )
+    .expect("copy build step");
     let cargo = tools.join("cargo");
     fs::write(
         &cargo,

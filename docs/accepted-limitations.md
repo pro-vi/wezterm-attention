@@ -273,6 +273,13 @@ one process of the user that has made itself non-dumpable is enough to leave
 the listing incomplete, and ssh-agent does that by default, so Linux usually
 behaves the same.
 
+A refused connection is read as a server that exited, because a running
+WezTerm keeps listening on its socket for its whole life. One case breaks that:
+on macOS a server that has stopped accepting connections while it still runs,
+with its accept queue full, also refuses. If that holds at two sweeps a minute
+apart, sweep ends its bindings, and pane trees go only after the retention age
+and two more sightings.
+
 Once you know such a server is gone, remove its records yourself: the `path`
 each incarnation carries in that diagnostic is relative to the state root, as
 in `<state root>/v2/realms/<realm id>/incarnations/<incarnation id>`.
@@ -316,6 +323,35 @@ present. When bash-preexec is loaded later in the same shell, the integration's
 DEBUG trap is wrapped by bash-preexec's own and no command in that shell is
 claimed again. Load bash-preexec before this file, or start a new shell after
 loading it.
+
+## Ctrl-C during a claim under bash-preexec on bash 3.2
+
+When bash-preexec is loaded, the claim runs inside its DEBUG trap. On bash 3.2,
+the macOS `/bin/bash`, a Ctrl-C there leaves the interrupted functions' names
+behind, and current bash-preexec checks that list to decide whether a command
+line was typed at the top level. From then on it runs no preexec function in
+that shell: not the claim, and not any other tool's hook. Without bash-preexec,
+and in zsh, the integration recovers. Start a new shell after interrupting a
+claim there. Catching the interrupt instead would let the interrupted command
+line run, unclaimed, which is not what Ctrl-C asks for.
+
+## Two GUIs without a writer closing same-numbered windows
+
+A GUI with no working `attention` writer, or whose `tab-source` did not answer
+through its whole retry backoff, publishes tab orders under the shared name
+`tabs/<window id>.json`, and window ids restart with every mux. When a window
+closes, the plugin removes that file only if it still holds the bytes this GUI
+wrote, but the check and the removal are two steps. If another such GUI writes
+the same name between them, its file is removed, and it is written again only
+when that GUI's bar changes. Only GUIs without a source answer share a name.
+
+## A mark stamped before an unbound clear
+
+`attention mark clear --source NAME` in a claimed launch that no provider
+session has bound yet removes the launch's activity, but leaves no record of
+when it did. `attention mark` reads its clock before taking the launch lock, so
+a mark stamped just before the clear and written just after it shows the
+activity again. A bound pane keeps a clear record and ignores such a mark.
 
 ## The acknowledgement write has no compare-and-swap
 

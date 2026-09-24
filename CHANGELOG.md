@@ -38,7 +38,7 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - `get_attention_view(pane)`, with bounded lifecycle observations and request evidence, and the `on_view_change` callback. See `docs/consumer-guide.md`.
 - Opt-in delivery of the exact prompt or reply text to consumer executables: `--consumer … --include-prompt` or `--include-reply`.
 - The drawn tab order, published to `tabs/` and read with `attention tabs`.
-- `attention sweep`, which previews by default and, with `--apply`, ends bindings whose panes are verified gone, removes a closed pane's whole tree once its binding ended more than 30 days ago and its absence is confirmed again, and collects leftover files. A mux server that is gone counts as a sighting of absence for its panes: a new server owns its socket, or the socket file is gone and the process probe read every process of this user and none carries the pane. A failed process probe, or one that could not read every process, is never a sighting; on macOS, which hides the environment of its own system binaries, that means the records of a server whose socket is gone are never removed.
+- `attention sweep`, which previews by default and, with `--apply`, ends bindings whose panes are verified gone, removes a closed pane's whole tree once its binding ended more than 30 days ago and its absence is confirmed again, and collects leftover files. A server counts as gone only when that is shown: its socket file refuses connections, as a GUI that quit leaves it; its `gui-sock-<pid>` process has exited; or the process probe read every process of this user and none carries the pane. A socket that was removed or replaced, including by `chmod` or `touch` on a live socket, is never a sighting by itself. So on macOS, and on Linux whenever a process of the user is non-dumpable, a mux server's records stay after its socket is removed, until you remove them by hand.
 - A `doctor` probe named `environment`, which checks inside a pane that the pane's socket has a server identity hooks can find.
 - `result.timing_ms` on `inspect` as on `bindings`, and `result.diagnostic_count` / `total_diagnostic_count` on `tabs`. Query diagnostics name the record path or pane they are about.
 - Options `show_directory`, `settled_title_fallback`, `show_provider`, `on_view_change` and `integration_root`; `attention.doctor(window)` in the Lua API.
@@ -48,10 +48,9 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - A prompt tints the pane `thinking` straight away, instead of waiting for the first tool call.
 - `thinking` from v2 records animates like the v1 spinner.
 - The tab text published in `tabs/*.json` always shows the spinner's first frame, so a spinning tab does not rewrite that file every second. The bar on screen still animates.
-- Tab text is repaired before it is drawn or published: ill-formed UTF-8 from a title formatter becomes U+FFFD, and control characters are removed, so every window stays readable through `attention tabs`.
+- Tab text is repaired before it is drawn or published: ill-formed UTF-8 from a title formatter becomes U+FFFD, and escape sequences and control characters are removed whole, so every window stays readable through `attention tabs`. A title formatter returns plain text: styling escapes in its return, such as `wezterm.format` output, are removed and their styling is dropped.
 - In zsh, the prompt hook drops `WEZTERM_ATTENTION_LAUNCH_ID` once a claimed agent has exited, as bash already did.
-- Alt+B clear-all never loses a review: a review written while the clear ran is kept, and a review a crash left moved aside is put back on the next poll.
-- The plugin removes a tab-order file it superseded only while the file still holds the bytes this process wrote.
+- Alt+B clear-all never loses a review: a review written while the clear ran is kept, and a review a crash left moved aside is put back by the GUI that moved it, or by any GUI once it is older than a clear can take.
 - A Claude turn that ends on an API error (`StopFailure`) shows `notify` instead of staying on `thinking` until its 30-minute timeout. A Codex `Interrupt` clears the activity.
 - A sub-agent waiting for permission raises `notify` on its pane.
 - Forked Claude and Codex sessions (`SessionStart` with source `fork`) are bound.
@@ -71,11 +70,11 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 ### Fixed
 
 - `attention mark clear --source NAME` also withdraws an activity that `attention mark` wrote before any provider session bound the launch. Another source's activity stays.
-- A sub-agent waiting for permission keeps the tab on `notify` while the lead keeps calling tools, for example Codex polling `wait_agent`. The notify ends when that sub-agent calls its next tool or stops, when the user prompts, or when the lead's turn ends.
+- A sub-agent waiting for permission keeps the tab on `notify` while the lead keeps calling tools, for example Codex polling `wait_agent`. The notify ends when that sub-agent calls its next tool or stops, when the user prompts, or when the lead's turn ends, however long the sub-agent waits. A sub-agent record that cannot be read does not stop the notify; the hook reports `partial`.
 - Sourcing the bash integration again from an rc file that assigns `PROMPT_COMMAND` puts its prompt hook back.
-- Ctrl-C while a claim or prompt publication is running no longer stops the bash and zsh integrations for the rest of the shell.
+- Ctrl-C while a claim or prompt publication is running no longer stops the bash and zsh integrations for the rest of the shell, except under bash-preexec on bash 3.2 (see accepted limitations). In zsh, a Ctrl-C during the publication at an agent's exit still drops the agent's launch id.
 - `scripts/install-cli.sh` installs the binary cargo reports building, also when `CARGO_BUILD_TARGET` or `build.target` is set, and refuses with a message when cargo reports none.
-- A window's first tab order waits for the GUI's source answer, so `attention tabs` never lists a window twice and no GUI removes a file another GUI wrote.
+- A window's first tab order waits for the GUI's source answer, including across failed runs, for up to the whole retry backoff (about 47 s), so `attention tabs` never lists a window twice. If every retry fails, held and new windows are published without a source, and this is logged once.
 - Alt+B clear recovery restores only its own leftovers or ones older than a clear can take, so it never undoes another GUI's clear.
 - A local pane's published identity must belong to the GUI's own mux, so output from another mux cannot make a local pane show or acknowledge that mux's records.
 
@@ -95,7 +94,11 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - A symlinked `tabs/` directory is refused, and sweep never deletes through it.
 - Temporaries left by an interrupted write no longer keep a binding or pane tree from retention.
 - The process probe matches a socket path by its resolved directory, so a process that names the socket through `/tmp` on macOS or a symlinked directory is still found.
-- A socket file that no longer exists, as after a GUI exits, is reported as `realm_unavailable` ("mux socket no longer exists") instead of `probe_unavailable`, so `doctor` and `sweep` no longer answer `unavailable` and exit 1 for as long as that GUI's records remain.
+- Every command reads a recorded server the same way. An exited GUI's bindings end and, after the retention age, its pane trees go. A socket that is gone (`socket_gone`, a new diagnostic code) or replaced (`incarnation_changed`) with no proof that its server exited keeps its records; `doctor` and `sweep` report that history as one diagnostic per code listing each incarnation, its directory and pane count, and stay complete however much there is. `inspect`, `bindings --socket` and `tabs` (`window_check.reason: socket_gone`) report a removed socket the same way, not as `probe_unavailable`.
+- `doctor` is incomplete and exits 1 when a mux whose socket still carries its incarnation does not answer its pane listing, as `sweep` already was.
+- Sweep's absence and retention diagnostics name the realm, incarnation, pane and binding, and each appears once per run.
+- The example status bar shortens a branch name by cell width, so a non-ASCII branch name no longer stops the right status updating.
+- The gate's performance comparison measures the binaries cargo reports building; `scripts/build-attention.sh` holds the build step the installer and the gate share.
 - The lock that `mark review`, `mark clear` and Pi's review events leave in `reviews/` no longer keeps an old pane's tree from retention.
 - Sweep removes nothing through a symlinked directory below the state root: subagent compaction and a cleared absence probe are refused there, as binding and pane removals already were.
 - `bindings --socket` reports a directory it could not read as `state_permissions` with its `path`, as realm-wide `bindings` does. A `binding_conflict` diagnostic names the provider session and its pane addresses, and a sweep diagnostic about a tab-order file's pane names the file and the pane.
@@ -114,4 +117,4 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
      while IFS= read -r file; do rm -f -- "$file"; done
    ```
 
-5. If you set `acknowledge_types`, rename it to `auto_clear`. If your `title_formatter` parsed `ctx.default_title` as `dir / title`, read `ctx.directory` and `tab.active_pane.title` instead.
+5. If you set `acknowledge_types`, rename it to `auto_clear`. If your `title_formatter` parsed `ctx.default_title` as `dir / title`, read `ctx.directory` and `tab.active_pane.title` instead. If your `title_formatter` returned `wezterm.format` output for styling, return plain text instead; set colors through the plugin's `colors` option.
