@@ -691,8 +691,29 @@ pub(crate) fn gui_process_exited(socket_path: &str) -> bool {
     else {
         return false;
     };
-    let signalled = unsafe { libc::kill(pid, 0) };
-    signalled != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    pid_state(pid) == PidState::Exited
+}
+
+/// What signal 0 says of a pid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PidState {
+    /// It answered, or it exists and this user may not signal it.
+    Running,
+    /// No process has this pid.
+    Exited,
+    /// The signal failed for another reason, which shows neither.
+    Unknown,
+}
+
+fn pid_state(pid: libc::pid_t) -> PidState {
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return PidState::Running;
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::EPERM) => PidState::Running,
+        Some(libc::ESRCH) => PidState::Exited,
+        _ => PidState::Unknown,
+    }
 }
 
 /// How long any one child this crate runs may take, output included.
@@ -963,8 +984,7 @@ fn own_pane_processes() -> Option<PaneProcessSet> {
 /// Whether `pid` names a process that has not exited, whoever may signal it.
 #[cfg(target_os = "macos")]
 fn still_running(pid: libc::pid_t) -> bool {
-    let signalled = unsafe { libc::kill(pid, 0) };
-    signalled == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    pid_state(pid) == PidState::Running
 }
 
 #[cfg(target_os = "linux")]
