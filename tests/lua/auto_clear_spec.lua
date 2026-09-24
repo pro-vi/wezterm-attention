@@ -237,11 +237,20 @@ local wezterm = {
 
 package.preload.wezterm = function() return wezterm end
 
+--- An integration root with the writer installed. Publication and tab source
+--- identity run only once the writer is there, so the tests about them name
+--- this root rather than depend on whether this checkout has been built.
+local writer_root = test_dir .. "/writer-root"
+assert(os.execute("mkdir -p " .. shell_quote(writer_root .. "/libexec") .. " "
+  .. shell_quote(writer_root .. "/bin")) == 0)
+assert(io.open(writer_root .. "/libexec/attention-rs", "w")):close()
+
 local attention = dofile(repo_root .. "/plugin/init.lua")
 attention.apply_to_config({}, {
   auto_poll = false,
   dir = test_dir,
   review_key = false,
+  integration_root = writer_root,
 })
 
 local format_tab_title = assert(
@@ -3243,7 +3252,7 @@ test("v2 user actions never replace future acknowledgement or review records", f
   drain_errors()
 end)
 
-test("unpublished mux pane schedules one realm publish from the resolved plugin root", function()
+test("unpublished mux pane schedules one realm publish from the integration root", function()
   local spawned = {}
   local original_background = wezterm.background_child_process
   wezterm.background_child_process = function(argv)
@@ -3258,6 +3267,7 @@ test("unpublished mux pane schedules one realm publish from the resolved plugin 
     auto_poll = false,
     dir = test_dir,
     review_key = false,
+    integration_root = writer_root,
   })
   local pane = { id = 9901, domain = "u2-test" }
   local window = window_double({ tabs = { { pane } }, focused = false })
@@ -3265,12 +3275,11 @@ test("unpublished mux pane schedules one realm publish from the resolved plugin 
   reloaded.poll(window, { call_after = function() end })
   wezterm.background_child_process = original_background
 
-  local expected_root = assert(internal.protocol_path:match("^(.*)/protocol/v2%.json$"))
   assert(#spawned == 1, "one realm should schedule one background publication")
   assert(spawned[1][1] == "env"
       and spawned[1][2] == "WEZTERM_ATTENTION_DIR=" .. test_dir
-      and spawned[1][3] == expected_root .. "/bin/attention",
-    "publication must use the resolved checkout command")
+      and spawned[1][3] == writer_root .. "/bin/attention",
+    "publication must use the integration root's command")
   assert(table.concat(spawned[1], " "):find(
     "hooks publish --socket /tmp/attention-u2-test.sock --quiet", 1, true),
     "publication must use the nested quiet realm command")
@@ -3289,7 +3298,8 @@ test("unpublished mux panes retry on the bounded schedule and stop when resolved
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({
     unix_domains = { { name = "retry-test", socket_path = "/tmp/attention-retry.sock" } },
-  }, { auto_poll = false, dir = test_dir, review_key = false })
+  }, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local call_after = function(delay, callback)
     scheduled[#scheduled + 1] = { delay = delay, callback = callback }
   end
@@ -3335,7 +3345,8 @@ test("a pane-count change restarts stabilization without doubling the schedule",
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({
     unix_domains = { { name = "stable-test", socket_path = "/tmp/attention-stable.sock" } },
-  }, { auto_poll = false, dir = test_dir, review_key = false })
+  }, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local call_after = function() end
   reloaded.poll(window_double({
     tabs = { { { id = 9921, domain = "stable-test" } } }, focused = false,
@@ -3362,7 +3373,8 @@ test("unequal pane counts in alternating windows start one realm publication", f
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({
     unix_domains = { { name = "window-stable", socket_path = "/tmp/attention-window-stable.sock" } },
-  }, { auto_poll = false, dir = test_dir, review_key = false })
+  }, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local first = window_double({
     window_id = 811,
     tabs = { { { id = 9923, domain = "window-stable" } } },
@@ -3395,7 +3407,8 @@ test("a resolved window cannot cancel another window's unpublished realm", funct
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({
     unix_domains = { { name = "mixed-window", socket_path = "/tmp/attention-mixed-window.sock" } },
-  }, { auto_poll = false, dir = test_dir, review_key = false })
+  }, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local unpublished = window_double({
     window_id = 813,
     tabs = { { { id = 9926, domain = "mixed-window" } } },
@@ -3429,7 +3442,8 @@ test("a window leaving a realm cancels its stale publication retry", function()
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({
     unix_domains = { { name = "departed-realm", socket_path = "/tmp/attention-departed.sock" } },
-  }, { auto_poll = false, dir = test_dir, review_key = false })
+  }, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local remote = window_double({
     window_id = 816,
     tabs = { { { id = 9928, domain = "departed-realm" } } }, focused = false,
@@ -3464,7 +3478,8 @@ test("closing an unpublished window cancels its stale publication retry", functi
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({
     unix_domains = { { name = "closed-realm", socket_path = "/tmp/attention-closed.sock" } },
-  }, { auto_poll = false, dir = test_dir, review_key = false })
+  }, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local closing = window_double({
     window_id = 817,
     tabs = { { { id = 9930, domain = "closed-realm" } } }, focused = false,
@@ -3504,7 +3519,8 @@ test("a failed publish logs once and keeps its retry schedule", function()
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({
     unix_domains = { { name = "failure-test", socket_path = "/tmp/attention-failure.sock" } },
-  }, { auto_poll = false, dir = test_dir, review_key = false })
+  }, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local call_after = function(delay, callback)
     scheduled[#scheduled + 1] = { delay = delay, callback = callback }
   end
@@ -4097,7 +4113,7 @@ test("C9 a retry needs a new live observation when inventory fails", function()
   local old=wezterm.background_child_process
   wezterm.background_child_process=function(argv) spawned[#spawned+1]=argv; return true end
   local instance=dofile(repo_root .. "/plugin/init.lua")
-  instance.apply_to_config({unix_domains={{name="lost-window",socket_path="/tmp/attention-lost-window.sock"}}},{auto_poll=false,dir=test_dir,review_key=false})
+  instance.apply_to_config({unix_domains={{name="lost-window",socket_path="/tmp/attention-lost-window.sock"}}},{auto_poll=false,dir=test_dir,review_key=false,integration_root=writer_root})
   local window=window_double({window_id=9002,tabs={{{id=12004,domain="lost-window"}}},focused=false})
   local opts={gui_windows=function()error("inventory unavailable")end,call_after=function(_,f)scheduled[#scheduled+1]=f end}
   instance.poll(window,opts); instance.poll(window,opts)
@@ -4195,7 +4211,8 @@ test("the default state root follows the same order as the writer", function()
   }
   for index, case in ipairs(cases) do
     local instance = load_with_environment(case.env)
-    instance.apply_to_config({}, { auto_poll = false, review_key = false, renderer = "manual" })
+    instance.apply_to_config({}, { auto_poll = false, review_key = false, renderer = "manual",
+      integration_root = writer_root })
     assert(instance._active_dir == case.root,
       "case " .. index .. ": expected " .. case.root .. ", got " .. tostring(instance._active_dir))
     local warnings = drain_warnings()
@@ -4206,6 +4223,83 @@ test("the default state root follows the same order as the writer", function()
       assert(#warnings == 0, "case " .. index .. " warned: " .. tostring(warnings[1]))
     end
   end
+end)
+
+test("loading without a module path fails with directions, and an explicit path loads", function()
+  local chunk = assert(loadfile(repo_root .. "/plugin/init.lua"))
+  -- WezTerm's Lua has no debug library, so dofile gives the plugin no way to
+  -- find its own directory. The harness has one; hide it.
+  local saved_debug = rawget(_G, "debug")
+  _G.debug = nil
+  local ok, failure = pcall(chunk)
+  local explicit_ok, explicit = pcall(chunk, "wezterm-attention", repo_root .. "/plugin/init.lua")
+  _G.debug = saved_debug
+  assert(not ok and tostring(failure):find("wezterm.plugin.require", 1, true)
+      and tostring(failure):find("loadfile", 1, true),
+    "the failure must say how to load the plugin, got: " .. tostring(failure))
+  assert(explicit_ok and type(explicit.apply_to_config) == "function",
+    "a module path passed by the caller must be enough: " .. tostring(explicit))
+end)
+
+--- A copy of the plugin in its own directory with no writer built, the layout
+--- `wezterm.plugin.require` produces before anyone runs install-cli.sh.
+local function unbuilt_plugin_copy()
+  local root = test_dir .. "/unbuilt-copy"
+  assert(os.execute("rm -rf " .. shell_quote(root) .. " && mkdir -p " .. shell_quote(root)
+    .. " && cp -R " .. shell_quote(repo_root .. "/plugin") .. " " .. shell_quote(repo_root .. "/protocol")
+    .. " " .. shell_quote(repo_root .. "/bin") .. " " .. shell_quote(root)) == 0)
+  return root
+end
+
+test("a discovered root without the writer is named once and starts no process", function()
+  local root = unbuilt_plugin_copy()
+  local started = 0
+  local real_run, real_background = wezterm.run_child_process, wezterm.background_child_process
+  wezterm.run_child_process = function() started = started + 1; return false, "", "" end
+  wezterm.background_child_process = function() started = started + 1; return true end
+  local ok, failure = pcall(function()
+    local instance = dofile(root .. "/plugin/init.lua")
+    local config = { unix_domains = { { name = "unbuilt", socket_path = "/tmp/attention-unbuilt.sock" } } }
+    instance.apply_to_config(config, { auto_poll = false, dir = test_dir, review_key = false })
+    local warnings = drain_warnings()
+    assert(#warnings == 1 and warnings[1]:find(root .. "/libexec/attention-rs", 1, true)
+        and warnings[1]:find("integration_root", 1, true),
+      "the missing writer must be named once with the way out: " .. tostring(warnings[1]))
+    assert(config.set_environment_variables.WEZTERM_ATTENTION_ROOT == nil,
+      "a root without its writer is not exported")
+    instance._internal.acquire_tab_source("/test/unbuilt.sock")
+    local window = window_double({ tabs = { { { id = 9971, domain = "unbuilt" } } }, focused = false })
+    instance.poll(window, { call_after = function() end })
+    instance.poll(window, { call_after = function() end })
+  end)
+  wezterm.run_child_process, wezterm.background_child_process = real_run, real_background
+  assert(ok, failure)
+  assert(started == 0, "a root with no writer must start no process, started " .. started)
+end)
+
+test("an explicit integration root is the one whose command runs", function()
+  local argv
+  local real_run = wezterm.run_child_process
+  wezterm.run_child_process = function(args) argv = args; return true, tab_source_response(args[4]), "" end
+  local ok, failure = pcall(function()
+    local instance = dofile(repo_root .. "/plugin/init.lua")
+    instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+      renderer = "manual", integration_root = writer_root })
+    instance._internal.acquire_tab_source("/test/explicit.sock")
+    assert(argv and argv[1] == writer_root .. "/bin/attention",
+      "tab source must run the integration root's command, ran " .. tostring(argv and argv[1]))
+    assert(#drain_warnings() == 0, "a root with its writer is not worth a warning")
+
+    local missing = test_dir .. "/explicit-without-writer"
+    local unbuilt = dofile(repo_root .. "/plugin/init.lua")
+    unbuilt.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+      renderer = "manual", integration_root = missing })
+    local warnings = drain_warnings()
+    assert(#warnings == 1 and warnings[1]:find(missing .. "/libexec/attention-rs", 1, true),
+      "an explicit root without its writer must be named: " .. tostring(warnings[1]))
+  end)
+  wezterm.run_child_process = real_run
+  assert(ok, failure)
 end)
 
 -- A producer reads WEZTERM_ATTENTION_ROOT as "write through the v2 writer", and
@@ -4570,7 +4664,8 @@ test("a domain seen through one readable tab is not a domain reported as publish
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({
     unix_domains = { { name = "partial-realm", socket_path = "/tmp/attention-partial.sock" } },
-  }, { auto_poll = false, dir = test_dir, review_key = false })
+  }, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local options = { call_after = function(delay, callback)
     scheduled[#scheduled + 1] = { delay = delay, callback = callback }
   end }
@@ -4848,7 +4943,8 @@ test("an unreadable identity leaves a domain's publication unconcluded", functio
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({
     unix_domains = { { name = "invalid-realm", socket_path = "/tmp/attention-invalid.sock" } },
-  }, { auto_poll = false, dir = test_dir, review_key = false })
+  }, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local options = { call_after = function(delay, callback)
     scheduled[#scheduled + 1] = { delay = delay, callback = callback }
   end }
@@ -4882,7 +4978,8 @@ test("a domain nobody could see this tick keeps its retry", function()
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({
     unix_domains = { { name = "quiet-realm", socket_path = "/tmp/attention-quiet.sock" } },
-  }, { auto_poll = false, dir = test_dir, review_key = false })
+  }, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local options = { call_after = function(delay, callback)
     scheduled[#scheduled + 1] = { delay = delay, callback = callback }
   end }

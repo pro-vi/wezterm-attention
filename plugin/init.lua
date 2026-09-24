@@ -101,8 +101,16 @@ local plugin_root = plugin_source and plugin_source:match("^(.*)/plugin/init%.lu
 if plugin_root and plugin_root:sub(1, 1) ~= "/" then
   local working_directory = os.getenv("PWD")
   if working_directory and working_directory:sub(1, 1) == "/" then
-    plugin_root = (working_directory .. "/" .. plugin_root):gsub("/%./", "/")
+    plugin_root = (working_directory .. "/" .. plugin_root):gsub("/%./", "/"):gsub("/%.$", "")
   end
+end
+if not plugin_root then
+  -- Every other module is loaded from beside this file, so without its path
+  -- nothing below can work. Say how to give it one.
+  error("wezterm-attention: cannot tell which directory the plugin was loaded from. Load it with "
+    .. 'wezterm.plugin.require("https://github.com/pro-vi/wezterm-attention"), or from a clone with '
+    .. 'loadfile(clone .. "/plugin/init.lua")("wezterm-attention", clone .. "/plugin/init.lua"). '
+    .. "dofile passes no module path, and WezTerm's Lua has no debug library to find one.", 0)
 end
 local loaded_module_errors = {}
 local function load_plugin_module(name)
@@ -362,7 +370,6 @@ local runtime_api = runtime_state.bind({
   decode_json = decode_json,
   sha256 = sha256,
   is_hex64 = is_hex64,
-  plugin_root = plugin_root,
   diagnostic = diagnostic,
   report_error_once = report_error_once,
   resolve_pane_read = resolve_pane_read,
@@ -470,6 +477,7 @@ function M.apply_to_config(config, opts)
   local auto_poll = opts.auto_poll ~= false
   M._active_dir = dir
   local integration_root = opts.integration_root or plugin_root
+  M._active_writer_installed = false
   if type(integration_root) == "string" and integration_root:sub(1, 1) == "/" then
     M._active_integration_root = integration_root
     config.set_environment_variables = config.set_environment_variables or {}
@@ -483,16 +491,20 @@ function M.apply_to_config(config, opts)
     -- installation that never built the writer: every callback would fail at the
     -- shim's missing-binary guard, and the v1 path the producer still carries
     -- could not be reached. So export it only once the writer is there.
-    local writer = io.open(integration_root .. "/libexec/attention-rs", "r")
+    local writer_path = integration_root .. "/libexec/attention-rs"
+    local writer = io.open(writer_path, "r")
     if writer then
       writer:close()
+      M._active_writer_installed = true
       config.set_environment_variables.WEZTERM_ATTENTION_ROOT = integration_root
+    else
+      -- Once per config load. The usual cause is an install-cli.sh run in a
+      -- clone of the user's own while wezterm.plugin.require loads another
+      -- copy, which leaves every agent on v1 with nothing to say why.
+      report_warning_once("integration-writer", writer_path .. " is missing, so panes get no "
+        .. "WEZTERM_ATTENTION_ROOT and agents write v1 markers. Run scripts/install-cli.sh in "
+        .. integration_root .. ", or set integration_root to the clone where it was run.")
     end
-    -- Nothing is logged when it is absent. Running v1 is a supported state, not
-    -- a fault, and a line on every config evaluation about a configuration the
-    -- user may have chosen is how a log stops being read. Anything that then
-    -- genuinely fails -- a realm publication, a producer invoking the shim --
-    -- reports itself, and the README says what installing the writer changes.
   else
     M._active_integration_root = nil
     report_error_once("integration-root", "v2 integration root is unavailable")

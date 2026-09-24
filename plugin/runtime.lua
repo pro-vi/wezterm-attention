@@ -12,7 +12,6 @@ return function()
     local wezterm = context.wezterm
     local protocol = context.protocol
     local diagnostic = context.diagnostic
-    local plugin_root = context.plugin_root
     local report_error_once = context.report_error_once
     local resolve_pane_read = context.resolve_pane_read
     local read_attention_view = context.read_attention_view
@@ -351,7 +350,11 @@ return function()
     end
 
     local function acquire_tab_source(socket)
-      if type(socket) ~= "string" or socket:sub(1, 1) ~= "/" or not plugin_root
+      local root = M._active_integration_root
+      -- Without the writer the shim can only fail, and the backoff would run it
+      -- every thirty seconds for as long as the GUI lives.
+      if type(socket) ~= "string" or socket:sub(1, 1) ~= "/" or not root
+          or not M._active_writer_installed
           or type(wezterm.run_child_process) ~= "function" then return end
       if tab_source_state.socket ~= socket then
         tab_source_state = { socket = socket, retry_index = 1, retry_at = 0 }
@@ -361,7 +364,7 @@ return function()
       local token = {}
       state.pending = token
       local ok, success, stdout = pcall(wezterm.run_child_process,
-        { plugin_root .. "/bin/attention", "tab-source", "--socket", socket })
+        { root .. "/bin/attention", "tab-source", "--socket", socket })
       if tab_source_state ~= state or state.pending ~= token then return end
       state.pending = nil
       local source = ok and success and parse_tab_source_response(stdout) or nil
@@ -602,7 +605,7 @@ return function()
         domain, window_key, pane_count, unpublished, opts, partial)
       local socket = M._active_unix_domains and M._active_unix_domains[domain]
       local root = M._active_integration_root
-      if not socket or not root then return false end
+      if not socket or not root or not M._active_writer_installed then return false end
       local schedule = publish_schedule_by_realm[socket]
       if not schedule then
         -- A partial look cannot start one either: its count is the count of the
