@@ -1508,17 +1508,6 @@ pub(crate) fn replaced_server_pane_gone(
         || processes.is_some_and(|probe| probe.presence(socket_path, pane_id) == Presence::Absent)
 }
 
-/// A pane's presence as a reader reports it.
-pub(crate) fn pane_presence(
-    root: &Path,
-    address: &PaneAddress,
-    panes: Option<&dyn PaneLister>,
-    processes: Option<&dyn ProcessProbe>,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> String {
-    reader_presence(root, address, panes, processes, diagnostics).0
-}
-
 /// A pane's presence as a reader reports it, and whether the server that
 /// held its incarnation may be gone, which the report alone does not say.
 fn reader_presence(

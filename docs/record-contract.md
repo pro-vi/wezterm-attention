@@ -235,7 +235,9 @@ resolved path, device, inode and change time) and what else can be shown:
 - **Did not answer.** The socket still carries the incarnation, does not refuse, and its pane
   listing fails or times out. That is an unavailable probe in `doctor` and `sweep` alike: the
   diagnostic is `realm_unavailable` with the listing's own message, and the report is incomplete.
-  A tab-order file naming such a pane is kept, and leaves sweep incomplete the same way.
+  A tab-order file naming such a pane is kept, and leaves sweep incomplete the same way. So does
+  one naming any pane whose absence sweep could not decide for its binding: a pane listing that
+  failed another way, or an unlisted pane the process probe did not answer for.
 
 A probe recorded at a monotonic time later than the current clock, as after a reboot, restarts
 the count; that can only delay an end. Every other diagnostic of sweep's absence and retention

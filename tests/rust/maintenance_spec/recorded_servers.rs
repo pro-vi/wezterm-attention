@@ -408,6 +408,49 @@ fn a_tab_order_pane_whose_mux_does_not_answer_leaves_sweep_incomplete() {
     }
 }
 
+/// A pane lister whose `wezterm cli list` fails with `code`.
+struct FailingPanes(&'static str);
+
+impl PaneLister for FailingPanes {
+    fn list(&self, _socket_path: &str) -> wezterm_attention::protocol::Result<Vec<PaneRow>> {
+        Err(AttentionError::new(self.0, "wezterm cli list failed"))
+    }
+}
+
+/// However the pane listing fails -- no answer, or an answer that is not a
+/// pane list -- the pane is undecided. A tab order naming it leaves sweep
+/// incomplete exactly as the pane's binding does.
+#[test]
+fn a_failed_listing_leaves_a_tab_order_undecided_as_it_does_a_binding() {
+    for code in ["realm_unavailable", "record_invalid"] {
+        let setup = Setup::new();
+        setup.claim_and_bind();
+        let (address, _) = pane_address(&setup.env).expect("address");
+        let marker = format!("v2:{}:{}:42", address.realm_id, address.incarnation_id);
+        let path = write_tab_order(&setup.root(), 5, &[&marker]);
+        for operation in [None, Some(OP_1)] {
+            let (_, diagnostics) = sweep(
+                &setup.root(),
+                None,
+                operation.is_some(),
+                operation,
+                &setup.clock,
+                &FailingPanes(code),
+                Some(&setup.processes),
+            )
+            .expect("sweep");
+            let undecided = |named: &str| {
+                diagnostics.iter().any(|item| {
+                    item.code == "probe_unavailable" && item.context.contains_key(named)
+                })
+            };
+            assert!(undecided("binding_id"), "{code}: {diagnostics:?}");
+            assert!(undecided("path"), "{code}: {diagnostics:?}");
+            assert!(path.exists());
+        }
+    }
+}
+
 /// A missing `gui-sock-<pid>` socket whose GUI process has exited: the GUI's
 /// local panes ended with it, so the pane is absent, and the binding ends
 /// after two sightings although the process listing could not read every

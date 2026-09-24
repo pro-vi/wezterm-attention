@@ -15,7 +15,7 @@ use crate::protocol::{
 };
 use crate::query::{
     FileStamp, ListOncePerSocket, PaneEvidence, ProbeOncePerAssembly, collect_state_files,
-    pane_evidence, pane_presence, read_bindings_with_ports, read_tab_publications,
+    pane_evidence, read_bindings_with_ports, read_tab_publications,
 };
 use crate::records::{
     CommitPlan, RecordIdentity, Replacement, commit_nested_with, ends_binding, launch_path,
@@ -1367,20 +1367,27 @@ fn collect_tab_orders(
                     Some(cached) => cached.clone(),
                     None => {
                         let before = diagnostics.len();
+                        // The evidence a binding's absence is decided on. A
+                        // pane it leaves undecided leaves this file's fate
+                        // undecided too; a server that may be gone is kept
+                        // history, which decides nothing.
                         let observed =
-                            pane_presence(root, address, Some(panes), processes, diagnostics);
-                        // A mux that did not answer leaves this file's fate
-                        // undecided, as it does a binding's.
-                        if observed == "unavailable"
-                            && diagnostics[before..]
-                                .iter()
-                                .any(|item| item.code == "realm_unavailable")
-                        {
-                            diagnostics.push(diagnostic(
-                                "probe_unavailable",
-                                "tab order pane presence cannot be established",
-                            ));
-                        }
+                            match pane_evidence(root, address, Some(panes), processes, diagnostics)
+                            {
+                                PaneEvidence::Observed(presence) => {
+                                    if presence == "unavailable" {
+                                        diagnostics.push(diagnostic(
+                                            "probe_unavailable",
+                                            "tab order pane presence cannot be established",
+                                        ));
+                                    }
+                                    presence
+                                }
+                                PaneEvidence::ServerGone { diagnostic } => {
+                                    diagnostics.push(diagnostic);
+                                    "unavailable".to_owned()
+                                }
+                            };
                         // Named by the file that asked and the pane it asked
                         // about, as a bindings answer names its panes.
                         for item in &mut diagnostics[before..] {
