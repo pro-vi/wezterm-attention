@@ -1506,6 +1506,43 @@ fn sweep_keeps_a_tab_order_whose_panes_could_not_be_probed() {
     assert!(unknown.exists());
 }
 
+/// A tab order can outlive the records of the server it names, as when a
+/// server's incarnation records are removed by hand. There is no socket to
+/// ask, so the file is kept, but no probe failed and no later sweep could
+/// decide more, so the sweep stays complete.
+#[test]
+fn sweep_keeps_a_tab_order_naming_an_unrecorded_pane_without_calling_it_unprobed() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let root = setup.root();
+    let (address, _) = pane_address(&setup.env).expect("address");
+    let unrecorded_incarnation = format!("v2:{}:{}:7", address.realm_id, "b".repeat(64));
+    let unrecorded_realm = format!("v2:{}:{}:7", "c".repeat(64), address.incarnation_id);
+    let only_unrecorded = write_tab_order(&root, 9, &[&unrecorded_incarnation, &unrecorded_realm]);
+    // Sorts before the listed pane, so it is looked at first.
+    let before_present = format!("v2:{}:{}:7", address.realm_id, "0".repeat(64));
+    let present = format!("v2:{}:{}:42", address.realm_id, address.incarnation_id);
+    let with_present = write_tab_order(&root, 10, &[&before_present, &present]);
+    for operation in [
+        "00000000-0000-4000-8000-000000000724",
+        "00000000-0000-4000-8000-000000000725",
+    ] {
+        let (applied, diagnostics) = setup.run_sweep(true, Some(operation));
+        assert_eq!(tab_order_detail(&applied.details, 9)["action"], "keep");
+        assert_eq!(
+            tab_order_detail(&applied.details, 9)["reason"],
+            "not_recorded"
+        );
+        assert_eq!(tab_order_detail(&applied.details, 10)["reason"], "present");
+        assert!(
+            diagnostics.iter().all(|d| d.code != "probe_unavailable"),
+            "{diagnostics:?}"
+        );
+        assert_eq!(applied.failed_steps, 0);
+    }
+    assert!(only_unrecorded.exists() && with_present.exists());
+}
+
 #[test]
 fn a_realm_filtered_sweep_leaves_tab_orders_alone() {
     let setup = Setup::new();

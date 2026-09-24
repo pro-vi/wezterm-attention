@@ -258,7 +258,9 @@ resolved path, device, inode and change time) and what else can be shown:
   diagnostic is `realm_unavailable` with the listing's own message, and the report is incomplete.
   A tab-order file naming such a pane is kept, and leaves sweep incomplete the same way. So does
   one naming any pane whose absence sweep could not decide for its binding: a pane listing that
-  failed another way, or an unlisted pane the process probe did not answer for.
+  failed another way, or an unlisted pane the process probe did not answer for. A tab-order file
+  naming a pane whose realm or incarnation is not recorded is kept too, with the reason
+  `not_recorded`; there is no socket to ask, so it leaves sweep complete.
 
 A probe recorded at a monotonic time later than the current clock, as after a reboot, restarts
 the count; that can only delay an end. Every other diagnostic of sweep's absence and retention

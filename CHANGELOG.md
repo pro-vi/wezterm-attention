@@ -102,7 +102,7 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - `doctor` is incomplete and exits 1 when a mux whose socket still carries its incarnation does not answer its pane listing, as `sweep` already was.
 - Sweep's absence and retention diagnostics name the realm, incarnation, pane and binding, and each appears once per run.
 - A tab-order file naming a pane whose mux did not answer makes `sweep` incomplete (exit 1), as a binding's pane does.
-- A tab-order file naming any pane whose absence sweep could not decide, including one whose pane listing was malformed or whose process probe did not answer, makes `sweep` incomplete, as the pane's binding does.
+- A tab-order file naming any pane whose absence sweep could not decide, including one whose pane listing was malformed or whose process probe did not answer, makes `sweep` incomplete, as the pane's binding does. A file naming a pane whose realm or incarnation is not recorded is kept with the reason `not_recorded` and leaves `sweep` complete.
 - `sweep --apply` against a mux that accepts connections and never answers waits out one listing deadline for that socket, not two per pane.
 - An absence probe that sweep keeps because it is outside the state root is listed as an `absence` detail with action `keep`, as pane retention lists it, instead of leaving no detail.
 - A non-UTF-8 `XDG_STATE_HOME` is refused as a non-UTF-8 `WEZTERM_ATTENTION_DIR` is, when it is the variable that decides the state root, rather than skipped in favour of `~/.local/state/wezterm-attention`. Both refusals say the value is not UTF-8.

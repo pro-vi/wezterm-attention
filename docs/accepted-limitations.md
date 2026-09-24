@@ -229,9 +229,12 @@ stay on disk:
   a file naming only those goes. A window attached to a mux server names that
   server's panes, which are usually still running, or gone together with their
   socket with nothing to show the server gone, which a reader reports as
-  unavailable rather than absent. So that file stays until you remove it. It
-  is safe to delete `tabs/<incarnation id>-<window id>.json` by hand once no
-  GUI with that window is running.
+  unavailable rather than absent. So that file stays until you remove it. So
+  does a file naming a pane whose realm or incarnation records are gone, as
+  after you remove a server's records by hand; with no socket to ask, it
+  leaves sweep complete. It is safe to delete
+  `tabs/<incarnation id>-<window id>.json` by hand once no GUI with that
+  window is running.
 - **Temporary files from an interrupted write, outside a tree being removed.**
   So is a review that Alt+B had moved aside to `<review>.json.<session>.clear`
   when it was interrupted. They do not stop a binding or pane tree from being

@@ -16,7 +16,7 @@ use crate::protocol::{
 use crate::query::{
     FileStamp, ListOncePerSocket, PaneEvidence, ProbeOncePerAssembly, collect_binding_files,
     collect_state_files, kept_history_code, name_address, pane_evidence, read_bindings_with_ports,
-    read_tab_publications, record_address,
+    read_tab_publications, reader_presence, record_address, recorded_socket,
 };
 use crate::records::{
     CommitPlan, RecordIdentity, Replacement, atomic_replace_if_different, binding_session_entry,
@@ -1011,6 +1011,10 @@ fn absence_action(
 /// answer: sweep reports it once for the whole run and decides nothing on it.
 const SERVER_GONE: &str = "server_gone";
 
+/// Why a tab order naming a pane whose realm or incarnation record this store
+/// does not hold is kept: there is no socket to ask, and no probe failed.
+const NOT_RECORDED: &str = "not_recorded";
+
 /// A pane's presence as the absence rule reads it, with every diagnostic
 /// taken on the way named by the pane and the binding that asked.
 fn absence_presence(
@@ -1313,8 +1317,9 @@ fn apply_projection_collection(
 /// names is verified absent, or once it names no tab at all: WezTerm closes a
 /// window whose last tab closes, so an empty order is the bar's final draw. A
 /// file naming a v1 marker id is kept, because a bare pane id has no realm to
-/// ask; so is one whose panes could not be probed. A GUI source is not the pane
-/// realm a sweep selects, so a realm-filtered sweep leaves these files alone.
+/// ask; so is one naming a pane whose realm or incarnation is not recorded,
+/// and one whose panes could not be probed. A GUI source is not the pane realm
+/// a sweep selects, so a realm-filtered sweep leaves these files alone.
 /// Returns how many steps failed.
 fn collect_tab_orders(
     root: &Path,
@@ -1353,27 +1358,27 @@ fn collect_tab_orders(
                     Some(cached) => cached.clone(),
                     None => {
                         let before = diagnostics.len();
-                        // The evidence a binding's absence is decided on. A
-                        // pane it leaves undecided leaves this file's fate
-                        // undecided too; a server that may be gone is kept
-                        // history, which decides nothing.
-                        let observed =
-                            match pane_evidence(root, address, Some(panes), processes, diagnostics)
-                            {
-                                PaneEvidence::Observed(presence) => {
-                                    if presence == "unavailable" {
-                                        diagnostics.push(diagnostic(
-                                            "probe_unavailable",
-                                            "tab order pane presence cannot be established",
-                                        ));
-                                    }
-                                    presence
-                                }
-                                PaneEvidence::ServerGone { diagnostic } => {
-                                    diagnostics.push(diagnostic);
-                                    "unavailable".to_owned()
-                                }
-                            };
+                        // A pane whose realm or incarnation this store does
+                        // not record has no socket to ask. Nothing failed to
+                        // answer, and no later sweep can learn more, so it
+                        // keeps the file without leaving the sweep undecided.
+                        // Otherwise it is the evidence a binding's absence is
+                        // decided on. A pane that leaves undecided leaves this
+                        // file's fate undecided too; a server that may be
+                        // gone is kept history, which decides nothing.
+                        let observed = if matches!(recorded_socket(root, address), Ok(None)) {
+                            NOT_RECORDED.to_owned()
+                        } else {
+                            let (observed, server_gone) =
+                                reader_presence(root, address, Some(panes), processes, diagnostics);
+                            if observed == "unavailable" && !server_gone {
+                                diagnostics.push(diagnostic(
+                                    "probe_unavailable",
+                                    "tab order pane presence cannot be established",
+                                ));
+                            }
+                            observed
+                        };
                         // Named by the file that asked and the pane it asked
                         // about, as a bindings answer names its panes.
                         name_address(&mut diagnostics[before..], address);
@@ -1389,6 +1394,9 @@ fn collect_tab_orders(
                     "present" => {
                         keep = Some("present");
                         break;
+                    }
+                    NOT_RECORDED => {
+                        keep.get_or_insert(NOT_RECORDED);
                     }
                     _ => keep = Some("unavailable"),
                 }

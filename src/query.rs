@@ -1616,7 +1616,7 @@ pub(crate) fn replaced_server_pane_gone(
 
 /// A pane's presence as a reader reports it, and whether the server that
 /// held its incarnation may be gone, which the report alone does not say.
-fn reader_presence(
+pub(crate) fn reader_presence(
     root: &Path,
     address: &PaneAddress,
     panes: Option<&dyn PaneLister>,
@@ -1727,7 +1727,7 @@ pub(crate) fn record_address(record: &Value) -> Option<PaneAddress> {
 
 /// The socket a pane's realm record names, when both the realm and this
 /// incarnation are recorded.
-fn recorded_socket(root: &Path, address: &PaneAddress) -> Result<Option<String>> {
+pub(crate) fn recorded_socket(root: &Path, address: &PaneAddress) -> Result<Option<String>> {
     let Some(realm) = read_record(
         &realm_path(root, &address.realm_id).join("realm.json"),
         Some("realm"),
