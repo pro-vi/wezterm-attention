@@ -38,7 +38,7 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - `get_attention_view(pane)`, with bounded lifecycle observations and request evidence, and the `on_view_change` callback. See `docs/consumer-guide.md`.
 - Opt-in delivery of the exact prompt or reply text to consumer executables: `--consumer … --include-prompt` or `--include-reply`.
 - The drawn tab order, published to `tabs/` and read with `attention tabs`.
-- `attention sweep`, which previews by default and, with `--apply`, ends bindings whose panes are verified gone, removes a closed pane's whole tree once its binding ended more than 30 days ago and its absence is confirmed again, and collects leftover files. A mux server that is gone counts as a sighting of absence for its panes: a new server owns its socket, or the socket file is gone and the process probe finds no process carrying the pane. A failed process probe is never a sighting.
+- `attention sweep`, which previews by default and, with `--apply`, ends bindings whose panes are verified gone, removes a closed pane's whole tree once its binding ended more than 30 days ago and its absence is confirmed again, and collects leftover files. A mux server that is gone counts as a sighting of absence for its panes: a new server owns its socket, or the socket file is gone and the process probe read every process of this user and none carries the pane. A failed process probe, or one that could not read every process, is never a sighting; on macOS, which hides the environment of its own system binaries, that means the records of a server whose socket is gone are never removed.
 - A `doctor` probe named `environment`, which checks inside a pane that the pane's socket has a server identity hooks can find.
 - `result.timing_ms` on `inspect` as on `bindings`, and `result.diagnostic_count` / `total_diagnostic_count` on `tabs`. Query diagnostics name the record path or pane they are about.
 - Options `show_directory`, `settled_title_fallback`, `show_provider`, `on_view_change` and `integration_root`; `attention.doctor(window)` in the Lua API.
@@ -85,6 +85,11 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - A closed stdout (`| head`) no longer makes a command panic.
 - A symlinked `tabs/` directory is refused, and sweep never deletes through it.
 - Temporaries left by an interrupted write no longer keep a binding or pane tree from retention.
+- The process probe matches a socket path by its resolved directory, so a process that names the socket through `/tmp` on macOS or a symlinked directory is still found.
+- A socket file that no longer exists, as after a GUI exits, is reported as `realm_unavailable` ("mux socket no longer exists") instead of `probe_unavailable`, so `doctor` and `sweep` no longer answer `unavailable` and exit 1 for as long as that GUI's records remain.
+- The lock that `mark review`, `mark clear` and Pi's review events leave in `reviews/` no longer keeps an old pane's tree from retention.
+- Sweep removes nothing through a symlinked directory below the state root: subagent compaction and a cleared absence probe are refused there, as binding and pane removals already were.
+- `bindings --socket` reports a directory it could not read as `state_permissions` with its `path`, as realm-wide `bindings` does. A `binding_conflict` diagnostic names the provider session and its pane addresses, and a sweep diagnostic about a tab-order file's pane names the file and the pane.
 
 ### Upgrading from 0.6
 
