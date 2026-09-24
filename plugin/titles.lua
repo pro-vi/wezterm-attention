@@ -97,7 +97,10 @@ return function(context)
       end
     end
     local settled_title = settled_title_for_tab(tab)
-    local base_title = server_title or directory or settled_title or ""
+    local base_title = server_title or directory or settled_title
+    -- Nothing else to go by: the title as it is right now, however often it
+    -- changes, rather than a tab with no name at all.
+    if not base_title then base_title = display_text(pane and pane.title, 256) or "" end
     return {
       server_title = server_title,
       directory = directory,

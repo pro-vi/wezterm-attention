@@ -53,7 +53,8 @@ local defaults = {
   show_provider = false,
 
   -- Base-title sources: server name, then directory, then a two-poll settled
-  -- process title. The raw process title is never read by the formatter.
+  -- process title, and the title as it is right now only when none of those
+  -- has anything to say.
   show_directory = true,
   settled_title_fallback = true,
 }

@@ -1990,7 +1990,7 @@ test("static pane title settles on the second poll and clears on change", functi
   attention.poll(first)
   local before_settle = format_tab_title(tab(17631, 17632, false))
   assert(not before_settle:find("stable-title", 1, true),
-    "one raw pane-title sample must not enter the formatter")
+    "one title sample must not settle")
   attention.poll(first)
   local settled = format_tab_title(tab(17631, 17632, false))
   assert(settled:find("stable-title", 1, true),
@@ -2100,6 +2100,17 @@ test("a long or control-character tab text is published within the tab reader's 
   local formatted = assert(read_tab_publication(9863)).tabs[1].text
   assert(not has_control(formatted), "a formatter's control character was published")
   assert(formatted:find("red[31mbell", 1, true), "the formatter's text must still be published")
+end)
+
+test("a tab with no name, directory or settled title shows the pane's current title", function()
+  local bare = tab(17681, 17682, false)
+  bare.active_pane.title = "vim\27]0;x"
+  local rendered = rendered_text(format_tab_title(bare))
+  assert(rendered:find("vim]0;x", 1, true), "the current title must fill an empty base, got " .. rendered)
+  local context
+  attention.wrap_title_formatter(function(_, ctx) context = ctx; return ctx.default_title end)(bare)
+  assert(context.default_title == "vim]0;x" and context.settled_title == nil,
+    "default_title carries the current title without claiming it settled")
 end)
 
 test("a change in the subagent count alone requests a redraw", function()
