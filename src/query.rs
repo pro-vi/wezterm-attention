@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::identity::PaneAddress;
 use crate::identity::socket_identity;
 use crate::observations::{LifecycleAvailability, LifecycleSnapshot, LifecycleView};
-use crate::protocol::{AttentionError, Diagnostic, Result};
+use crate::protocol::{AttentionError, Diagnostic, Result, hex64_text};
 use crate::records::{
     FileRecords, RecordReader, ends_binding, launch_path, pane_path, session_dir,
     session_entry_path, session_index_path,
@@ -36,12 +36,7 @@ impl PaneScope {
         let wire = serde_json::json!({"wire":2,"address":address,"launch_id":launch_id});
         if crate::protocol::parse_wire_value(&wire, crate::protocol::manifest()?)
             != crate::protocol::Verdict::Valid
-            || binding_id.as_ref().is_some_and(|id| {
-                id.len() != 64
-                    || !id
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            })
+            || binding_id.as_deref().is_some_and(|id| !hex64_text(id))
         {
             return Err(AttentionError::usage(
                 "scope requires a canonical address, launch UUID and optional binding ID",
@@ -2715,7 +2710,7 @@ fn read_tab_publication(
         .and_then(|stem| stem.to_str())
         .unwrap_or("");
     let (incarnation, id) = match stem.split_once('-') {
-        Some((incarnation, id)) if hex64(incarnation) => (Some(incarnation), id),
+        Some((incarnation, id)) if hex64_text(incarnation) => (Some(incarnation), id),
         None => (None, stem),
         _ => (None, ""),
     };
@@ -2758,13 +2753,6 @@ fn canonical_decimal(text: &str, max_digits: usize) -> bool {
         && (text.len() == 1 || !text.starts_with('0'))
 }
 
-fn hex64(text: &str) -> bool {
-    text.len() == 64
-        && text
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
 /// What `gui_tab_pane_ids` publishes: a v1 marker id, or the v2 cache key
 /// `address_cache_key` builds after a poll has identified the pane.
 fn published_marker_id(text: &str, pane_id_max_digits: usize) -> bool {
@@ -2782,8 +2770,8 @@ fn published_marker_id(text: &str, pane_id_max_digits: usize) -> bool {
     rest.len() >= pane_start
         && rest.as_bytes()[realm_end] == b':'
         && rest.as_bytes()[incarnation_end] == b':'
-        && hex64(&rest[..realm_end])
-        && hex64(&rest[incarnation_start..incarnation_end])
+        && hex64_text(&rest[..realm_end])
+        && hex64_text(&rest[incarnation_start..incarnation_end])
         && canonical_decimal(&rest[pane_start..], pane_id_max_digits)
 }
 
@@ -2824,8 +2812,8 @@ fn tab_publication(
                 .map_err(|_| invalid())?;
         if !Path::new(&source.socket_path).is_absolute()
             || source.socket_path.contains('\0')
-            || !hex64(&source.realm_id)
-            || !hex64(&source.incarnation_id)
+            || !hex64_text(&source.realm_id)
+            || !hex64_text(&source.incarnation_id)
             || crate::protocol::sha256_hex(source.socket_path.as_bytes()) != source.realm_id
             || incarnation != Some(source.incarnation_id.as_str())
         {

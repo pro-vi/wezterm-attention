@@ -469,12 +469,15 @@ fn safe_text(value: &Value, maximum: usize) -> bool {
 }
 
 fn hex64(value: &Value) -> bool {
-    value.as_str().is_some_and(|text| {
-        text.len() == 64
-            && text
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    })
+    value.as_str().is_some_and(hex64_text)
+}
+
+/// Whether `text` is 64 lowercase hex digits, the form every digest here takes.
+pub(crate) fn hex64_text(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn decimal_ns20(value: &Value) -> bool {

@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::identity::{PaneAddress, canonical_pane_id, socket_identity};
 use crate::protocol::{
-    AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, manifest, sha256_hex,
+    AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, hex64_text, manifest, sha256_hex,
 };
 use crate::query::{
     FileStamp, ListOncePerSocket, PaneEvidence, ProbeOncePerAssembly, collect_state_files,
@@ -1881,12 +1881,7 @@ fn pane_tree_prunable(root: &Path, pane: &Path, diagnostics: &mut Vec<Diagnostic
 fn review_lock_name(name: &str) -> bool {
     name.strip_prefix('.')
         .and_then(|name| name.strip_suffix(".lock"))
-        .is_some_and(|key| {
-            key.len() == 64
-                && key
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
+        .is_some_and(hex64_text)
 }
 
 fn pane_entries_prunable(
@@ -1978,10 +1973,7 @@ pub fn sweep(
     // result reports the id it used.
     let operation_id = operation_id.or_else(|| apply.then(|| Uuid::new_v4().to_string()));
     if let Some(realm) = realm_filter
-        && (realm.len() != 64
-            || !realm
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+        && !hex64_text(realm)
     {
         return Err(AttentionError::usage(
             "realm id must be 64 lowercase hex characters",
