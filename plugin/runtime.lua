@@ -353,21 +353,22 @@ return function()
 
     --- Can this GUI ask the attention command who it is? Without the writer
     --- the shim can only fail, and the backoff would run it every thirty
-    --- seconds for as long as the GUI lives.
+    --- seconds for as long as the GUI lives. Without the manifest no answer
+    --- can be read.
     local function can_acquire_tab_source(socket)
       return type(socket) == "string" and socket:sub(1, 1) == "/"
+        and protocol ~= nil
         and M._active_integration_root ~= nil and M._active_writer_installed == true
         and type(wezterm.run_child_process) == "function"
     end
 
     --- What a tab order is published under now: "ready" with the source,
-    --- "unavailable" when no answer can come or the last one failed, and
-    --- "pending" while an answer is still to come.
+    --- "unavailable" when no answer can come, and "pending" while one still
+    --- can. A failed run schedules its retry, so it is still "pending".
     local function tab_source_status()
       local state = tab_source_state
       if state.source then return "ready", state.source end
-      if state.failed or not can_acquire_tab_source(
-          state.socket or os.getenv("WEZTERM_UNIX_SOCKET")) then
+      if not can_acquire_tab_source(state.socket or os.getenv("WEZTERM_UNIX_SOCKET")) then
         return "unavailable"
       end
       return "pending"
@@ -411,14 +412,12 @@ return function()
       local source = ok and success and parse_tab_source_response(stdout) or nil
       if source then
         state.source = source
-        state.failed = nil
       else
-        state.failed = true
         local delay = publish_backoff_seconds[math.min(state.retry_index, #publish_backoff_seconds)]
         state.retry_at = now_ms() + delay * 1000
         state.retry_index = state.retry_index + 1
         report_error_once("tab-source:" .. socket,
-          "cannot identify the tab publisher's GUI socket; publishing without source identity")
+          "cannot identify the tab publisher's GUI socket yet; unpublished tab orders wait for a retry")
       end
     end
 
