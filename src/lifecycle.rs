@@ -1291,10 +1291,12 @@ pub fn apply_mark_review(
 }
 
 /// Withdraws what `source` published in the current launch: its review, and
-/// its activity, the way Pi's bus clear withdraws Pi's. The activity slot is
-/// shared by every writer of the binding, so the watermark is written only
-/// when the activity in it is this source's. A launch with no binding has no
-/// activity-clear record to write, so there only the review is withdrawn.
+/// its activity, the way Pi's bus clear withdraws Pi's. Activity is withdrawn
+/// where `mark` writes it. With a binding, the slot is shared by every writer
+/// of the binding, so the activity-clear watermark is written only when the
+/// activity in it is this source's. Without one, `mark` writes the launch's
+/// own activity record, and that record is removed when it is this source's;
+/// both readers treat an absent launch activity as no activity.
 pub fn apply_mark_clear(
     env: &BTreeMap<String, String>,
     source: &str,
@@ -1341,7 +1343,22 @@ pub fn apply_mark_clear(
             )?;
             let (_, current) = read_current(&launch, pointer, &address, &launch_id)?;
             let mut replacements = Vec::new();
+            let mut removals = vec![review_path.clone()];
             let mut cleared = None;
+            if current.is_none() {
+                let activity_path = launch.join("activity.json");
+                let activity = read_record(
+                    &activity_path,
+                    Some("activity"),
+                    &RecordIdentity::launch(&address, &launch_id),
+                )?;
+                if activity.as_ref().is_some_and(|activity| {
+                    activity["source"] == source && activity["target"] == json!({"kind":"launch"})
+                }) {
+                    removals.push(activity_path);
+                    cleared = Some(LifecycleResult::new(Disposition::Applied));
+                }
+            }
             if let Some(binding_id) = current
                 .as_ref()
                 .and_then(|record| record["binding_id"].as_str())
@@ -1381,7 +1398,7 @@ pub fn apply_mark_clear(
             Ok(CommitPlan {
                 result: Mutation::plain(result),
                 replacements,
-                removals: vec![review_path.clone()],
+                removals,
                 private_dirs: Vec::new(),
             })
         },
