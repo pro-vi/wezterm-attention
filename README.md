@@ -639,6 +639,7 @@ The Lua implementation is split by responsibility under `plugin/`: protocol vali
 - Check for keybind conflicts. Set `review_key = false` and bind manually if needed.
 - It does work on a pane that already has a marker — the flag is the separate `$WEZTERM_PANE.review` file. If the tab still shows `✓` or `!` after a press, that marker simply outranks the flag; the ◆ appears once you have seen it.
 - On a mux-attached pane that has not published its `WEZTERM_PANE` user var, the press is refused and logged once, because the plugin cannot tell which pane's files to write. See [Publishing the pane id](#publishing-the-pane-id).
+- On a pane with v2 records whose current launch claim is not the launch the pane last published, the press is refused and logged (`cannot flag this pane for review: ...`), because the flag would not show. The next prompt republishes the claim.
 
 ## Type annotations
 
