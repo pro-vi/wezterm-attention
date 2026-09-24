@@ -278,7 +278,7 @@ fn bash_automatic_claim_preserves_debug_trap_and_keeps_pending_publication_id() 
     fs::write(&claude, "#!/bin/sh\nexit 0\n").expect("write claude");
     fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).expect("chmod claude");
     let script = format!(
-        "export PATH='{}':\"$PATH\"; export WEZTERM_ATTENTION_ROOT='{}'; trap \"printf '<OLD:quoted phrase>\\n' >/dev/null\" DEBUG; source '{}'; eval \"$_WEZTERM_ATTENTION_PROMPT_INSTALL\"; M=stub claude; MODEL=\"one two\" claude; printf 'SELECTED=%s\\n' \"$WEZTERM_ATTENTION_LAUNCH_ID\"",
+        "export PATH='{}':\"$PATH\"; export WEZTERM_ATTENTION_ROOT='{}' WEZTERM_PANE=7; trap \"printf '<OLD:quoted phrase>\\n' >/dev/null\" DEBUG; source '{}'; eval \"$_WEZTERM_ATTENTION_PROMPT_INSTALL\"; M=stub claude; MODEL=\"one two\" claude; printf 'SELECTED=%s\\n' \"$WEZTERM_ATTENTION_LAUNCH_ID\"",
         scratch.0.display(),
         scratch.0.display(),
         repo_file("shell/wezterm-attention.bash")
