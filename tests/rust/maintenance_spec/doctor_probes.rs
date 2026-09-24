@@ -56,7 +56,90 @@ fn doctor_takes_one_process_listing_however_many_claims() {
         listings: AtomicUsize::new(0),
         single_looks: AtomicUsize::new(0),
     };
-    doctor(&setup.root(), Some(&setup.panes), Some(&probe)).expect("doctor");
+    wezterm_attention::maintenance::doctor_with_environment(
+        &setup.root(),
+        &setup.env,
+        Some(&setup.panes),
+        Some(&probe),
+    )
+    .expect("doctor");
     assert_eq!(probe.single_looks.load(Ordering::SeqCst), 0);
     assert_eq!(probe.listings.load(Ordering::SeqCst), 1);
+}
+
+fn probe_status(result: &Value, name: &str) -> Value {
+    result["probes"]
+        .as_array()
+        .expect("probes")
+        .iter()
+        .find(|probe| probe["name"] == name)
+        .unwrap_or_else(|| panic!("no {name} probe in {result}"))["status"]
+        .clone()
+}
+
+/// With no state, no claims and no pane around it, doctor checked nothing,
+/// and "healthy" would say it had. Each probe that found nothing to check
+/// says unobserved, and the result lists it among the unobserved scopes.
+#[test]
+fn doctor_on_an_empty_setup_says_what_it_could_not_observe() {
+    let setup = Setup::new();
+    let (result, diagnostics) = wezterm_attention::maintenance::doctor_with_environment(
+        &setup.root(),
+        &BTreeMap::new(),
+        Some(&setup.panes),
+        Some(&setup.processes),
+    )
+    .expect("doctor");
+    for name in [
+        "permissions",
+        "state_files",
+        "socket",
+        "processes",
+        "environment",
+    ] {
+        assert_eq!(
+            probe_status(&result, name),
+            "unobserved",
+            "{name}: {result}"
+        );
+        assert!(
+            result["unobserved"]
+                .as_array()
+                .expect("unobserved")
+                .contains(&json!(name)),
+            "{name}: {result}"
+        );
+    }
+    assert_eq!(probe_status(&result, "versions"), "healthy");
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+/// Run inside a pane whose server identity nothing has published, doctor
+/// says so: that is the setup where hooks run and nothing ever shows.
+#[test]
+fn doctor_in_a_pane_nothing_has_published_reports_it() {
+    let setup = Setup::new();
+    let (result, diagnostics) = wezterm_attention::maintenance::doctor_with_environment(
+        &setup.root(),
+        &setup.env,
+        Some(&setup.panes),
+        Some(&setup.processes),
+    )
+    .expect("doctor");
+    assert_eq!(probe_status(&result, "environment"), "finding", "{result}");
+    assert!(
+        diagnostics.iter().any(|d| d.code == "identity_unpublished"),
+        "{diagnostics:?}"
+    );
+
+    setup.claim_and_bind();
+    let (result, diagnostics) = wezterm_attention::maintenance::doctor_with_environment(
+        &setup.root(),
+        &setup.env,
+        Some(&setup.panes),
+        Some(&setup.processes),
+    )
+    .expect("doctor");
+    assert_eq!(probe_status(&result, "environment"), "healthy", "{result}");
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }

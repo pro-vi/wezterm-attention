@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::identity::{PaneAddress, canonical_pane_id};
+use crate::identity::{PaneAddress, canonical_pane_id, socket_identity};
 use crate::protocol::{
     AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, manifest, sha256_hex,
 };
@@ -303,6 +303,25 @@ pub fn doctor(
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
 ) -> Result<(Value, Vec<Diagnostic>)> {
+    let environment: BTreeMap<String, String> = ["WEZTERM_UNIX_SOCKET", "WEZTERM_PANE"]
+        .into_iter()
+        .filter_map(|name| Some((name.to_owned(), std::env::var(name).ok()?)))
+        .collect();
+    doctor_with_environment(root, &environment, panes, processes)
+}
+
+/// `doctor` as run from a process with `environment`. Only
+/// `WEZTERM_UNIX_SOCKET` and `WEZTERM_PANE` are read from it.
+///
+/// A probe that found nothing to check says `unobserved`, never `healthy`: a
+/// setup with no state, no claims and no pane passes every check vacuously,
+/// and that is the setup that cannot work.
+pub fn doctor_with_environment(
+    root: &Path,
+    environment: &BTreeMap<String, String>,
+    panes: Option<&dyn PaneLister>,
+    processes: Option<&dyn ProcessProbe>,
+) -> Result<(Value, Vec<Diagnostic>)> {
     // One process listing answers every claim and every binding doctor asks
     // about; a listing per claim cost seconds on a store with many claims.
     let probed_once = processes.map(ProbeOncePerAssembly::new);
@@ -314,7 +333,7 @@ pub fn doctor(
         .iter()
         .any(|item| item.code == "state_permissions");
     let permission_status = if !root.exists() {
-        "healthy"
+        "unobserved"
     } else if unreadable {
         "finding"
     } else {
@@ -340,7 +359,14 @@ pub fn doctor(
     let (rows, binding_diagnostics) = read_bindings_with_ports(root, panes, processes)?;
     let mut state_diagnostics = audit_diagnostics;
     state_diagnostics.extend(binding_diagnostics);
-    probes.push(json!({"name":"state_files","status":if state_diagnostics.is_empty(){"healthy"}else{"finding"}}));
+    let state_status = if !state_diagnostics.is_empty() {
+        "finding"
+    } else if audited_records.is_empty() {
+        "unobserved"
+    } else {
+        "healthy"
+    };
+    probes.push(json!({"name":"state_files","status":state_status}));
     let realm_sockets: BTreeMap<_, _> = audited_records
         .iter()
         .filter(|record| record["kind"] == "realm")
@@ -351,22 +377,28 @@ pub fn doctor(
             ))
         })
         .collect();
-    let process_unavailable = match processes {
-        Some(processes) if processes.available() => audited_records
-            .iter()
-            .filter(|record| record["kind"] == "claim")
-            .filter_map(|claim| {
-                let address = record_address(claim)?;
-                let socket = realm_sockets.get(&address.realm_id)?;
-                Some(processes.presence(socket, &address.pane_id))
-            })
-            .any(|presence| presence == Presence::Unavailable),
-        _ => true,
-    };
-    let process_status = if process_unavailable {
-        "unavailable"
-    } else {
-        "healthy"
+    let claimed: Vec<(&String, String)> = audited_records
+        .iter()
+        .filter(|record| record["kind"] == "claim")
+        .filter_map(|claim| {
+            let address = record_address(claim)?;
+            Some((realm_sockets.get(&address.realm_id)?, address.pane_id))
+        })
+        .collect();
+    let process_status = match processes {
+        Some(processes) if processes.available() => {
+            if claimed.is_empty() {
+                "unobserved"
+            } else if claimed
+                .iter()
+                .any(|(socket, pane)| processes.presence(socket, pane) == Presence::Unavailable)
+            {
+                "unavailable"
+            } else {
+                "healthy"
+            }
+        }
+        _ => "unavailable",
     };
     if process_status == "unavailable"
         && !diagnostics
@@ -411,12 +443,33 @@ pub fn doctor(
             .iter()
             .any(|item| item.code == "integration_version_mismatch");
     probes.push(json!({"name":"versions","status":if version_finding{"finding"}else{"healthy"}}));
-    probes.push(json!({"name":"socket","status":if state_diagnostics.iter().any(|item| matches!(item.code.as_str(),"realm_unavailable"|"incarnation_changed")){"finding"}else{"healthy"}}));
+    let socket_status = if state_diagnostics.iter().any(|item| {
+        matches!(
+            item.code.as_str(),
+            "realm_unavailable" | "incarnation_changed"
+        )
+    }) {
+        "finding"
+    } else if realm_sockets.is_empty() {
+        "unobserved"
+    } else {
+        "healthy"
+    };
+    probes.push(json!({"name":"socket","status":socket_status}));
+    let environment_status = environment_probe(root, environment, &mut diagnostics);
+    probes.push(json!({"name":"environment","status":environment_status}));
     diagnostics.extend(state_diagnostics);
+    let mut unobserved = vec![json!("gui_user_vars")];
+    unobserved.extend(
+        probes
+            .iter()
+            .filter(|probe| probe["status"] == "unobserved")
+            .map(|probe| probe["name"].clone()),
+    );
     Ok((
         json!({
-            "scope": ["state_files","socket","processes","permissions","versions"],
-            "unobserved": ["gui_user_vars"],
+            "scope": ["state_files","socket","processes","permissions","versions","environment"],
+            "unobserved": unobserved,
             "probes": probes,
             "bindings_scanned": rows.len(),
             "manifest": {
@@ -428,6 +481,55 @@ pub fn doctor(
         }),
         diagnostics,
     ))
+}
+
+/// Whether the pane doctor runs in has a server identity anything can find.
+/// Outside a pane there is nothing to check. Inside one, the socket must read
+/// as a mux socket and its realm and incarnation must be published, or hooks
+/// run and nothing they write is ever shown.
+fn environment_probe(
+    root: &Path,
+    environment: &BTreeMap<String, String>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> &'static str {
+    let (Some(socket), Some(_)) = (
+        environment.get("WEZTERM_UNIX_SOCKET"),
+        environment.get("WEZTERM_PANE"),
+    ) else {
+        return "unobserved";
+    };
+    let (realm_id, incarnation_id, _) = match socket_identity(socket) {
+        Ok(identity) => identity,
+        Err(error) => {
+            diagnostics.push(error.diagnostic);
+            return "finding";
+        }
+    };
+    let realm = root.join("v2/realms").join(&realm_id);
+    let published = read_record(
+        &realm.join("realm.json"),
+        Some("realm"),
+        &RecordIdentity::realm(&realm_id),
+    )
+    .is_ok_and(|record| record.is_some())
+        && read_record(
+            &realm
+                .join("incarnations")
+                .join(&incarnation_id)
+                .join("incarnation.json"),
+            Some("incarnation"),
+            &RecordIdentity::incarnation(&realm_id, &incarnation_id),
+        )
+        .is_ok_and(|record| record.is_some());
+    if published {
+        "healthy"
+    } else {
+        diagnostics.push(diagnostic(
+            "identity_unpublished",
+            "this pane's mux server identity is not published",
+        ));
+        "finding"
+    }
 }
 
 fn ns20(value: &str, code: &str) -> Result<u128> {

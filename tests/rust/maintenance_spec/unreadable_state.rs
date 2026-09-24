@@ -46,8 +46,7 @@ fn doctor_reports_a_directory_it_could_not_read() {
     let setup = Setup::new();
     setup.claim_and_bind();
     let _hidden = hide_bindings(&setup);
-    let (result, diagnostics) =
-        doctor(&setup.root(), Some(&setup.panes), Some(&setup.processes)).expect("doctor");
+    let (result, diagnostics) = setup.doctor();
     assert!(
         diagnostics.iter().any(|d| d.code == "state_permissions"),
         "{diagnostics:?}"

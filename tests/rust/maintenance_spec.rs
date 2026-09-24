@@ -12,8 +12,7 @@ use uuid::Uuid;
 use wezterm_attention::identity::{PaneAddress, pane_address};
 use wezterm_attention::lifecycle::{apply_provider_event, binding_id};
 use wezterm_attention::maintenance::{
-    ABSENCE_INTERVAL_NS, RETENTION_AGE_NS, binding_cap_paths_by_realm, doctor, limit_sweep_preview,
-    sweep,
+    ABSENCE_INTERVAL_NS, RETENTION_AGE_NS, binding_cap_paths_by_realm, limit_sweep_preview, sweep,
 };
 use wezterm_attention::providers::parse_provider_event;
 use wezterm_attention::query::read_bindings_with_ports;
@@ -275,6 +274,17 @@ impl Setup {
         path
     }
 
+    /// Doctor as run inside this fixture's pane, whatever pane runs the tests.
+    fn doctor(&self) -> (Value, Vec<wezterm_attention::protocol::Diagnostic>) {
+        wezterm_attention::maintenance::doctor_with_environment(
+            &self.root(),
+            &self.env,
+            Some(&self.panes),
+            Some(&self.processes),
+        )
+        .expect("doctor")
+    }
+
     fn run_sweep(
         &self,
         apply: bool,
@@ -300,8 +310,7 @@ impl Setup {
 fn doctor_reports_embedded_manifest_digest_and_confirmed_binding() {
     let setup = Setup::new();
     setup.claim_and_bind();
-    let (result, diagnostics) =
-        doctor(&setup.root(), Some(&setup.panes), Some(&setup.processes)).expect("doctor");
+    let (result, diagnostics) = setup.doctor();
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     assert_eq!(result["manifest"]["matches"], true);
     assert_eq!(
@@ -330,8 +339,7 @@ fn doctor_reports_a_future_claim_without_any_binding() {
         serde_json::to_vec(&claim).expect("future claim JSON"),
     )
     .expect("write future claim");
-    let (result, diagnostics) =
-        doctor(&setup.root(), Some(&setup.panes), Some(&setup.processes)).expect("doctor");
+    let (result, diagnostics) = setup.doctor();
     assert!(diagnostics.iter().any(|item| item.code == "future_schema"));
     assert!(
         result["probes"]
@@ -852,8 +860,7 @@ fn doctor_rejects_a_valid_record_at_the_wrong_depth() {
         }),
     )
     .expect("write misplaced record");
-    let (_, diagnostics) =
-        doctor(&setup.root(), Some(&setup.panes), Some(&setup.processes)).expect("doctor");
+    let (_, diagnostics) = setup.doctor();
     assert!(diagnostics.iter().any(|item| item.code == "record_invalid"));
 }
 
