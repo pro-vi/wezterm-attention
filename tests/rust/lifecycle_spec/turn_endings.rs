@@ -130,3 +130,133 @@ fn a_child_waiting_for_permission_asks_for_the_user() {
         );
     }
 }
+
+const PROVIDERS: [(&str, &str, &str); 2] = [
+    ("claude", "Explore", "Task"),
+    ("codex", "worker", "wait_agent"),
+];
+
+fn child(provider: &str, name: &str, agent: &str, agent_type: &str) -> ProviderEvent {
+    let mut patch = json!({"agent_id":agent,"agent_type":agent_type});
+    match name {
+        "SubagentStop" => patch["stop_hook_active"] = json!(false),
+        _ => patch["tool_name"] = json!("Bash"),
+    }
+    event(provider, name, "parent", patch)
+}
+
+fn lead(provider: &str, name: &str, tool: &str) -> ProviderEvent {
+    let patch = match name {
+        "PreToolUse" => json!({"tool_name":tool}),
+        "Stop" => json!({"stop_hook_active":false}),
+        _ => json!({}),
+    };
+    event(provider, name, "parent", patch)
+}
+
+fn shown(setup: &Setup, provider: &str) -> String {
+    let activity = read(setup.binding_dir(provider, "parent").join("activity.json"));
+    activity["type"].as_str().unwrap().to_owned()
+}
+
+// While a lead waits on a sub-agent it keeps calling tools (Codex polls
+// wait_agent), and each call would repaint the tab as thinking. The child is
+// still waiting for the user, so its notify stays until that child moves on.
+#[test]
+fn a_waiting_childs_notify_outlasts_the_leads_tool_calls() {
+    for (provider, agent_type, tool) in PROVIDERS {
+        let setup = bound(provider, "parent");
+        setup.apply(
+            &child(provider, "PermissionRequest", "child-a", agent_type),
+            "00000000000000000400",
+        );
+        setup.apply(
+            &child(provider, "PreToolUse", "child-b", agent_type),
+            "00000000000000000450",
+        );
+        let held = setup.apply(&lead(provider, "PreToolUse", tool), "00000000000000000500");
+        assert_eq!(held.disposition, "ignored", "{provider}");
+        assert_eq!(shown(&setup, provider), "notify", "{provider}");
+        let raw = fs::read_to_string(setup.binding_dir(provider, "parent").join("lifecycle.json"))
+            .unwrap();
+        assert!(
+            raw.contains(tool),
+            "{provider}: the held call keeps its observation"
+        );
+
+        setup.apply(
+            &child(provider, "PreToolUse", "child-a", agent_type),
+            "00000000000000000600",
+        );
+        setup.apply(&lead(provider, "PreToolUse", tool), "00000000000000000700");
+        assert_eq!(
+            shown(&setup, provider),
+            "thinking",
+            "{provider}: the child's next event says its request was answered"
+        );
+    }
+}
+
+#[test]
+fn a_waiting_childs_notify_ends_when_the_child_stops() {
+    for (provider, agent_type, tool) in PROVIDERS {
+        let setup = bound(provider, "parent");
+        setup.apply(
+            &child(provider, "PermissionRequest", "child-a", agent_type),
+            "00000000000000000400",
+        );
+        setup.apply(
+            &child(provider, "SubagentStop", "child-a", agent_type),
+            "00000000000000000500",
+        );
+        setup.apply(&lead(provider, "PreToolUse", tool), "00000000000000000600");
+        assert_eq!(shown(&setup, provider), "thinking", "{provider}");
+    }
+}
+
+// A user prompt or the end of the lead's turn replaces the notify as it would
+// replace any other: the user has acted, or the turn is over.
+#[test]
+fn a_prompt_or_a_turn_end_replaces_a_waiting_childs_notify() {
+    for (provider, agent_type, _) in PROVIDERS {
+        for (name, expected) in [("UserPromptSubmit", "thinking"), ("Stop", "stop")] {
+            let setup = bound(provider, "parent");
+            setup.apply(
+                &child(provider, "PermissionRequest", "child-a", agent_type),
+                "00000000000000000400",
+            );
+            setup.apply(&lead(provider, name, ""), "00000000000000000500");
+            assert_eq!(shown(&setup, provider), expected, "{provider} {name}");
+        }
+    }
+}
+
+// Two children wait at once. The notify stays until neither is waiting,
+// whichever of them is answered first.
+#[test]
+fn a_notify_stays_while_any_child_still_waits() {
+    for (provider, agent_type, tool) in PROVIDERS {
+        let setup = bound(provider, "parent");
+        for (agent, observation) in [
+            ("child-a", "00000000000000000400"),
+            ("child-b", "00000000000000000450"),
+        ] {
+            setup.apply(
+                &child(provider, "PermissionRequest", agent, agent_type),
+                observation,
+            );
+        }
+        setup.apply(
+            &child(provider, "PreToolUse", "child-b", agent_type),
+            "00000000000000000500",
+        );
+        setup.apply(&lead(provider, "PreToolUse", tool), "00000000000000000550");
+        assert_eq!(shown(&setup, provider), "notify", "{provider}");
+        setup.apply(
+            &child(provider, "PreToolUse", "child-a", agent_type),
+            "00000000000000000600",
+        );
+        setup.apply(&lead(provider, "PreToolUse", tool), "00000000000000000650");
+        assert_eq!(shown(&setup, provider), "thinking", "{provider}");
+    }
+}

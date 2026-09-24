@@ -502,7 +502,9 @@ fn parse_claude_or_codex(
         return event;
     }
     // A child blocked on a permission prompt waits for the user as the lead
-    // would, and Codex has no Notification hook to say so another way.
+    // would, and Codex has no Notification hook to say so another way. The
+    // lifecycle also refreshes the child's presence, so the lead's own tool
+    // calls do not repaint the notify while that child still waits.
     if event_name == "PermissionRequest" && event.agent_id.is_some() {
         event.action = ProviderAction::Activity;
         event.activity_type = Some("notify".to_owned());
