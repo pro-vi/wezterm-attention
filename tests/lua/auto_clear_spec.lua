@@ -624,7 +624,7 @@ local function test(name, callback)
   end
 end
 
--- ── U1: visible-attention projection ────────────────────────────────────────
+-- ── Visible-attention projection ────────────────────────────────────────────
 
 test("projection returns the highest-priority cached pane and ignores uncached ones", function()
   write_marker(711, "thinking")
@@ -705,7 +705,7 @@ test("Lua accepts the publication ID marker shape published by Pi", function()
     "Pi's publication ID and extra fields must not change the marker type")
 end)
 
--- ── U2: read-only rendering ─────────────────────────────────────────────────
+-- ── Read-only rendering ─────────────────────────────────────────────────────
 
 test("neither renderer clears a marker, even on the active tab", function()
   write_marker(101, "stop")
@@ -757,7 +757,7 @@ test("both renderers project the same attention for the same tab", function()
     "ctx.attention should still be indicator, type, color")
 end)
 
--- ── U2: publishing the drawn tab order ─────────────────────────────────────
+-- ── Publishing the drawn tab order ─────────────────────────────────────────
 
 --- WezTerm's format-tab-title argument is TabInformation userdata, not a table.
 --- `newproxy` is the luajit stand-in: `type()` is `"userdata"` and field reads
@@ -1128,7 +1128,7 @@ test("a v2 pane publishes its cache key, not the local pane id", function()
       .. tostring(published.tabs[1].marker_ids[1]))
 end)
 
--- ── U2: focus-aware acknowledgement ─────────────────────────────────────────
+-- ── Focus-aware acknowledgement ─────────────────────────────────────────────
 
 test("a focused poll acknowledges only the active pane", function()
   write_marker(801, "notify", "rev-801")
@@ -1441,7 +1441,7 @@ test("a focused window with no active pane acknowledges nothing", function()
   assert(#w.actions == 0, "there is no pane to perform an action through")
 end)
 
--- ── U2: focus-safe redraw ───────────────────────────────────────────────────
+-- ── Focus-safe redraw ───────────────────────────────────────────────────────
 
 test("a focused visible change requests exactly one redraw through the active pane", function()
   write_marker(831, "thinking")
@@ -1614,7 +1614,7 @@ test("a failed redraw action leaves marker and cache truth intact", function()
   assert(#drain_errors() == 0, "a disabled window should not repeat the runtime error")
 end)
 
--- ── U2: window scoping and composition root ─────────────────────────────────
+-- ── Window scoping and composition root ─────────────────────────────────────
 
 test("polling one window never removes another window's cache entries", function()
   write_marker(901, "thinking")
@@ -1711,7 +1711,7 @@ test("review toggles redraw after a successful marker mutation", function()
     "the real flag rename failure should be logged, got " .. tostring(errors[1]))
 end)
 
--- ── U3: which id names the marker file ──────────────────────────────────────
+-- ── Which id names the marker file ──────────────────────────────────────────
 
 test("a published WEZTERM_PANE user var names the marker, not the local pane id", function()
   write_marker(7001, "notify")
@@ -1906,7 +1906,7 @@ test("a pane with no socket to republish through is named once in the log", func
   assert(#warnings == 1 and warnings[1]:find("SSHMUX:host", 1, true))
 end)
 
--- ── U3: a closed pane versus a detached domain ──────────────────────────────
+-- ── A closed pane versus a detached domain ──────────────────────────────────
 
 test("a detached domain keeps the markers of panes still running on the server", function()
   write_marker(7101, "notify")
@@ -1931,7 +1931,7 @@ test("a detached domain keeps the markers of panes still running on the server",
   assert(attention.get_attention(7101) == "notify", "and stay visible for the reattach")
 end)
 
--- ── U3: marker metadata on the public read ──────────────────────────────────
+-- ── Marker metadata on the public read ──────────────────────────────────────
 
 test("get_attention reports the marker's source and reserved tuple slot", function()
   local file = assert(io.open(test_dir .. "/7201", "w"))
@@ -1958,7 +1958,7 @@ test("get_attention reports the marker's source and reserved tuple slot", functi
     "a direct disk read should report the same source and reserved tuple slot")
 end)
 
--- ── U3: hosts that repaint their own titles ─────────────────────────────────
+-- ── Hosts that repaint their own titles ─────────────────────────────────────
 
 test("request_redraw = false performs no action when attention changes", function()
   local quiet = dofile(repo_root .. "/plugin/init.lua")
@@ -1980,7 +1980,7 @@ test("request_redraw = false performs no action when attention changes", functio
   assert(#w.actions == 0, "and none recorded")
 end)
 
--- ── U3: acknowledgement replaces its sidecar atomically ─────────────────────
+-- ── Acknowledgement replaces its sidecar atomically ─────────────────────────
 
 test("acknowledgement renames its sidecar into place without unlinking it first", function()
   write_marker(7401, "notify", "pub-b")
@@ -2021,7 +2021,7 @@ test("acknowledgement renames its sidecar into place without unlinking it first"
   assert(attention.get_attention(7401) == nil, "and the acknowledged marker should be suppressed")
 end)
 
--- ── U4: the subagent activity sidecar ───────────────────────────────────────
+-- ── The subagent activity sidecar ───────────────────────────────────────────
 
 --- One fixed clock for this section. Every poll below is handed it, so a
 --- subagent's liveness is decided by the entry's own last_ms and nothing else.
@@ -2524,7 +2524,7 @@ test("a pane that vanishes between polls loses its subagent sidecar too", functi
   assert(attention.get_attention(7551) == nil, "and its cache entry")
 end)
 
--- ── U5: the manual review flag ──────────────────────────────────────────────
+-- ── The manual review flag ──────────────────────────────────────────────────
 
 test("the review flag outranks a thinking marker without replacing it", function()
   write_marker(7601, "thinking")
@@ -2691,7 +2691,7 @@ test("flagging a pane whose stop is already shown requests a redraw", function()
   assert(#w.actions == 2, "the flag arriving is itself a change, got " .. #w.actions)
 end)
 
--- ── Attention v2 U1: protocol, identity, and wall-age reader ────────────────
+-- ── Attention v2: protocol, identity, and wall-age reader ───────────────────
 
 test("Lua accepts and rejects every shared protocol fixture row", function()
   assert(internal.sha256("") ==
@@ -3213,7 +3213,7 @@ test("invalid child wall ages do not poison a valid sibling", function()
   assert(codes.record_invalid == true, "the malformed child must report record_invalid")
 end)
 
--- ── U1 review regressions ───────────────────────────────────────────────────
+-- ── Attention v2: reader, review, lifecycle and cleanup regressions ─────────
 
 test("cache recovery never crosses a launch identity boundary", function()
   materialize_state_case(protocol_fixture.state_case)
@@ -4672,7 +4672,7 @@ test("an on_view_change error is logged with its text, once per distinct error",
     "expected one line per distinct error with its text, got " .. #logged)
 end)
 
-test("C1 scalar lookup refuses two full pane addresses", function()
+test("scalar lookup refuses two full pane addresses", function()
   local a = materialize_v2_fixture(42, string.rep("a",64))
   local b = materialize_v2_fixture(42, string.rep("b",64))
   local instance = dofile(repo_root .. "/plugin/init.lua")
@@ -4684,7 +4684,7 @@ test("C1 scalar lookup refuses two full pane addresses", function()
   assert(instance.get_attention(42)==nil,"scalar lookup selected a realm")
 end)
 
-test("C1 shared full address survives one window dropping it", function()
+test("a shared full address survives one window dropping it", function()
   local a = materialize_v2_fixture(42, string.rep("e",64))
   local b = materialize_v2_fixture(43, string.rep("e",64))
   local instance = dofile(repo_root .. "/plugin/init.lua")
@@ -4700,7 +4700,7 @@ test("C1 shared full address survives one window dropping it", function()
   assert(instance.get_attention(43)=="notify")
 end)
 
-test("C1 first observation through Alt+B participates in scalar ambiguity", function()
+test("a first observation through Alt+B participates in scalar ambiguity", function()
   local a=materialize_v2_fixture(42,string.rep("a",64))
   local b=materialize_v2_fixture(42,string.rep("b",64))
   local instance=dofile(repo_root .. "/plugin/init.lua")
@@ -4719,7 +4719,7 @@ test("C1 first observation through Alt+B participates in scalar ambiguity", func
   assert(instance.get_attention(42)==nil,"a sibling poll must retain the overlay observation")
 end)
 
-test("C4 identity publication is not pane destruction", function()
+test("identity publication is not pane destruction", function()
   local id=12003
   write_marker(id,"thinking","upgrade-marker")
   write_acknowledgement_file(id,"publication\nupgrade-marker")
@@ -4738,7 +4738,7 @@ test("C4 identity publication is not pane destruction", function()
   end
 end)
 
-test("C1 C4 Alt+B replaces the same pane identity without deleting sidecars", function()
+test("Alt+B replaces the same pane identity without deleting sidecars", function()
   local id=12013
   write_marker(id,"thinking","overlay-upgrade")
   write_acknowledgement_file(id,"publication\noverlay-upgrade")
@@ -4759,7 +4759,7 @@ test("C1 C4 Alt+B replaces the same pane identity without deleting sidecars", fu
   end
 end)
 
-test("C5 every v2 record has a bounded file read", function()
+test("every v2 record has a bounded file read", function()
   local api=dofile(repo_root .. "/plugin/protocol.lua")({wezterm=wezterm,protocol_path=repo_root .. "/protocol/v2.json"})
   local original=io.open
   local requested
@@ -4773,7 +4773,7 @@ test("C5 every v2 record has a bounded file read", function()
   assert(requested==api.protocol.limits.max_json_bytes+1,"unbounded read: " .. tostring(requested))
 end)
 
-test("C9 a retry needs a new live observation when inventory fails", function()
+test("a retry needs a new live observation when inventory fails", function()
   local spawned,scheduled={},{}
   local old=wezterm.background_child_process
   wezterm.background_child_process=function(argv) spawned[#spawned+1]=argv; return true end

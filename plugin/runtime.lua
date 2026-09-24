@@ -555,8 +555,9 @@ return function()
     --- Windows that are still open. A workspace switch makes the GUI window
     --- show another workspace's mux window, so the one it showed leaves
     --- gui_windows() while it still exists, with its tabs, to be shown again.
-    --- Only a window gone from both has closed. Without the mux listing this is
-    --- the GUI inventory alone, as before.
+    --- Only a window gone from both has closed. Without the mux listing it is
+    --- the GUI inventory alone, so a window another workspace shows counts as
+    --- closed.
     local function open_window_keys(opts)
       local live = gui_window_keys(opts)
       if not live then return nil end

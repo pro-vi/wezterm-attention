@@ -580,7 +580,7 @@ test("missing pane: lifecycle write is a silent no-op that creates no file", asy
 });
 
 test('env: a unit-suffixed TTL ("30m") is rejected, not parsed as 30', async () => {
-	// F7: parseInt("30m") === 30 silently produced a 30ms TTL. Strict parse must
+	// parseInt("30m") === 30 silently produced a 30ms TTL. Strict parse must
 	// reject it and fall back to the 30-minute default.
 	const dir = freshDir("wez-ttl-");
 	process.env.WEZTERM_PANE = "42";

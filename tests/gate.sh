@@ -84,9 +84,8 @@ python3 tests/fixtures/consumer-migration/check.py
 luajit tests/lua/auto_clear_spec.lua
 # And again without the built writer. libexec/attention-rs is a build artifact
 # this repository does not track, so a machine that has built it can pass a
-# suite that a fresh clone fails on its first run. Observed 2026-09-18: 31 of
-# 130 Lua tests passed here and failed without it, across three green gate runs
-# that had no way to notice. Remembering to check by hand is not a check.
+# suite that a fresh clone fails on its first run, and nothing else in the gate
+# would notice. Remembering to check by hand is not a check.
 #
 # The second run uses a copy of the working tree. Moving the writer aside here
 # instead would break every hook and prompt that runs this checkout meanwhile.
