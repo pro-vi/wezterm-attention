@@ -1010,6 +1010,20 @@ fn safe_mark_text(value: &str, field: &str, maximum: usize) -> Result<()> {
     Ok(())
 }
 
+/// The plugin's Alt+B owns the review named "user"; a CLI writer that used
+/// the name would share that file and clear or forge the user's own flag.
+const PLUGIN_REVIEW_OWNER: &str = "user";
+
+fn safe_mark_source(source: &str) -> Result<()> {
+    safe_mark_text(source, "source", manifest()?.limits.safe_label_max_bytes)?;
+    if source == PLUGIN_REVIEW_OWNER {
+        return Err(AttentionError::usage(
+            "source \"user\" is reserved for the plugin's review key",
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn apply_mark_activity(
     env: &BTreeMap<String, String>,
@@ -1024,7 +1038,7 @@ pub fn apply_mark_activity(
     if !manifest()?.enums.activity_types.contains(activity_type) {
         return Err(AttentionError::usage("mark state is invalid"));
     }
-    safe_mark_text(source, "source", manifest()?.limits.safe_label_max_bytes)?;
+    safe_mark_source(source)?;
     if let Some(label) = label {
         safe_mark_text(label, "label", manifest()?.limits.safe_label_max_bytes)?;
     }
@@ -1209,7 +1223,7 @@ pub fn apply_mark_review(
     source: &str,
     clear: bool,
 ) -> Result<LifecycleResult> {
-    safe_mark_text(source, "source", manifest()?.limits.safe_label_max_bytes)?;
+    safe_mark_source(source)?;
     let root = state_root(env)?;
     let (address, _) = pane_address(env)?;
     let launch_id = canonical_uuid(
@@ -1268,6 +1282,106 @@ pub fn apply_mark_review(
                 result: Mutation::plain(result),
                 replacements: vec![Replacement::always(review_path.clone(), record)],
                 removals: Vec::new(),
+                private_dirs: Vec::new(),
+            })
+        },
+        |_| Ok(()),
+    )?;
+    Ok(mutation.result)
+}
+
+/// Withdraws what `source` published in the current launch: its review, and
+/// its activity, the way Pi's bus clear withdraws Pi's. The activity slot is
+/// shared by every writer of the binding, so the watermark is written only
+/// when the activity in it is this source's. A launch with no binding has no
+/// activity-clear record to write, so there only the review is withdrawn.
+pub fn apply_mark_clear(
+    env: &BTreeMap<String, String>,
+    source: &str,
+    observation: &str,
+) -> Result<LifecycleResult> {
+    safe_mark_source(source)?;
+    let root = state_root(env)?;
+    let (address, _) = pane_address(env)?;
+    let launch_id = canonical_uuid(
+        env.get("WEZTERM_ATTENTION_LAUNCH_ID").map(String::as_str),
+        "WEZTERM_ATTENTION_LAUNCH_ID",
+    )?;
+    let owner_key = crate::protocol::sha256_hex(source.as_bytes());
+    let pane = pane_path(&root, &address);
+    let review_path = pane.join("reviews").join(format!("{owner_key}.json"));
+    let launch = launch_path(&root, &address, &launch_id);
+    let (mutation, ()) = commit_triple_with(
+        &launch.join(".lock"),
+        &pane.join(".claim.lock"),
+        &pane.join("reviews").join(format!(".{owner_key}.lock")),
+        &pane.join("claim.json"),
+        Some("claim"),
+        &RecordIdentity::pane(&address),
+        Duration::from_secs(2),
+        |claim| {
+            if claim
+                .as_ref()
+                .is_none_or(|claim| !record_matches_launch(claim, &address, &launch_id))
+            {
+                return Err(AttentionError::new(
+                    "claim_stale",
+                    "current launch does not match claim",
+                ));
+            }
+            let review = read_record(
+                &review_path,
+                Some("review"),
+                &RecordIdentity::review(&address, &owner_key),
+            )?;
+            let pointer = read_record(
+                &launch.join("current-binding.json"),
+                Some("current_binding"),
+                &RecordIdentity::launch(&address, &launch_id),
+            )?;
+            let (_, current) = read_current(&launch, pointer, &address, &launch_id)?;
+            let mut replacements = Vec::new();
+            let mut cleared = None;
+            if let Some(binding_id) = current
+                .as_ref()
+                .and_then(|record| record["binding_id"].as_str())
+            {
+                let directory = launch.join("bindings").join(binding_id);
+                let identity = RecordIdentity::binding(&address, &launch_id, binding_id);
+                let clear_path = directory.join("activity-clear.json");
+                let activity = read_record(
+                    &directory.join("activity.json"),
+                    Some("activity"),
+                    &identity,
+                )?;
+                let clear = read_record(&clear_path, Some("activity_clear"), &identity)?;
+                let published = activity.as_ref().is_some_and(|activity| {
+                    activity["source"] == source
+                        && clear.as_ref().is_none_or(|clear| {
+                            activity["observed_mono_ns"].as_str()
+                                > clear["observed_mono_ns"].as_str()
+                        })
+                });
+                if published {
+                    let (result, replacement) = activity_clear_plan(
+                        &address,
+                        &launch_id,
+                        binding_id,
+                        &clear_path,
+                        observation,
+                    )?;
+                    replacements.extend(replacement);
+                    cleared = Some(result);
+                }
+            }
+            let mut result = cleared.unwrap_or_else(|| LifecycleResult::new(Disposition::Skipped));
+            if review.is_some() && result.disposition == Disposition::Skipped {
+                result.disposition = Disposition::Applied;
+            }
+            Ok(CommitPlan {
+                result: Mutation::plain(result),
+                replacements,
+                removals: vec![review_path.clone()],
                 private_dirs: Vec::new(),
             })
         },

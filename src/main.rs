@@ -984,29 +984,38 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             })
         }
         Some(Command::Mark(args)) => {
-            let result = if matches!(args.state.as_str(), "review" | "clear") {
-                wezterm_attention::lifecycle::apply_mark_review(
-                    &environment,
-                    &args.source,
-                    args.state == "clear",
-                )
-            } else {
-                let observation = clock
+            let observation = || {
+                clock
                     .monotonic_ns20()
-                    .map_err(|error| (Box::new(error), args.json, "mark".to_owned()))?;
-                let written_at = clock
-                    .unix_ns20()
-                    .map_err(|error| (Box::new(error), args.json, "mark".to_owned()))?;
-                wezterm_attention::lifecycle::apply_mark_activity(
+                    .map_err(|error| (Box::new(error), args.json, "mark".to_owned()))
+            };
+            let result = match args.state.as_str() {
+                "review" => wezterm_attention::lifecycle::apply_mark_review(
                     &environment,
-                    &args.state,
                     &args.source,
-                    args.frame,
-                    args.label.as_deref(),
-                    args.ttl_ms,
-                    &observation,
-                    &written_at,
-                )
+                    false,
+                ),
+                "clear" => wezterm_attention::lifecycle::apply_mark_clear(
+                    &environment,
+                    &args.source,
+                    &observation()?,
+                ),
+                _ => {
+                    let observation = observation()?;
+                    let written_at = clock
+                        .unix_ns20()
+                        .map_err(|error| (Box::new(error), args.json, "mark".to_owned()))?;
+                    wezterm_attention::lifecycle::apply_mark_activity(
+                        &environment,
+                        &args.state,
+                        &args.source,
+                        args.frame,
+                        args.label.as_deref(),
+                        args.ttl_ms,
+                        &observation,
+                        &written_at,
+                    )
+                }
             }
             .map_err(|error| (Box::new(error), args.json, "mark".to_owned()))?;
             emit(

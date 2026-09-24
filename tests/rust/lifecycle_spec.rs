@@ -45,6 +45,9 @@ mod turn_endings;
 #[path = "lifecycle_spec/metadata_fields.rs"]
 mod metadata_fields;
 
+#[path = "lifecycle_spec/mark_clear.rs"]
+mod mark_clear;
+
 struct Scratch(PathBuf);
 
 #[test]
