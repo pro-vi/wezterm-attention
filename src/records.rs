@@ -442,6 +442,20 @@ pub fn launch_path(root: &Path, address: &PaneAddress, launch_id: &str) -> PathB
     pane_path(root, address).join("launches").join(launch_id)
 }
 
+/// Where a binding record is kept. Below an empty root it is the path the
+/// session index keys the binding's entry by.
+pub fn binding_path(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+) -> PathBuf {
+    launch_path(root, address, launch_id)
+        .join("bindings")
+        .join(binding_id)
+        .join("binding.json")
+}
+
 /// The session index: `v2/sessions/<session key>/<entry key>.json` names
 /// each binding of one provider session, so finding a session's other
 /// bindings reads one directory instead of walking every binding. The keys
@@ -471,10 +485,7 @@ pub fn session_entry_path(
     launch_id: &str,
     binding_id: &str,
 ) -> PathBuf {
-    let binding = launch_path(Path::new(""), address, launch_id)
-        .join("bindings")
-        .join(binding_id)
-        .join("binding.json");
+    let binding = binding_path(Path::new(""), address, launch_id, binding_id);
     let key = crate::protocol::sha256_hex(binding.to_string_lossy().as_bytes());
     session_dir(root, provider, provider_session_id).join(format!("{key}.json"))
 }

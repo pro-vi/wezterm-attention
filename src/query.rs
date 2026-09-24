@@ -12,8 +12,8 @@ use crate::identity::socket_identity;
 use crate::observations::{LifecycleAvailability, LifecycleSnapshot, LifecycleView};
 use crate::protocol::{AttentionError, Diagnostic, Result, hex64_text};
 use crate::records::{
-    FileRecords, RecordReader, ends_binding, incarnation_path, launch_path, pane_path, realm_path,
-    session_dir, session_entry_path, session_index_path,
+    FileRecords, RecordReader, binding_path, ends_binding, incarnation_path, launch_path,
+    pane_path, realm_path, session_dir, session_entry_path, session_index_path,
 };
 use crate::records::{RecordIdentity, RecordRead, read_record, read_record_typed};
 use crate::wezterm::Clock;
@@ -1284,12 +1284,7 @@ fn session_binding_files(root: &Path, provider: &str, session: &str) -> Option<V
         if session_entry_path(root, provider, session, &address, &launch_id, &binding_id) != path {
             return None;
         }
-        files.push(
-            launch_path(root, &address, &launch_id)
-                .join("bindings")
-                .join(binding_id)
-                .join("binding.json"),
-        );
+        files.push(binding_path(root, &address, &launch_id, &binding_id));
     }
     Some(files)
 }
