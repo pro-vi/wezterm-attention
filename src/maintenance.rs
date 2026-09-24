@@ -609,6 +609,7 @@ struct RetentionOutcome {
 }
 
 fn compaction_plan(
+    root: &Path,
     binding_dir: &Path,
     address: &PaneAddress,
     launch_id: &str,
@@ -636,6 +637,17 @@ fn compaction_plan(
             diagnostics: vec![diagnostic(
                 "record_invalid",
                 "symlinked subagent directory is preserved",
+            )],
+        });
+    }
+    if agents.exists() && !directory_confined(root, &agents) {
+        return Ok(Compaction {
+            action: "blocked",
+            floor: None,
+            candidates: Vec::new(),
+            diagnostics: vec![diagnostic(
+                "record_invalid",
+                "subagent directory outside the state root is preserved",
             )],
         });
     }
@@ -894,13 +906,43 @@ fn binding_known_and_prunable(
     true
 }
 
-/// Whether a binding directory resolves inside the state root, so removing it
+/// Whether `directory` and every directory between it and the state root is
+/// a directory in its own right, not a symlink, so a removal there cannot
+/// reach through a link to somewhere outside the root. The root itself may be
+/// reached through a link: where it lives is the user's choice.
+fn directory_confined(root: &Path, directory: &Path) -> bool {
+    let Ok(relative) = directory.strip_prefix(root) else {
+        return false;
+    };
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return false;
+        };
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.is_dir() => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Whether removing `path` removes something inside the state root: its
+/// directory is confined, and it names an entry of that directory.
+fn removal_confined(root: &Path, path: &Path) -> bool {
+    matches!(
+        path.components().next_back(),
+        Some(std::path::Component::Normal(_))
+    ) && path
+        .parent()
+        .is_some_and(|parent| directory_confined(root, parent))
+}
+
+/// Whether a binding directory lies inside the state root, so removing it
 /// removes nothing outside.
 fn binding_confined(root: &Path, binding_dir: &Path, diagnostics: &mut Vec<Diagnostic>) -> bool {
-    let confined = fs::canonicalize(binding_dir)
-        .ok()
-        .zip(fs::canonicalize(root).ok())
-        .is_some_and(|(target, root)| target.starts_with(root));
+    let confined = directory_confined(root, binding_dir);
     if !confined {
         diagnostics.push(diagnostic(
             "record_invalid",
@@ -1292,6 +1334,15 @@ fn collect_tab_orders(
                     "reason": "changed",
                 })
             }
+            None if !removal_confined(root, &root.join(&relative)) => {
+                let mut item = diagnostic(
+                    "record_invalid",
+                    "tab order outside the state root is preserved",
+                );
+                item.context.insert("path".into(), json!(relative));
+                diagnostics.push(item);
+                continue;
+            }
             None => match remove_file_durable(&root.join(&relative)) {
                 Ok(_) => json!({
                     "kind": "tab_order_collection",
@@ -1548,6 +1599,14 @@ fn pane_retention(
                 run.observation,
             )?;
             match action {
+                "clear_absence" if !removal_confined(root, &probe_path) => plan(
+                    "keep",
+                    Vec::new(),
+                    vec![diagnostic(
+                        "record_invalid",
+                        "absence probe outside the state root is preserved",
+                    )],
+                ),
                 "clear_absence" => plan(action, vec![probe_path.clone()], Vec::new()),
                 "first_absence" => Ok(CommitPlan {
                     result: (action.to_owned(), Vec::new()),
@@ -1560,11 +1619,7 @@ fn pane_retention(
                 }),
                 "end" => {
                     let mut kept = Vec::new();
-                    let confined = fs::canonicalize(&pane)
-                        .ok()
-                        .zip(fs::canonicalize(root).ok())
-                        .is_some_and(|(target, root)| target.starts_with(root));
-                    if !confined {
+                    if !directory_confined(root, &pane) {
                         kept.push(diagnostic(
                             "record_invalid",
                             "pane removal target is outside the state root",
@@ -1864,6 +1919,7 @@ pub fn sweep(
                             });
                         }
                         let plan = compaction_plan(
+                            root,
                             binding_dir,
                             &address,
                             launch_id,
@@ -1923,7 +1979,15 @@ pub fn sweep(
                     }
                 }
             } else {
-                match compaction_plan(binding_dir, &address, launch_id, binding_id, &now, None) {
+                match compaction_plan(
+                    root,
+                    binding_dir,
+                    &address,
+                    launch_id,
+                    binding_id,
+                    &now,
+                    None,
+                ) {
                     Ok(plan) => {
                         diagnostics.extend(plan.diagnostics.clone());
                         if plan.action != "none" {
@@ -2052,6 +2116,20 @@ pub fn sweep(
                 let mut replacements = Vec::new();
                 let mut removals = Vec::new();
                 if action == "clear_absence" {
+                    if !removal_confined(root, &probe_path) {
+                        return Ok(CommitPlan {
+                            result: AbsenceOutcome {
+                                action: "changed".to_owned(),
+                                diagnostic: Some(diagnostic(
+                                    "record_invalid",
+                                    "absence probe outside the state root is preserved",
+                                )),
+                            },
+                            replacements,
+                            removals,
+                            private_dirs: Vec::new(),
+                        });
+                    }
                     removals.push(probe_path.clone());
                 } else if action == "first_absence" {
                     replacements.push(Replacement::always(
