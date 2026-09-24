@@ -1697,3 +1697,6 @@ mod doctor_probes;
 
 #[path = "maintenance_spec/lock_scope.rs"]
 mod lock_scope;
+
+#[path = "maintenance_spec/pane_retention.rs"]
+mod pane_retention;

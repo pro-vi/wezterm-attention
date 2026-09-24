@@ -1384,6 +1384,24 @@ fn record_spent<T>(spent: &Mutex<Duration>, call: impl FnOnce() -> T) -> T {
     answer
 }
 
+/// What the state and the mux say about one pane, before a caller decides
+/// what to make of it.
+pub(crate) enum PaneEvidence {
+    /// `present`, `verified_absent` or `unavailable`, as a reader reports it.
+    Observed(String),
+    /// The server that held this incarnation's panes is gone: the realm's
+    /// socket path no longer exists (`vanished`), or a different server now
+    /// owns it. A reader reports this as unavailable, with the diagnostic.
+    /// Sweep counts it as one sighting of absence, and only its
+    /// two-observation rule turns sightings into an ended binding.
+    IncarnationEnded {
+        diagnostic: Diagnostic,
+        socket_path: String,
+        vanished: bool,
+    },
+}
+
+/// A pane's presence as a reader reports it.
 pub(crate) fn pane_presence(
     root: &Path,
     address: &PaneAddress,
@@ -1391,8 +1409,25 @@ pub(crate) fn pane_presence(
     processes: Option<&dyn ProcessProbe>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> String {
+    match pane_evidence(root, address, panes, processes, diagnostics) {
+        PaneEvidence::Observed(presence) => presence,
+        PaneEvidence::IncarnationEnded { diagnostic, .. } => {
+            diagnostics.push(diagnostic);
+            "unavailable".to_owned()
+        }
+    }
+}
+
+pub(crate) fn pane_evidence(
+    root: &Path,
+    address: &PaneAddress,
+    panes: Option<&dyn PaneLister>,
+    processes: Option<&dyn ProcessProbe>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> PaneEvidence {
+    let unavailable = || PaneEvidence::Observed("unavailable".to_owned());
     let Some(panes) = panes else {
-        return "unavailable".to_owned();
+        return unavailable();
     };
     let realm_path = root
         .join("v2/realms")
@@ -1410,10 +1445,10 @@ pub(crate) fn pane_presence(
         &RecordIdentity::realm(&address.realm_id),
     ) {
         Ok(Some(record)) => record,
-        Ok(None) => return "unavailable".to_owned(),
+        Ok(None) => return unavailable(),
         Err(error) => {
             diagnostics.push(error.diagnostic);
-            return "unavailable".to_owned();
+            return unavailable();
         }
     };
     match read_record(
@@ -1422,37 +1457,56 @@ pub(crate) fn pane_presence(
         &RecordIdentity::incarnation(&address.realm_id, &address.incarnation_id),
     ) {
         Ok(Some(_)) => {}
-        Ok(None) => return "unavailable".to_owned(),
+        Ok(None) => return unavailable(),
         Err(error) => {
             diagnostics.push(error.diagnostic);
-            return "unavailable".to_owned();
+            return unavailable();
         }
     }
     let Some(socket_path) = realm.get("socket_path").and_then(Value::as_str) else {
-        return "unavailable".to_owned();
+        return unavailable();
     };
     match socket_identity(socket_path) {
         Ok((realm_id, incarnation_id, _))
             if realm_id == address.realm_id && incarnation_id == address.incarnation_id => {}
+        Ok((realm_id, _, _)) if realm_id == address.realm_id => {
+            return PaneEvidence::IncarnationEnded {
+                diagnostic: diagnostic("incarnation_changed", "realm socket identity changed"),
+                socket_path: socket_path.to_owned(),
+                vanished: false,
+            };
+        }
         Ok(_) => {
             diagnostics.push(diagnostic(
                 "incarnation_changed",
                 "realm socket identity changed",
             ));
-            return "unavailable".to_owned();
+            return unavailable();
+        }
+        // Only a path that is not there at all. A socket that exists and
+        // cannot be read, or is not a socket, says nothing about the server.
+        Err(error)
+            if fs::symlink_metadata(socket_path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return PaneEvidence::IncarnationEnded {
+                diagnostic: error.diagnostic,
+                socket_path: socket_path.to_owned(),
+                vanished: true,
+            };
         }
         Err(error) => {
             diagnostics.push(error.diagnostic);
-            return "unavailable".to_owned();
+            return unavailable();
         }
     }
-    presence_at_socket(
+    PaneEvidence::Observed(presence_at_socket(
         socket_path,
         &address.pane_id,
         Some(panes),
         processes,
         diagnostics,
-    )
+    ))
 }
 
 /// Whether another pane address holds a binding of this provider session that

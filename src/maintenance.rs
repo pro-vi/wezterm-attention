@@ -14,8 +14,8 @@ use crate::protocol::{
     AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, manifest, sha256_hex,
 };
 use crate::query::{
-    FileStamp, ProbeOncePerAssembly, collect_state_files, pane_presence, read_bindings_with_ports,
-    read_tab_publications,
+    FileStamp, PaneEvidence, ProbeOncePerAssembly, collect_state_files, pane_evidence,
+    pane_presence, read_bindings_with_ports, read_tab_publications,
 };
 use crate::records::{
     CommitPlan, RecordIdentity, Replacement, commit_nested_with, launch_path, pane_path,
@@ -922,13 +922,48 @@ fn absence_action(
                 "record_invalid",
             )?;
             let current = ns20(observation, "record_invalid")?;
-            Ok(if current.saturating_sub(prior) < ABSENCE_INTERVAL_NS {
+            // The monotonic clock restarts at boot, so a probe ahead of it was
+            // taken before a restart and cannot be measured against: it is
+            // replaced, and the count starts again.
+            Ok(if prior > current {
+                "first_absence"
+            } else if current - prior < ABSENCE_INTERVAL_NS {
                 "too_soon"
             } else {
                 "end"
             })
         }
         _ => Ok("unavailable"),
+    }
+}
+
+/// A pane's presence as the absence rule reads it. Beyond what a reader
+/// reports, a pane whose server is gone -- its socket path vanished, or a new
+/// server owns it -- is absent: one sighting, which the two-observation rule
+/// then weighs like any other.
+fn absence_presence(
+    root: &Path,
+    address: &PaneAddress,
+    panes: &dyn PaneLister,
+    processes: Option<&dyn ProcessProbe>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> String {
+    match pane_evidence(root, address, Some(panes), processes, diagnostics) {
+        PaneEvidence::Observed(presence) => presence,
+        // A process still carrying the vanished socket and this pane id may
+        // belong to a server whose socket file was removed while it runs.
+        PaneEvidence::IncarnationEnded {
+            diagnostic,
+            socket_path,
+            vanished: true,
+        } if processes.is_some_and(|probe| {
+            probe.presence(&socket_path, &address.pane_id) == Presence::Present
+        }) =>
+        {
+            diagnostics.push(diagnostic);
+            "unavailable".to_owned()
+        }
+        PaneEvidence::IncarnationEnded { .. } => "verified_absent".to_owned(),
     }
 }
 
@@ -1342,6 +1377,240 @@ fn collect_projection_orphans(
     }
 }
 
+/// What one sweep run decides with, for the steps that take it whole.
+struct SweepRun<'a> {
+    root: &'a Path,
+    apply: bool,
+    operation_id: Option<&'a str>,
+    observation: &'a str,
+    now: &'a str,
+    panes: &'a dyn PaneLister,
+    processes: Option<&'a dyn ProcessProbe>,
+}
+
+/// An absence probe counts toward removing a pane only if it was taken after
+/// the binding ended; one from before belongs to the binding's own absence,
+/// and the pane may have been seen since without anything clearing it. A
+/// probe ahead of this run's clock predates a restart and does not count
+/// either. An end ahead of the clock predates a restart too, so no probe from
+/// this boot can be shown to follow it: such a probe is taken again, which
+/// only delays removal.
+fn retention_probe(probe: Option<Value>, end: &Value, observation: &str) -> Option<Value> {
+    let ended = end["observed_mono_ns"].as_str().unwrap_or("");
+    probe.filter(|probe| {
+        let observed = probe["observed_mono_ns"].as_str().unwrap_or("");
+        observed <= observation && observed > ended
+    })
+}
+
+/// Removes a closed pane's whole tree -- claim, launches, bindings, reviews --
+/// once its current binding has been over for the retention age. The pane's
+/// absence is established by the same two-observation rule that ends a
+/// binding, counted afresh after the end, and nothing is removed without
+/// `--apply`. A tree holding anything sweep does not recognise is kept.
+fn pane_retention(
+    run: &SweepRun<'_>,
+    binding_path: &Path,
+    binding: &Value,
+    address: &PaneAddress,
+    end: &Value,
+    details: &mut Vec<Value>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<()> {
+    let root = run.root;
+    let launch_id = binding["launch_id"].as_str().unwrap_or("");
+    let binding_id = binding["binding_id"].as_str().unwrap_or("");
+    let written = end["written_at_unix_ns"].as_str().unwrap_or("");
+    match wall_age_exceeds(run.now, written, RETENTION_AGE_NS) {
+        Ok(true) => {}
+        Ok(false) => return Ok(()),
+        Err(error) => {
+            diagnostics.push(error.diagnostic);
+            return Ok(());
+        }
+    }
+    let pane = pane_path(root, address);
+    let probe_path = pane.join("absence-probe.json");
+    let probe_identity = RecordIdentity::pane(address);
+    let probe = match read_record(&probe_path, Some("absence_probe"), &probe_identity) {
+        Ok(probe) => retention_probe(probe, end, run.observation),
+        Err(error) => {
+            diagnostics.push(error.diagnostic);
+            return Ok(());
+        }
+    };
+    let presence = absence_presence(root, address, run.panes, run.processes, diagnostics);
+    let action = absence_action(&presence, probe.as_ref(), run.operation_id, run.observation)?;
+    let detail =
+        |action: &str| json!({"kind":"pane_retention","binding_id":binding_id,"action":action});
+    if action == "unavailable" {
+        diagnostics.push(diagnostic(
+            "probe_unavailable",
+            "pane absence cannot be established",
+        ));
+    }
+    if !run.apply {
+        details.push(if action != "end" {
+            detail(action)
+        } else if pane_tree_prunable(root, &pane, diagnostics) {
+            detail("prune")
+        } else {
+            detail("keep")
+        });
+        return Ok(());
+    }
+    let operation = run.operation_id.expect("apply operation id");
+    let binding_identity = RecordIdentity::binding(address, launch_id, binding_id);
+    let end_path = binding_path
+        .parent()
+        .expect("binding parent")
+        .join("end.json");
+    // The presence above was taken before the locks, as for a binding's own
+    // absence. Under them only the records are checked again.
+    let applied = commit_nested_with(
+        &launch_path(root, address, launch_id).join(".lock"),
+        &pane.join(".claim.lock"),
+        binding_path,
+        Some("binding"),
+        &binding_identity,
+        Duration::from_secs(2),
+        |locked_binding| {
+            let plan = |action: &str, removals: Vec<PathBuf>, diagnostics: Vec<Diagnostic>| {
+                Ok(CommitPlan {
+                    result: (action.to_owned(), diagnostics),
+                    replacements: Vec::new(),
+                    removals,
+                    private_dirs: Vec::new(),
+                })
+            };
+            let locked_end = read_record(&end_path, Some("binding_end"), &binding_identity)?;
+            if locked_binding.as_ref() != Some(binding)
+                || locked_end.as_ref() != Some(end)
+                || binding_selection(root, address, launch_id, binding_id)? != Some(true)
+            {
+                return plan(
+                    "changed",
+                    Vec::new(),
+                    vec![diagnostic(
+                        "record_invalid",
+                        "binding changed before pane retention",
+                    )],
+                );
+            }
+            let locked_probe = retention_probe(
+                read_record(&probe_path, Some("absence_probe"), &probe_identity)?,
+                end,
+                run.observation,
+            );
+            let action = absence_action(
+                &presence,
+                locked_probe.as_ref(),
+                Some(operation),
+                run.observation,
+            )?;
+            match action {
+                "clear_absence" => plan(action, vec![probe_path.clone()], Vec::new()),
+                "first_absence" => Ok(CommitPlan {
+                    result: (action.to_owned(), Vec::new()),
+                    replacements: vec![Replacement::always(
+                        probe_path.clone(),
+                        json!({"kind":"absence_probe","schema":manifest()?.record_schema,"address":address,"operation_id":operation,"observed_mono_ns":run.observation}),
+                    )],
+                    removals: Vec::new(),
+                    private_dirs: Vec::new(),
+                }),
+                "end" => {
+                    let mut kept = Vec::new();
+                    let confined = fs::canonicalize(&pane)
+                        .ok()
+                        .zip(fs::canonicalize(root).ok())
+                        .is_some_and(|(target, root)| target.starts_with(root));
+                    if !confined {
+                        kept.push(diagnostic(
+                            "record_invalid",
+                            "pane removal target is outside the state root",
+                        ));
+                        return plan("keep", Vec::new(), kept);
+                    }
+                    if !pane_tree_prunable(root, &pane, &mut kept) {
+                        return plan("keep", Vec::new(), kept);
+                    }
+                    plan("prune", vec![pane.clone()], kept)
+                }
+                other => plan(other, Vec::new(), Vec::new()),
+            }
+        },
+        |_| Ok(()),
+    );
+    match applied {
+        Ok(((action, locked_diagnostics), ())) => {
+            diagnostics.extend(locked_diagnostics);
+            if action != "changed" {
+                details.push(detail(&action));
+            }
+        }
+        Err(error) => diagnostics.push(error.diagnostic),
+    }
+    Ok(())
+}
+
+/// Whether every entry under a pane directory is state sweep recognises, so
+/// removing the tree removes nothing else: records that read as valid for
+/// their path, the two lock files, and the temporary files an interrupted
+/// write leaves beside a record. A symlink anywhere keeps the tree.
+fn pane_tree_prunable(root: &Path, directory: &Path, diagnostics: &mut Vec<Diagnostic>) -> bool {
+    let preserved = |diagnostics: &mut Vec<Diagnostic>, message: &str, path: &Path| {
+        let mut item = diagnostic("record_invalid", message);
+        item.context.insert(
+            "path".into(),
+            json!(path.strip_prefix(root).unwrap_or(path).to_string_lossy()),
+        );
+        diagnostics.push(item);
+        false
+    };
+    let Ok(entries) = fs::read_dir(directory) else {
+        return preserved(diagnostics, "pane state could not be read", directory);
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return preserved(diagnostics, "pane state could not be read", directory);
+        };
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        match entry.file_type() {
+            Ok(kind) if kind.is_symlink() => {
+                return preserved(diagnostics, "symlinked pane state is preserved", &path);
+            }
+            Ok(kind) if kind.is_dir() => {
+                if !pane_tree_prunable(root, &path, diagnostics) {
+                    return false;
+                }
+            }
+            Ok(kind) if kind.is_file() => {
+                if matches!(name.as_str(), ".lock" | ".claim.lock") || write_leftover(&name) {
+                    continue;
+                }
+                let recognised = state_kind(&path).is_some_and(|kind| {
+                    RecordIdentity::from_state_path(root, &path, kind)
+                        .and_then(|identity| read_record(&path, Some(kind), &identity))
+                        .is_ok_and(|record| record.is_some())
+                });
+                if !recognised {
+                    return preserved(diagnostics, "unknown pane state is preserved", &path);
+                }
+            }
+            _ => return preserved(diagnostics, "unknown pane state is preserved", &path),
+        }
+    }
+    true
+}
+
+/// A temporary file an interrupted atomic write left beside a record: the
+/// writer here names it `.<record>.<uuid>`, the plugin `<record>.<session>.tmp`.
+fn write_leftover(name: &str) -> bool {
+    name.contains(".json.") && (name.starts_with('.') || name.ends_with(".tmp"))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn sweep(
     root: &Path,
@@ -1384,6 +1653,9 @@ pub fn sweep(
     collect_projection_orphans(root, realm_filter, apply, &mut details, &mut diagnostics);
     let mut ended: BTreeMap<String, Vec<(String, PathBuf, bool)>> = BTreeMap::new();
     let mut presence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
+    // Kept apart from the readers' view above: here a vanished server counts
+    // as absence, which tab-order collection must not act on at first sight.
+    let mut absence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
     if realm_filter.is_none() {
         collect_tab_orders(
             root,
@@ -1575,6 +1847,26 @@ pub fn sweep(
                 "already_ended"
             };
             details.push(json!({"kind":"absence","binding_id":binding_id,"action":action}));
+            if let Some(end) = &end {
+                let run = SweepRun {
+                    root,
+                    apply,
+                    operation_id: operation_id.as_deref(),
+                    observation: &observation,
+                    now: &now,
+                    panes,
+                    processes,
+                };
+                pane_retention(
+                    &run,
+                    binding_path,
+                    &binding,
+                    &address,
+                    end,
+                    &mut details,
+                    &mut diagnostics,
+                )?;
+            }
             continue;
         }
         let presence_key = (
@@ -1582,11 +1874,11 @@ pub fn sweep(
             address.incarnation_id.clone(),
             address.pane_id.clone(),
         );
-        let presence = if let Some(cached) = presence_cache.get(&presence_key) {
+        let presence = if let Some(cached) = absence_cache.get(&presence_key) {
             cached.clone()
         } else {
-            let observed = pane_presence(root, &address, Some(panes), processes, &mut diagnostics);
-            presence_cache.insert(presence_key, observed.clone());
+            let observed = absence_presence(root, &address, panes, processes, &mut diagnostics);
+            absence_cache.insert(presence_key, observed.clone());
             observed
         };
         let probe_path = pane.join("absence-probe.json");
@@ -1621,8 +1913,7 @@ pub fn sweep(
         // A fresh look for the decision, taken before the locks: listing panes
         // can take seconds, and a hook writer gives up on these locks after
         // two. Under the locks only the records are checked again.
-        let fresh_presence =
-            pane_presence(root, &address, Some(panes), processes, &mut diagnostics);
+        let fresh_presence = absence_presence(root, &address, panes, processes, &mut diagnostics);
         let applied = commit_nested_with(
             &launch.join(".lock"),
             &pane.join(".claim.lock"),
