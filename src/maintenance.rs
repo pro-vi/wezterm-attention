@@ -1325,7 +1325,7 @@ fn collect_tab_orders(
     apply: bool,
     panes: &dyn PaneLister,
     processes: Option<&dyn ProcessProbe>,
-    presence_cache: &mut BTreeMap<(String, String, String), String>,
+    presence_cache: &mut BTreeMap<PaneAddress, String>,
     details: &mut Vec<Value>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> usize {
@@ -1340,25 +1340,20 @@ fn collect_tab_orders(
     diagnostics.extend(read_diagnostics);
     for window in windows {
         let relative = window.relative_path.to_string_lossy().into_owned();
-        let mut addresses: BTreeMap<(String, String, String), PaneAddress> = BTreeMap::new();
+        let mut addresses: BTreeSet<PaneAddress> = BTreeSet::new();
         let mut without_address = false;
         for marker_id in window.tabs.iter().flat_map(|tab| tab.marker_ids.iter()) {
             match v2_marker_address(marker_id) {
                 Some(address) => {
-                    let key = (
-                        address.realm_id.clone(),
-                        address.incarnation_id.clone(),
-                        address.pane_id.clone(),
-                    );
-                    addresses.insert(key, address);
+                    addresses.insert(address);
                 }
                 None => without_address = true,
             }
         }
         let mut keep = without_address.then_some("no_address");
         if keep.is_none() {
-            for (key, address) in &addresses {
-                let presence = match presence_cache.get(key) {
+            for address in &addresses {
+                let presence = match presence_cache.get(address) {
                     Some(cached) => cached.clone(),
                     None => {
                         let before = diagnostics.len();
@@ -1389,7 +1384,7 @@ fn collect_tab_orders(
                         for item in &mut diagnostics[before..] {
                             item.context.insert("path".into(), json!(relative));
                         }
-                        presence_cache.insert(key.clone(), observed.clone());
+                        presence_cache.insert(address.clone(), observed.clone());
                         observed
                     }
                 };
@@ -2012,11 +2007,11 @@ pub fn sweep(
     }
     failed += collect_projection_orphans(root, realm_filter, apply, &mut details, &mut diagnostics);
     let mut ended: BTreeMap<String, Vec<(String, PathBuf, bool)>> = BTreeMap::new();
-    let mut presence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
+    let mut presence_cache: BTreeMap<PaneAddress, String> = BTreeMap::new();
     // Kept apart from the readers' view above, which reads a pane of kept
     // history as unavailable where the absence rule reads it as
     // `SERVER_GONE`.
-    let mut absence_cache: BTreeMap<(String, String, String), String> = BTreeMap::new();
+    let mut absence_cache: BTreeMap<PaneAddress, String> = BTreeMap::new();
     if realm_filter.is_none() {
         failed += collect_tab_orders(
             root,
@@ -2246,12 +2241,7 @@ pub fn sweep(
             }
             continue;
         }
-        let presence_key = (
-            address.realm_id.clone(),
-            address.incarnation_id.clone(),
-            address.pane_id.clone(),
-        );
-        let presence = if let Some(cached) = absence_cache.get(&presence_key) {
+        let presence = if let Some(cached) = absence_cache.get(&address) {
             cached.clone()
         } else {
             let observed = absence_presence(
@@ -2262,7 +2252,7 @@ pub fn sweep(
                 processes,
                 &mut diagnostics,
             );
-            absence_cache.insert(presence_key, observed.clone());
+            absence_cache.insert(address.clone(), observed.clone());
             observed
         };
         // Kept history: reported once for the run, and nothing to decide.

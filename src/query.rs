@@ -2174,7 +2174,7 @@ fn assemble_bindings(
     let mut admitted_rows = Vec::new();
     let mut servers_gone = Vec::new();
     let mut ignored = Vec::new();
-    let mut presence_cache: BTreeMap<(String, String, String), (String, bool)> = BTreeMap::new();
+    let mut presence_cache: BTreeMap<PaneAddress, (String, bool)> = BTreeMap::new();
     let mut claim_cache: BTreeMap<PathBuf, (Option<Value>, Option<String>)> = BTreeMap::new();
     for (path, binding, admitted) in assessed {
         let diagnostics = if admitted {
@@ -2272,12 +2272,7 @@ fn assemble_bindings(
         let expected_session_match = string(&binding, "expected_session_id").map(|expected| {
             string(&binding, "provider_session_id").is_some_and(|actual| actual == expected)
         });
-        let presence_key = (
-            address.realm_id.clone(),
-            address.incarnation_id.clone(),
-            address.pane_id.clone(),
-        );
-        let (presence, server_gone) = if let Some(cached) = presence_cache.get(&presence_key) {
+        let (presence, server_gone) = if let Some(cached) = presence_cache.get(&address) {
             cached.clone()
         } else {
             let before_presence = diagnostics.len();
@@ -2291,7 +2286,7 @@ fn assemble_bindings(
             // One socket failure is reported once per pane it leaves unknown;
             // the address says which.
             name_address(&mut diagnostics[before_presence..], &address);
-            presence_cache.insert(presence_key, observed.clone());
+            presence_cache.insert(address.clone(), observed.clone());
             observed
         };
         let binding_health = binding_health(
@@ -2337,16 +2332,9 @@ fn assemble_bindings(
             .push(index);
     }
     for indices in duplicates.values() {
-        let addresses: BTreeSet<_> = indices
+        let addresses: BTreeSet<PaneAddress> = indices
             .iter()
-            .map(|index| {
-                let address = &rows[*index].address;
-                (
-                    address.realm_id.clone(),
-                    address.incarnation_id.clone(),
-                    address.pane_id.clone(),
-                )
-            })
+            .map(|index| rows[*index].address.clone())
             .collect();
         if addresses.len() > 1 {
             for index in indices {
@@ -2373,11 +2361,11 @@ fn assemble_bindings(
                 Value::Array(
                     addresses
                         .iter()
-                        .map(|(realm_id, incarnation_id, pane_id)| {
+                        .map(|address| {
                             serde_json::json!({
-                                "realm_id": realm_id,
-                                "incarnation_id": incarnation_id,
-                                "pane_id": pane_id,
+                                "realm_id": address.realm_id,
+                                "incarnation_id": address.incarnation_id,
+                                "pane_id": address.pane_id,
                             })
                         })
                         .collect(),
