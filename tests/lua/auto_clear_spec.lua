@@ -4891,10 +4891,33 @@ test("the default state root follows the same order as the writer", function()
     { env = {}, root = home_default },
     { env = { WEZTERM_ATTENTION_DIR = "relative/dir" }, root = home_default, warned = true },
   }
+  -- The writer takes a root only when it is at most the manifest's path bound
+  -- in bytes and holds no control character, C1 included.
+  local manifest = assert(io.open(repo_root .. "/protocol/v2.json", "r"))
+  local limit = decode_json(manifest:read("*a")).limits.path_max_bytes
+  manifest:close()
+  local function path_of(bytes) return ("/" .. string.rep("a", 7)):rep(bytes / 8) end
+  assert(#path_of(limit) == limit, "precondition: the bound is a multiple of 8")
+  for _, unsafe in ipairs({ test_dir .. "/x\1y", test_dir .. "/x\27[31my", test_dir .. "/x\194\133y",
+      test_dir .. "/x\127y", path_of(limit) .. "b" }) do
+    cases[#cases + 1] = { env = { XDG_STATE_HOME = unsafe }, root = home_default }
+    cases[#cases + 1] = { env = { WEZTERM_ATTENTION_DIR = unsafe }, root = home_default, warned = true }
+  end
+  cases[#cases + 1] = { env = { XDG_STATE_HOME = path_of(limit) },
+    root = path_of(limit) .. "/wezterm-attention" }
+  cases[#cases + 1] = { env = { WEZTERM_ATTENTION_DIR = path_of(limit) }, root = path_of(limit) }
+  local real_execute = os.execute
   for index, case in ipairs(cases) do
     local instance = load_with_environment(case.env)
-    instance.apply_to_config({}, { auto_poll = false, review_key = false, renderer = "manual",
-      integration_root = writer_root })
+    -- A root at the path bound is longer than this system lets mkdir create.
+    os.execute = function(command)
+      if #command > 1000 then return 0 end
+      return real_execute(command)
+    end
+    local ok, failure = pcall(instance.apply_to_config, {}, { auto_poll = false, review_key = false,
+      renderer = "manual", integration_root = writer_root })
+    os.execute = real_execute
+    assert(ok, failure)
     assert(instance._active_dir == case.root,
       "case " .. index .. ": expected " .. case.root .. ", got " .. tostring(instance._active_dir))
     local warnings = drain_warnings()
