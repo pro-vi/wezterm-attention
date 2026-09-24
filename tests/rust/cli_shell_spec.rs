@@ -464,7 +464,8 @@ fn query_defaults_errors_and_help_support_agent_composition() {
     assert!(!text.contains("complete=true before selecting"));
     let help = run(&["sweep", "--help"]);
     let text = String::from_utf8(help.stdout).unwrap();
-    assert!(text.contains("00000000-0000-4000-8000-000000000001"));
+    assert!(!text.contains("00000000-0000-4000-8000-000000000001"));
+    assert!(text.contains("result.operation_id"));
     assert!(text.contains("canonical lowercase UUID"));
     assert!(text.contains("Preview is the default"));
     assert!(text.contains("--all-details"));
@@ -741,6 +742,13 @@ fn published_tab_orders_are_read_and_one_refused_file_does_not_withhold_the_othe
     assert_eq!(envelope["command"], "tabs");
     assert_eq!(envelope["status"], "findings");
     assert_eq!(envelope["complete"], false);
+    let shown = envelope["diagnostics"]
+        .as_array()
+        .expect("diagnostics")
+        .len();
+    assert!(shown > 0);
+    assert_eq!(envelope["result"]["diagnostic_count"], shown);
+    assert_eq!(envelope["result"]["total_diagnostic_count"], shown);
 
     let windows = envelope["result"]["windows"]
         .as_array()
@@ -1542,6 +1550,22 @@ fn a_hook_command_never_exits_two_and_says_why_on_stderr() {
         let output = run(&args, b"");
         assert_eq!(output.status.code(), Some(expected), "{args:?}: {output:?}");
     }
+}
+
+#[test]
+fn doctor_that_had_nothing_to_look_at_says_unobserved_not_ok() {
+    let scratch = Scratch::new();
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .args(["doctor", "--json"])
+        .env_clear()
+        .env("HOME", &scratch.0)
+        .env("WEZTERM_ATTENTION_DIR", scratch.0.join("never-created"))
+        .output()
+        .expect("run doctor");
+    assert_eq!(output.status.code(), Some(0));
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("doctor JSON");
+    assert_eq!(envelope["status"], "unobserved");
+    assert_eq!(envelope["complete"], true);
 }
 
 #[test]

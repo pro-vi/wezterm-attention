@@ -346,7 +346,7 @@ fn socket_queries_never_autostart_and_preserve_legacy_transport() {
         ])
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(1));
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap()["complete"],
         false
@@ -380,7 +380,7 @@ fn socket_selector_conflicts_are_usage_errors_and_resolution_is_incomplete() {
         .args(["bindings", "--socket", "/missing", "--json"])
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(1));
     let response: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["complete"], false);
     assert!(response["result"].get("scope").is_none());
@@ -468,7 +468,7 @@ fn publish_rejects_the_removed_realm_selector() {
         ])
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(1));
 }
 
 #[test]
@@ -499,7 +499,7 @@ fn socket_truncation_is_explicit_and_legacy_shape_is_preserved() {
             command.args(["--socket", &setup.env["WEZTERM_UNIX_SOCKET"]]);
         }
         let output = command.output().unwrap();
-        assert!(output.status.success());
+        assert_eq!(output.status.code(), Some(1));
         let response: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(response["complete"], false);
         assert_eq!(response["result"]["scanned"], 2);
