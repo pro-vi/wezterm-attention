@@ -1,6 +1,6 @@
 # Mux setup
 
-This setup keeps attention on the right pane across local and attached WezTerm GUIs. Writing v2 records needs a POSIX system and the `attention` command built by `scripts/install-cli.sh` (see [Install](../README.md#install)). Without the command, the plugin still reads and renders v1 flat markers.
+This setup keeps attention on the right pane across local and attached WezTerm GUIs. Writing v2 records needs macOS or Linux (glibc, including aarch64), the two tested platforms, and the `attention` command built by `scripts/install-cli.sh` (see [Install](../README.md#install)). Without the command, the plugin still reads and renders v1 flat markers.
 
 ## WezTerm configuration
 
@@ -100,6 +100,10 @@ with_attention_claim sh -c 'codex exec "…" </dev/null'   # claim holds
 A wrapper that ignores the claim's exit status makes this silent. Check it, or keep the redirect
 inside the innermost command.
 
+### When a claim is refused
+
+A claim belongs to the pane's own terminal. A program started inside the pane, such as tmux, screen or an editor's terminal, inherits `WEZTERM_PANE` but runs on a different terminal, and a claim from there would take the pane away from the agent that owns it. So `attention hooks claim` asks the mux for the pane and refuses with `unsafe_tty` when the mux lists the pane on another terminal, or does not list it at all. When the mux cannot be asked, it refuses if `TMUX` or `STY` is set, and otherwise proceeds. Start agents from the pane's own shell, not from a tmux or screen session inside it.
+
 ## Provider hooks
 
 Registration is yours; this repository does not edit Claude or Codex settings. The README has complete, copyable blocks for [Claude Code](../README.md#claude-code-hooks) and [Codex](../README.md#codex-hooks). They come from the package's own description:
@@ -116,7 +120,6 @@ tool work. `SubagentStop` records ordered stopped evidence for that exact child.
 
 The bundled Pi extension is installed with `pi install` rather than registered here; see [Pi extension](../README.md#pi-extension). Its handlers enqueue without awaiting filesystem work and drain the queue during shutdown.
 
-<!-- pending: exec lane -->
 ## How attention finds the wezterm command
 
 `attention` runs `wezterm cli` to list a mux's panes. It looks for that command in this order:
@@ -126,9 +129,9 @@ The bundled Pi extension is installed with `pi install` rather than registered h
 3. `wezterm` in the directory of `$WEZTERM_EXECUTABLE`.
 4. `/Applications/WezTerm.app/Contents/MacOS/wezterm`.
 
-It runs only a file named exactly `wezterm`. It never runs `$WEZTERM_EXECUTABLE` itself: inside a pane that variable names `wezterm-gui` or `wezterm-mux-server`, and neither of them is the CLI. A candidate found after the `PATH` search is used only when every directory above it is owned by root or by you and is not writable by group or others; a root-owned directory whose group is `admin` or `wheel` is also accepted, which is how macOS installs `/Applications`.
+It never runs `$WEZTERM_EXECUTABLE` itself: inside a pane that variable names `wezterm-gui` or `wezterm-mux-server`, and neither of them is the CLI. A `PATH` entry is trusted as your own choice. A candidate from steps 2 to 4 is used only when it is still named `wezterm` after symlinks are resolved, and every directory above it is owned by root or by you and is not writable by group or others. A root-owned directory whose group is `admin` or `wheel` may be group-writable, which is how macOS installs `/Applications`, but never writable by others.
 
-Every `wezterm cli` call passes `--no-auto-start`, so a query against a stale socket reports the socket unavailable instead of starting a new mux server. When a pane listing fails, the diagnostic names the executable that ran and says either "timed out after N ms" or "exited with status N".
+Every `wezterm cli` call passes `--no-auto-start`, so a query against a stale socket reports the socket unavailable instead of starting a new mux server. A call that runs past its deadline is killed together with its whole process group. When a pane listing fails, the `record_invalid` diagnostic names the executable and what went wrong: `wezterm cli list via <path> timed out after 5000 ms`, or `… exited with status N`, `… was killed by signal N`, `… could not be started`, `… output could not be read`, `… output exceeded its bound`. A control character in the path prints as `?`.
 
 ## Verify the installation
 
@@ -138,5 +141,6 @@ attention bindings --json
 attention sweep --json
 ```
 
-`doctor` covers CLI-visible files, sockets, processes, permissions, and versions. It explicitly
-does not observe GUI user variables. `sweep` previews and removes nothing unless `--apply` is given, and `--apply` needs a fresh operation id each run: `attention sweep --apply --operation-id "$(uuidgen | tr A-Z a-z)"`. See [Record contract](record-contract.md#compatibility-and-precedence) for why a reused id does nothing.
+`doctor` covers CLI-visible files, sockets, processes, permissions, versions and the environment it runs in. It explicitly does not observe GUI user variables. Run inside a pane, the `environment` probe checks that the pane's socket has a server identity that hooks can find; outside a pane it says `unobserved`. Any probe that had nothing to check says `unobserved` rather than `healthy`, and is listed in `result.unobserved`; when every probe but `versions` was unobserved and there are no diagnostics, the whole report says `unobserved`. Without `--json`, `doctor` prints the status word on stdout and each diagnostic on stderr as `attention: <code>: <message>`.
+
+`sweep` previews and removes nothing unless `--apply` is given. `attention sweep --apply` makes up a fresh operation id for that run and reports it in `result.operation_id`. Pass `--operation-id` only to retry a run that was interrupted: a run under an id already used is treated as a replay of it. See [Record contract](record-contract.md#compatibility-and-precedence).
