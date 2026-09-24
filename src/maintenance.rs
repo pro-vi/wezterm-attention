@@ -1326,11 +1326,11 @@ fn collect_tab_orders(
     apply: bool,
     panes: &dyn PaneLister,
     processes: Option<&dyn ProcessProbe>,
-    presence_cache: &mut BTreeMap<PaneAddress, String>,
     details: &mut Vec<Value>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> usize {
     let mut failed = 0;
+    let mut presence_cache: BTreeMap<PaneAddress, String> = BTreeMap::new();
     let (windows, read_diagnostics) = match read_tab_publications(root) {
         Ok(value) => value,
         Err(error) => {
@@ -2007,10 +2007,9 @@ pub fn sweep(
     }
     failed += collect_projection_orphans(root, realm_filter, apply, &mut details, &mut diagnostics);
     let mut ended: BTreeMap<String, Vec<(String, PathBuf, bool)>> = BTreeMap::new();
-    let mut presence_cache: BTreeMap<PaneAddress, String> = BTreeMap::new();
-    // Kept apart from the readers' view above, which reads a pane of kept
-    // history as unavailable where the absence rule reads it as
-    // `SERVER_GONE`.
+    // The absence rule's view of each pane. The tab-order step keeps its
+    // own, which reads a pane of kept history as unavailable where this one
+    // reads it as `SERVER_GONE`.
     let mut absence_cache: BTreeMap<PaneAddress, String> = BTreeMap::new();
     if realm_filter.is_none() {
         failed += collect_tab_orders(
@@ -2018,7 +2017,6 @@ pub fn sweep(
             apply,
             panes,
             processes,
-            &mut presence_cache,
             &mut details,
             &mut diagnostics,
         );
