@@ -536,16 +536,50 @@ return function()
       return keys
     end
 
+    --- Mux windows that exist, by id as a decimal string, whether or not a GUI
+    --- window shows them. Nil when the mux cannot be listed.
+    local function mux_window_keys()
+      local mux = wezterm.mux
+      if not mux or type(mux.all_windows) ~= "function" then return nil end
+      local ok, windows = pcall(mux.all_windows)
+      if not ok or type(windows) ~= "table" then return nil end
+      local keys = {}
+      for _, mux_window in ipairs(windows) do
+        local id_ok, id = pcall(mux_window.window_id, mux_window)
+        if id_ok and id ~= nil then keys[tostring(id)] = true end
+      end
+      return keys
+    end
+
+    --- Windows that are still open. A workspace switch makes the GUI window
+    --- show another workspace's mux window, so the one it showed leaves
+    --- gui_windows() while it still exists, with its tabs, to be shown again.
+    --- Only a window gone from both has closed. Without the mux listing this is
+    --- the GUI inventory alone, as before.
+    local function open_window_keys(opts)
+      local live = gui_window_keys(opts)
+      if not live then return nil end
+      local existing = mux_window_keys()
+      if existing then
+        for key in pairs(existing) do live[key] = true end
+      end
+      return live
+    end
+
     local function prune_closed_publish_windows(current_window_key, opts, dir)
       local live = gui_window_keys(opts)
       if not live then return end
       -- The callback's window is authoritative even if WezTerm's inventory is
       -- between insertion and publication for a newly created GUI window.
       live[current_window_key] = true
-      withdraw_closed_tab_orders(dir, live)
+      local open = open_window_keys(opts) or live
+      open[current_window_key] = true
+      withdraw_closed_tab_orders(dir, open)
       for window_key in pairs(seen_marker_ids_by_window) do
-        if not live[window_key] then seen_marker_ids_by_window[window_key] = nil end
+        if not open[window_key] then seen_marker_ids_by_window[window_key] = nil end
       end
+      -- Publication work is about what a poll can see: a hidden window is not
+      -- polled, so it cannot renew or conclude an observation.
       for window_key in pairs(publish_domains_by_window) do
         if not live[window_key] then publish_domains_by_window[window_key] = nil end
       end
@@ -843,7 +877,7 @@ return function()
         end
       end
       callback_views_by_window[window_key] = next_views
-      local live = gui_window_keys(opts)
+      local live = open_window_keys(opts)
       if live then
         live[window_key] = true
         for other, states in pairs(callback_views_by_window) do

@@ -532,7 +532,10 @@ local function window_double(spec)
     action_calls      = 0,
   }
 
-  local mux_window = { tabs = function() return mux_tabs end }
+  local mux_window = {
+    tabs = function() return mux_tabs end,
+    window_id = function() return assigned_window_id end,
+  }
   mux_windows_by_id[assigned_window_id] = mux_window
 
   function w.mux_window()
@@ -977,6 +980,8 @@ local function publish_window(window_id, tab_id, pane_id)
 end
 
 local function poll_with_inventory(polling_window_id, live_window_ids)
+  -- A window that closed is gone from the mux as well as from the GUI.
+  for id in pairs(mux_windows_by_id) do mux_windows_by_id[id] = nil end
   local live = {}
   for index, id in ipairs(live_window_ids) do
     live[index] = window_double({ window_id = id, tabs = {}, focused = false })
@@ -4168,13 +4173,53 @@ test("GUI callback has per-window baselines and detached lifecycle updates", fun
   assert(messages[#messages].view.lifecycle.diagnostics[1].code=="probe_unavailable")
   instance.poll(w1,options); assert(messages[#messages].view.lifecycle.availability=="available")
   local count=#messages
-  options.gui_windows={w2}; instance.poll(w2,options)
+  options.gui_windows={w2}; mux_windows_by_id[13011]=nil; instance.poll(w2,options)
   assert(#messages==count+1 and messages[#messages].kind=="scope_lost" and messages[#messages].window_id==13011)
   instance.poll(w2,options); assert(#messages==count+1,"closing one window cannot reset another")
   local fresh=dofile(repo_root.."/plugin/init.lua")
   fresh.apply_to_config({}, {auto_poll=false,dir=test_dir,review_key=false,on_view_change=function(message) assert(message.kind=="initial") end})
   fresh.poll(w2,options)
   assert(#drain_errors()==0,"lifecycle read diagnostics belong to the lifecycle facet")
+end)
+
+test("a workspace switch hides a window without losing its views or its tab order", function()
+  local wire = materialize_v2_fixture(13041, string.rep("f", 64))
+  local messages, instance = {}, dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root,
+    on_view_change = function(message) messages[#messages + 1] = message end })
+  local shown = window_double({ window_id = 13041, focused = false,
+    tabs = { { { id = 13041, domain = "mux", attention = wire } } } })
+  local other = window_double({ window_id = 13042, focused = false, tabs = { { 13043 } } })
+  local options = { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end }
+  options.gui_windows = { shown }
+  instance.poll(shown, options)
+  assert(#messages == 1 and messages[1].kind == "initial")
+
+  -- WezTerm reuses the GUI window for the other workspace's mux window; the
+  -- first one leaves gui_windows() and stays in the mux.
+  options.gui_windows = { other }
+  instance.poll(other, options)
+  for _, message in ipairs(messages) do
+    assert(message.kind ~= "scope_lost", "a hidden window's views were reported lost")
+  end
+  options.gui_windows = { shown }
+  instance.poll(shown, options)
+  assert(#messages == 1, "switching back must not replay the unchanged view as initial")
+
+  mux_windows_by_id[13041] = nil
+  options.gui_windows = { other }
+  instance.poll(other, options)
+  assert(messages[#messages].kind == "scope_lost" and messages[#messages].window_id == 13041,
+    "a window gone from the mux is a scope that was lost")
+
+  publish_window(13044, 13045, 13046)
+  window_double({ window_id = 13044, tabs = {}, focused = false })
+  attention.poll(other, { gui_windows = { other } })
+  assert(path_exists(tab_publication_path(13044)), "a hidden window keeps its tab order")
+  mux_windows_by_id[13044] = nil
+  attention.poll(other, { gui_windows = { other } })
+  assert(not path_exists(tab_publication_path(13044)), "a closed window's tab order is withdrawn")
 end)
 
 test("GUI callback preserves binding targets through unavailable reads and replacements", function()
