@@ -3440,6 +3440,58 @@ test("Alt+B uses full v2 addresses and clear-all preserves activity", function()
     "clearing a masked review claim must preserve unrelated activity bytes")
 end)
 
+test("Alt+B refuses to flag a pane whose published launch is not its claim's", function()
+  local wire = materialize_v2_fixture(81)
+  local pane_root = test_dir .. "/v2/realms/" .. wire.address.realm_id
+    .. "/incarnations/" .. wire.address.incarnation_id .. "/panes/81"
+  assert(os.execute("rm -f " .. shell_quote(pane_root) .. "/reviews/*.json") == 0)
+  -- The claim names the fixture's launch; the pane still shows an older one.
+  wire.launch_id = "00000000-0000-4000-8000-000000000999"
+  local review = dofile(repo_root .. "/plugin/init.lua")
+  local config = {}
+  review.apply_to_config(config, { auto_poll = false, dir = test_dir, integration_root = writer_root })
+  local toggle = assert(config.keys[#config.keys].action)
+  local spec = { id = 9081, domain = "unix", attention = wire }
+  toggle(window_double({ tabs = { { spec } }, focused = true, active_pane_id = spec }), pane_from_entry(spec))
+  assert(not path_exists(pane_root .. "/reviews/" .. internal.sha256("user") .. ".json"),
+    "a review under a stale claim is one no reader shows")
+  local errors = drain_errors()
+  assert(#errors == 1 and errors[1]:find("claim", 1, true), "the refusal must say why, got " .. #errors)
+end)
+
+test("Alt+B clear-all leaves a review that was replaced after it looked", function()
+  local wire = materialize_v2_fixture(82)
+  local samples = protocol_fixture.record_samples
+  local pane_root = test_dir .. "/v2/realms/" .. wire.address.realm_id
+    .. "/incarnations/" .. wire.address.incarnation_id .. "/panes/82"
+  local path = pane_root .. "/reviews/" .. samples.review.owner_key .. ".json"
+  assert(path_exists(path), "precondition: the fixture carries a review")
+  local newer = decode_json(encode_json(samples.review))
+  newer.address = decode_json(encode_json(wire.address))
+  newer.event_id = "00000000-0000-4000-8000-000000000082"
+  local review = dofile(repo_root .. "/plugin/init.lua")
+  local config = {}
+  review.apply_to_config(config, { auto_poll = false, dir = test_dir, integration_root = writer_root })
+  local toggle = assert(config.keys[#config.keys].action)
+  local spec = { id = 9082, domain = "unix", attention = wire }
+  -- The writer replaces the review between the plugin's check and its removal.
+  local real_remove, real_rename, raced = os.remove, os.rename, false
+  local function race(target)
+    if target == path and not raced then raced = true; write_json_path(path, newer) end
+  end
+  os.remove = function(target) race(target); return real_remove(target) end
+  os.rename = function(from, to) race(from); return real_rename(from, to) end
+  local ok, failure = pcall(toggle, window_double({ tabs = { { spec } }, focused = true,
+    active_pane_id = spec }), pane_from_entry(spec))
+  os.remove, os.rename = real_remove, real_rename
+  assert(ok, failure)
+  assert(raced, "precondition: the clear reached the review")
+  local left = read_path(path)
+  assert(left and decode_json(left).event_id == newer.event_id,
+    "a review the user never saw must not be cleared")
+  materialize_v2_fixture(82)
+end)
+
 test("v2 user actions never replace future acknowledgement or review records", function()
   local wire = materialize_v2_fixture(71)
   local samples = protocol_fixture.record_samples

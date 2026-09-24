@@ -466,29 +466,42 @@ return function(context)
         { kind = "launch" }
     end
 
+    --- The pane's valid review files, and the record read from each.
     local function v2_review_paths(read, dir)
       local pattern = v2_pane_root(dir, read.address) .. "/reviews/*.json"
       local paths, glob_diagnostic = glob_paths(pattern)
       if not paths then
         report_error_once("review-enumerate:" .. read.cache_key,
           glob_diagnostic.code .. ": " .. glob_diagnostic.message)
-        return {}
+        return {}, {}
       end
-      local valid = {}
+      local valid, records = {}, {}
       for _, path in ipairs(paths) do
         local record, record_diagnostic = read_expected_record(
           path, "review", { address = read.address }, true)
         if record and path_stem(path) == record.owner_key then
           valid[#valid + 1] = path
+          records[path] = record
         else
           local item = record_diagnostic or identity_diagnostic("review", path)
           report_error_once("review-record:" .. path, item.code .. ": " .. item.message)
         end
       end
-      return valid
+      return valid, records
     end
 
     local function write_v2_user_review(read, dir)
+      -- A reader shows nothing for a pane whose claim is not the launch the pane
+      -- published, so a flag written now would light nothing; the writer refuses
+      -- its own marks in this state for the same reason.
+      local claim_path = v2_pane_root(dir, read.address) .. "/claim.json"
+      if not read_expected_record(claim_path, "claim",
+          { address = read.address, launch_id = read.launch_id }, true) then
+        report_error_once("review-claim:" .. read.cache_key .. ":" .. read.launch_id,
+          "cannot flag this pane for review: its claim is not the launch the pane published, "
+            .. "so the flag would not show")
+        return false
+      end
       local owner_id = "user"
       local owner_key = sha256(owner_id)
       local path = v2_pane_root(dir, read.address) .. "/reviews/" .. owner_key .. ".json"
@@ -502,15 +515,39 @@ return function(context)
       }, "review", { address = read.address })
     end
 
+    --- Remove the reviews this pane showed, and only those. A writer can
+    --- replace a review between the read above and the removal, and removing
+    --- by path would take the newer one, which the user never saw. So each
+    --- file is first moved aside, out of the reader's *.json pattern, and
+    --- read: the record that was shown is deleted, and anything else is put
+    --- back, unless a still newer write has taken the path since, which then
+    --- supersedes both.
     local function clear_v2_reviews(read, dir)
       local cleared = false
-      for _, path in ipairs(v2_review_paths(read, dir)) do
-        local removed, remove_err = os.remove(path)
-        if removed then
-          cleared = true
+      local paths, shown = v2_review_paths(read, dir)
+      for _, path in ipairs(paths) do
+        local taken = path .. "." .. publication_session .. ".clear"
+        local moved, move_err = os.rename(path, taken)
+        if not moved then
+          -- Already gone is the state a clear wants.
+          local still_there = io.open(path, "r")
+          if still_there then
+            still_there:close()
+            report_error_once("clear-v2-review:" .. path,
+              "failed to remove review claim " .. path .. ": " .. tostring(move_err))
+          end
         else
-          report_error_once("clear-v2-review:" .. path,
-            "failed to remove review claim " .. path .. ": " .. tostring(remove_err))
+          local record = read_expected_record(taken, "review", { address = read.address }, true)
+          local superseded = io.open(path, "r")
+          if superseded then superseded:close() end
+          if record and record.event_id == shown[path].event_id then
+            os.remove(taken)
+            cleared = true
+          elseif superseded then
+            os.remove(taken)
+          else
+            os.rename(taken, path)
+          end
         end
       end
       return cleared
