@@ -1714,16 +1714,17 @@ impl PaneLister for ListOncePerSocket<'_> {
 /// kept for the lifetime of one assembly and no longer. A listing that failed
 /// is kept the same way, and answers every later miss as unavailable: asking
 /// the probe pane by pane would run the failed listing once per pane, under
-/// a fresh deadline each time. Maintenance does not use this: it deletes on
-/// the answer, so it keeps a fresh look per decision.
-struct ProbeOncePerAssembly<'a> {
+/// a fresh deadline each time. Doctor shares one across its checks. Sweep does
+/// not use this: it deletes on the answer, so it keeps a fresh look per
+/// decision.
+pub(crate) struct ProbeOncePerAssembly<'a> {
     inner: &'a dyn ProcessProbe,
     listed: Mutex<Option<ProcessListing>>,
     spent: Mutex<Duration>,
 }
 
 impl<'a> ProbeOncePerAssembly<'a> {
-    fn new(inner: &'a dyn ProcessProbe) -> Self {
+    pub(crate) fn new(inner: &'a dyn ProcessProbe) -> Self {
         Self {
             inner,
             listed: Mutex::new(None),

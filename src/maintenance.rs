@@ -14,7 +14,8 @@ use crate::protocol::{
     AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, manifest, sha256_hex,
 };
 use crate::query::{
-    FileStamp, collect_state_files, pane_presence, read_bindings_with_ports, read_tab_publications,
+    FileStamp, ProbeOncePerAssembly, collect_state_files, pane_presence, read_bindings_with_ports,
+    read_tab_publications,
 };
 use crate::records::{
     CommitPlan, RecordIdentity, Replacement, commit_nested_with, launch_path, pane_path,
@@ -302,6 +303,10 @@ pub fn doctor(
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
 ) -> Result<(Value, Vec<Diagnostic>)> {
+    // One process listing answers every claim and every binding doctor asks
+    // about; a listing per claim cost seconds on a store with many claims.
+    let probed_once = processes.map(ProbeOncePerAssembly::new);
+    let processes = probed_once.as_ref().map(|probe| probe as &dyn ProcessProbe);
     let mut diagnostics = Vec::new();
     let mut probes = Vec::new();
     let (audited_records, audit_diagnostics) = audit_state(root);

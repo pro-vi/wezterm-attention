@@ -1684,3 +1684,6 @@ mod diagnostic_context;
 
 #[path = "maintenance_spec/realm_filters.rs"]
 mod realm_filters;
+
+#[path = "maintenance_spec/doctor_probes.rs"]
+mod doctor_probes;
