@@ -505,7 +505,11 @@ fn installed_shim_names_the_install_command_when_the_rust_binary_is_missing() {
         String::from_utf8(output.stderr).expect("stderr"),
         format!(
             "attention: Rust binary is missing; run {}/scripts/install-cli.sh and retry.\n",
-            scratch.0.canonicalize().expect("canonical scratch").display()
+            scratch
+                .0
+                .canonicalize()
+                .expect("canonical scratch")
+                .display()
         )
     );
 }
