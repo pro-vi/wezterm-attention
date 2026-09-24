@@ -3748,6 +3748,23 @@ test("a local pane naming another mux's pane of the same number is refused, not 
   materialize_v2_fixture(53)
 end)
 
+test("a GUI with the manual renderer still asks who its mux is", function()
+  local socket = "/test/own-gui-manual.sock"
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  local first = #(handlers["update-status"] or {}) + 1
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root })
+  local previous = wezterm.run_child_process
+  wezterm.run_child_process = function() return true, own_source_response(socket, string.rep("d", 64)), "" end
+  local window = window_double({ tabs = {}, focused = false })
+  local ok, failure = pcall(with_gui_socket, socket, function()
+    for index = first, #(handlers["update-status"] or {}) do handlers["update-status"][index](window) end
+  end)
+  wezterm.run_child_process = previous
+  assert(ok, failure)
+  assert(instance._internal.tab_source(), "local panes are checked against the answer, so it is asked for")
+end)
+
 test("a local pane naming this GUI's own mux is read, and another incarnation of it is not", function()
   local socket = "/test/own-gui-2.sock"
   local fixture_incarnation = protocol_fixture.wire_sample.address.incarnation_id

@@ -779,11 +779,14 @@ function M.apply_to_config(config, opts)
 
   -- ── Renderer: format-tab-title ────────────────────────────────────────
 
+  -- Whatever the renderer: a local pane's published identity is checked
+  -- against this answer as well as the bar publishing under it.
+  -- This callback may yield; pane-state polling has already finished in its own callback.
+  wezterm.on("update-status", function()
+    settle_tab_source(os.getenv("WEZTERM_UNIX_SOCKET"))
+  end)
+
   if renderer == "tab" then
-    -- This callback may yield; pane-state polling has already finished in its own callback.
-    wezterm.on("update-status", function()
-      settle_tab_source(os.getenv("WEZTERM_UNIX_SOCKET"))
-    end)
     wezterm.on("format-tab-title", function(tab, tabs, panes, cfg, hover, max_width)
       -- Read-only. WezTerm may call this at any moment, including for a window
       -- the user is not looking at, so acknowledgement belongs in poll() where
