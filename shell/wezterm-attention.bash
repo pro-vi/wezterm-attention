@@ -22,11 +22,17 @@ _WEZTERM_ATTENTION_IN_HOOK=0
 # that is not a NAME=value assignment, with shell quoting removed. It stops at
 # that word: the rest of the command can be kilobytes of literal text, and
 # every character read costs time before the command starts.
+#
+# Bash walks the whole string for ${#input} and for every ${input:index:1}, so
+# the length is taken once and characters are read from a 256-character window
+# taken once per 256 characters. A leading assignment of n characters then
+# costs about n*n/256 for the windows plus n*256 for the reads, not n*n.
 _wezterm_attention_find_command_word() {
   _wezterm_attention_command_word=
-  local input=$1 token= quote= character index escaped=0
-  for ((index = 0; index < ${#input}; index++)); do
-    character=${input:index:1}
+  local input=$1 length=${#1} window= token= quote= character index escaped=0
+  for ((index = 0; index < length; index++)); do
+    if ((index % 256 == 0)); then window=${input:index:256}; fi
+    character=${window:index % 256:1}
     if [ "$escaped" -eq 1 ]; then token+=$character; escaped=0; continue; fi
     if [ "$character" = "\\" ]; then escaped=1; continue; fi
     if [ -n "$quote" ]; then

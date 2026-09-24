@@ -234,6 +234,25 @@ else
   fail "a command with a 64 KiB literal is classified without reading all of it (status $long_status)"
 fi
 
+# An assignment before the command word has to be read whole. Bash walks the
+# whole string to find its length and to take one character from it, so a
+# scan that does either once per character takes time quadratic in the
+# assignment.
+assignment_status=0
+env -i HOME="$scratch/home" PATH=/usr/bin:/bin LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 \
+  perl -e 'alarm shift; exec @ARGV or die "cannot run $ARGV[0]: $!\n"' 5 \
+  "$bash_under_test" --noprofile --norc -c '
+    source "$1"
+    literal=$(printf "%032768d" 0)
+    _wezterm_attention_supported_command "PAYLOAD=\"$literal\" claude" &&
+      ! _wezterm_attention_supported_command "PAYLOAD=\"$literal\" echo"
+  ' _ "$integration" || assignment_status=$?
+if [ "$assignment_status" -eq 0 ]; then
+  pass "a command after a 32 KiB assignment is classified in under five seconds"
+else
+  fail "a command after a 32 KiB assignment is classified in under five seconds (status $assignment_status)"
+fi
+
 words_status=0
 env -i HOME="$scratch/home" PATH=/usr/bin:/bin "$bash_under_test" --noprofile --norc -c '
   source "$1"
