@@ -47,6 +47,7 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 
 - A prompt tints the pane `thinking` straight away, instead of waiting for the first tool call.
 - `thinking` from v2 records animates like the v1 spinner.
+- The tab text published in `tabs/*.json` always shows the spinner's first frame, so a spinning tab does not rewrite that file every second. The bar on screen still animates.
 - A Claude turn that ends on an API error (`StopFailure`) shows `notify` instead of staying on `thinking` until its 30-minute timeout. A Codex `Interrupt` clears the activity.
 - A sub-agent waiting for permission raises `notify` on its pane.
 - Forked Claude and Codex sessions (`SessionStart` with source `fork`) are bound.

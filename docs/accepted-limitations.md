@@ -170,7 +170,7 @@ a decoded fixture cannot express the difference.
 A pane's v1 flat marker files are named by its pane id. Deciding that nobody writes
 them any more is not a question about one window. Before unlinking, the plugin
 walks the mux -- every window, every tab, every pane -- and collects the names
-in use. Attention's writers no longer project those names for panes with v2 records,
+in use. Attention's writers do not project those names for panes with v2 records,
 so the walk runs only for absent panes that used v1 flat markers.
 
 Two consequences are deliberate.
@@ -228,8 +228,10 @@ stay on disk:
   delete `tabs/<incarnation id>-<window id>.json` by hand once no GUI with that
   window is running.
 - **Temporary files from an interrupted write, outside a tree being removed.**
-  They no longer stop a binding or pane tree from being pruned, and they go with
-  that tree when it is, but nothing collects one on its own.
+  So is a review that Alt+B had moved aside to `<review>.json.<session>.clear`
+  when it was interrupted. They do not stop a binding or pane tree from being
+  pruned, and they go with that tree when it is, but sweep collects none on its
+  own.
 - **Subagent records below the retention floor.** A child record older than its
   binding's floor is already ignored by every reader. It stays until its binding
   or pane tree is removed.
@@ -239,6 +241,44 @@ stay on disk:
 
 Collecting any of these would be a new deletion, and would need the same
 evidence rule the others have.
+
+## A running mux server whose socket file was deleted can lose its panes' records
+
+Sweep counts a pane as absent once for a server whose socket path no longer
+exists only when the process probe answers that no running process carries that
+socket and pane id. A failed probe is never a sighting. But macOS hides the
+environment of its own system binaries, Apple's `/bin/zsh` and `/bin/bash`
+among them, so a pane where only such a shell runs carries nothing the probe can
+see. If the socket file of a mux server that is still running is deleted, those
+panes read as absent: two sweeps a minute apart end their bindings, and 30 days
+later two more let `sweep --apply` remove their trees. A pane where an agent
+runs is seen through the agent's own process, unless that is a system binary
+too.
+
+Nothing outside the server can tell a deleted socket file from a stopped
+server when every process in the pane hides its environment. Keeping every such
+pane's records for good would be the other choice, and would leave the records of
+every mux that exited on disk.
+
+## After a reboot, pane retention can wait without bound
+
+Absence sightings and binding ends are ordered by the monotonic clock, which
+restarts at boot. A sighting recorded before a reboot reads as later than now and
+restarts the count, which costs a minute. A binding end recorded before a reboot
+is worse: no sighting from the new boot can be shown to follow it until the new
+uptime passes the uptime at which the end was recorded, so retention of that
+pane's tree waits until then. A machine rebooted more often than that never
+removes the tree. This errs toward keeping records: nothing is removed early.
+
+## Removing a pane tree removes the lock files it holds
+
+Pane retention removes the pane's whole directory while it holds the pane's
+claim lock and the launch lock, and those lock files are inside that directory. A
+writer that opened the old lock file and is waiting on it takes the lock on the
+removed file once sweep lets go, and a later writer creates a new lock file at
+the same path and takes that one, so both can hold "the" lock at once. This can
+only happen on a pane whose binding ended more than 30 days ago and that sweep
+has since seen absent twice, where no writer is expected.
 
 ## `mark clear` in a pane with no binding removes only the review
 
@@ -312,7 +352,8 @@ should follow. Most other modules are still public, `records` most consequential
 because this crate's own tests drive them.
 
 Documenting the boundary does not prevent an external program from compiling
-against internals; only privacy does that. Making `records` private is not a
+against internals; only privacy does that. `publish = false` in `Cargo.toml`
+keeps the crate off crates.io, so such a program has to build from a checkout. Making `records` private is not a
 one-line change either, because the currently public, unstable
 `read_pane_facts_with_ports` needs
 publicly nameable reader types, and several test files mix white-box storage
