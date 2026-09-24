@@ -225,6 +225,8 @@ pub struct PaneFacts {
     pub review: EvidenceCollection,
     pub lifecycle: LifecycleView,
     pub diagnostics: Vec<Diagnostic>,
+    /// Where the call spent its time, in the shape a bindings answer uses.
+    pub timing_ms: BindingTiming,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Eq, PartialEq)]
@@ -328,6 +330,7 @@ impl PaneFacts {
             review: EvidenceCollection::empty(RecordAvailability::Unavailable),
             lifecycle: LifecycleView::empty(LifecycleAvailability::Unavailable),
             diagnostics,
+            timing_ms: BindingTiming::default(),
         }
     }
     pub fn complete(&self) -> bool {
@@ -355,6 +358,43 @@ pub fn read_pane_facts(root: &Path, scope: &PaneScope) -> Result<PaneFacts> {
 }
 
 pub fn read_pane_facts_with_ports(
+    root: &Path,
+    scope: &PaneScope,
+    reader: &dyn RecordReader,
+    clock: &dyn Clock,
+    panes: Option<&dyn PaneLister>,
+    processes: Option<&dyn ProcessProbe>,
+) -> Result<PaneFacts> {
+    let started = Instant::now();
+    let listed_once = panes.map(ListOncePerSocket::new);
+    let probed_once = processes.map(ProbeOncePerAssembly::new);
+    let mut facts = read_pane_facts_once(
+        root,
+        scope,
+        reader,
+        clock,
+        listed_once.as_ref().map(|lister| lister as &dyn PaneLister),
+        probed_once.as_ref().map(|probe| probe as &dyn ProcessProbe),
+    )?;
+    facts.timing_ms = BindingTiming::from_wall(
+        started,
+        SpawnSpend {
+            pane_list: listed_once
+                .as_ref()
+                .map(ListOncePerSocket::spent)
+                .unwrap_or_default(),
+            process_list: probed_once
+                .as_ref()
+                .map(ProbeOncePerAssembly::spent)
+                .unwrap_or_default(),
+        },
+    );
+    Ok(facts)
+}
+
+/// One inspection, with ports that list each socket and take the process
+/// listing at most once, so the rival lookup reuses what presence asked.
+fn read_pane_facts_once(
     root: &Path,
     scope: &PaneScope,
     reader: &dyn RecordReader,
@@ -827,6 +867,7 @@ pub fn read_pane_facts_with_ports(
         review,
         lifecycle,
         diagnostics,
+        timing_ms: BindingTiming::default(),
     })
 }
 
@@ -1219,7 +1260,7 @@ pub fn read_bindings(root: &Path) -> Result<(Vec<BindingRow>, Vec<Diagnostic>)> 
     read_bindings_with_ports(root, None, None)
 }
 
-/// Where a bindings query spent its wall time.
+/// Where a bindings or inspect query spent its wall time.
 ///
 /// A query that took seconds either waited on a subprocess or read a lot of
 /// files, and a caller's own clock cannot tell those apart. `pane_list` is the
@@ -1253,6 +1294,15 @@ impl BindingTiming {
             "process_list": u64::try_from(self.process_list.as_millis()).unwrap_or(u64::MAX),
             "records": u64::try_from(self.records.as_millis()).unwrap_or(u64::MAX),
         })
+    }
+}
+
+impl Serialize for BindingTiming {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        self.as_millis().serialize(serializer)
     }
 }
 

@@ -157,3 +157,40 @@ fn a_stale_launch_is_unconfirmed_not_invalid() {
     assert_eq!(facts.binding_health, BindingHealth::Valid);
     assert_eq!(facts.reader_confidence, ReaderConfidence::Unconfirmed);
 }
+
+struct SlowPanes;
+
+impl PaneLister for SlowPanes {
+    fn list(&self, _socket_path: &str) -> wezterm_attention::protocol::Result<Vec<PaneRow>> {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        Ok(vec![PaneRow {
+            pane_id: "42".to_owned(),
+            tty_name: None,
+        }])
+    }
+}
+
+/// An inspect that took seconds says which phase took them, as a bindings
+/// answer does: the pane listing, the process probe, or the record reads.
+#[test]
+fn inspect_says_where_its_time_went() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let facts = read_pane_facts_with_ports(
+        &setup.root(),
+        &current_scope(&setup, "session-a"),
+        &FileRecords,
+        &setup.clock,
+        Some(&SlowPanes),
+        Some(&setup.processes),
+    )
+    .expect("inspect");
+    let value = serde_json::to_value(&facts).expect("facts serialize");
+    let timing = &value["timing_ms"];
+    for phase in ["pane_list", "process_list", "records"] {
+        assert!(timing[phase].is_u64(), "{phase}: {timing}");
+    }
+    assert!(timing["pane_list"].as_u64().unwrap() >= 150, "{timing}");
+    assert!(timing["records"].as_u64().unwrap() < 150, "{timing}");
+    assert_eq!(timing["process_list"], 0, "the pane was listed: {timing}");
+}
