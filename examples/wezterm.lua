@@ -344,14 +344,17 @@ config.quick_select_patterns = {
   "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", -- UUIDs
 }
 
--- Copy mode: vim-style / and ? search
-local key_tables = wezterm.gui.default_key_tables()
-table.insert(key_tables.copy_mode, { key = '/', mods = 'NONE', action = act.CopyMode 'EditPattern' })
-table.insert(key_tables.copy_mode, { key = '?', mods = 'NONE', action = act.CopyMode 'EditPattern' })
-table.insert(key_tables.copy_mode, { key = 'n', mods = 'NONE', action = act.CopyMode 'NextMatch' })
-table.insert(key_tables.copy_mode, { key = 'N', mods = 'NONE', action = act.CopyMode 'PriorMatch' })
-table.insert(key_tables.copy_mode, { key = 'N', mods = 'SHIFT', action = act.CopyMode 'PriorMatch' })
-config.key_tables = key_tables
+-- Copy mode: vim-style / and ? search. wezterm-mux-server reads this file
+-- too, and it has no wezterm.gui; key tables are the GUI's alone.
+if wezterm.gui then
+  local key_tables = wezterm.gui.default_key_tables()
+  table.insert(key_tables.copy_mode, { key = '/', mods = 'NONE', action = act.CopyMode 'EditPattern' })
+  table.insert(key_tables.copy_mode, { key = '?', mods = 'NONE', action = act.CopyMode 'EditPattern' })
+  table.insert(key_tables.copy_mode, { key = 'n', mods = 'NONE', action = act.CopyMode 'NextMatch' })
+  table.insert(key_tables.copy_mode, { key = 'N', mods = 'NONE', action = act.CopyMode 'PriorMatch' })
+  table.insert(key_tables.copy_mode, { key = 'N', mods = 'SHIFT', action = act.CopyMode 'PriorMatch' })
+  config.key_tables = key_tables
+end
 
 -- Auto-save session every 15 minutes
 resurrect.state_manager.periodic_save()
