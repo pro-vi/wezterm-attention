@@ -422,11 +422,18 @@ fn absolute_path(value: &str, name: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(value))
 }
 
-pub fn pane_path(root: &Path, address: &PaneAddress) -> PathBuf {
-    root.join("v2/realms")
-        .join(&address.realm_id)
+pub fn realm_path(root: &Path, realm_id: &str) -> PathBuf {
+    root.join("v2/realms").join(realm_id)
+}
+
+pub fn incarnation_path(root: &Path, realm_id: &str, incarnation_id: &str) -> PathBuf {
+    realm_path(root, realm_id)
         .join("incarnations")
-        .join(&address.incarnation_id)
+        .join(incarnation_id)
+}
+
+pub fn pane_path(root: &Path, address: &PaneAddress) -> PathBuf {
+    incarnation_path(root, &address.realm_id, &address.incarnation_id)
         .join("panes")
         .join(&address.pane_id)
 }

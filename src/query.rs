@@ -12,8 +12,8 @@ use crate::identity::socket_identity;
 use crate::observations::{LifecycleAvailability, LifecycleSnapshot, LifecycleView};
 use crate::protocol::{AttentionError, Diagnostic, Result, hex64_text};
 use crate::records::{
-    FileRecords, RecordReader, ends_binding, launch_path, pane_path, session_dir,
-    session_entry_path, session_index_path,
+    FileRecords, RecordReader, ends_binding, incarnation_path, launch_path, pane_path, realm_path,
+    session_dir, session_entry_path, session_index_path,
 };
 use crate::records::{RecordIdentity, RecordRead, read_record, read_record_typed};
 use crate::wezterm::Clock;
@@ -414,19 +414,16 @@ fn read_pane_facts_once(
     use RecordAvailability as A;
     // Scope is constructed/decoded through validation before any record or process I/O.
     let address = &scope.address;
-    let realm_root = root.join("v2/realms").join(&address.realm_id);
     let realm = RecordFacet::read(
         reader,
-        &realm_root.join("realm.json"),
+        &realm_path(root, &address.realm_id).join("realm.json"),
         "realm",
         &RecordIdentity::realm(&address.realm_id),
         "realm",
     );
     let incarnation = RecordFacet::read(
         reader,
-        &realm_root
-            .join("incarnations")
-            .join(&address.incarnation_id)
+        &incarnation_path(root, &address.realm_id, &address.incarnation_id)
             .join("incarnation.json"),
         "incarnation",
         &RecordIdentity::incarnation(&address.realm_id, &address.incarnation_id),
@@ -1126,11 +1123,7 @@ pub fn read_bindings_for_socket_timed(
         realm_id,
         incarnation_id,
     };
-    let selected = root
-        .join("v2/realms")
-        .join(&scope.realm_id)
-        .join("incarnations")
-        .join(&scope.incarnation_id);
+    let selected = incarnation_path(root, &scope.realm_id, &scope.incarnation_id);
     let mut files = Vec::new();
     let mut diagnostics = Vec::new();
     collect_selected_binding_files(root, &selected, &mut files, &mut diagnostics, true);
@@ -1650,43 +1643,15 @@ pub(crate) fn pane_evidence(
     let Some(panes) = panes else {
         return unavailable();
     };
-    let realm_path = root
-        .join("v2/realms")
-        .join(&address.realm_id)
-        .join("realm.json");
-    let incarnation_path = root
-        .join("v2/realms")
-        .join(&address.realm_id)
-        .join("incarnations")
-        .join(&address.incarnation_id)
-        .join("incarnation.json");
-    let realm = match read_record(
-        &realm_path,
-        Some("realm"),
-        &RecordIdentity::realm(&address.realm_id),
-    ) {
-        Ok(Some(record)) => record,
+    let socket_path = match recorded_socket(root, address) {
+        Ok(Some(socket_path)) => socket_path,
         Ok(None) => return unavailable(),
         Err(error) => {
             diagnostics.push(error.diagnostic);
             return unavailable();
         }
     };
-    match read_record(
-        &incarnation_path,
-        Some("incarnation"),
-        &RecordIdentity::incarnation(&address.realm_id, &address.incarnation_id),
-    ) {
-        Ok(Some(_)) => {}
-        Ok(None) => return unavailable(),
-        Err(error) => {
-            diagnostics.push(error.diagnostic);
-            return unavailable();
-        }
-    }
-    let Some(socket_path) = realm.get("socket_path").and_then(Value::as_str) else {
-        return unavailable();
-    };
+    let socket_path = socket_path.as_str();
     match server_state(socket_path, address, processes) {
         ServerState::Current => {}
         ServerState::Exited => return PaneEvidence::Observed("verified_absent".to_owned()),
@@ -1760,29 +1725,36 @@ pub(crate) fn record_address(record: &Value) -> Option<PaneAddress> {
     serde_json::from_value(record.get("address")?.clone()).ok()
 }
 
-/// The socket `pane_presence` would list for this address: the realm's
-/// recorded socket, when it still carries this incarnation. None when it would
-/// answer without listing.
-fn realm_socket(root: &Path, address: &PaneAddress) -> Option<String> {
-    let realm = root.join("v2/realms").join(&address.realm_id);
-    let record = read_record(
-        &realm.join("realm.json"),
+/// The socket a pane's realm record names, when both the realm and this
+/// incarnation are recorded.
+fn recorded_socket(root: &Path, address: &PaneAddress) -> Result<Option<String>> {
+    let Some(realm) = read_record(
+        &realm_path(root, &address.realm_id).join("realm.json"),
         Some("realm"),
         &RecordIdentity::realm(&address.realm_id),
-    )
-    .ok()??;
-    read_record(
-        &realm
-            .join("incarnations")
-            .join(&address.incarnation_id)
+    )?
+    else {
+        return Ok(None);
+    };
+    let incarnation = read_record(
+        &incarnation_path(root, &address.realm_id, &address.incarnation_id)
             .join("incarnation.json"),
         Some("incarnation"),
         &RecordIdentity::incarnation(&address.realm_id, &address.incarnation_id),
+    )?;
+    Ok(incarnation.and(string(&realm, "socket_path")))
+}
+
+/// The socket `pane_evidence` would list for this address: the realm's
+/// recorded socket, when it still carries this incarnation. None when it would
+/// answer without listing.
+fn realm_socket(root: &Path, address: &PaneAddress) -> Option<String> {
+    let socket = recorded_socket(root, address).ok()??;
+    matches!(
+        recorded_server(&socket, &address.realm_id, &address.incarnation_id),
+        RecordedServer::Current
     )
-    .ok()??;
-    let socket = string(&record, "socket_path")?;
-    let (realm_id, incarnation_id, _) = socket_identity(&socket).ok()?;
-    (realm_id == address.realm_id && incarnation_id == address.incarnation_id).then_some(socket)
+    .then_some(socket)
 }
 
 /// Whether the end record beside a binding ends it, by [`ends_binding`]. An

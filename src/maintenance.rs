@@ -20,8 +20,8 @@ use crate::query::{
 };
 use crate::records::{
     CommitPlan, RecordIdentity, Replacement, atomic_replace_if_different, binding_session_entry,
-    commit_nested_with, ends_binding, launch_path, pane_path, read_record, remove_file_durable,
-    session_index_marker, session_index_path, with_lock,
+    commit_nested_with, ends_binding, incarnation_path, launch_path, pane_path, read_record,
+    realm_path, remove_file_durable, session_index_marker, session_index_path, with_lock,
 };
 use crate::wezterm::{Clock, PaneLister, Presence, ProcessProbe};
 
@@ -511,18 +511,14 @@ fn environment_probe(
             return "finding";
         }
     };
-    let realm = root.join("v2/realms").join(&realm_id);
     let published = read_record(
-        &realm.join("realm.json"),
+        &realm_path(root, &realm_id).join("realm.json"),
         Some("realm"),
         &RecordIdentity::realm(&realm_id),
     )
     .is_ok_and(|record| record.is_some())
         && read_record(
-            &realm
-                .join("incarnations")
-                .join(&incarnation_id)
-                .join("incarnation.json"),
+            &incarnation_path(root, &realm_id, &incarnation_id).join("incarnation.json"),
             Some("incarnation"),
             &RecordIdentity::incarnation(&realm_id, &incarnation_id),
         )
@@ -1099,7 +1095,7 @@ fn fold_kept_history(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
                 json!({
                     "realm_id": realm_id,
                     "incarnation_id": incarnation_id,
-                    "path": format!("v2/realms/{realm_id}/incarnations/{incarnation_id}"),
+                    "path": incarnation_path(Path::new(""), &realm_id, &incarnation_id),
                     "pane_count": panes.len(),
                 })
             })

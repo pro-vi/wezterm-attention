@@ -14,8 +14,8 @@ use uuid::Uuid;
 use crate::identity::{PaneAddress, pane_address};
 use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, manifest};
 use crate::records::{
-    CommitPlan, RecordIdentity, Replacement, commit, mkdir_private, pane_path, read_record,
-    session_index_marker, session_index_path, state_root,
+    CommitPlan, RecordIdentity, Replacement, commit, incarnation_path, mkdir_private, pane_path,
+    read_record, realm_path, session_index_marker, session_index_path, state_root,
 };
 use crate::wezterm::{RuntimePorts, publication_bytes};
 
@@ -172,10 +172,8 @@ pub fn claim_launch_at_tty(
     let claim_path = pane.join("claim.json");
     let proposed = claim_record(&address, &launch_id, tty_path, &fingerprint, &observation);
     let (realm_record, incarnation_record) = manifests(&address, &metadata)?;
-    let realm_path = root.join("v2/realms").join(&address.realm_id);
-    let incarnation_path = realm_path
-        .join("incarnations")
-        .join(&address.incarnation_id);
+    let realm_path = realm_path(&root, &address.realm_id);
+    let incarnation_path = incarnation_path(&root, &address.realm_id, &address.incarnation_id);
     let reviews_path = pane.join("reviews");
 
     let selected = commit(
