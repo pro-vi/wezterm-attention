@@ -41,12 +41,13 @@ wezterm_attention_claim() {
   return $claim_status
 }
 
-# The third argument is the line as it runs, aliases expanded.
+# The third argument is the line as it runs, aliases expanded. The line is
+# matched whole rather than trimmed first: stripping trailing blanks with a
+# pattern tries every suffix, so its cost grows with the square of the line's
+# length, and a pasted heredoc can be hundreds of kilobytes.
 wezterm_attention_preexec() {
   setopt local_options extended_glob
-  local line=${3:-$1}
-  line=${${line##[[:space:]]#}%%[[:space:]]#}
-  if [[ $line == wezterm_attention_claim ]]; then
+  if [[ ${3:-$1} == [[:space:]]#wezterm_attention_claim[[:space:]]# ]]; then
     typeset -g _WEZTERM_ATTENTION_LAST_LINE=claim
   else
     typeset -g _WEZTERM_ATTENTION_LAST_LINE=other

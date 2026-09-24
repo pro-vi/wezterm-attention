@@ -115,6 +115,33 @@ check_typed "a claim alone on its line keeps the launch id for the agent on the 
   "agent=$launch
 next="
 
+# The preexec hook runs before every command, and a pasted heredoc can make
+# the line hundreds of kilobytes long. Stripping trailing blanks with a
+# pattern tries every suffix of the line, which takes time quadratic in it.
+cat > "$scratch/long-line.zsh" <<'EOF'
+source "$1"
+# Zsh runs preexec hooks before each line of a script too, which would
+# overwrite what the calls below record.
+add-zsh-hook -d preexec wezterm_attention_preexec
+line="  cat <<X ${(l:524288::a:)}  "
+wezterm_attention_preexec "$line" "$line" "$line"
+[[ $_WEZTERM_ATTENTION_LAST_LINE == other ]] || exit 1
+line=$' \t wezterm_attention_claim \n'
+wezterm_attention_preexec "$line" "$line" "$line"
+[[ $_WEZTERM_ATTENTION_LAST_LINE == claim ]]
+EOF
+long_status=0
+env -i HOME="$scratch" PATH=/usr/bin:/bin \
+  perl -e 'alarm shift; exec @ARGV or die "cannot run $ARGV[0]: $!\n"' 5 \
+  "$zsh_under_test" -f "$scratch/long-line.zsh" "$integration" > "$scratch/out" 2>&1 || long_status=$?
+if [ "$long_status" -eq 0 ]; then
+  printf 'ok - %s\n' "a 512 KiB command line is classified in under five seconds"
+else
+  printf 'not ok - %s\n' "a 512 KiB command line is classified in under five seconds (status $long_status)"
+  sed 's/^/#   /' "$scratch/out"
+  failures=$((failures + 1))
+fi
+
 # Ctrl-C while the writer runs stops that one claim or publication, and the
 # ones after it still happen. A person types Ctrl-C at a terminal, so these
 # drive zsh through one, with startup files in a scratch ZDOTDIR.
