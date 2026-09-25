@@ -28,8 +28,11 @@
 //!
 //! A supported operation's signature is supported with it. [`claim_launch`] and
 //! [`publish_current`] take [`wezterm::RuntimePorts`], so that type, the
-//! [`wezterm::Clock`], [`wezterm::TtyWriter`] and [`wezterm::PaneLister`] traits
-//! it holds, and [`wezterm::PaneRow`] in the last of those are supported too.
+//! [`wezterm::Clock`], [`wezterm::TtyWriter`], [`wezterm::PaneLister`] and
+//! [`wezterm::ProcessInspector`] traits it holds, [`wezterm::PaneRow`] in the
+//! third, and the [`wezterm::ProcessRead`], [`wezterm::ProcessFacts`],
+//! [`wezterm::ProcessStart`] and [`wezterm::ControllingTerminal`] answers of
+//! the fourth are supported too.
 //! [`lifecycle::outcome::AdmittedHook`] likewise carries
 //! [`providers::ProviderAction`], [`observations::Actor`] and
 //! [`observations::NativeCorrelation`] in its public fields. A declaration

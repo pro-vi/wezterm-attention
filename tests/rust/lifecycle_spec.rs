@@ -210,6 +210,7 @@ impl Setup {
             clock: &self.clock,
             tty: &self.tty,
             panes: &self.panes,
+            processes: &wezterm_attention::wezterm::SystemProcessInspector,
         }
     }
 
@@ -1272,6 +1273,7 @@ fn launch_rotation_after_resolution_cannot_add_old_execution_facts() {
                 clock: &clock,
                 tty: &setup.tty,
                 panes: &setup.panes,
+                processes: &wezterm_attention::wezterm::SystemProcessInspector,
             };
             apply_provider_event(
                 &event(
@@ -1300,6 +1302,7 @@ fn launch_rotation_after_resolution_cannot_add_old_execution_facts() {
             clock: &newer_clock,
             tty: &setup.tty,
             panes: &setup.panes,
+            processes: &wezterm_attention::wezterm::SystemProcessInspector,
         };
         let claimed = wezterm_attention::claim_launch(&newer, &ports);
         clock.released.wait();

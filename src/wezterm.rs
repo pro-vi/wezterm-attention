@@ -229,6 +229,253 @@ pub struct RuntimePorts<'a> {
     pub clock: &'a dyn Clock,
     pub tty: &'a dyn TtyWriter,
     pub panes: &'a dyn PaneLister,
+    pub processes: &'a dyn ProcessInspector,
+}
+
+/// A process's controlling terminal as the kernel records it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControllingTerminal {
+    /// The terminal's device number.
+    Device(u64),
+    /// The process has no controlling terminal.
+    Absent,
+    /// The kernel's answer does not say which: the process is marked as
+    /// having a terminal and no device is named.
+    Unknown,
+}
+
+/// When a process started, as the kernel records it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcessStart {
+    pub seconds: u64,
+    pub microseconds: u32,
+}
+
+/// What the kernel says of one live or zombie process.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessFacts {
+    pub pid: i32,
+    pub parent_pid: i32,
+    pub process_group: i32,
+    pub terminal: ControllingTerminal,
+    /// The foreground process group of the controlling terminal. It means
+    /// nothing unless `terminal` names a device.
+    pub terminal_foreground_group: i32,
+    /// The effective user id.
+    pub uid: u32,
+    pub start: ProcessStart,
+    pub traced: bool,
+    pub zombie: bool,
+}
+
+/// The answer to one question about a pid.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProcessRead {
+    Found(ProcessFacts),
+    /// No process has this pid.
+    Gone,
+    /// The question could not be answered: the call failed, was refused, or
+    /// returned less or other than one whole record for this pid.
+    Unknown,
+}
+
+/// The kernel's process table and terminal devices, as the claim an agent
+/// makes from its own hook needs them.
+pub trait ProcessInspector: Send + Sync {
+    /// Whether this platform lets an agent claim a pane from its own hook.
+    fn self_claim_supported(&self) -> bool;
+    fn own_pid(&self) -> i32;
+    fn process(&self, pid: i32) -> ProcessRead;
+    /// The kernel's id for the current boot as a lowercase UUID, or `None`
+    /// when it cannot be read or is not a UUID.
+    fn boot_session(&self) -> Option<String>;
+    /// The device number of the terminal at `path`, or `None` unless it is a
+    /// character device this user owns.
+    fn terminal_device(&self, path: &str) -> Option<u64>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemProcessInspector;
+
+impl ProcessInspector for SystemProcessInspector {
+    fn self_claim_supported(&self) -> bool {
+        cfg!(target_os = "macos")
+    }
+
+    fn own_pid(&self) -> i32 {
+        i32::try_from(std::process::id()).unwrap_or(0)
+    }
+
+    fn process(&self, pid: i32) -> ProcessRead {
+        read_process(pid)
+    }
+
+    fn boot_session(&self) -> Option<String> {
+        read_boot_session()
+    }
+
+    fn terminal_device(&self, path: &str) -> Option<u64> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let metadata = fs::metadata(path).ok()?;
+        (metadata.file_type().is_char_device() && metadata.uid() == unsafe { libc::geteuid() })
+            .then(|| u64::from(metadata.rdev() as u32))
+    }
+}
+
+/// `sizeof(struct kinfo_proc)` on 64-bit macOS, and the offsets of the fields
+/// read from it, from `<sys/sysctl.h>` and `<sys/proc.h>`: `kp_proc` is the
+/// 296-byte `struct extern_proc`, `kp_eproc` the 352-byte `struct eproc`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod kinfo {
+    pub const SIZE: usize = 648;
+    pub const START_SECONDS: usize = 0;
+    pub const START_MICROSECONDS: usize = 8;
+    pub const FLAG: usize = 32;
+    pub const STAT: usize = 36;
+    pub const PID: usize = 40;
+    pub const EFFECTIVE_UID: usize = 420;
+    pub const PARENT_PID: usize = 560;
+    pub const PROCESS_GROUP: usize = 564;
+    pub const TERMINAL_DEVICE: usize = 572;
+    pub const TERMINAL_GROUP: usize = 576;
+    /// `P_CONTROLT`: the process has a controlling terminal.
+    pub const CONTROLLING_TERMINAL: i32 = 0x2;
+    /// `P_TRACED`: a debugger is attached.
+    pub const TRACED: i32 = 0x800;
+    /// `SZOMB`: exited and not yet reaped.
+    pub const ZOMBIE: i8 = 5;
+    /// `NODEV`: the device a process without a terminal reports.
+    pub const NO_DEVICE: i32 = -1;
+}
+
+/// One `kinfo_proc` for `pid`, as `sysctl` returned it in `buffer`.
+///
+/// No bytes is the kernel's answer for a pid no process has. Anything but one
+/// whole record naming `pid` answers nothing.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn parse_kinfo_proc(buffer: &[u8], pid: i32) -> ProcessRead {
+    if buffer.is_empty() {
+        return ProcessRead::Gone;
+    }
+    if buffer.len() != kinfo::SIZE {
+        return ProcessRead::Unknown;
+    }
+    let i32_at = |offset: usize| {
+        i32::from_ne_bytes(
+            buffer[offset..offset + 4]
+                .try_into()
+                .expect("four bytes inside the record"),
+        )
+    };
+    let seconds = i64::from_ne_bytes(
+        buffer[kinfo::START_SECONDS..kinfo::START_SECONDS + 8]
+            .try_into()
+            .expect("eight bytes inside the record"),
+    );
+    let microseconds = i32_at(kinfo::START_MICROSECONDS);
+    let (Ok(seconds), Ok(microseconds)) = (u64::try_from(seconds), u32::try_from(microseconds))
+    else {
+        return ProcessRead::Unknown;
+    };
+    if i32_at(kinfo::PID) != pid || microseconds >= 1_000_000 {
+        return ProcessRead::Unknown;
+    }
+    let flag = i32_at(kinfo::FLAG);
+    let device = i32_at(kinfo::TERMINAL_DEVICE);
+    let terminal = if device != kinfo::NO_DEVICE {
+        ControllingTerminal::Device(u64::from(device as u32))
+    } else if flag & kinfo::CONTROLLING_TERMINAL == 0 {
+        ControllingTerminal::Absent
+    } else {
+        ControllingTerminal::Unknown
+    };
+    ProcessRead::Found(ProcessFacts {
+        pid,
+        parent_pid: i32_at(kinfo::PARENT_PID),
+        process_group: i32_at(kinfo::PROCESS_GROUP),
+        terminal,
+        terminal_foreground_group: i32_at(kinfo::TERMINAL_GROUP),
+        uid: i32_at(kinfo::EFFECTIVE_UID) as u32,
+        start: ProcessStart {
+            seconds,
+            microseconds,
+        },
+        traced: flag & kinfo::TRACED != 0,
+        zombie: buffer[kinfo::STAT] as i8 == kinfo::ZOMBIE,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn read_process(pid: i32) -> ProcessRead {
+    if pid <= 0 {
+        return ProcessRead::Unknown;
+    }
+    // Aligned for the record's eight-byte fields; one spare word shows a
+    // record larger than the one this code reads.
+    let mut buffer = [0_u64; kinfo::SIZE / 8 + 1];
+    let mut size = std::mem::size_of_val(&buffer);
+    let mut name = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
+    if unsafe {
+        libc::sysctl(
+            name.as_mut_ptr(),
+            4,
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return ProcessRead::Unknown;
+    }
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            buffer.as_ptr().cast::<u8>(),
+            size.min(std::mem::size_of_val(&buffer)),
+        )
+    };
+    parse_kinfo_proc(bytes, pid)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_process(_pid: i32) -> ProcessRead {
+    ProcessRead::Unknown
+}
+
+/// A boot session id as `kern.bootsessionuuid` gives it: a hyphenated UUID,
+/// in either case, with or without the C string's terminating NUL.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn parse_boot_session(bytes: &[u8]) -> Option<String> {
+    let bytes = bytes.strip_suffix(b"\0").unwrap_or(bytes);
+    let text = std::str::from_utf8(bytes).ok()?;
+    let parsed = uuid::Uuid::parse_str(text).ok()?;
+    let canonical = parsed.hyphenated().to_string();
+    canonical.eq_ignore_ascii_case(text).then_some(canonical)
+}
+
+#[cfg(target_os = "macos")]
+fn read_boot_session() -> Option<String> {
+    let mut buffer = [0_u8; 64];
+    let mut size = buffer.len();
+    let name = c"kern.bootsessionuuid";
+    if unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+    parse_boot_session(&buffer[..size.min(buffer.len())])
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_boot_session() -> Option<String> {
+    None
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1113,8 +1360,14 @@ pub fn default_ports<'a>(
     clock: &'a SystemClock,
     tty: &'a SystemTtyWriter,
     panes: &'a WeztermPaneLister,
+    processes: &'a SystemProcessInspector,
 ) -> RuntimePorts<'a> {
-    RuntimePorts { clock, tty, panes }
+    RuntimePorts {
+        clock,
+        tty,
+        panes,
+        processes,
+    }
 }
 
 fn base64(bytes: &[u8]) -> String {
@@ -1473,6 +1726,204 @@ mod tests {
             "opensesame",
         ] {
             assert!(!kept.contains(leaked), "{leaked} survived parsing: {kept}");
+        }
+    }
+
+    fn kinfo_record(pid: i32, flag: i32, stat: i8, device: i32) -> Vec<u8> {
+        use super::kinfo;
+        let mut record = vec![0_u8; kinfo::SIZE];
+        let mut put = |offset: usize, bytes: &[u8]| {
+            record[offset..offset + bytes.len()].copy_from_slice(bytes);
+        };
+        put(kinfo::START_SECONDS, &1_700_000_000_i64.to_ne_bytes());
+        put(kinfo::START_MICROSECONDS, &123_456_i32.to_ne_bytes());
+        put(kinfo::FLAG, &flag.to_ne_bytes());
+        put(kinfo::STAT, &[stat as u8]);
+        put(kinfo::PID, &pid.to_ne_bytes());
+        put(kinfo::EFFECTIVE_UID, &501_u32.to_ne_bytes());
+        put(kinfo::PARENT_PID, &77_i32.to_ne_bytes());
+        put(kinfo::PROCESS_GROUP, &66_i32.to_ne_bytes());
+        put(kinfo::TERMINAL_DEVICE, &device.to_ne_bytes());
+        put(kinfo::TERMINAL_GROUP, &66_i32.to_ne_bytes());
+        record
+    }
+
+    #[test]
+    fn a_process_record_answers_only_as_one_whole_record_for_the_pid_asked() {
+        use super::{ControllingTerminal, ProcessRead, ProcessStart, parse_kinfo_proc};
+        let ProcessRead::Found(facts) = parse_kinfo_proc(&kinfo_record(42, 0, 2, 0x1000003), 42)
+        else {
+            panic!("a whole record reads");
+        };
+        assert_eq!(facts.parent_pid, 77);
+        assert_eq!(facts.process_group, 66);
+        assert_eq!(facts.terminal_foreground_group, 66);
+        assert_eq!(facts.uid, 501);
+        assert_eq!(facts.terminal, ControllingTerminal::Device(0x1000003));
+        assert_eq!(
+            facts.start,
+            ProcessStart {
+                seconds: 1_700_000_000,
+                microseconds: 123_456
+            }
+        );
+        assert!(!facts.traced && !facts.zombie);
+
+        assert_eq!(parse_kinfo_proc(&[], 42), ProcessRead::Gone);
+        let whole = kinfo_record(42, 0, 2, 0x1000003);
+        for (label, bytes) in [
+            ("short", &whole[..whole.len() - 1]),
+            ("one byte", &whole[..1]),
+        ] {
+            assert_eq!(parse_kinfo_proc(bytes, 42), ProcessRead::Unknown, "{label}");
+        }
+        let mut longer = whole.clone();
+        longer.push(0);
+        assert_eq!(parse_kinfo_proc(&longer, 42), ProcessRead::Unknown);
+        assert_eq!(parse_kinfo_proc(&whole, 43), ProcessRead::Unknown);
+        let mut negative = whole.clone();
+        negative[..8].copy_from_slice(&(-1_i64).to_ne_bytes());
+        assert_eq!(parse_kinfo_proc(&negative, 42), ProcessRead::Unknown);
+        let mut past_second = whole;
+        past_second[8..12].copy_from_slice(&1_000_000_i32.to_ne_bytes());
+        assert_eq!(parse_kinfo_proc(&past_second, 42), ProcessRead::Unknown);
+    }
+
+    #[test]
+    fn a_process_record_says_whether_its_terminal_is_absent_or_unknown() {
+        use super::{ControllingTerminal, ProcessRead, parse_kinfo_proc};
+        let terminal = |flag, device| match parse_kinfo_proc(&kinfo_record(9, flag, 2, device), 9) {
+            ProcessRead::Found(facts) => facts.terminal,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(terminal(0, -1), ControllingTerminal::Absent);
+        assert_eq!(terminal(0x2, -1), ControllingTerminal::Unknown);
+        assert_eq!(terminal(0x2, 7), ControllingTerminal::Device(7));
+        let ProcessRead::Found(traced) = parse_kinfo_proc(&kinfo_record(9, 0x800, 5, -1), 9) else {
+            panic!("a whole record reads");
+        };
+        assert!(traced.traced && traced.zombie);
+    }
+
+    #[test]
+    fn a_boot_session_id_is_a_hyphenated_uuid_and_nothing_else() {
+        use super::parse_boot_session;
+        let lower = "0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b";
+        assert_eq!(
+            parse_boot_session(b"0F9A7C3E-51B2-4D6E-8A1B-2C3D4E5F6A7B\0").as_deref(),
+            Some(lower)
+        );
+        assert_eq!(parse_boot_session(lower.as_bytes()).as_deref(), Some(lower));
+        for malformed in [
+            &b""[..],
+            b"\0",
+            b"0f9a7c3e51b24d6e8a1b2c3d4e5f6a7b",
+            b"{0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b}",
+            b"0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b\n",
+            b"\xff\xfe",
+        ] {
+            assert_eq!(parse_boot_session(malformed), None, "{malformed:?}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_kernel_record_agrees_with_proc_pidinfo_for_this_process() {
+        use super::{ControllingTerminal, ProcessInspector, ProcessRead, SystemProcessInspector};
+        let inspector = SystemProcessInspector;
+        let pid = inspector.own_pid();
+        let ProcessRead::Found(facts) = inspector.process(pid) else {
+            panic!("this process reads");
+        };
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let filled = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdinfo).cast(),
+                size,
+            )
+        };
+        assert_eq!(filled, size);
+        assert_eq!(facts.pid, pid);
+        assert_eq!(facts.parent_pid as u32, info.pbi_ppid);
+        assert_eq!(facts.parent_pid, unsafe { libc::getppid() });
+        assert_eq!(facts.process_group as u32, info.pbi_pgid);
+        assert_eq!(facts.uid, info.pbi_uid);
+        assert_eq!(facts.uid, unsafe { libc::geteuid() });
+        assert_eq!(facts.start.seconds, info.pbi_start_tvsec);
+        assert_eq!(u64::from(facts.start.microseconds), info.pbi_start_tvusec);
+        match facts.terminal {
+            ControllingTerminal::Device(device) => {
+                assert_eq!(device, u64::from(info.e_tdev));
+                assert_eq!(facts.terminal_foreground_group as u32, info.e_tpgid);
+            }
+            ControllingTerminal::Absent => assert_eq!(info.e_tdev, u32::MAX),
+            ControllingTerminal::Unknown => panic!("this process's terminal is known"),
+        }
+        assert!(!facts.zombie);
+        assert!(inspector.boot_session().is_some());
+        assert!(inspector.self_claim_supported());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_unreaped_child_reads_as_a_zombie_and_a_reaped_one_as_gone() {
+        use super::{ProcessInspector, ProcessRead, SystemProcessInspector};
+        let inspector = SystemProcessInspector;
+        let mut child = std::process::Command::new("/usr/bin/true")
+            .spawn()
+            .expect("start a child");
+        let pid = i32::try_from(child.id()).expect("pid");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match inspector.process(pid) {
+                ProcessRead::Found(facts) if facts.zombie => break,
+                ProcessRead::Found(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                other => panic!("the child never became a zombie: {other:?}"),
+            }
+        }
+        child.wait().expect("reap the child");
+        assert_eq!(inspector.process(pid), ProcessRead::Gone);
+        assert_eq!(inspector.process(0), ProcessRead::Unknown);
+        assert_eq!(inspector.process(-1), ProcessRead::Unknown);
+    }
+
+    #[test]
+    fn only_a_character_device_names_a_terminal_device() {
+        use super::{ProcessInspector, SystemProcessInspector};
+        let mut master = 0;
+        let mut slave = 0;
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let path = tty_path_from_fd(slave).expect("tty path");
+        let device = SystemProcessInspector.terminal_device(&path);
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            device,
+            Some(u64::from(
+                std::fs::metadata(&path).expect("tty").rdev() as u32
+            ))
+        );
+        assert_eq!(SystemProcessInspector.terminal_device("/etc/hosts"), None);
+        assert_eq!(SystemProcessInspector.terminal_device("/no/such/tty"), None);
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
         }
     }
 

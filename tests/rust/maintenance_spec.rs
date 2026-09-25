@@ -214,6 +214,7 @@ impl Setup {
             clock: &self.clock,
             tty: &self.tty,
             panes: &self.panes,
+            processes: &wezterm_attention::wezterm::SystemProcessInspector,
         }
     }
 

@@ -7,7 +7,8 @@ use serde::Serialize;
 use wezterm_attention::protocol::{AttentionError, Diagnostic, Disposition};
 use wezterm_attention::query::read_bindings_timed;
 use wezterm_attention::wezterm::{
-    Clock, SystemClock, SystemProcessProbe, SystemTtyWriter, WeztermPaneLister, default_ports,
+    Clock, SystemClock, SystemProcessInspector, SystemProcessProbe, SystemTtyWriter,
+    WeztermPaneLister, default_ports,
 };
 
 #[derive(Debug, Parser)]
@@ -445,7 +446,8 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
     let tty = SystemTtyWriter;
     let panes = WeztermPaneLister;
     let processes = SystemProcessProbe;
-    let ports = default_ports(&clock, &tty, &panes);
+    let inspector = SystemProcessInspector;
+    let ports = default_ports(&clock, &tty, &panes, &inspector);
     match cli.command {
         None => {
             let mut command = Cli::command();

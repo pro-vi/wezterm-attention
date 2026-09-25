@@ -31,8 +31,8 @@ use wezterm_attention::records::{
 };
 use wezterm_attention::wezterm::{
     Clock, PaneLister, PaneRow, Presence, ProcessListing, ProcessProbe, RuntimePorts,
-    SystemProcessProbe, SystemTtyWriter, TtyWriter, parse_pane_rows, publication_bytes,
-    resolve_wezterm_executable, tty_path_from_fd,
+    SystemProcessInspector, SystemProcessProbe, SystemTtyWriter, TtyWriter, parse_pane_rows,
+    publication_bytes, resolve_wezterm_executable, tty_path_from_fd,
 };
 
 struct Scratch {
@@ -258,7 +258,12 @@ fn ports<'a>(
     tty: &'a dyn TtyWriter,
     panes: &'a dyn PaneLister,
 ) -> RuntimePorts<'a> {
-    RuntimePorts { clock, tty, panes }
+    RuntimePorts {
+        clock,
+        tty,
+        panes,
+        processes: &SystemProcessInspector,
+    }
 }
 
 fn fill_tty_output_queue(fd: libc::c_int) -> usize {
