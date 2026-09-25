@@ -20,7 +20,10 @@ use wezterm_attention::observations::LifecycleSnapshot;
 use wezterm_attention::providers::{ProviderAction, ProviderEvent, parse_provider_event};
 use wezterm_attention::query::read_bindings;
 use wezterm_attention::records::{atomic_replace, launch_path, pane_path, state_root, with_lock};
-use wezterm_attention::wezterm::{Clock, PaneLister, PaneRow, RuntimePorts, TtyWriter};
+use wezterm_attention::wezterm::{
+    Clock, ControllingTerminal, PaneLister, PaneRow, ProcessFacts, ProcessInspector, ProcessRead,
+    ProcessStart, RuntimePorts, TtyWriter,
+};
 
 #[path = "support/executables.rs"]
 mod executables;
@@ -48,6 +51,9 @@ mod metadata_fields;
 
 #[path = "lifecycle_spec/mark_clear.rs"]
 mod mark_clear;
+
+#[path = "lifecycle_spec/self_claim.rs"]
+mod self_claim;
 
 struct Scratch(PathBuf);
 
@@ -148,12 +154,169 @@ impl TtyWriter for FakeTty {
     }
 }
 
-#[derive(Default)]
-struct FakePanes(Vec<PaneRow>);
+/// The panes a mux lists, or `None` for a listing that fails.
+struct FakePanes {
+    rows: Mutex<Option<Vec<PaneRow>>>,
+    /// Runs as each listing is taken, before it answers.
+    on_list: Mutex<Option<Box<dyn FnMut() + Send>>>,
+}
+
+impl FakePanes {
+    fn new(rows: Vec<PaneRow>) -> Self {
+        Self {
+            rows: Mutex::new(Some(rows)),
+            on_list: Mutex::new(None),
+        }
+    }
+
+    fn set(&self, rows: Option<Vec<PaneRow>>) {
+        *self.rows.lock().expect("rows lock") = rows;
+    }
+}
 
 impl PaneLister for FakePanes {
     fn list(&self, _socket_path: &str) -> wezterm_attention::protocol::Result<Vec<PaneRow>> {
-        Ok(self.0.clone())
+        if let Some(hook) = self.on_list.lock().expect("hook lock").as_mut() {
+            hook();
+        }
+        self.rows.lock().expect("rows lock").clone().ok_or_else(|| {
+            wezterm_attention::protocol::AttentionError::new(
+                "realm_unavailable",
+                "synthetic listing failure",
+            )
+        })
+    }
+}
+
+/// The process ids a fake agent tree uses: the shell that started the agent,
+/// the agent, and the hook the agent runs.
+const SHELL_PID: i32 = 3000;
+const AGENT_PID: i32 = 4000;
+const HOOK_PID: i32 = 5000;
+const USER_ID: u32 = 501;
+const PANE_TTY_DEVICE: u64 = 0x1000_0777;
+const BOOT_SESSION: &str = "0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b";
+
+fn process_facts(pid: i32, parent_pid: i32, terminal: ControllingTerminal) -> ProcessFacts {
+    ProcessFacts {
+        pid,
+        parent_pid,
+        process_group: pid,
+        terminal,
+        terminal_foreground_group: AGENT_PID,
+        uid: USER_ID,
+        start: ProcessStart {
+            seconds: 1_700_000_000,
+            microseconds: u32::try_from(pid).expect("small pid"),
+        },
+        traced: false,
+        zombie: false,
+    }
+}
+
+/// A process table an agent's hook reads. By default the agent leads the
+/// pane terminal's foreground job, and its hook runs detached from any
+/// terminal, the way Claude Code starts one.
+struct FakeProcesses {
+    supported: Mutex<bool>,
+    own: Mutex<i32>,
+    table: Mutex<BTreeMap<i32, ProcessRead>>,
+    boot: Mutex<Option<String>>,
+    devices: Mutex<BTreeMap<String, u64>>,
+    /// Runs on every process read, with the pid read; an answer it gives
+    /// replaces the table's.
+    on_read: Mutex<Option<Box<dyn FnMut(i32) -> Option<ProcessRead> + Send>>>,
+}
+
+impl FakeProcesses {
+    fn new(tty_path: &str) -> Self {
+        let table = BTreeMap::from([
+            (
+                SHELL_PID,
+                ProcessRead::Found(process_facts(
+                    SHELL_PID,
+                    1,
+                    ControllingTerminal::Device(PANE_TTY_DEVICE),
+                )),
+            ),
+            (
+                AGENT_PID,
+                ProcessRead::Found(process_facts(
+                    AGENT_PID,
+                    SHELL_PID,
+                    ControllingTerminal::Device(PANE_TTY_DEVICE),
+                )),
+            ),
+            (
+                HOOK_PID,
+                ProcessRead::Found(process_facts(
+                    HOOK_PID,
+                    AGENT_PID,
+                    ControllingTerminal::Absent,
+                )),
+            ),
+        ]);
+        Self {
+            supported: Mutex::new(true),
+            own: Mutex::new(HOOK_PID),
+            table: Mutex::new(table),
+            boot: Mutex::new(Some(BOOT_SESSION.to_owned())),
+            devices: Mutex::new(BTreeMap::from([(tty_path.to_owned(), PANE_TTY_DEVICE)])),
+            on_read: Mutex::new(None),
+        }
+    }
+
+    fn set(&self, pid: i32, read: ProcessRead) {
+        self.table.lock().expect("table lock").insert(pid, read);
+    }
+
+    fn facts(&self, pid: i32) -> ProcessFacts {
+        match self.table.lock().expect("table lock").get(&pid) {
+            Some(ProcessRead::Found(facts)) => facts.clone(),
+            other => panic!("pid {pid} is not a live process here: {other:?}"),
+        }
+    }
+
+    fn change(&self, pid: i32, change: impl FnOnce(&mut ProcessFacts)) {
+        let mut facts = self.facts(pid);
+        change(&mut facts);
+        self.set(pid, ProcessRead::Found(facts));
+    }
+}
+
+impl ProcessInspector for FakeProcesses {
+    fn self_claim_supported(&self) -> bool {
+        *self.supported.lock().expect("supported lock")
+    }
+
+    fn own_pid(&self) -> i32 {
+        *self.own.lock().expect("own lock")
+    }
+
+    fn process(&self, pid: i32) -> ProcessRead {
+        if let Some(hook) = self.on_read.lock().expect("hook lock").as_mut()
+            && let Some(read) = hook(pid)
+        {
+            return read;
+        }
+        self.table
+            .lock()
+            .expect("table lock")
+            .get(&pid)
+            .cloned()
+            .unwrap_or(ProcessRead::Gone)
+    }
+
+    fn boot_session(&self) -> Option<String> {
+        self.boot.lock().expect("boot lock").clone()
+    }
+
+    fn terminal_device(&self, path: &str) -> Option<u64> {
+        self.devices
+            .lock()
+            .expect("devices lock")
+            .get(path)
+            .copied()
     }
 }
 
@@ -163,6 +326,7 @@ struct Setup {
     env: BTreeMap<String, String>,
     tty: FakeTty,
     panes: FakePanes,
+    processes: FakeProcesses,
     clock: FixedClock,
 }
 
@@ -172,10 +336,11 @@ impl Setup {
         let socket_path = scratch.0.join("mux.sock");
         let socket = UnixListener::bind(&socket_path).expect("bind disposable socket");
         let tty = FakeTty::new();
-        let panes = FakePanes(vec![PaneRow {
+        let panes = FakePanes::new(vec![PaneRow {
             pane_id: "42".to_owned(),
             tty_name: Some(tty.path.clone()),
         }]);
+        let processes = FakeProcesses::new(&tty.path);
         let env = BTreeMap::from([
             ("HOME".to_owned(), scratch.0.to_string_lossy().into_owned()),
             (
@@ -198,6 +363,7 @@ impl Setup {
             env,
             tty,
             panes,
+            processes,
             clock: FixedClock {
                 monotonic: "00000000000000000100",
                 unix: "00000000012345678900",
@@ -210,8 +376,21 @@ impl Setup {
             clock: &self.clock,
             tty: &self.tty,
             panes: &self.panes,
-            processes: &wezterm_attention::wezterm::SystemProcessInspector,
+            processes: &self.processes,
         }
+    }
+
+    /// The environment an agent's hook runs in when its agent was started
+    /// without a claim: no launch id, and the agent's pid asserted by the
+    /// hook entry.
+    fn agent_env(&self) -> BTreeMap<String, String> {
+        let mut env = self.env.clone();
+        env.remove("WEZTERM_ATTENTION_LAUNCH_ID");
+        env.insert(
+            "WEZTERM_ATTENTION_HOST_PID".to_owned(),
+            AGENT_PID.to_string(),
+        );
+        env
     }
 
     fn claim(&self) {
@@ -418,7 +597,7 @@ fn rich_rejection_preserves_legacy_contract() {
 
 #[test]
 fn tty_presence_is_not_execution_identity() {
-    let mut setup = Setup::new();
+    let setup = Setup::new();
     setup.claim();
     setup.apply(
         &event(
@@ -430,13 +609,19 @@ fn tty_presence_is_not_execution_identity() {
         "00000000000000000200",
     );
     let directory = setup.binding_dir("codex", "facts");
-    setup.env.remove("WEZTERM_ATTENTION_LAUNCH_ID");
-    let result = setup.apply(
+    let result = apply_provider_event(
         &event("codex", "PreToolUse", "facts", json!({"tool_name":"shell"})),
+        &setup.agent_env(),
         "00000000000000000300",
+        &setup.ports(),
+    )
+    .expect("a refusal is a result");
+    assert_eq!(result.disposition, "ignored");
+    assert_eq!(
+        result.diagnostic.as_ref().map(|item| item.code.as_str()),
+        Some("claim_stale")
     );
-    assert_eq!(result.disposition, "partial");
-    assert!(directory.join("activity.json").exists());
+    assert!(!directory.join("activity.json").exists());
     assert!(!directory.join("lifecycle.json").exists());
 }
 
@@ -1273,7 +1458,7 @@ fn launch_rotation_after_resolution_cannot_add_old_execution_facts() {
                 clock: &clock,
                 tty: &setup.tty,
                 panes: &setup.panes,
-                processes: &wezterm_attention::wezterm::SystemProcessInspector,
+                processes: &setup.processes,
             };
             apply_provider_event(
                 &event(
@@ -1302,7 +1487,7 @@ fn launch_rotation_after_resolution_cannot_add_old_execution_facts() {
             clock: &newer_clock,
             tty: &setup.tty,
             panes: &setup.panes,
-            processes: &wezterm_attention::wezterm::SystemProcessInspector,
+            processes: &setup.processes,
         };
         let claimed = wezterm_attention::claim_launch(&newer, &ports);
         clock.released.wait();
@@ -2272,60 +2457,9 @@ fn same_session_resume_reopens_an_older_end() {
 }
 
 #[test]
-fn session_start_self_claims_only_when_the_standin_gate_is_enabled() {
-    let mut enabled = Setup::new();
-    enabled.env.remove("WEZTERM_ATTENTION_LAUNCH_ID");
-    enabled.env.insert(
-        "WEZTERM_ATTENTION_ENABLE_SELF_CLAIM".to_owned(),
-        "1".to_owned(),
-    );
-    let start = event(
-        "claude",
-        "SessionStart",
-        "session-a",
-        json!({"source":"startup"}),
-    );
-    let result = enabled.apply(&start, "00000000000000000200");
-    assert_eq!(result.disposition, "applied");
-    let root = state_root(&enabled.env).expect("state root");
-    let (address, _) = pane_address(&enabled.env).expect("address");
-    assert!(pane_path(&root, &address).join("claim.json").exists());
-    assert_eq!(read_bindings(&root).expect("bindings").0.len(), 1);
-
-    let mut disabled = Setup::new();
-    disabled.env.remove("WEZTERM_ATTENTION_LAUNCH_ID");
-    let disabled_result = disabled.apply(&start, "00000000000000000200");
-    assert_eq!(disabled_result.disposition, "ignored");
-    assert_eq!(
-        disabled_result
-            .diagnostic
-            .as_ref()
-            .map(|item| item.code.as_str()),
-        Some("claim_stale")
-    );
-}
-
-#[test]
-fn tty_matching_claim_resolves_without_an_inherited_launch() {
-    let mut setup = Setup::new();
-    setup.claim();
-    setup.env.remove("WEZTERM_ATTENTION_LAUNCH_ID");
-    let start = event(
-        "claude",
-        "SessionStart",
-        "session-a",
-        json!({"source":"startup"}),
-    );
-    assert_eq!(
-        setup.apply(&start, "00000000000000000200").disposition,
-        "applied"
-    );
-}
-
-#[test]
 fn non_start_without_a_claim_is_stale_for_every_provider() {
     let mut setup = Setup::new();
-    setup.env.remove("WEZTERM_ATTENTION_LAUNCH_ID");
+    setup.env = setup.agent_env();
     for event in [
         event(
             "claude",

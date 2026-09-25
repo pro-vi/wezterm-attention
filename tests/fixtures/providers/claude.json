@@ -9,7 +9,6 @@
   },
   "cases": [
     { "id": "startup_binding", "event": "SessionStart", "patch": { "source": "startup" }, "expected": "binding" },
-    { "id": "self_claim_binding", "event": "SessionStart", "patch": { "source": "startup" }, "env": { "WEZTERM_ATTENTION_ENABLE_SELF_CLAIM": "1" }, "expected": "binding", "lifecycle_expected": "applied" },
     { "id": "resume_binding", "event": "SessionStart", "patch": { "source": "resume" }, "expected": "binding" },
     { "id": "clear_binding", "event": "SessionStart", "patch": { "source": "clear" }, "expected": "binding" },
     { "id": "fork_binding", "event": "SessionStart", "patch": { "source": "fork" }, "expected": "binding" },

@@ -8,7 +8,6 @@
   },
   "cases": [
     { "id": "startup_binding", "event": "session_start", "patch": { "start_source": "startup" }, "expected": "binding" },
-    { "id": "self_claim_binding", "event": "session_start", "patch": { "start_source": "startup" }, "env": { "WEZTERM_ATTENTION_ENABLE_SELF_CLAIM": "1" }, "expected": "binding", "lifecycle_expected": "applied" },
     { "id": "reload_confirmation", "event": "session_start", "patch": { "start_source": "reload" }, "expected": "binding" },
     { "id": "new_binding", "event": "session_start", "patch": { "start_source": "new" }, "expected": "binding" },
     { "id": "resume_binding", "event": "session_start", "patch": { "start_source": "resume" }, "expected": "binding" },

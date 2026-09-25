@@ -233,7 +233,8 @@
       "clock_skew",
       "integration_version_mismatch",
       "state_permissions",
-      "bad_usage"
+      "bad_usage",
+      "self_claim_parent_unverified"
     ],
     "end_reasons": ["session_end", "sweep_absent"],
     "pane_presence": ["present", "verified_absent", "unavailable"],

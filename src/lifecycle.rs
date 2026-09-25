@@ -173,12 +173,25 @@ impl LifecycleResult {
     }
 }
 
-#[derive(Clone, Debug)]
-struct ResolvedLaunch {
+#[derive(Clone)]
+struct ResolvedLaunch<'a> {
     evidence: Option<Rc<RefCell<HookEvidence>>>,
     root: PathBuf,
     address: PaneAddress,
     launch_id: String,
+    /// The pane's claim as it stood when the event was resolved.
+    claim: Value,
+    /// For an event that carried no launch id, the proof of the agent process
+    /// it came from, and what reads that process again.
+    host: Option<HostCheck<'a>>,
+}
+
+#[derive(Clone)]
+struct HostCheck<'a> {
+    proof: crate::launch::HostProof,
+    env: &'a BTreeMap<String, String>,
+    processes: &'a dyn crate::wezterm::ProcessInspector,
+    tty: &'a dyn crate::wezterm::TtyWriter,
 }
 
 #[derive(Clone, Debug)]
@@ -283,86 +296,58 @@ fn load_claim(root: &Path, address: &PaneAddress) -> Result<Option<Value>> {
     )
 }
 
-fn resolve_launch(
-    event: &ProviderEvent,
-    env: &BTreeMap<String, String>,
-    ports: &RuntimePorts<'_>,
-) -> Result<ResolvedLaunch> {
+/// Resolve the launch an agent event belongs to.
+///
+/// An inherited `WEZTERM_ATTENTION_LAUNCH_ID` decides alone: it matches the
+/// pane's claim, or the event is refused, whatever else is true. Without one
+/// the event resolves only against a claim its own agent process holds; see
+/// [`crate::launch::self_owned_launch`]. Nothing here ever finds a launch by
+/// the terminal alone.
+fn resolve_launch<'a>(
+    env: &'a BTreeMap<String, String>,
+    ports: &RuntimePorts<'a>,
+) -> Result<ResolvedLaunch<'a>> {
     let root = state_root(env)?;
     let (address, _) = pane_address(env)?;
     let claim = load_claim(&root, &address)?;
     if let Some(inherited) = env.get("WEZTERM_ATTENTION_LAUNCH_ID") {
         let inherited = canonical_uuid(Some(inherited), "WEZTERM_ATTENTION_LAUNCH_ID")?;
-        if claim
-            .as_ref()
-            .is_some_and(|record| record_matches_launch(record, &address, &inherited))
-        {
-            return Ok(ResolvedLaunch {
-                evidence: None,
-                root,
-                address,
-                launch_id: inherited,
-            });
-        }
-        return Err(AttentionError::new(
-            "claim_stale",
-            "inherited launch does not match the pane claim",
-        ));
+        return match claim {
+            Some(claim) if record_matches_launch(&claim, &address, &inherited) => {
+                Ok(ResolvedLaunch {
+                    evidence: None,
+                    root,
+                    address,
+                    launch_id: inherited,
+                    claim,
+                    host: None,
+                })
+            }
+            _ => Err(AttentionError::new(
+                "claim_stale",
+                "inherited launch does not match the pane claim",
+            )),
+        };
     }
-
-    let controlling = ports.tty.controlling_path()?;
-    let fingerprint = ports.tty.fingerprint(&controlling)?;
-    if let Some(claim) = claim
-        && claim.get("tty_path").and_then(Value::as_str) == Some(controlling.as_str())
-        && claim.get("tty_fingerprint").and_then(Value::as_str) == Some(fingerprint.as_str())
-    {
-        let launch_id = claim["launch_id"].as_str().unwrap_or_default().to_owned();
-        return Ok(ResolvedLaunch {
-            evidence: None,
-            root,
-            address,
-            launch_id,
-        });
-    }
-
-    if event.action != ProviderAction::Binding {
-        return Err(AttentionError::new(
-            "claim_stale",
-            "provider event has no matching pane claim",
-        ));
-    }
-    if env
-        .get("WEZTERM_ATTENTION_ENABLE_SELF_CLAIM")
-        .map(String::as_str)
-        != Some("1")
-    {
-        return Err(AttentionError::new(
-            "claim_stale",
-            "provider self-claim is disabled pending contact verification",
-        ));
-    }
-    let socket = env.get("WEZTERM_UNIX_SOCKET").ok_or_else(|| {
-        AttentionError::new("identity_unpublished", "WEZTERM_UNIX_SOCKET is missing")
-    })?;
-    let rows = ports.panes.list(socket)?;
-    let matching = rows.iter().any(|row| {
-        row.pane_id == address.pane_id && row.tty_name.as_deref() == Some(controlling.as_str())
-    });
-    if !matching {
-        return Err(AttentionError::new(
-            "unsafe_tty",
-            "controlling terminal does not match the enumerated pane",
-        ));
-    }
-    let launch_id = Uuid::new_v4().to_string();
-    let mut claimed_env = env.clone();
-    claimed_env.insert("WEZTERM_ATTENTION_LAUNCH_ID".to_owned(), launch_id.clone());
-    crate::claim_launch_at_tty(&claimed_env, ports, &controlling)?;
+    let resolved = crate::launch::self_owned_launch(env, ports, &address, claim)?;
+    let launch_id = resolved
+        .claim
+        .get("launch_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AttentionError::new("record_invalid", "claim has no launch id"))?
+        .to_owned();
     Ok(ResolvedLaunch {
         evidence: None,
         root,
         address,
         launch_id,
+        claim: resolved.claim,
+        host: Some(HostCheck {
+            proof: resolved.proof,
+            env,
+            processes: ports.processes,
+            tty: ports.tty,
+        }),
     })
 }
 
@@ -1202,21 +1187,21 @@ pub fn apply_mark_activity(
         env.get("WEZTERM_ATTENTION_LAUNCH_ID").map(String::as_str),
         "WEZTERM_ATTENTION_LAUNCH_ID",
     )?;
-    let claim = load_claim(&root, &address)?;
-    if claim
-        .as_ref()
-        .is_none_or(|claim| !record_matches_launch(claim, &address, &launch_id))
-    {
+    let Some(claim) = load_claim(&root, &address)?
+        .filter(|claim| record_matches_launch(claim, &address, &launch_id))
+    else {
         return Err(AttentionError::new(
             "claim_stale",
             "current launch does not match claim",
         ));
-    }
+    };
     let resolved = ResolvedLaunch {
         evidence: None,
         root,
         address,
         launch_id,
+        claim,
+        host: None,
     };
     let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
     let pointer_path = launch.join("current-binding.json");
@@ -2131,17 +2116,15 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
         env.get("WEZTERM_ATTENTION_LAUNCH_ID").map(String::as_str),
         "WEZTERM_ATTENTION_LAUNCH_ID",
     )?;
-    let claim = load_claim(&root, &address)?;
-    if claim
-        .as_ref()
-        .is_none_or(|claim| !record_matches_launch(claim, &address, &launch_id))
-    {
+    let Some(claim) = load_claim(&root, &address)?
+        .filter(|claim| record_matches_launch(claim, &address, &launch_id))
+    else {
         return Ok(LifecycleResult::diagnosed(
             Disposition::Ignored,
             "claim_stale",
             "prompt return has no matching claim",
         ));
-    }
+    };
     let launch = launch_path(&root, &address, &launch_id);
     let pointer_path = launch.join("current-binding.json");
     let (mutation, ()) = commit_with(
@@ -2236,6 +2219,8 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
                     root: root.clone(),
                     address: address.clone(),
                     launch_id: launch_id.clone(),
+                    claim: claim.clone(),
+                    host: None,
                 },
                 current_binding_id,
                 mutation,
@@ -2333,22 +2318,26 @@ fn apply_provider_event_inner(
             "observation is invalid",
         ));
     }
-    let mut resolved = match resolve_launch(event, env, ports) {
+    let mut resolved = match resolve_launch(env, ports) {
         Ok(resolved) => resolved,
         Err(error) => return Ok(LifecycleResult::ignored_error(error)),
     };
     resolved.evidence = evidence;
     let written_at = ports.clock.unix_ns20()?;
     let mut admitted = event.clone();
-    if admitted.observation.is_some() && !env.contains_key("WEZTERM_ATTENTION_LAUNCH_ID") {
+    // Lifecycle facts are kept only for an event whose process inherited its
+    // launch id. An agent's own claim proves which process holds the pane,
+    // not which execution an observation belongs to, so its events keep the
+    // indicator and leave the lifecycle unwritten -- a property of the mode,
+    // reported as not persisted rather than as a failed event.
+    if resolved.host.is_some()
+        && (admitted.observation.is_some() || admitted.observation_diagnostic.is_some())
+    {
         admitted.observation = None;
-        admitted.observation_diagnostic = Some(
-            AttentionError::new(
-                "claim_stale",
-                "tty recovery does not prove lifecycle execution identity",
-            )
-            .diagnostic,
-        );
+        admitted.observation_diagnostic = None;
+        if let Some(evidence) = &resolved.evidence {
+            evidence.borrow_mut().persistence.lifecycle = Persistence::Rejected;
+        }
     }
     let event = &admitted;
     let result = match event.action {
@@ -2419,6 +2408,8 @@ mod lifecycle_write_tests {
             root: root.clone(),
             address: address.clone(),
             launch_id: launch_id.clone(),
+            claim: samples["claim"].clone(),
+            host: None,
         };
         let launch = launch_path(&root, &address, &launch_id);
         crate::records::atomic_replace(

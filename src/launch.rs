@@ -17,7 +17,10 @@ use crate::records::{
     CommitPlan, RecordIdentity, Replacement, commit, incarnation_path, mkdir_private, pane_path,
     read_record, realm_path, session_index_marker, session_index_path, state_root,
 };
-use crate::wezterm::{RuntimePorts, publication_bytes};
+use crate::wezterm::{
+    ControllingTerminal, ProcessFacts, ProcessInspector, ProcessRead, ProcessStart, RuntimePorts,
+    TtyWriter, publication_bytes,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ApplyResult {
@@ -447,4 +450,341 @@ pub fn publish_realm(
     }
     report.skipped = report.attempted - report.published;
     Ok(report)
+}
+
+/// The process a self-owned claim belongs to: one process lifetime on one
+/// boot. A pid alone is not one, since the kernel reuses pids.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ClaimOwner {
+    pub(crate) pid: i32,
+    pub(crate) start: ProcessStart,
+    pub(crate) boot_session_id: String,
+}
+
+/// Which kind of claim a pane holds.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ClaimMode {
+    /// Made by a shell for the commands it starts, which inherit its launch id.
+    Shell,
+    /// Made by an agent's own hook, for that agent's process.
+    SelfOwned(ClaimOwner),
+}
+
+impl ClaimMode {
+    /// The mode of a claim record that has already been validated as one.
+    pub(crate) fn of(claim: &Value) -> Result<Self> {
+        let text = |field: &str| claim.get(field).and_then(Value::as_str);
+        let invalid = || AttentionError::new("record_invalid", "claim owner is invalid");
+        match (
+            text("owner_pid"),
+            text("owner_started_sec"),
+            text("owner_started_usec"),
+            text("owner_boot_session_id"),
+        ) {
+            (None, None, None, None) => Ok(Self::Shell),
+            (Some(pid), Some(seconds), Some(microseconds), Some(boot)) => {
+                Ok(Self::SelfOwned(ClaimOwner {
+                    pid: pid.parse().map_err(|_| invalid())?,
+                    start: ProcessStart {
+                        seconds: seconds.parse().map_err(|_| invalid())?,
+                        microseconds: microseconds.parse().map_err(|_| invalid())?,
+                    },
+                    boot_session_id: boot.to_owned(),
+                }))
+            }
+            _ => Err(invalid()),
+        }
+    }
+}
+
+fn parent_unverified(message: &str) -> AttentionError {
+    AttentionError::new("self_claim_parent_unverified", message)
+}
+
+/// The pid `WEZTERM_ATTENTION_HOST_PID` names: decimal digits with no sign or
+/// leading zero, naming a positive pid.
+fn asserted_host(env: &BTreeMap<String, String>) -> Result<i32> {
+    let value = env.get("WEZTERM_ATTENTION_HOST_PID").ok_or_else(|| {
+        parent_unverified(
+            "WEZTERM_ATTENTION_HOST_PID is missing; register the hook as \
+             `WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event ...`",
+        )
+    })?;
+    if value.is_empty() || value.starts_with('0') || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(parent_unverified("WEZTERM_ATTENTION_HOST_PID is not a pid"));
+    }
+    value
+        .parse::<i32>()
+        .map_err(|_| parent_unverified("WEZTERM_ATTENTION_HOST_PID is not a pid"))
+}
+
+/// What one reading of the process table says about the agent a hook runs
+/// under.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HostReading {
+    parent_pid: i32,
+    parent_start: ProcessStart,
+    /// The device of the terminal the hook or, when the hook has none, its
+    /// parent runs on.
+    terminal: u64,
+    /// Whether the parent leads the terminal's foreground job.
+    foreground: bool,
+}
+
+fn found(read: ProcessRead, whose: &str) -> Result<ProcessFacts> {
+    match read {
+        ProcessRead::Found(facts) => Ok(facts),
+        ProcessRead::Gone => Err(parent_unverified(&format!("{whose} has exited"))),
+        ProcessRead::Unknown => Err(parent_unverified(&format!(
+            "{whose} could not be read from the kernel"
+        ))),
+    }
+}
+
+/// Read the hook and its direct parent, and require that parent to be the
+/// process `expected_parent` names, to be this user's, and to be alive.
+///
+/// The hook's own terminal decides where it runs. Only when the hook has
+/// none -- a hook its agent started in a session of its own -- does the
+/// parent's decide, and nothing further up is consulted.
+fn read_host(processes: &dyn ProcessInspector, expected_parent: i32) -> Result<HostReading> {
+    let hook = found(processes.process(processes.own_pid()), "this hook")?;
+    if hook.traced {
+        return Err(parent_unverified("a debugger is attached to this hook"));
+    }
+    if hook.parent_pid == 1 {
+        return Err(parent_unverified(
+            "this hook's parent exited before it could be checked",
+        ));
+    }
+    if hook.parent_pid != expected_parent {
+        return Err(parent_unverified(
+            "this hook's parent is not the process WEZTERM_ATTENTION_HOST_PID names; \
+             it was run by a relay or a shell that stayed, not by the agent itself",
+        ));
+    }
+    let parent = found(processes.process(hook.parent_pid), "this hook's parent")?;
+    if parent.zombie {
+        return Err(parent_unverified("this hook's parent has exited"));
+    }
+    if parent.uid != hook.uid {
+        return Err(parent_unverified(
+            "this hook's parent belongs to another user",
+        ));
+    }
+    let unknown = || {
+        AttentionError::new(
+            "probe_unavailable",
+            "the agent's controlling terminal could not be read",
+        )
+    };
+    let (terminal, foreground_group) = match hook.terminal {
+        ControllingTerminal::Device(device) => (device, hook.terminal_foreground_group),
+        ControllingTerminal::Unknown => return Err(unknown()),
+        ControllingTerminal::Absent => match parent.terminal {
+            ControllingTerminal::Device(device) => (device, parent.terminal_foreground_group),
+            ControllingTerminal::Unknown => return Err(unknown()),
+            ControllingTerminal::Absent => {
+                return Err(AttentionError::new(
+                    "unsafe_tty",
+                    "neither this hook nor its agent has a controlling terminal",
+                ));
+            }
+        },
+    };
+    Ok(HostReading {
+        parent_pid: hook.parent_pid,
+        parent_start: parent.start,
+        terminal,
+        foreground: parent.process_group == foreground_group,
+    })
+}
+
+/// What an agent's hook proved about where it runs: the process that owns
+/// it, and the pane terminal that process runs on.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HostProof {
+    pub(crate) owner: ClaimOwner,
+    pub(crate) tty_path: String,
+    pub(crate) tty_fingerprint: String,
+    terminal: u64,
+    pub(crate) foreground: bool,
+}
+
+impl HostProof {
+    /// Prove which agent process started this hook and that it runs on the
+    /// terminal the mux lists for `WEZTERM_PANE`.
+    ///
+    /// The parent must be the process `WEZTERM_ATTENTION_HOST_PID` names:
+    /// the agent's hook entry sets it once, from its own `$PPID`, and execs
+    /// this command, so a relay that forwards the value or a shell that stays
+    /// behind leaves a different parent, and one that drops it leaves none.
+    /// The listing has to succeed and name the pane exactly once, with a
+    /// terminal whose device is the agent's. The parent is read again at the
+    /// end, and one that changed in between proves nothing.
+    pub(crate) fn establish(
+        env: &BTreeMap<String, String>,
+        ports: &RuntimePorts<'_>,
+        address: &PaneAddress,
+    ) -> Result<Self> {
+        let asserted = asserted_host(env)?;
+        let reading = read_host(ports.processes, asserted)?;
+        let boot_session_id = ports.processes.boot_session().ok_or_else(|| {
+            AttentionError::new("probe_unavailable", "the boot session id could not be read")
+        })?;
+        let socket = env.get("WEZTERM_UNIX_SOCKET").ok_or_else(|| {
+            AttentionError::new("identity_unpublished", "WEZTERM_UNIX_SOCKET is missing")
+        })?;
+        let rows = ports.panes.list(socket)?;
+        let mut listed = rows.iter().filter(|row| row.pane_id == address.pane_id);
+        let (Some(row), None) = (listed.next(), listed.next()) else {
+            return Err(AttentionError::new(
+                "unsafe_tty",
+                "the mux does not list this pane exactly once",
+            ));
+        };
+        let tty_path = row.tty_name.clone().ok_or_else(|| {
+            AttentionError::new("unsafe_tty", "the mux lists no terminal for this pane")
+        })?;
+        if ports.processes.terminal_device(&tty_path) != Some(reading.terminal) {
+            return Err(AttentionError::new(
+                "unsafe_tty",
+                "the agent runs on a terminal that is not the pane's",
+            ));
+        }
+        let tty_fingerprint = ports.tty.fingerprint(&tty_path)?;
+        let (current, _) = pane_address(env)?;
+        if current != *address {
+            return Err(AttentionError::new(
+                "incarnation_changed",
+                "mux socket changed while the agent was being checked",
+            ));
+        }
+        let proof = Self {
+            owner: ClaimOwner {
+                pid: reading.parent_pid,
+                start: reading.parent_start,
+                boot_session_id,
+            },
+            tty_path,
+            tty_fingerprint,
+            terminal: reading.terminal,
+            foreground: reading.foreground,
+        };
+        proof.confirm(env, ports.processes, ports.tty, address)?;
+        Ok(proof)
+    }
+
+    /// Read the same host again and return whether it still leads the
+    /// terminal's foreground job. The same parent, started at the same time on
+    /// the same boot, on the same terminal at the same path, under the same
+    /// socket; any difference refuses, and no other process is ever put in
+    /// the parent's place.
+    pub(crate) fn confirm(
+        &self,
+        env: &BTreeMap<String, String>,
+        processes: &dyn ProcessInspector,
+        tty: &dyn TtyWriter,
+        address: &PaneAddress,
+    ) -> Result<bool> {
+        let reading = read_host(processes, self.owner.pid)?;
+        if reading.parent_start != self.owner.start
+            || processes.boot_session().as_deref() != Some(self.owner.boot_session_id.as_str())
+        {
+            return Err(parent_unverified(
+                "this hook's parent changed while it was being checked",
+            ));
+        }
+        if reading.terminal != self.terminal
+            || processes.terminal_device(&self.tty_path) != Some(self.terminal)
+            || tty.fingerprint(&self.tty_path)? != self.tty_fingerprint
+        {
+            return Err(AttentionError::new(
+                "unsafe_tty",
+                "the agent's terminal changed while it was being checked",
+            ));
+        }
+        let (current, _) = pane_address(env)?;
+        if current != *address {
+            return Err(AttentionError::new(
+                "incarnation_changed",
+                "mux socket changed while the agent was being checked",
+            ));
+        }
+        Ok(reading.foreground)
+    }
+
+    /// Whether `claim` is this host's own: self-owned by the same process, at
+    /// the same terminal.
+    pub(crate) fn owns(&self, claim: &Value) -> Result<bool> {
+        Ok(
+            ClaimMode::of(claim)? == ClaimMode::SelfOwned(self.owner.clone())
+                && claim.get("tty_path").and_then(Value::as_str) == Some(self.tty_path.as_str())
+                && claim.get("tty_fingerprint").and_then(Value::as_str)
+                    == Some(self.tty_fingerprint.as_str()),
+        )
+    }
+}
+
+/// A launch resolved for an agent event that carries no launch id: the claim
+/// it resolved against, and the proof of the host that sent it.
+pub(crate) struct SelfOwnedLaunch {
+    pub(crate) claim: Value,
+    pub(crate) proof: HostProof,
+}
+
+/// Resolve an agent event that carries no launch id against a claim its own
+/// agent process holds.
+///
+/// Self-claim is on unless `WEZTERM_ATTENTION_ENABLE_SELF_CLAIM` says
+/// otherwise, and only where the platform supports it. A pane holding a
+/// shell claim refuses every such event: that claim belongs to the commands
+/// its shell starts, which carry its launch id.
+pub(crate) fn self_owned_launch(
+    env: &BTreeMap<String, String>,
+    ports: &RuntimePorts<'_>,
+    address: &PaneAddress,
+    claim: Option<Value>,
+) -> Result<SelfOwnedLaunch> {
+    if !ports.processes.self_claim_supported() {
+        return Err(AttentionError::new(
+            "claim_stale",
+            "an agent cannot claim its own pane on this platform; start it from a claiming shell",
+        ));
+    }
+    match env
+        .get("WEZTERM_ATTENTION_ENABLE_SELF_CLAIM")
+        .map(String::as_str)
+    {
+        None | Some("1") => {}
+        Some(_) => {
+            return Err(AttentionError::new(
+                "claim_stale",
+                "an agent claiming its own pane is switched off by WEZTERM_ATTENTION_ENABLE_SELF_CLAIM",
+            ));
+        }
+    }
+    asserted_host(env)?;
+    if let Some(claim) = &claim
+        && ClaimMode::of(claim)? == ClaimMode::Shell
+    {
+        return Err(AttentionError::new(
+            "claim_stale",
+            "the pane holds a shell claim, which an agent without its launch id cannot use",
+        ));
+    }
+    let proof = HostProof::establish(env, ports, address)?;
+    let Some(claim) = claim else {
+        return Err(AttentionError::new(
+            "claim_stale",
+            "provider event has no matching pane claim",
+        ));
+    };
+    if !proof.owns(&claim)? {
+        return Err(AttentionError::new(
+            "claim_stale",
+            "the pane's claim belongs to another agent process",
+        ));
+    }
+    Ok(SelfOwnedLaunch { claim, proof })
 }
