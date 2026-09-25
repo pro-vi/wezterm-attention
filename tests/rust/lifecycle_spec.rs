@@ -215,7 +215,6 @@ const BOOT_SESSION: &str = "0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b";
 
 fn process_facts(pid: i32, parent_pid: i32, terminal: ControllingTerminal) -> ProcessFacts {
     ProcessFacts {
-        pid,
         parent_pid,
         process_group: pid,
         terminal,

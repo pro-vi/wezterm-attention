@@ -254,7 +254,6 @@ pub struct ProcessStart {
 /// What the kernel says of one live or zombie process.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessFacts {
-    pub pid: i32,
     pub parent_pid: i32,
     pub process_group: i32,
     pub terminal: ControllingTerminal,
@@ -390,7 +389,6 @@ fn parse_kinfo_proc(buffer: &[u8], pid: i32) -> ProcessRead {
         ControllingTerminal::Unknown
     };
     ProcessRead::Found(ProcessFacts {
-        pid,
         parent_pid: i32_at(kinfo::PARENT_PID),
         process_group: i32_at(kinfo::PROCESS_GROUP),
         terminal,
@@ -1880,7 +1878,6 @@ mod tests {
                 info.pbi_flags
             );
         }
-        assert_eq!(facts.pid, pid);
         assert_eq!(facts.parent_pid as u32, info.pbi_ppid);
         assert_eq!(facts.process_group as u32, info.pbi_pgid);
         assert_eq!(facts.uid, info.pbi_uid);
