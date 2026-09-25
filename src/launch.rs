@@ -935,12 +935,7 @@ fn claim_for_host(
                     ));
                 }
                 match ClaimMode::of(current)? {
-                    ClaimMode::Shell => {
-                        return Err(AttentionError::new(
-                            "claim_stale",
-                            "the pane holds a shell claim, which an agent without its launch id cannot use",
-                        ));
-                    }
+                    ClaimMode::Shell => return Err(shell_claim_refusal()),
                     ClaimMode::SelfOwned(owner) if owner == proof.owner => {
                         if !proof.owns(current)? {
                             return Err(AttentionError::new(
@@ -1020,6 +1015,13 @@ fn claim_for_host(
     Ok((selected, published))
 }
 
+fn shell_claim_refusal() -> AttentionError {
+    AttentionError::new(
+        "claim_stale",
+        "the pane holds a shell claim, which an agent without its launch id cannot use",
+    )
+}
+
 /// Why an agent cannot claim its own pane in `env`, or `None` when it can.
 /// Self-claim is on unless `WEZTERM_ATTENTION_ENABLE_SELF_CLAIM` says
 /// otherwise, and only where the platform supports it.
@@ -1062,22 +1064,10 @@ pub(crate) fn self_owned_launch(
         return Err(refusal);
     }
     asserted_host(env)?;
-    match &claim {
-        Some(claim) if ClaimMode::of(claim)? == ClaimMode::Shell => {
-            return Err(AttentionError::new(
-                "claim_stale",
-                "the pane holds a shell claim, which an agent without its launch id cannot use",
-            ));
-        }
-        // Nothing but a session start can make a claim, so there is nothing
-        // to prove this against, and no reason to ask the mux.
-        None if !starts_session => {
-            return Err(AttentionError::new(
-                "claim_stale",
-                "provider event has no matching pane claim",
-            ));
-        }
-        _ => {}
+    if let Some(claim) = &claim
+        && ClaimMode::of(claim)? == ClaimMode::Shell
+    {
+        return Err(shell_claim_refusal());
     }
     if starts_session {
         let proof = HostProof::establish(env, ports, address)?;
@@ -1088,6 +1078,8 @@ pub(crate) fn self_owned_launch(
             publication_diagnostic,
         });
     }
+    // Nothing but a session start can make a claim, so there is nothing to
+    // prove this against, and no reason to ask the mux.
     let Some(claim) = claim else {
         return Err(AttentionError::new(
             "claim_stale",
