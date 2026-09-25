@@ -46,12 +46,27 @@ fn logging_wezterm(setup: &Setup, delay: &str) -> (PathBuf, PathBuf) {
     fs::write(
         &executable,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$WEZTERM_UNIX_SOCKET\" >> '{}'\nsleep {delay}\nprintf '%s\\n' '[{{\"pane_id\":\"42\"}}]'\n",
+            "#!/bin/sh\n[ -z \"${{ATTENTION_TEST_PRIME:-}}\" ] || exit 0\nprintf '%s\\n' \"$WEZTERM_UNIX_SOCKET\" >> '{}'\nsleep {delay}\nprintf '%s\\n' '[{{\"pane_id\":\"42\"}}]'\n",
             log.display()
         ),
     )
     .expect("fake wezterm");
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).expect("chmod");
+    // A process another test thread forks while the script was open for
+    // writing holds that handle until it execs, and until then the kernel
+    // refuses to run the script ("text file busy"). Run it once, retrying,
+    // so the listings the test counts and times never meet that refusal.
+    let runs = (0..200).any(|_| {
+        let ran = Command::new(&executable)
+            .env("ATTENTION_TEST_PRIME", "1")
+            .status()
+            .is_ok_and(|status| status.success());
+        if !ran {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        ran
+    });
+    assert!(runs, "the fake wezterm never became runnable");
     (directory, log)
 }
 
