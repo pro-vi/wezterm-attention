@@ -389,10 +389,21 @@ async function invokeWriter(request: WriterRequest, transportId: string): Promis
 			resolve(result);
 		};
 		try {
+			// The writer's direct parent is this Pi process, and a pane it claims is
+			// claimed for the process this names, so a value Pi inherited is replaced.
+			// The launch id is the one captured with the request; unset when there
+			// was none.
 			const child = spawn(
 				target.executable,
 				["hooks", "event", "pi", invocation.event],
-				{ env: { ...process.env, WEZTERM_ATTENTION_LAUNCH_ID: request.launchId }, stdio: ["pipe", "ignore", "pipe"] },
+				{
+					env: {
+						...process.env,
+						WEZTERM_ATTENTION_HOST_PID: String(process.pid),
+						WEZTERM_ATTENTION_LAUNCH_ID: request.launchId,
+					},
+					stdio: ["pipe", "ignore", "pipe"],
+				},
 			);
 			child.once("error", () => finish({ kind: "failed", message: "wezterm-attention: writer process could not start" }));
 			child.stderr.on("data", (chunk: Buffer | string) => {

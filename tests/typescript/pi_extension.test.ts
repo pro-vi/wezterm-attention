@@ -100,6 +100,8 @@ function clearAttentionEnvironment(): void {
 	delete process.env.PI_WEZTERM_ATTENTION_TTL_MS;
 	delete process.env.WEZTERM_ATTENTION_ROOT;
 	delete process.env.WEZTERM_ATTENTION_TEST_LOG;
+	delete process.env.WEZTERM_ATTENTION_HOST_PID;
+	delete process.env.WEZTERM_ATTENTION_LAUNCH_ID;
 	// Every writer in this file is a local fake, so the shipped 2s drain cap is
 	// only ever measuring how long this machine takes to spawn a shell. Under the
 	// gate's parallel load that exceeded 2s and two tests failed on a property
@@ -279,6 +281,33 @@ test("v2 dispatch: Pi lifecycle and bus requests use the serialized attention pr
 	expect(payloads[5]?.state).toBe("review");
 	expect(payloads[6]?.state).toBe("clear");
 	expect(payloads[7]?.reason).toBe("quit");
+});
+
+test("v2 dispatch: the writer is told Pi's own pid as its host, whatever Pi inherited", async () => {
+	const root = tempDir("wez-v2-host-");
+	const bin = join(root, "bin");
+	const log = join(root, "calls.log");
+	mkdirSync(bin);
+	writeFileSync(
+		join(bin, "attention"),
+		'#!/bin/sh\nprintf "%s %s\\n" "${WEZTERM_ATTENTION_HOST_PID-unset}" "${WEZTERM_ATTENTION_LAUNCH_ID-unset}" >> "$WEZTERM_ATTENTION_TEST_LOG"\ncat > /dev/null\n',
+	);
+	chmodSync(join(bin, "attention"), 0o755);
+	process.env.WEZTERM_ATTENTION_ROOT = root;
+	process.env.WEZTERM_ATTENTION_TEST_LOG = log;
+	// A value Pi inherited names whoever started Pi, not Pi.
+	process.env.WEZTERM_ATTENTION_HOST_PID = "1";
+	const h = loadExt();
+
+	await h.lifecycle["session_start"]!();
+	await h.lifecycle["agent_start"]!();
+	await h.lifecycle["session_shutdown"]!();
+
+	expect(readFileSync(log, "utf8").trim().split("\n")).toEqual([
+		`${process.pid} unset`,
+		`${process.pid} unset`,
+		`${process.pid} unset`,
+	]);
 });
 
 test("v2 dispatch: Pi reload drains queued writes without sending an end event or warning", async () => {
