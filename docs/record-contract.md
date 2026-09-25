@@ -115,11 +115,18 @@ A provider event finds its launch in this order, and stops at the first rule tha
    (`claim_stale`).
 3. Otherwise the writer proves its host. Its direct parent, as the kernel reports it, must be the
    process `WEZTERM_ATTENTION_HOST_PID` names, alive, this user's and not replaced while it is
-   read, and the writer must not be traced (`self_claim_parent_unverified`). The writer's own
-   controlling terminal, or, only when the kernel says it has none, the parent's, must be the
-   device of the terminal the mux lists for `WEZTERM_PANE` on the current socket; the listing must
-   succeed and name the pane exactly once. A terminal the kernel cannot report refuses
-   (`probe_unavailable`); a different terminal refuses (`unsafe_tty`).
+   read, and the writer must not be traced (`self_claim_parent_unverified`). The host's terminal
+   is the writer's own controlling terminal, or, only when the kernel says it has none, the
+   parent's; a terminal the kernel cannot report refuses (`probe_unavailable`). A session start
+   asks the mux: the host's terminal must be the device of the terminal the mux lists for
+   `WEZTERM_PANE` on the current socket, and the listing must succeed and name the pane exactly
+   once (`unsafe_tty` otherwise). Any other event asks the mux nothing and proves itself against
+   the pane's self-owned claim instead: the parent must be the claim's owner, the same pid started
+   at the same time on the same boot (`claim_stale` otherwise); the host's terminal must be the
+   device at the claim's `tty_path`, with the claim's `tty_fingerprint` (`unsafe_tty`); and the
+   socket must still be the incarnation the claim was made on (`incarnation_changed`). The listing
+   that made the claim proved that terminal is the pane's, and while its owner still runs on it,
+   nothing that listing would add has changed.
 4. A session start then claims, under the pane's claim lock and no other lock, after reading the
    same host again. No claim: a new self-owned claim with a new launch id. The same process's own
    claim: kept as it is, not rewritten. Another process's claim: replaced with a new launch id only
@@ -129,7 +136,7 @@ A provider event finds its launch in this order, and stops at the first rule tha
    needs the parent to be in the terminal's foreground process group; it need not lead that
    group, as a native agent started by a launcher process does not. Keeping does not need it.
    The claim is published to the proven terminal before the lock is released.
-5. Any other event resolves only against a self-owned claim whose owner is the process it proved.
+5. Any other event resolves against the self-owned claim it proved itself against.
 
 Lifecycle observations are kept only for an event with an inherited launch id; an event resolved
 through its own agent's claim writes the rest of its records and reports the lifecycle as not

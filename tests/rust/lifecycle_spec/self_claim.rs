@@ -415,7 +415,7 @@ fn a_hook_whose_origin_is_not_proven_changes_nothing() {
                 let mut changed = setup.processes.facts(AGENT_PID);
                 changed.start.seconds += 1;
                 // Each event reads the parent twice: once to prove it, and
-                // once more after the listing. The second reading differs.
+                // once more at the end of the proof. The second reading differs.
                 let reads = std::sync::atomic::AtomicUsize::new(0);
                 *setup.processes.on_read.lock().unwrap() = Some(std::sync::Arc::new(move |pid| {
                     if pid != AGENT_PID {
@@ -572,6 +572,39 @@ fn only_a_known_absent_terminal_lets_the_parent_s_terminal_decide() {
             }),
         ),
         (
+            "a pane terminal that is not a terminal device",
+            "unsafe_tty",
+            Box::new(|setup| setup.processes.devices.lock().unwrap().clear()),
+        ),
+        (
+            "a boot session id that cannot be read",
+            "probe_unavailable",
+            Box::new(|setup| *setup.processes.boot.lock().unwrap() = None),
+        ),
+    ];
+    let before = records(&setup);
+    for (label, code, arrange) in cases {
+        let setup_state = (
+            setup.processes.table.lock().unwrap().clone(),
+            setup.processes.devices.lock().unwrap().clone(),
+            setup.processes.boot.lock().unwrap().clone(),
+            setup.panes.rows.lock().unwrap().clone(),
+        );
+        arrange(&setup);
+        let diagnostic = refused(&setup, &setup.agent_env(), &tool);
+        assert_eq!(diagnostic.code, code, "{label}: {diagnostic:?}");
+        *setup.processes.table.lock().unwrap() = setup_state.0;
+        *setup.processes.devices.lock().unwrap() = setup_state.1;
+        *setup.processes.boot.lock().unwrap() = setup_state.2;
+        *setup.panes.rows.lock().unwrap() = setup_state.3;
+    }
+    assert_eq!(records(&setup), before);
+}
+
+#[test]
+fn a_session_start_needs_the_mux_to_list_the_pane_once_on_the_agent_s_terminal() {
+    let cases: Vec<(&str, &str, Arrangement)> = vec![
+        (
             "a listing that fails",
             "realm_unavailable",
             Box::new(|setup| setup.panes.set(None)),
@@ -607,34 +640,16 @@ fn only_a_known_absent_terminal_lets_the_parent_s_terminal_decide() {
                 }]))
             }),
         ),
-        (
-            "a pane terminal that is not a terminal device",
-            "unsafe_tty",
-            Box::new(|setup| setup.processes.devices.lock().unwrap().clear()),
-        ),
-        (
-            "a boot session id that cannot be read",
-            "probe_unavailable",
-            Box::new(|setup| *setup.processes.boot.lock().unwrap() = None),
-        ),
     ];
-    let before = records(&setup);
     for (label, code, arrange) in cases {
-        let setup_state = (
-            setup.processes.table.lock().unwrap().clone(),
-            setup.processes.devices.lock().unwrap().clone(),
-            setup.processes.boot.lock().unwrap().clone(),
-            setup.panes.rows.lock().unwrap().clone(),
-        );
+        let setup = Setup::new();
+        install(&setup, &self_owned_claim(&setup, AGENT_LAUNCH, AGENT_PID));
         arrange(&setup);
-        let diagnostic = refused(&setup, &setup.agent_env(), &tool);
+        let before = records(&setup);
+        let diagnostic = refused(&setup, &setup.agent_env(), &start("codex", "s"));
         assert_eq!(diagnostic.code, code, "{label}: {diagnostic:?}");
-        *setup.processes.table.lock().unwrap() = setup_state.0;
-        *setup.processes.devices.lock().unwrap() = setup_state.1;
-        *setup.processes.boot.lock().unwrap() = setup_state.2;
-        *setup.panes.rows.lock().unwrap() = setup_state.3;
+        assert_eq!(records(&setup), before, "{label}");
     }
-    assert_eq!(records(&setup), before);
 }
 
 #[test]
@@ -650,11 +665,7 @@ fn a_socket_replaced_while_the_agent_is_checked_proves_nothing() {
         *slot.lock().unwrap() = Some(UnixListener::bind(&socket).expect("rebind socket"));
     }));
     let before = records(&setup);
-    let diagnostic = refused(
-        &setup,
-        &setup.agent_env(),
-        &event("codex", "PreToolUse", "s", json!({"tool_name":"shell"})),
-    );
+    let diagnostic = refused(&setup, &setup.agent_env(), &start("codex", "s"));
     assert_eq!(diagnostic.code, "incarnation_changed", "{diagnostic:?}");
     assert_eq!(records(&setup), before);
 }
@@ -776,6 +787,160 @@ fn only_a_session_start_claims_a_pane() {
     }
     assert!(stored_claim(&setup).is_none());
     assert_eq!(listings.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// Count the mux listings `setup` answers from here on.
+fn count_listings(setup: &Setup) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    let listings = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = listings.clone();
+    *setup.panes.on_list.lock().unwrap() = Some(std::sync::Arc::new(move || {
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }));
+    listings
+}
+
+#[test]
+fn a_later_event_proves_its_agent_against_the_claim_without_asking_the_mux() {
+    let setup = Setup::new();
+    let env = setup.agent_env();
+    let listings = count_listings(&setup);
+    apply_as(&setup, &env, &start("claude", "s"), "00000000000000000200");
+    assert_eq!(
+        listings.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "making the claim lists the pane"
+    );
+    // The listing would fail from here on; nothing asks for it.
+    setup.panes.set(None);
+    for (name, patch, observation) in [
+        (
+            "UserPromptSubmit",
+            json!({"prompt":"go"}),
+            "00000000000000000300",
+        ),
+        (
+            "PreToolUse",
+            json!({"tool_name":"Bash"}),
+            "00000000000000000400",
+        ),
+        (
+            "PostToolUse",
+            json!({"tool_name":"Bash"}),
+            "00000000000000000500",
+        ),
+        (
+            "Stop",
+            json!({"stop_hook_active":false}),
+            "00000000000000000600",
+        ),
+    ] {
+        let result = apply_as(
+            &setup,
+            &env,
+            &event("claude", name, "s", patch),
+            observation,
+        );
+        assert_ne!(result.disposition, "ignored", "{name}: {result:?}");
+        assert!(result.diagnostic.is_none(), "{name}: {result:?}");
+    }
+    assert_eq!(listings.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_later_event_is_refused_unless_its_agent_still_runs_on_the_claim_s_terminal() {
+    let cases: Vec<(&str, &str, EnvArrangement)> = vec![
+        (
+            "a claim recorded at another terminal",
+            "unsafe_tty",
+            Box::new(|setup, _| {
+                let mut claim = stored_claim(setup).expect("claim");
+                claim["tty_path"] = json!("/dev/ttys778");
+                setup
+                    .processes
+                    .devices
+                    .lock()
+                    .unwrap()
+                    .insert("/dev/ttys778".into(), PANE_TTY_DEVICE + 1);
+                install(setup, &claim);
+            }),
+        ),
+        (
+            "a claim whose terminal was replaced since",
+            "unsafe_tty",
+            Box::new(|setup, _| {
+                let mut claim = stored_claim(setup).expect("claim");
+                claim["tty_fingerprint"] = json!("e".repeat(64));
+                install(setup, &claim);
+            }),
+        ),
+        (
+            "an agent now on another terminal",
+            "unsafe_tty",
+            Box::new(|setup, _| {
+                setup.processes.change(AGENT_PID, |agent| {
+                    agent.terminal = ControllingTerminal::Device(PANE_TTY_DEVICE + 7)
+                })
+            }),
+        ),
+        (
+            "another agent in the pane",
+            "claim_stale",
+            Box::new(|setup, env| *env = start_agent(setup, 4100, 5100)),
+        ),
+        (
+            "the same pid, started at another time",
+            "claim_stale",
+            Box::new(|setup, _| {
+                setup
+                    .processes
+                    .change(AGENT_PID, |agent| agent.start.microseconds += 1)
+            }),
+        ),
+        (
+            "another boot session",
+            "claim_stale",
+            Box::new(|setup, _| {
+                *setup.processes.boot.lock().unwrap() =
+                    Some("1f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b".into());
+            }),
+        ),
+        (
+            "the socket replaced while the agent is checked",
+            "incarnation_changed",
+            Box::new(|setup, _| {
+                let socket = PathBuf::from(&setup.env["WEZTERM_UNIX_SOCKET"]);
+                let replaced = std::sync::atomic::AtomicBool::new(false);
+                let holder = Mutex::new(None::<UnixListener>);
+                *setup.processes.on_read.lock().unwrap() = Some(std::sync::Arc::new(move |pid| {
+                    if pid == AGENT_PID && !replaced.swap(true, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        let _ = fs::remove_file(&socket);
+                        std::thread::sleep(Duration::from_millis(5));
+                        *holder.lock().unwrap() =
+                            Some(UnixListener::bind(&socket).expect("rebind socket"));
+                    }
+                    None
+                }));
+            }),
+        ),
+    ];
+    for (label, code, arrange) in cases {
+        let setup = Setup::new();
+        let mut env = setup.agent_env();
+        apply_as(&setup, &env, &start("claude", "s"), "00000000000000000200");
+        arrange(&setup, &mut env);
+        let listings = count_listings(&setup);
+        let before = records(&setup);
+        let tool = event("claude", "PreToolUse", "s", json!({"tool_name":"Bash"}));
+        let diagnostic = refused(&setup, &env, &tool);
+        assert_eq!(diagnostic.code, code, "{label}: {diagnostic:?}");
+        assert_eq!(records(&setup), before, "{label}");
+        assert_eq!(
+            listings.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "{label}"
+        );
+    }
 }
 
 #[test]

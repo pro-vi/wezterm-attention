@@ -716,6 +716,56 @@ impl HostProof {
         Ok(proof)
     }
 
+    /// Prove that this hook's agent is the process `claim` names, still on the
+    /// terminal the claim recorded, without asking the mux.
+    ///
+    /// Making the claim listed the pane and proved that terminal is its own.
+    /// While the owner, the same process on the same boot, still runs on that
+    /// terminal device at that path, with the fingerprint the claim recorded,
+    /// under the socket incarnation the claim was made on, nothing the
+    /// listing would add has changed. A different owner refuses as
+    /// `claim_stale`; the rest refuses as [`Self::establish`] does. The parent
+    /// is read again at the end, as there.
+    pub(crate) fn of_claim(
+        env: &BTreeMap<String, String>,
+        ports: &RuntimePorts<'_>,
+        address: &PaneAddress,
+        claim: &Value,
+    ) -> Result<Self> {
+        let asserted = asserted_host(env)?;
+        let reading = read_host(ports.processes, asserted)?;
+        let boot_session_id = ports.processes.boot_session().ok_or_else(|| {
+            AttentionError::new("probe_unavailable", "the boot session id could not be read")
+        })?;
+        let owner = ClaimOwner {
+            pid: reading.parent_pid,
+            start: reading.parent_start,
+            boot_session_id,
+        };
+        if ClaimMode::of(claim)? != ClaimMode::SelfOwned(owner.clone()) {
+            return Err(AttentionError::new(
+                "claim_stale",
+                "the pane's claim belongs to another agent process",
+            ));
+        }
+        let recorded = |field: &str| {
+            claim
+                .get(field)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| AttentionError::new("record_invalid", "claim has no terminal"))
+        };
+        let proof = Self {
+            owner,
+            tty_path: recorded("tty_path")?,
+            tty_fingerprint: recorded("tty_fingerprint")?,
+            terminal: reading.terminal,
+            foreground: reading.foreground,
+        };
+        proof.confirm(env, ports.processes, ports.tty, address)?;
+        Ok(proof)
+    }
+
     /// Read the same host again and return whether it is still in the
     /// terminal's foreground job. The same parent, started at the same time on
     /// the same boot, on the same terminal at the same path, under the same
@@ -1027,8 +1077,8 @@ pub(crate) fn self_owned_launch(
         }
         _ => {}
     }
-    let proof = HostProof::establish(env, ports, address)?;
     if starts_session {
+        let proof = HostProof::establish(env, ports, address)?;
         let (claim, publication_diagnostic) = claim_for_host(env, ports, address, &proof)?;
         return Ok(SelfOwnedLaunch {
             claim,
@@ -1042,12 +1092,7 @@ pub(crate) fn self_owned_launch(
             "provider event has no matching pane claim",
         ));
     };
-    if !proof.owns(&claim)? {
-        return Err(AttentionError::new(
-            "claim_stale",
-            "the pane's claim belongs to another agent process",
-        ));
-    }
+    let proof = HostProof::of_claim(env, ports, address, &claim)?;
     Ok(SelfOwnedLaunch {
         claim,
         proof,
