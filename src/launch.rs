@@ -572,7 +572,8 @@ struct HostReading {
     /// The device of the terminal the hook or, when the hook has none, its
     /// parent runs on.
     terminal: u64,
-    /// Whether the parent leads the terminal's foreground job.
+    /// Whether the parent is in the terminal's foreground process group. It
+    /// need not lead it: a launcher can lead the group it runs its agent in.
     foreground: bool,
 }
 
@@ -720,7 +721,7 @@ impl HostProof {
         Ok(proof)
     }
 
-    /// Read the same host again and return whether it still leads the
+    /// Read the same host again and return whether it is still in the
     /// terminal's foreground job. The same parent, started at the same time on
     /// the same boot, on the same terminal at the same path, under the same
     /// socket; any difference refuses, and no other process is ever put in
@@ -846,7 +847,7 @@ fn self_owned_claim_record(
 /// claim of another process proven gone is replaced with a new launch id;
 /// one still running, or one whose state cannot be read, keeps the pane, and
 /// so does a shell claim. Only a new or replacing claim needs the agent to
-/// lead the terminal's foreground job. The claim is published to the proven
+/// be in the terminal's foreground job. The claim is published to the proven
 /// terminal before the lock is released.
 fn claim_for_host(
     env: &BTreeMap<String, String>,
@@ -921,7 +922,7 @@ fn claim_for_host(
             if !foreground {
                 return Err(AttentionError::new(
                     "claim_stale",
-                    "the agent does not lead the pane's foreground job, so it cannot claim the pane",
+                    "the agent is not in the pane's foreground job, so it cannot claim the pane",
                 ));
             }
             let claim =

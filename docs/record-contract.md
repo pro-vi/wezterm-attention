@@ -122,8 +122,9 @@ A provider event finds its launch in this order, and stops at the first rule tha
    when that process is proven gone, meaning the boot session differs, no process has its pid, or
    the process there started at another time; a live owner keeps the pane (`claim_stale`), and a
    zombie or an owner that cannot be read keeps it too (`probe_unavailable`). Creating or replacing
-   needs the parent to lead the terminal's foreground process group; keeping does not. The claim
-   is published to the proven terminal before the lock is released.
+   needs the parent to be in the terminal's foreground process group; it need not lead that
+   group, as a native agent started by a launcher process does not. Keeping does not need it.
+   The claim is published to the proven terminal before the lock is released.
 5. Any other event resolves only against a self-owned claim whose owner is the process it proved.
 
 Lifecycle observations are kept only for an event with an inherited launch id; an event resolved

@@ -812,6 +812,29 @@ fn an_agent_that_is_not_the_foreground_job_does_not_claim_but_keeps_its_claim_wh
 }
 
 #[test]
+fn an_agent_in_the_foreground_job_claims_without_leading_it() {
+    // A launcher such as npm's `codex` leads the job and runs the native
+    // agent inside it.
+    let setup = Setup::new();
+    setup.processes.change(AGENT_PID, |agent| {
+        agent.process_group = SHELL_PID + 1;
+        agent.terminal_foreground_group = SHELL_PID + 1;
+    });
+    assert_eq!(
+        apply_as(
+            &setup,
+            &setup.agent_env(),
+            &start("codex", "s"),
+            "00000000000000000200"
+        )
+        .disposition,
+        "applied"
+    );
+    let claim = stored_claim(&setup).expect("the agent claimed the pane");
+    assert_eq!(claim["owner_pid"], json!(AGENT_PID.to_string()));
+}
+
+#[test]
 fn the_same_agent_starting_again_keeps_its_claim_exactly() {
     let setup = Setup::new();
     let env = setup.agent_env();
