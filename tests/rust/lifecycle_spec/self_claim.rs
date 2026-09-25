@@ -1015,3 +1015,102 @@ fn two_racing_first_hooks_of_one_agent_end_with_one_claim_both_resolve_to() {
         .collect();
     assert_eq!(launches, [launch], "both resolved to the one claim");
 }
+
+/// Run `command` the way an agent runs a registered hook command: through a
+/// shell, with the callback JSON on stdin, from this test process standing in
+/// for the agent. Returns the diagnostic code the writer printed.
+fn run_registered(setup: &Setup, shell: &[&str], command: &str) -> String {
+    let mut env = setup.env.clone();
+    env.remove("WEZTERM_ATTENTION_LAUNCH_ID");
+    let mut child = Command::new(shell[0])
+        .args(&shell[1..])
+        .arg(command)
+        .env_clear()
+        .envs(&env)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the hook shell");
+    child
+        .stdin
+        .take()
+        .expect("hook stdin")
+        .write_all(
+            serde_json::to_string(&payload(
+                "claude",
+                "SessionStart",
+                "s",
+                json!({"source":"startup"}),
+            ))
+            .expect("payload")
+            .as_bytes(),
+        )
+        .expect("deliver the callback");
+    let output = child.wait_with_output().expect("hook exits");
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("attention: "))
+        .and_then(|line| line.split(':').next())
+        .unwrap_or_else(|| panic!("the writer said nothing: {stderr}"))
+        .to_owned()
+}
+
+#[test]
+fn the_registered_hook_command_hands_the_agent_s_own_pid_to_the_writer() {
+    let setup = Setup::new();
+    // A checkout as installed: the launcher, which execs the built writer.
+    let checkout = setup._scratch.0.join("checkout");
+    fs::create_dir_all(checkout.join("bin")).unwrap();
+    fs::create_dir_all(checkout.join("libexec")).unwrap();
+    fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bin/attention"),
+        checkout.join("bin/attention"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        env!("CARGO_BIN_EXE_attention"),
+        checkout.join("libexec/attention-rs"),
+    )
+    .unwrap();
+    let attention = checkout.join("bin/attention");
+    let attention = attention.to_str().unwrap();
+    let registered = format!(
+        "WEZTERM_ATTENTION_HOST_PID=$PPID exec {attention} hooks event claude SessionStart"
+    );
+    // Past the parent check, the writer goes on to the terminal and the mux,
+    // which this test has neither of; any refusal from there on shows the
+    // parent was accepted.
+    let past_the_parent = ["unsafe_tty", "realm_unavailable"];
+    let mut shells = vec![vec!["/bin/sh", "-c"], vec!["/bin/bash", "-c"]];
+    if std::path::Path::new("/bin/zsh").exists() {
+        shells.push(vec!["/bin/zsh", "-lc"]);
+    }
+    for shell in &shells {
+        let code = run_registered(&setup, shell, &registered);
+        assert!(
+            past_the_parent.contains(&code.as_str()),
+            "{shell:?}: the registered command was refused as {code}"
+        );
+    }
+    // A shell that stays behind, and a relay that runs the command again
+    // below itself, leave a parent that is not the asserted one.
+    for command in [
+        format!(
+            "WEZTERM_ATTENTION_HOST_PID=$PPID {attention} hooks event claude SessionStart; true"
+        ),
+        format!(
+            "export WEZTERM_ATTENTION_HOST_PID=$PPID; /bin/sh -c 'exec {attention} hooks event claude SessionStart'; true"
+        ),
+        format!("exec {attention} hooks event claude SessionStart"),
+    ] {
+        assert_eq!(
+            run_registered(&setup, &["/bin/sh", "-c"], &command),
+            "self_claim_parent_unverified",
+            "{command}"
+        );
+    }
+    assert!(stored_claim(&setup).is_none());
+}
