@@ -111,8 +111,9 @@ A provider event finds its launch in this order, and stops at the first rule tha
 2. Without one, the event is refused when self-claim is switched off
    (`WEZTERM_ATTENTION_ENABLE_SELF_CLAIM` set to anything but `1`) or the platform is not macOS
    (`claim_stale`); when `WEZTERM_ATTENTION_HOST_PID` is missing or is not a positive decimal pid
-   (`self_claim_parent_unverified`); and when the pane holds a shell claim, for every event
-   (`claim_stale`).
+   (`self_claim_parent_unverified`); when the pane holds a shell claim, for every event
+   (`claim_stale`); and, for any event but a session start, when the pane holds no claim
+   (`claim_stale`), before anything is proved or the mux is asked.
 3. Otherwise the writer proves its host. Its direct parent, as the kernel reports it, must be the
    process `WEZTERM_ATTENTION_HOST_PID` names, alive, this user's and not replaced while it is
    read, and the writer must not be traced (`self_claim_parent_unverified`). The host's terminal
