@@ -121,6 +121,8 @@ struct FakeTty {
     path: String,
     fingerprint: String,
     writes: Mutex<Vec<Vec<u8>>>,
+    /// Whether a write fails, as one to a terminal whose queue stays full does.
+    refuses_writes: std::sync::atomic::AtomicBool,
 }
 
 impl FakeTty {
@@ -129,6 +131,7 @@ impl FakeTty {
             path: "/dev/ttys777".to_owned(),
             fingerprint: "f".repeat(64),
             writes: Mutex::new(Vec::new()),
+            refuses_writes: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -152,6 +155,15 @@ impl TtyWriter for FakeTty {
         data: &[u8],
         _expected_fingerprint: &str,
     ) -> wezterm_attention::protocol::Result<()> {
+        if self
+            .refuses_writes
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(wezterm_attention::protocol::AttentionError::new(
+                "unsafe_tty",
+                "synthetic terminal write failure",
+            ));
+        }
         self.writes.lock().expect("writes lock").push(data.to_vec());
         Ok(())
     }

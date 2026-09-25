@@ -789,6 +789,70 @@ fn an_agent_s_first_session_start_claims_the_pane_for_its_own_process() {
 }
 
 #[test]
+fn a_claim_the_terminal_refused_is_kept_and_published_at_the_next_session_start() {
+    let setup = Setup::new();
+    let env = setup.agent_env();
+    let refuse = |yes| {
+        setup
+            .tty
+            .refuses_writes
+            .store(yes, std::sync::atomic::Ordering::SeqCst)
+    };
+    refuse(true);
+    let result = apply_as(&setup, &env, &start("claude", "s"), "00000000000000000200");
+    assert_eq!(result.disposition, "applied");
+    assert_eq!(
+        result.diagnostic.as_ref().map(|found| found.code.as_str()),
+        Some("unsafe_tty"),
+        "the publication failure is reported: {result:?}"
+    );
+    let claim = stored_claim(&setup).expect("the claim is kept");
+    let launch = launch_of(&claim);
+    assert!(setup.tty.writes.lock().unwrap().is_empty());
+
+    // A dropped field says more about the event than the pending
+    // publication does.
+    let dropped = event(
+        "claude",
+        "SessionStart",
+        "t",
+        json!({"source":"clear","model":"m".repeat(300)}),
+    );
+    assert!(dropped.diagnostic.is_some(), "the parser drops the model");
+    let result = apply_as(&setup, &env, &dropped, "00000000000000000300");
+    assert_ne!(result.disposition, "ignored", "{result:?}");
+    assert_eq!(
+        result
+            .diagnostic
+            .as_ref()
+            .and_then(|found| found.context.get("dropped_fields").cloned()),
+        Some(json!(["model"])),
+        "{result:?}"
+    );
+
+    let prompt = event("claude", "UserPromptSubmit", "t", json!({"prompt":"go"}));
+    let result = apply_as(&setup, &env, &prompt, "00000000000000000400");
+    assert_eq!(result.disposition, "applied", "later events still land");
+    assert!(result.diagnostic.is_none(), "{result:?}");
+
+    refuse(false);
+    let resumed = event("claude", "SessionStart", "t", json!({"source":"resume"}));
+    let result = apply_as(&setup, &env, &resumed, "00000000000000000500");
+    assert_ne!(result.disposition, "ignored", "{result:?}");
+    assert!(result.diagnostic.is_none(), "{result:?}");
+    assert_eq!(stored_claim(&setup).as_ref(), Some(&claim));
+    let (address, _) = pane_address(&setup.env).expect("address");
+    assert_eq!(
+        *setup.tty.writes.lock().unwrap(),
+        [
+            wezterm_attention::wezterm::publication_bytes(&address, Some(&launch))
+                .expect("publication")
+        ],
+        "the next session start publishes the kept claim"
+    );
+}
+
+#[test]
 fn only_a_session_start_claims_a_pane() {
     let setup = Setup::new();
     // With no claim to prove it against, an event that cannot claim is
