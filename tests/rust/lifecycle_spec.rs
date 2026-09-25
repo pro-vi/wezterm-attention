@@ -61,7 +61,7 @@ mod claim_fence;
 struct Scratch(PathBuf);
 
 #[test]
-fn c2_plain_text_marker_is_left_alone() {
+fn a_plain_text_file_where_a_v1_marker_goes_is_left_alone() {
     let setup = Setup::new();
     setup.claim();
     setup.apply(
