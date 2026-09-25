@@ -1380,7 +1380,8 @@ fn the_registered_hook_command_hands_the_agent_s_own_pid_to_the_writer() {
         );
     }
     // A shell that stays behind, and a relay that runs the command again
-    // below itself, leave a parent that is not the asserted one.
+    // below itself, leave a parent that is not the asserted one, and a
+    // command without the assignment asserts no pid at all.
     for command in [
         format!(
             "WEZTERM_ATTENTION_HOST_PID=$PPID {attention} hooks event claude SessionStart; true"
