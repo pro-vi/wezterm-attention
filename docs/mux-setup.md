@@ -52,8 +52,17 @@ Sourcing the file a second time installs nothing new, so `source ~/.bashrc` afte
 
 ## Zsh launch claims
 
-Zsh exposes compound command lists too late to distinguish every executed agent command. Its
-supported path is therefore explicit. In `~/.zshrc`:
+On macOS, zsh needs no claim step. Start `claude`, `codex` or `pi` as you would anywhere: the agent's
+first session start claims the pane for the agent's own process, through the hook command in the
+[README](../README.md#claude-code-hooks) or, for Pi, through the extension. Sourcing the zsh
+integration is optional there; it republishes the pane's claim at every prompt.
+
+The explicit claim below is still the way to claim on Linux, where an agent does not claim its own
+pane in 1.0, and on macOS it gives the agent an inherited launch id, which lifecycle observations and
+`attention mark` need. Once a shell has claimed a pane, that pane refuses events from an agent
+started there without the claim's launch id; open a new pane to go back to agents claiming for
+themselves. Zsh exposes compound command lists too late to distinguish every executed agent
+command, so its claim is explicit. In `~/.zshrc`:
 
 ```zsh
 [[ -n "${WEZTERM_ATTENTION_ROOT:-}" ]] && source "$WEZTERM_ATTENTION_ROOT/shell/wezterm-attention.zsh"
@@ -118,7 +127,7 @@ attention hooks describe --provider claude --json
 attention hooks describe --provider codex --json
 ```
 
-For each `registration=register` row, run the `attention` link on your PATH with that row's `arguments` and pass the original callback JSON on stdin. Ignored rows are not registrations. `requires_launch_identity` qualifies rich facts and executable delivery; it does not remove legacy support. Evidence references describe parser, fixture and native-contact coverage, not live activation.
+For each `registration=register` row, run the `attention` link on your PATH with that row's `arguments` and pass the original callback JSON on stdin, as one command that first sets `WEZTERM_ATTENTION_HOST_PID=$PPID` and then `exec`s it; the README says why. Ignored rows are not registrations. `requires_launch_identity` qualifies rich facts and executable delivery; it does not remove legacy support. Evidence references describe parser, fixture and native-contact coverage, not live activation.
 
 Do not register a `SubagentStart` attention writer. A child becomes visible only after its first
 tool work. `SubagentStop` records ordered stopped evidence for that exact child.

@@ -84,7 +84,7 @@ attention.apply_to_config(config)
 
 With this form, update with `git pull` and rerun `install-cli.sh` in the clone. If you keep `wezterm.plugin.require` and build the command in your own clone, pass `integration_root = "/absolute/path/to/wezterm-attention"` to `apply_to_config`; the Lua then updates through `update_all` and the command through your clone, separately.
 
-Continue with [Mux setup](docs/mux-setup.md) for Bash or zsh launch claims, then register the [Claude Code](#claude-code-hooks) and [Codex](#codex-hooks) hooks. See [Record contract](docs/record-contract.md) for precedence and [Mux pane moves](docs/mux-pane-moves.md) before moving the final pane out of a server tab.
+Then register the [Claude Code](#claude-code-hooks) and [Codex](#codex-hooks) hooks. On macOS that is enough: an agent's first session start claims its pane by itself, so zsh needs no claim step. Bash still claims each agent command it starts, and on Linux a shell claim is the only way to claim; [Mux setup](docs/mux-setup.md) covers both shells. See [Record contract](docs/record-contract.md) for precedence and [Mux pane moves](docs/mux-pane-moves.md) before moving the final pane out of a server tab.
 
 ## Render modes
 
@@ -219,7 +219,7 @@ attention.apply_to_config(config, {
 
 ## Producer paths: v2 records and v1 flat markers
 
-Write v2 records through the `attention` command; never construct their JSON yourself. Use `attention hooks event PROVIDER EVENT` for provider callbacks, and `attention mark STATE --source NAME` for anything else, where `STATE` is `thinking`, `stop`, `notify`, `review` or `clear`. Both need the pane's current launch claim, so run the producer from a claiming shell: in bash, add its command name to `WEZTERM_ATTENTION_COMMANDS`; in zsh, start it as `wezterm_attention_claim && <command>`. See [Mux setup](docs/mux-setup.md).
+Write v2 records through the `attention` command; never construct their JSON yourself. Use `attention hooks event PROVIDER EVENT` for provider callbacks, and `attention mark STATE --source NAME` for anything else, where `STATE` is `thinking`, `stop`, `notify`, `review` or `clear`. Both write into the pane's current launch claim. On macOS an agent's registered hooks claim the pane for their agent themselves (see [Claude Code hooks](#claude-code-hooks)). `attention mark`, and every producer on Linux, needs the launch id of a claiming shell, so run it from one: in bash, add its command name to `WEZTERM_ATTENTION_COMMANDS`; in zsh, start it as `wezterm_attention_claim && <command>`. See [Mux setup](docs/mux-setup.md).
 
 `--source` defaults to `manual`. `attention mark clear --source NAME` removes that source's review flag and, when the activity the tab currently shows was published by that source, clears that activity too; it reports `applied` when it did either and `skipped` otherwise. The source name `user` belongs to `Alt+B` and every `mark` state refuses it.
 
@@ -494,37 +494,39 @@ The extension registers no commands and leaves print mode alone. It forwards `se
 
 Other extensions may emit `thinking`, `stop`, `notify`, `review`, or `clear` on the bus. Review uses the `pi-bus` owner. Clear writes an ordered activity-clear record and clears that owner without hiding newer activity.
 
-Which format Pi writes depends on the pane. Where `WEZTERM_ATTENTION_ROOT` is unset (the `attention` command is not built), it writes v1 flat markers. Where it is set, it writes v2 records through the command, and those need a launch claim: in a pane where `pi` was started without one, the writer refuses every event, Pi shows one warning, and the tab shows nothing for Pi. Start Pi from a shell that claims for it; see [Mux setup](docs/mux-setup.md).
+Which format Pi writes depends on the pane. Where `WEZTERM_ATTENTION_ROOT` is unset (the `attention` command is not built), it writes v1 flat markers. Where it is set, it writes v2 records through the command, and those need a launch claim. On macOS, Pi's session start claims the pane for the Pi process itself, so `pi` needs no claim step; the extension tells the writer its own pid for that. On Linux, or with self-claim switched off, a pane where `pi` was started without a claim refuses every event, Pi shows one warning, and the tab shows nothing for Pi; start Pi from a shell that claims for it, see [Mux setup](docs/mux-setup.md). Lifecycle observations are kept only for a Pi that inherited a shell's launch id.
 
 For cached lifecycle observations, question-publication evidence and consumer-owned presentation, see the [consumer guide](docs/consumer-guide.md).
 
 ## Claude Code hooks
 
-This repository does not edit Claude Code's settings; registration is yours. `attention hooks describe --provider claude --json` lists every native event with `registration` set to `register` or `ignored`. For each `register` row, run `attention` with that row's `arguments`; Claude Code passes the callback JSON on stdin, and the command reads it unchanged.
+This repository does not edit Claude Code's settings; registration is yours. `attention hooks describe --provider claude --json` lists every native event with `registration` set to `register` or `ignored`. For each `register` row, run `attention` with that row's `arguments`, in the command form below; Claude Code passes the callback JSON on stdin, and the command reads it unchanged.
 
 Register the `attention` link on your PATH, not `$WEZTERM_ATTENTION_ROOT/bin/attention`. Hooks are global: they also run in editors, other terminals, ssh sessions and cron, where that variable is unset, and on macOS the plugin directory's path contains a space, which splits an unquoted command. A hook that has nothing to record there, such as one outside WezTerm or in a pane with no claim, exits 0 and does not interrupt the agent. If the agent's PATH does not include `~/.local/bin`, put the link's absolute path in each `command` instead.
+
+Each command is `WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude <Event>`, for every event. On macOS this lets an agent that no shell claimed for record itself: its first `SessionStart` checks that the hook's direct parent is the process the variable names, that this process runs on the terminal the mux lists for the pane, and that it leads the pane's foreground job, then claims the pane for that process. Its later events are accepted from that same process. Keep `$PPID` literal in the file, so the shell the agent starts for the hook reads it there, where it names the agent. Keep the whole command one assignment and one `exec`: a shell that stays behind, as in `...; true`, `a && b` or a wrapper script that runs `attention` without `exec`, becomes the writer's parent instead, and the event is refused (`self_claim_parent_unverified`) without interrupting the agent. An agent started from a claiming shell inherits its launch id and needs none of this. A pane a shell has claimed refuses events from an agent that did not inherit that claim's launch id. Set `WEZTERM_ATTENTION_ENABLE_SELF_CLAIM=0` in the agent's environment to accept inherited launch ids only; on Linux that is the only mode in 1.0, and the assignment is harmless there.
 
 In `~/.claude/settings.json`:
 
 ```json
 {
   "hooks": {
-    "SessionStart":       [{ "hooks": [{ "type": "command", "command": "attention hooks event claude SessionStart" }] }],
-    "UserPromptSubmit":   [{ "hooks": [{ "type": "command", "command": "attention hooks event claude UserPromptSubmit" }] }],
-    "PreToolUse":         [{ "hooks": [{ "type": "command", "command": "attention hooks event claude PreToolUse" }] }],
-    "PostToolUse":        [{ "hooks": [{ "type": "command", "command": "attention hooks event claude PostToolUse" }] }],
-    "PostToolUseFailure": [{ "hooks": [{ "type": "command", "command": "attention hooks event claude PostToolUseFailure" }] }],
-    "PermissionRequest":  [{ "hooks": [{ "type": "command", "command": "attention hooks event claude PermissionRequest" }] }],
-    "PermissionDenied":   [{ "hooks": [{ "type": "command", "command": "attention hooks event claude PermissionDenied" }] }],
-    "Notification":       [{ "hooks": [{ "type": "command", "command": "attention hooks event claude Notification" }] }],
-    "Elicitation":        [{ "hooks": [{ "type": "command", "command": "attention hooks event claude Elicitation" }] }],
-    "ElicitationResult":  [{ "hooks": [{ "type": "command", "command": "attention hooks event claude ElicitationResult" }] }],
-    "PreCompact":         [{ "hooks": [{ "type": "command", "command": "attention hooks event claude PreCompact" }] }],
-    "PostCompact":        [{ "hooks": [{ "type": "command", "command": "attention hooks event claude PostCompact" }] }],
-    "Stop":               [{ "hooks": [{ "type": "command", "command": "attention hooks event claude Stop" }] }],
-    "StopFailure":        [{ "hooks": [{ "type": "command", "command": "attention hooks event claude StopFailure" }] }],
-    "SubagentStop":       [{ "hooks": [{ "type": "command", "command": "attention hooks event claude SubagentStop" }] }],
-    "SessionEnd":         [{ "hooks": [{ "type": "command", "command": "attention hooks event claude SessionEnd" }] }]
+    "SessionStart":       [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude SessionStart" }] }],
+    "UserPromptSubmit":   [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude UserPromptSubmit" }] }],
+    "PreToolUse":         [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude PreToolUse" }] }],
+    "PostToolUse":        [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude PostToolUse" }] }],
+    "PostToolUseFailure": [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude PostToolUseFailure" }] }],
+    "PermissionRequest":  [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude PermissionRequest" }] }],
+    "PermissionDenied":   [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude PermissionDenied" }] }],
+    "Notification":       [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude Notification" }] }],
+    "Elicitation":        [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude Elicitation" }] }],
+    "ElicitationResult":  [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude ElicitationResult" }] }],
+    "PreCompact":         [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude PreCompact" }] }],
+    "PostCompact":        [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude PostCompact" }] }],
+    "Stop":               [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude Stop" }] }],
+    "StopFailure":        [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude StopFailure" }] }],
+    "SubagentStop":       [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude SubagentStop" }] }],
+    "SessionEnd":         [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude SessionEnd" }] }]
   }
 }
 ```
@@ -533,22 +535,22 @@ Merge these into any hooks you already have. Do not register `SubagentStart`: a 
 
 ## Codex hooks
 
-Codex reads lifecycle hooks from `~/.codex/hooks.json`, and asks you to approve each new or edited hook once (`/hooks` in Codex). `attention hooks describe --provider codex --json` lists the rows; the same rule applies as for Claude Code, and so does the advice to register the link on your PATH.
+Codex reads lifecycle hooks from `~/.codex/hooks.json`, and asks you to approve each new or edited hook once (`/hooks` in Codex). `attention hooks describe --provider codex --json` lists the rows; the same rule and command form apply as for Claude Code, for the same reasons, and so does the advice to register the link on your PATH.
 
 ```json
 {
   "hooks": {
-    "SessionStart":      [{ "hooks": [{ "type": "command", "command": "attention hooks event codex SessionStart" }] }],
-    "UserPromptSubmit":  [{ "hooks": [{ "type": "command", "command": "attention hooks event codex UserPromptSubmit" }] }],
-    "PreToolUse":        [{ "hooks": [{ "type": "command", "command": "attention hooks event codex PreToolUse" }] }],
-    "PostToolUse":       [{ "hooks": [{ "type": "command", "command": "attention hooks event codex PostToolUse" }] }],
-    "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "attention hooks event codex PermissionRequest" }] }],
-    "PreCompact":        [{ "hooks": [{ "type": "command", "command": "attention hooks event codex PreCompact" }] }],
-    "PostCompact":       [{ "hooks": [{ "type": "command", "command": "attention hooks event codex PostCompact" }] }],
-    "Stop":              [{ "hooks": [{ "type": "command", "command": "attention hooks event codex Stop" }] }],
-    "Interrupt":         [{ "hooks": [{ "type": "command", "command": "attention hooks event codex Interrupt" }] }],
-    "SubagentStop":      [{ "hooks": [{ "type": "command", "command": "attention hooks event codex SubagentStop" }] }],
-    "SessionEnd":        [{ "hooks": [{ "type": "command", "command": "attention hooks event codex SessionEnd" }] }]
+    "SessionStart":      [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event codex SessionStart" }] }],
+    "UserPromptSubmit":  [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event codex UserPromptSubmit" }] }],
+    "PreToolUse":        [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event codex PreToolUse" }] }],
+    "PostToolUse":       [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event codex PostToolUse" }] }],
+    "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event codex PermissionRequest" }] }],
+    "PreCompact":        [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event codex PreCompact" }] }],
+    "PostCompact":       [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event codex PostCompact" }] }],
+    "Stop":              [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event codex Stop" }] }],
+    "Interrupt":         [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event codex Interrupt" }] }],
+    "SubagentStop":      [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event codex SubagentStop" }] }],
+    "SessionEnd":        [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event codex SessionEnd" }] }]
   }
 }
 ```

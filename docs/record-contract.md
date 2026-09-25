@@ -3,7 +3,7 @@
 This document describes the v2 records the `attention` command writes, and how they relate to the older v1 flat markers. "v1" and "v2" name those two formats, not releases of this project. `protocol/v2.json` is the machine-readable authority. Writers must call `bin/attention`; examples
 and provider hooks must not construct v2 record JSON themselves.
 
-This is an implementation contract, not an activation claim. `bin/attention` selects the Rust writer, but a hook registered before it was installed keeps doing what it did: a helper that writes flat files keeps writing them, and a zsh configuration that never calls `wezterm_attention_claim` never establishes a launch claim.
+This is an implementation contract, not an activation claim. `bin/attention` selects the Rust writer, but a hook registered before it was installed keeps doing what it did: a helper that writes flat files keeps writing them, and a hook registered without `WEZTERM_ATTENTION_HOST_PID=$PPID exec` never claims a pane for its agent.
 
 ## Identity and paths
 
@@ -79,6 +79,65 @@ Schema 2 carries `source` with canonical `socket_path`, `realm_id` and `incarnat
 
 
 Window checks are derived per query and never stored in publication files. Their statuses are `present`, `not_listed` and `unavailable`; source identity failure cannot produce `not_listed`. The recorded source namespace is separate from a pane realm, so realm-filtered sweep still leaves tab publications alone.
+
+## Claims and how an event finds its launch
+
+A pane's `claim.json` names the launch its records currently go to. A claim is one of two kinds,
+told apart by its owner fields:
+
+- A **shell claim** has none of them. A shell writes it for the commands it starts, through
+  `attention hooks claim`, and those commands inherit its launch id as
+  `WEZTERM_ATTENTION_LAUNCH_ID`. Every claim written before owner fields existed is one.
+- A **self-owned claim** has all four: `owner_pid`, `owner_started_sec` and `owner_started_usec`
+  (the process start time, as exact decimal integers) and `owner_boot_session_id` (the boot it
+  started in, as a lowercase UUID). An agent's own hook writes it, for that agent's process, and
+  nothing inherits its launch id.
+
+A claim with some but not all owner fields is invalid, never a shell claim. The record schema stays
+3: the fields are optional and additive, every earlier claim reads as before, and a reader that
+does not know them refuses a self-owned claim as invalid rather than misreading it. The plugin
+reader checks each field's type but not that the four come together; the writer and
+`tests/fixtures/v2/check.py` do.
+
+A provider event finds its launch in this order, and stops at the first rule that applies:
+
+1. An inherited `WEZTERM_ATTENTION_LAUNCH_ID` decides alone. It must match the pane's claim;
+   a malformed or different one refuses the event (`record_invalid`, `claim_stale`), whatever
+   else is true. Nothing below is asked of an event that carries one.
+2. Without one, the event is refused when self-claim is switched off
+   (`WEZTERM_ATTENTION_ENABLE_SELF_CLAIM` set to anything but `1`) or the platform is not macOS
+   (`claim_stale`); when `WEZTERM_ATTENTION_HOST_PID` is missing or is not a positive decimal pid
+   (`self_claim_parent_unverified`); and when the pane holds a shell claim, for every event
+   (`claim_stale`).
+3. Otherwise the writer proves its host. Its direct parent, as the kernel reports it, must be the
+   process `WEZTERM_ATTENTION_HOST_PID` names, alive, this user's and not replaced while it is
+   read, and the writer must not be traced (`self_claim_parent_unverified`). The writer's own
+   controlling terminal, or, only when the kernel says it has none, the parent's, must be the
+   device of the terminal the mux lists for `WEZTERM_PANE` on the current socket; the listing must
+   succeed and name the pane exactly once. A terminal the kernel cannot report refuses
+   (`probe_unavailable`); a different terminal refuses (`unsafe_tty`).
+4. A session start then claims, under the pane's claim lock and no other lock, after reading the
+   same host again. No claim: a new self-owned claim with a new launch id. The same process's own
+   claim: kept as it is, not rewritten. Another process's claim: replaced with a new launch id only
+   when that process is proven gone, meaning the boot session differs, no process has its pid, or
+   the process there started at another time; a live owner keeps the pane (`claim_stale`), and a
+   zombie or an owner that cannot be read keeps it too (`probe_unavailable`). Creating or replacing
+   needs the parent to lead the terminal's foreground process group; keeping does not. The claim
+   is published to the proven terminal before the lock is released.
+5. Any other event resolves only against a self-owned claim whose owner is the process it proved.
+
+Lifecycle observations are kept only for an event with an inherited launch id; an event resolved
+through its own agent's claim writes the rest of its records and reports the lifecycle as not
+persisted.
+
+Every writer of a launch's records takes the launch lock, then the pane's claim lock, then a
+review owner's lock where it also writes a review; `attention mark review`, which writes only the
+review, takes the claim lock and then the owner's. Under them it reads the claim again and writes
+only if the claim is exactly the one the event was resolved against and, for an event without a
+launch id, the same host still proves itself; otherwise it refuses and writes nothing, in either
+launch. A claim writer takes the claim lock alone. Publication to a terminal holds the pane's claim lock
+from reading the claim through the whole write. A pane with no state directory has no claim and no
+lock: its publication names only the pane, which leaves any launch a claim published in place.
 
 ## Ordering and wall age
 

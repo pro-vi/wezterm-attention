@@ -392,6 +392,53 @@ still running beside the second, as in `claude & claude`, and replacing a live
 agent's binding would take over its tab. Nothing is lost: the next command line
 gets a fresh claim and binds normally.
 
+## On Linux, only a shell claims a pane
+
+An agent claims its own pane only on macOS in 1.0. The proof reads a process's
+controlling terminal, parent and start time from the kernel through `sysctl`,
+and 1.0 has that reader for macOS only, so elsewhere the writer refuses
+before reading anything. On Linux an agent's events need a
+launch id inherited from a claiming shell, as before; an agent started without
+one records nothing. The hook command's `WEZTERM_ATTENTION_HOST_PID=$PPID exec`
+prefix is harmless there.
+
+## An agent's claim belongs to its process, not to one run of it
+
+A self-owned claim names a process: its pid, its start time and the boot it
+started in. Everything that process does is one launch. Several sessions in one
+agent process, as after `/clear` or a resume, are successive bindings of that
+launch, and a process that `exec`s another program keeps its pid and start time,
+so the claim goes with it. A claim passes to a new agent only when its owner is
+proven gone. Telling one invocation from the next inside a process would need
+evidence the kernel does not keep, and a guess would let one run take over
+another's pane.
+
+## A pane a shell has claimed refuses agents started without its launch id
+
+Once a shell has claimed a pane, whether the bash integration for a listed
+command or zsh's `wezterm_attention_claim`, an agent started in that pane
+without the claim's launch id is refused on every event (`claim_stale`) and
+shows nothing. The shell claim belongs to the commands its shell starts; letting
+an agent it did not start write into it is how one agent's work was reported as
+another's. Such an agent does not claim the pane for itself either, since that
+would take the pane from the shell's commands. Open a new pane to go back to
+agents claiming for themselves, or start the agent through the shell's claim.
+
+## A hook run through a relay or a compound command is refused
+
+The writer accepts an agent's own claim only when its direct parent is the
+process `WEZTERM_ATTENTION_HOST_PID` names, which the registered hook command
+sets from `$PPID` and then replaces itself with `attention` through `exec`. A
+hook command that keeps its shell, such as `...; true`, `a && b`, or a wrapper
+script that runs `attention` without `exec`, leaves that shell as the parent. A
+relay that receives the callback and starts `attention` itself, forwarding the
+value or not, leaves itself as the parent or drops the value. Each of these is
+refused with `self_claim_parent_unverified` and records nothing, where accepting
+it would record the relay or the shell as the agent. This holds against
+programs that cooperate with the hook entry; a same-user program that sets the
+value to its own pid can still claim a pane for itself, as it can already
+forge any record (see the [record contract](record-contract.md#trust-boundary)).
+
 ## A mark stamped before an unbound clear
 
 `attention mark clear --source NAME` in a claimed launch that no provider
