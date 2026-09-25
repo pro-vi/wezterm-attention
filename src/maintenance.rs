@@ -20,8 +20,9 @@ use crate::query::{
 };
 use crate::records::{
     CommitPlan, RecordIdentity, Replacement, atomic_replace_if_different, binding_session_entry,
-    commit_nested_with, ends_binding, incarnation_path, launch_path, pane_path, read_record,
-    realm_path, remove_file_durable, session_index_marker, session_index_path, with_lock,
+    commit_nested_with, directory_confined, ends_binding, incarnation_path, launch_path, pane_path,
+    read_record, realm_path, removal_confined, remove_file_durable, session_index_marker,
+    session_index_path, with_lock,
 };
 use crate::wezterm::{Clock, PaneLister, Presence, ProcessProbe};
 
@@ -905,39 +906,6 @@ fn binding_known_and_prunable(
     true
 }
 
-/// Whether `directory` and every directory between it and the state root is
-/// a directory in its own right, not a symlink, so a removal there cannot
-/// reach through a link to somewhere outside the root. The root itself may be
-/// reached through a link: where it lives is the user's choice.
-fn directory_confined(root: &Path, directory: &Path) -> bool {
-    let Ok(relative) = directory.strip_prefix(root) else {
-        return false;
-    };
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        let std::path::Component::Normal(name) = component else {
-            return false;
-        };
-        current.push(name);
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.is_dir() => {}
-            _ => return false,
-        }
-    }
-    true
-}
-
-/// Whether removing `path` removes something inside the state root: its
-/// directory is confined, and it names an entry of that directory.
-pub(crate) fn removal_confined(root: &Path, path: &Path) -> bool {
-    matches!(
-        path.components().next_back(),
-        Some(std::path::Component::Normal(_))
-    ) && path
-        .parent()
-        .is_some_and(|parent| directory_confined(root, parent))
-}
-
 /// Whether a binding directory lies inside the state root, so removing it
 /// removes nothing outside.
 fn binding_confined(root: &Path, binding_dir: &Path, diagnostics: &mut Vec<Diagnostic>) -> bool {
@@ -1762,6 +1730,7 @@ fn pane_retention(
     // The presence above was taken before the locks, as for a binding's own
     // absence. Under them only the records are checked again.
     let applied = commit_nested_with(
+        root,
         &launch_path(root, address, launch_id).join(".lock"),
         &pane.join(".claim.lock"),
         binding_path,
@@ -2098,6 +2067,7 @@ pub fn sweep(
             if apply {
                 let operation = operation_id.as_deref().expect("apply operation id");
                 let applied = commit_nested_with(
+                    root,
                     &launch.join(".lock"),
                     &pane.join(".claim.lock"),
                     binding_path,
@@ -2300,6 +2270,7 @@ pub fn sweep(
             &mut diagnostics,
         );
         let applied = commit_nested_with(
+            root,
             &launch.join(".lock"),
             &pane.join(".claim.lock"),
             binding_path,
@@ -2463,6 +2434,7 @@ pub fn sweep(
         let launch = launch_path(root, &address, launch_id);
         let pane = pane_path(root, &address);
         let outcome = commit_nested_with(
+            root,
             &launch.join(".lock"),
             &pane.join(".claim.lock"),
             &binding_path,

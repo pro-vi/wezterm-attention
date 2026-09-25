@@ -10,6 +10,8 @@ pub(super) const AGENT_LAUNCH: &str = "00000000-0000-4000-8000-0000000005a1";
 /// What one case changes about the fake machine before the event runs.
 type Arrangement = Box<dyn Fn(&Setup)>;
 type EnvArrangement = Box<dyn Fn(&Setup, &mut BTreeMap<String, String>)>;
+/// How one case gets the pane claimed, giving the environment its hooks run in.
+type ClaimedEnv = Box<dyn Fn(&Setup) -> BTreeMap<String, String>>;
 
 pub(super) fn claim_path(setup: &Setup) -> PathBuf {
     let root = state_root(&setup.env).expect("state root");
@@ -1186,6 +1188,61 @@ fn a_claim_removes_a_stale_absence_probe_only_inside_the_state_root() {
         assert!(stored_claim(&setup).is_some(), "{label}: the claim is made");
         assert_eq!(
             fs::read_to_string(outside.join("absence-probe.json/kept.txt")).ok(),
+            Some("kept\n".to_owned()),
+            "{label}: removed something outside the state root"
+        );
+    }
+}
+
+#[test]
+fn a_pi_clear_removes_its_review_only_inside_the_state_root() {
+    let review_name = format!(
+        "{}.json",
+        wezterm_attention::protocol::sha256_hex(b"pi-bus")
+    );
+    let pi_env: Vec<(&str, ClaimedEnv)> = vec![
+        (
+            "a shell claim",
+            Box::new(|setup| {
+                setup.claim();
+                setup.env.clone()
+            }),
+        ),
+        ("an agent's own claim", Box::new(|setup| setup.agent_env())),
+    ];
+    let clear = event("pi", "bus", "s", json!({"state":"clear"}));
+    for (label, env_for) in pi_env {
+        // Inside the state root, the clear removes the review it ends.
+        let setup = Setup::new();
+        let env = env_for(&setup);
+        let review = claim_path(&setup)
+            .parent()
+            .unwrap()
+            .join("reviews")
+            .join(&review_name);
+        apply_as(&setup, &env, &start("pi", "s"), "00000000000000000200");
+        let marked = event("pi", "bus", "s", json!({"state":"review"}));
+        apply_as(&setup, &env, &marked, "00000000000000000300");
+        assert!(review.exists(), "{label}: the review is written");
+        apply_as(&setup, &env, &clear, "00000000000000000400");
+        assert!(!review.exists(), "{label}: the clear removes the review");
+
+        // Through a pane directory that links outside the root, whatever
+        // stands at the review's name is kept and the clear still lands.
+        let setup = Setup::new();
+        let pane = claim_path(&setup).parent().unwrap().to_path_buf();
+        let outside = setup._scratch.0.join("outside");
+        let planted = outside.join("reviews").join(&review_name);
+        fs::create_dir_all(&planted).unwrap();
+        fs::write(planted.join("kept.txt"), "kept\n").unwrap();
+        fs::create_dir_all(pane.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &pane).unwrap();
+        let env = env_for(&setup);
+        apply_as(&setup, &env, &start("pi", "s"), "00000000000000000200");
+        let cleared = apply_as(&setup, &env, &clear, "00000000000000000300");
+        assert_ne!(cleared.disposition, "ignored", "{label}");
+        assert_eq!(
+            fs::read_to_string(planted.join("kept.txt")).ok(),
             Some("kept\n".to_owned()),
             "{label}: removed something outside the state root"
         );

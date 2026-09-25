@@ -440,6 +440,7 @@ fn binding_mutation(
         .join("binding.json");
     let pointer_path = launch.join("current-binding.json");
     let (mutation, _) = commit_nested_with(
+        &resolved.root,
         &launch.join(".lock"),
         &resolved.claim_lock(),
         &pointer_path,
@@ -830,6 +831,7 @@ fn apply_observation(
 ) -> Result<LifecycleResult> {
     let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
     let (mutation, _) = commit_nested_with(
+        &resolved.root,
         &launch.join(".lock"),
         &resolved.claim_lock(),
         &launch.join("current-binding.json"),
@@ -946,6 +948,7 @@ fn apply_activity(
     let pointer_path = launch.join("current-binding.json");
     let base = activity_base(resolved, event, &binding_id)?;
     let (mutation, ()) = commit_nested_with(
+        &resolved.root,
         &launch.join(".lock"),
         &resolved.claim_lock(),
         &pointer_path,
@@ -1274,6 +1277,7 @@ pub fn apply_mark_activity(
     let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
     let pointer_path = launch.join("current-binding.json");
     let (mutation, ()) = commit_nested_with(
+        &resolved.root,
         &launch.join(".lock"),
         &resolved.claim_lock(),
         &pointer_path,
@@ -1436,6 +1440,7 @@ pub fn apply_mark_review(env: &BTreeMap<String, String>, source: &str) -> Result
     let pane = pane_path(&root, &address);
     let review_path = pane.join("reviews").join(format!("{owner_key}.json"));
     let (mutation, ()) = commit_nested_with(
+        &root,
         &pane.join(".claim.lock"),
         &pane.join("reviews").join(format!(".{owner_key}.lock")),
         &pane.join("claim.json"),
@@ -1506,6 +1511,7 @@ pub fn apply_mark_clear(
     let review_path = pane.join("reviews").join(format!("{owner_key}.json"));
     let launch = launch_path(&root, &address, &launch_id);
     let (mutation, ()) = commit_triple_with(
+        &root,
         &launch.join(".lock"),
         &pane.join(".claim.lock"),
         &pane.join("reviews").join(format!(".{owner_key}.lock")),
@@ -1626,6 +1632,7 @@ fn apply_child(
         "stopped"
     };
     let (mutation, ()) = commit_nested_with(
+        &resolved.root,
         &launch.join(".lock"),
         &resolved.claim_lock(),
         &binding_path,
@@ -1832,6 +1839,7 @@ fn apply_end(
     let binding_path = binding_dir.join("binding.json");
     let end_path = binding_dir.join("end.json");
     let (mutation, ()) = commit_nested_with(
+        &resolved.root,
         &launch.join(".lock"),
         &resolved.claim_lock(),
         &binding_path,
@@ -1937,6 +1945,7 @@ fn apply_review_event(
         .join("reviews")
         .join(format!("{owner_key}.json"));
     let (mutation, ()) = commit_triple_with(
+        &resolved.root,
         &launch.join(".lock"),
         &pane_path(&resolved.root, &resolved.address).join(".claim.lock"),
         &pane_path(&resolved.root, &resolved.address)
@@ -2154,6 +2163,7 @@ fn apply_clear_event(
     let identity = RecordIdentity::launch(&resolved.address, &resolved.launch_id);
     let (mutation, ()) = if review_path.is_some() {
         commit_triple_with(
+            &resolved.root,
             &launch.join(".lock"),
             &pane.join(".claim.lock"),
             &pane.join("reviews").join(format!(".{owner_key}.lock")),
@@ -2166,6 +2176,7 @@ fn apply_clear_event(
         )?
     } else {
         commit_nested_with(
+            &resolved.root,
             &launch.join(".lock"),
             &pane.join(".claim.lock"),
             &pointer_path,
@@ -2239,6 +2250,7 @@ fn clear_at_prompt(
     let launch = launch_path(&root, &address, &launch_id);
     let pointer_path = launch.join("current-binding.json");
     let (mutation, ()) = commit_nested_with(
+        &root,
         &launch.join(".lock"),
         &pane_path(&root, &address).join(".claim.lock"),
         &pointer_path,

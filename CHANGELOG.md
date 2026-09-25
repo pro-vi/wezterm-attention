@@ -115,7 +115,7 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - The gate's performance comparison measures the binaries cargo reports building; `scripts/build-attention.sh` holds the build step the installer and the gate share.
 - The lock that `mark review`, `mark clear` and Pi's review events leave in `reviews/` no longer keeps an old pane's tree from retention.
 - Sweep removes nothing through a symlinked directory below the state root: subagent compaction and a cleared absence probe are refused there, as binding and pane removals already were.
-- A claim removes nothing through a symlinked directory below the state root either. A shell claim or an agent's own claim keeps the pane's absence probe there, and still claims the pane.
+- No hook or command removes anything through a symlinked directory below the state root either. A claim keeps the pane's absence probe there, and a clear (`mark clear`, or a Pi review clear or bus clear) keeps what stands at the review's name; the claim or the clear still lands.
 - `bindings --socket` reports a directory it could not read as `state_permissions` with its `path`, as realm-wide `bindings` does. A `binding_conflict` diagnostic names the provider session and its pane addresses, and a sweep diagnostic about a tab-order file's pane names the file and the pane.
 
 ### Upgrading from 0.6

@@ -899,6 +899,39 @@ pub fn remove_file_durable(path: &Path) -> Result<bool> {
     }
 }
 
+/// Whether `directory` and every directory between it and the state root is
+/// a directory in its own right, not a symlink, so a removal there cannot
+/// reach through a link to somewhere outside the root. The root itself may be
+/// reached through a link: where it lives is the user's choice.
+pub(crate) fn directory_confined(root: &Path, directory: &Path) -> bool {
+    let Ok(relative) = directory.strip_prefix(root) else {
+        return false;
+    };
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return false;
+        };
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.is_dir() => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Whether removing `path` removes something inside the state root: its
+/// directory is confined, and it names an entry of that directory.
+pub(crate) fn removal_confined(root: &Path, path: &Path) -> bool {
+    matches!(
+        path.components().next_back(),
+        Some(std::path::Component::Normal(_))
+    ) && path
+        .parent()
+        .is_some_and(|parent| directory_confined(root, parent))
+}
+
 fn remove_path_durable(path: &Path) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
@@ -963,6 +996,7 @@ pub fn with_lock<T>(
 }
 
 pub fn commit<T>(
+    root: &Path,
     lock_path: &Path,
     read_path: &Path,
     expected_kind: Option<&str>,
@@ -971,6 +1005,7 @@ pub fn commit<T>(
     decide: impl FnOnce(Option<Value>) -> Result<CommitPlan<T>>,
 ) -> Result<T> {
     let (result, ()) = commit_with(
+        root,
         lock_path,
         read_path,
         expected_kind,
@@ -982,7 +1017,9 @@ pub fn commit<T>(
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn commit_with<T, P>(
+    root: &Path,
     lock_path: &Path,
     read_path: &Path,
     expected_kind: Option<&str>,
@@ -994,13 +1031,16 @@ pub fn commit_with<T, P>(
     with_lock(lock_path, timeout, || {
         let current = read_record(read_path, expected_kind, expected_identity)?;
         let plan = decide(current)?;
-        apply_plan(&plan)?;
+        apply_plan(root, &plan)?;
         let post_result = after_apply(&plan.result)?;
         Ok((plan.result, post_result))
     })
 }
 
-fn apply_plan<T>(plan: &CommitPlan<T>) -> Result<()> {
+/// Applies a plan under its locks. A removal whose path reaches through a
+/// link out of the state root is kept, and the rest of the plan still lands:
+/// what stands there is not a record this writer made.
+fn apply_plan<T>(root: &Path, plan: &CommitPlan<T>) -> Result<()> {
     for directory in &plan.private_dirs {
         mkdir_private(directory)?;
     }
@@ -1011,7 +1051,11 @@ fn apply_plan<T>(plan: &CommitPlan<T>) -> Result<()> {
             atomic_replace(&replacement.path, &replacement.value)?;
         }
     }
-    for path in &plan.removals {
+    for path in plan
+        .removals
+        .iter()
+        .filter(|path| removal_confined(root, path))
+    {
         remove_path_durable(path)?;
     }
     Ok(())
@@ -1019,6 +1063,7 @@ fn apply_plan<T>(plan: &CommitPlan<T>) -> Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 pub fn commit_nested_with<T, P>(
+    root: &Path,
     outer_lock: &Path,
     inner_lock: &Path,
     read_path: &Path,
@@ -1032,7 +1077,7 @@ pub fn commit_nested_with<T, P>(
         with_lock(inner_lock, timeout, || {
             let current = read_record(read_path, expected_kind, expected_identity)?;
             let plan = decide(current)?;
-            apply_plan(&plan)?;
+            apply_plan(root, &plan)?;
             let post_result = after_apply(&plan.result)?;
             Ok((plan.result, post_result))
         })
@@ -1041,6 +1086,7 @@ pub fn commit_nested_with<T, P>(
 
 #[allow(clippy::too_many_arguments)]
 pub fn commit_triple_with<T, P>(
+    root: &Path,
     outer_lock: &Path,
     middle_lock: &Path,
     inner_lock: &Path,
@@ -1056,7 +1102,7 @@ pub fn commit_triple_with<T, P>(
             with_lock(inner_lock, timeout, || {
                 let current = read_record(read_path, expected_kind, expected_identity)?;
                 let plan = decide(current)?;
-                apply_plan(&plan)?;
+                apply_plan(root, &plan)?;
                 let post_result = after_apply(&plan.result)?;
                 Ok((plan.result, post_result))
             })
