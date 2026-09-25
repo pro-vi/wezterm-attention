@@ -471,6 +471,26 @@ fn a_hook_whose_origin_is_not_proven_changes_nothing() {
 }
 
 #[test]
+fn a_hook_under_another_parent_is_told_the_registration_that_works() {
+    let setup = Setup::new();
+    setup.processes.set(
+        4500,
+        ProcessRead::Found(process_facts(4500, AGENT_PID, ControllingTerminal::Absent)),
+    );
+    setup
+        .processes
+        .change(HOOK_PID, |hook| hook.parent_pid = 4500);
+    let diagnostic = refused(&setup, &setup.agent_env(), &start("claude", "s"));
+    assert_eq!(diagnostic.code, "self_claim_parent_unverified");
+    for part in [
+        "inherited",
+        "register the hook as `WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event ...`",
+    ] {
+        assert!(diagnostic.message.contains(part), "{part}: {diagnostic:?}");
+    }
+}
+
+#[test]
 fn a_detached_hook_and_one_that_holds_the_terminal_both_prove_their_agent() {
     for (label, hook_terminal) in [
         (

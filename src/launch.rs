@@ -600,8 +600,10 @@ fn read_host(processes: &dyn ProcessInspector, expected_parent: i32) -> Result<H
     }
     if hook.parent_pid != expected_parent {
         return Err(parent_unverified(
-            "this hook's parent is not the process WEZTERM_ATTENTION_HOST_PID names; \
-             it was run by a relay or a shell that stayed, not by the agent itself",
+            "this hook's parent is not the process WEZTERM_ATTENTION_HOST_PID names: \
+             a relay or a shell that stayed ran it, or it inherited the value; \
+             register the hook as `WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event ...`, \
+             with nothing after it",
         ));
     }
     let parent = found(processes.process(hook.parent_pid), "this hook's parent")?;
