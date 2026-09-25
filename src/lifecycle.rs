@@ -2195,6 +2195,47 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
             "prompt return has no matching claim",
         ));
     };
+    clear_at_prompt(root, address, launch_id, claim, observation)
+}
+
+/// Prompt return in a pane whose shell carries no launch id, as the shell of
+/// a pane an agent claimed for itself does.
+///
+/// That agent's activity is cleared only once its process is proven to have
+/// exited, since nothing else ends it when the agent is killed or crashes. A
+/// suspended agent, or one whose state cannot be read, keeps its activity.
+/// Any other claim, or none, gives `None` and writes nothing.
+pub fn prompt_return_after_agent_exit(
+    env: &BTreeMap<String, String>,
+    observation: &str,
+    ports: &RuntimePorts<'_>,
+) -> Result<Option<LifecycleResult>> {
+    let root = state_root(env)?;
+    let (address, _) = pane_address(env)?;
+    let Some(claim) = load_claim(&root, &address)? else {
+        return Ok(None);
+    };
+    if !crate::launch::owner_proven_gone(&claim, ports.processes) {
+        return Ok(None);
+    }
+    let launch_id = claim
+        .get("launch_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AttentionError::new("record_invalid", "claim has no launch id"))?
+        .to_owned();
+    clear_at_prompt(root, address, launch_id, claim, observation).map(Some)
+}
+
+/// Clear the lead activity of `launch_id`'s current binding at a prompt,
+/// under the launch lock then the claim lock, while the pane's claim is still
+/// `claim`.
+fn clear_at_prompt(
+    root: PathBuf,
+    address: PaneAddress,
+    launch_id: String,
+    claim: Value,
+    observation: &str,
+) -> Result<LifecycleResult> {
     let launch = launch_path(&root, &address, &launch_id);
     let pointer_path = launch.join("current-binding.json");
     let (mutation, ()) = commit_nested_with(

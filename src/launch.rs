@@ -808,6 +808,15 @@ fn owner_state(owner: &ClaimOwner, processes: &dyn ProcessInspector) -> OwnerSta
     }
 }
 
+/// Whether `claim` is an agent's own claim whose process is proven to have
+/// exited.
+pub(crate) fn owner_proven_gone(claim: &Value, processes: &dyn ProcessInspector) -> bool {
+    match ClaimMode::of(claim) {
+        Ok(ClaimMode::SelfOwned(owner)) => owner_state(&owner, processes) == OwnerState::Gone,
+        Ok(ClaimMode::Shell) | Err(_) => false,
+    }
+}
+
 fn self_owned_claim_record(
     address: &PaneAddress,
     launch_id: &str,

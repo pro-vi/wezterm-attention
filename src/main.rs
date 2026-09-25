@@ -541,16 +541,26 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 None => wezterm_attention::publish_current(&environment, &ports),
             }
             .map_err(|error| (Box::new(error), args.json, "hooks publish".to_owned()))?;
-            if selected_socket.is_none()
-                && environment
+            if selected_socket.is_none() {
+                let inherited = environment
                     .get("WEZTERM_ATTENTION_LAUNCH_ID")
-                    .is_some_and(|value| !value.is_empty())
-            {
+                    .is_some_and(|value| !value.is_empty());
+                // Without a launch id the shell started no agent here, but an
+                // agent that claimed the pane for itself may have exited.
                 match clock.monotonic_ns20().and_then(|observation| {
-                    wezterm_attention::lifecycle::prompt_return(&environment, &observation)
+                    if inherited {
+                        wezterm_attention::lifecycle::prompt_return(&environment, &observation)
+                            .map(Some)
+                    } else {
+                        wezterm_attention::lifecycle::prompt_return_after_agent_exit(
+                            &environment,
+                            &observation,
+                            &ports,
+                        )
+                    }
                 }) {
                     Ok(result) => {
-                        if let Some(diagnostic) = result.diagnostic {
+                        if let Some(diagnostic) = result.and_then(|result| result.diagnostic) {
                             report.diagnostics.push(diagnostic);
                         }
                     }

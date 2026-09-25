@@ -55,7 +55,9 @@ Sourcing the file a second time installs nothing new, so `source ~/.bashrc` afte
 On macOS, zsh needs no claim step. Start `claude`, `codex` or `pi` as you would anywhere: the agent's
 first session start claims the pane for the agent's own process, through the hook command in the
 [README](../README.md#claude-code-hooks) or, for Pi, through the extension. Sourcing the zsh
-integration is optional there; it republishes the pane's claim at every prompt.
+integration is optional there. It republishes the pane's claim at every prompt, and there it clears
+the activity an agent left behind once the agent's process has exited; without it, that activity
+stays until the next agent claims the pane.
 
 The explicit claim below is still the way to claim on Linux, where an agent does not claim its own
 pane in 1.0, and on macOS it gives the agent an inherited launch id, which lifecycle observations and

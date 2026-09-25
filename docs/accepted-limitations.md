@@ -413,6 +413,15 @@ proven gone. Telling one invocation from the next inside a process would need
 evidence the kernel does not keep, and a guess would let one run take over
 another's pane.
 
+## An agent that claimed its own pane can leave its last activity behind
+
+In a pane an agent claimed for itself, the shell integration's prompt hook
+clears the agent's standing activity once the agent's process is proven gone.
+Without the shell integration nothing runs at the prompt, so an agent that ends
+without a hook of its own ending that activity, because it was killed, crashed
+or cut its turn short, leaves its last activity on the tab until the next agent
+claims the pane or the pane closes.
+
 ## A pane a shell has claimed refuses agents started without its launch id
 
 Once a shell has claimed a pane, whether the bash integration for a listed

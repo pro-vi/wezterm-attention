@@ -1,7 +1,9 @@
 use super::*;
 
-use wezterm_attention::lifecycle::apply_provider_event_with_outcome;
 use wezterm_attention::lifecycle::outcome::Persistence;
+use wezterm_attention::lifecycle::{
+    apply_provider_event_with_outcome, prompt_return_after_agent_exit,
+};
 
 pub(super) const AGENT_LAUNCH: &str = "00000000-0000-4000-8000-0000000005a1";
 
@@ -1165,4 +1167,192 @@ fn a_claim_removes_a_stale_absence_probe_only_inside_the_state_root() {
             "{label}: removed something outside the state root"
         );
     }
+}
+
+/// An agent that claimed the pane for itself and is thinking in session "s".
+/// Returns its binding's directory.
+fn thinking_agent(setup: &Setup) -> PathBuf {
+    let env = setup.agent_env();
+    apply_as(setup, &env, &start("claude", "s"), "00000000000000000200");
+    let prompt = event("claude", "UserPromptSubmit", "s", json!({"prompt":"go"}));
+    apply_as(setup, &env, &prompt, "00000000000000000300");
+    let launch = launch_of(&stored_claim(setup).expect("the agent's claim"));
+    let binding = launch_dir(setup, &launch)
+        .join("bindings")
+        .join(binding_id("claude", "s", &launch));
+    let activity: Value =
+        serde_json::from_slice(&fs::read(binding.join("activity.json")).expect("activity"))
+            .expect("activity JSON");
+    assert_eq!(activity["type"], "thinking");
+    binding
+}
+
+/// The environment of the pane's shell at its prompt, which no agent
+/// started: no launch id and no host assertion.
+fn prompt_env(setup: &Setup) -> BTreeMap<String, String> {
+    let mut env = setup.env.clone();
+    env.remove("WEZTERM_ATTENTION_LAUNCH_ID");
+    env
+}
+
+fn return_to_prompt(setup: &Setup) -> Option<wezterm_attention::lifecycle::LifecycleResult> {
+    prompt_return_after_agent_exit(&prompt_env(setup), "00000000000000000400", &setup.ports())
+        .expect("prompt return")
+}
+
+#[test]
+fn the_prompt_clears_the_activity_of_an_agent_proven_gone() {
+    let cases: Vec<(&str, Arrangement)> = vec![
+        (
+            "killed without a session end",
+            Box::new(|setup| setup.processes.set(AGENT_PID, ProcessRead::Gone)),
+        ),
+        (
+            "its pid now another process's",
+            Box::new(|setup| {
+                setup
+                    .processes
+                    .change(AGENT_PID, |agent| agent.start.microseconds += 1)
+            }),
+        ),
+        (
+            "started before the machine rebooted",
+            Box::new(|setup| {
+                *setup.processes.boot.lock().unwrap() =
+                    Some("1f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b".into());
+            }),
+        ),
+    ];
+    for (label, retire) in cases {
+        let setup = Setup::new();
+        let binding = thinking_agent(&setup);
+        let claim = stored_claim(&setup);
+        retire(&setup);
+        let result = return_to_prompt(&setup).expect("the prompt return ran");
+        assert_eq!(result.disposition, "applied", "{label}: {result:?}");
+        let clear: Value = serde_json::from_slice(
+            &fs::read(binding.join("activity-clear.json")).expect("activity clear"),
+        )
+        .expect("clear JSON");
+        assert_eq!(clear["observed_mono_ns"], json!("00000000000000000400"));
+        assert_eq!(stored_claim(&setup), claim, "{label}: the claim is kept");
+    }
+}
+
+#[test]
+fn the_prompt_leaves_activity_whose_agent_is_not_proven_gone() {
+    let cases: Vec<(&str, Arrangement)> = vec![
+        ("still running, or suspended", Box::new(|_| {})),
+        (
+            "exited and not yet reaped",
+            Box::new(|setup| {
+                setup
+                    .processes
+                    .change(AGENT_PID, |agent| agent.zombie = true)
+            }),
+        ),
+        (
+            "unreadable",
+            Box::new(|setup| setup.processes.set(AGENT_PID, ProcessRead::Unknown)),
+        ),
+        (
+            "gone, on a machine whose boot id cannot be read",
+            Box::new(|setup| {
+                setup.processes.set(AGENT_PID, ProcessRead::Gone);
+                *setup.processes.boot.lock().unwrap() = None;
+            }),
+        ),
+    ];
+    for (label, arrange) in cases {
+        let setup = Setup::new();
+        thinking_agent(&setup);
+        arrange(&setup);
+        let before = records(&setup);
+        assert!(return_to_prompt(&setup).is_none(), "{label}");
+        assert_eq!(records(&setup), before, "{label}");
+    }
+
+    // A shell claim's activity ends at the prompt through the launch id its
+    // commands inherit, never without it.
+    let setup = Setup::new();
+    setup.claim();
+    setup.apply(&start("claude", "s"), "00000000000000000200");
+    setup.apply(
+        &event("claude", "UserPromptSubmit", "s", json!({"prompt":"go"})),
+        "00000000000000000300",
+    );
+    setup.processes.set(AGENT_PID, ProcessRead::Gone);
+    let before = records(&setup);
+    assert!(return_to_prompt(&setup).is_none(), "a shell claim");
+    assert_eq!(records(&setup), before, "a shell claim");
+
+    let setup = Setup::new();
+    assert!(return_to_prompt(&setup).is_none(), "no claim");
+    assert!(records(&setup).is_empty(), "no claim");
+}
+
+#[test]
+fn a_claim_replaced_before_the_prompt_return_writes_keeps_its_activity() {
+    let setup = Setup::new();
+    let binding = thinking_agent(&setup);
+    setup.processes.set(AGENT_PID, ProcessRead::Gone);
+    start_agent(&setup, 4100, 5100);
+    let successor = self_owned_claim(&setup, AGENT_LAUNCH, 4100);
+    // Another agent takes the pane while the old owner is being read: after
+    // the claim was read, before the locks are taken.
+    let (path, replacement) = (claim_path(&setup), successor.clone());
+    *setup.processes.on_read.lock().unwrap() = Some(std::sync::Arc::new(move |pid| {
+        if pid == AGENT_PID {
+            atomic_replace(&path, &replacement).expect("replace the claim");
+        }
+        None
+    }));
+    let result = return_to_prompt(&setup).expect("the prompt return ran");
+    assert_eq!(result.disposition, "ignored");
+    assert_eq!(
+        result.diagnostic.as_ref().map(|found| found.code.as_str()),
+        Some("claim_stale")
+    );
+    assert!(!binding.join("activity-clear.json").exists());
+    assert_eq!(stored_claim(&setup), Some(successor));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn hooks_publish_clears_the_activity_of_an_exited_agent_that_claimed_the_pane() {
+    let setup = Setup::new();
+    let binding = thinking_agent(&setup);
+    // The fake agent started under another boot session than this machine's,
+    // so the real process reader proves it gone.
+    let mut master = 0;
+    let mut slave = 0;
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    let stdin = unsafe { fs::File::from_raw_fd(libc::dup(slave)) };
+    let output = rust_command(&setup)
+        .env_remove("WEZTERM_ATTENTION_LAUNCH_ID")
+        .args(["hooks", "publish", "--json"])
+        .stdin(Stdio::from(stdin))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("publish at the prompt");
+    unsafe {
+        libc::close(master);
+        libc::close(slave);
+    }
+    assert!(output.status.success(), "{output:?}");
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("publish envelope");
+    assert_eq!(envelope["status"], "ok", "{envelope}");
+    assert!(binding.join("activity-clear.json").exists());
 }

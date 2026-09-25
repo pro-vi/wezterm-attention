@@ -192,7 +192,7 @@ activity reappears. Child presence behaves the same way across active, stopped, 
 retention-floor records. A stopped snapshot is retained because deleting it would discard the
 ordering fence.
 
-Prompt return is `hooks publish` from a bound pane. It republishes the pane identity and writes an activity-clear watermark for the current lead activity only. It never clears child presence and never writes `end.json`.
+Prompt return is `hooks publish` from a bound pane. It republishes the pane identity and writes an activity-clear watermark for the current lead activity only. It never clears child presence and never writes `end.json`. A shell that inherited a launch id clears that launch. A shell without one, in a pane an agent claimed for itself, clears the claim's launch only once the claim's owner is proven gone by the test a replacing claim uses: another boot session, no process at the pid, or a process there with another start time. An owner that still runs, or whose state cannot be read, keeps its activity, and so does a shell claim. The watermark is written under the launch lock and then the claim lock, only while the claim is the one that was read.
 
 ## Compatibility and precedence
 
