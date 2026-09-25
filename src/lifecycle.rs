@@ -393,12 +393,7 @@ fn resolve_launch<'a>(
         claim,
         event.action == ProviderAction::Binding,
     )?;
-    let launch_id = resolved
-        .claim
-        .get("launch_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| AttentionError::new("record_invalid", "claim has no launch id"))?
-        .to_owned();
+    let launch_id = crate::launch::claim_launch_id(&resolved.claim)?;
     Ok(ResolvedLaunch {
         evidence: None,
         root,
@@ -2238,11 +2233,7 @@ pub fn prompt_return_after_agent_exit(
     if !crate::launch::owner_proven_gone(&claim, ports.processes) {
         return Ok(None);
     }
-    let launch_id = claim
-        .get("launch_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| AttentionError::new("record_invalid", "claim has no launch id"))?
-        .to_owned();
+    let launch_id = crate::launch::claim_launch_id(&claim)?;
     clear_at_prompt(root, address, launch_id, claim, observation).map(Some)
 }
 

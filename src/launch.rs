@@ -322,17 +322,10 @@ pub fn claim_launch_at_tty(
                     "the pane holds an agent's own claim, which a shell cannot share",
                 ));
             }
-            let selected_launch = selected
-                .get("launch_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    AttentionError::new("record_invalid", "selected claim has no launch id")
-                })?
-                .to_owned();
             write.plan(
                 ApplyResult {
                     disposition,
-                    launch_id: selected_launch,
+                    launch_id: claim_launch_id(&selected)?,
                     publication: "pending".to_owned(),
                     publication_diagnostic: None,
                 },
@@ -569,6 +562,15 @@ impl ClaimMode {
             )),
         }
     }
+}
+
+/// The launch a claim record names.
+pub(crate) fn claim_launch_id(claim: &Value) -> Result<String> {
+    claim
+        .get("launch_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| AttentionError::new("record_invalid", "claim has no launch id"))
 }
 
 fn parent_unverified(message: &str) -> AttentionError {
@@ -1003,17 +1005,13 @@ fn claim_for_host(
             write.plan(claim.clone(), Some(&claim))
         },
         |claim| {
-            let launch_id = claim
-                .get("launch_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
             Ok(publish_claim(
                 env,
                 ports,
                 address,
                 &proof.tty_path,
                 &proof.tty_fingerprint,
-                launch_id,
+                &claim_launch_id(claim)?,
             )
             .err()
             .map(|error| error.diagnostic))
