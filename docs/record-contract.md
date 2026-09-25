@@ -95,9 +95,9 @@ told apart by its owner fields:
 
 A claim with some but not all owner fields is invalid, never a shell claim. The record schema stays
 3: the fields are optional and additive, every earlier claim reads as before, and a reader that
-does not know them refuses a self-owned claim as invalid rather than misreading it. The plugin
-reader checks each field's type but not that the four come together; the writer and
-`tests/fixtures/v2/check.py` do.
+does not know them refuses a self-owned claim as invalid rather than misreading it. Every reader
+refuses a claim that names some but not all owner fields as `record_invalid`: the writer and the
+queries through the Rust record layer, the plugin reader, and `tests/fixtures/v2/check.py`.
 
 A provider event finds its launch in this order, and stops at the first rule that applies:
 
