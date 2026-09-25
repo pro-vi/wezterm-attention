@@ -15,8 +15,9 @@ use crate::protocol::{
 };
 use crate::query::{
     FileStamp, ListOncePerSocket, PaneEvidence, ProbeOncePerAssembly, collect_binding_files,
-    collect_state_files, kept_history_code, name_address, pane_evidence, read_bindings_with_ports,
-    read_tab_publications, reader_presence, record_address, recorded_socket, state_relative,
+    collect_state_files, kept_history_code, name_address, naming_record, pane_evidence,
+    read_bindings_with_ports, read_tab_publications, reader_presence, record_address,
+    recorded_socket,
 };
 use crate::records::{
     CommitPlan, RecordIdentity, Replacement, atomic_replace_if_different, binding_session_entry,
@@ -69,16 +70,6 @@ pub fn limit_sweep_preview(details: Vec<Value>, all_details: bool) -> (Vec<Value
 
 fn diagnostic(code: &str, message: &str) -> Diagnostic {
     AttentionError::new(code, message).diagnostic
-}
-
-/// `error` naming the record at `path`, relative to the state root, as the
-/// query diagnostics do, so a reader can find the file it is about.
-fn naming_record(root: &Path, path: &Path, mut error: AttentionError) -> AttentionError {
-    error
-        .diagnostic
-        .context
-        .insert("path".into(), Value::String(state_relative(root, path)));
-    error
 }
 
 /// Every JSON file below `path`, with a diagnostic for each directory that

@@ -1199,8 +1199,7 @@ fn collect_selected_binding_files(
     };
     let symlink = |message: &str, path: &Path| {
         let mut item = diagnostic("record_invalid", message);
-        item.context
-            .insert("path".into(), Value::String(state_relative(root, path)));
+        name_path(&mut item, root, path);
         item
     };
     for entry in entries {
@@ -1350,8 +1349,7 @@ pub(crate) fn collect_state_files(
 /// The diagnostic for a state path a walk could not read.
 pub(crate) fn unreadable_state(root: &Path, path: &Path) -> Diagnostic {
     let mut item = diagnostic("state_permissions", "state directory could not be read");
-    item.context
-        .insert("path".into(), Value::String(state_relative(root, path)));
+    name_path(&mut item, root, path);
     item
 }
 
@@ -1362,6 +1360,19 @@ pub(crate) fn state_relative(root: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .into_owned()
+}
+
+/// Put `path` in `item`'s context, relative to the state root, so a reader
+/// can find the file or directory it is about.
+pub(crate) fn name_path(item: &mut Diagnostic, root: &Path, path: &Path) {
+    item.context
+        .insert("path".into(), Value::String(state_relative(root, path)));
+}
+
+/// `error` naming the record at `path`; see [`name_path`].
+pub(crate) fn naming_record(root: &Path, path: &Path, mut error: AttentionError) -> AttentionError {
+    name_path(&mut error.diagnostic, root, path);
+    error
 }
 
 fn string(record: &Value, field: &str) -> Option<String> {
@@ -2098,13 +2109,7 @@ fn assemble_bindings(
                 RecordRead::Invalid(error) | RecordRead::Unsupported(error) => Err(error),
             }
         };
-        read.map_err(|mut error| {
-            error
-                .diagnostic
-                .context
-                .insert("path".into(), Value::String(state_relative(root, path)));
-            error
-        })
+        read.map_err(|error| naming_record(root, path, error))
     };
     let mut rows = Vec::new();
     let mut diagnostics = Vec::new();
@@ -2119,8 +2124,7 @@ fn assemble_bindings(
                 path_identity(root, &path)
             else {
                 let mut item = diagnostic("record_invalid", "binding path has the wrong shape");
-                item.context
-                    .insert("path".into(), Value::String(state_relative(root, &path)));
+                name_path(&mut item, root, &path);
                 diagnostics.push(item);
                 continue;
             };
@@ -2661,8 +2665,7 @@ pub fn read_tab_publications(root: &Path) -> Result<(Vec<TabPublication>, Vec<Di
         let before = diagnostics.len();
         read_tab_publication(&path, &entry, limits, &mut windows, &mut diagnostics);
         for item in &mut diagnostics[before..] {
-            item.context
-                .insert("path".into(), Value::String(state_relative(root, &path)));
+            name_path(item, root, &path);
         }
     }
     windows.sort_by(|a, b| {
