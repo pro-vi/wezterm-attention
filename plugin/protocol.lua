@@ -629,6 +629,26 @@ return function(context)
     return wire, wire_diagnostic
   end
 
+  -- A claim names the process that owns it with all four owner fields or
+  -- none. One with only some is neither a shell claim nor a self-owned one.
+  local claim_owner_fields = { "owner_pid", "owner_started_sec", "owner_started_usec", "owner_boot_session_id" }
+
+  local function claim_owner_is_whole(value)
+    local present = 0
+    for _, field in ipairs(claim_owner_fields) do
+      if value[field] ~= nil then present = present + 1 end
+    end
+    if present == 0 then return true end
+    if present ~= #claim_owner_fields then return false end
+    -- Canonical decimals have no leading zeros, so length orders them first.
+    local function at_most(token, maximum)
+      return #token < #maximum or (#token == #maximum and token <= maximum)
+    end
+    return value.owner_pid ~= "0" and at_most(value.owner_pid, "2147483647")
+      and at_most(value.owner_started_sec, "18446744073709551615")
+      and at_most(value.owner_started_usec, "999999")
+  end
+
   local function parse_v2_record(value, expected_kind)
     if not protocol then
       return nil, diagnostic("probe_unavailable", "v2 protocol manifest is unavailable", {
@@ -656,6 +676,9 @@ return function(context)
     end
     if kind == "review" and sha256(parsed.owner_id) ~= parsed.owner_key then
       return nil, invalid("review owner_key does not match owner_id")
+    end
+    if kind == "claim" and not claim_owner_is_whole(parsed) then
+      return nil, invalid("claim names only part of its owner")
     end
     if kind == "lifecycle_snapshot" and not validate_lifecycle(parsed) then return nil, invalid("lifecycle snapshot violates its contract") end
     return parsed
