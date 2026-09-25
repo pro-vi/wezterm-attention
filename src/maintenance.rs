@@ -16,7 +16,7 @@ use crate::protocol::{
 use crate::query::{
     FileStamp, ListOncePerSocket, PaneEvidence, ProbeOncePerAssembly, collect_binding_files,
     collect_state_files, kept_history_code, name_address, pane_evidence, read_bindings_with_ports,
-    read_tab_publications, reader_presence, record_address, recorded_socket,
+    read_tab_publications, reader_presence, record_address, recorded_socket, state_relative,
 };
 use crate::records::{
     CommitPlan, RecordIdentity, Replacement, atomic_replace_if_different, binding_session_entry,
@@ -69,6 +69,16 @@ pub fn limit_sweep_preview(details: Vec<Value>, all_details: bool) -> (Vec<Value
 
 fn diagnostic(code: &str, message: &str) -> Diagnostic {
     AttentionError::new(code, message).diagnostic
+}
+
+/// `error` naming the record at `path`, relative to the state root, as the
+/// query diagnostics do, so a reader can find the file it is about.
+fn naming_record(root: &Path, path: &Path, mut error: AttentionError) -> AttentionError {
+    error
+        .diagnostic
+        .context
+        .insert("path".into(), Value::String(state_relative(root, path)));
+    error
 }
 
 /// Every JSON file below `path`, with a diagnostic for each directory that
@@ -225,17 +235,17 @@ fn binding_selection(
     launch_id: &str,
     binding_id: &str,
 ) -> Result<Option<bool>> {
-    let claim = read_record(
-        &pane_path(root, address).join("claim.json"),
-        Some("claim"),
-        &RecordIdentity::pane(address),
-    )?;
+    let claim_path = pane_path(root, address).join("claim.json");
+    let claim = read_record(&claim_path, Some("claim"), &RecordIdentity::pane(address))
+        .map_err(|error| naming_record(root, &claim_path, error))?;
     let Some(claim) = claim else { return Ok(None) };
+    let pointer_path = launch_path(root, address, launch_id).join("current-binding.json");
     let pointer = read_record(
-        &launch_path(root, address, launch_id).join("current-binding.json"),
+        &pointer_path,
         Some("current_binding"),
         &RecordIdentity::launch(address, launch_id),
-    )?;
+    )
+    .map_err(|error| naming_record(root, &pointer_path, error))?;
     Ok(Some(
         claim.get("launch_id").and_then(Value::as_str) == Some(launch_id)
             && pointer
@@ -254,23 +264,17 @@ fn audit_state(root: &Path) -> (Vec<Value>, Vec<Diagnostic>) {
     let mut records = Vec::new();
     for path in files {
         let Some(kind) = state_kind(&path) else {
-            diagnostics.push(diagnostic(
-                "record_invalid",
-                "unknown v2 state file is uninspected",
-            ));
+            let error =
+                AttentionError::new("record_invalid", "unknown v2 state file is uninspected");
+            diagnostics.push(naming_record(root, &path, error).diagnostic);
             continue;
         };
-        let identity = match RecordIdentity::from_state_path(root, &path, kind) {
-            Ok(identity) => identity,
-            Err(error) => {
-                diagnostics.push(error.diagnostic);
-                continue;
-            }
-        };
-        match read_record(&path, Some(kind), &identity) {
+        let read = RecordIdentity::from_state_path(root, &path, kind)
+            .and_then(|identity| read_record(&path, Some(kind), &identity));
+        match read {
             Ok(Some(record)) => records.push(record),
             Ok(None) => {}
-            Err(error) => diagnostics.push(error.diagnostic),
+            Err(error) => diagnostics.push(naming_record(root, &path, error).diagnostic),
         }
     }
     (records, diagnostics)

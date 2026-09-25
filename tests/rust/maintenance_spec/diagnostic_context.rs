@@ -57,3 +57,43 @@ fn a_tab_publication_diagnostic_names_its_file() {
         "{diagnostics:?}"
     );
 }
+
+#[test]
+fn doctor_and_sweep_name_a_record_they_could_not_read() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let root = setup.root();
+    let (address, _) = pane_address(&setup.env).expect("address");
+    let pane = pane_path(&root, &address);
+    let claim = pane.join("claim.json");
+    let review = pane
+        .join("reviews")
+        .join(format!("{}.json", "c".repeat(64)));
+    fs::write(&claim, r#"{"kind":"claim"}"#).expect("malformed claim");
+    fs::write(&review, "not json").expect("unreadable review");
+    let relative = |path: &Path| json!(path.strip_prefix(&root).unwrap().to_str().unwrap());
+    let (_, doctor) = setup.doctor();
+    let (_, swept) = setup.run_sweep(false, None);
+    for (command, diagnostics, paths) in [
+        ("doctor", &doctor, vec![&claim, &review]),
+        ("sweep", &swept, vec![&claim]),
+    ] {
+        let invalid: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == "record_invalid")
+            .collect();
+        assert!(
+            invalid.iter().all(|d| d.context.contains_key("path")),
+            "{command}: a diagnostic names no record: {invalid:?}"
+        );
+        for path in paths {
+            assert!(
+                invalid
+                    .iter()
+                    .any(|d| d.context.get("path") == Some(&relative(path))),
+                "{command}: no diagnostic names {}: {invalid:?}",
+                path.display()
+            );
+        }
+    }
+}
