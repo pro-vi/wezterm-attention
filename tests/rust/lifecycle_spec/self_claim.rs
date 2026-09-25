@@ -1397,6 +1397,67 @@ fn a_claim_replaced_before_the_prompt_return_writes_keeps_its_activity() {
     assert_eq!(stored_claim(&setup), Some(successor));
 }
 
+#[test]
+fn a_launch_id_an_agent_s_own_claim_made_is_never_inherited() {
+    let setup = Setup::new();
+    let binding = thinking_agent(&setup);
+    let mut claim = stored_claim(&setup).expect("the agent's claim");
+    let agent_launch = launch_of(&claim);
+    // The agent's claim was committed after a shell in the pane read its
+    // clock, so that shell's claim comes second and keeps the agent's.
+    claim["observed_mono_ns"] = json!("00000000000000000500");
+    install(&setup, &claim);
+    let before = records(&setup);
+    for (label, env) in [
+        ("a shell with no launch id", prompt_env(&setup)),
+        ("a shell holding the agent's launch id", {
+            let mut env = prompt_env(&setup);
+            env.insert("WEZTERM_ATTENTION_LAUNCH_ID".into(), agent_launch.clone());
+            env
+        }),
+    ] {
+        let refusal = wezterm_attention::claim_launch(&env, &setup.ports())
+            .expect_err("a shell never keeps an agent's own claim as its own");
+        assert_eq!(refusal.diagnostic.code, "claim_stale", "{label}");
+    }
+    assert_eq!(records(&setup), before);
+
+    // Whatever carries that launch id anyway is not the agent's process.
+    let mut env = prompt_env(&setup);
+    env.insert("WEZTERM_ATTENTION_LAUNCH_ID".into(), agent_launch);
+    for event in every_action() {
+        assert_eq!(refused(&setup, &env, &event).code, "claim_stale");
+    }
+    let prompt = prompt_return(&env, "00000000000000000600").expect("prompt return");
+    assert_eq!(prompt.disposition, "ignored");
+    let marks: Vec<(&str, wezterm_attention::protocol::Result<_>)> = vec![
+        (
+            "mark activity",
+            apply_mark_activity(
+                &env,
+                "notify",
+                "tester",
+                None,
+                None,
+                None,
+                "00000000000000000600",
+                "00000000012345678900",
+            ),
+        ),
+        ("mark review", apply_mark_review(&env, "tester")),
+        (
+            "mark clear",
+            apply_mark_clear(&env, "tester", "00000000000000000600"),
+        ),
+    ];
+    for (label, result) in marks {
+        let error = result.expect_err(label);
+        assert_eq!(error.diagnostic.code, "claim_stale", "{label}");
+    }
+    assert!(!binding.join("activity-clear.json").exists());
+    assert_eq!(records(&setup), before);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn hooks_publish_clears_the_activity_of_an_exited_agent_that_claimed_the_pane() {

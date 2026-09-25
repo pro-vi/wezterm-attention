@@ -87,7 +87,7 @@ fn confirm_native(resolved: &ResolvedLaunch, binding_id: &str, mutation: &Mutati
     let context = (|| -> Result<Option<AdmittedHook>> {
         let claim = load_claim(&resolved.root, &resolved.address)?;
         if claim.as_ref().is_none_or(|claim| {
-            !record_matches_launch(claim, &resolved.address, &resolved.launch_id)
+            !inherited_claim_matches(claim, &resolved.address, &resolved.launch_id)
         }) {
             return Ok(None);
         }
@@ -270,6 +270,15 @@ fn record_matches_launch(record: &Value, address: &PaneAddress, launch_id: &str)
         && record.get("launch_id").and_then(Value::as_str) == Some(launch_id)
 }
 
+/// Whether `claim` is the pane's shell claim for an inherited `launch_id`.
+/// An agent's own claim never matches: its launch id belongs to that agent's
+/// process, and whatever else carries it inherited it by mistake.
+fn inherited_claim_matches(claim: &Value, address: &PaneAddress, launch_id: &str) -> bool {
+    record_matches_launch(claim, address, launch_id)
+        && crate::launch::ClaimMode::of(claim)
+            .is_ok_and(|mode| mode == crate::launch::ClaimMode::Shell)
+}
+
 fn record_matches_binding(
     record: &Value,
     address: &PaneAddress,
@@ -360,7 +369,7 @@ fn resolve_launch<'a>(
     if let Some(inherited) = env.get("WEZTERM_ATTENTION_LAUNCH_ID") {
         let inherited = canonical_uuid(Some(inherited), "WEZTERM_ATTENTION_LAUNCH_ID")?;
         return match claim {
-            Some(claim) if record_matches_launch(&claim, &address, &inherited) => {
+            Some(claim) if inherited_claim_matches(&claim, &address, &inherited) => {
                 Ok(ResolvedLaunch {
                     evidence: None,
                     root,
@@ -742,7 +751,7 @@ fn append_observation(
         let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
         let claim = load_claim(&resolved.root, &resolved.address)?;
         if claim.as_ref().is_none_or(|record| {
-            !record_matches_launch(record, &resolved.address, &resolved.launch_id)
+            !inherited_claim_matches(record, &resolved.address, &resolved.launch_id)
         }) {
             return Err(AttentionError::new(
                 "claim_stale",
@@ -1258,7 +1267,7 @@ pub fn apply_mark_activity(
         "WEZTERM_ATTENTION_LAUNCH_ID",
     )?;
     let Some(claim) = load_claim(&root, &address)?
-        .filter(|claim| record_matches_launch(claim, &address, &launch_id))
+        .filter(|claim| inherited_claim_matches(claim, &address, &launch_id))
     else {
         return Err(AttentionError::new(
             "claim_stale",
@@ -1450,7 +1459,7 @@ pub fn apply_mark_review(env: &BTreeMap<String, String>, source: &str) -> Result
         |claim| {
             if claim
                 .as_ref()
-                .is_none_or(|claim| !record_matches_launch(claim, &address, &launch_id))
+                .is_none_or(|claim| !inherited_claim_matches(claim, &address, &launch_id))
             {
                 return Err(AttentionError::new(
                     "claim_stale",
@@ -1522,7 +1531,7 @@ pub fn apply_mark_clear(
         |claim| {
             if claim
                 .as_ref()
-                .is_none_or(|claim| !record_matches_launch(claim, &address, &launch_id))
+                .is_none_or(|claim| !inherited_claim_matches(claim, &address, &launch_id))
             {
                 return Err(AttentionError::new(
                     "claim_stale",
@@ -2198,7 +2207,7 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
         "WEZTERM_ATTENTION_LAUNCH_ID",
     )?;
     let Some(claim) = load_claim(&root, &address)?
-        .filter(|claim| record_matches_launch(claim, &address, &launch_id))
+        .filter(|claim| inherited_claim_matches(claim, &address, &launch_id))
     else {
         return Ok(LifecycleResult::diagnosed(
             Disposition::Ignored,

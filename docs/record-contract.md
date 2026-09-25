@@ -87,7 +87,9 @@ told apart by its owner fields:
 
 - A **shell claim** has none of them. A shell writes it for the commands it starts, through
   `attention hooks claim`, and those commands inherit its launch id as
-  `WEZTERM_ATTENTION_LAUNCH_ID`. Every claim written before owner fields existed is one.
+  `WEZTERM_ATTENTION_LAUNCH_ID`. Every claim written before owner fields existed is one. Where
+  `hooks claim` would keep a self-owned claim, because it is newer or names the same launch, it
+  refuses with `claim_stale` and prints no launch id.
 - A **self-owned claim** has all four: `owner_pid`, `owner_started_sec` and `owner_started_usec`
   (the process start time, as exact decimal integers) and `owner_boot_session_id` (the boot it
   started in, as a lowercase UUID). An agent's own hook writes it, for that agent's process, and
@@ -101,9 +103,11 @@ queries through the Rust record layer, the plugin reader, and `tests/fixtures/v2
 
 A provider event finds its launch in this order, and stops at the first rule that applies:
 
-1. An inherited `WEZTERM_ATTENTION_LAUNCH_ID` decides alone. It must match the pane's claim;
-   a malformed or different one refuses the event (`record_invalid`, `claim_stale`), whatever
-   else is true. Nothing below is asked of an event that carries one.
+1. An inherited `WEZTERM_ATTENTION_LAUNCH_ID` decides alone. It must match the pane's shell
+   claim; a malformed one refuses the event (`record_invalid`), and so does a different one or
+   one that names a self-owned claim (`claim_stale`), whatever else is true. Nothing below is
+   asked of an event that carries one. `attention mark` and prompt return hold an inherited
+   launch id to the same rule.
 2. Without one, the event is refused when self-claim is switched off
    (`WEZTERM_ATTENTION_ENABLE_SELF_CLAIM` set to anything but `1`) or the platform is not macOS
    (`claim_stale`); when `WEZTERM_ATTENTION_HOST_PID` is missing or is not a positive decimal pid

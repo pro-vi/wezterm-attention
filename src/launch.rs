@@ -264,6 +264,15 @@ pub fn claim_launch_at_tty(
                     ],
                 ),
             };
+            // The shell exports the launch id this returns to every command it
+            // starts, and an agent's own claim belongs to that agent's process
+            // alone, so a kept claim has to be a shell's.
+            if ClaimMode::of(&selected)? != ClaimMode::Shell {
+                return Err(AttentionError::new(
+                    "claim_stale",
+                    "the pane holds an agent's own claim, which a shell cannot share",
+                ));
+            }
             let selected_launch = selected
                 .get("launch_id")
                 .and_then(Value::as_str)
