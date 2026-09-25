@@ -1724,3 +1724,65 @@ fn a_publication_cut_short_by_a_stalled_tty_is_closed_once_the_tty_drains() {
         String::from_utf8_lossy(&published[published.len().saturating_sub(8)..])
     );
 }
+
+#[test]
+fn a_claim_names_its_owner_with_all_owner_fields_or_none() {
+    let fixture: Value = serde_json::from_str(include_str!("../fixtures/v2/protocol-cases.json"))
+        .expect("protocol fixture JSON");
+    let protocol = manifest().expect("embedded manifest");
+    let shell = fixture["record_samples"]["claim"].clone();
+    let mut self_owned = shell.clone();
+    for (field, value) in [
+        ("owner_pid", "4242"),
+        ("owner_started_sec", "1700000000"),
+        ("owner_started_usec", "123456"),
+        (
+            "owner_boot_session_id",
+            "0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b",
+        ),
+    ] {
+        self_owned[field] = json!(value);
+    }
+    assert_eq!(parse_record_value(&shell, protocol).as_str(), "valid");
+    assert_eq!(parse_record_value(&self_owned, protocol).as_str(), "valid");
+    for field in wezterm_attention::protocol::CLAIM_OWNER_FIELDS {
+        let mut partial = self_owned.clone();
+        partial.as_object_mut().expect("claim object").remove(field);
+        assert_eq!(
+            parse_record_value(&partial, protocol).as_str(),
+            "record_invalid",
+            "a claim missing only {field} is neither kind"
+        );
+    }
+    for (field, value) in [
+        ("owner_pid", "0"),
+        ("owner_pid", "2147483648"),
+        ("owner_started_sec", "18446744073709551616"),
+        ("owner_started_usec", "1000000"),
+    ] {
+        let mut wrong = self_owned.clone();
+        wrong[field] = json!(value);
+        assert_eq!(
+            parse_record_value(&wrong, protocol).as_str(),
+            "record_invalid",
+            "{field} {value}"
+        );
+    }
+
+    // On disk a partial claim reads as invalid, never as a shell claim.
+    let scratch = Scratch::new();
+    let address: wezterm_attention::identity::PaneAddress =
+        serde_json::from_value(shell["address"].clone()).expect("address");
+    let path = pane_path(&scratch.path, &address).join("claim.json");
+    let mut partial = self_owned.clone();
+    partial
+        .as_object_mut()
+        .expect("claim object")
+        .remove("owner_boot_session_id");
+    fs::create_dir_all(path.parent().expect("pane directory")).expect("pane directory");
+    fs::write(&path, serde_json::to_vec(&partial).expect("claim bytes")).expect("write claim");
+    assert!(matches!(
+        read_record_typed(&path, Some("claim"), &RecordIdentity::pane(&address)),
+        RecordRead::Invalid(_)
+    ));
+}

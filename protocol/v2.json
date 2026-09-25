@@ -865,7 +865,7 @@
     },
     "claim": {
       "required": ["kind", "schema", "address", "launch_id", "tty_path", "tty_fingerprint", "observed_mono_ns"],
-      "optional": [],
+      "optional": ["owner_pid", "owner_started_sec", "owner_started_usec", "owner_boot_session_id"],
       "types": {
         "kind": "record_kind",
         "schema": "record_schema",
@@ -873,7 +873,11 @@
         "launch_id": "uuid",
         "tty_path": "absolute_path",
         "tty_fingerprint": "hex64",
-        "observed_mono_ns": "monotonic_ns20"
+        "observed_mono_ns": "monotonic_ns20",
+        "owner_pid": "canonical_decimal",
+        "owner_started_sec": "canonical_decimal",
+        "owner_started_usec": "canonical_decimal",
+        "owner_boot_session_id": "uuid"
       }
     },
     "binding": {

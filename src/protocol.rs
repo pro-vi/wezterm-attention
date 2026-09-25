@@ -724,12 +724,47 @@ pub fn parse_record_value(value: &Value, protocol: &Manifest) -> Verdict {
             .and_then(Value::as_str)
             .zip(value.get("owner_key").and_then(Value::as_str))
             .is_some_and(|(id, key)| sha256_hex(id.as_bytes()) == key),
+        "claim" => claim_owner_is_whole(value),
         _ => true,
     };
     if digest_matches {
         Verdict::Valid
     } else {
         Verdict::RecordInvalid
+    }
+}
+
+/// The fields of a claim that name the process owning it. A claim holds all of
+/// them or none: one with none is a shell claim, made by a shell for the
+/// commands it starts; one with all is self-owned, made by an agent's own hook.
+pub const CLAIM_OWNER_FIELDS: [&str; 4] = [
+    "owner_pid",
+    "owner_started_sec",
+    "owner_started_usec",
+    "owner_boot_session_id",
+];
+
+/// Whether a claim's owner fields are all absent, or all present with values a
+/// process can have: a positive pid, and a start time whose microseconds are
+/// less than a second. A claim with only some of them is neither kind.
+fn claim_owner_is_whole(value: &Value) -> bool {
+    let number = |field: &str| value.get(field).and_then(Value::as_str);
+    match CLAIM_OWNER_FIELDS
+        .iter()
+        .filter(|field| value.get(**field).is_some())
+        .count()
+    {
+        0 => true,
+        4 => {
+            number("owner_pid")
+                .and_then(|pid| pid.parse::<i32>().ok())
+                .is_some_and(|pid| pid > 0)
+                && number("owner_started_sec").is_some_and(|seconds| seconds.parse::<u64>().is_ok())
+                && number("owner_started_usec")
+                    .and_then(|microseconds| microseconds.parse::<u32>().ok())
+                    .is_some_and(|microseconds| microseconds < 1_000_000)
+        }
+        _ => false,
     }
 }
 

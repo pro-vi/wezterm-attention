@@ -253,7 +253,26 @@ def parse_record(value: Any, manifest: dict[str, Any]) -> str:
         "owner_key"
     ]:
         return "record_invalid"
+    if kind == "claim" and not claim_owner_is_whole(value):
+        return "record_invalid"
     return "valid"
+
+
+CLAIM_OWNER_FIELDS = ("owner_pid", "owner_started_sec", "owner_started_usec", "owner_boot_session_id")
+
+
+def claim_owner_is_whole(value: dict[str, Any]) -> bool:
+    """A claim names its owning process with all four owner fields or none."""
+    present = [field for field in CLAIM_OWNER_FIELDS if field in value]
+    if not present:
+        return True
+    if len(present) != len(CLAIM_OWNER_FIELDS):
+        return False
+    return (
+        0 < int(value["owner_pid"]) <= 2**31 - 1
+        and int(value["owner_started_sec"]) < 2**64
+        and int(value["owner_started_usec"]) < 1_000_000
+    )
 
 
 def compact_size(value: Any) -> int:
@@ -516,6 +535,33 @@ def run(render: bool) -> int:
             check_path_identity(entry["path"], record)
         except InvalidRecord as error:
             failures.append(f"state {entry['path']}: {error}")
+
+    # A claim with only some owner fields is neither a shell claim nor a
+    # self-owned one. The plugin reader does not check this yet, so these rows
+    # live here rather than in the shared parse rows every reader runs.
+    self_owned = copy.deepcopy(fixture["record_samples"]["claim"])
+    self_owned.update(
+        owner_pid="4242",
+        owner_started_sec="1700000000",
+        owner_started_usec="123456",
+        owner_boot_session_id="0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b",
+    )
+    if parse_record(self_owned, manifest) != "valid":
+        failures.append("a whole self-owned claim did not read as valid")
+    for field in CLAIM_OWNER_FIELDS:
+        partial = copy.deepcopy(self_owned)
+        del partial[field]
+        if parse_record(partial, manifest) != "record_invalid":
+            failures.append(f"a claim without {field} alone read as a claim")
+    for field, bad in (
+        ("owner_pid", "0"),
+        ("owner_pid", "2147483648"),
+        ("owner_started_usec", "1000000"),
+    ):
+        wrong = copy.deepcopy(self_owned)
+        wrong[field] = bad
+        if parse_record(wrong, manifest) != "record_invalid":
+            failures.append(f"a claim with {field} {bad} read as a claim")
 
     older = copy.deepcopy(fixture["record_samples"]["subagent_presence"])
     newer = copy.deepcopy(older)
