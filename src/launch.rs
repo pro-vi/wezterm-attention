@@ -876,6 +876,9 @@ enum OwnerState {
     Unknown,
 }
 
+/// Rests on the kernel fixing a process's start time when it forks: an
+/// `exec` keeps it, so a process that still runs reads the same start at
+/// every check, and a different start at its pid is another process.
 fn owner_state(owner: &ClaimOwner, processes: &dyn ProcessInspector) -> OwnerState {
     let Some(boot) = processes.boot_session() else {
         return OwnerState::Unknown;
