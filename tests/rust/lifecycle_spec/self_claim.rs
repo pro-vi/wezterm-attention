@@ -1303,6 +1303,7 @@ fn two_racing_first_hooks_of_one_agent_end_with_one_claim_both_resolve_to() {
 /// Run `command` the way an agent runs a registered hook command: through a
 /// shell, with the callback JSON on stdin, from this test process standing in
 /// for the agent. Returns the diagnostic code the writer printed.
+#[cfg(target_os = "macos")]
 fn run_registered(setup: &Setup, shell: &[&str], command: &str) -> String {
     let mut env = setup.env.clone();
     env.remove("WEZTERM_ATTENTION_LAUNCH_ID");
@@ -1342,6 +1343,8 @@ fn run_registered(setup: &Setup, shell: &[&str], command: &str) -> String {
         .to_owned()
 }
 
+// Self-claim is macOS only; elsewhere the writer refuses before any parent check.
+#[cfg(target_os = "macos")]
 #[test]
 fn the_registered_hook_command_hands_the_agent_s_own_pid_to_the_writer() {
     let setup = Setup::new();
