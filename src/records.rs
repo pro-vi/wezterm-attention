@@ -1015,9 +1015,9 @@ pub fn commit_with<T, P>(
     })
 }
 
-/// Applies a plan under its locks. A removal whose path reaches through a
-/// link out of the state root is kept, and the rest of the plan still lands:
-/// what stands there is not a record this writer made.
+/// Applies a plan under its locks. A removal below a symlinked directory, or
+/// not below the state root at all, is kept, and the rest of the plan still
+/// lands: what stands there is not a record this writer made.
 fn apply_plan<T>(root: &Path, plan: &CommitPlan<T>) -> Result<()> {
     for directory in &plan.private_dirs {
         mkdir_private(directory)?;
