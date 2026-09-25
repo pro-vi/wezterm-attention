@@ -725,7 +725,7 @@ pub fn parse_record_value(value: &Value, protocol: &Manifest) -> Verdict {
             .and_then(Value::as_str)
             .zip(value.get("owner_key").and_then(Value::as_str))
             .is_some_and(|(id, key)| sha256_hex(id.as_bytes()) == key),
-        "claim" => claim_owner_is_whole(value),
+        "claim" => claim_owner(value).is_ok(),
         _ => true,
     };
     if digest_matches {
@@ -745,27 +745,29 @@ pub const CLAIM_OWNER_FIELDS: [&str; 4] = [
     "owner_boot_session_id",
 ];
 
-/// Whether a claim's owner fields are all absent, or all present with values a
-/// process can have: a positive pid, and a start time whose microseconds are
-/// less than a second. A claim with only some of them is neither kind.
-fn claim_owner_is_whole(value: &Value) -> bool {
-    let number = |field: &str| value.get(field).and_then(Value::as_str);
-    match CLAIM_OWNER_FIELDS
-        .iter()
-        .filter(|field| value.get(**field).is_some())
-        .count()
-    {
-        0 => true,
-        4 => {
-            number("owner_pid")
-                .and_then(|pid| pid.parse::<i32>().ok())
-                .is_some_and(|pid| pid > 0)
-                && number("owner_started_sec").is_some_and(|seconds| seconds.parse::<u64>().is_ok())
-                && number("owner_started_usec")
-                    .and_then(|microseconds| microseconds.parse::<u32>().ok())
-                    .is_some_and(|microseconds| microseconds < 1_000_000)
+/// A claim's owner as its owner fields name it: the pid, the start time's
+/// seconds and microseconds, and the boot session id.
+pub(crate) type ClaimOwnerFields<'a> = (i32, u64, u32, &'a str);
+
+/// The owner a claim's owner fields name: `None` when all are absent, and an
+/// error unless all are present with values a process can have, a positive
+/// pid and a start time whose microseconds are less than a second.
+pub(crate) fn claim_owner(value: &Value) -> std::result::Result<Option<ClaimOwnerFields<'_>>, ()> {
+    let [pid, seconds, microseconds, boot] =
+        CLAIM_OWNER_FIELDS.map(|field| value.get(field).map(Value::as_str));
+    match (pid, seconds, microseconds, boot) {
+        (None, None, None, None) => Ok(None),
+        (Some(Some(pid)), Some(Some(seconds)), Some(Some(microseconds)), Some(Some(boot))) => {
+            let pid = pid.parse::<i32>().ok().filter(|pid| *pid > 0).ok_or(())?;
+            let seconds = seconds.parse::<u64>().map_err(|_| ())?;
+            let microseconds = microseconds
+                .parse::<u32>()
+                .ok()
+                .filter(|microseconds| *microseconds < 1_000_000)
+                .ok_or(())?;
+            Ok(Some((pid, seconds, microseconds, boot)))
         }
-        _ => false,
+        _ => Err(()),
     }
 }
 

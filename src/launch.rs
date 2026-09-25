@@ -553,26 +553,20 @@ pub(crate) enum ClaimMode {
 impl ClaimMode {
     /// The mode of a claim record that has already been validated as one.
     pub(crate) fn of(claim: &Value) -> Result<Self> {
-        let text = |field: &str| claim.get(field).and_then(Value::as_str);
-        let invalid = || AttentionError::new("record_invalid", "claim owner is invalid");
-        match (
-            text("owner_pid"),
-            text("owner_started_sec"),
-            text("owner_started_usec"),
-            text("owner_boot_session_id"),
-        ) {
-            (None, None, None, None) => Ok(Self::Shell),
-            (Some(pid), Some(seconds), Some(microseconds), Some(boot)) => {
-                Ok(Self::SelfOwned(ClaimOwner {
-                    pid: pid.parse().map_err(|_| invalid())?,
-                    start: ProcessStart {
-                        seconds: seconds.parse().map_err(|_| invalid())?,
-                        microseconds: microseconds.parse().map_err(|_| invalid())?,
-                    },
-                    boot_session_id: boot.to_owned(),
-                }))
-            }
-            _ => Err(invalid()),
+        match crate::protocol::claim_owner(claim) {
+            Ok(None) => Ok(Self::Shell),
+            Ok(Some((pid, seconds, microseconds, boot))) => Ok(Self::SelfOwned(ClaimOwner {
+                pid,
+                start: ProcessStart {
+                    seconds,
+                    microseconds,
+                },
+                boot_session_id: boot.to_owned(),
+            })),
+            Err(()) => Err(AttentionError::new(
+                "record_invalid",
+                "claim owner is invalid",
+            )),
         }
     }
 }
@@ -918,10 +912,15 @@ fn self_owned_claim_record(
         &proof.tty_fingerprint,
         observation,
     );
-    record["owner_pid"] = json!(proof.owner.pid.to_string());
-    record["owner_started_sec"] = json!(proof.owner.start.seconds.to_string());
-    record["owner_started_usec"] = json!(proof.owner.start.microseconds.to_string());
-    record["owner_boot_session_id"] = json!(proof.owner.boot_session_id);
+    let owner = &proof.owner;
+    for (field, value) in crate::protocol::CLAIM_OWNER_FIELDS.into_iter().zip([
+        owner.pid.to_string(),
+        owner.start.seconds.to_string(),
+        owner.start.microseconds.to_string(),
+        owner.boot_session_id.clone(),
+    ]) {
+        record[field] = json!(value);
+    }
     record
 }
 
