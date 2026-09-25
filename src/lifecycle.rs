@@ -184,6 +184,8 @@ struct ResolvedLaunch<'a> {
     /// For an event that carried no launch id, the proof of the agent process
     /// it came from, and what reads that process again.
     host: Option<HostCheck<'a>>,
+    /// Why the claim this event made was not published to the terminal.
+    publication_diagnostic: Option<Diagnostic>,
 }
 
 #[derive(Clone)]
@@ -304,6 +306,7 @@ fn load_claim(root: &Path, address: &PaneAddress) -> Result<Option<Value>> {
 /// [`crate::launch::self_owned_launch`]. Nothing here ever finds a launch by
 /// the terminal alone.
 fn resolve_launch<'a>(
+    event: &ProviderEvent,
     env: &'a BTreeMap<String, String>,
     ports: &RuntimePorts<'a>,
 ) -> Result<ResolvedLaunch<'a>> {
@@ -321,6 +324,7 @@ fn resolve_launch<'a>(
                     launch_id: inherited,
                     claim,
                     host: None,
+                    publication_diagnostic: None,
                 })
             }
             _ => Err(AttentionError::new(
@@ -329,7 +333,13 @@ fn resolve_launch<'a>(
             )),
         };
     }
-    let resolved = crate::launch::self_owned_launch(env, ports, &address, claim)?;
+    let resolved = crate::launch::self_owned_launch(
+        env,
+        ports,
+        &address,
+        claim,
+        event.action == ProviderAction::Binding,
+    )?;
     let launch_id = resolved
         .claim
         .get("launch_id")
@@ -348,6 +358,7 @@ fn resolve_launch<'a>(
             processes: ports.processes,
             tty: ports.tty,
         }),
+        publication_diagnostic: resolved.publication_diagnostic,
     })
 }
 
@@ -1202,6 +1213,7 @@ pub fn apply_mark_activity(
         launch_id,
         claim,
         host: None,
+        publication_diagnostic: None,
     };
     let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
     let pointer_path = launch.join("current-binding.json");
@@ -2221,6 +2233,7 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
                     launch_id: launch_id.clone(),
                     claim: claim.clone(),
                     host: None,
+                    publication_diagnostic: None,
                 },
                 current_binding_id,
                 mutation,
@@ -2318,7 +2331,7 @@ fn apply_provider_event_inner(
             "observation is invalid",
         ));
     }
-    let mut resolved = match resolve_launch(env, ports) {
+    let mut resolved = match resolve_launch(event, env, ports) {
         Ok(resolved) => resolved,
         Err(error) => return Ok(LifecycleResult::ignored_error(error)),
     };
@@ -2363,9 +2376,13 @@ fn apply_provider_event_inner(
     };
     // Metadata the parser dropped is reported unless the lifecycle has a
     // finding of its own, which says more about what happened to the event.
+    // A claim this event made and could not publish says less than either.
     result.map(|mut result| {
         if result.diagnostic.is_none() {
-            result.diagnostic = event.diagnostic.clone();
+            result.diagnostic = event
+                .diagnostic
+                .clone()
+                .or_else(|| resolved.publication_diagnostic.clone());
         }
         result
     })
@@ -2410,6 +2427,7 @@ mod lifecycle_write_tests {
             launch_id: launch_id.clone(),
             claim: samples["claim"].clone(),
             host: None,
+            publication_diagnostic: None,
         };
         let launch = launch_path(&root, &address, &launch_id);
         crate::records::atomic_replace(

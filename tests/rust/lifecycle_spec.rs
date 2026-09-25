@@ -158,7 +158,7 @@ impl TtyWriter for FakeTty {
 struct FakePanes {
     rows: Mutex<Option<Vec<PaneRow>>>,
     /// Runs as each listing is taken, before it answers.
-    on_list: Mutex<Option<Box<dyn FnMut() + Send>>>,
+    on_list: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl FakePanes {
@@ -176,7 +176,8 @@ impl FakePanes {
 
 impl PaneLister for FakePanes {
     fn list(&self, _socket_path: &str) -> wezterm_attention::protocol::Result<Vec<PaneRow>> {
-        if let Some(hook) = self.on_list.lock().expect("hook lock").as_mut() {
+        let hook = self.on_list.lock().expect("hook lock").clone();
+        if let Some(hook) = hook {
             hook();
         }
         self.rows.lock().expect("rows lock").clone().ok_or_else(|| {
@@ -214,6 +215,8 @@ fn process_facts(pid: i32, parent_pid: i32, terminal: ControllingTerminal) -> Pr
     }
 }
 
+type ReadHook = std::sync::Arc<dyn Fn(i32) -> Option<ProcessRead> + Send + Sync>;
+
 /// A process table an agent's hook reads. By default the agent leads the
 /// pane terminal's foreground job, and its hook runs detached from any
 /// terminal, the way Claude Code starts one.
@@ -225,7 +228,7 @@ struct FakeProcesses {
     devices: Mutex<BTreeMap<String, u64>>,
     /// Runs on every process read, with the pid read; an answer it gives
     /// replaces the table's.
-    on_read: Mutex<Option<Box<dyn FnMut(i32) -> Option<ProcessRead> + Send>>>,
+    on_read: Mutex<Option<ReadHook>>,
 }
 
 impl FakeProcesses {
@@ -294,9 +297,8 @@ impl ProcessInspector for FakeProcesses {
     }
 
     fn process(&self, pid: i32) -> ProcessRead {
-        if let Some(hook) = self.on_read.lock().expect("hook lock").as_mut()
-            && let Some(read) = hook(pid)
-        {
+        let hook = self.on_read.lock().expect("hook lock").clone();
+        if let Some(read) = hook.and_then(|hook| hook(pid)) {
             return read;
         }
         self.table

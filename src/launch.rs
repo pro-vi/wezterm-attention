@@ -14,8 +14,8 @@ use uuid::Uuid;
 use crate::identity::{PaneAddress, pane_address};
 use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, manifest};
 use crate::records::{
-    CommitPlan, RecordIdentity, Replacement, commit, incarnation_path, mkdir_private, pane_path,
-    read_record, realm_path, session_index_marker, session_index_path, state_root,
+    CommitPlan, RecordIdentity, Replacement, commit, commit_with, incarnation_path, mkdir_private,
+    pane_path, read_record, realm_path, session_index_marker, session_index_path, state_root,
 };
 use crate::wezterm::{
     ControllingTerminal, ProcessFacts, ProcessInspector, ProcessRead, ProcessStart, RuntimePorts,
@@ -727,10 +727,194 @@ impl HostProof {
 }
 
 /// A launch resolved for an agent event that carries no launch id: the claim
-/// it resolved against, and the proof of the host that sent it.
+/// it resolved against, the proof of the host that sent it, and why a claim
+/// this event made could not be published to the terminal.
 pub(crate) struct SelfOwnedLaunch {
     pub(crate) claim: Value,
     pub(crate) proof: HostProof,
+    pub(crate) publication_diagnostic: Option<Diagnostic>,
+}
+
+/// Whether the process a self-owned claim names still runs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OwnerState {
+    Alive,
+    /// Proven to have exited: the machine rebooted since, or its pid names no
+    /// process, or names one that started at another time.
+    Gone,
+    /// Neither could be shown. A zombie counts here: it has exited but its
+    /// pid is still held, and nothing else it proves is needed.
+    Unknown,
+}
+
+fn owner_state(owner: &ClaimOwner, processes: &dyn ProcessInspector) -> OwnerState {
+    let Some(boot) = processes.boot_session() else {
+        return OwnerState::Unknown;
+    };
+    if boot != owner.boot_session_id {
+        return OwnerState::Gone;
+    }
+    match processes.process(owner.pid) {
+        ProcessRead::Gone => OwnerState::Gone,
+        ProcessRead::Unknown => OwnerState::Unknown,
+        ProcessRead::Found(facts) if facts.zombie => OwnerState::Unknown,
+        ProcessRead::Found(facts) if facts.start != owner.start => OwnerState::Gone,
+        ProcessRead::Found(_) => OwnerState::Alive,
+    }
+}
+
+fn self_owned_claim_record(
+    address: &PaneAddress,
+    launch_id: &str,
+    proof: &HostProof,
+    observation: &str,
+) -> Value {
+    let mut record = claim_record(
+        address,
+        launch_id,
+        &proof.tty_path,
+        &proof.tty_fingerprint,
+        observation,
+    );
+    record["owner_pid"] = json!(proof.owner.pid.to_string());
+    record["owner_started_sec"] = json!(proof.owner.start.seconds.to_string());
+    record["owner_started_usec"] = json!(proof.owner.start.microseconds.to_string());
+    record["owner_boot_session_id"] = json!(proof.owner.boot_session_id);
+    record
+}
+
+/// Claim the pane for the agent process `proof` names, at a session start.
+///
+/// Under the pane's claim lock, and no other lock: the same host is read
+/// again and must still prove itself, then the claim is decided. No claim
+/// gives a new one with a new launch id. The same process's own claim is kept
+/// as it stands, so a callback already resolved against it stays valid. A
+/// claim of another process proven gone is replaced with a new launch id;
+/// one still running, or one whose state cannot be read, keeps the pane, and
+/// so does a shell claim. Only a new or replacing claim needs the agent to
+/// lead the terminal's foreground job. The claim is published to the proven
+/// terminal before the lock is released.
+fn claim_for_host(
+    env: &BTreeMap<String, String>,
+    ports: &RuntimePorts<'_>,
+    address: &PaneAddress,
+    proof: &HostProof,
+) -> Result<(Value, Option<Diagnostic>)> {
+    let root = state_root(env)?;
+    mkdir_private(&root)?;
+    let new_store = !root.join("v2").exists();
+    let (_, metadata) = pane_address(env)?;
+    let (realm_record, incarnation_record) = manifests(address, &metadata)?;
+    let pane = pane_path(&root, address);
+    let claim_path = pane.join("claim.json");
+    let observation = ports.clock.monotonic_ns20()?;
+    let (selected, published) = commit_with(
+        &pane.join(".claim.lock"),
+        &claim_path,
+        Some("claim"),
+        &RecordIdentity::pane(address),
+        std::time::Duration::from_secs(2),
+        |existing| {
+            let foreground = proof.confirm(env, ports.processes, ports.tty, address)?;
+            let kept = |claim: Value| CommitPlan {
+                result: claim,
+                replacements: Vec::new(),
+                removals: Vec::new(),
+                private_dirs: Vec::new(),
+            };
+            if let Some(current) = &existing {
+                if current.get("address")
+                    != Some(&serde_json::to_value(address).map_err(AttentionError::record_json)?)
+                {
+                    return Err(AttentionError::new(
+                        "record_invalid",
+                        "claim interior address mismatches its path",
+                    ));
+                }
+                match ClaimMode::of(current)? {
+                    ClaimMode::Shell => {
+                        return Err(AttentionError::new(
+                            "claim_stale",
+                            "the pane holds a shell claim, which an agent without its launch id cannot use",
+                        ));
+                    }
+                    ClaimMode::SelfOwned(owner) if owner == proof.owner => {
+                        if !proof.owns(current)? {
+                            return Err(AttentionError::new(
+                                "unsafe_tty",
+                                "the agent's claim names a terminal the agent no longer runs on",
+                            ));
+                        }
+                        return Ok(kept(current.clone()));
+                    }
+                    ClaimMode::SelfOwned(owner) => match owner_state(&owner, ports.processes) {
+                        OwnerState::Gone => {}
+                        OwnerState::Alive => {
+                            return Err(AttentionError::new(
+                                "claim_stale",
+                                "another agent process that still runs holds the pane's claim",
+                            ));
+                        }
+                        OwnerState::Unknown => {
+                            return Err(AttentionError::new(
+                                "probe_unavailable",
+                                "whether the agent holding the pane's claim still runs could not be read",
+                            ));
+                        }
+                    },
+                }
+            }
+            if !foreground {
+                return Err(AttentionError::new(
+                    "claim_stale",
+                    "the agent does not lead the pane's foreground job, so it cannot claim the pane",
+                ));
+            }
+            let claim =
+                self_owned_claim_record(address, &Uuid::new_v4().to_string(), proof, &observation);
+            let mut replacements = vec![
+                Replacement::if_different(
+                    realm_path(&root, &address.realm_id).join("realm.json"),
+                    realm_record.clone(),
+                ),
+                Replacement::if_different(
+                    incarnation_path(&root, &address.realm_id, &address.incarnation_id)
+                        .join("incarnation.json"),
+                    incarnation_record.clone(),
+                ),
+                Replacement::always(claim_path.clone(), claim.clone()),
+            ];
+            if new_store {
+                replacements.push(Replacement::if_different(
+                    session_index_path(&root),
+                    session_index_marker()?,
+                ));
+            }
+            Ok(CommitPlan {
+                result: claim,
+                replacements,
+                removals: vec![pane.join("absence-probe.json")],
+                private_dirs: vec![pane.join("reviews")],
+            })
+        },
+        |claim| {
+            let launch_id = claim
+                .get("launch_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            Ok(publish_claim(
+                env,
+                ports,
+                address,
+                &proof.tty_path,
+                &proof.tty_fingerprint,
+                launch_id,
+            )
+            .err()
+            .map(|error| error.diagnostic))
+        },
+    )?;
+    Ok((selected, published))
 }
 
 /// Resolve an agent event that carries no launch id against a claim its own
@@ -745,6 +929,7 @@ pub(crate) fn self_owned_launch(
     ports: &RuntimePorts<'_>,
     address: &PaneAddress,
     claim: Option<Value>,
+    starts_session: bool,
 ) -> Result<SelfOwnedLaunch> {
     if !ports.processes.self_claim_supported() {
         return Err(AttentionError::new(
@@ -774,6 +959,14 @@ pub(crate) fn self_owned_launch(
         ));
     }
     let proof = HostProof::establish(env, ports, address)?;
+    if starts_session {
+        let (claim, publication_diagnostic) = claim_for_host(env, ports, address, &proof)?;
+        return Ok(SelfOwnedLaunch {
+            claim,
+            proof,
+            publication_diagnostic,
+        });
+    }
     let Some(claim) = claim else {
         return Err(AttentionError::new(
             "claim_stale",
@@ -786,5 +979,9 @@ pub(crate) fn self_owned_launch(
             "the pane's claim belongs to another agent process",
         ));
     }
-    Ok(SelfOwnedLaunch { claim, proof })
+    Ok(SelfOwnedLaunch {
+        claim,
+        proof,
+        publication_diagnostic: None,
+    })
 }

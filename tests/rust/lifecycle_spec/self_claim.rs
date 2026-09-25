@@ -405,13 +405,13 @@ fn a_hook_whose_origin_is_not_proven_changes_nothing() {
                 changed.start.seconds += 1;
                 // Each event reads the parent twice: once to prove it, and
                 // once more after the listing. The second reading differs.
-                let mut reads = 0;
-                *setup.processes.on_read.lock().unwrap() = Some(Box::new(move |pid| {
+                let reads = std::sync::atomic::AtomicUsize::new(0);
+                *setup.processes.on_read.lock().unwrap() = Some(std::sync::Arc::new(move |pid| {
                     if pid != AGENT_PID {
                         return None;
                     }
-                    reads += 1;
-                    (reads % 2 == 0).then(|| ProcessRead::Found(changed.clone()))
+                    let read = reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    (read % 2 == 0).then(|| ProcessRead::Found(changed.clone()))
                 }));
             }),
         ),
@@ -420,13 +420,13 @@ fn a_hook_whose_origin_is_not_proven_changes_nothing() {
             Box::new(|setup, _| {
                 let mut orphaned = setup.processes.facts(HOOK_PID);
                 orphaned.parent_pid = 1;
-                let mut reads = 0;
-                *setup.processes.on_read.lock().unwrap() = Some(Box::new(move |pid| {
+                let reads = std::sync::atomic::AtomicUsize::new(0);
+                *setup.processes.on_read.lock().unwrap() = Some(std::sync::Arc::new(move |pid| {
                     if pid != HOOK_PID {
                         return None;
                     }
-                    reads += 1;
-                    (reads % 2 == 0).then(|| ProcessRead::Found(orphaned.clone()))
+                    let read = reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    (read % 2 == 0).then(|| ProcessRead::Found(orphaned.clone()))
                 }));
             }),
         ),
@@ -631,7 +631,7 @@ fn a_socket_replaced_while_the_agent_is_checked_proves_nothing() {
     let socket = PathBuf::from(&setup.env["WEZTERM_UNIX_SOCKET"]);
     let replacement = std::sync::Arc::new(Mutex::new(None::<UnixListener>));
     let slot = replacement.clone();
-    *setup.panes.on_list.lock().unwrap() = Some(Box::new(move || {
+    *setup.panes.on_list.lock().unwrap() = Some(std::sync::Arc::new(move || {
         let _ = fs::remove_file(&socket);
         std::thread::sleep(Duration::from_millis(5));
         *slot.lock().unwrap() = Some(UnixListener::bind(&socket).expect("rebind socket"));
@@ -644,4 +644,365 @@ fn a_socket_replaced_while_the_agent_is_checked_proves_nothing() {
     );
     assert_eq!(diagnostic.code, "incarnation_changed", "{diagnostic:?}");
     assert_eq!(records(&setup), before);
+}
+
+fn start(provider: &str, session: &str) -> ProviderEvent {
+    match provider {
+        "pi" => event(
+            "pi",
+            "session_start",
+            session,
+            json!({"start_source":"startup"}),
+        ),
+        _ => event(
+            provider,
+            "SessionStart",
+            session,
+            json!({"source":"startup"}),
+        ),
+    }
+}
+
+fn apply_as(
+    setup: &Setup,
+    env: &BTreeMap<String, String>,
+    event: &ProviderEvent,
+    observation: &str,
+) -> wezterm_attention::lifecycle::LifecycleResult {
+    apply_provider_event(event, env, observation, &setup.ports()).expect("event applies")
+}
+
+fn launch_of(claim: &Value) -> String {
+    claim["launch_id"]
+        .as_str()
+        .expect("claim launch")
+        .to_owned()
+}
+
+/// Put another agent in the pane: `agent` started by the shell, running the
+/// hook `hook`, and leading the terminal's foreground job.
+fn start_agent(setup: &Setup, agent: i32, hook: i32) -> BTreeMap<String, String> {
+    let mut facts = process_facts(
+        agent,
+        SHELL_PID,
+        ControllingTerminal::Device(PANE_TTY_DEVICE),
+    );
+    facts.terminal_foreground_group = agent;
+    setup.processes.set(agent, ProcessRead::Found(facts));
+    setup.processes.set(
+        hook,
+        ProcessRead::Found(process_facts(hook, agent, ControllingTerminal::Absent)),
+    );
+    *setup.processes.own.lock().unwrap() = hook;
+    let mut env = setup.agent_env();
+    env.insert("WEZTERM_ATTENTION_HOST_PID".into(), agent.to_string());
+    env
+}
+
+#[test]
+fn an_agent_s_first_session_start_claims_the_pane_for_its_own_process() {
+    for provider in ["claude", "codex", "pi"] {
+        let setup = Setup::new();
+        let env = setup.agent_env();
+        assert_eq!(
+            apply_as(&setup, &env, &start(provider, "s"), "00000000000000000200").disposition,
+            "applied",
+            "{provider}"
+        );
+        let claim = stored_claim(&setup).expect("the start claimed the pane");
+        let agent = setup.processes.facts(AGENT_PID);
+        assert_eq!(claim["owner_pid"], json!(AGENT_PID.to_string()));
+        assert_eq!(
+            claim["owner_started_sec"],
+            json!(agent.start.seconds.to_string())
+        );
+        assert_eq!(
+            claim["owner_started_usec"],
+            json!(agent.start.microseconds.to_string())
+        );
+        assert_eq!(claim["owner_boot_session_id"], json!(BOOT_SESSION));
+        assert_eq!(claim["tty_path"], json!(setup.tty.path));
+        assert_eq!(claim["tty_fingerprint"], json!(setup.tty.fingerprint));
+        let launch = launch_of(&claim);
+        Uuid::parse_str(&launch).expect("a fresh launch id");
+        assert!(!env.contains_key("WEZTERM_ATTENTION_LAUNCH_ID"));
+        assert!(
+            launch_dir(&setup, &launch)
+                .join("bindings")
+                .join(binding_id(provider, "s", &launch))
+                .join("binding.json")
+                .exists()
+        );
+        let writes = setup.tty.writes.lock().unwrap();
+        let published = writes.last().expect("the claim was published");
+        let (address, _) = pane_address(&setup.env).expect("address");
+        assert_eq!(
+            published,
+            &wezterm_attention::wezterm::publication_bytes(&address, Some(&launch))
+                .expect("publication")
+        );
+    }
+}
+
+#[test]
+fn only_a_session_start_claims_a_pane() {
+    let setup = Setup::new();
+    for event in every_action() {
+        if event.action == ProviderAction::Binding {
+            continue;
+        }
+        let diagnostic = refused(&setup, &setup.agent_env(), &event);
+        assert_eq!(diagnostic.code, "claim_stale", "{}", event.source_event);
+    }
+    assert!(stored_claim(&setup).is_none());
+}
+
+#[test]
+fn an_agent_that_is_not_the_foreground_job_does_not_claim_but_keeps_its_claim_when_backgrounded() {
+    let setup = Setup::new();
+    let env = setup.agent_env();
+    setup.processes.change(AGENT_PID, |agent| {
+        agent.terminal_foreground_group = SHELL_PID
+    });
+    let diagnostic = refused(&setup, &env, &start("claude", "s"));
+    assert_eq!(diagnostic.code, "claim_stale");
+    assert!(diagnostic.message.contains("foreground"), "{diagnostic:?}");
+    assert!(stored_claim(&setup).is_none());
+
+    setup.processes.change(AGENT_PID, |agent| {
+        agent.terminal_foreground_group = AGENT_PID
+    });
+    apply_as(&setup, &env, &start("claude", "s"), "00000000000000000200");
+    let claim = stored_claim(&setup).expect("claimed in the foreground");
+    // Suspended with Ctrl-Z, or put behind another job: the claim stays its.
+    setup.processes.change(AGENT_PID, |agent| {
+        agent.terminal_foreground_group = SHELL_PID
+    });
+    let prompt = event("claude", "UserPromptSubmit", "s", json!({"prompt":"go"}));
+    assert_eq!(
+        apply_as(&setup, &env, &prompt, "00000000000000000300").disposition,
+        "applied"
+    );
+    let resumed = event("claude", "SessionStart", "s", json!({"source":"resume"}));
+    assert_ne!(
+        apply_as(&setup, &env, &resumed, "00000000000000000400").disposition,
+        "ignored",
+        "its own claim is reused without a foreground check"
+    );
+    assert_eq!(stored_claim(&setup).as_ref(), Some(&claim));
+}
+
+#[test]
+fn the_same_agent_starting_again_keeps_its_claim_exactly() {
+    let setup = Setup::new();
+    let env = setup.agent_env();
+    apply_as(&setup, &env, &start("claude", "s"), "00000000000000000200");
+    let first = fs::read(claim_path(&setup)).expect("claim bytes");
+    let clear = event("claude", "SessionStart", "t", json!({"source":"clear"}));
+    assert_eq!(
+        apply_as(&setup, &env, &clear, "00000000000000000300").disposition,
+        "replaced"
+    );
+    assert_eq!(
+        fs::read(claim_path(&setup)).expect("claim bytes"),
+        first,
+        "a reused claim is not rewritten, so callbacks resolved against it stay valid"
+    );
+}
+
+#[test]
+fn sequential_agents_in_one_pane_get_distinct_launch_ids() {
+    let setup = Setup::new();
+    let first_env = setup.agent_env();
+    apply_as(
+        &setup,
+        &first_env,
+        &start("claude", "a"),
+        "00000000000000000200",
+    );
+    let first = launch_of(&stored_claim(&setup).expect("first claim"));
+    apply_as(
+        &setup,
+        &first_env,
+        &event("claude", "SessionEnd", "a", json!({"reason":"other"})),
+        "00000000000000000300",
+    );
+    setup.processes.set(AGENT_PID, ProcessRead::Gone);
+    setup.processes.set(HOOK_PID, ProcessRead::Gone);
+    let second_env = start_agent(&setup, 4100, 5100);
+    assert_eq!(
+        apply_as(
+            &setup,
+            &second_env,
+            &start("codex", "b"),
+            "00000000000000000400"
+        )
+        .disposition,
+        "applied"
+    );
+    let claim = stored_claim(&setup).expect("second claim");
+    let second = launch_of(&claim);
+    assert_ne!(first, second);
+    assert_eq!(claim["owner_pid"], json!("4100"));
+    assert!(
+        launch_dir(&setup, &first)
+            .join("bindings")
+            .join(binding_id("claude", "a", &first))
+            .join("end.json")
+            .exists(),
+        "the first agent's records stay where they were"
+    );
+}
+
+#[test]
+fn a_successor_binds_after_its_predecessor_is_proven_gone() {
+    let cases: Vec<(&str, Box<dyn Fn(&Setup)>)> = vec![
+        (
+            "killed without a session end",
+            Box::new(|setup| setup.processes.set(AGENT_PID, ProcessRead::Gone)),
+        ),
+        (
+            "its pid now another process's",
+            Box::new(|setup| {
+                setup
+                    .processes
+                    .change(AGENT_PID, |agent| agent.start.microseconds += 1)
+            }),
+        ),
+        (
+            "started before the machine rebooted",
+            Box::new(|setup| {
+                *setup.processes.boot.lock().unwrap() =
+                    Some("1f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b".into());
+            }),
+        ),
+    ];
+    for (label, retire) in cases {
+        let setup = Setup::new();
+        apply_as(
+            &setup,
+            &setup.agent_env(),
+            &start("claude", "a"),
+            "00000000000000000200",
+        );
+        let first = launch_of(&stored_claim(&setup).expect("first claim"));
+        let second_env = start_agent(&setup, 4100, 5100);
+        retire(&setup);
+        assert_eq!(
+            apply_as(
+                &setup,
+                &second_env,
+                &start("claude", "b"),
+                "00000000000000000300"
+            )
+            .disposition,
+            "applied",
+            "{label}"
+        );
+        let second = launch_of(&stored_claim(&setup).expect("second claim"));
+        assert_ne!(first, second, "{label}");
+        let tool = event("claude", "PreToolUse", "b", json!({"tool_name":"Bash"}));
+        assert_eq!(
+            apply_as(&setup, &second_env, &tool, "00000000000000000400").disposition,
+            "applied",
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn a_running_or_unreadable_owner_keeps_the_pane() {
+    let cases: Vec<(&str, &str, Box<dyn Fn(&Setup)>)> = vec![
+        ("still running", "claim_stale", Box::new(|_| {})),
+        (
+            "exited and not yet reaped",
+            "probe_unavailable",
+            Box::new(|setup| {
+                setup
+                    .processes
+                    .change(AGENT_PID, |agent| agent.zombie = true)
+            }),
+        ),
+        (
+            "unreadable",
+            "probe_unavailable",
+            Box::new(|setup| setup.processes.set(AGENT_PID, ProcessRead::Unknown)),
+        ),
+    ];
+    for (label, code, arrange) in cases {
+        let setup = Setup::new();
+        apply_as(
+            &setup,
+            &setup.agent_env(),
+            &start("claude", "a"),
+            "00000000000000000200",
+        );
+        let claim = stored_claim(&setup).expect("first claim");
+        let second_env = start_agent(&setup, 4100, 5100);
+        arrange(&setup);
+        let before = records(&setup);
+        let diagnostic = refused(&setup, &second_env, &start("claude", "b"));
+        assert_eq!(diagnostic.code, code, "{label}: {diagnostic:?}");
+        assert_eq!(stored_claim(&setup).as_ref(), Some(&claim), "{label}");
+        assert_eq!(records(&setup), before, "{label}");
+    }
+    // A boot id this machine cannot read proves nothing about any owner, and
+    // leaves the new agent unproven too.
+    let setup = Setup::new();
+    apply_as(
+        &setup,
+        &setup.agent_env(),
+        &start("claude", "a"),
+        "00000000000000000200",
+    );
+    let claim = stored_claim(&setup).expect("first claim");
+    let second_env = start_agent(&setup, 4100, 5100);
+    setup.processes.set(AGENT_PID, ProcessRead::Gone);
+    *setup.processes.boot.lock().unwrap() = None;
+    assert_eq!(
+        refused(&setup, &second_env, &start("claude", "b")).code,
+        "probe_unavailable"
+    );
+    assert_eq!(stored_claim(&setup).as_ref(), Some(&claim));
+}
+
+#[test]
+fn two_racing_first_hooks_of_one_agent_end_with_one_claim_both_resolve_to() {
+    let setup = Setup::new();
+    let env = setup.agent_env();
+    // Both hooks have proven their agent before either takes the claim lock.
+    let proven = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let gate = proven.clone();
+    *setup.panes.on_list.lock().unwrap() = Some(std::sync::Arc::new(move || {
+        gate.wait();
+    }));
+    let results: Vec<_> = thread::scope(|scope| {
+        // One callback delivered twice, as a retrying runner would.
+        let hooks: Vec<_> = (0..2)
+            .map(|_| {
+                let (setup, env) = (&setup, &env);
+                scope.spawn(move || {
+                    apply_as(setup, env, &start("claude", "s"), "00000000000000000200")
+                })
+            })
+            .collect();
+        hooks.into_iter().map(|hook| hook.join().unwrap()).collect()
+    });
+    *setup.panes.on_list.lock().unwrap() = None;
+    let dispositions: BTreeSet<_> = results
+        .iter()
+        .map(|result| result.disposition.as_str())
+        .collect();
+    assert_eq!(
+        dispositions,
+        BTreeSet::from(["applied", "confirmed"]),
+        "{results:?}"
+    );
+    let launch = launch_of(&stored_claim(&setup).expect("one claim"));
+    let launches: Vec<_> = fs::read_dir(launch_dir(&setup, &launch).parent().unwrap())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(launches, [launch.clone()], "both resolved to the one claim");
 }
