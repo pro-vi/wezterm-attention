@@ -22,8 +22,8 @@ use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, free_of_c
 use crate::providers::{ProviderAction, ProviderEvent};
 use crate::records::{
     CommitPlan, PreparedRecordWrite, RecordIdentity, RecordRead, Replacement, commit_nested_with,
-    commit_triple_with, commit_with, ends_binding, launch_path, pane_path, read_record,
-    read_record_typed, session_entry, session_entry_path, state_root,
+    commit_triple_with, ends_binding, launch_path, pane_path, read_record, read_record_typed,
+    session_entry, session_entry_path, state_root,
 };
 use crate::wezterm::RuntimePorts;
 
@@ -194,6 +194,50 @@ struct HostCheck<'a> {
     env: &'a BTreeMap<String, String>,
     processes: &'a dyn crate::wezterm::ProcessInspector,
     tty: &'a dyn crate::wezterm::TtyWriter,
+}
+
+impl ResolvedLaunch<'_> {
+    fn claim_lock(&self) -> PathBuf {
+        pane_path(&self.root, &self.address).join(".claim.lock")
+    }
+
+    /// Why this event may no longer write, given the pane's claim as read
+    /// under this launch's lock and then the claim lock.
+    ///
+    /// The claim must be exactly the one the event was resolved against, and
+    /// an event that carried no launch id must still come from the agent
+    /// process that proved it. Otherwise the event is refused outright: it
+    /// writes nothing, and never continues into whatever launch holds the
+    /// pane now.
+    fn lapsed(&self, current: Option<&Value>) -> Option<LifecycleResult> {
+        if current != Some(&self.claim) {
+            return Some(LifecycleResult::diagnosed(
+                Disposition::Ignored,
+                "claim_stale",
+                "the pane's claim changed after this event was resolved",
+            ));
+        }
+        let host = self.host.as_ref()?;
+        host.proof
+            .confirm(host.env, host.processes, host.tty, &self.address)
+            .err()
+            .map(LifecycleResult::ignored_error)
+    }
+
+    /// [`Self::lapsed`] for a caller whose commit did not read the claim.
+    fn lapsed_now(&self) -> Result<Option<LifecycleResult>> {
+        Ok(self.lapsed(load_claim(&self.root, &self.address)?.as_ref()))
+    }
+}
+
+/// A plan that writes nothing and reports `result`.
+fn refusal(result: LifecycleResult) -> CommitPlan<Mutation> {
+    CommitPlan {
+        result: Mutation::plain(result),
+        replacements: Vec::new(),
+        removals: Vec::new(),
+        private_dirs: Vec::new(),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -395,13 +439,17 @@ fn binding_mutation(
         .join(&binding_id)
         .join("binding.json");
     let pointer_path = launch.join("current-binding.json");
-    let (mutation, _) = commit_with(
+    let (mutation, _) = commit_nested_with(
         &launch.join(".lock"),
+        &resolved.claim_lock(),
         &pointer_path,
         Some("current_binding"),
         &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
         Duration::from_secs(2),
         |pointer| {
+            if let Some(lapsed) = resolved.lapsed_now()? {
+                return Ok(refusal(lapsed));
+            }
             let (_, current) = read_current(
                 &launch,
                 pointer.clone(),
@@ -781,13 +829,17 @@ fn apply_observation(
     written_at: &str,
 ) -> Result<LifecycleResult> {
     let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
-    let (mutation, _) = commit_with(
+    let (mutation, _) = commit_nested_with(
         &launch.join(".lock"),
+        &resolved.claim_lock(),
         &launch.join("current-binding.json"),
         Some("current_binding"),
         &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
         Duration::from_secs(2),
         |_| {
+            if let Some(lapsed) = resolved.lapsed_now()? {
+                return Ok(refusal(lapsed));
+            }
             Ok(append_observation(
                 resolved,
                 event,
@@ -893,13 +945,17 @@ fn apply_activity(
     let activity_path = binding_dir.join("activity.json");
     let pointer_path = launch.join("current-binding.json");
     let base = activity_base(resolved, event, &binding_id)?;
-    let (mutation, ()) = commit_with(
+    let (mutation, ()) = commit_nested_with(
         &launch.join(".lock"),
+        &resolved.claim_lock(),
         &pointer_path,
         Some("current_binding"),
         &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
         Duration::from_secs(2),
         |pointer| {
+            if let Some(lapsed) = resolved.lapsed_now()? {
+                return Ok(refusal(lapsed));
+            }
             let (_, current) =
                 read_current(&launch, pointer, &resolved.address, &resolved.launch_id)?;
             if current
@@ -1217,13 +1273,20 @@ pub fn apply_mark_activity(
     };
     let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
     let pointer_path = launch.join("current-binding.json");
-    let (mutation, ()) = commit_with(
+    let (mutation, ()) = commit_nested_with(
         &launch.join(".lock"),
+        &resolved.claim_lock(),
         &pointer_path,
         Some("current_binding"),
         &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
         Duration::from_secs(2),
         |pointer| {
+            if resolved.lapsed_now()?.is_some() {
+                return Err(AttentionError::new(
+                    "claim_stale",
+                    "current launch does not match claim",
+                ));
+            }
             let (_, current) =
                 read_current(&launch, pointer, &resolved.address, &resolved.launch_id)?;
             let binding_id = current
@@ -1562,13 +1625,17 @@ fn apply_child(
     } else {
         "stopped"
     };
-    let (mutation, ()) = commit_with(
+    let (mutation, ()) = commit_nested_with(
         &launch.join(".lock"),
+        &resolved.claim_lock(),
         &binding_path,
         Some("binding"),
         &RecordIdentity::binding(&resolved.address, &resolved.launch_id, &binding_id),
         Duration::from_secs(2),
         |binding| {
+            if let Some(lapsed) = resolved.lapsed_now()? {
+                return Ok(refusal(lapsed));
+            }
             if binding.as_ref().is_none_or(|record| {
                 !record_matches_binding(record, &resolved.address, &resolved.launch_id, &binding_id)
             }) {
@@ -1764,13 +1831,17 @@ fn apply_end(
     let binding_dir = launch.join("bindings").join(&binding_id);
     let binding_path = binding_dir.join("binding.json");
     let end_path = binding_dir.join("end.json");
-    let (mutation, ()) = commit_with(
+    let (mutation, ()) = commit_nested_with(
         &launch.join(".lock"),
+        &resolved.claim_lock(),
         &binding_path,
         Some("binding"),
         &RecordIdentity::binding(&resolved.address, &resolved.launch_id, &binding_id),
         Duration::from_secs(2),
         |binding| {
+            if let Some(lapsed) = resolved.lapsed_now()? {
+                return Ok(refusal(lapsed));
+            }
             let Some(binding) = binding else {
                 return Ok(CommitPlan {
                     result: Mutation::plain(LifecycleResult::diagnosed(
@@ -1876,19 +1947,8 @@ fn apply_review_event(
         &RecordIdentity::pane(&resolved.address),
         Duration::from_secs(2),
         |claim| {
-            if claim.as_ref().is_none_or(|claim| {
-                !record_matches_launch(claim, &resolved.address, &resolved.launch_id)
-            }) {
-                return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::diagnosed(
-                        Disposition::Ignored,
-                        "claim_stale",
-                        "Pi review launch is no longer current",
-                    )),
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                });
+            if let Some(lapsed) = resolved.lapsed(claim.as_ref()) {
+                return Ok(refusal(lapsed));
             }
             let pointer = read_record(
                 &launch.join("current-binding.json"),
@@ -2049,10 +2109,8 @@ fn apply_clear_event(
             Some("claim"),
             &RecordIdentity::pane(&resolved.address),
         )?;
-        if claim.as_ref().is_none_or(|claim| {
-            !record_matches_launch(claim, &resolved.address, &resolved.launch_id)
-        }) {
-            return ignored("clear event is not for the current launch");
+        if let Some(lapsed) = resolved.lapsed(claim.as_ref()) {
+            return Ok(refusal(lapsed));
         }
         let (_, current) = read_current(&launch, pointer, &resolved.address, &resolved.launch_id)?;
         if current
@@ -2139,13 +2197,21 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
     };
     let launch = launch_path(&root, &address, &launch_id);
     let pointer_path = launch.join("current-binding.json");
-    let (mutation, ()) = commit_with(
+    let (mutation, ()) = commit_nested_with(
         &launch.join(".lock"),
+        &pane_path(&root, &address).join(".claim.lock"),
         &pointer_path,
         Some("current_binding"),
         &RecordIdentity::launch(&address, &launch_id),
         Duration::from_secs(2),
         |pointer| {
+            if load_claim(&root, &address)?.as_ref() != Some(&claim) {
+                return Ok(refusal(LifecycleResult::diagnosed(
+                    Disposition::Ignored,
+                    "claim_stale",
+                    "prompt return has no matching claim",
+                )));
+            }
             let (_, current) = read_current(&launch, pointer, &address, &launch_id)?;
             let Some(current) = current else {
                 return Ok(CommitPlan {

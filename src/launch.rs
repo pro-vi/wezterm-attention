@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::identity::{PaneAddress, pane_address};
 use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, manifest};
 use crate::records::{
-    CommitPlan, RecordIdentity, Replacement, commit, commit_with, incarnation_path, mkdir_private,
+    CommitPlan, RecordIdentity, Replacement, commit_with, incarnation_path, mkdir_private,
     pane_path, read_record, realm_path, session_index_marker, session_index_path, state_root,
 };
 use crate::wezterm::{
@@ -179,7 +179,7 @@ pub fn claim_launch_at_tty(
     let incarnation_path = incarnation_path(&root, &address.realm_id, &address.incarnation_id);
     let reviews_path = pane.join("reviews");
 
-    let selected = commit(
+    let (mut selected, published) = commit_with(
         &pane.join(".claim.lock"),
         &claim_path,
         Some("claim"),
@@ -289,24 +289,24 @@ pub fn claim_launch_at_tty(
                 private_dirs: vec![reviews_path],
             })
         },
+        // Published before the claim lock is released, so no later claim can
+        // be published first and then covered by this one. The claim is
+        // committed by this point, so a failure here is a publication failure
+        // and belongs on the result the commit already selected: returned as
+        // an error it would throw away the launch id of a claim that exists
+        // on disk.
+        |selected| {
+            Ok(publish_claim(
+                env,
+                ports,
+                &address,
+                tty_path,
+                &fingerprint,
+                &selected.launch_id,
+            ))
+        },
     )?;
-
-    let mut selected = selected;
-    // The claim is committed by this point, so every later failure is a
-    // publication failure and belongs on the result the commit already selected.
-    // Returning it as an error instead throws away the launch id of a claim that
-    // exists on disk, and the diagnostic names only the publication, so a caller
-    // cannot tell a claim that never happened from one that did. The terminal
-    // write already reported this way; the incarnation re-check and the
-    // publication encoding did not.
-    match publish_claim(
-        env,
-        ports,
-        &address,
-        tty_path,
-        &fingerprint,
-        &selected.launch_id,
-    ) {
+    match published {
         Ok(()) => selected.publication = "published".to_owned(),
         Err(error) => selected.publication_diagnostic = Some(error.diagnostic),
     }
@@ -334,6 +334,56 @@ fn publish_claim(
     ports.tty.write(tty_path, &bytes, fingerprint)
 }
 
+/// Hold the pane's claim lock, when the pane has state, from reading its
+/// claim through the whole terminal write, so a claim made meanwhile is
+/// published after this publication and never covered by it.
+///
+/// A pane with no state directory has no claim and no lock to take, and this
+/// creates neither: publishing to every listed pane must not leave a
+/// directory for each. Such a publication names the pane and no launch, and
+/// the terminal keeps the launch a claim publishes whatever order the two
+/// land in, since naming the pane again changes nothing else.
+fn with_pane_claim<T>(
+    root: &std::path::Path,
+    address: &PaneAddress,
+    publish: impl FnOnce(Option<Value>) -> Result<T>,
+) -> Result<T> {
+    let pane = pane_path(root, address);
+    let read = || {
+        read_record(
+            &pane.join("claim.json"),
+            Some("claim"),
+            &RecordIdentity::pane(address),
+        )
+    };
+    if !pane.is_dir() {
+        return publish(None);
+    }
+    crate::records::with_lock(
+        &pane.join(".claim.lock"),
+        std::time::Duration::from_secs(2),
+        || publish(read()?),
+    )
+}
+
+/// The launch a stored claim publishes to `tty_path`: its own, when it names
+/// this pane at that terminal.
+fn claimed_launch(
+    claim: Option<&Value>,
+    address: &PaneAddress,
+    tty_path: &str,
+    fingerprint: &str,
+) -> Option<String> {
+    let record = claim?;
+    let matches = record.get("address") == serde_json::to_value(address).ok().as_ref()
+        && record.get("tty_path").and_then(Value::as_str) == Some(tty_path)
+        && record.get("tty_fingerprint").and_then(Value::as_str) == Some(fingerprint);
+    matches
+        .then(|| record.get("launch_id").and_then(Value::as_str))
+        .flatten()
+        .map(str::to_owned)
+}
+
 pub fn publish_current(
     env: &BTreeMap<String, String>,
     ports: &RuntimePorts<'_>,
@@ -342,31 +392,22 @@ pub fn publish_current(
     let (address, _) = pane_address(env)?;
     let tty_path = ports.tty.current_path()?;
     let fingerprint = ports.tty.fingerprint(&tty_path)?;
-    let claim = read_record(
-        &pane_path(&root, &address).join("claim.json"),
-        Some("claim"),
-        &RecordIdentity::pane(&address),
-    )?;
-    let launch_id = claim.as_ref().and_then(|record| {
-        let matches = record.get("address") == serde_json::to_value(&address).ok().as_ref()
-            && record.get("tty_path").and_then(Value::as_str) == Some(tty_path.as_str())
-            && record.get("tty_fingerprint").and_then(Value::as_str) == Some(fingerprint.as_str());
-        matches
-            .then(|| record.get("launch_id").and_then(Value::as_str))
-            .flatten()
-    });
-    let (current_address, _) = pane_address(env)?;
-    if current_address != address {
-        return Err(AttentionError::new(
-            "incarnation_changed",
-            "mux socket changed before publication",
-        ));
-    }
-    ports.tty.write(
-        &tty_path,
-        &publication_bytes(&address, launch_id)?,
-        &fingerprint,
-    )?;
+    let launch_id = with_pane_claim(&root, &address, |claim| {
+        let launch_id = claimed_launch(claim.as_ref(), &address, &tty_path, &fingerprint);
+        let (current_address, _) = pane_address(env)?;
+        if current_address != address {
+            return Err(AttentionError::new(
+                "incarnation_changed",
+                "mux socket changed before publication",
+            ));
+        }
+        ports.tty.write(
+            &tty_path,
+            &publication_bytes(&address, launch_id.as_deref())?,
+            &fingerprint,
+        )?;
+        Ok(launch_id)
+    })?;
     Ok(PublishReport {
         attempted: 1,
         published: 1,
@@ -411,34 +452,23 @@ pub fn publish_realm(
                 incarnation_id: incarnation_id.clone(),
                 pane_id,
             };
-            let claim = read_record(
-                &pane_path(&root, &address).join("claim.json"),
-                Some("claim"),
-                &RecordIdentity::pane(&address),
-            )?;
-            let launch_id = claim.as_ref().and_then(|record| {
-                let matches = record.get("address") == serde_json::to_value(&address).ok().as_ref()
-                    && record.get("tty_path").and_then(Value::as_str) == Some(tty_name)
-                    && record.get("tty_fingerprint").and_then(Value::as_str)
-                        == Some(fingerprint.as_str());
-                matches
-                    .then(|| record.get("launch_id").and_then(Value::as_str))
-                    .flatten()
-            });
-            let (current_realm, current_incarnation, _) =
-                crate::identity::socket_identity(socket_path)?;
-            if current_realm != realm_id || current_incarnation != incarnation_id {
-                return Err(AttentionError::new(
-                    "incarnation_changed",
-                    "mux socket changed before pane publication",
-                ));
-            }
-            ports.tty.write(
-                tty_name,
-                &publication_bytes(&address, launch_id)?,
-                &fingerprint,
-            )?;
-            Ok::<bool, AttentionError>(launch_id.is_some())
+            with_pane_claim(&root, &address, |claim| {
+                let launch_id = claimed_launch(claim.as_ref(), &address, tty_name, &fingerprint);
+                let (current_realm, current_incarnation, _) =
+                    crate::identity::socket_identity(socket_path)?;
+                if current_realm != realm_id || current_incarnation != incarnation_id {
+                    return Err(AttentionError::new(
+                        "incarnation_changed",
+                        "mux socket changed before pane publication",
+                    ));
+                }
+                ports.tty.write(
+                    tty_name,
+                    &publication_bytes(&address, launch_id.as_deref())?,
+                    &fingerprint,
+                )?;
+                Ok(launch_id.is_some())
+            })
         })();
         match result {
             Ok(has_v2) => {

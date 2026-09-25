@@ -55,6 +55,9 @@ mod mark_clear;
 #[path = "lifecycle_spec/self_claim.rs"]
 mod self_claim;
 
+#[path = "lifecycle_spec/claim_fence.rs"]
+mod claim_fence;
+
 struct Scratch(PathBuf);
 
 #[test]
@@ -1450,6 +1453,8 @@ fn launch_rotation_after_resolution_cannot_add_old_execution_facts() {
     );
     let path = setup.binding_dir("codex", "old").join("lifecycle.json");
     let before = fs::read(&path).unwrap();
+    let activity = setup.binding_dir("codex", "old").join("activity.json");
+    let activity_before = fs::read(&activity).unwrap();
     let clock = PausingClock {
         entered: std::sync::Barrier::new(2),
         released: std::sync::Barrier::new(2),
@@ -1495,10 +1500,15 @@ fn launch_rotation_after_resolution_cannot_add_old_execution_facts() {
         clock.released.wait();
         claimed.unwrap();
         let result = pending.join().unwrap();
-        assert_eq!(result.disposition, "partial");
+        assert_eq!(result.disposition, "ignored");
         assert_eq!(result.diagnostic.unwrap().code, "claim_stale");
     });
     assert_eq!(fs::read(path).unwrap(), before);
+    assert_eq!(
+        fs::read(activity).unwrap(),
+        activity_before,
+        "a refused event writes nothing into the launch it was resolved against"
+    );
 }
 
 fn run_hook(setup: &Setup, arguments: &[&str], payload: &Value) -> std::process::Output {

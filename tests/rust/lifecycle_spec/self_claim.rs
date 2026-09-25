@@ -3,22 +3,26 @@ use super::*;
 use wezterm_attention::lifecycle::apply_provider_event_with_outcome;
 use wezterm_attention::lifecycle::outcome::Persistence;
 
-const AGENT_LAUNCH: &str = "00000000-0000-4000-8000-0000000005a1";
+pub(super) const AGENT_LAUNCH: &str = "00000000-0000-4000-8000-0000000005a1";
 
-fn claim_path(setup: &Setup) -> PathBuf {
+/// What one case changes about the fake machine before the event runs.
+type Arrangement = Box<dyn Fn(&Setup)>;
+type EnvArrangement = Box<dyn Fn(&Setup, &mut BTreeMap<String, String>)>;
+
+pub(super) fn claim_path(setup: &Setup) -> PathBuf {
     let root = state_root(&setup.env).expect("state root");
     let (address, _) = pane_address(&setup.env).expect("address");
     pane_path(&root, &address).join("claim.json")
 }
 
-fn stored_claim(setup: &Setup) -> Option<Value> {
+pub(super) fn stored_claim(setup: &Setup) -> Option<Value> {
     fs::read(claim_path(setup))
         .ok()
         .map(|bytes| serde_json::from_slice(&bytes).expect("claim JSON"))
 }
 
 /// A claim the agent process `owner` holds at the pane's terminal.
-fn self_owned_claim(setup: &Setup, launch_id: &str, owner: i32) -> Value {
+pub(super) fn self_owned_claim(setup: &Setup, launch_id: &str, owner: i32) -> Value {
     let (address, _) = pane_address(&setup.env).expect("address");
     let start = setup.processes.facts(owner).start;
     json!({
@@ -36,11 +40,11 @@ fn self_owned_claim(setup: &Setup, launch_id: &str, owner: i32) -> Value {
     })
 }
 
-fn install(setup: &Setup, claim: &Value) {
+pub(super) fn install(setup: &Setup, claim: &Value) {
     atomic_replace(&claim_path(setup), claim).expect("write claim");
 }
 
-fn launch_dir(setup: &Setup, launch_id: &str) -> PathBuf {
+pub(super) fn launch_dir(setup: &Setup, launch_id: &str) -> PathBuf {
     let root = state_root(&setup.env).expect("state root");
     let (address, _) = pane_address(&setup.env).expect("address");
     launch_path(&root, &address, launch_id)
@@ -48,8 +52,8 @@ fn launch_dir(setup: &Setup, launch_id: &str) -> PathBuf {
 
 /// Every record file under the state root and its bytes, lock files aside,
 /// so a refusal can be shown to have written nothing.
-fn records(setup: &Setup) -> BTreeMap<PathBuf, Vec<u8>> {
-    fn walk(directory: &std::path::Path, found: &mut BTreeMap<PathBuf, Vec<u8>>) {
+pub(super) fn records(setup: &Setup) -> BTreeMap<PathBuf, String> {
+    fn walk(directory: &std::path::Path, found: &mut BTreeMap<PathBuf, String>) {
         let Ok(entries) = fs::read_dir(directory) else {
             return;
         };
@@ -61,7 +65,10 @@ fn records(setup: &Setup) -> BTreeMap<PathBuf, Vec<u8>> {
                 .extension()
                 .is_some_and(|extension| extension == "json")
             {
-                found.insert(path.clone(), fs::read(&path).expect("record bytes"));
+                found.insert(
+                    path.clone(),
+                    fs::read_to_string(&path).expect("record text"),
+                );
             }
         }
     }
@@ -72,7 +79,7 @@ fn records(setup: &Setup) -> BTreeMap<PathBuf, Vec<u8>> {
 
 /// One event for every action a provider event can take, in one session per
 /// provider.
-fn every_action() -> Vec<ProviderEvent> {
+pub(super) fn every_action() -> Vec<ProviderEvent> {
     let events = vec![
         event("codex", "SessionStart", "s", json!({"source":"startup"})),
         event(
@@ -275,7 +282,7 @@ fn switched_off_or_unsupported_self_claim_never_takes_a_weaker_path() {
 
 #[test]
 fn a_hook_whose_origin_is_not_proven_changes_nothing() {
-    let cases: Vec<(&str, Box<dyn Fn(&Setup, &mut BTreeMap<String, String>)>)> = vec![
+    let cases: Vec<(&str, EnvArrangement)> = vec![
         (
             "missing assertion, as a relay that drops it leaves",
             Box::new(|_, env| {
@@ -411,7 +418,8 @@ fn a_hook_whose_origin_is_not_proven_changes_nothing() {
                         return None;
                     }
                     let read = reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                    (read % 2 == 0).then(|| ProcessRead::Found(changed.clone()))
+                    read.is_multiple_of(2)
+                        .then(|| ProcessRead::Found(changed.clone()))
                 }));
             }),
         ),
@@ -426,7 +434,8 @@ fn a_hook_whose_origin_is_not_proven_changes_nothing() {
                         return None;
                     }
                     let read = reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                    (read % 2 == 0).then(|| ProcessRead::Found(orphaned.clone()))
+                    read.is_multiple_of(2)
+                        .then(|| ProcessRead::Found(orphaned.clone()))
                 }));
             }),
         ),
@@ -512,7 +521,7 @@ fn only_a_known_absent_terminal_lets_the_parent_s_terminal_decide() {
     let setup = Setup::new();
     install(&setup, &self_owned_claim(&setup, AGENT_LAUNCH, AGENT_PID));
     let tool = event("codex", "PreToolUse", "s", json!({"tool_name":"shell"}));
-    let cases: Vec<(&str, &str, Box<dyn Fn(&Setup)>)> = vec![
+    let cases: Vec<(&str, &str, Arrangement)> = vec![
         (
             "a hook whose terminal cannot be read",
             "probe_unavailable",
@@ -646,7 +655,7 @@ fn a_socket_replaced_while_the_agent_is_checked_proves_nothing() {
     assert_eq!(records(&setup), before);
 }
 
-fn start(provider: &str, session: &str) -> ProviderEvent {
+pub(super) fn start(provider: &str, session: &str) -> ProviderEvent {
     match provider {
         "pi" => event(
             "pi",
@@ -663,7 +672,7 @@ fn start(provider: &str, session: &str) -> ProviderEvent {
     }
 }
 
-fn apply_as(
+pub(super) fn apply_as(
     setup: &Setup,
     env: &BTreeMap<String, String>,
     event: &ProviderEvent,
@@ -672,7 +681,7 @@ fn apply_as(
     apply_provider_event(event, env, observation, &setup.ports()).expect("event applies")
 }
 
-fn launch_of(claim: &Value) -> String {
+pub(super) fn launch_of(claim: &Value) -> String {
     claim["launch_id"]
         .as_str()
         .expect("claim launch")
@@ -856,7 +865,7 @@ fn sequential_agents_in_one_pane_get_distinct_launch_ids() {
 
 #[test]
 fn a_successor_binds_after_its_predecessor_is_proven_gone() {
-    let cases: Vec<(&str, Box<dyn Fn(&Setup)>)> = vec![
+    let cases: Vec<(&str, Arrangement)> = vec![
         (
             "killed without a session end",
             Box::new(|setup| setup.processes.set(AGENT_PID, ProcessRead::Gone)),
@@ -912,7 +921,7 @@ fn a_successor_binds_after_its_predecessor_is_proven_gone() {
 
 #[test]
 fn a_running_or_unreadable_owner_keeps_the_pane() {
-    let cases: Vec<(&str, &str, Box<dyn Fn(&Setup)>)> = vec![
+    let cases: Vec<(&str, &str, Arrangement)> = vec![
         ("still running", "claim_stale", Box::new(|_| {})),
         (
             "exited and not yet reaped",
@@ -1004,5 +1013,5 @@ fn two_racing_first_hooks_of_one_agent_end_with_one_claim_both_resolve_to() {
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(launches, [launch.clone()], "both resolved to the one claim");
+    assert_eq!(launches, [launch], "both resolved to the one claim");
 }

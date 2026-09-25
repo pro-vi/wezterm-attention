@@ -1786,3 +1786,209 @@ fn a_claim_names_its_owner_with_all_owner_fields_or_none() {
         RecordRead::Invalid(_)
     ));
 }
+
+/// A terminal whose first write waits until the test lets it land. Every
+/// write, held or not, is recorded in the order it lands.
+struct HeldTty {
+    inner: FakeTty,
+    held: std::sync::atomic::AtomicBool,
+    entered: Mutex<std::sync::mpsc::Sender<()>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl TtyWriter for HeldTty {
+    fn current_path(&self) -> wezterm_attention::protocol::Result<String> {
+        self.inner.current_path()
+    }
+
+    fn fingerprint(&self, path: &str) -> wezterm_attention::protocol::Result<String> {
+        self.inner.fingerprint(path)
+    }
+
+    fn write(
+        &self,
+        path: &str,
+        data: &[u8],
+        expected_fingerprint: &str,
+    ) -> wezterm_attention::protocol::Result<()> {
+        if self.held.swap(false, Ordering::SeqCst) {
+            self.entered.lock().unwrap().send(()).unwrap();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the test releases the held write");
+        }
+        self.inner.write(path, data, expected_fingerprint)
+    }
+}
+
+const NEWER_LAUNCH: &str = "00000000-0000-4000-8000-0000000009b2";
+
+/// Hold `publish`'s terminal write, and while it is held let a shell claim
+/// the pane with `NEWER_LAUNCH`. Returns whether that claim had to wait for
+/// the held write, and the terminal's writes in the order they landed.
+fn claim_during_publication(
+    environment: &BTreeMap<String, String>,
+    publish: impl FnOnce(&RuntimePorts<'_>) + Send,
+) -> (bool, Vec<Vec<u8>>) {
+    let (entered_tx, entered) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    let tty = HeldTty {
+        inner: FakeTty::new(),
+        held: std::sync::atomic::AtomicBool::new(true),
+        entered: Mutex::new(entered_tx),
+        release: Mutex::new(release_rx),
+    };
+    let panes = this_pane();
+    let older = FixedClock("00000000000000000100");
+    let newer = FixedClock("00000000000000000200");
+    let mut newer_env = environment.clone();
+    newer_env.insert("WEZTERM_ATTENTION_LAUNCH_ID".into(), NEWER_LAUNCH.into());
+    let claimed = std::sync::atomic::AtomicBool::new(false);
+    let waited = thread::scope(|scope| {
+        let publisher = scope.spawn(|| publish(&ports(&older, &tty, &panes)));
+        entered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the publication reached the terminal");
+        let competitor = scope.spawn(|| {
+            let result = wezterm_attention::claim_launch(&newer_env, &ports(&newer, &tty, &panes));
+            claimed.store(true, Ordering::SeqCst);
+            result
+        });
+        thread::sleep(Duration::from_millis(300));
+        let waited = !claimed.load(Ordering::SeqCst);
+        release.send(()).unwrap();
+        publisher.join().unwrap();
+        competitor.join().unwrap().expect("the newer claim");
+        waited
+    });
+    let writes = tty
+        .inner
+        .writes
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .map(|(_, data, _)| data)
+        .collect();
+    (waited, writes)
+}
+
+/// The launch the terminal holds after `writes`: the last one any write
+/// carried. A write that names only the pane leaves it as it was.
+fn terminal_launch(environment: &BTreeMap<String, String>, writes: &[Vec<u8>]) -> Option<String> {
+    let (address, _) = pane_address(environment).expect("address");
+    writes.iter().rev().find_map(|write| {
+        ["00000000-0000-4000-8000-000000000101", NEWER_LAUNCH]
+            .into_iter()
+            .find(|launch| {
+                *write == publication_bytes(&address, Some(launch)).expect("publication")
+            })
+            .map(str::to_owned)
+    })
+}
+
+#[test]
+fn every_publisher_holds_the_claim_until_its_terminal_write_lands() {
+    type Publisher = Box<dyn FnOnce(&BTreeMap<String, String>, &RuntimePorts<'_>) + Send>;
+    let cases: Vec<(&str, bool, Publisher)> = vec![
+        (
+            "a claim's own publication",
+            false,
+            Box::new(|environment, ports| {
+                wezterm_attention::claim_launch(environment, ports).expect("older claim");
+            }),
+        ),
+        (
+            "the prompt's publication",
+            true,
+            Box::new(|environment, ports| {
+                wezterm_attention::publish_current(environment, ports).expect("publication");
+            }),
+        ),
+        (
+            "a reattached mux's publication",
+            true,
+            Box::new(|environment, ports| {
+                let report = wezterm_attention::publish_realm(
+                    &environment["WEZTERM_UNIX_SOCKET"],
+                    environment,
+                    ports,
+                )
+                .expect("publication");
+                assert_eq!(report.published, 1, "{report:?}");
+            }),
+        ),
+    ];
+    for (label, claim_first, publish) in cases {
+        let (_scratch, _listener, environment) = setup();
+        if claim_first {
+            let tty = FakeTty::new();
+            wezterm_attention::claim_launch(
+                &environment,
+                &ports(&FixedClock("00000000000000000050"), &tty, &this_pane()),
+            )
+            .expect("older claim");
+        }
+        let (waited, writes) =
+            claim_during_publication(&environment, |ports| publish(&environment, ports));
+        assert!(
+            waited,
+            "{label}: the claim changed during the terminal write"
+        );
+        assert_eq!(
+            terminal_launch(&environment, &writes).as_deref(),
+            Some(NEWER_LAUNCH),
+            "{label}: an older launch was published after the newer claim"
+        );
+    }
+}
+
+#[test]
+fn a_publication_that_found_no_claim_never_outlasts_a_new_one() {
+    // The pane has state but no claim: the publication holds the claim lock,
+    // so the claim waits and is published after it.
+    let (_scratch, _listener, environment) = setup();
+    let (address, _) = pane_address(&environment).expect("address");
+    let pane = pane_path(&state_root(&environment).expect("state root"), &address);
+    fs::create_dir_all(&pane).expect("pane state");
+    let (waited, writes) = claim_during_publication(&environment, |ports| {
+        let report = wezterm_attention::publish_current(&environment, ports).expect("publication");
+        assert_eq!(report.v2_published, 0);
+    });
+    assert!(waited, "the claim changed during the terminal write");
+    assert_eq!(
+        writes.last(),
+        Some(&publication_bytes(&address, Some(NEWER_LAUNCH)).unwrap())
+    );
+
+    // The pane has no state at all: there is no lock to take and none is
+    // made, and a publication naming only the pane, landing whenever it does,
+    // leaves the terminal on the newer claim's launch.
+    let (_scratch, _listener, environment) = setup();
+    let (address, _) = pane_address(&environment).expect("address");
+    let (_, writes) = claim_during_publication(&environment, |ports| {
+        wezterm_attention::publish_current(&environment, ports).expect("publication");
+    });
+    assert_eq!(
+        writes.last(),
+        Some(&publication_bytes(&address, None).unwrap()),
+        "the publication that found no claim landed last"
+    );
+    assert_eq!(
+        terminal_launch(&environment, &writes).as_deref(),
+        Some(NEWER_LAUNCH)
+    );
+    let (_scratch, _listener, environment) = setup();
+    let tty = FakeTty::new();
+    wezterm_attention::publish_current(
+        &environment,
+        &ports(&FixedClock("00000000000000000100"), &tty, &this_pane()),
+    )
+    .expect("publication");
+    let (address, _) = pane_address(&environment).expect("address");
+    assert!(
+        !pane_path(&state_root(&environment).expect("state root"), &address).exists(),
+        "publishing to an unclaimed pane leaves no state behind"
+    );
+}
