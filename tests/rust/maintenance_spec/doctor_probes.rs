@@ -2,7 +2,7 @@
 
 use super::*;
 use std::sync::atomic::AtomicUsize;
-use wezterm_attention::wezterm::{PaneProcessSet, ProcessListing};
+use wezterm_attention::wezterm::{PaneProcessSet, ProcessInspector, ProcessListing, ProcessRead};
 
 /// Offers one listing of every process, and counts how it is asked. Like the
 /// system probe, it answers whether it is available by taking a listing.
@@ -68,6 +68,7 @@ fn doctor_takes_one_process_listing_however_many_claims() {
         &setup.env,
         Some(&setup.panes),
         Some(&probe),
+        &wezterm_attention::wezterm::SystemProcessInspector,
     )
     .expect("doctor");
     assert_eq!(probe.single_looks.load(Ordering::SeqCst), 0);
@@ -95,6 +96,7 @@ fn doctor_on_an_empty_setup_says_what_it_could_not_observe() {
         &BTreeMap::new(),
         Some(&setup.panes),
         Some(&setup.processes),
+        &wezterm_attention::wezterm::SystemProcessInspector,
     )
     .expect("doctor");
     for name in [
@@ -121,32 +123,90 @@ fn doctor_on_an_empty_setup_says_what_it_could_not_observe() {
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
 
+/// A platform that does or does not let an agent claim its own pane. Doctor
+/// asks it nothing else.
+struct SelfClaimPlatform(bool);
+
+impl ProcessInspector for SelfClaimPlatform {
+    fn self_claim_supported(&self) -> bool {
+        self.0
+    }
+
+    fn own_pid(&self) -> i32 {
+        0
+    }
+
+    fn process(&self, _pid: i32) -> ProcessRead {
+        ProcessRead::Unknown
+    }
+
+    fn boot_session(&self) -> Option<String> {
+        None
+    }
+
+    fn terminal_device(&self, _path: &str) -> Option<u64> {
+        None
+    }
+}
+
 /// Run inside a pane whose server identity nothing has published, doctor
-/// says so: that is the setup where hooks run and nothing ever shows.
+/// says so where only a claiming shell could publish it: that is the setup
+/// where hooks run and nothing ever shows. Where an agent can claim its own
+/// pane, nothing publishes the identity before the first agent starts, and
+/// the agent's hook publishes it, so there is nothing yet to check.
 #[test]
-fn doctor_in_a_pane_nothing_has_published_reports_it() {
+fn doctor_in_a_pane_nothing_has_published_reports_it_where_no_agent_can_claim() {
     let setup = Setup::new();
-    let (result, diagnostics) = wezterm_attention::maintenance::doctor_with_environment(
-        &setup.root(),
-        &setup.env,
-        Some(&setup.panes),
-        Some(&setup.processes),
-    )
-    .expect("doctor");
-    assert_eq!(probe_status(&result, "environment"), "finding", "{result}");
+    let doctor = |env: &BTreeMap<String, String>, supported: bool| {
+        wezterm_attention::maintenance::doctor_with_environment(
+            &setup.root(),
+            env,
+            Some(&setup.panes),
+            Some(&setup.processes),
+            &SelfClaimPlatform(supported),
+        )
+        .expect("doctor")
+    };
+    let mut switched_off = setup.env.clone();
+    switched_off.insert(
+        "WEZTERM_ATTENTION_ENABLE_SELF_CLAIM".to_owned(),
+        "0".to_owned(),
+    );
+    for (label, env, supported) in [
+        ("switched off", &switched_off, true),
+        ("unsupported", &setup.env, false),
+    ] {
+        let (result, diagnostics) = doctor(env, supported);
+        assert_eq!(
+            probe_status(&result, "environment"),
+            "finding",
+            "{label}: {result}"
+        );
+        assert!(
+            diagnostics.iter().any(|d| d.code == "identity_unpublished"),
+            "{label}: {diagnostics:?}"
+        );
+    }
+
+    let (result, diagnostics) = doctor(&setup.env, true);
+    assert_eq!(
+        probe_status(&result, "environment"),
+        "unobserved",
+        "{result}"
+    );
     assert!(
-        diagnostics.iter().any(|d| d.code == "identity_unpublished"),
+        !diagnostics.iter().any(|d| d.code == "identity_unpublished"),
         "{diagnostics:?}"
     );
 
     setup.claim_and_bind();
-    let (result, diagnostics) = wezterm_attention::maintenance::doctor_with_environment(
-        &setup.root(),
-        &setup.env,
-        Some(&setup.panes),
-        Some(&setup.processes),
-    )
-    .expect("doctor");
-    assert_eq!(probe_status(&result, "environment"), "healthy", "{result}");
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    for (env, supported) in [
+        (&setup.env, true),
+        (&switched_off, true),
+        (&setup.env, false),
+    ] {
+        let (result, diagnostics) = doctor(env, supported);
+        assert_eq!(probe_status(&result, "environment"), "healthy", "{result}");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
 }

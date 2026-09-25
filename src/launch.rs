@@ -959,22 +959,15 @@ fn claim_for_host(
     Ok((selected, published))
 }
 
-/// Resolve an agent event that carries no launch id against a claim its own
-/// agent process holds.
-///
+/// Why an agent cannot claim its own pane in `env`, or `None` when it can.
 /// Self-claim is on unless `WEZTERM_ATTENTION_ENABLE_SELF_CLAIM` says
-/// otherwise, and only where the platform supports it. A pane holding a
-/// shell claim refuses every such event: that claim belongs to the commands
-/// its shell starts, which carry its launch id.
-pub(crate) fn self_owned_launch(
+/// otherwise, and only where the platform supports it.
+pub(crate) fn self_claim_refusal(
     env: &BTreeMap<String, String>,
-    ports: &RuntimePorts<'_>,
-    address: &PaneAddress,
-    claim: Option<Value>,
-    starts_session: bool,
-) -> Result<SelfOwnedLaunch> {
-    if !ports.processes.self_claim_supported() {
-        return Err(AttentionError::new(
+    processes: &dyn ProcessInspector,
+) -> Option<AttentionError> {
+    if !processes.self_claim_supported() {
+        return Some(AttentionError::new(
             "claim_stale",
             "an agent cannot claim its own pane on this platform; start it from a claiming shell",
         ));
@@ -983,13 +976,29 @@ pub(crate) fn self_owned_launch(
         .get("WEZTERM_ATTENTION_ENABLE_SELF_CLAIM")
         .map(String::as_str)
     {
-        None | Some("1") => {}
-        Some(_) => {
-            return Err(AttentionError::new(
-                "claim_stale",
-                "an agent claiming its own pane is switched off by WEZTERM_ATTENTION_ENABLE_SELF_CLAIM",
-            ));
-        }
+        None | Some("1") => None,
+        Some(_) => Some(AttentionError::new(
+            "claim_stale",
+            "an agent claiming its own pane is switched off by WEZTERM_ATTENTION_ENABLE_SELF_CLAIM",
+        )),
+    }
+}
+
+/// Resolve an agent event that carries no launch id against a claim its own
+/// agent process holds.
+///
+/// Only where [`self_claim_refusal`] allows it. A pane holding a shell claim
+/// refuses every such event: that claim belongs to the commands its shell
+/// starts, which carry its launch id.
+pub(crate) fn self_owned_launch(
+    env: &BTreeMap<String, String>,
+    ports: &RuntimePorts<'_>,
+    address: &PaneAddress,
+    claim: Option<Value>,
+    starts_session: bool,
+) -> Result<SelfOwnedLaunch> {
+    if let Some(refusal) = self_claim_refusal(env, ports.processes) {
+        return Err(refusal);
     }
     asserted_host(env)?;
     match &claim {

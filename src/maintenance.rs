@@ -24,7 +24,7 @@ use crate::records::{
     read_record, realm_path, removal_confined, remove_file_durable, session_index_marker,
     session_index_path, with_lock,
 };
-use crate::wezterm::{Clock, PaneLister, Presence, ProcessProbe};
+use crate::wezterm::{Clock, PaneLister, Presence, ProcessInspector, ProcessProbe};
 
 pub const ABSENCE_INTERVAL_NS: u128 = 60_000_000_000;
 pub const RETENTION_AGE_NS: u128 = 30 * 24 * 60 * 60 * 1_000_000_000;
@@ -328,6 +328,7 @@ pub fn doctor_with_environment(
     environment: &BTreeMap<String, String>,
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
+    inspector: &dyn ProcessInspector,
 ) -> Result<(Value, Vec<Diagnostic>)> {
     let probed_once = processes.map(ProbeOncePerAssembly::new);
     let processes = probed_once.as_ref().map(|probe| probe as &dyn ProcessProbe);
@@ -466,7 +467,7 @@ pub fn doctor_with_environment(
         "healthy"
     };
     probes.push(json!({"name":"socket","status":socket_status}));
-    let environment_status = environment_probe(root, environment, &mut diagnostics);
+    let environment_status = environment_probe(root, environment, inspector, &mut diagnostics);
     probes.push(json!({"name":"environment","status":environment_status}));
     diagnostics.extend(state_diagnostics);
     let diagnostics = fold_kept_history(diagnostics);
@@ -497,10 +498,13 @@ pub fn doctor_with_environment(
 /// Whether the pane doctor runs in has a server identity anything can find.
 /// Outside a pane there is nothing to check. Inside one, the socket must read
 /// as a mux socket and its realm and incarnation must be published, or hooks
-/// run and nothing they write is ever shown.
+/// run and nothing they write is ever shown. Where an agent can claim its own
+/// pane, its hook publishes them at its first session start, so until then
+/// there is nothing to check.
 fn environment_probe(
     root: &Path,
     environment: &BTreeMap<String, String>,
+    inspector: &dyn ProcessInspector,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> &'static str {
     let (Some(socket), Some(_)) = (
@@ -530,6 +534,8 @@ fn environment_probe(
         .is_ok_and(|record| record.is_some());
     if published {
         "healthy"
+    } else if crate::launch::self_claim_refusal(environment, inspector).is_none() {
+        "unobserved"
     } else {
         diagnostics.push(diagnostic(
             "identity_unpublished",

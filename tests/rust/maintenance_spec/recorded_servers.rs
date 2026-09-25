@@ -316,6 +316,7 @@ fn an_exited_guis_stale_socket_file_is_reclaimed() {
         &BTreeMap::new(),
         Some(&UnansweredPanes),
         Some(&setup.processes),
+        &wezterm_attention::wezterm::SystemProcessInspector,
     )
     .expect("doctor");
     assert!(

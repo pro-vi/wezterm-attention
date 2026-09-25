@@ -1095,6 +1095,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 &environment,
                 Some(&panes),
                 Some(&processes),
+                &inspector,
             )
             .map_err(|error| (Box::new(error), args.json, "doctor".to_owned()))?;
             // A probe that did not answer, or a mux that did not list its

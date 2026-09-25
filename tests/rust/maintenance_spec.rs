@@ -296,6 +296,7 @@ impl Setup {
             &self.env,
             Some(&self.panes),
             Some(&self.processes),
+            &wezterm_attention::wezterm::SystemProcessInspector,
         )
         .expect("doctor")
     }
