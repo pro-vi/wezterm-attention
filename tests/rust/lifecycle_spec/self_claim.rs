@@ -756,6 +756,13 @@ fn an_agent_s_first_session_start_claims_the_pane_for_its_own_process() {
 #[test]
 fn only_a_session_start_claims_a_pane() {
     let setup = Setup::new();
+    // With no claim to prove it against, an event that cannot claim is
+    // refused before the mux is asked.
+    let listings = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = listings.clone();
+    *setup.panes.on_list.lock().unwrap() = Some(std::sync::Arc::new(move || {
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }));
     for event in every_action() {
         if event.action == ProviderAction::Binding {
             continue;
@@ -764,6 +771,7 @@ fn only_a_session_start_claims_a_pane() {
         assert_eq!(diagnostic.code, "claim_stale", "{}", event.source_event);
     }
     assert!(stored_claim(&setup).is_none());
+    assert_eq!(listings.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 #[test]

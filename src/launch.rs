@@ -980,13 +980,22 @@ pub(crate) fn self_owned_launch(
         }
     }
     asserted_host(env)?;
-    if let Some(claim) = &claim
-        && ClaimMode::of(claim)? == ClaimMode::Shell
-    {
-        return Err(AttentionError::new(
-            "claim_stale",
-            "the pane holds a shell claim, which an agent without its launch id cannot use",
-        ));
+    match &claim {
+        Some(claim) if ClaimMode::of(claim)? == ClaimMode::Shell => {
+            return Err(AttentionError::new(
+                "claim_stale",
+                "the pane holds a shell claim, which an agent without its launch id cannot use",
+            ));
+        }
+        // Nothing but a session start can make a claim, so there is nothing
+        // to prove this against, and no reason to ask the mux.
+        None if !starts_session => {
+            return Err(AttentionError::new(
+                "claim_stale",
+                "provider event has no matching pane claim",
+            ));
+        }
+        _ => {}
     }
     let proof = HostProof::establish(env, ports, address)?;
     if starts_session {
