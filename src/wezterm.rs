@@ -410,6 +410,13 @@ fn read_process(pid: i32) -> ProcessRead {
     if pid <= 0 {
         return ProcessRead::Unknown;
     }
+    with_kinfo_proc(pid, |bytes| parse_kinfo_proc(bytes, pid)).unwrap_or(ProcessRead::Unknown)
+}
+
+/// Hand `read` the bytes `sysctl` returns as `pid`'s `kinfo_proc`, or give
+/// `None` when the call fails.
+#[cfg(target_os = "macos")]
+fn with_kinfo_proc<T>(pid: i32, read: impl FnOnce(&[u8]) -> T) -> Option<T> {
     // Aligned for the record's eight-byte fields; one spare word shows a
     // record larger than the one this code reads.
     let mut buffer = [0_u64; kinfo::SIZE / 8 + 1];
@@ -426,7 +433,7 @@ fn read_process(pid: i32) -> ProcessRead {
         )
     } != 0
     {
-        return ProcessRead::Unknown;
+        return None;
     }
     let bytes = unsafe {
         std::slice::from_raw_parts(
@@ -434,7 +441,7 @@ fn read_process(pid: i32) -> ProcessRead {
             size.min(std::mem::size_of_val(&buffer)),
         )
     };
-    parse_kinfo_proc(bytes, pid)
+    Some(read(bytes))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1826,14 +1833,20 @@ mod tests {
         }
     }
 
+    /// Compare what the `kinfo_proc` reader says about `pid` with what
+    /// `proc_pidinfo` says, field by field, and return the reader's facts.
     #[cfg(target_os = "macos")]
-    #[test]
-    fn the_kernel_record_agrees_with_proc_pidinfo_for_this_process() {
+    fn agrees_with_proc_pidinfo(pid: i32) -> super::ProcessFacts {
         use super::{ControllingTerminal, ProcessInspector, ProcessRead, SystemProcessInspector};
-        let inspector = SystemProcessInspector;
-        let pid = inspector.own_pid();
-        let ProcessRead::Found(facts) = inspector.process(pid) else {
-            panic!("this process reads");
+        // From <sys/proc_info.h> and <sys/proc.h>; the libc crate does not
+        // carry them. Every process on a 64-bit Mac has the LP64 bit, so a
+        // flag word read at the wrong offset shows there.
+        const PROC_FLAG_TRACED: u32 = 0x2;
+        const PROC_FLAG_LP64: u32 = 0x10;
+        const PROC_FLAG_CONTROLT: u32 = 0x80;
+        const P_LP64: i32 = 0x4;
+        let ProcessRead::Found(facts) = SystemProcessInspector.process(pid) else {
+            panic!("pid {pid} reads");
         };
         let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
         let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
@@ -1847,25 +1860,143 @@ mod tests {
             )
         };
         assert_eq!(filled, size);
+        let flag = super::with_kinfo_proc(pid, |bytes| {
+            i32::from_ne_bytes(
+                bytes[super::kinfo::FLAG..super::kinfo::FLAG + 4]
+                    .try_into()
+                    .expect("four bytes"),
+            )
+        })
+        .expect("the record reads");
+        for (bit, pbi_bit) in [
+            (P_LP64, PROC_FLAG_LP64),
+            (super::kinfo::CONTROLLING_TERMINAL, PROC_FLAG_CONTROLT),
+            (super::kinfo::TRACED, PROC_FLAG_TRACED),
+        ] {
+            assert_eq!(
+                flag & bit != 0,
+                info.pbi_flags & pbi_bit != 0,
+                "pid {pid}: bit {bit:#x} of {flag:#x} against {pbi_bit:#x} of {:#x}",
+                info.pbi_flags
+            );
+        }
         assert_eq!(facts.pid, pid);
         assert_eq!(facts.parent_pid as u32, info.pbi_ppid);
-        assert_eq!(facts.parent_pid, unsafe { libc::getppid() });
         assert_eq!(facts.process_group as u32, info.pbi_pgid);
         assert_eq!(facts.uid, info.pbi_uid);
-        assert_eq!(facts.uid, unsafe { libc::geteuid() });
         assert_eq!(facts.start.seconds, info.pbi_start_tvsec);
         assert_eq!(u64::from(facts.start.microseconds), info.pbi_start_tvusec);
+        assert_eq!(
+            facts.traced,
+            info.pbi_flags & PROC_FLAG_TRACED != 0,
+            "pid {pid}: flags {:#x}",
+            info.pbi_flags
+        );
+        let controlling = info.pbi_flags & PROC_FLAG_CONTROLT != 0;
         match facts.terminal {
             ControllingTerminal::Device(device) => {
+                assert!(controlling, "pid {pid}: flags {:#x}", info.pbi_flags);
                 assert_eq!(device, u64::from(info.e_tdev));
                 assert_eq!(facts.terminal_foreground_group as u32, info.e_tpgid);
             }
-            ControllingTerminal::Absent => assert_eq!(info.e_tdev, u32::MAX),
-            ControllingTerminal::Unknown => panic!("this process's terminal is known"),
+            ControllingTerminal::Absent => {
+                assert!(!controlling, "pid {pid}: flags {:#x}", info.pbi_flags);
+                assert_eq!(info.e_tdev, u32::MAX);
+            }
+            ControllingTerminal::Unknown => panic!("pid {pid}: its terminal is known"),
         }
         assert!(!facts.zombie);
+        facts
+    }
+
+    /// Start `/bin/sleep` in a session of its own, with `terminal` as its
+    /// standard input and, when given, its controlling terminal, and wait
+    /// until the kernel shows it there.
+    #[cfg(target_os = "macos")]
+    fn sleeper_in_its_own_session(terminal: Option<i32>) -> std::process::Child {
+        use super::{ControllingTerminal, ProcessInspector, ProcessRead, SystemProcessInspector};
+        use std::os::fd::FromRawFd;
+        use std::os::unix::process::CommandExt;
+        // `_IO('t', 97)` from <sys/ttycom.h>; the libc crate does not carry it
+        // for Apple targets.
+        const TIOCSCTTY: libc::c_ulong = 0x2000_7461;
+        let mut command = std::process::Command::new("/bin/sleep");
+        command.arg("30");
+        if let Some(fd) = terminal {
+            let stdin = unsafe { std::fs::File::from_raw_fd(libc::dup(fd)) };
+            command.stdin(std::process::Stdio::from(stdin));
+        } else {
+            command.stdin(std::process::Stdio::null());
+        }
+        let controlling = terminal.is_some();
+        unsafe {
+            command.pre_exec(move || {
+                if libc::setsid() < 0 || (controlling && libc::ioctl(0, TIOCSCTTY, 0) < 0) {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().expect("start the sleeper");
+        let pid = i32::try_from(child.id()).expect("pid");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !matches!(
+            SystemProcessInspector.process(pid),
+            ProcessRead::Found(facts) if facts.process_group == pid
+                && (!controlling || matches!(facts.terminal, ControllingTerminal::Device(_)))
+        ) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the sleeper never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        child
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_kernel_record_agrees_with_proc_pidinfo() {
+        use super::{ControllingTerminal, ProcessInspector, SystemProcessInspector};
+        let inspector = SystemProcessInspector;
+        let own = agrees_with_proc_pidinfo(inspector.own_pid());
+        assert_eq!(own.parent_pid, unsafe { libc::getppid() });
+        assert_eq!(own.uid, unsafe { libc::geteuid() });
         assert!(inspector.boot_session().is_some());
         assert!(inspector.self_claim_supported());
+
+        let mut detached = sleeper_in_its_own_session(None);
+        let facts = agrees_with_proc_pidinfo(i32::try_from(detached.id()).expect("pid"));
+        assert_eq!(facts.terminal, ControllingTerminal::Absent);
+        detached.kill().expect("stop the detached sleeper");
+        detached.wait().expect("reap the detached sleeper");
+
+        let (mut master, mut slave) = (0, 0);
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let mut attached = sleeper_in_its_own_session(Some(slave));
+        let pid = i32::try_from(attached.id()).expect("pid");
+        let facts = agrees_with_proc_pidinfo(pid);
+        assert!(
+            matches!(facts.terminal, ControllingTerminal::Device(_)),
+            "{facts:?}"
+        );
+        assert_eq!(facts.terminal_foreground_group, pid);
+        attached.kill().expect("stop the attached sleeper");
+        attached.wait().expect("reap the attached sleeper");
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
+        }
     }
 
     #[cfg(target_os = "macos")]
