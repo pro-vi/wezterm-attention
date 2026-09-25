@@ -995,28 +995,6 @@ pub fn with_lock<T>(
     result
 }
 
-pub fn commit<T>(
-    root: &Path,
-    lock_path: &Path,
-    read_path: &Path,
-    expected_kind: Option<&str>,
-    expected_identity: &RecordIdentity,
-    timeout: Duration,
-    decide: impl FnOnce(Option<Value>) -> Result<CommitPlan<T>>,
-) -> Result<T> {
-    let (result, ()) = commit_with(
-        root,
-        lock_path,
-        read_path,
-        expected_kind,
-        expected_identity,
-        timeout,
-        decide,
-        |_| Ok(()),
-    )?;
-    Ok(result)
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn commit_with<T, P>(
     root: &Path,
