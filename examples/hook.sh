@@ -1,6 +1,9 @@
 #!/usr/bin/env sh
 # Without arguments, write a custom stop marker. With PROVIDER EVENT, forward
 # original hook stdin without constructing v2 JSON. Both need a launch claim.
+# For an agent that claims its own pane, register it as
+# `WEZTERM_ATTENTION_HOST_PID=$PPID exec sh hook.sh PROVIDER EVENT`, so the
+# writer this script execs stays the agent's direct child.
 # To opt into transient reply delivery, pass consumer flags after PROVIDER EVENT:
 # hook.sh claude Stop --consumer /absolute/reply-sink.mjs --include-reply --consumer-timeout-ms 1000
 # ATTENTION_REPLY_FILE selects the application-owned sink destination.

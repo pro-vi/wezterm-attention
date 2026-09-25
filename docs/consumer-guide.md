@@ -229,7 +229,7 @@ Repeat `--consumer` for multiple executables. Each gets the explicit positive, r
 
 `HookDelivery` contains `schema`, a fresh `delivery_id`, `scope`, `action`, `provider`, `provider_session_id`, `source_event`, `actor`, optional `correlation` and `observation_id`, `persistence`, `reply`, and `prompt`. Scope contains the admitted `address`, `launch_id`, and a binding `target` (`kind="binding"`, `binding_id`). `action` uses the existing provider-action vocabulary and distinguishes binding, activity, parent Stop, child presence, end, review, clear and observation-only operations. It is not a controller command or permission.
 
-Identity is captured inside the same native application path. Delivery requires inherited launch identity and a matching provider binding. Tty-only recovery does not qualify. The label remains that admitted source even if a newer occupant appears before a consumer acts. No executable runs inside an Attention writer lock.
+Identity is captured inside the same native application path. Delivery requires inherited launch identity and a matching provider binding. An event admitted through the agent's own pane claim does not qualify. The label remains that admitted source even if a newer occupant appears before a consumer acts. No executable runs inside an Attention writer lock.
 
 Persistence reports four independent fields:
 
