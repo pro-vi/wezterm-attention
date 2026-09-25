@@ -85,6 +85,96 @@ fn manifests(
     ))
 }
 
+/// What writing a pane's claim keeps in step with it: the realm and
+/// incarnation manifests, the session index of a store the claim starts, the
+/// pane's reviews directory, and no absence probe left from before.
+struct ClaimWrite {
+    root: std::path::PathBuf,
+    address: PaneAddress,
+    pane: std::path::PathBuf,
+    realm_record: Value,
+    incarnation_record: Value,
+    /// A store this claim starts holds no binding, so its session index is
+    /// complete from the first record, and every binding writer keeps it so.
+    new_store: bool,
+}
+
+impl ClaimWrite {
+    fn new(
+        root: &std::path::Path,
+        address: &PaneAddress,
+        metadata: &crate::identity::SocketMetadata,
+        new_store: bool,
+    ) -> Result<Self> {
+        let (realm_record, incarnation_record) = manifests(address, metadata)?;
+        Ok(Self {
+            root: root.to_path_buf(),
+            address: address.clone(),
+            pane: pane_path(root, address),
+            realm_record,
+            incarnation_record,
+            new_store,
+        })
+    }
+
+    fn claim_path(&self) -> std::path::PathBuf {
+        self.pane.join("claim.json")
+    }
+
+    fn lock_path(&self) -> std::path::PathBuf {
+        self.pane.join(".claim.lock")
+    }
+
+    /// Refuse a stored claim whose interior address is not this pane's.
+    fn check_address(&self, current: &Value) -> Result<()> {
+        if current.get("address")
+            != Some(&serde_json::to_value(&self.address).map_err(AttentionError::record_json)?)
+        {
+            return Err(AttentionError::new(
+                "record_invalid",
+                "claim interior address mismatches its path",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The plan that writes `claim`, or with `None` keeps the stored one, and
+    /// reports `result`.
+    fn plan<T>(&self, result: T, claim: Option<&Value>) -> Result<CommitPlan<T>> {
+        let mut replacements = match claim {
+            Some(claim) => vec![
+                Replacement::if_different(
+                    realm_path(&self.root, &self.address.realm_id).join("realm.json"),
+                    self.realm_record.clone(),
+                ),
+                Replacement::if_different(
+                    incarnation_path(
+                        &self.root,
+                        &self.address.realm_id,
+                        &self.address.incarnation_id,
+                    )
+                    .join("incarnation.json"),
+                    self.incarnation_record.clone(),
+                ),
+                Replacement::always(self.claim_path(), claim.clone()),
+            ],
+            None => Vec::new(),
+        };
+        if self.new_store {
+            replacements.push(Replacement::if_different(
+                session_index_path(&self.root),
+                session_index_marker()?,
+            ));
+        }
+        Ok(CommitPlan {
+            result,
+            replacements,
+            removals: vec![self.pane.join("absence-probe.json")],
+            private_dirs: vec![self.pane.join("reviews")],
+        })
+    }
+}
+
 /// Claim the pane for a launch from the shell running in it, at stdin's tty.
 ///
 /// The claiming terminal is checked against the pane before anything is
@@ -161,8 +251,6 @@ pub fn claim_launch_at_tty(
 ) -> Result<ApplyResult> {
     let root = state_root(env)?;
     mkdir_private(&root)?;
-    // A store this claim starts holds no binding, so its session index is
-    // complete from the first record, and every binding writer keeps it so.
     let new_store = !root.join("v2").exists();
     let (address, metadata) = pane_address(env)?;
     let launch_id = match env.get("WEZTERM_ATTENTION_LAUNCH_ID") {
@@ -171,18 +259,13 @@ pub fn claim_launch_at_tty(
     };
     let fingerprint = ports.tty.fingerprint(tty_path)?;
     let observation = ports.clock.monotonic_ns20()?;
-    let pane = pane_path(&root, &address);
-    let claim_path = pane.join("claim.json");
     let proposed = claim_record(&address, &launch_id, tty_path, &fingerprint, &observation);
-    let (realm_record, incarnation_record) = manifests(&address, &metadata)?;
-    let realm_path = realm_path(&root, &address.realm_id);
-    let incarnation_path = incarnation_path(&root, &address.realm_id, &address.incarnation_id);
-    let reviews_path = pane.join("reviews");
+    let write = ClaimWrite::new(&root, &address, &metadata, new_store)?;
 
     let (mut selected, published) = commit_with(
         &root,
-        &pane.join(".claim.lock"),
-        &claim_path,
+        &write.lock_path(),
+        &write.claim_path(),
         Some("claim"),
         &RecordIdentity::pane(&address),
         std::time::Duration::from_secs(2),
@@ -194,18 +277,9 @@ pub fn claim_launch_at_tty(
                     "mux socket changed before claim commit",
                 ));
             }
-            let (disposition, selected, replacements) = match existing {
+            let (disposition, selected, writes) = match existing {
                 Some(current) => {
-                    if current.get("address")
-                        != Some(
-                            &serde_json::to_value(&address).map_err(AttentionError::record_json)?,
-                        )
-                    {
-                        return Err(AttentionError::new(
-                            "record_invalid",
-                            "claim interior address mismatches its path",
-                        ));
-                    }
+                    write.check_address(&current)?;
                     let same_identity = [
                         "kind",
                         "schema",
@@ -217,7 +291,7 @@ pub fn claim_launch_at_tty(
                     .iter()
                     .all(|field| current.get(*field) == proposed.get(*field));
                     if same_identity {
-                        (Disposition::Confirmed, current, Vec::new())
+                        (Disposition::Confirmed, current, false)
                     } else {
                         let current_order = current
                             .get("observed_mono_ns")
@@ -226,43 +300,18 @@ pub fn claim_launch_at_tty(
                                 AttentionError::new("record_invalid", "claim order is invalid")
                             })?;
                         if observation.as_str() < current_order {
-                            (Disposition::Ignored, current, Vec::new())
+                            (Disposition::Ignored, current, false)
                         } else if observation == current_order {
                             return Err(AttentionError::new(
                                 "record_invalid",
                                 "equal claim order has different content",
                             ));
                         } else {
-                            (
-                                Disposition::Applied,
-                                proposed.clone(),
-                                vec![
-                                    Replacement::if_different(
-                                        realm_path.join("realm.json"),
-                                        realm_record.clone(),
-                                    ),
-                                    Replacement::if_different(
-                                        incarnation_path.join("incarnation.json"),
-                                        incarnation_record.clone(),
-                                    ),
-                                    Replacement::always(claim_path.clone(), proposed.clone()),
-                                ],
-                            )
+                            (Disposition::Applied, proposed.clone(), true)
                         }
                     }
                 }
-                None => (
-                    Disposition::Applied,
-                    proposed.clone(),
-                    vec![
-                        Replacement::if_different(realm_path.join("realm.json"), realm_record),
-                        Replacement::if_different(
-                            incarnation_path.join("incarnation.json"),
-                            incarnation_record,
-                        ),
-                        Replacement::always(claim_path.clone(), proposed),
-                    ],
-                ),
+                None => (Disposition::Applied, proposed.clone(), true),
             };
             // The shell exports the launch id this returns to every command it
             // starts, and an agent's own claim belongs to that agent's process
@@ -280,24 +329,15 @@ pub fn claim_launch_at_tty(
                     AttentionError::new("record_invalid", "selected claim has no launch id")
                 })?
                 .to_owned();
-            let mut replacements = replacements;
-            if new_store {
-                replacements.push(Replacement::if_different(
-                    session_index_path(&root),
-                    session_index_marker()?,
-                ));
-            }
-            Ok(CommitPlan {
-                result: ApplyResult {
+            write.plan(
+                ApplyResult {
                     disposition,
                     launch_id: selected_launch,
                     publication: "pending".to_owned(),
                     publication_diagnostic: None,
                 },
-                replacements,
-                removals: vec![pane.join("absence-probe.json")],
-                private_dirs: vec![reviews_path],
-            })
+                writes.then_some(&selected),
+            )
         },
         // Published before the claim lock is released, so no later claim can
         // be published first and then covered by this one. The claim is
@@ -906,14 +946,12 @@ fn claim_for_host(
     mkdir_private(&root)?;
     let new_store = !root.join("v2").exists();
     let (_, metadata) = pane_address(env)?;
-    let (realm_record, incarnation_record) = manifests(address, &metadata)?;
-    let pane = pane_path(&root, address);
-    let claim_path = pane.join("claim.json");
+    let write = ClaimWrite::new(&root, address, &metadata, new_store)?;
     let observation = ports.clock.monotonic_ns20()?;
     let (selected, published) = commit_with(
         &root,
-        &pane.join(".claim.lock"),
-        &claim_path,
+        &write.lock_path(),
+        &write.claim_path(),
         Some("claim"),
         &RecordIdentity::pane(address),
         std::time::Duration::from_secs(2),
@@ -926,14 +964,7 @@ fn claim_for_host(
                 private_dirs: Vec::new(),
             };
             if let Some(current) = &existing {
-                if current.get("address")
-                    != Some(&serde_json::to_value(address).map_err(AttentionError::record_json)?)
-                {
-                    return Err(AttentionError::new(
-                        "record_invalid",
-                        "claim interior address mismatches its path",
-                    ));
-                }
+                write.check_address(current)?;
                 match ClaimMode::of(current)? {
                     ClaimMode::Shell => return Err(shell_claim_refusal()),
                     ClaimMode::SelfOwned(owner) if owner == proof.owner => {
@@ -970,30 +1001,7 @@ fn claim_for_host(
             }
             let claim =
                 self_owned_claim_record(address, &Uuid::new_v4().to_string(), proof, &observation);
-            let mut replacements = vec![
-                Replacement::if_different(
-                    realm_path(&root, &address.realm_id).join("realm.json"),
-                    realm_record.clone(),
-                ),
-                Replacement::if_different(
-                    incarnation_path(&root, &address.realm_id, &address.incarnation_id)
-                        .join("incarnation.json"),
-                    incarnation_record.clone(),
-                ),
-                Replacement::always(claim_path.clone(), claim.clone()),
-            ];
-            if new_store {
-                replacements.push(Replacement::if_different(
-                    session_index_path(&root),
-                    session_index_marker()?,
-                ));
-            }
-            Ok(CommitPlan {
-                result: claim,
-                replacements,
-                removals: vec![pane.join("absence-probe.json")],
-                private_dirs: vec![pane.join("reviews")],
-            })
+            write.plan(claim.clone(), Some(&claim))
         },
         |claim| {
             let launch_id = claim
