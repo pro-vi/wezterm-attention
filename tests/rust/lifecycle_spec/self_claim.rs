@@ -1122,3 +1122,47 @@ fn the_registered_hook_command_hands_the_agent_s_own_pid_to_the_writer() {
     }
     assert!(stored_claim(&setup).is_none());
 }
+
+#[test]
+fn a_claim_removes_a_stale_absence_probe_only_inside_the_state_root() {
+    let claims: Vec<(&str, Arrangement)> = vec![
+        ("a shell claim", Box::new(|setup| setup.claim())),
+        (
+            "an agent's own claim",
+            Box::new(|setup| {
+                apply_as(
+                    setup,
+                    &setup.agent_env(),
+                    &start("claude", "s"),
+                    "00000000000000000200",
+                );
+            }),
+        ),
+    ];
+    for (label, claim) in claims {
+        // Inside the state root, a new claim makes the probe stale and
+        // removes it.
+        let setup = Setup::new();
+        let pane = claim_path(&setup).parent().unwrap().to_path_buf();
+        fs::create_dir_all(&pane).unwrap();
+        fs::write(pane.join("absence-probe.json"), "{}").unwrap();
+        claim(&setup);
+        assert!(stored_claim(&setup).is_some(), "{label}: the claim is made");
+        assert!(!pane.join("absence-probe.json").exists(), "{label}");
+
+        let setup = Setup::new();
+        let pane = claim_path(&setup).parent().unwrap().to_path_buf();
+        let outside = setup._scratch.0.join("outside");
+        fs::create_dir_all(outside.join("absence-probe.json")).unwrap();
+        fs::write(outside.join("absence-probe.json/kept.txt"), "kept\n").unwrap();
+        fs::create_dir_all(pane.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &pane).unwrap();
+        claim(&setup);
+        assert!(stored_claim(&setup).is_some(), "{label}: the claim is made");
+        assert_eq!(
+            fs::read_to_string(outside.join("absence-probe.json/kept.txt")).ok(),
+            Some("kept\n".to_owned()),
+            "{label}: removed something outside the state root"
+        );
+    }
+}

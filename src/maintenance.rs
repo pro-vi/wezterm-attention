@@ -929,7 +929,7 @@ fn directory_confined(root: &Path, directory: &Path) -> bool {
 
 /// Whether removing `path` removes something inside the state root: its
 /// directory is confined, and it names an entry of that directory.
-fn removal_confined(root: &Path, path: &Path) -> bool {
+pub(crate) fn removal_confined(root: &Path, path: &Path) -> bool {
     matches!(
         path.components().next_back(),
         Some(std::path::Component::Normal(_))

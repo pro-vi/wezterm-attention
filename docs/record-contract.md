@@ -362,7 +362,9 @@ review events leave beside the reviews, do not hold a binding or pane tree back 
 lock-like file of any other name or place does. Every removal sweep makes stays inside the state
 root: a target reached through a symlinked directory below the root is kept, with a
 `record_invalid` diagnostic, and so are subagent records below a symlinked directory. An absence
-probe kept that way shows as action `keep` in its `absence` or `pane_retention` detail.
+probe kept that way shows as action `keep` in its `absence` or `pane_retention` detail. A new
+claim, a shell's or an agent's own, removes the pane's absence probe by the same rule: below a
+symlinked directory it keeps the probe and makes the claim.
 
 A retention floor advances only across complete monotonic-timestamp groups that were already
 ineligible under the prior floor. An eligible member blocks the whole equal-timestamp group.

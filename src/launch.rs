@@ -285,7 +285,7 @@ pub fn claim_launch_at_tty(
                     publication_diagnostic: None,
                 },
                 replacements,
-                removals: vec![pane.join("absence-probe.json")],
+                removals: absence_probe_removal(&root, &pane),
                 private_dirs: vec![reviews_path],
             })
         },
@@ -364,6 +364,21 @@ fn with_pane_claim<T>(
         std::time::Duration::from_secs(2),
         || publish(read()?),
     )
+}
+
+/// The pane's absence probe, which a new claim makes stale, when removing it
+/// cannot reach outside the state root. A pane directory reached through a
+/// link keeps whatever is there; the claim goes ahead either way.
+fn absence_probe_removal(
+    root: &std::path::Path,
+    pane: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
+    let probe = pane.join("absence-probe.json");
+    if crate::maintenance::removal_confined(root, &probe) {
+        vec![probe]
+    } else {
+        Vec::new()
+    }
 }
 
 /// The launch a stored claim publishes to `tty_path`: its own, when it names
@@ -923,7 +938,7 @@ fn claim_for_host(
             Ok(CommitPlan {
                 result: claim,
                 replacements,
-                removals: vec![pane.join("absence-probe.json")],
+                removals: absence_probe_removal(&root, &pane),
                 private_dirs: vec![pane.join("reviews")],
             })
         },
