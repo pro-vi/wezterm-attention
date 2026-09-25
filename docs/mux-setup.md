@@ -95,8 +95,11 @@ its identity. Claiming on one line and starting the agent on the next still work
 held only the claim keeps the ID for the next one.
 
 The danger is a wrapper that calls the helper and launches the agent regardless of its status. There
-the agent runs with no identity, every callback from that run is discarded, and nothing in the
-agent's own output says so.
+the agent runs with no launch id, and nothing in the agent's own output says so. On macOS, in a pane
+no shell has claimed, the agent then claims the pane for itself at its first session start, and its
+callbacks are recorded without the lifecycle observations an inherited launch id gives. With
+self-claim switched off, on Linux, or in a pane that already holds a shell claim, every callback
+from that run is discarded.
 
 `codex exec` and `claude -p` both commonly take a redirect, so put it on the agent and not on
 anything that contains the claim:
@@ -109,7 +112,7 @@ The trap is a wrapper. If you write your own helper that calls `wezterm_attentio
 execs the agent, a redirect written on the wrapper applies to the claim inside it too:
 
 ```sh
-with_attention_claim codex exec "…" < /dev/null          # claim fails, identity unset, callbacks lost
+with_attention_claim codex exec "…" < /dev/null          # claim fails, no launch id (see above)
 with_attention_claim sh -c 'codex exec "…" </dev/null'   # claim holds
 ```
 
