@@ -6,56 +6,14 @@
 //!
 //! ## What is supported
 //!
-//! The stable way to use this project is the `attention` command and its JSON
-//! envelopes, which `docs/consumer-guide.md` specifies. A Rust caller that links
-//! the library instead depends on these, and only these:
-//!
-//! - [`query`] for reading facts: [`query::read_bindings`],
-//!   [`query::read_pane_facts`], and the row and facet types they return. A
-//!   socket-scoped listing is supported as a CLI query; no suffix-free Rust
-//!   wrapper for it exists, so none is promised here. The published tab order
-//!   is the same: `attention tabs` is the supported way to read it, and
-//!   [`query::read_tab_publications`] is how that command does it, not a
-//!   promise to a linking caller.
-//! - [`lifecycle`] for applying a provider event, and [`lifecycle::outcome`] for
-//!   what that event was admitted as and what it persisted.
-//! - [`consumer`] for building and delivering a hook envelope.
-//! - [`identity`] for pane addresses, and [`protocol`] for the manifest and the
-//!   record validators.
-//! - [`claim_launch`], [`claim_launch_at_tty`], [`publish_current`],
-//!   [`publish_realm`], [`environment`] and [`state_root_from_environment`] here
-//!   at the root.
-//!
-//! A supported operation's signature is supported with it. [`claim_launch`] and
-//! [`publish_current`] take [`wezterm::RuntimePorts`], so that type, the
-//! [`wezterm::Clock`], [`wezterm::TtyWriter`], [`wezterm::PaneLister`] and
-//! [`wezterm::ProcessInspector`] traits it holds, [`wezterm::PaneRow`] in the
-//! third, and the [`wezterm::ProcessRead`], [`wezterm::ProcessFacts`],
-//! [`wezterm::ProcessStart`] and [`wezterm::ControllingTerminal`] answers of
-//! the fourth are supported too.
-//! [`lifecycle::outcome::AdmittedHook`] likewise carries
-//! [`providers::ProviderAction`], [`observations::Actor`] and
-//! [`observations::NativeCorrelation`] in its public fields. A declaration
-//! whose operations need types it disowns is not usable, so those are named
-//! here rather than left to inference.
-//!
-//! ## What is not
-//!
-//! Everything else reachable from this crate is implementation. [`records`] in
-//! particular exposes storage mechanics -- locking, atomic replacement, path
-//! construction, durable deletion -- because this crate's own tests drive them,
-//! not because a consumer should. [`maintenance`] and
-//! [`hook_content`] are the same, as are the members of [`wezterm`],
-//! [`providers`] and [`observations`] not named above: public because nothing
-//! has yet made them private, not because their shapes are promised.
-//!
-//! The `_with_ports` variants take injectable readers, clocks and pane listers.
-//! They exist so tests can substitute them and are unstable for that reason; the
-//! variants without a suffix are the supported spelling.
-//!
-//! These may change without a major version. `docs/accepted-limitations.md`
-//! records why the boundary is documented rather than enforced, and what it
-//! would take to enforce it.
+//! The supported interface of this project is the `attention` command -- its
+//! JSON envelopes, diagnostic codes and exit codes, which
+//! `docs/consumer-guide.md` specifies -- and the WezTerm plugin's documented
+//! Lua API. The Rust items this crate exports are not supported for use outside
+//! this repository and may change in any release. They are public because the
+//! `attention` binary and this repository's integration tests link the library.
+//! `docs/accepted-limitations.md` records why that is documented rather than
+//! enforced.
 
 pub mod consumer;
 pub mod hook_content;
@@ -77,10 +35,8 @@ pub use launch::{
 use std::collections::BTreeMap;
 use std::env;
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
 
-use crate::protocol::Result;
-use crate::records::{NOT_UTF8, STATE_ROOT_VARIABLES, state_root};
+use crate::records::{NOT_UTF8, STATE_ROOT_VARIABLES};
 
 /// The process environment, keeping only variables whose name and value are
 /// both UTF-8. `env::vars` panics on the first variable that is not, which
@@ -106,8 +62,4 @@ pub fn environment() -> BTreeMap<String, String> {
             }
         })
         .collect()
-}
-
-pub fn state_root_from_environment() -> Result<PathBuf> {
-    state_root(&environment())
 }
