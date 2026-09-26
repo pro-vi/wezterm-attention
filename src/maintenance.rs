@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::identity::{PaneAddress, parse_marker_id, socket_identity};
+use crate::identity::{PaneAddress, marker_address, socket_identity};
 use crate::presence::{
     FailedListingOncePerSocket, ListOncePerSocket, PaneEvidence, ProbeOncePerAssembly,
     kept_history_code, pane_evidence, reader_presence, recorded_socket,
@@ -23,9 +23,9 @@ use crate::query::{
 use crate::records::{
     BINDING_FILE, BindingState, CommitPlan, FileRecords, RecordIdentity, RecordRead, Replacement,
     agents_dir, atomic_replace_if_different, binding_record_kind, binding_session_entry,
-    claim_lock, commit, directory_confined, ends_binding, incarnation_dir, launch_lock, lock_file,
-    pane_dir, read_bounded, read_record, read_record_at, removal_confined, remove_file_durable,
-    session_index_marker, session_index_path,
+    claim_lock, commit, directory_confined, ends_binding, incarnation_dir, is_state_lock,
+    launch_lock, pane_dir, read_bounded, read_record, read_record_at, removal_confined,
+    remove_file_durable, session_index_marker, session_index_path,
 };
 use crate::wezterm::{Clock, PaneLister, Presence, ProcessInspector, ProcessProbe};
 
@@ -966,7 +966,7 @@ fn collect_tab_orders(
         let mut addresses: BTreeSet<PaneAddress> = BTreeSet::new();
         let mut without_address = false;
         for marker_id in window.tabs.iter().flat_map(|tab| tab.marker_ids.iter()) {
-            match parse_marker_id(marker_id) {
+            match marker_address(marker_id) {
                 Some(address) => {
                     addresses.insert(address);
                 }
@@ -1381,7 +1381,7 @@ fn pane_entries_prunable(
                 }
             }
             Ok(kind) if kind.is_file() => {
-                if lock_file(pane, directory, &name) || write_leftover(&name) {
+                if is_state_lock(pane, directory, &name) || write_leftover(&name) {
                     continue;
                 }
                 let recognised =

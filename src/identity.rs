@@ -38,7 +38,7 @@ pub fn canonical_pane_id(value: &str) -> Result<String> {
 /// The pane a published `v2:<realm_id>:<incarnation_id>:<pane_id>` marker id
 /// names, when it is one: two digests and a canonical pane id. A bare
 /// decimal marker id names no address.
-pub fn parse_marker_id(text: &str) -> Option<PaneAddress> {
+pub fn marker_address(text: &str) -> Option<PaneAddress> {
     let mut parts = text.strip_prefix("v2:")?.splitn(3, ':');
     let (realm_id, incarnation_id, pane_id) = (parts.next()?, parts.next()?, parts.next()?);
     if !crate::protocol::hex64_text(realm_id) || !crate::protocol::hex64_text(incarnation_id) {

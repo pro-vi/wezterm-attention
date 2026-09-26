@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::identity::{PaneAddress, parse_marker_id, socket_identity};
+use crate::identity::{PaneAddress, marker_address, socket_identity};
 use crate::observations::{LifecycleAvailability, LifecycleSnapshot, LifecycleView};
 use crate::presence::{
     AssemblyListings, PaneEvidence, RecordedServer, ServerState, SocketChange, SpawnSpend,
@@ -2183,7 +2183,7 @@ fn read_tab_publication(
 /// What `gui_tab_pane_ids` publishes: a v1 marker id, or the v2 cache key
 /// `address_cache_key` builds after a poll has identified the pane.
 fn published_marker_id(text: &str, pane_id_max_digits: usize) -> bool {
-    canonical_decimal_text(text, pane_id_max_digits) || parse_marker_id(text).is_some()
+    canonical_decimal_text(text, pane_id_max_digits) || marker_address(text).is_some()
 }
 
 /// A tab publication as the bar writes it, before its values are checked.

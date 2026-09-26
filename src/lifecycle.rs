@@ -1475,7 +1475,7 @@ pub fn apply_mark_clear(
 /// pane whose claim names another launch, so a write then would show nothing.
 /// The plugin is not a process in the pane, so the inherited-launch rule a
 /// hook answers to is not its rule.
-fn plugin_claim_matches(
+fn require_plugin_claim(
     claim: Option<&Value>,
     address: &PaneAddress,
     launch_id: &str,
@@ -1516,7 +1516,7 @@ pub fn apply_user_review(
         &RecordIdentity::pane(address),
         |claim| {
             if set {
-                plugin_claim_matches(claim.as_ref(), address, launch_id)?;
+                require_plugin_claim(claim.as_ref(), address, launch_id)?;
             }
             // Never over, or instead of, a review this version cannot read.
             let existing = read_record(&review_path, Some("review"), &review)?;
@@ -1568,7 +1568,7 @@ pub fn acknowledge_activity(
         "current_binding",
         &RecordIdentity::launch(address, launch_id),
         |pointer| {
-            plugin_claim_matches(read_claim(root, address)?.as_ref(), address, launch_id)?;
+            require_plugin_claim(read_claim(root, address)?.as_ref(), address, launch_id)?;
             let current = read_current(root, pointer, address, launch_id)?;
             let binding_id = current
                 .as_ref()

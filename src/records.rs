@@ -633,7 +633,7 @@ const LAUNCH_LOCK: &str = ".lock";
 
 /// Whether the file `name` in `directory`, inside the tree of the pane at
 /// `pane`, is named as one of the locks above, which a writer leaves in place.
-pub(crate) fn lock_file(pane: &Path, directory: &Path, name: &str) -> bool {
+pub(crate) fn is_state_lock(pane: &Path, directory: &Path, name: &str) -> bool {
     matches!(name, CLAIM_LOCK | LAUNCH_LOCK)
         || (directory == pane.join(REVIEWS)
             && name
