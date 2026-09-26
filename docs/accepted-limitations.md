@@ -14,19 +14,18 @@ file is the maintained public account, and it is the one to read first.
 
 `Cargo.toml` denies `dbg_macro`, `todo`, `unimplemented`, `unsafe_op_in_unsafe_fn`
 and `unused_must_use`. It does not deny `clippy::unwrap_used` or
-`clippy::expect_used`, which fire at 25 sites in the library.
+`clippy::expect_used`, which still fire at sites in the library.
 
-Denying them today would mean adding 25 allow attributes, which announces an
+Denying them today would mean adding an allow attribute at each site, which announces an
 intention while changing nothing. The sites need reading individually: some are
 genuinely infallible and want a comment, some want an error path. Until that pass
 happens, the table locks in the lints the crate already satisfies and says
 nothing about the ones it does not.
 
-To reproduce the count, run `cargo clippy --lib -- -W clippy::unwrap_used
--W clippy::expect_used`. Nineteen of the 25 are `expect` and six are `unwrap`;
-`src/query.rs` holds eleven of them. The command also lints `build.rs`, and
-reports its one `expect` (cargo sets `CARGO_MANIFEST_DIR`) as a 26th warning,
-which is not a library site. Each site is one of three things, and they
+To list the sites, run `cargo clippy --lib -- -W clippy::unwrap_used
+-W clippy::expect_used`. The command also lints `build.rs`, and reports its one
+`expect` (cargo sets `CARGO_MANIFEST_DIR`), which is not a library site. Each
+site is one of three things, and they
 need separating before the lint can go on:
 
 1. A genuine invariant. It keeps the call and gains an `#[allow]` with a
@@ -419,9 +418,7 @@ and it takes whatever the next commit changes. Once modules start moving to
 then hands callers a `serde_json::Value` that remembers none of it. Later reads
 re-derive each field with a fallback, most often
 `record["observed_mono_ns"].as_str().unwrap_or("")`. `src/lifecycle.rs` and
-`src/maintenance.rs` hold about thirty of these each. `src/query.rs` has the
-sharper form in its TTL check: `.parse::<u128>().unwrap()` on a record-sourced
-string.
+`src/maintenance.rs` hold about twenty of these each.
 
 The fallback is unreachable today. `protocol/v2.json` declares `observed_mono_ns`
 required on `activity` and `activity_clear`, `validate_shape` rejects a missing
@@ -446,9 +443,7 @@ subagent-clear watermark a parent stop writes. Do not rewrite every site
 mechanically; some read fields that really are optional.
 
 A fix is done when a record with a missing or mistyped `observed_mono_ns` is
-rejected before any visibility decision runs, and the TTL check in `src/query.rs`
-produces a diagnostic instead of a panic when the written timestamp cannot be
-parsed.
+rejected before any visibility decision runs.
 
 ## Record validity is decided in two layers inside one function
 

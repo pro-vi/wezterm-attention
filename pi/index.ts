@@ -438,7 +438,7 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 	//      write restores it.
 	//   2. Memory — only under a *permanently* blocked write (a dead NFS/SMB/FUSE mount,
 	//      not a merely slow one): the chain retains every op queued behind the stuck head
-	//      (a real in-flight fs op is libuv-rooted), growing until the mount recovers or
+	//      (an in-flight writer process is libuv-rooted), growing until the mount recovers or
 	//      the process restarts.
 	//
 	// The obvious fixes are all worse: a sticky abandoned flag → permanent silence after

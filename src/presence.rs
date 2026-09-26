@@ -667,7 +667,7 @@ mod pane_listing_tests {
         };
         let once = ListOncePerSocket::new(&counting);
         // Three bound panes on one socket ask the same question of the same
-        // list. Before this wrapper each ask spawned its own `wezterm cli list`.
+        // list.
         for _ in 0..3 {
             assert_eq!(once.list("/s/one").unwrap()[0].pane_id, "/s/one");
         }

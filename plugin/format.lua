@@ -160,8 +160,8 @@ return function(context)
       settled_title = titles.settled_title,
       -- One home per fact. `attention` carries the positional entries for
       -- formatters written against the first API, and named fields for the
-      -- rest. There used to be flattened copies of all of them at this level
-      -- too, which gave every fact two spellings and no rule for choosing.
+      -- rest. Nothing is copied to this level: two spellings of one fact
+      -- leave no rule for choosing.
       attention = attention,
     }
   end
