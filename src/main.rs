@@ -151,8 +151,6 @@ struct PublishArgs {
     json: bool,
     #[arg(long)]
     quiet: bool,
-    #[arg(long)]
-    all_details: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -660,11 +658,8 @@ fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
             } else {
                 "findings"
             };
-            let diagnostics = if args.all_details {
-                report.diagnostics.clone()
-            } else {
-                report.diagnostics.iter().take(50).cloned().collect()
-            };
+            let diagnostics: Vec<Diagnostic> =
+                report.diagnostics.iter().take(50).cloned().collect();
             let complete = diagnostics.len() == report.diagnostics.len();
             let result = serde_json::json!({
                 "attempted": report.attempted,
