@@ -12,7 +12,8 @@ if source_response then
 end
 
 local overlays = dofile(repo .. "/plugin/overlays.lua")({
-  wezterm = { log_error = function() end },
+  -- A source is encoded with WezTerm's encoder, which only a WezTerm run has.
+  wezterm = { log_error = function() end, json_encode = source_response and require("wezterm").json_encode },
   now_ms = function() return 1789884000123 end,
 })
 

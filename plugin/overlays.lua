@@ -30,26 +30,6 @@ return function(context)
     end) .. '"'
   end
 
-  local function json_value(value)
-    local value_type = type(value)
-    if value_type == "string" then return json_string(value) end
-    if value_type == "number" or value_type == "boolean" then return tostring(value) end
-    if value_type ~= "table" then return nil end
-    local keys = {}
-    for key in pairs(value) do
-      if type(key) ~= "string" then return nil end
-      keys[#keys + 1] = key
-    end
-    table.sort(keys)
-    local fields = {}
-    for _, key in ipairs(keys) do
-      local encoded = json_value(value[key])
-      if not encoded then return nil end
-      fields[#fields + 1] = json_string(key) .. ":" .. encoded
-    end
-    return "{" .. table.concat(fields, ",") .. "}"
-  end
-
   --- Place `body` at `path` through a temporary file this process owns, so a
   --- reader sees either the previous content or the whole new one. The name
   --- carries this process's session token: two WezTerm processes writing the
@@ -89,10 +69,10 @@ return function(context)
     return true
   end
 
-  --- Spell an integral number the way JSON wants it read back. `json_value`
-  --- renders a number with `tostring`, and what that gives for an integral
-  --- value depends on the Lua the plugin runs under; the reader of the file
-  --- below wants an integer in every one of them.
+  --- Spell an integral number the way JSON wants it read back. What
+  --- `tostring` gives for an integral value depends on the Lua the plugin
+  --- runs under; the reader of the file below wants an integer in every one
+  --- of them.
   local function integer(value)
     return string.format("%d", math.floor(value))
   end
@@ -198,11 +178,10 @@ return function(context)
       path = dir .. "/tabs/"
         .. (source and (source.incarnation_id .. "-") or "") .. integer(window_id) .. ".json"
     end
-    -- Keys in sorted order, as json_value writes them.
     local body = table.concat({
       '{"published_at_ms":', integer(drawn_at or now_ms()),
       ',"schema":', source and "2" or "1",
-      source and (',"source":' .. json_value(source)) or "",
+      source and (',"source":' .. wezterm.json_encode(source)) or "",
       ',"tabs":', list,
       ',"window_id":', integer(window_id), "}",
     })

@@ -310,6 +310,8 @@ local function encode_json(value)
   table.sort(parts)
   return "{" .. table.concat(parts, ",") .. "}"
 end
+-- The plugin encodes a tab order's source with WezTerm's own encoder.
+wezterm.json_encode = encode_json
 
 local function dirname(path)
   return assert(path:match("^(.*)/[^/]+$"), "path has no parent: " .. path)
