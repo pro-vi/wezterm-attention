@@ -833,7 +833,7 @@ fn absence_action(
 /// records are kept.
 /// That is the state of the recorded history, not a probe that did not
 /// answer: sweep reports it once for the whole run and decides nothing on it.
-const SERVER_GONE: &str = "server_gone";
+const KEPT_HISTORY: &str = "kept_history";
 
 /// Why a tab order naming a pane whose realm or incarnation record this store
 /// does not hold is kept: there is no socket to ask, and no probe failed.
@@ -852,9 +852,9 @@ fn absence_presence(
     let before = diagnostics.len();
     let presence = match pane_evidence(root, address, Some(panes), processes, diagnostics) {
         PaneEvidence::Observed(presence) => presence,
-        PaneEvidence::ServerGone { diagnostic } => {
+        PaneEvidence::KeptHistory { diagnostic } => {
             diagnostics.push(diagnostic);
-            SERVER_GONE.to_owned()
+            KEPT_HISTORY.to_owned()
         }
     };
     name_pane(&mut diagnostics[before..], address, binding_id);
@@ -994,9 +994,9 @@ fn collect_tab_orders(
                         ) {
                             NOT_RECORDED.to_owned()
                         } else {
-                            let (observed, server_gone) =
+                            let (observed, kept_history) =
                                 reader_presence(root, address, Some(panes), processes, diagnostics);
-                            if observed == "unavailable" && !server_gone {
+                            if observed == "unavailable" && !kept_history {
                                 diagnostics.push(Diagnostic::new(
                                     "probe_unavailable",
                                     "tab order pane presence cannot be established",
@@ -1222,7 +1222,7 @@ fn pane_retention(
         run.processes,
         diagnostics,
     );
-    if presence == SERVER_GONE {
+    if presence == KEPT_HISTORY {
         return Ok(false);
     }
     let action = absence_action(&presence, probe.as_ref(), run.operation_id, run.observation)?;
@@ -1476,7 +1476,7 @@ pub fn sweep(
     let mut ended: BTreeMap<String, Vec<(String, PathBuf, bool)>> = BTreeMap::new();
     // The absence rule's view of each pane. The tab-order step keeps its
     // own, which reads a pane of kept history as unavailable where this one
-    // reads it as `SERVER_GONE`.
+    // reads it as `KEPT_HISTORY`.
     let mut absence_cache: BTreeMap<PaneAddress, String> = BTreeMap::new();
     if realm_filter.is_none() {
         failed += collect_tab_orders(
@@ -1711,7 +1711,7 @@ pub fn sweep(
             observed
         };
         // Kept history: reported once for the run, and nothing to decide.
-        if presence == SERVER_GONE {
+        if presence == KEPT_HISTORY {
             continue;
         }
         let probe_identity = RecordIdentity::pane(&address);
@@ -1840,7 +1840,7 @@ pub fn sweep(
                     details.push(
                         json!({"kind":"absence","binding_id":binding_id,"action":outcome.action}),
                     );
-                    if outcome.action == "unavailable" && fresh_presence != SERVER_GONE {
+                    if outcome.action == "unavailable" && fresh_presence != KEPT_HISTORY {
                         diagnostics.push(absence_unavailable(
                             "binding absence cannot be established",
                             &address,

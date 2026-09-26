@@ -313,12 +313,12 @@ fn reader_confidence(current: bool, presence: &str) -> ReaderConfidence {
 
 /// Whether a row takes part in the provider-session conflict check. Only live
 /// claims compete: a binding that has ended, whose pane is verified absent, or
-/// whose server is gone (a new server owns its socket path, or the path is
-/// gone) is history. A session resumed in a new pane, or under a restarted
+/// whose records are kept history (its socket path no longer serves its
+/// incarnation) is history. A session resumed in a new pane, or under a restarted
 /// mux, leaves one behind every time, and calling that a conflict hides the
 /// pane the session actually runs in.
-fn competes(ended: bool, server_gone: bool, presence: &str) -> bool {
-    !ended && !server_gone && presence != "verified_absent"
+fn competes(ended: bool, kept_history: bool, presence: &str) -> bool {
+    !ended && !kept_history && presence != "verified_absent"
 }
 
 impl PaneFacts {
@@ -719,7 +719,7 @@ fn read_pane_facts_once(
             PaneEvidence::Observed(presence) => presence,
             // A socket that refuses is answered as one that is gone or
             // replaced: the scope's server may no longer be the one there.
-            PaneEvidence::ServerGone { diagnostic } => {
+            PaneEvidence::KeptHistory { diagnostic } => {
                 return Ok(PaneFacts::scope_unavailable(scope, diagnostic));
             }
         }
@@ -731,11 +731,11 @@ fn read_pane_facts_once(
     // would not have matched, so the row is the pane's current one.
     let confidence = reader_confidence(true, &presence);
     let ended = end.availability == A::Present;
-    // A scope whose server may be gone was answered above, so the one left
-    // here is live or shown exited, as `bindings` would say of this row.
-    let server_gone = false;
+    // A scope whose records are kept history was answered above, so the one
+    // left here is live or shown exited, as `bindings` would say of this row.
+    let kept_history = false;
     let conflicted = binding.record.as_ref().is_some_and(|record| {
-        competes(ended, server_gone, &presence)
+        competes(ended, kept_history, &presence)
             && session_live_elsewhere(
                 root,
                 address,
@@ -1473,11 +1473,11 @@ fn session_live_elsewhere(
         {
             continue;
         }
-        let (presence, server_gone) =
+        let (presence, kept_history) =
             reader_presence(root, other, panes, processes, &mut Vec::new());
         if competes(
             binding_ended(root, &binding, &identity),
-            server_gone,
+            kept_history,
             &presence,
         ) {
             return true;
@@ -1697,7 +1697,7 @@ fn assemble_bindings(
         );
     }
     let mut admitted_rows = Vec::new();
-    let mut servers_gone = Vec::new();
+    let mut kept_histories = Vec::new();
     let mut ignored = Vec::new();
     let mut presence_cache: BTreeMap<PaneAddress, (String, bool)> = BTreeMap::new();
     let mut claim_cache: BTreeMap<PaneAddress, RecordRead> = BTreeMap::new();
@@ -1758,7 +1758,7 @@ fn assemble_bindings(
         );
         let current = state.current(&launch_id, &binding_id);
         let ended = state.ended(&binding);
-        let (presence, server_gone) = if let Some(cached) = presence_cache.get(&address) {
+        let (presence, kept_history) = if let Some(cached) = presence_cache.get(&address) {
             cached.clone()
         } else {
             let before_presence = diagnostics.len();
@@ -1797,13 +1797,13 @@ fn assemble_bindings(
             },
         ));
         admitted_rows.push(admitted);
-        servers_gone.push(server_gone);
+        kept_histories.push(kept_history);
     }
     let mut duplicates: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
     for (index, row) in rows.iter().enumerate() {
         if !competes(
             row.binding_phase == "ended",
-            servers_gone[index],
+            kept_histories[index],
             &row.pane_presence,
         ) {
             continue;

@@ -29,11 +29,11 @@ pub(crate) enum PaneEvidence {
     /// socket removed, replaced or not accepting, so its records are kept. A
     /// reader reports the pane as unavailable, with the diagnostic, which
     /// says what became of the socket: no probe failed to answer.
-    ServerGone { diagnostic: Diagnostic },
+    KeptHistory { diagnostic: Diagnostic },
 }
 
 /// Whether a diagnostic says a pane's server may be gone, which
-/// [`PaneEvidence::ServerGone`] carries: kept history, not a probe that did
+/// [`PaneEvidence::KeptHistory`] carries: kept history, not a probe that did
 /// not answer.
 pub(crate) fn kept_history_code(code: &str) -> bool {
     matches!(
@@ -155,7 +155,7 @@ pub(crate) fn reader_presence(
 ) -> (String, bool) {
     match pane_evidence(root, address, panes, processes, diagnostics) {
         PaneEvidence::Observed(presence) => (presence, false),
-        PaneEvidence::ServerGone { diagnostic } => {
+        PaneEvidence::KeptHistory { diagnostic } => {
             diagnostics.push(diagnostic);
             ("unavailable".to_owned(), true)
         }
@@ -185,7 +185,7 @@ pub(crate) fn pane_evidence(
     match server_state(socket_path, address, processes) {
         ServerState::Current => {}
         ServerState::Exited => return PaneEvidence::Observed("verified_absent".to_owned()),
-        ServerState::Kept(diagnostic) => return PaneEvidence::ServerGone { diagnostic },
+        ServerState::Kept(diagnostic) => return PaneEvidence::KeptHistory { diagnostic },
         ServerState::Unreadable(error) => {
             diagnostics.push(error.diagnostic);
             return unavailable();
@@ -288,7 +288,7 @@ pub(crate) fn presence_at_socket(
         if replaced_server_pane_gone(socket_path, pane_id, processes) {
             return observed("verified_absent");
         }
-        return PaneEvidence::ServerGone {
+        return PaneEvidence::KeptHistory {
             diagnostic: Diagnostic::new("socket_refused", "mux socket refuses connections"),
         };
     }
