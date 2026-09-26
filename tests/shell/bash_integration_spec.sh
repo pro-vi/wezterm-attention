@@ -259,7 +259,9 @@ env -i HOME="$scratch/home" PATH=/usr/bin:/bin "$bash_under_test" --noprofile --
     "/opt/tools/claude -p x" "\"codex\" exec" "  pi" "A=a\\ b B= pi" "\"\" claude"; do
     _wezterm_attention_supported_command "$command" || { echo "rejected: $command"; exit 1; }
   done
-  for command in "echo claude" "X=1" "" "claudex" "git commit -m claude"; do
+  # A backslash keeps a quote in the word: bash runs a program named "claude"
+  # with the quotes, not claude.
+  for command in "echo claude" "X=1" "" "claudex" "git commit -m claude" "\\\"claude\\\"" "\\'"'"'claude\\'"'"'"; do
     ! _wezterm_attention_supported_command "$command" || { echo "accepted: $command"; exit 1; }
   done
 ' _ "$integration" > "$scratch/session.out" 2>&1 || words_status=$?
