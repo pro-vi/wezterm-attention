@@ -1,9 +1,8 @@
 #!/usr/bin/env sh
 # Loads examples/wezterm.lua in a real WezTerm config evaluation
 # (`wezterm show-keys`, which opens no window and touches no mux), with this
-# checkout's plugin in place of the plugin download and a stand-in for the
-# session plugin, then runs its status-bar handler once against a scratch
-# repository.
+# checkout's plugin in place of the plugin download, then runs its
+# update-status handler once.
 set -u
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -12,27 +11,17 @@ scratch=$(mktemp -d "${TMPDIR:-/tmp}/attention-examples-spec.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
 failures=0
 
-mkdir -p "$scratch/home" "$scratch/config" "$scratch/repo"
-git -C "$scratch/repo" init -q
-git -C "$scratch/repo" -c user.name=spec -c user.email=spec@example.invalid \
-  commit -q --allow-empty -m start
-printf 'x\n' > "$scratch/repo/file"
-git -C "$scratch/repo" add file
-printf '#!/bin/sh\ntouch "%s/fsmonitor-ran"\n' "$scratch" > "$scratch/fsmonitor"
-chmod 755 "$scratch/fsmonitor"
-git -C "$scratch/repo" config core.fsmonitor "$scratch/fsmonitor"
+mkdir -p "$scratch/home" "$scratch/config"
 
-cat > "$scratch/config/wezterm.lua" <<'EOF'
+cat > "$scratch/config/wezterm.lua" <<'LUA'
 local wezterm = require("wezterm")
 local root = os.getenv("ATTENTION_EXAMPLE_ROOT")
 local result = assert(io.open(os.getenv("ATTENTION_EXAMPLE_RESULT"), "w"))
 package.path = root .. "/?/init.lua;" .. package.path
 local attention = require("plugin")
-local stand_in
-stand_in = setmetatable({}, { __index = function() return stand_in end, __call = function() end })
 wezterm.plugin.require = function(url)
-  if url:find("wezterm-attention", 1, true) then return attention end
-  return stand_in
+  assert(url:find("wezterm-attention", 1, true), "the example loads only this plugin: " .. url)
+  return attention
 end
 local handlers = {}
 local register = wezterm.on
@@ -45,23 +34,22 @@ if os.getenv("ATTENTION_EXAMPLE_NO_GUI") then wezterm.gui = nil end
 local ok, config = pcall(dofile, root .. "/examples/wezterm.lua")
 result:write("loaded=", tostring(ok), "\n")
 if not ok then result:write("error=", tostring(config), "\n"); result:close(); error(config) end
-attention.poll = function() end
-local window = { set_left_status = function() end,
-  set_right_status = function(_, text) result:write("status=", text, "\n") end }
-local pane = { get_current_working_dir = function() return { file_path = os.getenv("ATTENTION_EXAMPLE_REPO") } end,
-  tab = function() return nil end }
+local window, pane = {}, {}
+attention.poll = function(polled, opts)
+  result:write("polled=", tostring(polled == window and opts.active_pane == pane), "\n")
+end
 local ran, problem = pcall(handlers["update-status"], window, pane)
 result:write("update_status=", tostring(ran), " ", tostring(problem), "\n")
 result:close()
 return config
-EOF
+LUA
 
 # Loads the example once; the key table goes to keys, the wrapper's report to
 # result. Arguments are extra environment assignments.
 load_example() {
-  rm -f "$scratch/result" "$scratch/fsmonitor-ran"
+  rm -f "$scratch/result"
   env -i HOME="$scratch/home" PATH=/usr/bin:/bin ATTENTION_EXAMPLE_ROOT="$root" \
-    ATTENTION_EXAMPLE_RESULT="$scratch/result" ATTENTION_EXAMPLE_REPO="$scratch/repo" "$@" \
+    ATTENTION_EXAMPLE_RESULT="$scratch/result" "$@" \
     "$wezterm" --config-file "$scratch/config/wezterm.lua" show-keys --lua \
     > "$scratch/keys" 2> "$scratch/stderr"
 }
@@ -83,18 +71,8 @@ name="the example config loads with follow-up.lua beside it"
 check grep -q '^loaded=true$' "$scratch/result"
 name="the example keeps the plugin's Alt+B binding"
 check grep -q "^    { key = 'b', mods = 'ALT', " "$scratch/keys"
-name="the example adds its copy-mode search keys in the GUI"
-check grep -q "^      { key = '/', mods = 'NONE', action = act.CopyMode 'EditPattern' }," "$scratch/keys"
-name="the status bar reads the repository without running its fsmonitor hook"
-check sh -c 'grep -q "^update_status=true" "$1" && grep -q "^status=.*+1" "$1" && [ ! -e "$2" ]' _ \
-  "$scratch/result" "$scratch/fsmonitor-ran"
-
-# Past its cut, the branch name is CJK text: three bytes to each character.
-git -C "$scratch/repo" -c core.fsmonitor=false checkout -q -b "feature/修复登录页面的问题"
-load_example
-name="the status bar shortens a long non-ASCII branch name on a character boundary"
-check sh -c 'grep -q "^update_status=true" "$1" && grep -q "^status=.* feature/修复登录页\.\. " "$1"' _ \
-  "$scratch/result"
+name="the example's update-status handler polls with the event pane"
+check sh -c 'grep -q "^polled=true$" "$1" && grep -q "^update_status=true" "$1"' _ "$scratch/result"
 
 load_example ATTENTION_EXAMPLE_NO_GUI=1
 name="the example config loads where WezTerm has no gui module, as in the mux server"

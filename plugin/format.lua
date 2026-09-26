@@ -1,10 +1,10 @@
 return function(context)
   local M = context.M
   local defaults = context.defaults
-  local drawn_pane_key = context.drawn_pane_key
-  local attention_cache = context.attention_cache
-  local title_sources = context.title_sources
-  local display_text = context.display_text
+  local drawn_pane_key = context.runtime_state.drawn_pane_key
+  local attention_cache = context.runtime_state.attention_cache
+  local title_sources = context.titles.title_sources
+  local display_text = context.titles.display_text
 
   local function gui_tab_pane_ids(tab)
     local ids = {}
@@ -115,7 +115,10 @@ return function(context)
     }
   end
 
-
+  --- Apply the shared attention indicator and color decoration to a base title.
+  -- `2: ◔ name`: the index first, as WezTerm's own default renders it, then the
+  -- attention indicator, then the base. `show_index` false drops the index the
+  -- way `show_tab_index_in_tab_bar = false` does for the default renderer.
   --- `indicator` replaces the visible one when given.
   local function decorate_tab_title(tab, visible, base, show_index, indicator)
     local index = ""
@@ -155,10 +158,10 @@ return function(context)
       server_title = titles.server_title,
       directory = titles.directory,
       settled_title = titles.settled_title,
-      -- One home per fact. `attention` carries the v1 positional entries for
-      -- formatters written against the shipped API, and named fields for the
-      -- rest. There used to be flattened copies of all of them at this level
-      -- too, which gave every fact two spellings and no rule for choosing.
+      -- One home per fact. `attention` carries the positional entries for
+      -- formatters written against the first API, and named fields for the
+      -- rest. Nothing is copied to this level: two spellings of one fact
+      -- leave no rule for choosing.
       attention = attention,
     }
   end

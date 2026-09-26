@@ -41,7 +41,7 @@ fn claim_more_panes(setup: &Setup, panes: &[&str]) {
     let root = setup.root();
     let (address, _) = pane_address(&setup.env).expect("address");
     let claim: Value = serde_json::from_slice(
-        &fs::read(pane_path(&root, &address).join("claim.json")).expect("claim"),
+        &fs::read(pane_dir(&root, &address).join("claim.json")).expect("claim"),
     )
     .expect("claim JSON");
     for pane in panes {
@@ -49,7 +49,7 @@ fn claim_more_panes(setup: &Setup, panes: &[&str]) {
         other.pane_id = (*pane).to_owned();
         let mut copy = claim.clone();
         copy["address"] = json!(other);
-        atomic_replace(&pane_path(&root, &other).join("claim.json"), &copy).expect("claim copy");
+        atomic_replace(&pane_dir(&root, &other).join("claim.json"), &copy).expect("claim copy");
     }
 }
 

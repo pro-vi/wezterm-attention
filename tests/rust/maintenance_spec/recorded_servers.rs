@@ -6,7 +6,9 @@
 //! doctor and sweep report that history once, however much of it there is. A
 //! mux that did not answer leaves them incomplete.
 
-use super::pane_retention::{OP_1, OP_2, actions, end_long_ago, end_reason, pane_dir, tree_bytes};
+use super::pane_retention::{
+    OP_1, OP_2, actions, end_long_ago, end_reason, setup_pane_dir, tree_bytes,
+};
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 use wezterm_attention::protocol::{AttentionError, Diagnostic};
@@ -131,7 +133,7 @@ fn a_live_socket_whose_metadata_changed_ends_nothing() {
         let setup = Setup::new();
         setup.claim_and_bind();
         let binding_dir = setup.binding_dir();
-        let pane = pane_dir(&setup);
+        let pane = setup_pane_dir(&setup);
         change_socket_metadata(&setup);
         setup.processes.set(presence);
         let (runs, diagnostics) = two_applies(&setup, &setup.panes);
@@ -159,7 +161,7 @@ fn a_live_socket_whose_metadata_changed_keeps_an_old_panes_tree() {
         setup.claim_and_bind();
         wezterm_attention::lifecycle::apply_mark_review(&setup.env, "build").expect("mark review");
         end_long_ago(&setup);
-        let pane = pane_dir(&setup);
+        let pane = setup_pane_dir(&setup);
         change_socket_metadata(&setup);
         setup.processes.set(presence);
         let before = tree_bytes(&setup.root());
@@ -247,7 +249,7 @@ fn a_live_mux_with_a_full_accept_queue_ends_nothing() {
         let setup = Setup::new();
         setup.claim_and_bind();
         let binding_dir = setup.binding_dir();
-        let pane = pane_dir(&setup);
+        let pane = setup_pane_dir(&setup);
         let (_queued, refused) = fill_accept_queue(&setup.env["WEZTERM_UNIX_SOCKET"]);
         if cfg!(target_os = "macos") {
             assert!(refused, "the full queue must refuse a connection");
@@ -277,7 +279,7 @@ fn a_live_mux_with_a_full_accept_queue_keeps_an_old_panes_tree() {
         setup.claim_and_bind();
         wezterm_attention::lifecycle::apply_mark_review(&setup.env, "build").expect("mark review");
         end_long_ago(&setup);
-        let pane = pane_dir(&setup);
+        let pane = setup_pane_dir(&setup);
         let (_queued, _) = fill_accept_queue(&setup.env["WEZTERM_UNIX_SOCKET"]);
         setup.processes.set(presence);
         let before = tree_bytes(&setup.root());
@@ -355,7 +357,7 @@ fn a_refusing_mux_socket_is_kept_as_history() {
     let setup = Setup::new();
     setup.claim_and_bind();
     let binding_dir = setup.binding_dir();
-    let pane = pane_dir(&setup);
+    let pane = setup_pane_dir(&setup);
     let (address, _) = pane_address(&setup.env).expect("address");
     setup.stop_listening();
     for presence in [Presence::Present, Presence::Unseen, Presence::Unavailable] {
@@ -519,7 +521,7 @@ fn a_gone_gui_socket_whose_process_runs_is_kept() {
     let setup = Setup::with_socket_name(&format!("gui-sock-{}", std::process::id()));
     setup.claim_and_bind();
     let binding_dir = setup.binding_dir();
-    let pane = pane_dir(&setup);
+    let pane = setup_pane_dir(&setup);
     fs::remove_file(&setup.env["WEZTERM_UNIX_SOCKET"]).expect("remove socket");
     setup.processes.set(Presence::Unseen);
     let (runs, diagnostics) = two_applies(&setup, &setup.panes);

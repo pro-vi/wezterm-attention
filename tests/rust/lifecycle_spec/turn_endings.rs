@@ -81,7 +81,7 @@ fn an_interrupted_codex_turn_clears_its_activity_and_keeps_its_observation() {
     let raw = fs::read_to_string(directory.join("lifecycle.json")).unwrap();
     assert!(raw.contains("user_interrupt"), "{raw}");
     let (address, _) = pane_address(&setup.env).unwrap();
-    let review = pane_path(&state_root(&setup.env).unwrap(), &address)
+    let review = pane_dir(&state_root(&setup.env).unwrap(), &address)
         .join("reviews")
         .join(format!(
             "{}.json",

@@ -11,11 +11,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::identity::{PaneAddress, pane_address};
+use crate::identity::{PaneAddress, pane_address, pane_socket};
 use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, manifest};
 use crate::records::{
-    CommitPlan, RecordIdentity, Replacement, commit_with, incarnation_path, mkdir_private,
-    pane_path, read_record, realm_path, session_index_marker, session_index_path, state_root,
+    CommitPlan, LOCK_TIMEOUT, RecordIdentity, Replacement, claim_lock, commit, mkdir_private,
+    pane_dir, read_claim, reviews_dir, session_index_marker, session_index_path, state_root,
 };
 use crate::wezterm::{
     ControllingTerminal, ProcessFacts, ProcessInspector, ProcessRead, ProcessStart, RuntimePorts,
@@ -91,7 +91,6 @@ fn manifests(
 struct ClaimWrite {
     root: std::path::PathBuf,
     address: PaneAddress,
-    pane: std::path::PathBuf,
     realm_record: Value,
     incarnation_record: Value,
     /// A store this claim starts holds no binding, so its session index is
@@ -109,19 +108,18 @@ impl ClaimWrite {
         Ok(Self {
             root: root.to_path_buf(),
             address: address.clone(),
-            pane: pane_path(root, address),
             realm_record,
             incarnation_record,
             new_store: !root.join("v2").exists(),
         })
     }
 
-    fn claim_path(&self) -> std::path::PathBuf {
-        self.pane.join("claim.json")
+    fn lock_path(&self) -> std::path::PathBuf {
+        claim_lock(&self.root, &self.address)
     }
 
-    fn lock_path(&self) -> std::path::PathBuf {
-        self.pane.join(".claim.lock")
+    fn identity(&self) -> RecordIdentity {
+        RecordIdentity::pane(&self.address)
     }
 
     /// Refuse a stored claim whose interior address is not this pane's.
@@ -140,22 +138,19 @@ impl ClaimWrite {
     /// The plan that writes `claim`, or with `None` keeps the stored one, and
     /// reports `result`.
     fn plan<T>(&self, result: T, claim: Option<&Value>) -> Result<CommitPlan<T>> {
+        let (realm_id, incarnation_id) = (&self.address.realm_id, &self.address.incarnation_id);
         let mut replacements = match claim {
             Some(claim) => vec![
                 Replacement::if_different(
-                    realm_path(&self.root, &self.address.realm_id).join("realm.json"),
+                    RecordIdentity::realm(realm_id).path(&self.root, "realm")?,
                     self.realm_record.clone(),
                 ),
                 Replacement::if_different(
-                    incarnation_path(
-                        &self.root,
-                        &self.address.realm_id,
-                        &self.address.incarnation_id,
-                    )
-                    .join("incarnation.json"),
+                    RecordIdentity::incarnation(realm_id, incarnation_id)
+                        .path(&self.root, "incarnation")?,
                     self.incarnation_record.clone(),
                 ),
-                Replacement::always(self.claim_path(), claim.clone()),
+                Replacement::always(self.identity().path(&self.root, "claim")?, claim.clone()),
             ],
             None => Vec::new(),
         };
@@ -168,8 +163,8 @@ impl ClaimWrite {
         Ok(CommitPlan {
             result,
             replacements,
-            removals: vec![self.pane.join("absence-probe.json")],
-            private_dirs: vec![self.pane.join("reviews")],
+            removals: vec![self.identity().path(&self.root, "absence_probe")?],
+            private_dirs: vec![reviews_dir(&self.root, &self.address)],
         })
     }
 }
@@ -260,21 +255,18 @@ pub fn claim_launch_at_tty(
     let proposed = claim_record(&address, &launch_id, tty_path, &fingerprint, &observation);
     let write = ClaimWrite::new(&root, &address, &metadata)?;
 
-    let (mut selected, published) = commit_with(
+    let (mut selected, published) = commit(
         &root,
-        &write.lock_path(),
-        &write.claim_path(),
-        Some("claim"),
-        &RecordIdentity::pane(&address),
-        std::time::Duration::from_secs(2),
+        &[&write.lock_path()],
+        "claim",
+        &write.identity(),
         |existing| {
-            let (locked_address, _) = pane_address(env)?;
-            if locked_address != address {
-                return Err(AttentionError::new(
-                    "incarnation_changed",
-                    "mux socket changed before claim commit",
-                ));
-            }
+            same_incarnation(
+                pane_socket(env)?,
+                &address.realm_id,
+                &address.incarnation_id,
+                "before claim commit",
+            )?;
             let (disposition, selected, writes) = match existing {
                 Some(current) => {
                     write.check_address(&current)?;
@@ -354,6 +346,26 @@ pub fn claim_launch_at_tty(
     Ok(selected)
 }
 
+/// Refuse to go on once the mux socket at `socket_path` no longer carries the
+/// incarnation `realm_id` and `incarnation_id` name: a server that took the
+/// socket's place is another server, and what was checked or decided for the
+/// old one says nothing of it. `moment` says when the change was found.
+fn same_incarnation(
+    socket_path: &str,
+    realm_id: &str,
+    incarnation_id: &str,
+    moment: &str,
+) -> Result<()> {
+    let (current_realm, current_incarnation, _) = crate::identity::socket_identity(socket_path)?;
+    if current_realm != realm_id || current_incarnation != incarnation_id {
+        return Err(AttentionError::new(
+            "incarnation_changed",
+            format!("mux socket changed {moment}"),
+        ));
+    }
+    Ok(())
+}
+
 /// Publish a committed claim to the terminal, leaving the caller to decide what
 /// a failure means for the claim it already wrote.
 fn publish_claim(
@@ -364,13 +376,12 @@ fn publish_claim(
     fingerprint: &str,
     launch_id: &str,
 ) -> Result<()> {
-    let (current_address, _) = pane_address(env)?;
-    if current_address != *address {
-        return Err(AttentionError::new(
-            "incarnation_changed",
-            "mux socket changed before publication",
-        ));
-    }
+    same_incarnation(
+        pane_socket(env)?,
+        &address.realm_id,
+        &address.incarnation_id,
+        "before publication",
+    )?;
     let bytes = publication_bytes(address, Some(launch_id))?;
     ports.tty.write(tty_path, &bytes, fingerprint)
 }
@@ -389,22 +400,12 @@ fn with_pane_claim<T>(
     address: &PaneAddress,
     publish: impl FnOnce(Option<Value>) -> Result<T>,
 ) -> Result<T> {
-    let pane = pane_path(root, address);
-    let read = || {
-        read_record(
-            &pane.join("claim.json"),
-            Some("claim"),
-            &RecordIdentity::pane(address),
-        )
-    };
-    if !pane.is_dir() {
+    if !pane_dir(root, address).is_dir() {
         return publish(None);
     }
-    crate::records::with_lock(
-        &pane.join(".claim.lock"),
-        std::time::Duration::from_secs(2),
-        || publish(read()?),
-    )
+    crate::records::with_lock(&claim_lock(root, address), LOCK_TIMEOUT, || {
+        publish(read_claim(root, address)?)
+    })
 }
 
 /// The launch a stored claim publishes to `tty_path`: its own, when it names
@@ -425,6 +426,37 @@ fn claimed_launch(
         .map(str::to_owned)
 }
 
+/// Publish the pane at `address` to its terminal at `tty_path`: the pane's
+/// address, and the launch of its claim when that
+/// claim was made at this terminal. The pane's claim lock is held from
+/// reading the claim through the write, and the mux socket must still carry
+/// the pane's incarnation. Returns the launch published, if any.
+fn publish_pane(
+    root: &std::path::Path,
+    address: &PaneAddress,
+    socket_path: &str,
+    tty_path: &str,
+    fingerprint: &str,
+    tty: &dyn TtyWriter,
+    moment: &str,
+) -> Result<Option<String>> {
+    with_pane_claim(root, address, |claim| {
+        let launch_id = claimed_launch(claim.as_ref(), address, tty_path, fingerprint);
+        same_incarnation(
+            socket_path,
+            &address.realm_id,
+            &address.incarnation_id,
+            moment,
+        )?;
+        tty.write(
+            tty_path,
+            &publication_bytes(address, launch_id.as_deref())?,
+            fingerprint,
+        )?;
+        Ok(launch_id)
+    })
+}
+
 pub fn publish_current(
     env: &BTreeMap<String, String>,
     ports: &RuntimePorts<'_>,
@@ -433,22 +465,15 @@ pub fn publish_current(
     let (address, _) = pane_address(env)?;
     let tty_path = ports.tty.current_path()?;
     let fingerprint = ports.tty.fingerprint(&tty_path)?;
-    let launch_id = with_pane_claim(&root, &address, |claim| {
-        let launch_id = claimed_launch(claim.as_ref(), &address, &tty_path, &fingerprint);
-        let (current_address, _) = pane_address(env)?;
-        if current_address != address {
-            return Err(AttentionError::new(
-                "incarnation_changed",
-                "mux socket changed before publication",
-            ));
-        }
-        ports.tty.write(
-            &tty_path,
-            &publication_bytes(&address, launch_id.as_deref())?,
-            &fingerprint,
-        )?;
-        Ok(launch_id)
-    })?;
+    let launch_id = publish_pane(
+        &root,
+        &address,
+        pane_socket(env)?,
+        &tty_path,
+        &fingerprint,
+        ports.tty,
+        "before publication",
+    )?;
     Ok(PublishReport {
         attempted: 1,
         published: 1,
@@ -466,13 +491,12 @@ pub fn publish_realm(
     let root = state_root(env)?;
     let (realm_id, incarnation_id, _) = crate::identity::socket_identity(socket_path)?;
     let rows = ports.panes.list(socket_path)?;
-    let (current_realm, current_incarnation, _) = crate::identity::socket_identity(socket_path)?;
-    if (current_realm, current_incarnation) != (realm_id.clone(), incarnation_id.clone()) {
-        return Err(AttentionError::new(
-            "incarnation_changed",
-            "mux socket changed during enumeration",
-        ));
-    }
+    same_incarnation(
+        socket_path,
+        &realm_id,
+        &incarnation_id,
+        "during enumeration",
+    )?;
     let mut report = PublishReport {
         attempted: rows.len(),
         published: 0,
@@ -493,23 +517,16 @@ pub fn publish_realm(
                 incarnation_id: incarnation_id.clone(),
                 pane_id,
             };
-            with_pane_claim(&root, &address, |claim| {
-                let launch_id = claimed_launch(claim.as_ref(), &address, tty_name, &fingerprint);
-                let (current_realm, current_incarnation, _) =
-                    crate::identity::socket_identity(socket_path)?;
-                if current_realm != realm_id || current_incarnation != incarnation_id {
-                    return Err(AttentionError::new(
-                        "incarnation_changed",
-                        "mux socket changed before pane publication",
-                    ));
-                }
-                ports.tty.write(
-                    tty_name,
-                    &publication_bytes(&address, launch_id.as_deref())?,
-                    &fingerprint,
-                )?;
-                Ok(launch_id.is_some())
-            })
+            publish_pane(
+                &root,
+                &address,
+                socket_path,
+                tty_name,
+                &fingerprint,
+                ports.tty,
+                "before pane publication",
+            )
+            .map(|launch_id| launch_id.is_some())
         })();
         match result {
             Ok(has_v2) => {
@@ -584,7 +601,7 @@ fn asserted_host(env: &BTreeMap<String, String>) -> Result<i32> {
              `WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event ...`",
         )
     })?;
-    if value.is_empty() || value.starts_with('0') || !value.bytes().all(|b| b.is_ascii_digit()) {
+    if !crate::protocol::pid_text(value) {
         return Err(parent_unverified("WEZTERM_ATTENTION_HOST_PID is not a pid"));
     }
     value
@@ -723,10 +740,7 @@ impl HostProof {
         address: &PaneAddress,
     ) -> Result<Self> {
         let (owner, reading) = read_owner(env, ports.processes)?;
-        let socket = env.get("WEZTERM_UNIX_SOCKET").ok_or_else(|| {
-            AttentionError::new("identity_unpublished", "WEZTERM_UNIX_SOCKET is missing")
-        })?;
-        let rows = ports.panes.list(socket)?;
+        let rows = ports.panes.list(pane_socket(env)?)?;
         let mut listed = rows.iter().filter(|row| row.pane_id == address.pane_id);
         let (Some(row), None) = (listed.next(), listed.next()) else {
             return Err(AttentionError::new(
@@ -744,13 +758,12 @@ impl HostProof {
             ));
         }
         let tty_fingerprint = ports.tty.fingerprint(&tty_path)?;
-        let (current, _) = pane_address(env)?;
-        if current != *address {
-            return Err(AttentionError::new(
-                "incarnation_changed",
-                "mux socket changed while the agent was being checked",
-            ));
-        }
+        same_incarnation(
+            pane_socket(env)?,
+            &address.realm_id,
+            &address.incarnation_id,
+            "while the agent was being checked",
+        )?;
         let proof = Self {
             owner,
             tty_path,
@@ -832,13 +845,12 @@ impl HostProof {
                 "the agent no longer runs on the terminal the pane was proven to use",
             ));
         }
-        let (current, _) = pane_address(env)?;
-        if current != *address {
-            return Err(AttentionError::new(
-                "incarnation_changed",
-                "mux socket changed while the agent was being checked",
-            ));
-        }
+        same_incarnation(
+            pane_socket(env)?,
+            &address.realm_id,
+            &address.incarnation_id,
+            "while the agent was being checked",
+        )?;
         Ok(reading.foreground)
     }
 
@@ -950,13 +962,11 @@ fn claim_for_host(
     let (_, metadata) = pane_address(env)?;
     let write = ClaimWrite::new(&root, address, &metadata)?;
     let observation = ports.clock.monotonic_ns20()?;
-    let (selected, published) = commit_with(
+    let (selected, published) = commit(
         &root,
-        &write.lock_path(),
-        &write.claim_path(),
-        Some("claim"),
-        &RecordIdentity::pane(address),
-        std::time::Duration::from_secs(2),
+        &[&write.lock_path()],
+        "claim",
+        &write.identity(),
         |existing| {
             let foreground = proof.confirm(env, ports.processes, ports.tty, address)?;
             if let Some(current) = &existing {

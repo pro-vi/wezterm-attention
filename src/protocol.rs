@@ -42,19 +42,38 @@ pub struct AttentionError {
     pub exit_code: i32,
 }
 
-impl AttentionError {
+impl Diagnostic {
+    /// A diagnostic with one of the declared codes and nothing in its
+    /// context, pointing at `attention doctor` for help.
     pub fn new(code: &str, message: impl Into<String>) -> Self {
         assert!(
             EMITTED_DIAGNOSTIC_CODES.contains(&code),
             "undeclared diagnostic code: {code}"
         );
         Self {
-            diagnostic: Diagnostic {
-                code: code.to_owned(),
-                message: message.into(),
-                context: BTreeMap::new(),
-                help: "attention doctor".to_owned(),
-            },
+            code: code.to_owned(),
+            message: message.into(),
+            context: BTreeMap::new(),
+            help: "attention doctor".to_owned(),
+        }
+    }
+
+    /// This diagnostic with `value` under `field` in its context.
+    pub fn with(mut self, field: &str, value: impl Into<Value>) -> Self {
+        self.set(field, value);
+        self
+    }
+
+    /// Put `value` under `field` in this diagnostic's context.
+    pub fn set(&mut self, field: &str, value: impl Into<Value>) {
+        self.context.insert(field.to_owned(), value.into());
+    }
+}
+
+impl AttentionError {
+    pub fn new(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            diagnostic: Diagnostic::new(code, message),
             exit_code: 3,
         }
     }
@@ -167,7 +186,6 @@ pub enum Disposition {
     Ignored,
     Conflict,
     Partial,
-    RepairedProjection,
 }
 
 impl Disposition {
@@ -182,7 +200,6 @@ impl Disposition {
             Self::Ignored => "ignored",
             Self::Conflict => "conflict",
             Self::Partial => "partial",
-            Self::RepairedProjection => "repaired_projection",
         }
     }
 }
@@ -496,18 +513,42 @@ pub fn hex64_text(text: &str) -> bool {
 }
 
 fn decimal_ns20(value: &Value) -> bool {
-    value
-        .as_str()
-        .is_some_and(|text| text.len() == 20 && text.bytes().all(|byte| byte.is_ascii_digit()))
+    value.as_str().is_some_and(ns20_text)
+}
+
+/// Whether `text` is a nanosecond stamp as every record writes one: exactly
+/// 20 decimal digits, zero-padded.
+pub fn ns20_text(text: &str) -> bool {
+    text.len() == 20 && text.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn canonical_decimal(value: &Value, maximum: usize) -> bool {
-    value.as_str().is_some_and(|text| {
-        !text.is_empty()
-            && text.len() <= maximum
-            && text.bytes().all(|byte| byte.is_ascii_digit())
-            && (text == "0" || !text.starts_with('0'))
-    })
+    value
+        .as_str()
+        .is_some_and(|text| canonical_decimal_text(text, maximum))
+}
+
+/// Whether `text` is a decimal number of at most `maximum` digits with no
+/// sign and no leading zero, the way every id this project writes is
+/// spelled.
+pub fn canonical_decimal_text(text: &str, maximum: usize) -> bool {
+    !text.is_empty()
+        && text.len() <= maximum
+        && text.bytes().all(|byte| byte.is_ascii_digit())
+        && (text == "0" || !text.starts_with('0'))
+}
+
+/// Whether `text` names a process: a canonical decimal other than zero.
+pub(crate) fn pid_text(text: &str) -> bool {
+    text != "0" && canonical_decimal_text(text, usize::MAX)
+}
+
+/// Whether more than `interval_ns` nanoseconds passed from the stamp
+/// `written` to the stamp `now`. `None` when `now` is earlier than `written`,
+/// as a wall clock that was set back leaves it, or either is not a stamp.
+pub(crate) fn elapsed_beyond(now: &str, written: &str, interval_ns: u128) -> Option<bool> {
+    let (now, written) = (now.parse::<u128>().ok()?, written.parse::<u128>().ok()?);
+    (now >= written).then(|| now > written + interval_ns)
 }
 
 fn validate_address(value: &Value, protocol: &Manifest) -> bool {
@@ -841,8 +882,7 @@ pub fn eligible_subagent_presence(
     if parse_record_value(presence, protocol) != Verdict::Valid {
         return (false, Some("record_invalid"));
     }
-    let Some(now) = now_unix_ns.filter(|value| decimal_ns20(&Value::String((*value).to_owned())))
-    else {
+    let Some(now) = now_unix_ns.filter(|value| ns20_text(value)) else {
         return (false, Some("probe_unavailable"));
     };
     let order = presence["observed_mono_ns"].as_str().unwrap_or("");
@@ -853,13 +893,11 @@ pub fn eligible_subagent_presence(
         return (false, None);
     }
     let written = presence["written_at_unix_ns"].as_str().unwrap_or("");
-    if now < written {
-        return (false, Some("clock_skew"));
-    }
-    let now = now.parse::<u128>().expect("validated decimal");
-    let written = written.parse::<u128>().expect("validated record decimal");
     let ttl = presence["ttl_ms"].as_u64().unwrap_or(0) as u128 * 1_000_000;
-    (now <= written + ttl, None)
+    match elapsed_beyond(now, written, ttl) {
+        Some(expired) => (!expired, None),
+        None => (false, Some("clock_skew")),
+    }
 }
 
 /// Serialize a document for a terminal to show. serde_json escapes C0 and

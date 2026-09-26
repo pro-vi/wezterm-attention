@@ -1,26 +1,26 @@
 return function(context)
   local M = context.M
-  local protocol = context.protocol
-  local protocol_load_error = context.protocol_load_error
-  local parse_wire_json = context.parse_wire_json
-  local address_cache_key = context.address_cache_key
-  local same_address = context.same_address
-  local diagnostic = context.diagnostic
-  local invalid = context.invalid
-  local diagnostics_have_unavailable_io = context.diagnostics_have_unavailable_io
-  local health_from_diagnostics = context.health_from_diagnostics
-  local collect_diagnostic = context.collect_diagnostic
-  local v2_pane_root = context.v2_pane_root
-  local binding_root = context.binding_root
-  local read_expected_record_cached = context.read_expected_record_cached
-  local read_record_collection = context.read_record_collection
-  local identity_diagnostic = context.identity_diagnostic
-  local same_target
-  local age_exceeds_ms = context.age_exceeds_ms
-  local eligible_subagent = context.eligible_subagent
-  local deep_copy = context.deep_copy
   local defaults = context.defaults
   local wezterm = context.wezterm
+  local protocol_api = context.protocol_api
+  local protocol = protocol_api.protocol
+  local protocol_load_error = protocol_api.protocol_load_error
+  local parse_wire_json = protocol_api.parse_wire_json
+  local address_cache_key = protocol_api.address_cache_key
+  local same_address = protocol_api.same_address
+  local diagnostic = protocol_api.diagnostic
+  local invalid = protocol_api.invalid
+  local diagnostics_have_unavailable_io = protocol_api.diagnostics_have_unavailable_io
+  local health_from_diagnostics = protocol_api.health_from_diagnostics
+  local collect_diagnostic = protocol_api.collect_diagnostic
+  local v2_pane_root = protocol_api.v2_pane_root
+  local binding_root = protocol_api.binding_root
+  local read_expected_record_cached = protocol_api.read_expected_record_cached
+  local read_record_collection = protocol_api.read_record_collection
+  local identity_diagnostic = protocol_api.identity_diagnostic
+  local age_exceeds_ms = protocol_api.age_exceeds_ms
+  local eligible_subagent = protocol_api.eligible_subagent
+  local deep_copy = protocol_api.deep_copy
 
   local function request_evidence(observations, provider)
     local groups, ordered = {}, {}
@@ -36,7 +36,7 @@ return function(context)
       elseif kind == "approval_requested" or kind == "automatic_denial" then
         request_kind, role = "approval", kind == "approval_requested" and "request" or "denial"
         if kind == "automatic_denial" then
-          local class, mode = context.classify_lifecycle_tool(provider, item.tool_name)
+          local class, mode = protocol_api.classify_lifecycle_tool(provider, item.tool_name)
           if class ~= "generic" then request_kind, question_mode = class, mode end
         end
         namespace, native_id = "tool", c.tool_call_id
@@ -121,13 +121,13 @@ return function(context)
   end
 
   -- ── Pane identity ───────────────────────────────────────────────────────────
-  -- A marker file is named by the pane id a process reads from its own
-  -- $WEZTERM_PANE. A GUI attached to a mux server over a unix domain gives its
-  -- client panes fresh local ids, so pane:pane_id() there names a different pane
-  -- than the writer did, and every marker read or write through it addresses the
-  -- wrong file. The fix is a published id: the shell (and any hook) emits its
-  -- $WEZTERM_PANE as the WEZTERM_PANE user var via OSC 1337 SetUserVar, and
-  -- pane:get_user_vars() returns it for local and mux-client panes alike.
+  -- A writer names a pane by the id it reads from its own $WEZTERM_PANE. A GUI
+  -- attached to a mux server over a unix domain gives its client panes fresh
+  -- local ids, so pane:pane_id() there names a different pane than the writer
+  -- did. The fix is a published identity: the attention command emits the
+  -- pane's WEZTERM_PANE and, once a launch has claimed it, WEZTERM_ATTENTION
+  -- user vars via OSC 1337 SetUserVar, and pane:get_user_vars() returns them
+  -- for local and mux-client panes alike.
 
   local function canonical_pane_id(value)
     if type(value) ~= "string" then return nil end
@@ -305,7 +305,7 @@ return function(context)
           { pane_id = local_id }) }
       end
       return {
-        kind = "v2",
+        kind = "claimed",
         address = wire.address,
         launch_id = wire.launch_id,
         marker_id = wire.address.pane_id,
@@ -313,10 +313,11 @@ return function(context)
       }
     end
 
-    if local_id then return { kind = "v1", marker_id = local_id, cache_key = local_id } end
+    -- Known, and with nothing to read: no launch has claimed the pane.
+    if local_id then return { kind = "unclaimed", marker_id = local_id, cache_key = local_id } end
     local published = type(vars) == "table" and canonical_pane_id(vars.WEZTERM_PANE) or nil
     if published then
-      return { kind = "v1", marker_id = published, cache_key = published }
+      return { kind = "unclaimed", marker_id = published, cache_key = published }
     end
     return { kind = "unpublished", domain = domain or "?" }
   end
@@ -336,7 +337,7 @@ return function(context)
     return activity_type
   end
 
-  local function empty_v2_view(read, diagnostics, records)
+  local function empty_view(read, diagnostics, records)
     local unavailable = diagnostics_have_unavailable_io(diagnostics)
     records = records or {}
     return {
@@ -386,7 +387,7 @@ return function(context)
       collect_diagnostic(diagnostics, diagnostic(
         "probe_unavailable", "v2 protocol manifest is unavailable",
         { detail = tostring(protocol_load_error) }))
-      return empty_v2_view(read, diagnostics, records)
+      return empty_view(read, diagnostics, records)
     end
 
     local dir = (opts and opts.dir) or M._active_dir or defaults.dir
@@ -413,7 +414,7 @@ return function(context)
     records.claim = claim
     collect_diagnostic(diagnostics, claim_diagnostic)
     if not realm or not incarnation or not claim then
-      return empty_v2_view(read, diagnostics, records)
+      return empty_view(read, diagnostics, records)
     end
 
     local launch_root = pane_root .. "/launches/" .. read.launch_id
@@ -424,7 +425,7 @@ return function(context)
     }, false, previous_records.pointer)
     records.pointer = pointer
     collect_diagnostic(diagnostics, pointer_diagnostic)
-    if pointer_diagnostic and not pointer then return empty_v2_view(read, diagnostics, records) end
+    if pointer_diagnostic and not pointer then return empty_view(read, diagnostics, records) end
 
     local binding
     local activity
@@ -455,7 +456,7 @@ return function(context)
       }, true, previous_binding_records.binding)
       records.binding = binding
       collect_diagnostic(diagnostics, binding_diagnostic)
-      if not binding then return empty_v2_view(read, diagnostics, records) end
+      if not binding then return empty_view(read, diagnostics, records) end
 
       local end_diagnostic
       binding_end, end_diagnostic = read_expected_record_cached(
@@ -680,28 +681,20 @@ return function(context)
     return read_view_at(read, later, again)
   end
 
-  --- The id under which this pane's markers are written, or nil when the pane
-  --- has published nothing and its local id cannot be trusted to name them.
+  --- The pane id writers name this pane by, or nil when the pane has
+  --- published nothing and its local id cannot be trusted to name it.
   function M.pane_marker_id(pane)
     local read = resolve_pane_read(pane)
-    if read.kind == "v1" or read.kind == "v2" then return read.marker_id end
+    if read.kind == "unclaimed" or read.kind == "claimed" then return read.marker_id end
     return nil
   end
 
-
   return {
     lifecycle_facet = lifecycle_facet,
-    is_local_domain = is_local_domain,
     unix_domain_socket = unix_domain_socket,
     refresh_domain_facts = refresh_domain_facts,
-    canonical_pane_id = canonical_pane_id,
-    pane_call = pane_call,
     pane_method = pane_method,
     resolve_pane_read = resolve_pane_read,
-    same_target = same_target,
-    effective_attention_type = effective_attention_type,
-    empty_v2_view = empty_v2_view,
     read_attention_view = read_attention_view,
-    pane_marker_id = M.pane_marker_id,
   }
 end

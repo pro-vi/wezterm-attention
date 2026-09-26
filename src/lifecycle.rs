@@ -6,7 +6,6 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -21,8 +20,9 @@ use crate::observations::{LifecycleSnapshot, ObservationPools};
 use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, free_of_control, manifest};
 use crate::providers::{ProviderAction, ProviderEvent};
 use crate::records::{
-    CommitPlan, PreparedRecordWrite, RecordIdentity, RecordRead, Replacement, commit_nested_with,
-    commit_triple_with, ends_binding, launch_path, pane_path, read_record, read_record_typed,
+    CommitPlan, PLUGIN_LOCK_TIMEOUT, PreparedRecordWrite, RecordIdentity, RecordRead, Replacement,
+    agents_dir, claim_lock, commit, commit_waiting, ends_binding, launch_lock, pane_dir,
+    read_claim, read_record, read_record_at, read_record_typed, read_record_typed_at, review_lock,
     session_entry, session_entry_path, state_root,
 };
 use crate::wezterm::RuntimePorts;
@@ -53,7 +53,6 @@ fn accepted(result: &LifecycleResult) -> bool {
             | Disposition::Confirmed
             | Disposition::Replaced
             | Disposition::Skipped
-            | Disposition::RepairedProjection
     )
 }
 
@@ -85,25 +84,20 @@ fn confirm_native(resolved: &ResolvedLaunch, binding_id: &str, mutation: &Mutati
         return;
     }
     let context = (|| -> Result<Option<AdmittedHook>> {
-        let claim = load_claim(&resolved.root, &resolved.address)?;
         // The claim reread here is never an agent's own with this launch id:
         // an agent's claim is always made with a fresh launch id, and no
         // shell exported that id for this event to inherit.
-        if claim.as_ref().is_none_or(|claim| {
-            !inherited_claim_matches(claim, &resolved.address, &resolved.launch_id)
-        }) {
+        if inherited_claim(&resolved.root, &resolved.address, &resolved.launch_id)?.is_none() {
             return Ok(None);
         }
-        let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
-        let pointer = read_record(
-            &launch.join("current-binding.json"),
-            Some("current_binding"),
-            &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
-        )?;
-        let (_, binding) = read_current(&launch, pointer, &resolved.address, &resolved.launch_id)?;
-        let Some(binding) = binding.filter(|binding| {
-            record_matches_binding(binding, &resolved.address, &resolved.launch_id, binding_id)
-        }) else {
+        let pointer = read_record_at(&resolved.root, "current_binding", &resolved.launch())?;
+        let Some(binding) = read_current(
+            &resolved.root,
+            pointer,
+            &resolved.address,
+            &resolved.launch_id,
+        )?
+        .filter(|binding| binding["binding_id"].as_str() == Some(binding_id)) else {
             return Ok(None);
         };
         let event = &evidence.event;
@@ -150,7 +144,6 @@ pub struct LifecycleResult {
     pub disposition: Disposition,
     pub diagnostic: Option<Diagnostic>,
     pub event_id: Option<String>,
-    pub repaired_projection: bool,
 }
 
 impl LifecycleResult {
@@ -159,13 +152,12 @@ impl LifecycleResult {
             disposition,
             diagnostic: None,
             event_id: None,
-            repaired_projection: false,
         }
     }
 
     fn diagnosed(disposition: Disposition, code: &str, message: &str) -> Self {
         let mut result = Self::new(disposition);
-        result.diagnostic = Some(AttentionError::new(code, message).diagnostic);
+        result.diagnostic = Some(Diagnostic::new(code, message));
         result
     }
 
@@ -201,7 +193,21 @@ struct HostCheck<'a> {
 
 impl ResolvedLaunch<'_> {
     fn claim_lock(&self) -> PathBuf {
-        pane_path(&self.root, &self.address).join(".claim.lock")
+        claim_lock(&self.root, &self.address)
+    }
+
+    fn launch_lock(&self) -> PathBuf {
+        launch_lock(&self.root, &self.address, &self.launch_id)
+    }
+
+    /// The identity of this launch's own records.
+    fn launch(&self) -> RecordIdentity {
+        RecordIdentity::launch(&self.address, &self.launch_id)
+    }
+
+    /// The identity of the records of this launch's binding `binding_id`.
+    fn binding(&self, binding_id: &str) -> RecordIdentity {
+        RecordIdentity::binding(&self.address, &self.launch_id, binding_id)
     }
 
     /// Why this event may no longer write, given the pane's claim as read
@@ -229,17 +235,7 @@ impl ResolvedLaunch<'_> {
 
     /// [`Self::lapsed`] for a caller whose commit did not read the claim.
     fn lapsed_now(&self) -> Result<Option<LifecycleResult>> {
-        Ok(self.lapsed(load_claim(&self.root, &self.address)?.as_ref()))
-    }
-}
-
-/// A plan that writes nothing and reports `result`.
-fn refusal(result: LifecycleResult) -> CommitPlan<Mutation> {
-    CommitPlan {
-        result: Mutation::plain(result),
-        replacements: Vec::new(),
-        removals: Vec::new(),
-        private_dirs: Vec::new(),
+        Ok(self.lapsed(read_claim(&self.root, &self.address)?.as_ref()))
     }
 }
 
@@ -282,24 +278,16 @@ fn inherited_claim_matches(claim: &Value, address: &PaneAddress, launch_id: &str
             .is_ok_and(|mode| mode == crate::launch::ClaimMode::Shell)
 }
 
-fn record_matches_binding(
-    record: &Value,
-    address: &PaneAddress,
-    launch_id: &str,
-    binding_id: &str,
-) -> bool {
-    record_matches_launch(record, address, launch_id)
-        && record.get("binding_id").and_then(Value::as_str) == Some(binding_id)
-}
-
+/// The binding a launch's current-binding `pointer` selects, read by the
+/// launch's own identity. A pointer whose binding is missing is an error.
 fn read_current(
-    launch: &Path,
+    root: &Path,
     pointer: Option<Value>,
     address: &PaneAddress,
     launch_id: &str,
-) -> Result<(Option<Value>, Option<Value>)> {
+) -> Result<Option<Value>> {
     let Some(pointer) = pointer else {
-        return Ok((None, None));
+        return Ok(None);
     };
     let binding_id = pointer
         .get("binding_id")
@@ -307,28 +295,13 @@ fn read_current(
         .ok_or_else(|| {
             AttentionError::new("record_invalid", "current binding pointer is invalid")
         })?;
-    if !record_matches_binding(&pointer, address, launch_id, binding_id) {
-        return Err(AttentionError::new(
-            "record_invalid",
-            "current binding pointer identity mismatches its path",
-        ));
-    }
-    let binding = read_record(
-        &launch
-            .join("bindings")
-            .join(binding_id)
-            .join("binding.json"),
-        Some("binding"),
+    read_record_at(
+        root,
+        "binding",
         &RecordIdentity::binding(address, launch_id, binding_id),
     )?
-    .ok_or_else(|| AttentionError::new("record_invalid", "current binding record is missing"))?;
-    if !record_matches_binding(&binding, address, launch_id, binding_id) {
-        return Err(AttentionError::new(
-            "record_invalid",
-            "current binding record identity mismatches its path",
-        ));
-    }
-    Ok((Some(pointer), Some(binding)))
+    .map(Some)
+    .ok_or_else(|| AttentionError::new("record_invalid", "current binding record is missing"))
 }
 
 fn provider_name(event: &ProviderEvent) -> Result<&'static str> {
@@ -346,12 +319,41 @@ fn event_binding_id(event: &ProviderEvent, launch_id: &str) -> Result<String> {
     Ok(binding_id(provider_name(event)?, session, launch_id))
 }
 
-fn load_claim(root: &Path, address: &PaneAddress) -> Result<Option<Value>> {
-    read_record(
-        &pane_path(root, address).join("claim.json"),
-        Some("claim"),
-        &RecordIdentity::pane(address),
-    )
+/// The pane's claim, when it is the shell claim an inherited `launch_id` came
+/// from; see [`inherited_claim_matches`].
+fn inherited_claim(root: &Path, address: &PaneAddress, launch_id: &str) -> Result<Option<Value>> {
+    Ok(read_claim(root, address)?
+        .filter(|claim| inherited_claim_matches(claim, address, launch_id)))
+}
+
+/// The state root, the pane and the launch id a process inherited from the
+/// shell that claimed its pane, as its environment names them.
+fn inherited(env: &BTreeMap<String, String>) -> Result<(PathBuf, PaneAddress, String)> {
+    let root = state_root(env)?;
+    let (address, _) = pane_address(env)?;
+    let launch_id = canonical_uuid(
+        env.get("WEZTERM_ATTENTION_LAUNCH_ID").map(String::as_str),
+        "WEZTERM_ATTENTION_LAUNCH_ID",
+    )?;
+    Ok((root, address, launch_id))
+}
+
+/// The launch a process inherited, resolved against the pane's claim; `None`
+/// when that claim is not the shell claim the launch id came from.
+fn inherited_launch<'a>(env: &BTreeMap<String, String>) -> Result<Option<ResolvedLaunch<'a>>> {
+    let (root, address, launch_id) = inherited(env)?;
+    let Some(claim) = inherited_claim(&root, &address, &launch_id)? else {
+        return Ok(None);
+    };
+    Ok(Some(ResolvedLaunch {
+        evidence: None,
+        root,
+        address,
+        launch_id,
+        claim,
+        host: None,
+        publication_diagnostic: None,
+    }))
 }
 
 /// Resolve the launch an agent event belongs to.
@@ -368,7 +370,7 @@ fn resolve_launch<'a>(
 ) -> Result<ResolvedLaunch<'a>> {
     let root = state_root(env)?;
     let (address, _) = pane_address(env)?;
-    let claim = load_claim(&root, &address)?;
+    let claim = read_claim(&root, &address)?;
     if let Some(inherited) = env.get("WEZTERM_ATTENTION_LAUNCH_ID") {
         let inherited = canonical_uuid(Some(inherited), "WEZTERM_ATTENTION_LAUNCH_ID")?;
         return match claim {
@@ -440,82 +442,52 @@ fn binding_mutation(
         AttentionError::new("record_invalid", "binding event has no start source")
     })?;
     let binding_id = binding_id(provider, session, &resolved.launch_id);
-    let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
-    let binding_path = launch
-        .join("bindings")
-        .join(&binding_id)
-        .join("binding.json");
-    let pointer_path = launch.join("current-binding.json");
-    let (mutation, _) = commit_nested_with(
+    let binding_path = resolved
+        .binding(&binding_id)
+        .path(&resolved.root, "binding")?;
+    let pointer_path = resolved.launch().path(&resolved.root, "current_binding")?;
+    let (mutation, _) = commit(
         &resolved.root,
-        &launch.join(".lock"),
-        &resolved.claim_lock(),
-        &pointer_path,
-        Some("current_binding"),
-        &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
-        Duration::from_secs(2),
+        &[&resolved.launch_lock(), &resolved.claim_lock()],
+        "current_binding",
+        &resolved.launch(),
         |pointer| {
             if let Some(lapsed) = resolved.lapsed_now()? {
-                return Ok(refusal(lapsed));
+                return Ok(CommitPlan::reporting(Mutation::plain(lapsed)));
             }
-            let (_, current) = read_current(
-                &launch,
+            let current = read_current(
+                &resolved.root,
                 pointer.clone(),
                 &resolved.address,
                 &resolved.launch_id,
             )?;
-            let existing = read_record(
-                &binding_path,
-                Some("binding"),
-                &RecordIdentity::binding(&resolved.address, &resolved.launch_id, &binding_id),
-            )?;
-            if let Some(existing) = &existing
-                && !record_matches_binding(
-                    existing,
-                    &resolved.address,
-                    &resolved.launch_id,
-                    &binding_id,
-                )
-            {
-                return Err(AttentionError::new(
-                    "record_invalid",
-                    "binding identity mismatches its path",
-                ));
-            }
+            let existing =
+                read_record_at(&resolved.root, "binding", &resolved.binding(&binding_id))?;
             if let Some(current) = &current
                 && current.get("binding_id").and_then(Value::as_str) != Some(binding_id.as_str())
             {
                 let current_order = current["observed_mono_ns"].as_str().unwrap_or("");
                 if observation < current_order {
-                    return Ok(CommitPlan {
-                        result: Mutation::plain(LifecycleResult::diagnosed(
+                    return Ok(CommitPlan::reporting(Mutation::plain(
+                        LifecycleResult::diagnosed(
                             Disposition::Ignored,
                             "binding_conflict",
                             "older binding selection was ignored",
-                        )),
-                        replacements: Vec::new(),
-                        removals: Vec::new(),
-                        private_dirs: Vec::new(),
-                    });
+                        ),
+                    )));
                 }
                 if observation == current_order {
-                    return Ok(CommitPlan {
-                        result: Mutation::plain(LifecycleResult::diagnosed(
+                    return Ok(CommitPlan::reporting(Mutation::plain(
+                        LifecycleResult::diagnosed(
                             Disposition::Conflict,
                             "binding_conflict",
                             "equal binding order names a different binding",
-                        )),
-                        replacements: Vec::new(),
-                        removals: Vec::new(),
-                        private_dirs: Vec::new(),
-                    });
+                        ),
+                    )));
                 }
                 let current_id = current["binding_id"].as_str().unwrap_or("");
-                let current_end = read_record(
-                    &launch.join("bindings").join(current_id).join("end.json"),
-                    Some("binding_end"),
-                    &RecordIdentity::binding(&resolved.address, &resolved.launch_id, current_id),
-                )?;
+                let current_end =
+                    read_record_at(&resolved.root, "binding_end", &resolved.binding(current_id))?;
                 let current_ended = current_end
                     .as_ref()
                     .is_some_and(|end| ends_binding(end, current));
@@ -525,16 +497,13 @@ fn binding_mutation(
                     _ => false,
                 };
                 if matches!(source, "compact" | "reload") || (!current_ended && !replace) {
-                    return Ok(CommitPlan {
-                        result: Mutation::plain(LifecycleResult::diagnosed(
+                    return Ok(CommitPlan::reporting(Mutation::plain(
+                        LifecycleResult::diagnosed(
                             Disposition::Conflict,
                             "binding_conflict",
                             "provider start cannot replace the active binding",
-                        )),
-                        replacements: Vec::new(),
-                        removals: Vec::new(),
-                        private_dirs: Vec::new(),
-                    });
+                        ),
+                    )));
                 }
             }
 
@@ -646,10 +615,8 @@ fn binding_mutation(
                 );
             }
             Ok(CommitPlan {
-                result: Mutation::plain(result),
                 replacements,
-                removals: Vec::new(),
-                private_dirs: Vec::new(),
+                ..CommitPlan::reporting(Mutation::plain(result))
             })
         },
         |mutation| {
@@ -703,24 +670,171 @@ fn semantic_activity(mut value: Value) -> Value {
     value
 }
 
-// The plugin acknowledges a publication by naming its `event_id` in `ack.json`
-// and shows nothing for that id again, so an acknowledged activity is no longer
-// on screen: repeating the same semantic activity has to publish a fresh
+// An acknowledgement names the `event_id` the user was shown in `ack.json`, and
+// the plugin shows nothing for that id again, so an acknowledged activity is no
+// longer on screen: repeating the same semantic activity has to publish a fresh
 // `event_id` rather than report the acknowledged one as still current. The
-// plugin owns this record, so an unreadable one counts as no acknowledgement
-// instead of failing the event.
-fn acknowledged(activity_path: &Path, identity: &RecordIdentity, existing: &Value) -> bool {
-    let RecordRead::Present(ack) = read_record_typed(
-        &activity_path.with_file_name("ack.json"),
-        Some("acknowledgement"),
-        identity,
-    ) else {
+// acknowledgement is the user's record, not a hook's, so an unreadable one
+// counts as no acknowledgement instead of failing the event.
+fn acknowledged(root: &Path, identity: &RecordIdentity, existing: &Value) -> bool {
+    let RecordRead::Present(ack) = read_record_typed_at(root, "acknowledgement", identity) else {
         return false;
     };
     let Some(event_id) = existing["event_id"].as_str() else {
         return false;
     };
     ack["target"] == existing["target"] && ack["activity_event_id"].as_str() == Some(event_id)
+}
+
+/// Whether the clear watermark `clear` covers what was observed at
+/// `observation`: it was observed at or before the clear. No clear covers
+/// nothing.
+fn covered_by_clear(observation: &str, clear: Option<&Value>) -> bool {
+    clear.is_some_and(|clear| observation <= clear["observed_mono_ns"].as_str().unwrap_or(""))
+}
+
+/// Whether `activity` is newer than the clear watermark `clear` of its slot.
+fn uncleared(activity: &Value, clear: Option<&Value>) -> bool {
+    !covered_by_clear(activity["observed_mono_ns"].as_str().unwrap_or(""), clear)
+}
+
+/// Where the activity of launch `launch_id` in the pane at `address` is
+/// kept, as the launch's current binding record `current` decides: that
+/// binding's slot, with the slot's clear watermark, or without a binding the
+/// launch's own slot, which has none.
+struct ActivitySlot {
+    identity: RecordIdentity,
+    target: Value,
+    clear: Option<Value>,
+}
+
+fn activity_slot(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    current: Option<&Value>,
+) -> Result<ActivitySlot> {
+    Ok(
+        match current
+            .and_then(|record| record.get("binding_id"))
+            .and_then(Value::as_str)
+        {
+            Some(binding_id) => {
+                let identity = RecordIdentity::binding(address, launch_id, binding_id);
+                ActivitySlot {
+                    clear: read_record_at(root, "activity_clear", &identity)?,
+                    identity,
+                    target: json!({"kind":"binding","binding_id":binding_id}),
+                }
+            }
+            None => ActivitySlot {
+                identity: RecordIdentity::launch(address, launch_id),
+                target: json!({"kind":"launch"}),
+                clear: None,
+            },
+        },
+    )
+}
+
+/// Whether the activity `existing` is still on screen: newer than the clear
+/// watermark of its slot, and not acknowledged by the user.
+fn activity_visible(
+    root: &Path,
+    identity: &RecordIdentity,
+    existing: Option<&Value>,
+    clear: Option<&Value>,
+) -> bool {
+    match existing {
+        Some(activity) => uncleared(activity, clear) && !acknowledged(root, identity, activity),
+        None => clear.is_none(),
+    }
+}
+
+/// What an activity does to the slot it is written in: its result, the
+/// activity that stands in the slot afterwards, and the record written when
+/// it takes the slot.
+struct ActivityOutcome {
+    result: LifecycleResult,
+    standing: Option<Value>,
+    written: Option<Value>,
+}
+
+/// The one ordering every activity writer applies. An activity with content
+/// `base`, observed at `observation`, meets the activity `existing` in its
+/// slot and the slot's `clear` watermark. The same content still `visible`
+/// is a replay of it; a `held` activity keeps the slot; otherwise the later
+/// observation takes the slot, unless the clear already covers it. An equal
+/// observation with other content is a conflict.
+fn plan_activity(
+    existing: Option<Value>,
+    clear: Option<&Value>,
+    visible: bool,
+    held: bool,
+    base: &Value,
+    observation: &str,
+    written_at: &str,
+) -> ActivityOutcome {
+    let kept = |result, standing| ActivityOutcome {
+        result,
+        standing,
+        written: None,
+    };
+    let covered = || covered_by_clear(observation, clear);
+    if let Some(existing) = existing {
+        if visible && semantic_activity(existing.clone()) == *base {
+            let mut result = LifecycleResult::new(Disposition::Skipped);
+            result.event_id = existing["event_id"].as_str().map(str::to_owned);
+            return kept(result, Some(existing));
+        }
+        if held {
+            return kept(LifecycleResult::new(Disposition::Ignored), Some(existing));
+        }
+        let order = existing["observed_mono_ns"].as_str().unwrap_or("");
+        if observation < order {
+            return kept(LifecycleResult::new(Disposition::Ignored), Some(existing));
+        }
+        if observation == order {
+            return kept(
+                LifecycleResult::diagnosed(
+                    Disposition::Conflict,
+                    "record_invalid",
+                    "equal activity order has different content",
+                ),
+                Some(existing),
+            );
+        }
+        if covered() {
+            return kept(
+                LifecycleResult::diagnosed(
+                    Disposition::Ignored,
+                    "binding_conflict",
+                    "activity observation is covered by activity clear",
+                ),
+                Some(existing),
+            );
+        }
+    } else if covered() {
+        return kept(
+            LifecycleResult::diagnosed(
+                Disposition::Ignored,
+                "binding_conflict",
+                "activity observation is covered by activity clear",
+            ),
+            None,
+        );
+    }
+    let event_id = Uuid::new_v4().to_string();
+    let mut record = base.clone();
+    record["event_id"] = json!(event_id);
+    record["observed_mono_ns"] = json!(observation);
+    record["written_at_unix_ns"] = json!(written_at);
+    let mut result = LifecycleResult::new(Disposition::Applied);
+    result.event_id = Some(event_id);
+    ActivityOutcome {
+        result,
+        standing: Some(record.clone()),
+        written: Some(record),
+    }
 }
 
 // Called inside the selected launch's lock. Rich rejection does not discard an
@@ -746,43 +860,35 @@ fn append_observation(
             return Ok(None);
         };
         let binding_id = event_binding_id(event, &resolved.launch_id)?;
-        let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
-        let claim = load_claim(&resolved.root, &resolved.address)?;
         // Only an inherited launch reaches here with an observation, and the
         // claim reread under the lock is never an agent's own with its launch
         // id: an agent's claim is always made with a fresh launch id, which no
         // shell exported for this event to inherit.
-        if claim.as_ref().is_none_or(|record| {
-            !inherited_claim_matches(record, &resolved.address, &resolved.launch_id)
-        }) {
+        if inherited_claim(&resolved.root, &resolved.address, &resolved.launch_id)?.is_none() {
             return Err(AttentionError::new(
                 "claim_stale",
                 "lifecycle claim changed",
             ));
         }
-        let pointer = read_record(
-            &launch.join("current-binding.json"),
-            Some("current_binding"),
-            &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
+        let pointer = read_record_at(&resolved.root, "current_binding", &resolved.launch())?;
+        let binding = read_current(
+            &resolved.root,
+            pointer,
+            &resolved.address,
+            &resolved.launch_id,
         )?;
-        let (_, binding) = read_current(&launch, pointer, &resolved.address, &resolved.launch_id)?;
-        if binding.as_ref().is_none_or(|record| {
-            !record_matches_binding(record, &resolved.address, &resolved.launch_id, &binding_id)
-        }) {
+        if binding
+            .as_ref()
+            .is_none_or(|record| record["binding_id"].as_str() != Some(binding_id.as_str()))
+        {
             return Err(AttentionError::new(
                 "claim_stale",
                 "lifecycle binding changed",
             ));
         }
-        let path = launch
-            .join("bindings")
-            .join(&binding_id)
-            .join("lifecycle.json");
-        let existing = read_record(
-            &path,
-            Some("lifecycle_snapshot"),
-            &RecordIdentity::binding(&resolved.address, &resolved.launch_id, &binding_id),
-        )?;
+        let identity = resolved.binding(&binding_id);
+        let path = identity.path(&resolved.root, "lifecycle_snapshot")?;
+        let existing = read_record(&path, Some("lifecycle_snapshot"), &identity)?;
         let mut snapshot = match existing {
             Some(value) => serde_json::from_value::<LifecycleSnapshot>(value).map_err(|_| {
                 AttentionError::new("record_invalid", "lifecycle snapshot is invalid")
@@ -840,30 +946,21 @@ fn apply_observation(
     observation: &str,
     written_at: &str,
 ) -> Result<LifecycleResult> {
-    let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
-    let (mutation, _) = commit_nested_with(
+    let (mutation, _) = commit(
         &resolved.root,
-        &launch.join(".lock"),
-        &resolved.claim_lock(),
-        &launch.join("current-binding.json"),
-        Some("current_binding"),
-        &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
-        Duration::from_secs(2),
+        &[&resolved.launch_lock(), &resolved.claim_lock()],
+        "current_binding",
+        &resolved.launch(),
         |_| {
             if let Some(lapsed) = resolved.lapsed_now()? {
-                return Ok(refusal(lapsed));
+                return Ok(CommitPlan::reporting(Mutation::plain(lapsed)));
             }
             Ok(append_observation(
                 resolved,
                 event,
                 observation,
                 written_at,
-                CommitPlan {
-                    result: Mutation::plain(LifecycleResult::new(Disposition::Applied)),
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                },
+                CommitPlan::reporting(Mutation::plain(LifecycleResult::new(Disposition::Applied))),
             ))
         },
         |mutation| {
@@ -883,37 +980,32 @@ fn apply_observation(
 const WAITING_FOR_PERMISSION: &str = "permission";
 
 /// Whether a child that asked for permission at or after `since` has not
-/// emitted anything since. A parent clear or the retention floor ends the wait;
-/// the presence TTL does not, because a child blocked on an approval prompt
-/// sends nothing to refresh it. A fence or presence that cannot be read answers
-/// no, which leaves the activity to its usual order.
-fn child_still_waits(
-    resolved: &ResolvedLaunch,
-    binding_dir: &Path,
-    binding_id: &str,
-    since: &str,
-) -> bool {
-    let identity = RecordIdentity::binding(&resolved.address, &resolved.launch_id, binding_id);
-    let fence = |name: &str, kind: &str, field: &str| match read_record_typed(
-        &binding_dir.join(name),
-        Some(kind),
-        &identity,
-    ) {
-        RecordRead::Present(value) => Ok(value[field].as_str().map(str::to_owned)),
-        RecordRead::Missing => Ok(None),
-        _ => Err(()),
-    };
+/// emitted anything since: the fence of
+/// [`crate::protocol::eligible_subagent_presence`] without its TTL. A parent
+/// clear or the retention floor ends the wait; the presence TTL does not,
+/// because a child blocked on an approval prompt sends nothing to refresh it.
+/// A fence or presence that cannot be read answers no, which leaves the
+/// activity to its usual order.
+fn child_still_waits(resolved: &ResolvedLaunch, binding_id: &str, since: &str) -> bool {
+    let identity = resolved.binding(binding_id);
+    let fence =
+        |kind: &str, field: &str| match read_record_typed_at(&resolved.root, kind, &identity) {
+            RecordRead::Present(value) => Ok(value[field].as_str().map(str::to_owned)),
+            RecordRead::Missing => Ok(None),
+            _ => Err(()),
+        };
     let (Ok(clear), Ok(floor)) = (
-        fence("agents-clear.json", "subagent_clear", "observed_mono_ns"),
-        fence(
-            "agents-floor.json",
-            "subagent_retention_floor",
-            "floor_mono_ns",
-        ),
+        fence("subagent_clear", "observed_mono_ns"),
+        fence("subagent_retention_floor", "floor_mono_ns"),
     ) else {
         return false;
     };
-    let Ok(entries) = std::fs::read_dir(binding_dir.join("agents")) else {
+    let Ok(entries) = std::fs::read_dir(agents_dir(
+        &resolved.root,
+        &resolved.address,
+        &resolved.launch_id,
+        binding_id,
+    )) else {
         return false;
     };
     entries.flatten().any(|entry| {
@@ -953,61 +1045,46 @@ fn apply_activity(
     parent_stop: bool,
 ) -> Result<LifecycleResult> {
     let binding_id = event_binding_id(event, &resolved.launch_id)?;
-    let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
-    let binding_dir = launch.join("bindings").join(&binding_id);
-    let activity_path = binding_dir.join("activity.json");
-    let pointer_path = launch.join("current-binding.json");
+    let identity = resolved.binding(&binding_id);
+    let activity_path = identity.path(&resolved.root, "activity")?;
     let base = activity_base(resolved, event, &binding_id)?;
-    let (mutation, ()) = commit_nested_with(
+    let (mutation, ()) = commit(
         &resolved.root,
-        &launch.join(".lock"),
-        &resolved.claim_lock(),
-        &pointer_path,
-        Some("current_binding"),
-        &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
-        Duration::from_secs(2),
+        &[&resolved.launch_lock(), &resolved.claim_lock()],
+        "current_binding",
+        &resolved.launch(),
         |pointer| {
             if let Some(lapsed) = resolved.lapsed_now()? {
-                return Ok(refusal(lapsed));
+                return Ok(CommitPlan::reporting(Mutation::plain(lapsed)));
             }
-            let (_, current) =
-                read_current(&launch, pointer, &resolved.address, &resolved.launch_id)?;
+            let current = read_current(
+                &resolved.root,
+                pointer,
+                &resolved.address,
+                &resolved.launch_id,
+            )?;
             if current
                 .as_ref()
                 .and_then(|record| record.get("binding_id"))
                 .and_then(Value::as_str)
                 != Some(binding_id.as_str())
             {
-                return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::diagnosed(
+                return Ok(CommitPlan::reporting(Mutation::plain(
+                    LifecycleResult::diagnosed(
                         Disposition::Ignored,
                         "claim_stale",
                         "activity event is not for the current binding",
-                    )),
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                });
+                    ),
+                )));
             }
-            let identity =
-                RecordIdentity::binding(&resolved.address, &resolved.launch_id, &binding_id);
             let existing = read_record(&activity_path, Some("activity"), &identity)?;
-            let clear = read_record(
-                &binding_dir.join("activity-clear.json"),
-                Some("activity_clear"),
-                &identity,
-            )?;
-            let visible = clear.as_ref().is_none_or(|clear| {
-                existing.as_ref().is_some_and(|activity| {
-                    activity["observed_mono_ns"].as_str().unwrap_or("")
-                        > clear["observed_mono_ns"].as_str().unwrap_or("")
-                })
-            }) && existing
-                .as_ref()
-                .is_none_or(|activity| !acknowledged(&activity_path, &identity, activity));
+            let clear = read_record_at(&resolved.root, "activity_clear", &identity)?;
+            let visible =
+                activity_visible(&resolved.root, &identity, existing.as_ref(), clear.as_ref());
             // A lead that waits on a sub-agent keeps calling tools, and each
             // call is thinking. While a child that asked for permission is
-            // still waiting, its notify is what the user needs to see. A
+            // still waiting, its notify is what the user needs to see, and
+            // the lead's next tool call is expected, not a conflict. A
             // prompt, or anything but thinking, replaces it as usual.
             let held = event.agent_id.is_none()
                 && base["type"] == "thinking"
@@ -1017,80 +1094,27 @@ fn apply_activity(
                     activity["type"] == "notify"
                         && child_still_waits(
                             resolved,
-                            &binding_dir,
                             &binding_id,
                             activity["observed_mono_ns"].as_str().unwrap_or(""),
                         )
                 });
-            let mut replacements = Vec::new();
-            let (result, activity) = if let Some(existing) = existing {
-                if visible && semantic_activity(existing.clone()) == base {
-                    let mut result = LifecycleResult::new(Disposition::Skipped);
-                    result.event_id = existing["event_id"].as_str().map(str::to_owned);
-                    (result, Some(existing))
-                } else if held {
-                    // The notify stands for a sub-agent still waiting on the
-                    // user; the lead's next tool call is expected, not a conflict.
-                    (LifecycleResult::new(Disposition::Ignored), Some(existing))
-                } else {
-                    let order = existing["observed_mono_ns"].as_str().unwrap_or("");
-                    if observation < order {
-                        (LifecycleResult::new(Disposition::Ignored), Some(existing))
-                    } else if observation == order {
-                        (
-                            LifecycleResult::diagnosed(
-                                Disposition::Conflict,
-                                "record_invalid",
-                                "equal activity order has different content",
-                            ),
-                            Some(existing),
-                        )
-                    } else if clear.as_ref().is_some_and(|clear| {
-                        observation <= clear["observed_mono_ns"].as_str().unwrap_or("")
-                    }) {
-                        (
-                            LifecycleResult::diagnosed(
-                                Disposition::Ignored,
-                                "binding_conflict",
-                                "activity observation is covered by activity clear",
-                            ),
-                            Some(existing),
-                        )
-                    } else {
-                        let event_id = Uuid::new_v4().to_string();
-                        let mut record = base.clone();
-                        record["event_id"] = json!(event_id);
-                        record["observed_mono_ns"] = json!(observation);
-                        record["written_at_unix_ns"] = json!(written_at);
-                        replacements
-                            .push(Replacement::always(activity_path.clone(), record.clone()));
-                        let mut result = LifecycleResult::new(Disposition::Applied);
-                        result.event_id = Some(event_id);
-                        (result, Some(record))
-                    }
-                }
-            } else if clear.as_ref().is_some_and(|clear| {
-                observation <= clear["observed_mono_ns"].as_str().unwrap_or("")
-            }) {
-                (
-                    LifecycleResult::diagnosed(
-                        Disposition::Ignored,
-                        "binding_conflict",
-                        "activity observation is covered by activity clear",
-                    ),
-                    None,
-                )
-            } else {
-                let event_id = Uuid::new_v4().to_string();
-                let mut record = base.clone();
-                record["event_id"] = json!(event_id);
-                record["observed_mono_ns"] = json!(observation);
-                record["written_at_unix_ns"] = json!(written_at);
-                replacements.push(Replacement::always(activity_path.clone(), record.clone()));
-                let mut result = LifecycleResult::new(Disposition::Applied);
-                result.event_id = Some(event_id);
-                (result, Some(record))
-            };
+            let ActivityOutcome {
+                result,
+                standing: activity,
+                written,
+            } = plan_activity(
+                existing,
+                clear.as_ref(),
+                visible,
+                held,
+                &base,
+                observation,
+                written_at,
+            );
+            let mut replacements: Vec<_> = written
+                .map(|record| Replacement::always(activity_path.clone(), record))
+                .into_iter()
+                .collect();
             // Only a child's permission request reaches here with an agent id.
             // Its presence marks the child as waiting until its next tool call
             // or its stop. The presence only holds the notify against the
@@ -1130,7 +1154,7 @@ fn apply_activity(
                     "event_id": surviving_activity["event_id"],
                     "observed_mono_ns": surviving_order,
                 });
-                let clear_path = binding_dir.join("agents-clear.json");
+                let clear_path = identity.path(&resolved.root, "subagent_clear")?;
                 let existing_clear = read_record(&clear_path, Some("subagent_clear"), &identity)?;
                 if existing_clear.as_ref().is_none_or(|current| {
                     current["observed_mono_ns"].as_str().unwrap_or("") < surviving_order
@@ -1140,16 +1164,13 @@ fn apply_activity(
                     current["observed_mono_ns"].as_str().unwrap_or("") == surviving_order
                         && current != &desired
                 }) {
-                    return Ok(CommitPlan {
-                        result: Mutation::plain(LifecycleResult::diagnosed(
+                    return Ok(CommitPlan::reporting(Mutation::plain(
+                        LifecycleResult::diagnosed(
                             Disposition::Conflict,
                             "record_invalid",
                             "equal parent-clear order has different content",
-                        )),
-                        replacements: Vec::new(),
-                        removals: Vec::new(),
-                        private_dirs: Vec::new(),
-                    });
+                        ),
+                    )));
                 }
             }
             let mut plan = append_observation(
@@ -1158,13 +1179,8 @@ fn apply_activity(
                 observation,
                 written_at,
                 CommitPlan {
-                    result: Mutation {
-                        result,
-                        lifecycle_replacement: None,
-                    },
                     replacements,
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
+                    ..CommitPlan::reporting(Mutation::plain(result))
                 },
             );
             if let Some(error) = presence_error {
@@ -1200,10 +1216,7 @@ fn apply_observed_outputs_with(
     confirm_native(resolved, binding_id, mutation);
     if let Some(replacement) = &mutation.lifecycle_replacement {
         replace(replacement).map_err(|mut error| {
-            error
-                .diagnostic
-                .context
-                .insert("lifecycle_write".into(), json!("unconfirmed"));
+            error.diagnostic.set("lifecycle_write", "unconfirmed");
             error
         })?;
         if let Some(cell) = &resolved.evidence {
@@ -1222,13 +1235,14 @@ fn safe_mark_text(value: &str, field: &str, maximum: usize) -> Result<()> {
     Ok(())
 }
 
-/// The plugin's Alt+B owns the review named "user"; a CLI writer that used
-/// the name would share that file and clear or forge the user's own flag.
-const PLUGIN_REVIEW_OWNER: &str = "user";
+/// The review key owns the review named "user", the user's own flag, and
+/// only `attention plugin` writes it; a producer that used the name would
+/// share that file and clear or forge the user's flag.
+const USER_REVIEW_OWNER: &str = "user";
 
 fn safe_mark_source(source: &str) -> Result<()> {
     safe_mark_text(source, "source", manifest()?.limits.safe_label_max_bytes)?;
-    if source == PLUGIN_REVIEW_OWNER {
+    if source == USER_REVIEW_OWNER {
         return Err(AttentionError::usage(
             "source \"user\" is reserved for the plugin's review key",
         ));
@@ -1262,39 +1276,17 @@ pub fn apply_mark_activity(
     {
         return Err(AttentionError::usage("ttl_ms must be positive"));
     }
-    let root = state_root(env)?;
-    let (address, _) = pane_address(env)?;
-    let launch_id = canonical_uuid(
-        env.get("WEZTERM_ATTENTION_LAUNCH_ID").map(String::as_str),
-        "WEZTERM_ATTENTION_LAUNCH_ID",
-    )?;
-    let Some(claim) = load_claim(&root, &address)?
-        .filter(|claim| inherited_claim_matches(claim, &address, &launch_id))
-    else {
+    let Some(resolved) = inherited_launch(env)? else {
         return Err(AttentionError::new(
             "claim_stale",
             "current launch does not match claim",
         ));
     };
-    let resolved = ResolvedLaunch {
-        evidence: None,
-        root,
-        address,
-        launch_id,
-        claim,
-        host: None,
-        publication_diagnostic: None,
-    };
-    let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
-    let pointer_path = launch.join("current-binding.json");
-    let (mutation, ()) = commit_nested_with(
+    let (mutation, ()) = commit(
         &resolved.root,
-        &launch.join(".lock"),
-        &resolved.claim_lock(),
-        &pointer_path,
-        Some("current_binding"),
-        &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
-        Duration::from_secs(2),
+        &[&resolved.launch_lock(), &resolved.claim_lock()],
+        "current_binding",
+        &resolved.launch(),
         |pointer| {
             if resolved.lapsed_now()?.is_some() {
                 return Err(AttentionError::new(
@@ -1302,32 +1294,23 @@ pub fn apply_mark_activity(
                     "current launch does not match claim",
                 ));
             }
-            let (_, current) =
-                read_current(&launch, pointer, &resolved.address, &resolved.launch_id)?;
-            let binding_id = current
-                .as_ref()
-                .and_then(|record| record.get("binding_id"))
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            let (path, target, clear) = match &binding_id {
-                Some(binding_id) => {
-                    let directory = launch.join("bindings").join(binding_id);
-                    (
-                        directory.join("activity.json"),
-                        json!({"kind":"binding","binding_id":binding_id}),
-                        read_record(
-                            &directory.join("activity-clear.json"),
-                            Some("activity_clear"),
-                            &RecordIdentity::binding(
-                                &resolved.address,
-                                &resolved.launch_id,
-                                binding_id,
-                            ),
-                        )?,
-                    )
-                }
-                None => (launch.join("activity.json"), json!({"kind":"launch"}), None),
-            };
+            let current = read_current(
+                &resolved.root,
+                pointer,
+                &resolved.address,
+                &resolved.launch_id,
+            )?;
+            let ActivitySlot {
+                identity: activity_identity,
+                target,
+                clear,
+            } = activity_slot(
+                &resolved.root,
+                &resolved.address,
+                &resolved.launch_id,
+                current.as_ref(),
+            )?;
+            let path = activity_identity.path(&resolved.root, "activity")?;
             let mut base = json!({
                 "kind": "activity",
                 "schema": manifest()?.record_schema,
@@ -1346,118 +1329,47 @@ pub fn apply_mark_activity(
             if let Some(ttl_ms) = ttl_ms {
                 base["ttl_ms"] = json!(ttl_ms);
             }
-            let activity_identity = match binding_id.as_deref() {
-                Some(binding_id) => {
-                    RecordIdentity::binding(&resolved.address, &resolved.launch_id, binding_id)
-                }
-                None => RecordIdentity::launch(&resolved.address, &resolved.launch_id),
-            };
             let existing = read_record(&path, Some("activity"), &activity_identity)?;
-            let visible = clear.as_ref().is_none_or(|clear| {
-                existing.as_ref().is_some_and(|activity| {
-                    activity["observed_mono_ns"].as_str().unwrap_or("")
-                        > clear["observed_mono_ns"].as_str().unwrap_or("")
-                })
-            }) && existing
-                .as_ref()
-                .is_none_or(|activity| !acknowledged(&path, &activity_identity, activity));
-            let mut replacements = Vec::new();
-            let result = if let Some(existing) = existing {
-                if visible && semantic_activity(existing.clone()) == base {
-                    let mut result = LifecycleResult::new(Disposition::Skipped);
-                    result.event_id = existing["event_id"].as_str().map(str::to_owned);
-                    result
-                } else {
-                    let order = existing["observed_mono_ns"].as_str().unwrap_or("");
-                    if observation < order {
-                        LifecycleResult::new(Disposition::Ignored)
-                    } else if observation == order {
-                        LifecycleResult::diagnosed(
-                            Disposition::Conflict,
-                            "record_invalid",
-                            "equal activity order has different content",
-                        )
-                    } else if clear.as_ref().is_some_and(|clear| {
-                        observation <= clear["observed_mono_ns"].as_str().unwrap_or("")
-                    }) {
-                        LifecycleResult::diagnosed(
-                            Disposition::Ignored,
-                            "binding_conflict",
-                            "activity observation is covered by activity clear",
-                        )
-                    } else {
-                        let event_id = Uuid::new_v4().to_string();
-                        let mut record = base.clone();
-                        record["event_id"] = json!(event_id);
-                        record["observed_mono_ns"] = json!(observation);
-                        record["written_at_unix_ns"] = json!(written_at);
-                        replacements.push(Replacement::always(path.clone(), record));
-                        let mut result = LifecycleResult::new(Disposition::Applied);
-                        result.event_id = Some(event_id);
-                        result
-                    }
-                }
-            } else if clear.as_ref().is_some_and(|clear| {
-                observation <= clear["observed_mono_ns"].as_str().unwrap_or("")
-            }) {
-                LifecycleResult::diagnosed(
-                    Disposition::Ignored,
-                    "binding_conflict",
-                    "activity observation is covered by activity clear",
-                )
-            } else {
-                let event_id = Uuid::new_v4().to_string();
-                let mut record = base;
-                record["event_id"] = json!(event_id);
-                record["observed_mono_ns"] = json!(observation);
-                record["written_at_unix_ns"] = json!(written_at);
-                replacements.push(Replacement::always(path, record));
-                let mut result = LifecycleResult::new(Disposition::Applied);
-                result.event_id = Some(event_id);
-                result
-            };
+            let visible = activity_visible(
+                &resolved.root,
+                &activity_identity,
+                existing.as_ref(),
+                clear.as_ref(),
+            );
+            let ActivityOutcome {
+                result, written, ..
+            } = plan_activity(
+                existing,
+                clear.as_ref(),
+                visible,
+                false,
+                &base,
+                observation,
+                written_at,
+            );
+            let replacements: Vec<_> = written
+                .map(|record| Replacement::always(path, record))
+                .into_iter()
+                .collect();
             Ok(CommitPlan {
-                result: Mutation {
-                    result,
-                    lifecycle_replacement: None,
-                },
                 replacements,
-                removals: Vec::new(),
-                private_dirs: Vec::new(),
+                ..CommitPlan::reporting(Mutation::plain(result))
             })
         },
-        |mutation| {
-            let binding_id = read_record(
-                &pointer_path,
-                Some("current_binding"),
-                &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
-            )?
-            .and_then(|pointer| pointer["binding_id"].as_str().map(str::to_owned));
-            apply_observed_outputs(&resolved, binding_id.as_deref().unwrap_or(""), mutation)
-        },
+        |_| Ok(()),
     )?;
     Ok(mutation.result)
 }
 
 pub fn apply_mark_review(env: &BTreeMap<String, String>, source: &str) -> Result<LifecycleResult> {
     safe_mark_source(source)?;
-    let root = state_root(env)?;
-    let (address, _) = pane_address(env)?;
-    let launch_id = canonical_uuid(
-        env.get("WEZTERM_ATTENTION_LAUNCH_ID").map(String::as_str),
-        "WEZTERM_ATTENTION_LAUNCH_ID",
-    )?;
-    let owner_key = crate::protocol::sha256_hex(source.as_bytes());
-    let pane = pane_path(&root, &address);
-    let review_path = pane.join("reviews").join(format!("{owner_key}.json"));
-    let (mutation, ()) = commit_nested_with(
+    let (root, address, launch_id) = inherited(env)?;
+    let review = review_slot(&root, &address, source)?;
+    let (mutation, ()) = commit(
         &root,
-        &pane.join(".claim.lock"),
-        &pane.join("reviews").join(format!(".{owner_key}.lock")),
-        &pane.join("claim.json"),
-        Some("claim"),
+        &[&claim_lock(&root, &address), &review.lock],
+        "claim",
         &RecordIdentity::pane(&address),
-        Duration::from_secs(2),
         |claim| {
             if claim
                 .as_ref()
@@ -1468,34 +1380,87 @@ pub fn apply_mark_review(env: &BTreeMap<String, String>, source: &str) -> Result
                     "current launch does not match claim",
                 ));
             }
-            // Replaced whatever is there, but never over a review this
-            // version cannot read.
-            read_record(
-                &review_path,
-                Some("review"),
-                &RecordIdentity::review(&address, &owner_key),
-            )?;
-            let event_id = Uuid::new_v4().to_string();
-            let record = json!({
-                "kind": "review",
-                "schema": manifest()?.record_schema,
-                "address": address,
-                "owner_id": source,
-                "owner_key": owner_key,
-                "event_id": event_id,
-            });
-            let mut result = LifecycleResult::new(Disposition::Applied);
-            result.event_id = Some(event_id);
-            Ok(CommitPlan {
-                result: Mutation::plain(result),
-                replacements: vec![Replacement::always(review_path.clone(), record)],
-                removals: Vec::new(),
-                private_dirs: Vec::new(),
-            })
+            review.plan(ReviewChange::Set)
         },
         |_| Ok(()),
     )?;
     Ok(mutation.result)
+}
+
+/// Where the review of one owner on one pane is kept: the owner's key, the
+/// record's identity and path, and the lock its writers take after the
+/// pane's claim lock.
+struct ReviewSlot<'a> {
+    address: &'a PaneAddress,
+    owner_id: &'a str,
+    owner_key: String,
+    identity: RecordIdentity,
+    path: PathBuf,
+    lock: PathBuf,
+}
+
+fn review_slot<'a>(
+    root: &Path,
+    address: &'a PaneAddress,
+    owner_id: &'a str,
+) -> Result<ReviewSlot<'a>> {
+    let owner_key = crate::protocol::sha256_hex(owner_id.as_bytes());
+    let identity = RecordIdentity::review(address, &owner_key);
+    let path = identity.path(root, "review")?;
+    let lock = review_lock(root, address, &owner_key);
+    Ok(ReviewSlot {
+        address,
+        owner_id,
+        owner_key,
+        identity,
+        path,
+        lock,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum ReviewChange {
+    Set,
+    Withdraw,
+}
+
+impl ReviewSlot<'_> {
+    /// The plan that sets the owner's review, replacing whatever is there,
+    /// or withdraws it: `applied` when there was one to withdraw, `skipped`
+    /// when there was none. Never over, or instead of, a review this version
+    /// cannot read.
+    fn plan(&self, change: ReviewChange) -> Result<CommitPlan<Mutation>> {
+        let existing = read_record(&self.path, Some("review"), &self.identity)?;
+        match change {
+            ReviewChange::Set => {
+                let event_id = Uuid::new_v4().to_string();
+                let record = json!({
+                    "kind": "review",
+                    "schema": manifest()?.record_schema,
+                    "address": self.address,
+                    "owner_id": self.owner_id,
+                    "owner_key": self.owner_key,
+                    "event_id": event_id,
+                });
+                let mut result = LifecycleResult::new(Disposition::Applied);
+                result.event_id = Some(event_id);
+                Ok(CommitPlan {
+                    replacements: vec![Replacement::always(self.path.clone(), record)],
+                    ..CommitPlan::reporting(Mutation::plain(result))
+                })
+            }
+            ReviewChange::Withdraw => Ok(CommitPlan {
+                removals: vec![self.path.clone()],
+                ..CommitPlan::reporting(Mutation::plain(LifecycleResult::new(
+                    if existing.is_some() {
+                        Disposition::Applied
+                    } else {
+                        Disposition::Skipped
+                    },
+                )))
+            }),
+        }
+    }
 }
 
 /// Withdraws what `source` published in the current launch: its review, and
@@ -1511,25 +1476,18 @@ pub fn apply_mark_clear(
     observation: &str,
 ) -> Result<LifecycleResult> {
     safe_mark_source(source)?;
-    let root = state_root(env)?;
-    let (address, _) = pane_address(env)?;
-    let launch_id = canonical_uuid(
-        env.get("WEZTERM_ATTENTION_LAUNCH_ID").map(String::as_str),
-        "WEZTERM_ATTENTION_LAUNCH_ID",
-    )?;
-    let owner_key = crate::protocol::sha256_hex(source.as_bytes());
-    let pane = pane_path(&root, &address);
-    let review_path = pane.join("reviews").join(format!("{owner_key}.json"));
-    let launch = launch_path(&root, &address, &launch_id);
-    let (mutation, ()) = commit_triple_with(
+    let (root, address, launch_id) = inherited(env)?;
+    let review = review_slot(&root, &address, source)?;
+    let launch = RecordIdentity::launch(&address, &launch_id);
+    let (mutation, ()) = commit(
         &root,
-        &launch.join(".lock"),
-        &pane.join(".claim.lock"),
-        &pane.join("reviews").join(format!(".{owner_key}.lock")),
-        &pane.join("claim.json"),
-        Some("claim"),
+        &[
+            &launch_lock(&root, &address, &launch_id),
+            &claim_lock(&root, &address),
+            &review.lock,
+        ],
+        "claim",
         &RecordIdentity::pane(&address),
-        Duration::from_secs(2),
         |claim| {
             if claim
                 .as_ref()
@@ -1540,27 +1498,15 @@ pub fn apply_mark_clear(
                     "current launch does not match claim",
                 ));
             }
-            let review = read_record(
-                &review_path,
-                Some("review"),
-                &RecordIdentity::review(&address, &owner_key),
-            )?;
-            let pointer = read_record(
-                &launch.join("current-binding.json"),
-                Some("current_binding"),
-                &RecordIdentity::launch(&address, &launch_id),
-            )?;
-            let (_, current) = read_current(&launch, pointer, &address, &launch_id)?;
+            let withdrawn = review.plan(ReviewChange::Withdraw)?;
+            let pointer = read_record_at(&root, "current_binding", &launch)?;
+            let current = read_current(&root, pointer, &address, &launch_id)?;
             let mut replacements = Vec::new();
-            let mut removals = vec![review_path.clone()];
+            let mut removals = withdrawn.removals;
             let mut cleared = None;
             if current.is_none() {
-                let activity_path = launch.join("activity.json");
-                let activity = read_record(
-                    &activity_path,
-                    Some("activity"),
-                    &RecordIdentity::launch(&address, &launch_id),
-                )?;
+                let activity_path = launch.path(&root, "activity")?;
+                let activity = read_record(&activity_path, Some("activity"), &launch)?;
                 if activity.as_ref().is_some_and(|activity| {
                     activity["source"] == source && activity["target"] == json!({"kind":"launch"})
                 }) {
@@ -1572,43 +1518,171 @@ pub fn apply_mark_clear(
                 .as_ref()
                 .and_then(|record| record["binding_id"].as_str())
             {
-                let directory = launch.join("bindings").join(binding_id);
                 let identity = RecordIdentity::binding(&address, &launch_id, binding_id);
-                let clear_path = directory.join("activity-clear.json");
-                let activity = read_record(
-                    &directory.join("activity.json"),
-                    Some("activity"),
-                    &identity,
-                )?;
-                let clear = read_record(&clear_path, Some("activity_clear"), &identity)?;
+                let activity = read_record_at(&root, "activity", &identity)?;
+                let clear = read_record_at(&root, "activity_clear", &identity)?;
                 let published = activity.as_ref().is_some_and(|activity| {
-                    activity["source"] == source
-                        && clear.as_ref().is_none_or(|clear| {
-                            activity["observed_mono_ns"].as_str()
-                                > clear["observed_mono_ns"].as_str()
-                        })
+                    activity["source"] == source && uncleared(activity, clear.as_ref())
                 });
                 if published {
-                    let (result, replacement) = activity_clear_plan(
-                        &address,
-                        &launch_id,
-                        binding_id,
-                        &clear_path,
-                        observation,
-                    )?;
+                    let (result, replacement) =
+                        activity_clear_plan(&root, &address, &launch_id, binding_id, observation)?;
                     replacements.extend(replacement);
                     cleared = Some(result);
                 }
             }
             let mut result = cleared.unwrap_or_else(|| LifecycleResult::new(Disposition::Skipped));
-            if review.is_some() && result.disposition == Disposition::Skipped {
+            if withdrawn.result.result.disposition == Disposition::Applied
+                && result.disposition == Disposition::Skipped
+            {
                 result.disposition = Disposition::Applied;
             }
             Ok(CommitPlan {
-                result: Mutation::plain(result),
                 replacements,
                 removals,
-                private_dirs: Vec::new(),
+                ..CommitPlan::reporting(Mutation::plain(result))
+            })
+        },
+        |_| Ok(()),
+    )?;
+    Ok(mutation.result)
+}
+
+/// The claim a write by the plugin needs: one that names the launch the pane
+/// published, whichever kind of claim holds it. A reader shows nothing for a
+/// pane whose claim names another launch, so a write then would show nothing.
+/// The plugin is not a process in the pane, so the inherited-launch rule a
+/// hook answers to is not its rule.
+fn require_plugin_claim(
+    claim: Option<&Value>,
+    address: &PaneAddress,
+    launch_id: &str,
+) -> Result<()> {
+    if claim.is_some_and(|claim| record_matches_launch(claim, address, launch_id)) {
+        Ok(())
+    } else {
+        Err(AttentionError::new(
+            "claim_stale",
+            "the pane's claim does not name the launch the pane published",
+        ))
+    }
+}
+
+/// Sets the user's review, the flag the review key owns, on the pane at
+/// `address` whose published launch is `launch_id`. The plugin names the
+/// pane itself, because it is not a process in it.
+pub fn set_user_review(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+) -> Result<LifecycleResult> {
+    commit_user_review(root, address, ReviewChange::Set, |claim| {
+        require_plugin_claim(claim, address, launch_id)
+    })
+}
+
+/// Withdraws the user's review from the pane at `address`. It does not look
+/// at the claim: a withdrawal lights nothing, and the key withdraws whatever
+/// flag it finds on disk, whichever launch the claim names. Only that
+/// owner's review is touched: another owner's review is that owner's to
+/// withdraw.
+pub fn clear_user_review(root: &Path, address: &PaneAddress) -> Result<LifecycleResult> {
+    commit_user_review(root, address, ReviewChange::Withdraw, |_| Ok(()))
+}
+
+fn commit_user_review(
+    root: &Path,
+    address: &PaneAddress,
+    change: ReviewChange,
+    check_claim: impl FnOnce(Option<&Value>) -> Result<()>,
+) -> Result<LifecycleResult> {
+    // Taking the locks creates the pane's directory, and sweep reaches a pane
+    // tree only through its bindings, so a pane with no records keeps none:
+    // it has no claim to flag and no review to withdraw.
+    if !pane_dir(root, address).is_dir() {
+        check_claim(None)?;
+        return Ok(LifecycleResult::new(Disposition::Skipped));
+    }
+    let review = review_slot(root, address, USER_REVIEW_OWNER)?;
+    let (mutation, ()) = commit_waiting(
+        root,
+        &[&claim_lock(root, address), &review.lock],
+        PLUGIN_LOCK_TIMEOUT,
+        "claim",
+        &RecordIdentity::pane(address),
+        |claim| {
+            check_claim(claim.as_ref())?;
+            review.plan(change)
+        },
+        |_| Ok(()),
+    )?;
+    Ok(mutation.result)
+}
+
+/// Records that the user has seen the activity `activity_event_id` of launch
+/// `launch_id` in the pane at `address`, so the tab stops showing it. It is
+/// decided under the locks every activity writer takes, and written only
+/// while that activity is still the one the pane shows: a newer activity, or
+/// a clear, is something the user has not seen, and the answer is `ignored`
+/// with nothing written.
+pub fn acknowledge_activity(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    activity_event_id: &str,
+) -> Result<LifecycleResult> {
+    let (mutation, ()) = commit_waiting(
+        root,
+        &[
+            &launch_lock(root, address, launch_id),
+            &claim_lock(root, address),
+        ],
+        PLUGIN_LOCK_TIMEOUT,
+        "current_binding",
+        &RecordIdentity::launch(address, launch_id),
+        |pointer| {
+            require_plugin_claim(read_claim(root, address)?.as_ref(), address, launch_id)?;
+            let current = read_current(root, pointer, address, launch_id)?;
+            let ActivitySlot {
+                identity,
+                target,
+                clear,
+            } = activity_slot(root, address, launch_id, current.as_ref())?;
+            let activity = read_record_at(root, "activity", &identity)?;
+            let shown = activity.as_ref().is_some_and(|activity| {
+                activity["event_id"].as_str() == Some(activity_event_id)
+                    && activity["target"] == target
+                    && uncleared(activity, clear.as_ref())
+            });
+            if !shown {
+                return Ok(CommitPlan::reporting(Mutation::plain(
+                    LifecycleResult::new(Disposition::Ignored),
+                )));
+            }
+            let ack_path = identity.path(root, "acknowledgement")?;
+            // Never over an acknowledgement this version cannot read.
+            if let Some(existing) = read_record(&ack_path, Some("acknowledgement"), &identity)?
+                && existing["activity_event_id"].as_str() == Some(activity_event_id)
+            {
+                let mut result = LifecycleResult::new(Disposition::Skipped);
+                result.event_id = existing["event_id"].as_str().map(str::to_owned);
+                return Ok(CommitPlan::reporting(Mutation::plain(result)));
+            }
+            let event_id = Uuid::new_v4().to_string();
+            let record = json!({
+                "kind": "acknowledgement",
+                "schema": manifest()?.record_schema,
+                "address": address,
+                "launch_id": launch_id,
+                "target": target,
+                "activity_event_id": activity_event_id,
+                "event_id": event_id,
+            });
+            let mut result = LifecycleResult::new(Disposition::Applied);
+            result.event_id = Some(event_id);
+            Ok(CommitPlan {
+                replacements: vec![Replacement::always(ack_path, record)],
+                ..CommitPlan::reporting(Mutation::plain(result))
             })
         },
         |_| Ok(()),
@@ -1632,41 +1706,28 @@ fn apply_child(
         .as_deref()
         .or(event.child_source.as_deref())
         .ok_or_else(|| AttentionError::new("record_invalid", "child event has no source"))?;
-    let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
-    let binding_path = launch
-        .join("bindings")
-        .join(&binding_id)
-        .join("binding.json");
     let status = if event.action == ProviderAction::ChildActive {
         "active"
     } else {
         "stopped"
     };
-    let (mutation, ()) = commit_nested_with(
+    let (mutation, ()) = commit(
         &resolved.root,
-        &launch.join(".lock"),
-        &resolved.claim_lock(),
-        &binding_path,
-        Some("binding"),
-        &RecordIdentity::binding(&resolved.address, &resolved.launch_id, &binding_id),
-        Duration::from_secs(2),
+        &[&resolved.launch_lock(), &resolved.claim_lock()],
+        "binding",
+        &resolved.binding(&binding_id),
         |binding| {
             if let Some(lapsed) = resolved.lapsed_now()? {
-                return Ok(refusal(lapsed));
+                return Ok(CommitPlan::reporting(Mutation::plain(lapsed)));
             }
-            if binding.as_ref().is_none_or(|record| {
-                !record_matches_binding(record, &resolved.address, &resolved.launch_id, &binding_id)
-            }) {
-                return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::diagnosed(
+            if binding.is_none() {
+                return Ok(CommitPlan::reporting(Mutation::plain(
+                    LifecycleResult::diagnosed(
                         Disposition::Ignored,
                         "claim_stale",
                         "child event has no matching binding",
-                    )),
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                });
+                    ),
+                )));
             }
             let mut replacements = Vec::new();
             let result = plan_presence(
@@ -1686,13 +1747,8 @@ fn apply_child(
                 observation,
                 written_at,
                 CommitPlan {
-                    result: Mutation {
-                        lifecycle_replacement: None,
-                        result,
-                    },
                     replacements,
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
+                    ..CommitPlan::reporting(Mutation::plain(result))
                 },
             ))
         },
@@ -1716,32 +1772,18 @@ fn plan_presence(
     status: &str,
     replacements: &mut Vec<Replacement>,
 ) -> Result<LifecycleResult> {
-    let binding_dir = launch_path(&resolved.root, &resolved.address, &resolved.launch_id)
-        .join("bindings")
-        .join(binding_id);
     let agent_key = crate::protocol::sha256_hex(agent_id.as_bytes());
-    let presence_path = binding_dir.join("agents").join(format!("{agent_key}.json"));
-    let identity = RecordIdentity::binding(&resolved.address, &resolved.launch_id, binding_id);
-    let existing = read_record(
-        &presence_path,
-        Some("subagent_presence"),
-        &RecordIdentity::agent(
-            &resolved.address,
-            &resolved.launch_id,
-            binding_id,
-            &agent_key,
-        ),
-    )?;
-    let floor = read_record(
-        &binding_dir.join("agents-floor.json"),
-        Some("subagent_retention_floor"),
-        &identity,
-    )?;
-    let clear = read_record(
-        &binding_dir.join("agents-clear.json"),
-        Some("subagent_clear"),
-        &identity,
-    )?;
+    let presence = RecordIdentity::agent(
+        &resolved.address,
+        &resolved.launch_id,
+        binding_id,
+        &agent_key,
+    );
+    let presence_path = presence.path(&resolved.root, "subagent_presence")?;
+    let identity = resolved.binding(binding_id);
+    let existing = read_record(&presence_path, Some("subagent_presence"), &presence)?;
+    let floor = read_record_at(&resolved.root, "subagent_retention_floor", &identity)?;
+    let clear = read_record_at(&resolved.root, "subagent_clear", &identity)?;
     if let Some(existing) = existing {
         let existing_order = existing["observed_mono_ns"].as_str().unwrap_or("");
         if existing["status"] == "stopped" && status == "stopped" {
@@ -1765,50 +1807,17 @@ fn plan_presence(
             ));
         }
     }
-    child_replacement(
-        resolved,
-        event,
-        observation,
-        written_at,
-        binding_id,
-        agent_id,
-        &agent_key,
-        source,
-        status,
-        &presence_path,
-        floor.as_ref(),
-        clear.as_ref(),
-        replacements,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn child_replacement(
-    resolved: &ResolvedLaunch,
-    event: &ProviderEvent,
-    observation: &str,
-    written_at: &str,
-    binding_id: &str,
-    agent_id: &str,
-    agent_key: &str,
-    source: &str,
-    status: &str,
-    presence_path: &Path,
-    floor: Option<&Value>,
-    clear: Option<&Value>,
-    replacements: &mut Vec<Replacement>,
-) -> Result<LifecycleResult> {
-    if floor.is_some_and(|floor| observation <= floor["floor_mono_ns"].as_str().unwrap_or("")) {
+    if floor
+        .as_ref()
+        .is_some_and(|floor| observation <= floor["floor_mono_ns"].as_str().unwrap_or(""))
+    {
         return Ok(LifecycleResult::diagnosed(
             Disposition::Ignored,
             "binding_conflict",
             "child observation is covered by retention floor",
         ));
     }
-    if status == "active"
-        && clear
-            .is_some_and(|clear| observation <= clear["observed_mono_ns"].as_str().unwrap_or(""))
-    {
+    if status == "active" && covered_by_clear(observation, clear.as_ref()) {
         return Ok(LifecycleResult::diagnosed(
             Disposition::Ignored,
             "binding_conflict",
@@ -1832,7 +1841,7 @@ fn child_replacement(
         "written_at_unix_ns": written_at,
         "ttl_ms": manifest()?.limits.subagent_ttl_ms,
     });
-    replacements.push(Replacement::always(presence_path.to_path_buf(), record));
+    replacements.push(Replacement::always(presence_path, record));
     let mut result = LifecycleResult::new(Disposition::Applied);
     result.event_id = Some(event_id);
     Ok(result)
@@ -1845,51 +1854,36 @@ fn apply_end(
     written_at: &str,
 ) -> Result<LifecycleResult> {
     let binding_id = event_binding_id(event, &resolved.launch_id)?;
-    let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
-    let binding_dir = launch.join("bindings").join(&binding_id);
-    let binding_path = binding_dir.join("binding.json");
-    let end_path = binding_dir.join("end.json");
-    let (mutation, ()) = commit_nested_with(
+    let identity = resolved.binding(&binding_id);
+    let end_path = identity.path(&resolved.root, "binding_end")?;
+    let (mutation, ()) = commit(
         &resolved.root,
-        &launch.join(".lock"),
-        &resolved.claim_lock(),
-        &binding_path,
-        Some("binding"),
-        &RecordIdentity::binding(&resolved.address, &resolved.launch_id, &binding_id),
-        Duration::from_secs(2),
+        &[&resolved.launch_lock(), &resolved.claim_lock()],
+        "binding",
+        &identity,
         |binding| {
             if let Some(lapsed) = resolved.lapsed_now()? {
-                return Ok(refusal(lapsed));
+                return Ok(CommitPlan::reporting(Mutation::plain(lapsed)));
             }
             let Some(binding) = binding else {
-                return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::diagnosed(
+                return Ok(CommitPlan::reporting(Mutation::plain(
+                    LifecycleResult::diagnosed(
                         Disposition::Ignored,
                         "claim_stale",
                         "end event has no matching binding",
-                    )),
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                });
+                    ),
+                )));
             };
             if observation < binding["observed_mono_ns"].as_str().unwrap_or("") {
-                return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::diagnosed(
+                return Ok(CommitPlan::reporting(Mutation::plain(
+                    LifecycleResult::diagnosed(
                         Disposition::Ignored,
                         "binding_conflict",
                         "end observation predates binding",
-                    )),
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                });
+                    ),
+                )));
             }
-            let existing = read_record(
-                &end_path,
-                Some("binding_end"),
-                &RecordIdentity::binding(&resolved.address, &resolved.launch_id, &binding_id),
-            )?;
+            let existing = read_record(&end_path, Some("binding_end"), &identity)?;
             if let Some(existing) = existing {
                 let order = existing["observed_mono_ns"].as_str().unwrap_or("");
                 let disposition = if observation < order {
@@ -1904,12 +1898,7 @@ fn apply_end(
                 if disposition != Disposition::Applied {
                     let mut result = LifecycleResult::new(disposition);
                     result.event_id = existing["event_id"].as_str().map(str::to_owned);
-                    return Ok(CommitPlan {
-                        result: Mutation::plain(result),
-                        replacements: Vec::new(),
-                        removals: Vec::new(),
-                        private_dirs: Vec::new(),
-                    });
+                    return Ok(CommitPlan::reporting(Mutation::plain(result)));
                 }
             }
             let event_id = Uuid::new_v4().to_string();
@@ -1928,10 +1917,8 @@ fn apply_end(
             let mut result = LifecycleResult::new(Disposition::Applied);
             result.event_id = Some(event_id);
             Ok(CommitPlan {
-                result: Mutation::plain(result),
                 replacements: vec![Replacement::always(end_path.clone(), record)],
-                removals: Vec::new(),
-                private_dirs: Vec::new(),
+                ..CommitPlan::reporting(Mutation::plain(result))
             })
         },
         |mutation| {
@@ -1948,96 +1935,45 @@ fn apply_review_event(
     clear: bool,
 ) -> Result<LifecycleResult> {
     let binding_id = event_binding_id(event, &resolved.launch_id)?;
-    let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
-    let claim_path = pane_path(&resolved.root, &resolved.address).join("claim.json");
-    let owner_id = "pi-bus";
-    let owner_key = crate::protocol::sha256_hex(owner_id.as_bytes());
-    let review_path = pane_path(&resolved.root, &resolved.address)
-        .join("reviews")
-        .join(format!("{owner_key}.json"));
-    let (mutation, ()) = commit_triple_with(
+    let review = review_slot(&resolved.root, &resolved.address, "pi-bus")?;
+    let (mutation, ()) = commit(
         &resolved.root,
-        &launch.join(".lock"),
-        &pane_path(&resolved.root, &resolved.address).join(".claim.lock"),
-        &pane_path(&resolved.root, &resolved.address)
-            .join("reviews")
-            .join(format!(".{owner_key}.lock")),
-        &claim_path,
-        Some("claim"),
+        &[
+            &resolved.launch_lock(),
+            &resolved.claim_lock(),
+            &review.lock,
+        ],
+        "claim",
         &RecordIdentity::pane(&resolved.address),
-        Duration::from_secs(2),
         |claim| {
             if let Some(lapsed) = resolved.lapsed(claim.as_ref()) {
-                return Ok(refusal(lapsed));
+                return Ok(CommitPlan::reporting(Mutation::plain(lapsed)));
             }
-            let pointer = read_record(
-                &launch.join("current-binding.json"),
-                Some("current_binding"),
-                &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
+            let pointer = read_record_at(&resolved.root, "current_binding", &resolved.launch())?;
+            let current = read_current(
+                &resolved.root,
+                pointer,
+                &resolved.address,
+                &resolved.launch_id,
             )?;
-            let (_, current) =
-                read_current(&launch, pointer, &resolved.address, &resolved.launch_id)?;
             if current
                 .as_ref()
                 .and_then(|record| record.get("binding_id"))
                 .and_then(Value::as_str)
                 != Some(binding_id.as_str())
             {
-                return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::diagnosed(
+                return Ok(CommitPlan::reporting(Mutation::plain(
+                    LifecycleResult::diagnosed(
                         Disposition::Ignored,
                         "claim_stale",
                         "Pi review is not for the current binding",
-                    )),
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                });
+                    ),
+                )));
             }
-            let existing = read_record(
-                &review_path,
-                Some("review"),
-                &RecordIdentity::review(&resolved.address, &owner_key),
-            )?;
-            if let Some(existing) = &existing
-                && (existing.get("address")
-                    != serde_json::to_value(&resolved.address).ok().as_ref()
-                    || existing.get("owner_key").and_then(Value::as_str)
-                        != Some(owner_key.as_str()))
-            {
-                return Err(AttentionError::new(
-                    "record_invalid",
-                    "review record identity mismatches its path",
-                ));
-            }
-            if clear {
-                return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::new(if existing.is_some() {
-                        Disposition::Applied
-                    } else {
-                        Disposition::Skipped
-                    })),
-                    replacements: Vec::new(),
-                    removals: vec![review_path.clone()],
-                    private_dirs: Vec::new(),
-                });
-            }
-            let event_id = Uuid::new_v4().to_string();
-            let record = json!({
-                "kind": "review",
-                "schema": manifest()?.record_schema,
-                "address": resolved.address,
-                "owner_id": owner_id,
-                "owner_key": owner_key,
-                "event_id": event_id,
-            });
-            let mut result = LifecycleResult::new(Disposition::Applied);
-            result.event_id = Some(event_id);
-            Ok(CommitPlan {
-                result: Mutation::plain(result),
-                replacements: vec![Replacement::always(review_path.clone(), record)],
-                removals: Vec::new(),
-                private_dirs: Vec::new(),
+            review.plan(if clear {
+                ReviewChange::Withdraw
+            } else {
+                ReviewChange::Set
             })
         },
         |mutation| {
@@ -2052,17 +1988,15 @@ fn apply_review_event(
 /// watermark already newer wins and an equal one is a replay, so neither
 /// writes; either way the result names the stored watermark's event.
 fn activity_clear_plan(
+    root: &Path,
     address: &PaneAddress,
     launch_id: &str,
     binding_id: &str,
-    clear_path: &Path,
     observation: &str,
 ) -> Result<(LifecycleResult, Option<Replacement>)> {
-    let existing = read_record(
-        clear_path,
-        Some("activity_clear"),
-        &RecordIdentity::binding(address, launch_id, binding_id),
-    )?;
+    let identity = RecordIdentity::binding(address, launch_id, binding_id);
+    let clear_path = identity.path(root, "activity_clear")?;
+    let existing = read_record(&clear_path, Some("activity_clear"), &identity)?;
     if let Some(existing) = &existing {
         let order = existing["observed_mono_ns"].as_str().unwrap_or("");
         if observation <= order {
@@ -2087,10 +2021,7 @@ fn activity_clear_plan(
     });
     let mut result = LifecycleResult::new(Disposition::Applied);
     result.event_id = Some(event_id);
-    Ok((
-        result,
-        Some(Replacement::always(clear_path.to_owned(), record)),
-    ))
+    Ok((result, Some(Replacement::always(clear_path, record))))
 }
 
 // Pi's bus `clear` withdraws both its activity and its review. A Codex
@@ -2102,37 +2033,28 @@ fn apply_clear_event(
     written_at: &str,
 ) -> Result<LifecycleResult> {
     let binding_id = event_binding_id(event, &resolved.launch_id)?;
-    let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
-    let binding_dir = launch.join("bindings").join(&binding_id);
-    let pointer_path = launch.join("current-binding.json");
-    let clear_path = binding_dir.join("activity-clear.json");
-    let pane = pane_path(&resolved.root, &resolved.address);
-    let claim_path = pane.join("claim.json");
     let owner_key = crate::protocol::sha256_hex(b"pi-bus");
     let review_path = (event.provider == Some(crate::providers::Provider::Pi))
-        .then(|| pane.join("reviews").join(format!("{owner_key}.json")));
+        .then(|| {
+            RecordIdentity::review(&resolved.address, &owner_key).path(&resolved.root, "review")
+        })
+        .transpose()?;
     let decide = |pointer: Option<Value>| {
         let ignored = |message| {
-            Ok(CommitPlan {
-                result: Mutation::plain(LifecycleResult::diagnosed(
-                    Disposition::Ignored,
-                    "claim_stale",
-                    message,
-                )),
-                replacements: Vec::new(),
-                removals: Vec::new(),
-                private_dirs: Vec::new(),
-            })
+            Ok(CommitPlan::reporting(Mutation::plain(
+                LifecycleResult::diagnosed(Disposition::Ignored, "claim_stale", message),
+            )))
         };
-        let claim = read_record(
-            &claim_path,
-            Some("claim"),
-            &RecordIdentity::pane(&resolved.address),
-        )?;
+        let claim = read_claim(&resolved.root, &resolved.address)?;
         if let Some(lapsed) = resolved.lapsed(claim.as_ref()) {
-            return Ok(refusal(lapsed));
+            return Ok(CommitPlan::reporting(Mutation::plain(lapsed)));
         }
-        let (_, current) = read_current(&launch, pointer, &resolved.address, &resolved.launch_id)?;
+        let current = read_current(
+            &resolved.root,
+            pointer,
+            &resolved.address,
+            &resolved.launch_id,
+        )?;
         if current
             .as_ref()
             .and_then(|record| record.get("binding_id"))
@@ -2142,10 +2064,10 @@ fn apply_clear_event(
             return ignored("clear event is not for the current binding");
         }
         let (mut result, replacement) = activity_clear_plan(
+            &resolved.root,
             &resolved.address,
             &resolved.launch_id,
             &binding_id,
-            &clear_path,
             observation,
         )?;
         let mut removals = Vec::new();
@@ -2163,61 +2085,40 @@ fn apply_clear_event(
             observation,
             written_at,
             CommitPlan {
-                result: Mutation::plain(result),
                 replacements: replacement.into_iter().collect(),
                 removals,
-                private_dirs: Vec::new(),
+                ..CommitPlan::reporting(Mutation::plain(result))
             },
         ))
     };
     let after_apply = |mutation: &Mutation| apply_observed_outputs(resolved, &binding_id, mutation);
-    let identity = RecordIdentity::launch(&resolved.address, &resolved.launch_id);
-    let (mutation, ()) = if review_path.is_some() {
-        commit_triple_with(
-            &resolved.root,
-            &launch.join(".lock"),
-            &pane.join(".claim.lock"),
-            &pane.join("reviews").join(format!(".{owner_key}.lock")),
-            &pointer_path,
-            Some("current_binding"),
-            &identity,
-            Duration::from_secs(2),
-            decide,
-            after_apply,
-        )?
+    let (launch_lock, claim_lock) = (resolved.launch_lock(), resolved.claim_lock());
+    let review_lock = review_lock(&resolved.root, &resolved.address, &owner_key);
+    let locks: &[&Path] = if review_path.is_some() {
+        &[&launch_lock, &claim_lock, &review_lock]
     } else {
-        commit_nested_with(
-            &resolved.root,
-            &launch.join(".lock"),
-            &pane.join(".claim.lock"),
-            &pointer_path,
-            Some("current_binding"),
-            &identity,
-            Duration::from_secs(2),
-            decide,
-            after_apply,
-        )?
+        &[&launch_lock, &claim_lock]
     };
+    let (mutation, ()) = commit(
+        &resolved.root,
+        locks,
+        "current_binding",
+        &resolved.launch(),
+        decide,
+        after_apply,
+    )?;
     Ok(mutation.result)
 }
 
 pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Result<LifecycleResult> {
-    let root = state_root(env)?;
-    let (address, _) = pane_address(env)?;
-    let launch_id = canonical_uuid(
-        env.get("WEZTERM_ATTENTION_LAUNCH_ID").map(String::as_str),
-        "WEZTERM_ATTENTION_LAUNCH_ID",
-    )?;
-    let Some(claim) = load_claim(&root, &address)?
-        .filter(|claim| inherited_claim_matches(claim, &address, &launch_id))
-    else {
+    let Some(resolved) = inherited_launch(env)? else {
         return Ok(LifecycleResult::diagnosed(
             Disposition::Ignored,
             "claim_stale",
             "prompt return has no matching claim",
         ));
     };
-    clear_at_prompt(root, address, launch_id, claim, observation)
+    clear_at_prompt(resolved, observation)
 }
 
 /// Prompt return in a pane whose shell carries no launch id, as the shell of
@@ -2234,137 +2135,67 @@ pub fn prompt_return_after_agent_exit(
 ) -> Result<Option<LifecycleResult>> {
     let root = state_root(env)?;
     let (address, _) = pane_address(env)?;
-    let Some(claim) = load_claim(&root, &address)? else {
+    let Some(claim) = read_claim(&root, &address)? else {
         return Ok(None);
     };
     if !crate::launch::owner_proven_gone(&claim, ports.processes) {
         return Ok(None);
     }
     let launch_id = crate::launch::claim_launch_id(&claim)?;
-    clear_at_prompt(root, address, launch_id, claim, observation).map(Some)
+    let resolved = ResolvedLaunch {
+        evidence: None,
+        root,
+        address,
+        launch_id,
+        claim,
+        host: None,
+        publication_diagnostic: None,
+    };
+    clear_at_prompt(resolved, observation).map(Some)
 }
 
 /// Clear the lead activity of `launch_id`'s current binding at a prompt,
 /// under the launch lock then the claim lock, while the pane's claim is still
 /// `claim`.
-fn clear_at_prompt(
-    root: PathBuf,
-    address: PaneAddress,
-    launch_id: String,
-    claim: Value,
-    observation: &str,
-) -> Result<LifecycleResult> {
-    let launch = launch_path(&root, &address, &launch_id);
-    let pointer_path = launch.join("current-binding.json");
-    let (mutation, ()) = commit_nested_with(
-        &root,
-        &launch.join(".lock"),
-        &pane_path(&root, &address).join(".claim.lock"),
-        &pointer_path,
-        Some("current_binding"),
-        &RecordIdentity::launch(&address, &launch_id),
-        Duration::from_secs(2),
+fn clear_at_prompt(resolved: ResolvedLaunch, observation: &str) -> Result<LifecycleResult> {
+    let ResolvedLaunch {
+        root,
+        address,
+        launch_id,
+        claim,
+        ..
+    } = &resolved;
+    let launch = resolved.launch();
+    let (mutation, ()) = commit(
+        root,
+        &[&resolved.launch_lock(), &resolved.claim_lock()],
+        "current_binding",
+        &launch,
         |pointer| {
-            if load_claim(&root, &address)?.as_ref() != Some(&claim) {
-                return Ok(refusal(LifecycleResult::diagnosed(
-                    Disposition::Ignored,
-                    "claim_stale",
-                    "prompt return has no matching claim",
+            if read_claim(root, address)?.as_ref() != Some(claim) {
+                return Ok(CommitPlan::reporting(Mutation::plain(
+                    LifecycleResult::diagnosed(
+                        Disposition::Ignored,
+                        "claim_stale",
+                        "prompt return has no matching claim",
+                    ),
                 )));
             }
-            let (_, current) = read_current(&launch, pointer, &address, &launch_id)?;
+            let current = read_current(root, pointer, address, launch_id)?;
             let Some(current) = current else {
-                return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::new(Disposition::Applied)),
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                });
+                return Ok(CommitPlan::reporting(Mutation::plain(
+                    LifecycleResult::new(Disposition::Applied),
+                )));
             };
-            let binding_id = current["binding_id"].as_str().unwrap_or("").to_owned();
-            let binding_dir = launch.join("bindings").join(&binding_id);
-            let clear_path = binding_dir.join("activity-clear.json");
-            let existing = read_record(
-                &clear_path,
-                Some("activity_clear"),
-                &RecordIdentity::binding(&address, &launch_id, &binding_id),
-            )?;
-            if let Some(existing) = &existing
-                && observation < existing["observed_mono_ns"].as_str().unwrap_or("")
-            {
-                let mut result = LifecycleResult::new(Disposition::Ignored);
-                result.event_id = existing["event_id"].as_str().map(str::to_owned);
-                return Ok(CommitPlan {
-                    result: Mutation::plain(result),
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                });
-            }
-            if existing.as_ref().is_some_and(|clear| {
-                observation == clear["observed_mono_ns"].as_str().unwrap_or("")
-            }) {
-                let mut result = LifecycleResult::new(Disposition::Skipped);
-                result.event_id = existing
-                    .as_ref()
-                    .and_then(|clear| clear["event_id"].as_str())
-                    .map(str::to_owned);
-                return Ok(CommitPlan {
-                    result: Mutation {
-                        lifecycle_replacement: None,
-                        result,
-                    },
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                });
-            }
-            let event_id = Uuid::new_v4().to_string();
-            let record = json!({
-                "kind": "activity_clear",
-                "schema": manifest()?.record_schema,
-                "address": address,
-                "launch_id": launch_id,
-                "binding_id": binding_id,
-                "event_id": event_id,
-                "observed_mono_ns": observation,
-            });
-            let mut result = LifecycleResult::new(Disposition::Applied);
-            result.event_id = Some(event_id);
+            let binding_id = current["binding_id"].as_str().unwrap_or("");
+            let (result, replacement) =
+                activity_clear_plan(root, address, launch_id, binding_id, observation)?;
             Ok(CommitPlan {
-                result: Mutation {
-                    lifecycle_replacement: None,
-                    result,
-                },
-                replacements: vec![Replacement::always(clear_path, record)],
-                removals: Vec::new(),
-                private_dirs: Vec::new(),
+                replacements: replacement.into_iter().collect(),
+                ..CommitPlan::reporting(Mutation::plain(result))
             })
         },
-        |mutation| {
-            let pointer = read_record(
-                &pointer_path,
-                Some("current_binding"),
-                &RecordIdentity::launch(&address, &launch_id),
-            )?;
-            let current_binding_id = pointer
-                .as_ref()
-                .and_then(|pointer| pointer["binding_id"].as_str())
-                .unwrap_or("");
-            apply_observed_outputs(
-                &ResolvedLaunch {
-                    evidence: None,
-                    root: root.clone(),
-                    address: address.clone(),
-                    launch_id: launch_id.clone(),
-                    claim: claim.clone(),
-                    host: None,
-                    publication_diagnostic: None,
-                },
-                current_binding_id,
-                mutation,
-            )
-        },
+        |_| Ok(()),
     )?;
     Ok(mutation.result)
 }
@@ -2420,12 +2251,7 @@ pub fn apply_provider_event_with_outcome(
         .is_ok_and(|r| matches!(r.disposition.as_str(), "ignored" | "conflict"))
     {
         let p = &mut evidence.persistence;
-        for value in [
-            &mut p.native_state,
-            &mut p.activity,
-            &mut p.compatibility,
-            &mut p.lifecycle,
-        ] {
+        for value in [&mut p.native_state, &mut p.activity, &mut p.lifecycle] {
             if *value == Persistence::Unconfirmed {
                 *value = Persistence::Rejected;
             }
@@ -2451,7 +2277,7 @@ fn apply_provider_event_inner(
         result.diagnostic = event.diagnostic.clone();
         return Ok(result);
     }
-    if observation.len() != 20 || !observation.bytes().all(|byte| byte.is_ascii_digit()) {
+    if !crate::protocol::ns20_text(observation) {
         return Err(AttentionError::new(
             "record_invalid",
             "observation is invalid",
@@ -2517,6 +2343,7 @@ fn apply_provider_event_inner(
 #[cfg(test)]
 mod lifecycle_write_tests {
     use super::*;
+    use crate::records::LOCK_TIMEOUT;
     #[test]
     fn failure_of_snapshot_write_reports_partial_state() {
         let fixture: Value =
@@ -2555,14 +2382,15 @@ mod lifecycle_write_tests {
             host: None,
             publication_diagnostic: None,
         };
-        let launch = launch_path(&root, &address, &launch_id);
+        let launch = RecordIdentity::launch(&address, &launch_id);
+        let binding = RecordIdentity::binding(&address, &launch_id, binding_id);
         crate::records::atomic_replace(
-            &pane_path(&root, &address).join("claim.json"),
+            &RecordIdentity::pane(&address).path(&root, "claim").unwrap(),
             &samples["claim"],
         )
         .unwrap();
         crate::records::atomic_replace(
-            &launch.join("current-binding.json"),
+            &launch.path(&root, "current_binding").unwrap(),
             &samples["current_binding"],
         )
         .unwrap();
@@ -2573,18 +2401,20 @@ mod lifecycle_write_tests {
         let mut snapshot = cases["cases"][1]["value"].clone();
         snapshot["provider"] = json!("claude");
         crate::protocol::validate_record(&snapshot, Some("lifecycle_snapshot")).unwrap();
-        let path = launch
-            .join("bindings")
-            .join(binding_id)
-            .join("lifecycle.json");
-        crate::records::atomic_replace(&path.with_file_name("binding.json"), &samples["binding"])
-            .unwrap();
+        let path = binding.path(&root, "lifecycle_snapshot").unwrap();
+        crate::records::atomic_replace(
+            &binding.path(&root, "binding").unwrap(),
+            &samples["binding"],
+        )
+        .unwrap();
         let mutation = Mutation {
             result: LifecycleResult::new(Disposition::Applied),
             lifecycle_replacement: Some(PreparedRecordWrite::new(path.clone(), &snapshot).unwrap()),
         };
-        let error =
-            crate::records::with_lock(&launch.join(".lock"), Duration::from_secs(2), || {
+        let error = crate::records::with_lock(
+            &launch_lock(&root, &address, &launch_id),
+            LOCK_TIMEOUT,
+            || {
                 apply_observed_outputs_with(&resolved, binding_id, &mutation, |_| {
                     assert!(
                         !root.join("42").exists(),
@@ -2595,8 +2425,9 @@ mod lifecycle_write_tests {
                         "synthetic snapshot write failure",
                     ))
                 })
-            })
-            .unwrap_err();
+            },
+        )
+        .unwrap_err();
         assert!(!error.diagnostic.context.contains_key("legacy_applied"));
         assert_eq!(error.diagnostic.context["lifecycle_write"], "unconfirmed");
         assert!(!path.exists());

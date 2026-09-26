@@ -1,9 +1,8 @@
 return function(context)
   local M = context.M
-  local defaults = context.defaults
-  local report_error_once = context.report_error_once
-  local is_safe_text = context.is_safe_text
-  local drawn_pane_key = context.drawn_pane_key
+  local report_error_once = context.overlays.report_error_once
+  local is_safe_text = context.protocol_api.is_safe_text
+  local drawn_pane_key = context.runtime_state.drawn_pane_key
   local settled_title_state = {}
 
   --- The second byte each UTF-8 lead byte allows, where it is narrower than
@@ -152,7 +151,7 @@ return function(context)
 
   local function sample_settled_title(cache_key, launch_id, raw_title, provider)
     if M._active_settled_title_fallback == false then return nil end
-    local scope = tostring(launch_id or "v1")
+    local scope = tostring(launch_id or "unclaimed")
     local title = normalized_pane_title(raw_title)
     local state = settled_title_state[cache_key]
     if not state or state.scope ~= scope then
@@ -224,18 +223,11 @@ return function(context)
     }
   end
 
-  local function default_title(tab)
-    return title_sources(tab).base_title
-  end
-
   return {
     well_formed_utf8 = well_formed_utf8,
     display_text = display_text,
-    normalized_pane_title = normalized_pane_title,
     sample_settled_title = sample_settled_title,
     settled_title_state = settled_title_state,
-    settled_title_for_tab = settled_title_for_tab,
     title_sources = title_sources,
-    default_title = default_title,
   }
 end

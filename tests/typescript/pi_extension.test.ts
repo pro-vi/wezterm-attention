@@ -85,10 +85,9 @@ function loadExt() {
 }
 
 // Teardown is centralised so a FAILING assertion still cleans up, and so no test
-// inherits env from its neighbour. Previously both were done by trailing
-// statements, which a failed expect() skips — leaking temp dirs exactly when you
-// are iterating on a red test, and leaving WEZTERM_PANE set to a traversal path
-// after the traversal tests.
+// inherits env from its neighbour: trailing statements are skipped by a failed
+// expect(), which would leak temp dirs exactly when you are iterating on a red
+// test, and leave one test's environment in the next.
 const tempDirs: string[] = [];
 const originalHome = process.env.HOME;
 function clearAttentionEnvironment(): void {
@@ -97,7 +96,6 @@ function clearAttentionEnvironment(): void {
 	delete process.env.XDG_STATE_HOME;
 	if (originalHome === undefined) delete process.env.HOME;
 	else process.env.HOME = originalHome;
-	delete process.env.PI_WEZTERM_ATTENTION_TTL_MS;
 	delete process.env.WEZTERM_ATTENTION_ROOT;
 	delete process.env.WEZTERM_ATTENTION_TEST_LOG;
 	delete process.env.WEZTERM_ATTENTION_HOST_PID;
@@ -152,63 +150,52 @@ function parseRecord(text: string): Record<string, unknown> {
 	return parsed;
 }
 
-function readMarker(dir: string, pane = "42"): Record<string, unknown> {
-	return parseRecord(readFileSync(join(dir, pane), "utf8"));
+// A checkout whose bin/attention logs each call's arguments and the payload it
+// was given, one line each, to the returned log.
+function fakeWriter(prefix: string): string {
+	const root = tempDir(prefix);
+	const log = join(root, "calls.log");
+	mkdirSync(join(root, "bin"));
+	writeFileSync(
+		join(root, "bin", "attention"),
+		'#!/bin/sh\nIFS= read -r payload || :\nprintf "%s\\n%s\\n" "$*" "$payload" >> "$WEZTERM_ATTENTION_TEST_LOG"\n',
+	);
+	chmodSync(join(root, "bin", "attention"), 0o755);
+	process.env.WEZTERM_ATTENTION_ROOT = root;
+	process.env.WEZTERM_ATTENTION_TEST_LOG = log;
+	return log;
 }
 
-test("lifecycle: agent_start writes a thinking marker with ttl_ms, updated_at, source pi", async () => {
-	const dir = freshDir("wez-life1-");
-	process.env.WEZTERM_PANE = "42";
-	const { lifecycle } = loadExt();
-	await lifecycle["agent_start"]!();
-	await lifecycle["session_shutdown"]!(); // lifecycle no longer awaits I/O; drain it
-	const m = readMarker(dir);
-	expect(m.type).toBe("thinking");
-	expect(m.source).toBe("pi");
-	expect(typeof m.publication_id).toBe("string");
-	expect(typeof m.ttl_ms).toBe("number");
-	expect(typeof m.updated_at).toBe("number"); // locks the contract field bun won't typecheck
-	// Units, not just presence. `docs/record-contract.md` puts seconds in
-	// `updated_at` and milliseconds in `updated_at_ms`. Writing milliseconds
-	// under `updated_at` still satisfies a typeof check while reading as a date
-	// tens of thousands of years out.
-	const nowSeconds = Date.now() / 1000;
-	expect(m.updated_at).toBeGreaterThan(nowSeconds - 60);
-	expect(m.updated_at).toBeLessThanOrEqual(nowSeconds + 1);
-	expect(Math.floor(m.updated_at_ms / 1000)).toBe(m.updated_at);
-});
+function loggedCalls(log: string): Array<{ command: string; payload: Record<string, unknown> }> {
+	if (!existsSync(log)) return [];
+	const lines = readFileSync(log, "utf8").trim().split("\n");
+	const calls = [];
+	for (let index = 0; index + 1 < lines.length; index += 2) {
+		calls.push({ command: lines[index]!, payload: parseRecord(lines[index + 1]!) });
+	}
+	return calls;
+}
 
-test("lifecycle: tool_execution_start writes a thinking marker", async () => {
-	const dir = freshDir("wez-tool-");
-	process.env.WEZTERM_PANE = "42";
-	const { lifecycle } = loadExt();
-	await lifecycle["tool_execution_start"]!();
-	await lifecycle["session_shutdown"]!(); // lifecycle no longer awaits I/O; drain it
-	expect(readMarker(dir).type).toBe("thinking");
-});
-
-test("lifecycle: agent_settled — not agent_end — writes the stop marker", async () => {
+test("lifecycle: agent_settled — not agent_end — reports the turn settled", async () => {
 	// agent_end is nonterminal (auto-retry/compaction can follow); only
 	// agent_settled means Pi is truly done, so `stop` must hang off it. Assert
 	// agent_end is NOT even registered, so a false mid-run ✓ is impossible.
-	const dir = freshDir("wez-settled-");
-	process.env.WEZTERM_PANE = "42";
+	const log = fakeWriter("wez-settled-");
 	const { lifecycle } = loadExt();
 	expect(lifecycle["agent_end"]).toBeUndefined();
+	await lifecycle["session_start"]!();
 	await lifecycle["agent_settled"]!();
-	await lifecycle["session_shutdown"]!(); // lifecycle no longer awaits I/O; drain it
-	const m = readMarker(dir);
-	expect(m.type).toBe("stop");
-	expect(m.ttl_ms).toBeUndefined();
+	await lifecycle["session_shutdown"]!(); // lifecycle does not await the writer; drain it
+	expect(loggedCalls(log).map((call) => call.command)).toContain("hooks event pi agent_settled");
 });
 
-test("lifecycle: handlers return before marker I/O lands (no agent-critical-path await)", async () => {
+test("lifecycle: handlers return before the writer runs (no agent-critical-path await)", async () => {
 	// Pi awaits lifecycle handlers on the agent's OWN critical path:
 	//   agent-loop.ts  await emit("tool_execution_start")  → then prepares the tool call
 	//   agent.ts       for (listener of listeners) await listener(event, signal)   (serial, no timeout)
 	//   agent-session.ts  await this._emitExtensionEvent(event)  → before the TUI notify
 	//   runner.ts      await handler(event, ctx)
-	// So awaiting a marker write here puts the filesystem in the agent's latency
+	// So awaiting the writer here puts the filesystem in the agent's latency
 	// budget, and on a mount whose syscalls block forever it wedges the host: one
 	// stuck op parks every later lifecycle event (shared serial chain), the TUI never
 	// sees the event, and abort cannot release a parked await. Headless is worse —
@@ -217,13 +204,13 @@ test("lifecycle: handlers return before marker I/O lands (no agent-critical-path
 	//
 	// Both assertions carry weight: the first locks OUT restoring the await, the
 	// second locks IN that the write is deferred rather than dropped.
-	const dir = freshDir("wez-nocritpath-");
-	process.env.WEZTERM_PANE = "42";
+	const log = fakeWriter("wez-nocritpath-");
 	const { lifecycle } = loadExt();
+	await lifecycle["session_start"]!();
 	await lifecycle["agent_start"]!();
-	expect(existsSync(join(dir, "42"))).toBe(false); // returned without waiting on I/O
+	expect(existsSync(log)).toBe(false); // returned without waiting on the writer
 	await lifecycle["session_shutdown"]!();
-	expect(existsSync(join(dir, "42"))).toBe(true); // ...and the write still lands
+	expect(loggedCalls(log).map((call) => call.command)).toContain("hooks event pi agent_start"); // ...and it still ran
 });
 
 test("registration: the extension listens on the wezterm-attention:mark channel", () => {
@@ -334,33 +321,44 @@ test("v2 dispatch: Pi reload drains queued writes without sending an end event o
 	expect(notifications).toEqual([]);
 });
 
-test("fallback: an unset checkout root keeps the v1 marker path", async () => {
-	const dir = freshDir("wez-fallback-unset-");
+test("writer: an unset checkout root records nothing and says so once", async () => {
+	const dir = freshDir("wez-unset-root-");
 	process.env.WEZTERM_PANE = "42";
-	const { lifecycle } = loadExt();
+	const { lifecycle, emit } = loadExt();
+	await lifecycle["session_start"]!();
 	await lifecycle["agent_start"]!();
+	await emit("notify");
 	await lifecycle["session_shutdown"]!();
-	expect(readMarker(dir).type).toBe("thinking");
+	expect(readdirSync(dir)).toEqual([]);
+	expect(await reportedNotifications(1)).toHaveLength(1);
+	expect(notifications[0]?.message).toContain("WEZTERM_ATTENTION_ROOT is not set");
+	expect(notifications[0]?.level).toBe("warning");
+});
+
+// Pi runs in other terminals too, where there is no tab to show anything on.
+test("writer: outside a WezTerm pane an unset checkout root records nothing and says nothing", async () => {
+	const dir = freshDir("wez-outside-pane-");
+	const { lifecycle, emit } = loadExt();
+	await lifecycle["session_start"]!();
+	await lifecycle["agent_start"]!();
+	await emit("notify");
+	await lifecycle["session_shutdown"]!();
+	expect(readdirSync(dir)).toEqual([]);
 	expect(notifications).toEqual([]);
 });
 
-test("fallback: a configured checkout without a writer logs once and writes no v1 marker", async () => {
-	const dir = freshDir("wez-fallback-missing-");
-	process.env.WEZTERM_PANE = "42";
+test("writer: a configured checkout without a writer logs once", async () => {
 	process.env.WEZTERM_ATTENTION_ROOT = tempDir("wez-root-missing-");
 	const { lifecycle } = loadExt();
 	await lifecycle["session_start"]!();
 	await lifecycle["agent_start"]!();
 	await lifecycle["session_shutdown"]!();
-	expect(existsSync(join(dir, "42"))).toBe(false);
 	expect(await reportedNotifications(1)).toHaveLength(1);
 	expect(notifications[0]?.message).toContain("no executable bin/attention");
 	expect(notifications[0]?.level).toBe("warning");
 });
 
-test("fallback: an invoked writer exit never creates a v1 marker and logs once", async () => {
-	const dir = freshDir("wez-fallback-exit-");
-	process.env.WEZTERM_PANE = "42";
+test("writer: an invoked writer exit logs once", async () => {
 	const root = tempDir("wez-root-exit-");
 	mkdirSync(join(root, "bin"));
 	writeFileSync(join(root, "bin", "attention"), "#!/bin/sh\nIFS= read -r payload || :\nexit 3\n");
@@ -370,14 +368,11 @@ test("fallback: an invoked writer exit never creates a v1 marker and logs once",
 	await lifecycle["session_start"]!();
 	await lifecycle["agent_start"]!();
 	await lifecycle["session_shutdown"]!();
-	expect(existsSync(join(dir, "42"))).toBe(false);
 	expect(await reportedNotifications(1)).toHaveLength(1);
 	expect(notifications[0]?.message).toBe("wezterm-attention: writer exited with status 3");
 });
 
-test("fallback: the writer's first diagnostic line is reported without control characters", async () => {
-	freshDir("wez-fallback-line-");
-	process.env.WEZTERM_PANE = "42";
+test("writer: the writer's first diagnostic line is reported without control characters", async () => {
 	const root = tempDir("wez-root-line-");
 	mkdirSync(join(root, "bin"));
 	writeFileSync(
@@ -397,9 +392,7 @@ test("fallback: the writer's first diagnostic line is reported without control c
 	expect(message.length).toBeLessThan(300);
 });
 
-test("fallback: an exit-zero hook diagnostic is reported and never treated as success", async () => {
-	const dir = freshDir("wez-fallback-diagnostic-");
-	process.env.WEZTERM_PANE = "42";
+test("writer: an exit-zero hook diagnostic is reported and never treated as success", async () => {
 	const root = tempDir("wez-root-diagnostic-");
 	mkdirSync(join(root, "bin"));
 	writeFileSync(
@@ -412,72 +405,33 @@ test("fallback: an exit-zero hook diagnostic is reported and never treated as su
 	await lifecycle["session_start"]!();
 	await lifecycle["agent_start"]!();
 	await lifecycle["session_shutdown"]!();
-	expect(existsSync(join(dir, "42"))).toBe(false);
 	expect(await reportedNotifications(1)).toHaveLength(1);
 	expect(notifications[0]?.message).toBe(
 		"wezterm-attention: writer rejected the event: attention: identity_unpublished: test rejection",
 	);
 });
 
-test("event: emitting a notify object writes a labeled notify marker", async () => {
-	const dir = freshDir("wez-evt-");
-	process.env.WEZTERM_PANE = "42";
-	const { emit } = loadExt();
-	await emit({ type: "notify", label: "answer me" });
-	const m = readMarker(dir);
-	expect(m.type).toBe("notify");
-	expect(m.label).toBe("answer me");
-});
-
 test("event: a bare string state is accepted", async () => {
-	const dir = freshDir("wez-evtstr-");
-	process.env.WEZTERM_PANE = "42";
-	const { emit } = loadExt();
+	const log = fakeWriter("wez-evtstr-");
+	const { lifecycle, emit } = loadExt();
+	await lifecycle["session_start"]!();
 	await emit("review");
-	expect(readMarker(dir).type).toBe("review");
+	expect(loggedCalls(log).at(-1)?.payload.state).toBe("review");
 });
 
-test("publication: identical states receive distinct publication IDs", async () => {
-	const dir = freshDir("wez-publication-");
-	process.env.WEZTERM_PANE = "42";
-	const { emit } = loadExt();
-
-	await emit("notify");
-	const first = readMarker(dir).publication_id;
-	await emit("notify");
-	const second = readMarker(dir).publication_id;
-
-	expect(typeof first).toBe("string");
-	expect(typeof second).toBe("string");
-	expect(second).not.toBe(first);
-});
-
-test("ordering: notify then clear leaves NO marker (last requested wins)", async () => {
-	const dir = freshDir("wez-order1-");
-	process.env.WEZTERM_PANE = "42";
-	const { emit } = loadExt();
-	let present = 0;
-	for (let i = 0; i < 30; i++) {
+test("ordering: notify then clear reach the writer in the order they were requested", async () => {
+	const log = fakeWriter("wez-order1-");
+	const { lifecycle, emit } = loadExt();
+	await lifecycle["session_start"]!();
+	for (let i = 0; i < 10; i++) {
 		// Emit both before either settles (exercise the interleaving), then await
 		// both deterministically — no sleep, so the assertion can't run early.
 		const a = emit("notify");
 		const b = emit("clear");
 		await Promise.all([a, b]);
-		if (existsSync(join(dir, "42"))) present++;
 	}
-	expect(present).toBe(0);
-});
-
-test("ordering: clear then notify leaves a notify marker", async () => {
-	const dir = freshDir("wez-order2-");
-	process.env.WEZTERM_PANE = "42";
-	const { emit } = loadExt();
-	writeFileSync(join(dir, "42"), "{}");
-	const a = emit("clear");
-	const b = emit("notify");
-	await Promise.all([a, b]);
-	expect(existsSync(join(dir, "42"))).toBe(true);
-	expect(readMarker(dir).type).toBe("notify");
+	const states = loggedCalls(log).slice(1).map((call) => call.payload.state);
+	expect(states).toEqual(Array.from({ length: 10 }, () => ["notify", "clear"]).flat());
 });
 
 test("reload (real module re-eval): retire-at-registration collapses N fresh generations to one listener", async () => {
@@ -541,186 +495,26 @@ test("failed reload: session_shutdown does NOT dispose the listener", async () =
 	// failure keeps the session running (handleReloadCommand catches it). So
 	// disposing on shutdown would silence notify with no successor. Shutdown must
 	// only drain — the listener stays live.
-	const dir = freshDir("wez-failreload-");
-	process.env.WEZTERM_PANE = "42";
+	const log = fakeWriter("wez-failreload-");
 	const h = loadExt();
 	expect(typeof h.lifecycle["session_shutdown"]).toBe("function");
+	await h.lifecycle["session_start"]!();
 	await h.lifecycle["session_shutdown"]!(); // shutdown fires, then imagine reload throws
 	expect(h.handlers.length).toBe(1); // listener still live
 	await h.emit("notify"); // cooperative path still works
-	expect(existsSync(join(dir, "42"))).toBe(true);
+	expect(loggedCalls(log).at(-1)?.payload.state).toBe("notify");
 });
 
 test("session_shutdown drains in-flight writes before returning", async () => {
 	// The drain is what closes the cross-reload write race — locked separately so
 	// removing `await mutationChain` turns the suite red.
-	const dir = freshDir("wez-drain-");
-	process.env.WEZTERM_PANE = "42";
+	const log = fakeWriter("wez-drain-");
 	const h = loadExt();
+	await h.lifecycle["session_start"]!();
 	const pending = h.emit("notify"); // in-flight; deliberately not awaited here
 	await h.lifecycle["session_shutdown"]!(); // must not return until `pending` settles
-	expect(existsSync(join(dir, "42"))).toBe(true); // drained → write landed
+	expect(loggedCalls(log).some((call) => call.payload.state === "notify")).toBe(true); // drained → write landed
 	await pending;
-});
-
-test("traversal: a bad pane id writes NOTHING outside the marker dir", async () => {
-	const parent = tempDir("wez-trav1-");
-	const dir = join(parent, "markerdir");
-	mkdirSync(dir);
-	const victim = join(parent, "victim.txt");
-	writeFileSync(victim, "IMPORTANT");
-	process.env.WEZTERM_ATTENTION_DIR = dir;
-	process.env.WEZTERM_PANE = "../victim.txt";
-	const { emit } = loadExt();
-	await emit("notify");
-	expect(readFileSync(victim, "utf8")).toBe("IMPORTANT"); // untouched
-});
-
-test("traversal: a bad pane id does NOT delete an outside file on clear", async () => {
-	const parent = tempDir("wez-trav2-");
-	const dir = join(parent, "markerdir");
-	mkdirSync(dir);
-	const victim = join(parent, "victim.txt");
-	writeFileSync(victim, "IMPORTANT");
-	process.env.WEZTERM_ATTENTION_DIR = dir;
-	process.env.WEZTERM_PANE = "../victim.txt";
-	const { emit } = loadExt();
-	await emit("clear");
-	expect(existsSync(victim)).toBe(true); // not deleted
-});
-
-test("cleanup: a failed rename does not leak temp files", async () => {
-	const dir = freshDir("wez-leak-");
-	process.env.WEZTERM_PANE = "42";
-	mkdirSync(join(dir, "42")); // marker path is a directory → rename fails
-	const { emit } = loadExt();
-	for (let i = 0; i < 10; i++) await emit("notify");
-	const leaked = readdirSync(dir).filter((f) => f.includes(".tmp."));
-	expect(leaked.length).toBe(0);
-});
-
-test("missing pane: lifecycle write is a silent no-op that creates no file", async () => {
-	const dir = freshDir("wez-nopane-");
-	delete process.env.WEZTERM_PANE; // the condition under test, not teardown
-	const { lifecycle } = loadExt();
-	await lifecycle["agent_start"]!();
-	await lifecycle["session_shutdown"]!(); // lifecycle no longer awaits I/O; drain it
-	expect(readdirSync(dir).length).toBe(0); // nothing written at all, not merely no "undefined" file
-});
-
-test('env: a unit-suffixed TTL ("30m") is rejected, not parsed as 30', async () => {
-	// parseInt("30m") === 30 silently produced a 30ms TTL. Strict parse must
-	// reject it and fall back to the 30-minute default.
-	const dir = freshDir("wez-ttl-");
-	process.env.WEZTERM_PANE = "42";
-	process.env.PI_WEZTERM_ATTENTION_TTL_MS = "30m";
-	const { lifecycle } = loadExt();
-	await lifecycle["agent_start"]!();
-	await lifecycle["session_shutdown"]!(); // lifecycle no longer awaits I/O; drain it
-	const m = readMarker(dir);
-	expect(m.ttl_ms).toBe(30 * 60 * 1000); // default, NOT 30
-});
-
-test("env: a relative WEZTERM_ATTENTION_DIR is skipped with one warning, never used as a cwd path", async () => {
-	// A relative override would write markers under cwd (scatter) and let clear
-	// rm() a cwd file. It is skipped for the next rule, as the plugin skips it.
-	const relDir = join(process.cwd(), "wez-rel-marker-dir");
-	rmSync(relDir, { recursive: true, force: true });
-	const home = tempDir("wez-rel-home-");
-	process.env.HOME = home;
-	process.env.WEZTERM_ATTENTION_DIR = "wez-rel-marker-dir";
-	process.env.WEZTERM_PANE = "42";
-	const { lifecycle, emit } = loadExt();
-	await lifecycle["agent_start"]!();
-	await lifecycle["session_shutdown"]!(); // lifecycle no longer awaits I/O; drain it
-	expect(readMarker(join(home, ".local", "state", "wezterm-attention")).type).toBe("thinking");
-	await emit("clear"); // clear path resolves the same way → no rm of a cwd file
-	expect(existsSync(join(home, ".local", "state", "wezterm-attention", "42"))).toBe(false);
-	expect(existsSync(relDir)).toBe(false); // dir never even created
-	expect(notifications).toHaveLength(1);
-	expect(notifications[0]?.message).toContain("WEZTERM_ATTENTION_DIR");
-	rmSync(relDir, { recursive: true, force: true });
-});
-
-test("env: the default root is $XDG_STATE_HOME/wezterm-attention when that is absolute, else ~/.local/state", async () => {
-	const home = tempDir("wez-xdg-home-");
-	const stateHome = tempDir("wez-xdg-state-");
-	process.env.HOME = home;
-	process.env.WEZTERM_PANE = "42";
-	process.env.XDG_STATE_HOME = stateHome;
-	let { lifecycle } = loadExt();
-	await lifecycle["agent_start"]!();
-	await lifecycle["session_shutdown"]!();
-	expect(readMarker(join(stateHome, "wezterm-attention")).type).toBe("thinking");
-	for (const ignored of ["", "relative/state"]) {
-		process.env.XDG_STATE_HOME = ignored;
-		({ lifecycle } = loadExt());
-		await lifecycle["agent_settled"]!();
-		await lifecycle["session_shutdown"]!();
-		expect(readMarker(join(home, ".local", "state", "wezterm-attention")).type).toBe("stop");
-		rmSync(join(home, ".local"), { recursive: true, force: true });
-	}
-	expect(existsSync(join(process.cwd(), "relative"))).toBe(false);
-	expect(notifications).toEqual([]);
-});
-
-test("env: a root the writer would refuse, too long or holding a control character, is skipped", async () => {
-	// The writer takes a root only when it is at most the manifest's path bound
-	// in bytes and holds no character Rust's char::is_control is true for.
-	const manifest = parseRecord(readFileSync(join(import.meta.dir, "../../protocol/v2.json"), "utf8"));
-	const limits = manifest.limits as Record<string, number>;
-	const limit = limits.path_max_bytes!;
-	const home = tempDir("wez-unsafe-home-");
-	const scratch = tempDir("wez-unsafe-root-");
-	const homeRoot = join(home, ".local", "state", "wezterm-attention");
-	process.env.HOME = home;
-	process.env.WEZTERM_PANE = "42";
-	const tooLong = "/" + "a".repeat(limit);
-	const unsafe = [join(scratch, "x\u0001y"), join(scratch, "x\u007fy"), join(scratch, "x\u0085y"), tooLong];
-	let expectedNotifications = 0;
-	for (const name of ["XDG_STATE_HOME", "WEZTERM_ATTENTION_DIR"]) {
-		for (const value of unsafe) {
-			process.env[name] = value;
-			const { lifecycle } = loadExt();
-			await lifecycle["agent_start"]!();
-			await lifecycle["session_shutdown"]!();
-			expect(readMarker(homeRoot).type).toBe("thinking");
-			rmSync(join(home, ".local"), { recursive: true, force: true });
-			delete process.env[name];
-			if (name === "WEZTERM_ATTENTION_DIR") expectedNotifications++;
-			expect(notifications).toHaveLength(expectedNotifications);
-		}
-	}
-	expect(readdirSync(scratch)).toEqual([]);
-	for (const message of notifications.map((entry) => entry.message)) {
-		expect(message).toContain("WEZTERM_ATTENTION_DIR");
-		expect(message).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
-	}
-});
-
-test("env: a root that is not UTF-8 is skipped and named, as the writer refuses it", async () => {
-	// Node decodes the environment as UTF-8 and puts U+FFFD where the bytes were
-	// not; the writer refuses a WEZTERM_ATTENTION_DIR or XDG_STATE_HOME like that.
-	const home = tempDir("wez-utf8-home-");
-	const scratch = tempDir("wez-utf8-root-");
-	const homeRoot = join(home, ".local", "state", "wezterm-attention");
-	process.env.HOME = home;
-	process.env.WEZTERM_PANE = "42";
-	for (const name of ["XDG_STATE_HOME", "WEZTERM_ATTENTION_DIR"]) {
-		process.env[name] = join(scratch, "x\uFFFDy");
-		const { lifecycle } = loadExt();
-		await lifecycle["agent_start"]!();
-		await lifecycle["session_shutdown"]!();
-		expect(readMarker(homeRoot).type).toBe("thinking");
-		rmSync(join(home, ".local"), { recursive: true, force: true });
-		delete process.env[name];
-	}
-	expect(readdirSync(scratch)).toEqual([]);
-	const messages = notifications.map((entry) => entry.message);
-	expect(messages).toHaveLength(2);
-	expect(messages[0]).toContain("XDG_STATE_HOME");
-	expect(messages[1]).toContain("WEZTERM_ATTENTION_DIR");
-	for (const message of messages) expect(message).not.toContain("\uFFFD");
 });
 
 test("env: a configured writer is never started with a root that is not UTF-8", async () => {
@@ -769,56 +563,33 @@ test("env: a configured writer is never started with a root that is not UTF-8", 
 	expect(readdirSync(scratch)).toEqual([]);
 });
 
-test('env: TTL_MS="0" falls back to the default, not an instantly-stale marker', async () => {
-	// "0" is a plausible "disable the TTL" reading, and it passes the digits-only
-	// gate — only the `parsed > 0` range check rejects it. Without that check the
-	// marker ships ttl_ms: 0 and plugin/init.lua expires the spinner immediately.
-	const dir = freshDir("wez-ttl0-");
-	process.env.WEZTERM_PANE = "42";
-	process.env.PI_WEZTERM_ATTENTION_TTL_MS = "0";
-	const { lifecycle } = loadExt();
-	await lifecycle["agent_start"]!();
-	await lifecycle["session_shutdown"]!(); // lifecycle no longer awaits I/O; drain it
-	const m = readMarker(dir);
-	expect(m.ttl_ms).toBe(30 * 60 * 1000); // default, NOT 0
-});
+// The states README.md lists for other extensions to emit. It is a public
+// cross-extension contract, so every one is locked here rather than left to the
+// lifecycle path, which emits none of them over the bus.
+const BUS_STATES = ["thinking", "stop", "notify", "review"];
 
-// The alias table README.md advertises to other extension authors. It is a public
-// cross-extension contract, so every row is locked here rather than left to the
-// lifecycle path (which only ever calls mark("thinking"|"stop") directly and so
-// exercises none of the mapping).
-const ALIAS_CASES: Array<[string, string]> = [
-	["busy", "thinking"],
-	["thinking", "thinking"],
-	["ready", "stop"],
-	["stop", "stop"],
-	["blocked", "notify"],
-	["pending", "notify"],
-	["notify", "notify"],
-	["review", "review"],
-];
-
-test("event: every documented alias maps to its canonical marker state", async () => {
-	for (const [alias, expected] of ALIAS_CASES) {
-		const dir = freshDir("wez-alias-");
-		process.env.WEZTERM_PANE = "42";
+test("event: every documented state reaches the writer as itself", async () => {
+	for (const state of BUS_STATES) {
+		const log = fakeWriter("wez-state-");
 		const h = loadExt();
-		await h.emit(alias);
-		const m = readMarker(dir);
-		expect(m.type).toBe(expected); // `${alias}` → `${expected}`
-		rmSync(dir, { recursive: true, force: true });
+		await h.lifecycle["session_start"]!();
+		await h.emit(state);
+		expect(loggedCalls(log).at(-1)?.payload.state).toBe(state);
 	}
 });
 
 test("event: an unrecognized state is rejected, writing nothing", async () => {
 	// normalizeState's `default: undefined` is the gate. Without it an arbitrary
-	// string reaches disk as {"type":"bogus"} — litter the plugin's valid_types
-	// table ignores, but litter this writer should never produce.
-	const dir = freshDir("wez-bogus-");
-	process.env.WEZTERM_PANE = "42";
+	// string reaches the writer as a bus state it would refuse.
+	const log = fakeWriter("wez-bogus-");
 	const h = loadExt();
+	await h.lifecycle["session_start"]!();
 	await h.emit("bogus");
-	expect(readdirSync(dir).length).toBe(0);
+	await h.lifecycle["session_shutdown"]!();
+	expect(loggedCalls(log).map((call) => call.command)).toEqual([
+		"hooks event pi session_start",
+		"hooks event pi session_shutdown",
+	]);
 });
 
 test("drain override: a delay the timer cannot hold falls back instead of wrapping to 1ms", () => {

@@ -32,22 +32,6 @@ local function drain_errors()
   return drained
 end
 
---- The subagent sidecar's nested shape, for the json_parse double below.
---- Returns nil when the content carries no readable "agents" object, which is
---- what an empty or truncated file looks like to a real parser.
-local function parse_agents(content)
-  local body = content:match('"agents"%s*:%s*(%b{})')
-  if not body then return nil end
-  local agents = {}
-  for agent_id, entry in body:gmatch('"([^"]+)"%s*:%s*(%b{})') do
-    agents[agent_id] = {
-      type    = entry:match('"type"%s*:%s*"([^"]+)"'),
-      last_ms = tonumber(entry:match('"last_ms"%s*:%s*(%-?%d+)')),
-    }
-  end
-  return agents
-end
-
 --- Small strict JSON decoder for the LuaJIT harness. Production uses
 --- wezterm.json_parse; this decoder lets the same nested protocol fixture run
 --- here without weakening it into the old regular-expression double.
@@ -187,10 +171,9 @@ local function decode_json(content)
 end
 
 local handlers = {}
--- The mux windows this test has built. The plugin asks the mux who owns a flat
--- path before unlinking it, because a saved observation cannot see a pane that
--- moved a moment ago. Cleared per test, so one test's windows cannot vouch for
--- another's panes.
+-- The mux windows this test has built, which the mux double lists: the plugin
+-- asks the mux which windows still exist. Cleared per test, so one test's
+-- windows cannot vouch for another's.
 -- Keyed by window id, because a test builds a fresh double for each poll and a
 -- mux window has one current content, not one per time it was looked at.
 local mux_windows_by_id = {}
@@ -327,6 +310,8 @@ local function encode_json(value)
   table.sort(parts)
   return "{" .. table.concat(parts, ",") .. "}"
 end
+-- The plugin encodes a tab order's source with WezTerm's own encoder.
+wezterm.json_encode = encode_json
 
 local function dirname(path)
   return assert(path:match("^(.*)/[^/]+$"), "path has no parent: " .. path)
@@ -366,17 +351,6 @@ end
 
 -- ── Fixtures ────────────────────────────────────────────────────────────────
 
-local function write_marker(pane_id, marker_type, publication_id)
-  local file = assert(io.open(test_dir .. "/" .. pane_id, "w"))
-  if publication_id then
-    file:write(string.format(
-      '{"type":"%s","publication_id":"%s"}', marker_type, publication_id))
-  else
-    file:write(string.format('{"type":"%s"}', marker_type))
-  end
-  file:close()
-end
-
 local function path_exists(path)
   local file = io.open(path, "r")
   if not file then return false end
@@ -392,62 +366,196 @@ local function read_path(path)
   return content
 end
 
-local function marker_exists(pane_id)
-  return path_exists(test_dir .. "/" .. pane_id)
+local function copy_json(value)
+  return decode_json(encode_json(value))
+end
+
+--- The time every poll below reads its records at, unless a test says. It is
+--- also WezTerm's clock, for a poll the plugin starts itself.
+local fixture_now = protocol_fixture.state_case.now_unix_ns
+wezterm.time = { now = function()
+  return { format_utc = function() return (fixture_now:gsub("^0+", "")) end }
+end }
+
+--- The realm the panes below live in, apart from the fixture's own, so a
+--- test that seeds the fixture's pane 42 and one that seeds a pane here
+--- never share a directory.
+local seeded_realm = string.rep("e", 64)
+
+--- The identity each pane id below publishes once a test has given it
+--- records. A window double's bare pane id then stands for a mux-client pane
+--- publishing it, whose GUI-local number is the pane id.
+local seeded_wires = {}
+
+local function seeded_wire(pane_id)
+  local key = tostring(pane_id)
+  local wire = seeded_wires[key]
+  if wire then return wire end
+  wire = copy_json(protocol_fixture.wire_sample)
+  wire.address.realm_id = seeded_realm
+  wire.address.pane_id = key
+  seeded_wires[key] = wire
+  return wire
+end
+
+local function seeded_pane_root(pane_id)
+  local wire = seeded_wire(pane_id)
+  return test_dir .. "/v2/realms/" .. wire.address.realm_id .. "/incarnations/"
+    .. wire.address.incarnation_id .. "/panes/" .. wire.address.pane_id
+end
+
+--- Where the seeded pane's activity and its acknowledgement live.
+local function seeded_records_root(pane_id)
+  local wire = seeded_wire(pane_id)
+  return seeded_pane_root(pane_id) .. "/launches/" .. wire.launch_id .. "/bindings/"
+    .. protocol_fixture.record_samples.binding.binding_id
+end
+
+--- The key the plugin caches a seeded pane's view under.
+local function seeded_key(pane_id)
+  return internal.address_cache_key(seeded_wire(pane_id).address)
+end
+
+local function user_review_path(pane_id)
+  return seeded_pane_root(pane_id) .. "/reviews/" .. internal.sha256("user") .. ".json"
+end
+
+--- Records of the fixture's kind `sample`, moved to the seeded pane.
+local function seeded_record(pane_id, sample)
+  local wire = seeded_wire(pane_id)
+  local record = copy_json(protocol_fixture.record_samples[sample])
+  if record.realm_id then record.realm_id = wire.address.realm_id end
+  if record.address then record.address = copy_json(wire.address) end
+  return record
+end
+
+local event_counter = 0
+local function next_event_id()
+  event_counter = event_counter + 1
+  return string.format("00000000-0000-4000-a000-%012d", event_counter)
+end
+
+--- A claimed and bound pane with nothing to show: whatever an earlier test
+--- left for the same pane id is gone.
+local function seed_pane(pane_id)
+  local wire = seeded_wire(pane_id)
+  assert(os.execute("rm -rf " .. shell_quote(seeded_pane_root(pane_id))) == 0)
+  local realm_root = test_dir .. "/v2/realms/" .. wire.address.realm_id
+  write_json_path(realm_root .. "/realm.json", seeded_record(pane_id, "realm"))
+  write_json_path(realm_root .. "/incarnations/" .. wire.address.incarnation_id
+    .. "/incarnation.json", seeded_record(pane_id, "incarnation"))
+  local pane_root = seeded_pane_root(pane_id)
+  write_json_path(pane_root .. "/claim.json", seeded_record(pane_id, "claim"))
+  write_json_path(pane_root .. "/launches/" .. wire.launch_id .. "/current-binding.json",
+    seeded_record(pane_id, "current_binding"))
+  write_json_path(seeded_records_root(pane_id) .. "/binding.json", seeded_record(pane_id, "binding"))
+  return wire
+end
+
+--- Publish `activity_type` for the pane, as its agent's hook does, and
+--- return the activity's event id. A pane with no records yet is seeded
+--- first. `review` is the user's flag, which the review key sets.
+local function write_activity(pane_id, activity_type, frame)
+  if not path_exists(seeded_pane_root(pane_id) .. "/claim.json") then seed_pane(pane_id) end
+  if activity_type == "review" then
+    local review = seeded_record(pane_id, "review")
+    review.event_id = next_event_id()
+    write_json_path(user_review_path(pane_id), review)
+    return review.event_id
+  end
+  local activity = seeded_record(pane_id, "activity")
+  activity.type = activity_type
+  activity.label = nil
+  activity.frame = frame
+  activity.event_id = next_event_id()
+  activity.observed_mono_ns = string.format("%020d", 3000000000 + event_counter)
+  write_json_path(seeded_records_root(pane_id) .. "/activity.json", activity)
+  return activity.event_id
+end
+
+local function activity_exists(pane_id)
+  return path_exists(seeded_records_root(pane_id) .. "/activity.json")
+end
+
+local function clear_activity(pane_id)
+  os.remove(seeded_records_root(pane_id) .. "/activity.json")
+end
+
+--- Record that the user saw the pane's activity `event_id`, as the attention
+--- command does when the plugin asks it to.
+local function write_acknowledgement(pane_id, event_id)
+  local ack = seeded_record(pane_id, "acknowledgement")
+  ack.activity_event_id = event_id
+  ack.event_id = next_event_id()
+  write_json_path(seeded_records_root(pane_id) .. "/ack.json", ack)
 end
 
 local function acknowledgement_exists(pane_id)
-  return path_exists(test_dir .. "/" .. pane_id .. ".ack")
+  return path_exists(seeded_records_root(pane_id) .. "/ack.json")
 end
 
-local function subagents_exists(pane_id)
-  return path_exists(test_dir .. "/" .. pane_id .. ".agents")
+--- The command lines the plugin ran through wezterm.run_child_process while
+--- `callback` ran. `answer(argv)` gives the child's (success, stdout); by
+--- default an "applied" answer, which is all a test that only watches the
+--- command line needs.
+local function applied_answer(argv)
+  local action = table.concat(argv, " "):match(" plugin ([%w%-]+)") or "unknown"
+  return true, '{"schema":1,"command":"plugin ' .. action .. '","status":"ok",'
+    .. '"complete":true,"result":{"disposition":"applied","diagnostic":null,'
+    .. '"event_id":"00000000-0000-4000-a000-999999999999"},"diagnostics":[]}'
 end
 
-local function review_flag_exists(pane_id)
-  return path_exists(test_dir .. "/" .. pane_id .. ".review")
-end
-
---- Write the review flag sidecar the way the Alt+B handler does.
-local function write_review_flag_file(pane_id, publication_id)
-  local file = assert(io.open(test_dir .. "/" .. pane_id .. ".review", "w"))
-  file:write(string.format(
-    '{"publication_id":"%s"}', publication_id or ("flag-" .. pane_id)))
-  file:close()
-end
-
---- Write the flag sidecar byte for byte, for shapes a fixture cannot express.
-local function write_raw_review_flag(pane_id, content)
-  local file = assert(io.open(test_dir .. "/" .. pane_id .. ".review", "w"))
-  file:write(content)
-  file:close()
-end
-
---- Write a pane's subagent activity sidecar.
---- `entries` is a list of { id = string, type = string?, last_ms = number }.
-local function write_subagents(pane_id, entries)
-  local parts = {}
-  for _, entry in ipairs(entries) do
-    parts[#parts + 1] = string.format(
-      '"%s":{"type":"%s","last_ms":%d}', entry.id, entry.type or "general-purpose", entry.last_ms)
+local function with_plugin_command(answer, callback)
+  local spawned = {}
+  local previous = wezterm.run_child_process
+  wezterm.run_child_process = function(argv)
+    spawned[#spawned + 1] = argv
+    return (answer or applied_answer)(argv)
   end
-  local file = assert(io.open(test_dir .. "/" .. pane_id .. ".agents", "w"))
-  file:write('{"agents":{' .. table.concat(parts, ",") .. "}}")
-  file:close()
+  local ok, failure = pcall(callback)
+  wezterm.run_child_process = previous
+  assert(ok, failure)
+  return spawned
 end
 
---- Write a sidecar byte for byte, for the shapes a fixture cannot express.
-local function write_raw_subagents(pane_id, content)
-  local file = assert(io.open(test_dir .. "/" .. pane_id .. ".agents", "w"))
-  file:write(content)
-  file:close()
+--- The `attention plugin` arguments of a spawned command line, after the
+--- executable, as one string.
+local function plugin_arguments(argv)
+  for index, value in ipairs(argv) do
+    if value:sub(-#"/bin/attention") == "/bin/attention" then
+      return table.concat(argv, " ", index + 1)
+    end
+  end
+  return nil
 end
 
-local function write_acknowledgement_file(pane_id, identity)
-  local file = assert(io.open(test_dir .. "/" .. pane_id .. ".ack", "w"))
-  file:write(identity)
-  file:close()
+--- What the attention command does for `plugin set-review` and
+--- `plugin clear-review` on a seeded pane, answered as it answers.
+local function reviewing_answer(argv)
+  local arguments = assert(plugin_arguments(argv), "not an attention command line")
+  local action = assert(arguments:match("^plugin (%S+)"))
+  local function flag(name) return assert(arguments:match("%-%-" .. name .. " (%S+)"), name) end
+  local address = {
+    realm_id = flag("realm%-id"), incarnation_id = flag("incarnation%-id"), pane_id = flag("pane%-id"),
+  }
+  local path = test_dir .. "/v2/realms/" .. address.realm_id .. "/incarnations/"
+    .. address.incarnation_id .. "/panes/" .. address.pane_id .. "/reviews/"
+    .. internal.sha256("user") .. ".json"
+  local disposition = "applied"
+  if action == "set-review" then
+    local review = copy_json(protocol_fixture.record_samples.review)
+    review.address, review.event_id = address, next_event_id()
+    write_json_path(path, review)
+  elseif path_exists(path) then
+    os.remove(path)
+  else
+    disposition = "skipped"
+  end
+  return true, '{"schema":1,"command":"plugin ' .. action .. '","status":"ok","complete":true,'
+    .. '"result":{"disposition":"' .. disposition .. '","diagnostic":null,"event_id":null},'
+    .. '"diagnostics":[]}'
 end
+
 
 --- A mux pane double.
 ---
@@ -482,8 +590,11 @@ mux_pane = function(pane_id, spec)
 end
 
 --- Tab entries in a window double are either a bare local pane id or
---- { id, domain, published }.
+--- { id, domain, published, attention }. A bare id a test has seeded records
+--- for stands for the mux-client pane that publishes them.
 local function pane_from_entry(entry)
+  local seeded = type(entry) ~= "table" and seeded_wires[tostring(entry)]
+  if seeded then return mux_pane(entry, { domain = "unix", attention = seeded }) end
   if type(entry) == "table" then
     return mux_pane(entry.id, {
       unresolvable = entry.unresolvable,
@@ -594,7 +705,8 @@ end
 --- Poll a single unfocused tab. Used wherever a test only needs the cache
 --- filled and wants no acknowledgement or redraw in the way.
 local function poll(pane_ids)
-  attention.poll(window_double({ tabs = { pane_ids }, focused = false }))
+  attention.poll(window_double({ tabs = { pane_ids }, focused = false }),
+    { now_unix_ns = fixture_now })
 end
 
 --- Poll as the focused window, returning the double so the test can inspect
@@ -609,7 +721,9 @@ local function poll_focused(spec)
     on_focus_check = spec.on_focus_check,
     window_id      = spec.window_id,
   })
-  attention.poll(w, spec.opts)
+  local opts = { now_unix_ns = fixture_now }
+  for key, value in pairs(spec.opts or {}) do opts[key] = value end
+  attention.poll(w, opts)
   return w
 end
 
@@ -647,11 +761,11 @@ end
 -- ── Visible-attention projection ────────────────────────────────────────────
 
 test("projection returns the highest-priority cached pane and ignores uncached ones", function()
-  write_marker(711, "thinking")
-  write_marker(712, "notify")
+  write_activity(711, "thinking")
+  write_activity(712, "notify")
   poll({ 711, 712 })
 
-  local visible = internal.resolve_visible_attention({ "711", "712", "799" })
+  local visible = internal.resolve_visible_attention({ seeded_key(711), seeded_key(712), "799" })
   assert(visible.type == "notify", "notify outranks thinking, got " .. tostring(visible.type))
   assert(visible.indicator == "! ", "indicator should be the notify glyph")
   assert(visible.color == "#240f16", "color should be the notify tint")
@@ -662,88 +776,54 @@ test("projection returns the highest-priority cached pane and ignores uncached o
 end)
 
 test("generated thinking frames are stable inside one wall-clock bucket", function()
-  write_marker(731, "thinking")
+  write_activity(731, "thinking")
   local w = window_double({ tabs = { { 731 } }, focused = false })
 
-  attention.poll(w, { now_ms = 1000 })
+  attention.poll(w, { now_ms = 1000, now_unix_ns = fixture_now })
   local _, f0 = attention.get_attention(731)
-  attention.poll(w, { now_ms = 1500 })
+  attention.poll(w, { now_ms = 1500, now_unix_ns = fixture_now })
   local _, f1 = attention.get_attention(731)
-  attention.poll(w, { now_ms = 1999 })
+  attention.poll(w, { now_ms = 1999, now_unix_ns = fixture_now })
   local _, f2 = attention.get_attention(731)
   assert(f0 == 1 and f1 == 1 and f2 == 1,
     "one bucket should keep one frame but got "
       .. tostring(f0) .. "," .. tostring(f1) .. "," .. tostring(f2))
 
-  attention.poll(w, { now_ms = 2000 })
+  attention.poll(w, { now_ms = 2000, now_unix_ns = fixture_now })
   local _, next_frame = attention.get_attention(731)
   assert(next_frame == 2, "crossing the bucket should advance to frame 2, got " .. tostring(next_frame))
 end)
 
 test("time-derived frames preserve the public get_attention return shape", function()
-  write_marker(732, "thinking")
+  write_activity(732, "thinking")
   local w = window_double({ tabs = { { 732 } }, focused = false })
 
-  attention.poll(w, { now_ms = 3000 })
+  attention.poll(w, { now_ms = 3000, now_unix_ns = fixture_now })
   local state, frame = attention.get_attention(732)
 
   assert(state == "thinking", "the first return remains the marker type")
   assert(frame == 3, "the second return remains the derived frame, got " .. tostring(frame))
 end)
 
-test("a marker that is not an object, or whose frame is not a count, cannot break a poll", function()
-  for index, content in ipairs({ "5", "true", '"thinking"', "[1]" }) do
-    local id = 7190 + index
-    local out = assert(io.open(test_dir .. "/" .. id, "w")); out:write(content); out:close()
-    poll({ id })
-    assert(attention.get_attention(id) == nil, content .. " is not a marker")
-  end
-  for index, frame in ipairs({ '"2"', "1.5", "-1" }) do
-    local id = 7195 + index
-    local out = assert(io.open(test_dir .. "/" .. id, "w"))
-    out:write('{"type":"thinking","frame":' .. frame .. "}"); out:close()
-    poll({ id })
-    local atype, shown = attention.get_attention(id)
-    assert(atype == "thinking" and type(shown) == "number"
-      and shown == math.floor(shown) and shown >= 0, "frame " .. frame .. " reached the renderer")
-    local rendered = format_tab_title(tab(id, id + 100, false))
-    assert(type(rendered) == "table", "the thinking tab must still render")
-  end
-end)
-
-test("Lua accepts the publication ID marker shape published by Pi", function()
-  local file = assert(io.open(test_dir .. "/733", "w"))
-  file:write('{"type":"notify","source":"pi","publication_id":"pi-publication",'
-    .. '"updated_at":1000,"label":"done","unknown":"ignored"}')
-  file:close()
-
-  attention.poll(
-    window_double({ tabs = { { 733 } }, focused = false }),
-    { now_ms = 1000000 })
-
-  assert(attention.get_attention(733) == "notify",
-    "Pi's publication ID and extra fields must not change the marker type")
-end)
-
 -- ── Read-only rendering ─────────────────────────────────────────────────────
 
 test("neither renderer clears a marker, even on the active tab", function()
-  write_marker(101, "stop")
-  write_marker(102, "notify")
+  write_activity(101, "stop")
+  write_activity(102, "notify")
   poll({ 101, 102 })
 
   format_tab_title(tab(101, 102, true))
   attention.wrap_title_formatter(function() return "custom title" end)(tab(101, 102, true))
 
-  assert(marker_exists(101), "the active pane's marker must survive rendering")
-  assert(marker_exists(102), "the sibling pane's marker must survive rendering")
+  assert(activity_exists(101), "the active pane's marker must survive rendering")
+  assert(activity_exists(102), "the sibling pane's marker must survive rendering")
   assert(attention.get_attention(101) == "stop", "rendering must not touch the cache")
   assert(attention.get_attention(102) == "notify", "rendering must not touch the cache")
 end)
 
 test("the tab renders the highest-priority pane, sibling included", function()
-  write_marker(111, "review")
-  write_marker(112, "stop")
+  write_activity(111, "review")
+  write_activity(112, "stop")
   poll({ 111, 112 })
 
   local rendered = format_tab_title(tab(111, 112, true))
@@ -754,8 +834,8 @@ test("the tab renders the highest-priority pane, sibling included", function()
 end)
 
 test("both renderers project the same attention for the same tab", function()
-  write_marker(741, "review")
-  write_marker(742, "stop")
+  write_activity(741, "review")
+  write_activity(742, "stop")
   poll({ 741, 742 })
 
   local wrapper_attention
@@ -834,13 +914,19 @@ local function tab_source_response(socket, incarnation)
 end
 
 test("tab source parsing refuses when the plugin manifest is unavailable", function()
-  local degraded = dofile(repo_root .. "/plugin/runtime.lua")().bind({ M = {} })
+  -- A runtime bound to a protocol module whose manifest did not load.
+  local function unloaded_manifest_runtime(values)
+    values.protocol_api = { now_ms = function() return os.time() * 1000 end }
+    values.overlays = { report_error_once = function() end }
+    values.reader, values.titles = {}, {}
+    return dofile(repo_root .. "/plugin/runtime.lua")().bind(values)
+  end
+  local degraded = unloaded_manifest_runtime({ M = {} })
   assert(degraded.parse_tab_source_response(tab_source_response("/test/gui.sock")) == nil)
   -- No answer could be read, so a tab order drawn meanwhile is not held for one.
-  local writer = dofile(repo_root .. "/plugin/runtime.lua")().bind({
+  local writer = unloaded_manifest_runtime({
     M = { _active_integration_root = writer_root, _active_writer_installed = true },
     wezterm = { run_child_process = function() return true, tab_source_response("/test/gui.sock"), "" end },
-    now_ms = function() return os.time() * 1000 end, report_error_once = function() end,
   })
   writer.acquire_tab_source("/test/gui.sock")
   assert(writer.tab_source_status() == "unavailable")
@@ -1050,7 +1136,7 @@ test("a window first published without a source keeps that one file after the so
   assert(path_exists(legacy), "with no source to wait for, the first draw publishes unsourced")
   wezterm.run_child_process = function(args) return true, tab_source_response(args[4]), "" end
   internal.acquire_tab_source("/test/gui.sock")
-  write_marker(9832, "stop")
+  write_activity(9832, "stop")
   poll({ 9832 })
   format_tab_title(drawn, { drawn })
   local later = gui_tab({ window_id = 9829, tab_id = 9828, tab_index = 0, panes = { 9827 } })
@@ -1143,6 +1229,9 @@ test("two GUIs drawing the same window id never remove each other's tab order", 
     integration_root = other_root })
   local other_format = assert(handlers["format-tab-title"][other_handler])
   drain_warnings()
+  -- A pane is published under the key a poll found it by.
+  poll({ 9862 })
+  other.poll(window_double({ tabs = { { 9863 } }, focused = false }))
 
   internal.reset_tab_source()
   os.getenv = function(name)
@@ -1202,8 +1291,9 @@ test("a closed window's tab order another process rewrote is not withdrawn", fun
 end)
 
 test("a window publishes its drawn order once every one of its tabs is drawn", function()
-  write_marker(9820, "stop")
-  poll({ 9820 })
+  write_activity(9820, "stop")
+  -- 9821 has no records: a pane no launch has claimed is published by its id.
+  poll({ 9820, 9821 })
 
   local first = gui_tab({ window_id = 9800, tab_id = 9810, tab_index = 0, panes = { 9820 } })
   local second = gui_tab({ window_id = 9800, tab_id = 9811, tab_index = 1, panes = { 9821 } })
@@ -1226,15 +1316,15 @@ test("a window publishes its drawn order once every one of its tabs is drawn", f
   assert(published.tabs[1].text == rendered_text(first_drawn)
       and published.tabs[2].text == rendered_text(second_drawn),
     "the text is what those calls drew")
-  assert(published.tabs[1].marker_ids[1] == "9820"
+  assert(published.tabs[1].marker_ids[1] == seeded_key(9820)
       and published.tabs[2].marker_ids[1] == "9821",
-    "each tab carries the ids its markers are named by")
+    "each tab carries the keys its panes are cached under")
 
   -- Byte for byte, because the reader on the other side wants integers and
   -- this is where the plugin's own encoding is decided.
   assert(read_path(tab_publication_path(9800)) == string.format(
     '{"published_at_ms":%d,"schema":1,"tabs":['
-      .. '{"marker_ids":["9820"],"number":1,"text":%s},'
+      .. '{"marker_ids":["' .. seeded_key(9820) .. '"],"number":1,"text":%s},'
       .. '{"marker_ids":["9821"],"number":2,"text":%s}],"window_id":9800}\n',
     published.published_at_ms,
     encode_json_string(published.tabs[1].text),
@@ -1243,7 +1333,7 @@ test("a window publishes its drawn order once every one of its tabs is drawn", f
 end)
 
 test("a redraw that draws the same thing writes no file", function()
-  write_marker(9822, "stop")
+  write_activity(9822, "stop")
   poll({ 9822 })
 
   local first = gui_tab({ window_id = 9801, tab_id = 9812, tab_index = 0, panes = { 9822 } })
@@ -1259,7 +1349,7 @@ test("a redraw that draws the same thing writes no file", function()
   assert(not path_exists(tab_publication_path(9801)),
     "an unchanged bar must not write on the GUI thread")
 
-  write_marker(9823, "notify")
+  write_activity(9823, "notify")
   poll({ 9822, 9823 })
   format_tab_title(first, bar)
   local changed_drawn = format_tab_title(second, bar)
@@ -1272,7 +1362,7 @@ test("a redraw that draws the same thing writes no file", function()
 end)
 
 test("the published ids are the translated ones, not the window's local ids", function()
-  write_marker(9840, "stop")
+  write_activity(9840, "stop")
   attention.poll(window_double({
     tabs = { { { id = 9830, published = 9840, domain = "mux" } } }, focused = false }))
 
@@ -1286,7 +1376,7 @@ test("the published ids are the translated ones, not the window's local ids", fu
 end)
 
 test("a mux-client pane drawn before any poll shows no other pane's attention", function()
-  write_marker(9746, "stop")
+  write_activity(9746, "stop")
   -- A client pane that published 9746 as its marker id, walked by polls long
   -- enough for its title to settle.
   for _ = 1, 2 do
@@ -1311,6 +1401,7 @@ test("two windows publish their own orders into their own files", function()
   local left = gui_tab({ window_id = 9803, tab_id = 9815, tab_index = 0, panes = { 9824 } })
   local right_first = gui_tab({ window_id = 9804, tab_id = 9816, tab_index = 0, panes = { 9825 } })
   local right_second = gui_tab({ window_id = 9804, tab_id = 9817, tab_index = 1, panes = { 9826 } })
+  poll({ 9824, 9825, 9826 })
 
   format_tab_title(left, { left })
   format_tab_title(right_first, { right_first, right_second })
@@ -1394,7 +1485,7 @@ test("a window id reused after withdrawal publishes again", function()
   poll_with_inventory(9806, { 9806 })
 end)
 
-test("a v2 pane publishes its cache key, not the local pane id", function()
+test("a claimed pane publishes its cache key, not the local pane id", function()
   materialize_state_case(protocol_fixture.state_case)
   attention.poll(window_double({ tabs = { { {
     id = 9850, domain = "unix", attention = protocol_fixture.wire_sample,
@@ -1409,319 +1500,325 @@ test("a v2 pane publishes its cache key, not the local pane id", function()
   local published = assert(read_tab_publication(9805), "the window should be published")
   local key = internal.address_cache_key(protocol_fixture.wire_sample.address)
   assert(published.tabs[1].marker_ids[1] == key,
-    "a v2 pane publishes the cache key the plugin indexes it by, got "
+    "a claimed pane publishes the cache key the plugin indexes it by, got "
       .. tostring(published.tabs[1].marker_ids[1]))
 end)
 
 -- ── Focus-aware acknowledgement ─────────────────────────────────────────────
 
+--- What the attention command answers to `plugin acknowledge` for a seeded
+--- pane: it writes the acknowledgement only while the event named is still
+--- the pane's activity, as the command does under its locks.
+local function acknowledging_answer(argv)
+  local arguments = assert(plugin_arguments(argv), "not an attention command line")
+  local function flag(name) return assert(arguments:match("%-%-" .. name .. " (%S+)"), name) end
+  local address = {
+    realm_id = flag("realm%-id"), incarnation_id = flag("incarnation%-id"), pane_id = flag("pane%-id"),
+  }
+  local launch_id, event_id = flag("launch%-id"), flag("activity%-event%-id")
+  local launch_root = test_dir .. "/v2/realms/" .. address.realm_id .. "/incarnations/"
+    .. address.incarnation_id .. "/panes/" .. address.pane_id .. "/launches/" .. launch_id
+  local pointer = read_path(launch_root .. "/current-binding.json")
+  local records_root = launch_root .. "/bindings/" .. decode_json(pointer).binding_id
+  local current = read_path(records_root .. "/activity.json")
+  local disposition = "ignored"
+  if current and decode_json(current).event_id == event_id then
+    local ack = copy_json(protocol_fixture.record_samples.acknowledgement)
+    ack.address, ack.launch_id = address, launch_id
+    ack.target = decode_json(current).target
+    ack.activity_event_id, ack.event_id = event_id, next_event_id()
+    write_json_path(records_root .. "/ack.json", ack)
+    disposition = "applied"
+  end
+  return true, '{"schema":1,"command":"plugin acknowledge","status":"ok","complete":true,'
+    .. '"result":{"disposition":"' .. disposition .. '","diagnostic":null,"event_id":null},'
+    .. '"diagnostics":[]}'
+end
+
 test("a focused poll acknowledges only the active pane", function()
-  write_marker(801, "notify", "rev-801")
-  write_marker(802, "stop")
+  local event_id = write_activity(801, "notify")
+  write_activity(802, "stop")
 
-  local w = poll_focused({ tabs = { { 801, 802 } }, active_pane_id = 801 })
+  local w
+  local spawned = with_plugin_command(acknowledging_answer, function()
+    w = poll_focused({ tabs = { { 801, 802 } }, active_pane_id = 801 })
+  end)
 
-  assert(marker_exists(801), "acknowledgement must never remove the canonical marker")
-  assert(acknowledgement_exists(801), "the viewed marker identity should be recorded")
-  assert(marker_exists(802), "an unfocused sibling marker should remain")
-  assert(attention.get_attention(801) == nil, "the acknowledged cache entry should be gone")
+  assert(#spawned == 1, "one acknowledgement runs, got " .. #spawned)
+  local wire = seeded_wire(801)
+  assert(spawned[1][1] == "env" and spawned[1][2] == "WEZTERM_ATTENTION_DIR=" .. test_dir,
+    "the state directory is handed to the command")
+  assert(plugin_arguments(spawned[1]) == table.concat({
+    "plugin", "acknowledge",
+    "--realm-id", wire.address.realm_id,
+    "--incarnation-id", wire.address.incarnation_id,
+    "--pane-id", "801",
+    "--launch-id", wire.launch_id,
+    "--activity-event-id", event_id,
+  }, " "), "the command names the pane, its launch and the event shown: "
+    .. tostring(plugin_arguments(spawned[1])))
+  assert(activity_exists(801), "acknowledgement must never remove the activity")
+  assert(attention.get_attention(801) == nil, "the acknowledged activity is gone from the tab at once")
   assert(attention.get_attention(802) == "stop", "the sibling cache entry should remain")
   assert(#w.status_writes == 0 and #w.title_writes == 0,
     "the plugin must not write status or title text")
 end)
 
 test("an unfocused poll acknowledges nothing and performs no action", function()
-  write_marker(811, "notify")
-  write_marker(812, "stop")
+  write_activity(811, "notify")
+  write_activity(812, "stop")
 
   local w = window_double({ tabs = { { 811, 812 } }, focused = false, active_pane_id = 811 })
-  attention.poll(w)
+  local spawned = with_plugin_command(acknowledging_answer, function()
+    attention.poll(w, { now_unix_ns = fixture_now })
+  end)
 
-  assert(marker_exists(811), "a background window must not acknowledge its active pane")
-  assert(marker_exists(812), "a background window must not acknowledge any pane")
+  assert(#spawned == 0, "a background window must not acknowledge its active pane")
   assert(attention.get_attention(811) == "notify", "the cache should still be filled")
   assert(#w.actions == 0, "an unfocused window must never be sent a key action")
 end)
 
-test("visiting the sibling pane acknowledges its retained marker", function()
-  write_marker(401, "stop")
-  write_marker(402, "notify")
+test("visiting the sibling pane acknowledges its activity", function()
+  write_activity(401, "stop")
+  local sibling_event = write_activity(402, "notify")
 
-  poll_focused({ tabs = { { 401, 402 } }, active_pane_id = 401 })
-  assert(marker_exists(402), "the unvisited sibling marker should remain")
+  with_plugin_command(acknowledging_answer, function()
+    poll_focused({ tabs = { { 401, 402 } }, active_pane_id = 401 })
+  end)
+  assert(not acknowledgement_exists(402), "the unvisited sibling is not acknowledged")
 
-  poll_focused({ tabs = { { 401, 402 } }, active_pane_id = 402 })
-  assert(marker_exists(402), "acknowledgement must leave canonical writer truth intact")
-  assert(acknowledgement_exists(402), "the visited sibling should gain an acknowledgement")
+  local spawned = with_plugin_command(acknowledging_answer, function()
+    poll_focused({ tabs = { { 401, 402 } }, active_pane_id = 402 })
+  end)
+  assert(#spawned == 1 and plugin_arguments(spawned[1]):find("--activity-event-id " .. sibling_event, 1, true),
+    "the visited sibling's activity is acknowledged")
   assert(attention.get_attention(402) == nil, "the acknowledged sibling should disappear from effective cache")
 end)
 
-test("a new publication ID releases an older acknowledgement", function()
-  write_marker(931, "notify", "publication-a")
-  poll_focused({ tabs = { { 930, 931 } }, active_pane_id = 931 })
-  assert(attention.get_attention(931) == nil, "publication A should be acknowledged")
+test("a new activity is shown again after an older one was acknowledged", function()
+  write_activity(931, "notify")
+  with_plugin_command(acknowledging_answer, function()
+    poll_focused({ tabs = { { 930, 931 } }, active_pane_id = 931 })
+  end)
+  assert(attention.get_attention(931) == nil, "the first activity should be acknowledged")
 
-  write_marker(931, "notify", "publication-b")
+  write_activity(931, "notify")
   poll({ 930, 931 })
 
-  assert(attention.get_attention(931) == "notify", "publication B must be visible")
-  assert(not acknowledgement_exists(931), "the stale publication-A acknowledgement should be removed")
+  assert(attention.get_attention(931) == "notify", "the second activity must be visible")
 end)
 
-test("legacy raw identity remains compatible and changed bytes become visible", function()
-  write_marker(932, "stop")
-  poll_focused({ tabs = { { 930, 932 } }, active_pane_id = 932 })
-  assert(attention.get_attention(932) == nil, "legacy stop should be acknowledged by raw identity")
-
-  write_marker(932, "notify")
-  poll({ 930, 932 })
-
-  assert(attention.get_attention(932) == "notify", "changed legacy bytes must become visible")
-  assert(not acknowledgement_exists(932), "changed raw identity should release the sidecar")
-end)
-
-test("a stale acknowledgement never suppresses mismatched canonical truth when cleanup fails", function()
-  write_marker(933, "notify", "publication-b")
-  write_acknowledgement_file(933, "publication\npublication-a")
-
-  local ack_path = test_dir .. "/933.ack"
-  local real_remove = os.remove
-  os.remove = function(path)
-    if path == ack_path then return nil, "permission denied" end
-    return real_remove(path)
-  end
-  poll({ 933 })
-  os.remove = real_remove
-
-  assert(attention.get_attention(933) == "notify", "mismatched current truth must remain visible")
-  assert(acknowledgement_exists(933), "precondition: failed cleanup leaves the stale sidecar")
-  local errors = drain_errors()
-  assert(#errors == 1 and errors[1]:find("failed to remove acknowledgement", 1, true),
-    "cleanup failure should log once, got " .. tostring(errors[1]))
-end)
-
-test("canonical absence clears acknowledgement without resurrecting state", function()
-  write_marker(941, "stop", "publication-a")
-  poll_focused({ tabs = { { 940, 941 } }, active_pane_id = 941 })
-  assert(acknowledgement_exists(941), "the sidecar should exist after acknowledgement")
-
-  os.remove(test_dir .. "/941")
-  poll({ 940, 941 })
-
-  assert(attention.get_attention(941) == nil, "absence remains clear")
-  assert(not acknowledgement_exists(941), "absence should release stale acknowledgement")
-end)
-
-test("direct disk reads respect acknowledgement identity", function()
-  write_marker(942, "notify", "publication-a")
-  poll_focused({ tabs = { { 940, 942 } }, active_pane_id = 942 })
-
-  assert(attention.get_attention(942, { dir = test_dir }) == nil,
-    "a direct read should expose effective attention, not acknowledged physical state")
-end)
-
-test("acknowledgement survives a plugin reload without moving canonical truth", function()
-  write_marker(947, "notify", "publication-a")
-  poll_focused({ tabs = { { 940, 947 } }, active_pane_id = 947 })
-  assert(acknowledgement_exists(947), "precondition: sidecar exists")
+test("an acknowledgement survives a plugin reload", function()
+  write_activity(947, "notify")
+  with_plugin_command(acknowledging_answer, function()
+    poll_focused({ tabs = { { 940, 947 } }, active_pane_id = 947 })
+  end)
+  assert(acknowledgement_exists(947), "precondition: acknowledged")
 
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
   reloaded.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false })
-  reloaded.poll(window_double({ tabs = { { 940, 947 } }, focused = false }))
+  reloaded.poll(window_double({ tabs = { { 940, 947 } }, focused = false }),
+    { now_unix_ns = fixture_now })
 
-  assert(marker_exists(947), "reload must leave canonical marker untouched")
+  assert(activity_exists(947), "reload must leave the activity untouched")
   assert(reloaded.get_attention(947) == nil, "reload should honor the durable acknowledgement")
 end)
 
-test("acknowledgement write failure leaves marker visible and cache truthful", function()
-  write_marker(943, "notify", "publication-a")
-  poll({ 943 })
+--- The answer of a `plugin acknowledge` that failed with diagnostic `code`.
+local function acknowledgement_failed(code, message)
+  return false, '{"schema":1,"command":"plugin acknowledge","status":"unavailable",'
+    .. '"complete":false,"result":{},"diagnostics":[{"code":"' .. code .. '",'
+    .. '"message":"' .. message .. '","context":{},"help":""}]}'
+end
 
-  local outcome = internal.acknowledge_focused_pane(943, {
-    dir = test_dir,
-    now_ms = 1000,
-    write_acknowledgement = function() return false end,
-  })
-
-  assert(outcome == "failed", "the failure should be explicit, got " .. tostring(outcome))
-  assert(marker_exists(943), "acknowledgement failure must retain canonical truth")
-  assert(not acknowledgement_exists(943), "a failed write must not install a sidecar")
-  assert(attention.get_attention(943) == "notify", "the marker must remain visible")
-end)
-
-test("acknowledgement rename failure removes its temp and leaves truth visible", function()
-  write_marker(948, "notify", "publication-a")
-  poll({ 948 })
-
-  local ack_path = test_dir .. "/948.ack"
-  local real_rename = os.rename
-  os.rename = function(from, to)
-    if to == ack_path then return nil, "permission denied" end
-    return real_rename(from, to)
+test("a refused acknowledgement leaves the activity visible, says why once, and is not retried", function()
+  write_activity(943, "notify")
+  local function refused()
+    return acknowledgement_failed("claim_stale",
+      "the pane's claim does not name the launch the pane published")
   end
-  local ok, outcome = pcall(internal.acknowledge_focused_pane, 948, {
-    dir = test_dir,
-    now_ms = 1000,
-  })
-  os.rename = real_rename
+  local real_time = os.time
+  local spawned
+  local ok, failure = pcall(function()
+    spawned = with_plugin_command(refused, function()
+      poll_focused({ tabs = { { 943 } }, active_pane_id = 943 })
+      poll_focused({ tabs = { { 943 } }, active_pane_id = 943 })
+      -- Past every backoff wait: a refusal stands for this event.
+      os.time = function() return real_time() + 600 end
+      poll_focused({ tabs = { { 943 } }, active_pane_id = 943 })
+    end)
+  end)
+  os.time = real_time
+  assert(ok, failure)
 
-  assert(ok and outcome == "failed", "rename failure should return failed")
-  assert(marker_exists(948), "canonical truth must remain")
-  assert(not acknowledgement_exists(948), "failed rename must not install acknowledgement")
-  assert(not path_exists(internal.acknowledgement_tmp_path(test_dir, "948")),
-    "failed rename must remove its temp file")
-  assert(attention.get_attention(948) == "notify", "failed acknowledgement must remain visible")
+  assert(#spawned == 1, "the same activity is not tried again on every poll, got " .. #spawned)
+  assert(attention.get_attention(943) == "notify", "the activity must remain visible")
   local errors = drain_errors()
-  assert(#errors == 1 and errors[1]:find("failed to place acknowledgement", 1, true),
-    "the real rename failure should be logged")
+  assert(#errors == 1 and errors[1]:find("claim_stale", 1, true),
+    "the failure is reported once with the command's reason, got " .. tostring(errors[1]))
+
+  -- A newer activity is a new thing to acknowledge.
+  write_activity(943, "stop")
+  spawned = with_plugin_command(acknowledging_answer, function()
+    poll_focused({ tabs = { { 943 } }, active_pane_id = 943 })
+  end)
+  assert(#spawned == 1 and attention.get_attention(943) == nil, "the newer activity is acknowledged")
 end)
 
-test("public removal clears canonical marker and acknowledgement sidecar", function()
-  write_marker(944, "stop", "publication-a")
-  poll_focused({ tabs = { { 940, 944 } }, active_pane_id = 944 })
-  assert(acknowledgement_exists(944), "precondition: sidecar exists")
-
-  attention.remove_marker(944, { dir = test_dir })
-
-  assert(not marker_exists(944), "public removal should remove canonical marker")
-  assert(not acknowledgement_exists(944), "public removal should remove sidecar")
-  assert(attention.get_attention(944) == nil, "public removal should clear cache")
-end)
-
-test("public removal and direct reads refuse an id that is not a pane id", function()
-  local outside = test_dir .. "/outside"
-  assert(os.execute("mkdir -p " .. shell_quote(outside)) == 0)
-  local victim = test_dir .. "/victim"
-  for _, suffix in ipairs({ "", ".ack", ".review", ".agents" }) do
-    local out = assert(io.open(victim .. suffix, "w")); out:write('{"type":"stop"}'); out:close()
+test("an acknowledgement that failed in a way that can pass is tried again after a wait", function()
+  local failures = {
+    [9431] = function() return acknowledgement_failed("probe_unavailable", "state lock timed out") end,
+    [9432] = function() error("spawn failed") end,
+    [9433] = function() return false, "" end,
+  }
+  local real_time = os.time
+  for pane_id, fail in pairs(failures) do
+    write_activity(pane_id, "notify")
+    local runs = 0
+    local function failing_once(argv)
+      runs = runs + 1
+      if runs == 1 then return fail(argv) end
+      return acknowledging_answer(argv)
+    end
+    local ok, failure = pcall(function()
+      with_plugin_command(failing_once, function()
+        poll_focused({ tabs = { { pane_id } }, active_pane_id = pane_id })
+        poll_focused({ tabs = { { pane_id } }, active_pane_id = pane_id })
+        assert(runs == 1, "pane " .. pane_id .. ": the retry waits for its backoff, ran " .. runs)
+        os.time = function() return real_time() + 60 end
+        poll_focused({ tabs = { { pane_id } }, active_pane_id = pane_id })
+      end)
+    end)
+    os.time = real_time
+    assert(ok, failure)
+    assert(runs == 2, "pane " .. pane_id .. ": the failed run is tried once more, ran " .. runs)
+    assert(attention.get_attention(pane_id) == nil, "pane " .. pane_id .. ": the retry acknowledged it")
+    local errors = drain_errors()
+    assert(#errors == 1, "pane " .. pane_id .. ": the failure is reported once, got " .. #errors)
   end
-  attention.remove_marker("../victim", { dir = outside })
-  attention.get_attention("../victim", { dir = outside })
-  for _, suffix in ipairs({ "", ".ack", ".review", ".agents" }) do
-    assert(path_exists(victim .. suffix), "a ../ id reached " .. victim .. suffix)
+end)
+
+-- The reader and the command can disagree about which activity is shown. An
+-- answer is an answer: asking again on every poll would change nothing.
+test("an acknowledgement the command answered is not asked again for that event", function()
+  write_activity(9434, "notify")
+  local function ignoring()
+    return true, '{"schema":1,"command":"plugin acknowledge","status":"ok","complete":true,'
+      .. '"result":{"disposition":"ignored","diagnostic":null,"event_id":null},"diagnostics":[]}'
   end
-  assert(attention.get_attention("../victim", { dir = outside }) == nil)
-  for _, suffix in ipairs({ "", ".ack", ".review", ".agents" }) do os.remove(victim .. suffix) end
+  local spawned = with_plugin_command(ignoring, function()
+    for _ = 1, 3 do poll_focused({ tabs = { { 9434 } }, active_pane_id = 9434 }) end
+  end)
+  assert(#spawned == 1, "one run for the event, got " .. #spawned)
+  assert(attention.get_attention(9434) == "notify", "an ignored acknowledgement hides nothing")
 end)
 
-test("public removal without opts uses the configured marker directory", function()
-  local configured_dir = test_dir .. "/configured"
-  assert(os.execute("mkdir -p " .. shell_quote(configured_dir)) == 0)
-  local marker = assert(io.open(configured_dir .. "/949", "w"))
-  marker:write('{"type":"notify","publication_id":"publication-a"}')
-  marker:close()
-  local ack = assert(io.open(configured_dir .. "/949.ack", "w"))
-  ack:write("publication\npublication-a")
-  ack:close()
-
-  local configured = dofile(repo_root .. "/plugin/init.lua")
-  configured.apply_to_config({}, {
-    auto_poll = false,
-    dir = configured_dir,
-    review_key = false,
-  })
-  configured.remove_marker(949)
-
-  assert(not path_exists(configured_dir .. "/949"), "configured marker should be removed")
-  assert(not path_exists(configured_dir .. "/949.ack"),
-    "configured acknowledgement should be removed")
+test("a command that answers nothing is said to predate the plugin", function()
+  write_activity(9435, "notify")
+  with_plugin_command(function() return false, "" end, function()
+    poll_focused({ tabs = { { 9435 } }, active_pane_id = 9435 })
+  end)
+  local errors = drain_errors()
+  assert(#errors == 1 and errors[1]:find("may predate this plugin", 1, true)
+      and errors[1]:find("scripts/install-cli.sh", 1, true)
+      and errors[1]:find(writer_root, 1, true),
+    "the log names the likely cause and the way out, got " .. tostring(errors[1]))
 end)
 
-test("a pane that vanishes between polls has its marker and sidecar removed", function()
-  write_marker(945, "notify", "publication-a")
+test("each different failure of a pane's command is logged once", function()
+  write_activity(9436, "notify")
+  local answers = {
+    function() return acknowledgement_failed("probe_unavailable", "state lock timed out") end,
+    function() return false, "" end,
+    function() return false, "" end,
+  }
+  local runs = 0
+  local real_time = os.time
+  local ok, failure = pcall(function()
+    with_plugin_command(function(argv)
+      runs = runs + 1
+      return answers[runs](argv)
+    end, function()
+      for step = 0, 2 do
+        os.time = function() return real_time() + 60 * step end
+        poll_focused({ tabs = { { 9436 } }, active_pane_id = 9436 })
+      end
+    end)
+  end)
+  os.time = real_time
+  assert(ok, failure)
+  assert(runs == 3, "the command ran on each wait, ran " .. runs)
+  local errors = drain_errors()
+  assert(#errors == 2, "two different failures, each logged once, got " .. #errors)
+  assert(errors[2]:find("may predate this plugin", 1, true),
+    "the later failure is logged too, got " .. tostring(errors[2]))
+end)
+
+test("a pane that vanishes between polls leaves the cache and keeps its records", function()
+  seed_pane(940)
+  write_activity(945, "notify")
   local window_id = 9450
-  poll_focused({
-    tabs = { { 940, 945 } },
-    active_pane_id = 945,
-    window_id = window_id,
-  })
-  assert(acknowledgement_exists(945), "precondition: sidecar exists")
+  attention.poll(window_double({
+    tabs = { { 940, 945 } }, focused = false, window_id = window_id,
+  }), { now_unix_ns = fixture_now })
+  assert(attention.get_attention(945) == "notify", "precondition: shown")
 
   -- 945 is gone; 940 is still here, so its domain is still represented and the
   -- disappearance reads as a closed pane rather than a detached domain.
   attention.poll(window_double({
     tabs = { { 940 } }, focused = false, window_id = window_id,
-  }))
+  }), { now_unix_ns = fixture_now })
 
-  assert(not marker_exists(945), "a closed pane should lose its canonical marker")
-  assert(not acknowledgement_exists(945), "a closed pane should lose its sidecar")
+  assert(activity_exists(945), "the records are the writer's, and stay")
   assert(attention.get_attention(945) == nil, "a closed pane should leave the cache")
 end)
 
-test("TTL cleanup removes canonical marker and acknowledgement sidecar", function()
-  local file = assert(io.open(test_dir .. "/946", "w"))
-  file:write('{"type":"notify","publication_id":"publication-a",'
-    .. '"updated_at_ms":1000000000000,"ttl_ms":1000}')
-  file:close()
-  local w = window_double({ tabs = { { 940, 946 } }, focused = true, active_pane_id = 946 })
-  attention.poll(w, { now_ms = 1000000000000 })
-  assert(acknowledgement_exists(946), "precondition: sidecar exists")
-
-  attention.poll(
-    window_double({ tabs = { { 940, 946 } }, focused = false }),
-    { now_ms = 1000000001001 })
-
-  assert(not marker_exists(946), "expired canonical marker should be removed")
-  assert(not acknowledgement_exists(946), "TTL cleanup should remove sidecar")
-  assert(attention.get_attention(946) == nil, "expired attention should leave cache")
-end)
-
-test("a stale update-status pane is never destructive authority", function()
-  write_marker(951, "notify", "publication-a")
+test("a stale update-status pane is never acknowledgement authority", function()
+  write_activity(951, "notify")
   local w = window_double({ tabs = { { 951, 952 } }, focused = true, active_pane_id = 952 })
 
-  attention.poll(w, { active_pane = mux_pane(951) })
+  local spawned = with_plugin_command(acknowledging_answer, function()
+    attention.poll(w, { active_pane = pane_from_entry(951), now_unix_ns = fixture_now })
+  end)
 
-  assert(marker_exists(951), "the stale event pane's marker must remain")
-  assert(not acknowledgement_exists(951), "the stale event pane must not be acknowledged")
+  assert(#spawned == 0, "the stale event pane must not be acknowledged")
   assert(attention.get_attention(951) == "notify", "the unseen notification must remain visible")
 end)
 
-test("acknowledgement never deletes a newer non-clearable marker", function()
-  write_marker(501, "stop", "publication-a")
-  write_marker(502, "notify")
+test("an activity replaced before its acknowledgement is not acknowledged unseen", function()
+  for _, replacement in ipairs({ "thinking", "notify" }) do
+    local shown = write_activity(501, "stop")
+    write_activity(502, "notify")
+    local rewrote = false
+    local spawned = with_plugin_command(acknowledging_answer, function()
+      poll_focused({
+        tabs = { { 501, 502 } },
+        active_pane_id = 501,
+        on_focus_check = function()
+          if rewrote then return end
+          rewrote = true
+          -- The poll has already read the stop the user is looking at.
+          write_activity(501, replacement)
+        end,
+      })
+    end)
 
-  local rewrote = false
-  poll_focused({
-    tabs = { { 501, 502 } },
-    active_pane_id = 501,
-    on_focus_check = function()
-      if rewrote then return end
-      rewrote = true
-      -- The poll has already cached publication A. Replace it before current
-      -- active-pane acknowledgement reads physical truth.
-      write_marker(501, "thinking", "publication-b")
-    end,
-  })
-
-  assert(marker_exists(501), "the newer thinking marker should remain on disk")
-  assert(attention.get_attention(501) == "thinking", "the cache should adopt the newer marker")
-  assert(not acknowledgement_exists(501), "a non-clearable replacement must not be acknowledged")
-end)
-
-test("a same-type replacement during acknowledgement remains visible", function()
-  write_marker(981, "notify", "publication-a")
-  local replaced = false
-  poll_focused({
-    tabs = { { 980, 981 } },
-    active_pane_id = 981,
-    on_focus_check = function()
-      if replaced then return end
-      replaced = true
-      write_marker(981, "notify", "publication-b")
-    end,
-  })
-
-  assert(attention.get_attention(981) == "notify", "replacement B must remain visible")
-  assert(not acknowledgement_exists(981), "replacement B must not be acknowledged unseen")
+    assert(#spawned == 1 and plugin_arguments(spawned[1]):find("--activity-event-id " .. shown, 1, true),
+      "what is acknowledged is the activity this poll showed")
+    assert(not acknowledgement_exists(501), "the replacement must not be acknowledged unseen")
+    assert(attention.get_attention(501) == replacement, "the tab takes the replacement at once")
+  end
 end)
 
 test("a focused window with no active pane acknowledges nothing", function()
-  write_marker(821, "notify")
+  write_activity(821, "notify")
 
-  local w = poll_focused({ tabs = { { 821 } }, active_pane_id = nil })
+  local w
+  local spawned = with_plugin_command(acknowledging_answer, function()
+    w = poll_focused({ tabs = { { 821 } }, active_pane_id = nil })
+  end)
 
-  assert(marker_exists(821), "with no active pane there is nothing to acknowledge")
+  assert(#spawned == 0, "with no active pane there is nothing to acknowledge")
   assert(attention.get_attention(821) == "notify", "the cache should still be filled")
   assert(#w.actions == 0, "there is no pane to perform an action through")
 end)
@@ -1729,7 +1826,7 @@ end)
 -- ── Focus-safe redraw ───────────────────────────────────────────────────────
 
 test("a focused visible change requests exactly one redraw through the active pane", function()
-  write_marker(831, "thinking")
+  write_activity(831, "thinking")
 
   local w = poll_focused({ tabs = { { 830, 831 } }, active_pane_id = 830 })
 
@@ -1742,7 +1839,7 @@ test("a focused visible change requests exactly one redraw through the active pa
 end)
 
 test("an unchanged tab bar requests no redraw", function()
-  write_marker(841, "thinking")
+  write_activity(841, "thinking")
   poll({ 840, 841 })
 
   -- Pin the frame so the animation cannot manufacture a visible change.
@@ -1758,14 +1855,14 @@ test("an unchanged tab bar requests no redraw", function()
 end)
 
 test("a masked cache change requests a harmless redraw", function()
-  write_marker(851, "notify")
-  write_marker(852, "notify")
+  write_activity(851, "notify")
+  write_activity(852, "notify")
   poll({ 850, 851, 852 })
 
   -- 852 falls from notify to stop; 851 still shows notify, so the tab does not
   -- change. 850 is the active pane and carries no marker, so nothing is
   -- acknowledged either.
-  write_marker(852, "stop")
+  write_activity(852, "stop")
   local w = poll_focused({ tabs = { { 850, 851, 852 } }, active_pane_id = 850 })
 
   assert(#w.actions == 1, "a cache change should request one redraw, got " .. #w.actions)
@@ -1773,10 +1870,10 @@ test("a masked cache change requests a harmless redraw", function()
 end)
 
 test("a marker disappearing requests a redraw", function()
-  write_marker(861, "notify")
+  write_activity(861, "notify")
   poll({ 860, 861 })
 
-  os.remove(test_dir .. "/861")
+  clear_activity(861)
   local w = poll_focused({ tabs = { { 860, 861 } }, active_pane_id = 860 })
 
   assert(attention.get_attention(861) == nil, "the cache should drop the removed marker")
@@ -1784,22 +1881,22 @@ test("a marker disappearing requests a redraw", function()
 end)
 
 test("animation redraws once per wall-clock bucket, not once per poll", function()
-  write_marker(871, "thinking")
+  write_activity(871, "thinking")
 
   local w = window_double({ tabs = { { 870, 871 } }, focused = true, active_pane_id = 870 })
-  attention.poll(w, { now_ms = 1000 })
+  attention.poll(w, { now_ms = 1000, now_unix_ns = fixture_now })
   assert(#w.actions == 1, "the marker appearing is the first visible change")
 
-  attention.poll(w, { now_ms = 1000 })
-  attention.poll(w, { now_ms = 1999 })
+  attention.poll(w, { now_ms = 1000, now_unix_ns = fixture_now })
+  attention.poll(w, { now_ms = 1999, now_unix_ns = fixture_now })
   assert(#w.actions == 1, "induced polls in one bucket must not redraw again")
 
-  attention.poll(w, { now_ms = 2000 })
+  attention.poll(w, { now_ms = 2000, now_unix_ns = fixture_now })
   assert(#w.actions == 2, "the next bucket is a new indicator, so one new redraw")
   assert(select(2, attention.get_attention(871)) == 2, "the frame should come from the new bucket")
 end)
 
-test("a v2 thinking pane animates the way a v1 one does", function()
+test("a thinking pane animates from the wall clock", function()
   materialize_state_case(protocol_fixture.state_case)
   local samples = protocol_fixture.record_samples
   local pane_root = test_dir .. "/v2/realms/" .. samples.claim.address.realm_id
@@ -1826,7 +1923,7 @@ test("a v2 thinking pane animates the way a v1 one does", function()
 end)
 
 test("the spinner's frame does not rewrite the published tab order", function()
-  write_marker(9870, "thinking")
+  write_activity(9870, "thinking")
   local drawn_tab = gui_tab({ window_id = 9871, tab_id = 9872, tab_index = 0, panes = { 9870 } })
   local path = tab_publication_path(9871)
   local real_open, writes = io.open, 0
@@ -1837,7 +1934,8 @@ test("the spinner's frame does not rewrite the published tab order", function()
   local drawn, published = {}, {}
   local ok, failure = pcall(function()
     for second = 1, 4 do
-      attention.poll(window_double({ tabs = { { 9870 } }, focused = false }), { now_ms = second * 1000 })
+      attention.poll(window_double({ tabs = { { 9870 } }, focused = false }),
+        { now_ms = second * 1000, now_unix_ns = fixture_now })
       drawn[second] = rendered_text(format_tab_title(drawn_tab, { drawn_tab }))
       published[second] = read_tab_publication(9871).tabs[1].text
     end
@@ -1850,7 +1948,7 @@ test("the spinner's frame does not rewrite the published tab order", function()
 end)
 
 test("redraw-induced polls terminate inside the current frame bucket", function()
-  write_marker(873, "thinking")
+  write_activity(873, "thinking")
 
   local reentries = 0
   local current_now = 1000
@@ -1861,23 +1959,23 @@ test("redraw-induced polls terminate inside the current frame bucket", function(
     on_action = function(window)
       for _ = 1, 2 do
         reentries = reentries + 1
-        attention.poll(window, { now_ms = current_now })
+        attention.poll(window, { now_ms = current_now, now_unix_ns = fixture_now })
       end
     end,
   })
 
-  attention.poll(w, { now_ms = 1000 })
+  attention.poll(w, { now_ms = 1000, now_unix_ns = fixture_now })
   assert(reentries == 2, "the redraw action should induce two nested polls in this double")
   assert(w.action_calls == 1, "neither nested poll may request another action")
 
   current_now = 2000
-  attention.poll(w, { now_ms = current_now })
+  attention.poll(w, { now_ms = current_now, now_unix_ns = fixture_now })
   assert(reentries == 4 and w.action_calls == 2,
     "the next bucket should permit exactly one more action")
 end)
 
 test("a failed redraw action leaves marker and cache truth intact", function()
-  write_marker(881, "notify")
+  write_activity(881, "notify")
 
   local w = poll_focused({
     tabs           = { { 880, 881 } },
@@ -1886,15 +1984,15 @@ test("a failed redraw action leaves marker and cache truth intact", function()
   })
 
   assert(#w.actions == 0, "the failed action should record nothing")
-  assert(marker_exists(881), "a failed redraw must not touch the marker")
+  assert(activity_exists(881), "a failed redraw must not touch the marker")
   assert(attention.get_attention(881) == "notify", "a failed redraw must not touch the cache")
 
   local errors = drain_errors()
   assert(#errors == 1 and errors[1]:find("redraw failed", 1, true),
     "the failure should be logged once, got " .. tostring(errors[1]))
 
-  write_marker(881, "stop")
-  attention.poll(w, { now_ms = 2000 })
+  write_activity(881, "stop")
+  attention.poll(w, { now_ms = 2000, now_unix_ns = fixture_now })
   assert(w.action_calls == 1, "a failed window should not retry the redraw action")
   assert(#drain_errors() == 0, "a disabled window should not repeat the runtime error")
 end)
@@ -1902,8 +2000,8 @@ end)
 -- ── Window scoping and composition root ─────────────────────────────────────
 
 test("polling one window never removes another window's cache entries", function()
-  write_marker(901, "thinking")
-  write_marker(902, "thinking")
+  write_activity(901, "thinking")
+  write_activity(902, "thinking")
 
   poll_focused({ tabs = { { 901 } }, active_pane_id = 901 })
   assert(attention.get_attention(901) == "thinking", "window A's pane should be cached")
@@ -1914,14 +2012,16 @@ test("polling one window never removes another window's cache entries", function
 end)
 
 test("poll resolves current pane even when the event pane is supplied", function()
-  write_marker(911, "notify", "publication-a")
+  write_activity(911, "notify")
 
   local w = window_double({ tabs = { { 911 } }, focused = true, active_pane_id = 911 })
-  attention.poll(w, { active_pane = mux_pane(911) })
+  local spawned = with_plugin_command(nil, function()
+    attention.poll(w, { active_pane = pane_from_entry(911), now_unix_ns = fixture_now })
+  end)
 
-  assert(w.active_pane_calls == 1, "destructive authority must be resolved at use time")
-  assert(marker_exists(911), "acknowledgement must retain canonical writer truth")
-  assert(acknowledgement_exists(911), "the current active pane should be acknowledged")
+  assert(w.active_pane_calls == 1, "acknowledgement authority must be resolved at use time")
+  assert(#spawned == 1 and plugin_arguments(spawned[1]):find("--pane-id 911", 1, true),
+    "the current active pane should be acknowledged")
 end)
 
 test("the registered update-status handler resolves current pane before acknowledgement", function()
@@ -1929,99 +2029,84 @@ test("the registered update-status handler resolves current pane before acknowle
   -- handlers once per module instance.
   local second = dofile(repo_root .. "/plugin/init.lua")
   local first_new_handler = #(handlers["update-status"] or {}) + 1
-  second.apply_to_config({}, { dir = test_dir, review_key = false })
-  write_marker(921, "notify", "publication-a")
+  second.apply_to_config({}, { dir = test_dir, review_key = false, integration_root = writer_root })
+  write_activity(921, "notify")
 
   local w = window_double({ tabs = { { 921 } }, focused = true, active_pane_id = 921 })
-  for index = first_new_handler, #handlers["update-status"] do
-    handlers["update-status"][index](w, mux_pane(921))
-  end
+  local spawned = with_plugin_command(nil, function()
+    for index = first_new_handler, #handlers["update-status"] do
+      handlers["update-status"][index](w, pane_from_entry(921))
+    end
+  end)
 
   assert(w.active_pane_calls == 1, "the handler must not trust its captured event pane")
-  assert(marker_exists(921), "the canonical marker should remain")
-  assert(acknowledgement_exists(921), "the current active pane should be acknowledged")
+  local acknowledgements = 0
+  for _, argv in ipairs(spawned) do
+    if (plugin_arguments(argv) or ""):find("plugin acknowledge", 1, true) then
+      acknowledgements = acknowledgements + 1
+    end
+  end
+  assert(acknowledgements == 1, "the current active pane should be acknowledged")
 end)
 
-test("review toggles redraw after a successful marker mutation", function()
+test("the review key redraws after the command it runs succeeds, and only then", function()
   local review = dofile(repo_root .. "/plugin/init.lua")
   local config = {}
-  review.apply_to_config(config, { auto_poll = false, dir = test_dir })
+  review.apply_to_config(config, { auto_poll = false, dir = test_dir, integration_root = writer_root })
   local toggle = assert(config.keys and config.keys[1] and config.keys[1].action,
     "review key action was not registered")
 
-  write_marker(971, "notify", "notify-971")
-  write_marker(972, "review", "review-972")
+  write_activity(971, "notify")
+  write_activity(972, "review")
   local masked = window_double({ tabs = { { 971, 972 } }, focused = true, active_pane_id = 972 })
-  review.poll(window_double({ tabs = { { 971, 972 } }, focused = false }), { now_ms = 1000 })
-  toggle(masked, mux_pane(972))
-  assert(not marker_exists(972), "the review marker should still be removed")
+  review.poll(window_double({ tabs = { { 971, 972 } }, focused = false }), { now_unix_ns = fixture_now })
+  local spawned = with_plugin_command(reviewing_answer, function()
+    toggle(masked, pane_from_entry(972))
+  end)
+  assert(#spawned == 1 and plugin_arguments(spawned[1]):find("^plugin clear%-review .*%-%-pane%-id 972"),
+    "a flagged tab withdraws the user's flag: " .. tostring(plugin_arguments(spawned[1] or {})))
   assert(masked.action_calls == 1, "a successful review removal should redraw once")
 
-  write_marker(973, "review", "review-973")
-  local visible = window_double({ tabs = { { 973 } }, focused = true, active_pane_id = 973 })
-  review.poll(window_double({ tabs = { { 973 } }, focused = false }), { now_ms = 1000 })
-  toggle(visible, mux_pane(973))
-  assert(not marker_exists(973), "the visible review marker should be removed")
-  assert(visible.action_calls == 1, "removing visible review attention should redraw once")
+  write_activity(974, "notify")
+  local unflagged = window_double({ tabs = { { 974 } }, focused = true, active_pane_id = 974 })
+  spawned = with_plugin_command(reviewing_answer, function()
+    toggle(unflagged, pane_from_entry(974))
+  end)
+  local wire = seeded_wire(974)
+  assert(#spawned == 1 and plugin_arguments(spawned[1]) == table.concat({
+    "plugin", "set-review",
+    "--realm-id", wire.address.realm_id,
+    "--incarnation-id", wire.address.incarnation_id,
+    "--pane-id", "974",
+    "--launch-id", wire.launch_id,
+  }, " "), "an unflagged tab flags the focused pane: " .. tostring(plugin_arguments(spawned[1] or {})))
+  assert(unflagged.action_calls == 1, "setting the flag should redraw once")
+  assert(review.get_attention(974) == "review" or select(6, review.get_attention(974)) == true,
+    "the flag shows at once")
 
-  write_marker(974, "notify", "notify-974")
-  local acknowledged = window_double({ tabs = { { 974 } }, focused = true, active_pane_id = 974 })
-  review.poll(acknowledged, { now_ms = 2000 })
-  assert(acknowledgement_exists(974), "precondition: notify is acknowledged")
-  toggle(acknowledged, mux_pane(974))
-  local marker = assert(io.open(test_dir .. "/974", "r"))
-  local marker_bytes = marker:read("*a")
-  marker:close()
-  assert(marker_bytes:find('"type":"notify"', 1, true),
-    "review must not overwrite acknowledged writer truth")
-  assert(review_flag_exists(974), "the flag is written beside the marker instead")
-
-  local flag_path = test_dir .. "/975.review"
-  local real_rename = os.rename
-  os.rename = function(from, to)
-    if to == flag_path then return nil, "permission denied" end
-    return real_rename(from, to)
-  end
+  write_activity(975, "notify")
   local failed = window_double({ tabs = { { 975 } }, focused = true, active_pane_id = 975 })
-  local ok, toggle_err = pcall(toggle, failed, mux_pane(975))
-  os.rename = real_rename
-  assert(ok, "review rename failure should be contained: " .. tostring(toggle_err))
-  assert(not review_flag_exists(975), "a failed flag write must not create canonical state")
-  assert(not marker_exists(975), "and must not fall back to writing the marker file")
-  assert(not path_exists(internal.review_tmp_path(test_dir, "975")),
-    "failed flag publication must remove its temp")
-  assert(failed.action_calls == 0, "a failed flag write must not claim a redraw")
+  spawned = with_plugin_command(function()
+    return false, '{"schema":1,"command":"plugin set-review","status":"unavailable",'
+      .. '"complete":false,"result":{},"diagnostics":[{"code":"probe_unavailable",'
+      .. '"message":"state lock timed out","context":{},"help":""}]}'
+  end, function()
+    toggle(failed, pane_from_entry(975))
+    toggle(failed, pane_from_entry(975))
+  end)
+  assert(#spawned == 2, "each press runs the command")
+  assert(failed.action_calls == 0, "a failed write must not claim a redraw")
   local errors = drain_errors()
-  assert(#errors == 1 and errors[1]:find("failed to place review flag", 1, true),
-    "the real flag rename failure should be logged, got " .. tostring(errors[1]))
+  assert(#errors == 1 and errors[1]:find("state lock timed out", 1, true),
+    "the failure should be logged once with the command's reason, got " .. tostring(errors[1]))
 end)
 
--- ── Which id names the marker file ──────────────────────────────────────────
+-- ── Which id names the pane ──────────────────────────────────────────
 
-test("a published WEZTERM_PANE user var names the marker, not the local pane id", function()
-  write_marker(7001, "notify")
-
-  -- A mux-client pane: the GUI numbered it 12, but the process inside it reads
-  -- 7001 from $WEZTERM_PANE and writes its marker under that name.
-  attention.poll(window_double({
-    tabs    = { { { id = 12, domain = "unix", published = 7001 } } },
-    focused = false,
-  }))
-
-  assert(attention.get_attention(7001) == "notify",
-    "the published id should be the cache key")
-  assert(attention.get_attention(12) == nil,
-    "the GUI's local id must never be read as a marker id")
-end)
-
-test("a local pane with no user var falls back to its own pane id", function()
+test("a local pane with no user var is named by its own pane id", function()
   local pane = mux_pane(7002)
   assert(attention.pane_marker_id(pane) == "7002",
-    "a local pane's id is its marker id even unpublished")
-
-  write_marker(7002, "stop")
-  poll({ 7002 })
-  assert(attention.get_attention(7002) == "stop", "the local fallback should address the marker")
+    "a local pane's id is its pane id even unpublished")
 end)
 
 test("a non-decimal user var is rejected in favour of the local fallback", function()
@@ -2037,21 +2122,20 @@ end)
 test("a mux pane that has published nothing has no marker id and is skipped", function()
   local unpublished = mux_pane(7003, { domain = "unix" })
   assert(attention.pane_marker_id(unpublished) == nil,
-    "an unpublished remote pane's local id names some other pane's markers")
+    "an unpublished remote pane's local id names some other pane")
 
-  -- Cache marker "7003" from a genuinely local pane in one window.
-  write_marker(7003, "notify")
+  -- Cache pane 7003's activity from the pane that publishes it, in one window.
+  write_activity(7003, "notify")
   poll({ 7003 })
-  assert(attention.get_attention(7003) == "notify", "precondition: marker 7003 is cached")
+  assert(attention.get_attention(7003) == "notify", "precondition: pane 7003 is cached")
 
   -- Another window holds a remote pane the GUI also numbered 7003. Polling it
-  -- must neither read nor remove marker 7003.
+  -- must not touch pane 7003's cache entry.
   attention.poll(window_double({
     tabs    = { { { id = 7003, domain = "unix" } } },
     focused = false,
   }))
-  assert(marker_exists(7003), "an unpublished remote pane must not touch a marker file")
-  assert(attention.get_attention(7003) == "notify", "nor the cache entry that marker owns")
+  assert(attention.get_attention(7003) == "notify", "an unpublished remote pane is not pane 7003")
 
   -- And its tab renders nothing, rather than the other pane's notify.
   local rendered = format_tab_title(tab(7003, 7003, true))
@@ -2059,15 +2143,6 @@ test("a mux pane that has published nothing has no marker id and is skipped", fu
     "a tab of unresolvable panes must carry no tint")
   assert(not rendered:find("! ", 1, true),
     "a tab of unresolvable panes must not borrow another pane's indicator")
-end)
-
-test("GUI doctor reports unpublished mux panes without filesystem probes", function()
-  local pane = mux_pane(7004, { domain = "unix" })
-  local diagnostics = attention.doctor(window_double({
-    tabs = { { pane } }, focused = false,
-  }))
-  assert(#diagnostics == 1 and diagnostics[1].code == "identity_unpublished",
-    "GUI doctor must report the user-var half the CLI cannot observe")
 end)
 
 test("a local pane's own id outranks a WEZTERM_PANE that disagrees with it", function()
@@ -2095,7 +2170,7 @@ test("a v2 identity naming another pane is refused in a local pane", function()
   local foreign = internal.resolve_pane_read(mux_pane(4299, { attention = wire }))
   assert(foreign.kind == "invalid", "a local pane printed pane 42's identity and was believed")
   local own = internal.resolve_pane_read(mux_pane(tonumber(wire.address.pane_id), { attention = wire }))
-  assert(own.kind == "v2", "a local pane's own identity is still read")
+  assert(own.kind == "claimed", "a local pane's own identity is still read")
 end)
 
 test("exec, WSL and serial domains are local, so their panes need no published id", function()
@@ -2193,54 +2268,39 @@ end)
 
 -- ── A closed pane versus a detached domain ──────────────────────────────────
 
-test("a detached domain keeps the markers of panes still running on the server", function()
-  write_marker(7101, "notify")
+test("a detached domain keeps the attention of panes still running on the server", function()
+  write_activity(7101, "notify")
   local window_id = 7100
 
   attention.poll(window_double({
-    tabs      = { { { id = 5, domain = "unix", published = 7101 }, 40 } },
+    tabs      = { { { id = 5, domain = "unix", attention = seeded_wire(7101) }, 40 } },
     focused   = false,
     window_id = window_id,
-  }))
-  assert(attention.get_attention(7101) == "notify", "precondition: the remote marker is cached")
+  }), { now_unix_ns = fixture_now })
+  assert(attention.get_attention(7101) == "notify", "precondition: the remote pane is cached")
 
   -- The unix domain is detached: every one of its panes leaves this window in
-  -- one tick, while the processes writing their markers keep running.
+  -- one tick, while the processes in them keep running.
   attention.poll(window_double({
     tabs      = { { 40 } },
     focused   = false,
     window_id = window_id,
-  }))
+  }), { now_unix_ns = fixture_now })
 
-  assert(marker_exists(7101), "a detached domain's markers must survive the detach")
-  assert(attention.get_attention(7101) == "notify", "and stay visible for the reattach")
+  assert(attention.get_attention(7101) == "notify", "its attention stays visible for the reattach")
 end)
 
--- ── Marker metadata on the public read ──────────────────────────────────────
+-- ── Activity metadata on the public read ──────────────────────────────────────
 
-test("get_attention reports the marker's source and reserved tuple slot", function()
-  local file = assert(io.open(test_dir .. "/7201", "w"))
-  file:write('{"type":"notify","source":"codex","controller":true,"publication_id":"pub-7201"}')
-  file:close()
+test("get_attention reports the activity's source and reserved tuple slot", function()
+  write_activity(7201, "notify")
   poll({ 7201 })
 
   local atype, frame, source, reserved = attention.get_attention(7201)
   assert(atype == "notify", "the first two returns keep their meaning")
-  assert(frame == nil, "a notify marker carries no frame")
-  assert(source == "codex", "source should be the marker's source string, got " .. tostring(source))
+  assert(frame == nil, "a notify activity carries no frame")
+  assert(source == "claude", "source should be the activity's source, got " .. tostring(source))
   assert(reserved == false, "the fourth tuple slot is reserved and always false")
-  assert(attention.get_attention_view(mux_pane(7201)).controller == nil,
-    "application metadata in a flat marker must not become a public fact")
-
-  write_marker(7202, "stop")
-  poll({ 7202 })
-  local _, _, plain_source, plain_reserved = attention.get_attention(7202)
-  assert(plain_source == nil, "a marker with no source reports none")
-  assert(plain_reserved == false, "the reserved tuple slot remains false")
-
-  local _, _, direct_source, direct_reserved = attention.get_attention(7201, { dir = test_dir })
-  assert(direct_source == "codex" and direct_reserved == false,
-    "a direct disk read should report the same source and reserved tuple slot")
 end)
 
 -- ── Hosts that repaint their own titles ─────────────────────────────────────
@@ -2254,63 +2314,33 @@ test("request_redraw = false performs no action when attention changes", functio
     request_redraw = false,
   })
 
-  write_marker(7301, "notify")
+  write_activity(7301, "notify")
   local w = window_double({
     tabs = { { 7300, 7301 } }, focused = true, active_pane_id = 7300,
   })
-  quiet.poll(w, { now_ms = 1000 })
+  quiet.poll(w, { now_ms = 1000, now_unix_ns = fixture_now })
 
   assert(quiet.get_attention(7301) == "notify", "polling still fills the cache")
   assert(w.action_calls == 0, "no redraw action should be attempted at all")
   assert(#w.actions == 0, "and none recorded")
 end)
 
--- ── Acknowledgement replaces its sidecar atomically ─────────────────────────
+-- ── Subagents ───────────────────────────────────────────────────────────────
 
-test("acknowledgement renames its sidecar into place without unlinking it first", function()
-  write_marker(7401, "notify", "pub-b")
-  poll({ 7401 })
-  -- A sidecar from an earlier publication is already sitting there.
-  write_acknowledgement_file(7401, "publication\npub-a")
-
-  local ack_path = test_dir .. "/7401.ack"
-  local tmp_path = internal.acknowledgement_tmp_path(test_dir, "7401")
-  assert(tmp_path ~= ack_path .. ".tmp",
-    "the in-flight name must be private to this process, not a shared '<id>.ack.tmp'")
-
-  local removed, renamed = {}, {}
-  local real_remove, real_rename = os.remove, os.rename
-  os.remove = function(path)
-    table.insert(removed, path)
-    return real_remove(path)
+--- Give the pane `count` live subagents, in place of any it had.
+local function write_subagents(pane_id, count)
+  if not path_exists(seeded_pane_root(pane_id) .. "/claim.json") then seed_pane(pane_id) end
+  local agents = seeded_records_root(pane_id) .. "/agents"
+  assert(os.execute("rm -rf " .. shell_quote(agents)) == 0)
+  for index = 1, count do
+    local presence = seeded_record(pane_id, "subagent_presence")
+    presence.agent_id = "agent-" .. index
+    presence.agent_key = internal.sha256(presence.agent_id)
+    presence.event_id = next_event_id()
+    presence.written_at_unix_ns = fixture_now
+    write_json_path(agents .. "/" .. presence.agent_key .. ".json", presence)
   end
-  os.rename = function(from, to)
-    table.insert(renamed, from .. " -> " .. to)
-    return real_rename(from, to)
-  end
-  local ok, outcome = pcall(internal.acknowledge_focused_pane, 7401, {
-    dir = test_dir,
-    now_ms = 1000,
-  })
-  os.remove, os.rename = real_remove, real_rename
-
-  assert(ok and outcome == "acknowledged", "the acknowledgement should succeed: " .. tostring(outcome))
-  for _, path in ipairs(removed) do
-    assert(path ~= ack_path,
-      "the sidecar must be replaced by rename, never unlinked first")
-  end
-  assert(renamed[1] == tmp_path .. " -> " .. ack_path,
-    "the only rename should place this process's temp over the sidecar, got "
-      .. tostring(renamed[1]))
-  assert(acknowledgement_exists(7401), "the sidecar should now hold the new publication")
-  assert(attention.get_attention(7401) == nil, "and the acknowledged marker should be suppressed")
-end)
-
--- ── The subagent activity sidecar ───────────────────────────────────────────
-
---- One fixed clock for this section. Every poll below is handed it, so a
---- subagent's liveness is decided by the entry's own last_ms and nothing else.
-local SIDECAR_NOW = 1000000000000
+end
 
 local function poll_at(pane_ids, spec)
   spec = spec or {}
@@ -2320,98 +2350,50 @@ local function poll_at(pane_ids, spec)
     active_pane_id = spec.active_pane_id,
     window_id      = spec.window_id,
   })
-  attention.poll(w, { now_ms = SIDECAR_NOW })
+  attention.poll(w, { now_unix_ns = fixture_now, call_after = function() end })
   return w
 end
 
-test("the sidecar reports live entries only, on the poll's own clock", function()
-  write_marker(7501, "stop")
-  write_subagents(7501, {
-    { id = "agent-a", last_ms = SIDECAR_NOW - 1000 },
-    { id = "agent-b", last_ms = SIDECAR_NOW - 599000 },
-    -- Older than the ten-minute window, so it is not counted.
-    { id = "agent-c", last_ms = SIDECAR_NOW - 700000 },
-  })
-
-  poll_at({ 7500, 7501 })
-
-  local atype, _, _, _, subagents = attention.get_attention(7501)
-  assert(atype == "stop", "the marker still reports its own type, got " .. tostring(atype))
-  assert(subagents == 2,
-    "two of the three entries are live, got " .. tostring(subagents))
-end)
-
-test("an unreadable sidecar counts zero and leaves the marker alone", function()
-  write_marker(7502, "notify")
-  write_raw_subagents(7502, '{"agents":{"agent-a":{"last_ms":')
-  poll_at({ 7500, 7502 })
-  local truncated_type, _, _, _, truncated_count = attention.get_attention(7502)
-  assert(truncated_type == "notify", "a corrupt sidecar must not disturb its marker")
-  assert(truncated_count == 0, "a truncated sidecar counts zero, got " .. tostring(truncated_count))
-
-  write_marker(7503, "notify")
-  write_raw_subagents(7503, "not json at all")
-  poll_at({ 7500, 7503 })
-  local garbage_type, _, _, _, garbage_count = attention.get_attention(7503)
-  assert(garbage_type == "notify", "nor must content that is not JSON at all")
-  assert(garbage_count == 0, "unparseable content counts zero, got " .. tostring(garbage_count))
-
-  write_marker(7504, "notify")
-  write_raw_subagents(7504, "")
-  poll_at({ 7500, 7504 })
-  assert(select(5, attention.get_attention(7504)) == 0, "an empty sidecar counts zero")
-end)
-
-test("live subagents keep a pane visible with no marker of its own", function()
-  write_subagents(7511, {
-    { id = "agent-a", last_ms = SIDECAR_NOW - 1000 },
-    { id = "agent-b", last_ms = SIDECAR_NOW - 2000 },
-  })
+test("live subagents keep a pane visible with no activity of its own", function()
+  write_subagents(7511, 2)
 
   poll_at({ 7510, 7511 })
 
   local atype, frame, source, reserved, subagents = attention.get_attention(7511)
-  assert(atype == nil, "a pane with no marker reports no type, got " .. tostring(atype))
+  assert(atype == nil, "a pane with no activity reports no type, got " .. tostring(atype))
   assert(frame == nil and source == nil, "and no frame or source")
   assert(reserved == false, "the fourth tuple slot stays false, got " .. tostring(reserved))
   assert(subagents == 2, "but its live subagents are reported, got " .. tostring(subagents))
-  assert(not marker_exists(7511), "the sidecar must not manufacture a marker file")
 end)
 
-test("an acknowledged marker leaves its pane's subagent count behind", function()
-  write_marker(7561, "stop", "publication-a")
-  write_subagents(7561, {
-    { id = "agent-a", last_ms = SIDECAR_NOW - 1000 },
-    { id = "agent-b", last_ms = SIDECAR_NOW - 2000 },
-  })
+test("an acknowledged activity leaves its pane's subagent count behind", function()
+  write_activity(7561, "stop")
+  write_subagents(7561, 2)
 
-  poll_at({ 7560, 7561 }, { focused = true, active_pane_id = 7561 })
+  with_plugin_command(acknowledging_answer, function()
+    poll_at({ 7560, 7561 }, { focused = true, active_pane_id = 7561 })
+  end)
   assert(acknowledgement_exists(7561), "precondition: the viewed stop is acknowledged")
 
-  -- A second, unfocused tick: the acknowledged branch of the poll must keep the
-  -- count as surely as the acknowledgement itself did.
   poll_at({ 7560, 7561 })
 
   local atype, _, _, _, subagents = attention.get_attention(7561)
-  assert(atype == nil, "the acknowledged marker is no longer effective")
+  assert(atype == nil, "the acknowledged activity is no longer effective")
   assert(subagents == 2, "but its subagents are still working, got " .. tostring(subagents))
-  assert(internal.resolve_visible_attention({ "7561" }).indicator == "+2 ",
+  assert(internal.resolve_visible_attention({ seeded_key(7561) }).indicator == "+2 ",
     "so its tab shows the count alone")
 end)
 
 test("the tab indicator carries the subagent count", function()
-  write_marker(7521, "stop")
-  write_subagents(7522, {
-    { id = "agent-a", last_ms = SIDECAR_NOW - 1000 },
-    { id = "agent-b", last_ms = SIDECAR_NOW - 2000 },
-  })
+  write_activity(7521, "stop")
+  write_subagents(7522, 2)
 
   poll_at({ 7521, 7522 })
 
-  local visible = internal.resolve_visible_attention({ "7521", "7522" })
+  local visible = internal.resolve_visible_attention({ seeded_key(7521), seeded_key(7522) })
   assert(visible.indicator == "✓+2 ",
     "the count rides in the indicator's own trailing space, got " .. tostring(visible.indicator))
-  assert(visible.type == "stop", "the marker type is unchanged")
+  assert(visible.type == "stop", "the activity type is unchanged")
   assert(visible.color == "#12271c", "and so is its tint")
 
   local rendered = format_tab_title(tab(7521, 7522, true))
@@ -2419,19 +2401,19 @@ test("the tab indicator carries the subagent count", function()
   assert(rendered[2].Text:find("✓+2 ", 1, true),
     "the rendered title should carry the count, got " .. tostring(rendered[2].Text))
 
-  local count_only = internal.resolve_visible_attention({ "7522" })
+  local count_only = internal.resolve_visible_attention({ seeded_key(7522) })
   assert(count_only.indicator == "+2 ",
-    "with no marker the count is the whole indicator, got " .. tostring(count_only.indicator))
-  assert(count_only.type == nil, "and it names no marker type")
+    "with no activity the count is the whole indicator, got " .. tostring(count_only.indicator))
+  assert(count_only.type == nil, "and it names no type")
   assert(count_only.color == nil, "a bare count keeps the tab's default colors")
 end)
 
-test("count-only uses default colors for v1 and native v2 views", function()
+test("count-only keeps the default colors", function()
   local sentinel = { colors = { stop = "SENTINEL" } }
   internal.attention_cache["7591"] = { type = nil, subagents = 2 }
-  local v1_visible = internal.resolve_visible_attention({ "7591" }, sentinel)
-  assert(v1_visible.indicator == "+2 " and v1_visible.type == nil and v1_visible.color == nil,
-    "the v1 adapter must not turn a count into stop state")
+  local bare_visible = internal.resolve_visible_attention({ "7591" }, sentinel)
+  assert(bare_visible.indicator == "+2 " and bare_visible.type == nil and bare_visible.color == nil,
+    "a count must not turn into stop state")
 
   materialize_state_case(protocol_fixture.state_case)
   local samples = protocol_fixture.record_samples
@@ -2455,7 +2437,7 @@ test("count-only uses default colors for v1 and native v2 views", function()
   local key = internal.address_cache_key(protocol_fixture.wire_sample.address)
   local v2_visible = internal.resolve_visible_attention({ key }, sentinel)
   assert(v2_visible.indicator == "+1 " and v2_visible.type == nil and v2_visible.color == nil,
-    "native v2 count-only state must also keep default colors")
+    "a count read from records must also keep default colors")
   internal.attention_cache["7591"] = nil
 end)
 
@@ -2467,6 +2449,8 @@ test("built-in and manual formatter contexts expose identical named attention", 
     auto_poll = false, dir = test_dir, review_key = false, show_provider = true,
     title_formatter = function(_, ctx) built_ctx = ctx; return "built" end,
   })
+  -- A poll maps the GUI's pane numbers to cache keys; these panes are unclaimed.
+  built.poll(window_double({ tabs = { { 7601, 7602 } }, focused = false }))
   built._internal.attention_cache["7601"] = {
     type = "notify", activity_type = "notify", frame = nil, source = "claude",
     provider = "claude", subagents = 2, review = false,
@@ -2481,6 +2465,7 @@ test("built-in and manual formatter contexts expose identical named attention", 
     renderer = "manual", auto_poll = false, dir = test_dir, review_key = false,
     show_provider = true,
   })
+  manual.poll(window_double({ tabs = { { 7601, 7602 } }, focused = false }))
   manual._internal.attention_cache["7601"] = {
     type = "notify", activity_type = "notify", frame = nil, source = "claude",
     provider = "claude", subagents = 2, review = false,
@@ -2633,9 +2618,9 @@ end)
 test("invalid pane title cannot destroy a higher base source", function()
   local title_tab = tab(17661, 17662, false)
   title_tab.tab_title = "server-safe"
-  internal.sample_settled_title("17661", "v1", "valid", nil)
-  internal.sample_settled_title("17661", "v1", "valid", nil)
-  internal.sample_settled_title("17661", "v1", "bad\nvalue", nil)
+  internal.sample_settled_title("17661", "launch", "valid", nil)
+  internal.sample_settled_title("17661", "launch", "valid", nil)
+  internal.sample_settled_title("17661", "launch", "bad\nvalue", nil)
   local rendered = format_tab_title(title_tab)
   assert(rendered:find("server-safe", 1, true),
     "an invalid fallback sample must not affect the server-owned title")
@@ -2786,68 +2771,33 @@ test("a tab with no name, directory or settled title shows the pane's current ti
 end)
 
 test("a change in the subagent count alone requests a redraw", function()
-  write_marker(7531, "stop")
-  write_subagents(7531, {
-    { id = "agent-a", last_ms = SIDECAR_NOW - 1000 },
-    { id = "agent-b", last_ms = SIDECAR_NOW - 2000 },
-  })
+  write_activity(7531, "stop")
+  write_subagents(7531, 2)
 
-  -- 7530 is the active pane and carries no marker, so nothing is acknowledged
-  -- and the stop marker on 7531 stays byte-identical throughout.
+  -- 7530 is the active pane and has no records, so nothing is acknowledged
+  -- and the stop on 7531 stays as it is throughout.
   local w = window_double({
     tabs = { { 7530, 7531 } }, focused = true, active_pane_id = 7530,
   })
-  attention.poll(w, { now_ms = SIDECAR_NOW })
-  assert(#w.actions == 1, "the marker appearing is the first visible change, got " .. #w.actions)
+  attention.poll(w, { now_unix_ns = fixture_now, call_after = function() end })
+  assert(#w.actions == 1, "the activity appearing is the first visible change, got " .. #w.actions)
 
-  attention.poll(w, { now_ms = SIDECAR_NOW })
+  attention.poll(w, { now_unix_ns = fixture_now, call_after = function() end })
   assert(#w.actions == 1, "an unchanged tick must not redraw again, got " .. #w.actions)
 
-  write_subagents(7531, {
-    { id = "agent-a", last_ms = SIDECAR_NOW - 1000 },
-    { id = "agent-b", last_ms = SIDECAR_NOW - 2000 },
-    { id = "agent-c", last_ms = SIDECAR_NOW - 3000 },
-  })
-  attention.poll(w, { now_ms = SIDECAR_NOW })
+  write_subagents(7531, 3)
+  attention.poll(w, { now_unix_ns = fixture_now, call_after = function() end })
 
   assert(select(5, attention.get_attention(7531)) == 3, "the third subagent should be counted")
   assert(#w.actions == 2,
     "the count changing is itself a visible change, got " .. #w.actions)
 end)
 
-test("removal takes the subagent sidecar with the marker", function()
-  write_marker(7541, "stop", "publication-a")
-  write_subagents(7541, { { id = "agent-a", last_ms = SIDECAR_NOW - 1000 } })
-  poll_at({ 7540, 7541 })
-  assert(subagents_exists(7541), "precondition: the sidecar exists")
+-- ── The review flag ─────────────────────────────────────────────────────────
 
-  attention.remove_marker(7541, { dir = test_dir })
-
-  assert(not marker_exists(7541), "the marker should be gone")
-  assert(not subagents_exists(7541), "and the subagent sidecar with it")
-  assert(attention.get_attention(7541) == nil, "and the cache entry")
-end)
-
-test("a pane that vanishes between polls loses its subagent sidecar too", function()
-  write_marker(7551, "stop")
-  write_subagents(7551, { { id = "agent-a", last_ms = SIDECAR_NOW - 1000 } })
-  poll_at({ 7550, 7551 }, { window_id = 7550 })
-  assert(subagents_exists(7551), "precondition: the sidecar exists")
-
-  -- 7551 is gone and 7550 remains, so its domain is still represented and the
-  -- disappearance reads as a closed pane rather than a detached domain.
-  poll_at({ 7550 }, { window_id = 7550 })
-
-  assert(not marker_exists(7551), "a closed pane loses its marker")
-  assert(not subagents_exists(7551), "and its subagent sidecar")
-  assert(attention.get_attention(7551) == nil, "and its cache entry")
-end)
-
--- ── The manual review flag ──────────────────────────────────────────────────
-
-test("the review flag outranks a thinking marker without replacing it", function()
-  write_marker(7601, "thinking")
-  write_review_flag_file(7601)
+test("the review flag outranks a thinking activity without replacing it", function()
+  write_activity(7601, "thinking")
+  write_activity(7601, "review")
 
   poll_at({ 7600, 7601 })
 
@@ -2855,156 +2805,90 @@ test("the review flag outranks a thinking marker without replacing it", function
   assert(atype == "review", "the flag should outrank thinking, got " .. tostring(atype))
   assert(frame == nil, "a review indicator carries no spinner frame, got " .. tostring(frame))
   assert(flagged == true, "the entry should record the flag, got " .. tostring(flagged))
-
-  local marker = assert(io.open(test_dir .. "/7601", "r"))
-  local bytes = marker:read("*a")
-  marker:close()
-  assert(bytes:find('"type":"thinking"', 1, true),
-    "the writer's marker must be untouched, got " .. bytes)
-  assert(internal.resolve_visible_attention({ "7601" }).indicator == "◆ ",
+  assert(internal.attention_cache[seeded_key(7601)].activity_type == "thinking",
+    "the activity underneath is untouched")
+  assert(internal.resolve_visible_attention({ seeded_key(7601) }).indicator == "◆ ",
     "and the tab should show the review glyph")
 end)
 
-test("a stop marker outranks the flag until that stop is acknowledged", function()
-  write_marker(7611, "stop", "stop-7611")
-  write_review_flag_file(7611)
+test("a stop outranks the flag until that stop is acknowledged", function()
+  write_activity(7611, "stop")
+  write_activity(7611, "review")
 
   poll_at({ 7610, 7611 })
   local atype, _, _, _, _, flagged = attention.get_attention(7611)
   assert(atype == "stop", "stop outranks review, got " .. tostring(atype))
   assert(flagged == true, "but the entry still carries the flag, got " .. tostring(flagged))
-  assert(internal.resolve_visible_attention({ "7611" }).indicator == "✓ ",
+  assert(internal.resolve_visible_attention({ seeded_key(7611) }).indicator == "✓ ",
     "and the tab shows the stop glyph")
 
-  poll_at({ 7610, 7611 }, { focused = true, active_pane_id = 7611 })
+  with_plugin_command(acknowledging_answer, function()
+    poll_at({ 7610, 7611 }, { focused = true, active_pane_id = 7611 })
+  end)
   assert(acknowledgement_exists(7611), "precondition: the viewed stop is acknowledged")
 
   local after, _, _, _, _, after_flagged = attention.get_attention(7611)
   assert(after == "review",
     "with the stop acknowledged the flag becomes visible, got " .. tostring(after))
   assert(after_flagged == true, "and is still recorded, got " .. tostring(after_flagged))
-  assert(marker_exists(7611), "acknowledgement never removes writer truth")
-  assert(review_flag_exists(7611), "and never removes the flag")
+  assert(path_exists(user_review_path(7611)), "acknowledgement never removes the flag")
 end)
 
-test("Alt+B flags a pane a process already owns, and one press clears the tab", function()
+test("Alt+B flags a pane with an activity, and one press clears the user's flags from the tab", function()
   local review = dofile(repo_root .. "/plugin/init.lua")
   local config = {}
-  review.apply_to_config(config, { auto_poll = false, dir = test_dir })
+  review.apply_to_config(config, { auto_poll = false, dir = test_dir, integration_root = writer_root })
   local toggle = assert(config.keys and config.keys[1] and config.keys[1].action,
     "review key action was not registered")
 
-  write_marker(7621, "thinking")
-  write_marker(7622, "notify", "notify-7622")
+  write_activity(7621, "thinking")
+  write_activity(7622, "notify")
   local tabs = { { 7621, 7622 } }
-  review.poll(window_double({ tabs = tabs, focused = false }), { now_ms = 1000 })
+  review.poll(window_double({ tabs = tabs, focused = false }), { now_unix_ns = fixture_now })
 
   local w = window_double({ tabs = tabs, focused = true, active_pane_id = 7621 })
-  toggle(w, mux_pane(7621))
+  with_plugin_command(reviewing_answer, function() toggle(w, pane_from_entry(7621)) end)
 
-  assert(review_flag_exists(7621),
-    "Alt+B must flag a pane whose marker file a process already owns")
+  assert(path_exists(user_review_path(7621)), "Alt+B flags a pane an agent is working in")
   assert(review.get_attention(7621) == "review",
     "and the flag must take the pane's indicator without another poll")
   assert(w.action_calls == 1, "a successful flag should redraw once, got " .. w.action_calls)
 
-  -- The sibling was flagged by something else; one press must clear the tab.
-  write_review_flag_file(7622)
-  toggle(w, mux_pane(7621))
+  -- The sibling carries the user's flag too, and another owner's review.
+  write_activity(7622, "review")
+  local other = seeded_record(7622, "review")
+  other.owner_id = "pi-bus"
+  other.owner_key = internal.sha256(other.owner_id)
+  other.event_id = next_event_id()
+  local other_path = seeded_pane_root(7622) .. "/reviews/" .. other.owner_key .. ".json"
+  write_json_path(other_path, other)
+  local spawned = with_plugin_command(reviewing_answer, function() toggle(w, pane_from_entry(7621)) end)
 
-  assert(not review_flag_exists(7621), "one press clears the flag from the pressed pane")
-  assert(not review_flag_exists(7622), "and from every other pane of its tab")
-  assert(marker_exists(7621) and marker_exists(7622),
-    "clearing the flag must leave both process markers on disk")
-  local sibling = assert(io.open(test_dir .. "/7622", "r"))
-  local sibling_bytes = sibling:read("*a")
-  sibling:close()
-  assert(sibling_bytes:find('"type":"notify"', 1, true),
-    "the sibling's notify must survive byte for byte, got " .. sibling_bytes)
+  assert(#spawned == 2, "one press clears the user's flag from every pane of the tab")
+  assert(not path_exists(user_review_path(7621)) and not path_exists(user_review_path(7622)),
+    "the user's flags are gone")
+  assert(path_exists(other_path), "another owner's review is that owner's to withdraw")
+  assert(activity_exists(7621) and activity_exists(7622),
+    "clearing the flag must leave both activities on disk")
   assert(review.get_attention(7621) == "thinking",
-    "the pressed pane falls back to its own marker, got "
+    "the pressed pane falls back to its own activity, got "
       .. tostring(review.get_attention(7621)))
-  assert(review.get_attention(7622) == "notify", "and so does the sibling")
-end)
-
-test("an expired marker takes only its own state, not the flag or the subagents", function()
-  local file = assert(io.open(test_dir .. "/7631", "w"))
-  file:write('{"type":"thinking","publication_id":"pub-7631",'
-    .. '"updated_at_ms":1000000000000,"ttl_ms":1000}')
-  file:close()
-  write_review_flag_file(7631)
-  write_subagents(7631, { { id = "agent-a", last_ms = 1000000000000 } })
-
-  attention.poll(
-    window_double({ tabs = { { 7630, 7631 } }, focused = false }),
-    { now_ms = 1000000001001 })
-
-  assert(not marker_exists(7631), "the expired marker should be removed")
-  assert(review_flag_exists(7631), "the user's flag did not age out with an agent's spinner")
-  assert(subagents_exists(7631), "and neither did the subagent sidecar")
-
-  local atype, _, _, _, subagents, flagged = attention.get_attention(7631)
-  assert(atype == "review", "the pane still shows the flag, got " .. tostring(atype))
-  assert(flagged == true, "which is still recorded, got " .. tostring(flagged))
-  assert(subagents == 1, "and its live subagent is still counted, got " .. tostring(subagents))
-end)
-
-test("a pane that vanishes between polls loses its review flag too", function()
-  write_marker(7641, "stop")
-  write_review_flag_file(7641)
-  poll_at({ 7640, 7641 }, { window_id = 7640 })
-  assert(review_flag_exists(7641), "precondition: the flag exists")
-
-  -- 7641 is gone and 7640 remains, so its domain is still represented and the
-  -- disappearance reads as a closed pane rather than a detached domain.
-  poll_at({ 7640 }, { window_id = 7640 })
-
-  assert(not marker_exists(7641), "a closed pane loses its marker")
-  assert(not review_flag_exists(7641), "and the flag that pointed at it")
-  assert(attention.get_attention(7641) == nil, "and its cache entry")
-end)
-
-test("a review marker written by an older version is read as the same flag", function()
-  write_marker(7651, "review", "legacy-7651")
-
-  poll_at({ 7650, 7651 })
-
-  local atype, _, _, _, _, flagged = attention.get_attention(7651)
-  assert(atype == "review", "a legacy review marker still shows review, got " .. tostring(atype))
-  assert(flagged == true,
-    "and reports itself as flagged, so a clear can find it, got " .. tostring(flagged))
-end)
-
-test("an unreadable review flag still counts as flagged", function()
-  write_marker(7661, "thinking")
-  write_raw_review_flag(7661, "not json at all")
-  poll_at({ 7660, 7661 })
-  assert(attention.get_attention(7661) == "review",
-    "a flag whose body is corrupt must not silently disappear, got "
-      .. tostring(attention.get_attention(7661)))
-
-  write_raw_review_flag(7662, "")
-  poll_at({ 7660, 7662 })
-  local atype, _, _, _, _, flagged = attention.get_attention(7662)
-  assert(atype == "review" and flagged == true,
-    "an empty flag file is still a flag, got " .. tostring(atype))
 end)
 
 test("flagging a pane whose stop is already shown requests a redraw", function()
-  write_marker(7671, "stop")
+  write_activity(7671, "stop")
 
-  -- 7670 is the active pane and carries no marker, so nothing is acknowledged
-  -- and the stop marker on 7671 stays byte-identical throughout.
+  -- 7670 is the active pane and has no records, so nothing is acknowledged.
   local w = window_double({
     tabs = { { 7670, 7671 } }, focused = true, active_pane_id = 7670,
   })
-  attention.poll(w, { now_ms = SIDECAR_NOW })
-  assert(#w.actions == 1, "the marker appearing is the first visible change, got " .. #w.actions)
-  attention.poll(w, { now_ms = SIDECAR_NOW })
+  attention.poll(w, { now_unix_ns = fixture_now })
+  assert(#w.actions == 1, "the activity appearing is the first visible change, got " .. #w.actions)
+  attention.poll(w, { now_unix_ns = fixture_now })
   assert(#w.actions == 1, "an unchanged tick must not redraw again, got " .. #w.actions)
 
-  write_review_flag_file(7671)
-  attention.poll(w, { now_ms = SIDECAR_NOW })
+  write_activity(7671, "review")
+  attention.poll(w, { now_unix_ns = fixture_now })
 
   assert(select(6, attention.get_attention(7671)) == true, "the flag should be recorded")
   assert(#w.actions == 2, "the flag arriving is itself a change, got " .. #w.actions)
@@ -3346,6 +3230,7 @@ test("call_after only wakes a fresh TTL read", function()
     "scheduling alone must not expire the child")
 
   clock_value = "00000000610000000001"
+  local previous_time = wezterm.time
   wezterm.time = {
     now = function()
       local seconds = clock_value:sub(1, 11):gsub("^0+", "")
@@ -3361,7 +3246,7 @@ test("call_after only wakes a fresh TTL read", function()
     call_after = function() error("expired state must not schedule another TTL wakeup") end,
   }
   callback()
-  wezterm.time = nil
+  wezterm.time = previous_time
   assert(select(5, attention.get_attention(42)) == 0,
     "the fresh read one nanosecond later must derive expiry")
 end)
@@ -3385,17 +3270,16 @@ test("unavailable UTC omits TTL children but preserves non-TTL activity", functi
     "the unavailable clock must be diagnosed")
 end)
 
-test("invalid and future v2 identity never downgrade to a plausible v1 marker", function()
-  write_marker(7781, "notify")
+test("an invalid or future identity is diagnosed and shows nothing", function()
   local invalid_pane = {
     id = 7780, domain = "unix", published = 7781, attention = "not-json",
   }
   attention.poll(window_double({ tabs = { { invalid_pane } }, focused = false }))
   assert(attention.get_attention(7781) == nil,
-    "malformed v2 identity must not read the valid-looking v1 file")
+    "a malformed identity reads nothing under the pane id it also published")
   local rendered = format_tab_title(tab(7780, 7782, false))
   assert(type(rendered) == "string" and not rendered:find("! ", 1, true),
-    "malformed v2 identity must render no borrowed v1 marker")
+    "a malformed identity renders no attention")
   local malformed_errors = drain_errors()
   assert(#malformed_errors == 1 and malformed_errors[1]:find("record_invalid", 1, true),
     "malformed identity must be diagnosed distinctly")
@@ -3404,7 +3288,7 @@ test("invalid and future v2 identity never downgrade to a plausible v1 marker", 
   future.wire = 3
   local future_pane = { id = 7783, domain = "unix", published = 7781, attention = future }
   attention.poll(window_double({ tabs = { { future_pane } }, focused = false }))
-  assert(attention.get_attention(7781) == nil, "future identity must not downgrade to v1")
+  assert(attention.get_attention(7781) == nil, "a future identity reads nothing either")
   local future_errors = drain_errors()
   assert(#future_errors == 1 and future_errors[1]:find("future_schema", 1, true),
     "future identity must be diagnosed distinctly")
@@ -3434,7 +3318,7 @@ test("a core interior-address mismatch makes the v2 view invalid", function()
     "interior mismatch must be diagnosed")
 end)
 
-test("a future core record blocks v1 downgrade and stays visible as future schema", function()
+test("a future core record stays visible as future schema", function()
   local future_wire = decode_json(encode_json(protocol_fixture.wire_sample))
   future_wire.address.pane_id = "44"
   local future_claim = decode_json(encode_json(protocol_fixture.record_samples.claim))
@@ -3444,7 +3328,6 @@ test("a future core record blocks v1 downgrade and stays visible as future schem
     .. "/incarnations/" .. future_wire.address.incarnation_id
     .. "/panes/44/claim.json"
   write_json_path(claim_path, future_claim)
-  write_marker(7791, "notify")
 
   local pane_spec = {
     id = 4253, domain = "unix", published = 7791, attention = future_wire,
@@ -3457,8 +3340,6 @@ test("a future core record blocks v1 downgrade and stays visible as future schem
   local view = assert(internal.attention_cache[key], "future view must remain diagnosable")
   assert(view.binding_health == "future_schema" and view.activity_type == nil,
     "future claim must expose no v2 activity")
-  assert(attention.get_attention(7791) == nil,
-    "the plausible v1 marker must remain ineligible")
   local errors = drain_errors()
   assert(#errors >= 1 and errors[1]:find("future_schema", 1, true),
     "future schema must be reported")
@@ -3664,18 +3545,6 @@ test("matching forged child filenames cannot duplicate one raw agent id", functi
   assert(invalid_hash, "the forged agent_key relationship must be diagnosed")
 end)
 
-test("v1 identity clears a stale scalar-to-v2 cache projection", function()
-  local instance = dofile(repo_root .. "/plugin/init.lua")
-  instance.apply_to_config({}, {auto_poll=false,dir=test_dir,review_key=false})
-  local wire = materialize_v2_fixture(42, string.rep("d",64))
-  instance.poll(window_double({window_id=9010,tabs={{{id=42,attention=wire}}},focused=false}),
-    {now_unix_ns=protocol_fixture.state_case.now_unix_ns,call_after=function()end})
-  write_marker(42, "thinking")
-  instance.poll(window_double({window_id=9010,tabs={{42}},focused=false}))
-  assert(instance.get_attention(42) == "thinking",
-    "the public scalar query must return the pane's current v1 cache")
-end)
-
 test("an unbound launch reads and applies its exact acknowledgement", function()
   local samples = protocol_fixture.record_samples
   local wire = decode_json(encode_json(protocol_fixture.wire_sample))
@@ -3841,12 +3710,14 @@ test("focused v2 acknowledgement targets only the active pane's exact event", fu
   os.remove(sibling_root .. "/ack.json")
   local active = { id = 9051, domain = "unix", attention = wire }
   local sibling = { id = 9052, domain = "unix", attention = sibling_wire }
-  attention.poll(window_double({
-    tabs = { { active, sibling } }, focused = true, active_pane_id = active,
-  }), {
-    now_unix_ns = protocol_fixture.state_case.now_unix_ns,
-    call_after = function() end,
-  })
+  with_plugin_command(acknowledging_answer, function()
+    attention.poll(window_double({
+      tabs = { { active, sibling } }, focused = true, active_pane_id = active,
+    }), {
+      now_unix_ns = protocol_fixture.state_case.now_unix_ns,
+      call_after = function() end,
+    })
+  end)
 
   local ack_raw = assert(read_path(binding_root_path .. "/ack.json"))
   local ack = assert(internal.parse_v2_record_json(ack_raw, "acknowledgement"))
@@ -3855,7 +3726,7 @@ test("focused v2 acknowledgement targets only the active pane's exact event", fu
   assert(ack.target.kind == "binding" and ack.target.binding_id == samples.binding.binding_id,
     "the acknowledgement must name the selected binding")
   assert(not path_exists(sibling_root .. "/ack.json"),
-    "focusing one v2 pane must not acknowledge its sibling")
+    "focusing one claimed pane must not acknowledge its sibling")
   local key = internal.address_cache_key(wire.address)
   assert(internal.attention_cache[key].activity_type == nil,
     "the exact acknowledged activity must be suppressed on the same poll")
@@ -3889,8 +3760,10 @@ local function v2_ack_path(wire)
 end
 
 local function focus_v2_pane(instance, spec)
-  instance.poll(window_double({ tabs = { { spec } }, focused = true, active_pane_id = spec }),
-    { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+  with_plugin_command(acknowledging_answer, function()
+    instance.poll(window_double({ tabs = { { spec } }, focused = true, active_pane_id = spec }),
+      { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+  end)
 end
 
 test("a local pane naming another mux's pane of the same number is refused, not acknowledged", function()
@@ -4001,7 +3874,7 @@ test("before a GUI knows its own mux, a local pane is checked against its socket
   assert(refusals() == 1, "the refusal is logged once the answer names this GUI's mux")
 end)
 
-test("Alt+B uses full v2 addresses and clear-all preserves activity", function()
+test("Alt+B uses full addresses and clearing leaves other owners and activity", function()
   local realm_b = string.rep("9", 64)
   local wire_a = materialize_v2_fixture(61)
   local wire_b = materialize_v2_fixture(61, realm_b)
@@ -4017,7 +3890,7 @@ test("Alt+B uses full v2 addresses and clear-all preserves activity", function()
 
   local review = dofile(repo_root .. "/plugin/init.lua")
   local config = {}
-  review.apply_to_config(config, { auto_poll = false, dir = test_dir })
+  review.apply_to_config(config, { auto_poll = false, dir = test_dir, integration_root = writer_root })
   local toggle = assert(config.keys and config.keys[#config.keys].action,
     "Alt+B action was not registered")
   local pane_a = pane_from_entry({ id = 9061, domain = "unix-a", attention = wire_a })
@@ -4029,7 +3902,7 @@ test("Alt+B uses full v2 addresses and clear-all preserves activity", function()
   local user_key = internal.sha256("user")
   local user_path = pane_a_root .. "/reviews/" .. user_key .. ".json"
 
-  toggle(window, pane_a)
+  with_plugin_command(reviewing_answer, function() toggle(window, pane_a) end)
   local user_raw = assert(read_path(user_path))
   local user_record = assert(internal.parse_v2_record_json(user_raw, "review"))
   assert(user_record.owner_id == "user" and user_record.address.realm_id == wire_a.address.realm_id,
@@ -4047,15 +3920,15 @@ test("Alt+B uses full v2 addresses and clear-all preserves activity", function()
     .. "/bindings/" .. samples.binding.binding_id .. "/activity.json"
   local activity_before = assert(read_path(activity_path))
 
-  toggle(window, pane_a)
-  assert(not path_exists(user_path), "clear-all must remove the active pane's user claim")
-  assert(not path_exists(pane_b_root .. "/reviews/" .. other.owner_key .. ".json"),
-    "clear-all must remove a sibling's valid claim through its full address")
+  with_plugin_command(reviewing_answer, function() toggle(window, pane_a) end)
+  assert(not path_exists(user_path), "a press must remove the active pane's user review")
+  assert(path_exists(pane_b_root .. "/reviews/" .. other.owner_key .. ".json"),
+    "another owner's review is that owner's to withdraw")
   assert(read_path(activity_path) == activity_before,
-    "clearing a masked review claim must preserve unrelated activity bytes")
+    "clearing a review must preserve unrelated activity bytes")
 end)
 
-test("Alt+B refuses to flag a pane whose published launch is not its claim's", function()
+test("Alt+B names the launch the pane published, and says once why the command refused", function()
   local wire = materialize_v2_fixture(81)
   local pane_root = test_dir .. "/v2/realms/" .. wire.address.realm_id
     .. "/incarnations/" .. wire.address.incarnation_id .. "/panes/81"
@@ -4067,325 +3940,31 @@ test("Alt+B refuses to flag a pane whose published launch is not its claim's", f
   review.apply_to_config(config, { auto_poll = false, dir = test_dir, integration_root = writer_root })
   local toggle = assert(config.keys[#config.keys].action)
   local spec = { id = 9081, domain = "unix", attention = wire }
-  toggle(window_double({ tabs = { { spec } }, focused = true, active_pane_id = spec }), pane_from_entry(spec))
-  assert(not path_exists(pane_root .. "/reviews/" .. internal.sha256("user") .. ".json"),
-    "a review under a stale claim is one no reader shows")
+  local window = window_double({ tabs = { { spec } }, focused = true, active_pane_id = spec })
+  local spawned = with_plugin_command(function()
+    return false, '{"schema":1,"command":"plugin set-review","status":"unavailable",'
+      .. '"complete":false,"result":{},"diagnostics":[{"code":"claim_stale","message":'
+      .. '"the pane\'s claim does not name the launch the pane published","context":{},"help":""}]}'
+  end, function() toggle(window, pane_from_entry(spec)) end)
+  assert(#spawned == 1 and plugin_arguments(spawned[1]):find("--launch-id " .. wire.launch_id, 1, true),
+    "the command is asked about the launch the pane published")
+  assert(window.action_calls == 0, "a refused flag claims no redraw")
   local errors = drain_errors()
-  assert(#errors == 1 and errors[1]:find("claim", 1, true), "the refusal must say why, got " .. #errors)
+  assert(#errors == 1 and errors[1]:find("claim_stale", 1, true), "the refusal must say why, got " .. #errors)
 end)
 
-test("Alt+B clear-all leaves a review that was replaced after it looked", function()
-  local wire = materialize_v2_fixture(82)
-  local samples = protocol_fixture.record_samples
-  local pane_root = test_dir .. "/v2/realms/" .. wire.address.realm_id
-    .. "/incarnations/" .. wire.address.incarnation_id .. "/panes/82"
-  local path = pane_root .. "/reviews/" .. samples.review.owner_key .. ".json"
-  assert(path_exists(path), "precondition: the fixture carries a review")
-  local newer = decode_json(encode_json(samples.review))
-  newer.address = decode_json(encode_json(wire.address))
-  newer.event_id = "00000000-0000-4000-8000-000000000082"
-  local review = dofile(repo_root .. "/plugin/init.lua")
-  local config = {}
-  review.apply_to_config(config, { auto_poll = false, dir = test_dir, integration_root = writer_root })
-  local toggle = assert(config.keys[#config.keys].action)
-  local spec = { id = 9082, domain = "unix", attention = wire }
-  -- The writer replaces the review between the plugin's check and its removal.
-  local real_remove, real_rename, raced = os.remove, os.rename, false
-  local function race(target)
-    if target == path and not raced then raced = true; write_json_path(path, newer) end
-  end
-  os.remove = function(target) race(target); return real_remove(target) end
-  os.rename = function(from, to) race(from); return real_rename(from, to) end
-  local ok, failure = pcall(toggle, window_double({ tabs = { { spec } }, focused = true,
-    active_pane_id = spec }), pane_from_entry(spec))
-  os.remove, os.rename = real_remove, real_rename
-  assert(ok, failure)
-  assert(raced, "precondition: the clear reached the review")
-  local left = read_path(path)
-  assert(left and decode_json(left).event_id == newer.event_id,
-    "a review the user never saw must not be cleared")
-  materialize_v2_fixture(82)
-end)
-
-test("Alt+B clear-all does not put a review back over one written after it looked", function()
-  local wire = materialize_v2_fixture(85)
-  local samples = protocol_fixture.record_samples
-  local pane_root = test_dir .. "/v2/realms/" .. wire.address.realm_id
-    .. "/incarnations/" .. wire.address.incarnation_id .. "/panes/85"
-  local path = pane_root .. "/reviews/" .. samples.review.owner_key .. ".json"
-  assert(path_exists(path), "precondition: the fixture carries a review")
-  local function version(event_id)
-    local record = decode_json(encode_json(samples.review))
-    record.address = decode_json(encode_json(wire.address))
-    record.event_id = event_id
-    return record
-  end
-  local unseen = version("00000000-0000-4000-8000-000000000851")
-  local newest = version("00000000-0000-4000-8000-000000000852")
-  local review = dofile(repo_root .. "/plugin/init.lua")
-  local config = {}
-  review.apply_to_config(config, { auto_poll = false, dir = test_dir, integration_root = writer_root })
-  local toggle = assert(config.keys[#config.keys].action)
-  local spec = { id = 9085, domain = "unix", attention = wire }
-  -- One writer replaces the review as the clear moves it aside, so what was
-  -- moved is not what the tab showed and has to go back. A second writer
-  -- lands just after the clear has looked at the path and found it empty.
-  local real_rename, real_open = os.rename, io.open
-  local moved, landed = false, false
-  os.rename = function(from, to)
-    if from == path and not moved then moved = true; write_json_path(path, unseen) end
-    return real_rename(from, to)
-  end
-  io.open = function(target, mode)
-    local file, err = real_open(target, mode)
-    if target == path and moved and not landed and not file then
-      landed = true
-      write_json_path(path, newest)
-    end
-    return file, err
-  end
-  local ok, failure = pcall(toggle, window_double({ tabs = { { spec } }, focused = true,
-    active_pane_id = spec }), pane_from_entry(spec))
-  os.rename, io.open = real_rename, real_open
-  assert(ok, failure)
-  assert(moved and landed, "precondition: both writes reached the clear")
-  local left = read_path(path)
-  assert(left and decode_json(left).event_id == newest.event_id,
-    "the review written last must survive the clear putting its own copy back")
-  materialize_v2_fixture(85)
-end)
-
---- Move a pane's review aside under the name a clear gives it while it looks,
---- as a GUI that died in the middle of Alt+B leaves it. The name carries the
---- time the clear moved it, `moved_at_ms`, long ago unless a test says.
-local function leave_cleared_review(pane_id, moved_at_ms)
-  local wire = materialize_v2_fixture(pane_id)
-  local samples = protocol_fixture.record_samples
-  local path = test_dir .. "/v2/realms/" .. wire.address.realm_id
-    .. "/incarnations/" .. wire.address.incarnation_id .. "/panes/" .. pane_id
-    .. "/reviews/" .. samples.review.owner_key .. ".json"
-  local before = assert(read_path(path), "precondition: the fixture carries a review")
-  local leftover = path .. ".table0x10a2b3c4." .. (moved_at_ms or 1000) .. ".clear"
-  assert(os.rename(path, leftover))
-  return wire, path, leftover, before
-end
-
-local function poll_v2_pane(instance, spec, now_ms)
-  instance.poll(window_double({ tabs = { { spec } }, focused = false }),
-    { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end,
-      now_ms = now_ms })
-end
-
-local function review_leftovers(path)
-  local found = {}
-  for _, candidate in ipairs(wezterm.glob(dirname(path) .. "/*.clear")) do
-    found[#found + 1] = candidate
-  end
-  return found
-end
-
-test("a clear still running in another GUI is not undone by this one's poll", function()
-  local wire = materialize_v2_fixture(89)
-  local samples = protocol_fixture.record_samples
-  local path = test_dir .. "/v2/realms/" .. wire.address.realm_id
-    .. "/incarnations/" .. wire.address.incarnation_id .. "/panes/89/reviews/"
-    .. samples.review.owner_key .. ".json"
-  assert(path_exists(path), "precondition: the fixture carries a review")
-  local clearing = dofile(repo_root .. "/plugin/init.lua")
-  local config = {}
-  clearing.apply_to_config(config, { auto_poll = false, dir = test_dir, renderer = "manual",
-    integration_root = writer_root })
-  local toggle = assert(config.keys[#config.keys].action)
-  local watching = dofile(repo_root .. "/plugin/init.lua")
-  watching.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
-    renderer = "manual", integration_root = writer_root })
-  local spec = { id = 9089, domain = "unix", attention = wire }
-  poll_v2_pane(watching, spec)
-  local key = internal.address_cache_key(wire.address)
-  assert(watching._internal.attention_cache[key].review == true, "precondition: the other GUI shows it")
-  -- The other GUI polls while this one's clear is between moving the review
-  -- aside and removing it.
-  local real_rename, paused = os.rename, false
-  os.rename = function(from, to)
-    local moved, err = real_rename(from, to)
-    if from == path and to:match("%.clear$") and not paused then
-      paused = true
-      poll_v2_pane(watching, spec)
-    end
-    return moved, err
-  end
-  local ok, failure = pcall(toggle, window_double({ tabs = { { spec } }, focused = true,
-    active_pane_id = spec }), pane_from_entry(spec))
-  os.rename = real_rename
-  assert(ok, failure)
-  assert(paused, "precondition: the other GUI polled mid-clear")
-  assert(not path_exists(path), "the review the user cleared must stay cleared")
-  assert(#review_leftovers(path) == 0, "the clear leaves nothing aside")
-  materialize_v2_fixture(89)
-end)
-
-test("a review this process's own clear could not put back is put back on its next poll", function()
-  local wire = materialize_v2_fixture(79)
-  local samples = protocol_fixture.record_samples
-  local path = test_dir .. "/v2/realms/" .. wire.address.realm_id
-    .. "/incarnations/" .. wire.address.incarnation_id .. "/panes/79/reviews/"
-    .. samples.review.owner_key .. ".json"
-  local unseen = decode_json(encode_json(samples.review))
-  unseen.address = decode_json(encode_json(wire.address))
-  unseen.event_id = "00000000-0000-4000-8000-000000000791"
-  local instance = dofile(repo_root .. "/plugin/init.lua")
-  local config = {}
-  instance.apply_to_config(config, { auto_poll = false, dir = test_dir, renderer = "manual",
-    integration_root = writer_root })
-  local toggle = assert(config.keys[#config.keys].action)
-  local spec = { id = 9079, domain = "unix", attention = wire }
-  poll_v2_pane(instance, spec)
-  -- A writer replaces the review as the clear moves it aside, so it has to go
-  -- back, and the link that would put it back fails.
-  local real_rename, real_execute, replaced, refused = os.rename, os.execute, false, false
-  os.rename = function(from, to)
-    if from == path and not replaced then replaced = true; write_json_path(path, unseen) end
-    return real_rename(from, to)
-  end
-  os.execute = function(command)
-    if command:sub(1, 3) == "ln " and not refused then refused = true; return 1 end
-    return real_execute(command)
-  end
-  local ok, failure = pcall(toggle, window_double({ tabs = { { spec } }, focused = true,
-    active_pane_id = spec }), pane_from_entry(spec))
-  os.rename, os.execute = real_rename, real_execute
-  assert(ok, failure)
-  assert(replaced and refused, "precondition: the put-back was refused")
-  assert(not path_exists(path) and #review_leftovers(path) == 1, "precondition: left aside")
-  local errors = drain_errors()
-  assert(#errors == 1 and errors[1]:find("cannot put back review", 1, true))
-  poll_v2_pane(instance, spec)
-  local left = read_path(path)
-  assert(left and decode_json(left).event_id == unseen.event_id,
-    "the review the user never saw is put back without waiting")
-  assert(#review_leftovers(path) == 0, "the review lives at one name only")
-  materialize_v2_fixture(79)
-end)
-
-test("another GUI's leftover is put back only once it is older than a clear takes", function()
-  local moved_at = 1789884000000
-  local wire, path, leftover, before = leave_cleared_review(84, moved_at)
-  local instance = dofile(repo_root .. "/plugin/init.lua")
-  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
-    renderer = "manual", integration_root = writer_root })
-  local spec = { id = 9084, domain = "unix", attention = wire }
-  poll_v2_pane(instance, spec, moved_at + 1000)
-  assert(not path_exists(path) and read_path(leftover) == before,
-    "a clear moved it a second ago and may still be running")
-  poll_v2_pane(instance, spec, moved_at + 2000)
-  assert(not path_exists(path), "still young")
-  poll_v2_pane(instance, spec, moved_at + 61000)
-  assert(read_path(path) == before, "abandoned: the flag the user set comes back")
-  assert(not path_exists(leftover), "the review lives at one name only")
-end)
-
-test("a review a crashed clear left aside is put back on the pane's next read", function()
-  local wire, path, leftover, before = leave_cleared_review(86)
-  local instance = dofile(repo_root .. "/plugin/init.lua")
-  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
-    renderer = "manual", integration_root = writer_root })
-  poll_v2_pane(instance, { id = 9086, domain = "unix", attention = wire })
-  assert(read_path(path) == before, "the flag the user set must come back byte for byte")
-  assert(not path_exists(leftover), "the review lives at one name only")
-  local key = internal.address_cache_key(wire.address)
-  assert(instance._internal.attention_cache[key].review == true,
-    "the same poll shows the restored flag")
-end)
-
-test("a review left aside while this process was already showing the pane is put back", function()
-  local wire = materialize_v2_fixture(87)
-  local instance = dofile(repo_root .. "/plugin/init.lua")
-  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
-    renderer = "manual", integration_root = writer_root })
-  local spec = { id = 9087, domain = "unix", attention = wire }
-  poll_v2_pane(instance, spec)
-  local _, path, leftover, before = leave_cleared_review(87)
-  poll_v2_pane(instance, spec)
-  assert(read_path(path) == before, "another GUI's crashed clear must not lose the flag")
-  assert(not path_exists(leftover), "the review lives at one name only")
-end)
-
-test("a review left aside stays aside when a live review has taken its name", function()
-  local wire, path, leftover, before = leave_cleared_review(88)
-  local live = decode_json(before)
-  live.event_id = "00000000-0000-4000-8000-000000000881"
-  write_json_path(path, live)
-  local live_raw = read_path(path)
-  local instance = dofile(repo_root .. "/plugin/init.lua")
-  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
-    renderer = "manual", integration_root = writer_root })
-  poll_v2_pane(instance, { id = 9088, domain = "unix", attention = wire })
-  assert(read_path(path) == live_raw, "the live review is not replaced")
-  assert(read_path(leftover) == before, "the older copy is sweep's, not the plugin's")
-  os.remove(leftover)
-end)
-
-test("a stop hidden behind a higher-ranked review flag is not acknowledged, v1 or v2", function()
+test("a stop hidden behind a higher-ranked review flag is not acknowledged", function()
   local wire = materialize_v2_fixture(83)
-  local samples = protocol_fixture.record_samples
-  local ack_path = test_dir .. "/v2/realms/" .. wire.address.realm_id .. "/incarnations/"
-    .. wire.address.incarnation_id .. "/panes/83/launches/" .. wire.launch_id
-    .. "/bindings/" .. samples.binding.binding_id .. "/ack.json"
-  local ack_before = assert(read_path(ack_path))
   local instance = dofile(repo_root .. "/plugin/init.lua")
   instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
     renderer = "manual", integration_root = writer_root,
     priority = { "thinking", "stop", "notify", "review" } })
   local v2_pane = { id = 83, domain = "unix", attention = wire }
-  instance.poll(window_double({ tabs = { { v2_pane } }, focused = true, active_pane_id = v2_pane }),
-    { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
-  assert(read_path(ack_path) == ack_before, "the v2 pane showed its review flag, not the notify")
-
-  write_marker(7301, "stop")
-  write_review_flag_file(7301)
-  instance.poll(window_double({ tabs = { { 7301 } }, focused = true, active_pane_id = 7301 }))
-  assert(not acknowledgement_exists(7301), "the v1 pane showed its review flag, not the stop")
-end)
-
-test("v2 user actions never replace future acknowledgement or review records", function()
-  local wire = materialize_v2_fixture(71)
-  local samples = protocol_fixture.record_samples
-  local pane_root = test_dir .. "/v2/realms/" .. wire.address.realm_id
-    .. "/incarnations/" .. wire.address.incarnation_id .. "/panes/71"
-  local binding_root_path = pane_root .. "/launches/" .. wire.launch_id
-    .. "/bindings/" .. samples.binding.binding_id
-  local ack_path = binding_root_path .. "/ack.json"
-  local future_ack = decode_json(encode_json(samples.acknowledgement))
-  future_ack.address = decode_json(encode_json(wire.address))
-  future_ack.schema = 999
-  write_json_path(ack_path, future_ack)
-  local ack_before = assert(read_path(ack_path))
-  local pane_spec = { id = 9071, domain = "unix", attention = wire }
-  attention.poll(window_double({
-    tabs = { { pane_spec } }, focused = true, active_pane_id = pane_spec,
-  }), { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
-  assert(read_path(ack_path) == ack_before,
-    "focus must preserve an existing future acknowledgement byte for byte")
-  local key = internal.address_cache_key(wire.address)
-  assert(internal.attention_cache[key].activity_type == "notify",
-    "a refused acknowledgement must leave the notification visible")
-
-  local user_key = internal.sha256("user")
-  local review_path = pane_root .. "/reviews/" .. user_key .. ".json"
-  local future_review = decode_json(encode_json(samples.review))
-  future_review.address = decode_json(encode_json(wire.address))
-  future_review.schema = 999
-  write_json_path(review_path, future_review)
-  local review_before = assert(read_path(review_path))
-  local review = dofile(repo_root .. "/plugin/init.lua")
-  local config = {}
-  review.apply_to_config(config, { auto_poll = false, dir = test_dir })
-  local toggle = assert(config.keys and config.keys[#config.keys].action)
-  toggle(window_double({ tabs = { { pane_spec } }, focused = true,
-    active_pane_id = pane_spec }), pane_from_entry(pane_spec))
-  assert(read_path(review_path) == review_before,
-    "Alt+B must preserve an existing future user review byte for byte")
-  drain_errors()
+  local spawned = with_plugin_command(acknowledging_answer, function()
+    instance.poll(window_double({ tabs = { { v2_pane } }, focused = true, active_pane_id = v2_pane }),
+      { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+  end)
+  assert(#spawned == 0, "the pane showed its review flag, not the notify")
 end)
 
 test("unpublished mux pane schedules one realm publish from the integration root", function()
@@ -4812,13 +4391,16 @@ test("question publication, tool return, and badge dismissal stay independent", 
   local post = snapshot.pools.requests.observations[1]
   post.correlation = { tool_call_id = "question-q1", turn_id = "turn-1" }
   local reloaded = dofile(repo_root .. "/plugin/init.lua")
-  reloaded.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false })
+  reloaded.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root })
   local window = window_double({ tabs = { { { id = 9971, domain = "unix", attention = wire } } }, focused = false })
   local pane = mux_pane(9971, { domain = "unix", attention = wire })
   local function read(focused)
     write_json_path(directory .. "/lifecycle.json", snapshot)
     local target = focused and window_double({ tabs = { { { id = 9971, domain = "unix", attention = wire } } }, focused = true, active_pane_id = { id = 9971, domain = "unix", attention = wire } }) or window
-    reloaded.poll(target, { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+    with_plugin_command(acknowledging_answer, function()
+      reloaded.poll(target, { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+    end)
     return assert(reloaded.get_attention_view(pane))
   end
   local view = read(false)
@@ -4939,7 +4521,7 @@ test("twenty full lifecycle panes keep polling and getter work bounded", functio
   instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false })
   local window = window_double({ tabs = { entries }, focused = false })
   local old_open, old_popen = io.open, io.popen
-  local reads, writes, globs, leftover_looks = 0, 0, 0, 0
+  local reads, writes, globs = 0, 0, 0
   io.open = function(path, mode)
     if mode and mode:find("w", 1, true) then writes = writes + 1 end
     if path:match("/lifecycle%.json$") then reads = reads + 1 end
@@ -4951,10 +4533,6 @@ test("twenty full lifecycle panes keep polling and getter work bounded", functio
     for _ = 1, 2 do
       instance.poll(window, { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end,
         glob = function(pattern)
-          if pattern:match("/reviews/%*%.clear$") then
-            leftover_looks = leftover_looks + 1
-            return {}
-          end
           globs = globs + 1
           local directory = assert(pattern:match("^(.*)/%*%.json$"))
           assert(directory:match("/reviews$") or directory:match("/agents$"), "no historical directory walk")
@@ -4975,8 +4553,6 @@ test("twenty full lifecycle panes keep polling and getter work bounded", functio
   io.open, io.popen = old_open, old_popen
   assert(ok, failure)
   assert(reads == 40 and globs == 80 and writes == 0, "exactly one sidecar read per pane/poll and no writes")
-  assert(leftover_looks == 20, "a pane is searched for a clear's leftovers on its first poll only, got "
-    .. leftover_looks)
   io.write(string.format("lifecycle workload: 20 panes, 2 polls, 128 observations each; CPU %.2f ms; 40 snapshot reads; 0 writes\n", cpu_ms))
 end)
 
@@ -5216,9 +4792,9 @@ test("GUI callback preserves binding targets through unavailable reads and repla
   local ended=decode_json(encode_json(samples.binding_end));ended.address=wire.address;ended.observed_mono_ns="00000000009000000000"
   write_json_path(launch.."/bindings/"..pointer.binding_id.."/end.json",ended);instance.poll(window,options)
   assert(messages[#messages].kind=="updated" and messages[#messages].view.binding_phase=="ended")
-  local v1=window_double({window_id=13020,tabs={{13020}},focused=false})
-  instance.poll(v1,options);assert(messages[#messages].kind=="scope_lost")
-  count=#messages;instance.poll(v1,options);assert(#messages==count,"V1 cannot fabricate a scope")
+  local unclaimed=window_double({window_id=13020,tabs={{13020}},focused=false})
+  instance.poll(unclaimed,options);assert(messages[#messages].kind=="scope_lost")
+  count=#messages;instance.poll(unclaimed,options);assert(#messages==count,"an unclaimed pane cannot fabricate a scope")
   local errors=drain_errors();assert(#errors==2,"only the injected pointer failure and missing new binding are expected")
 end)
 
@@ -5304,58 +4880,37 @@ test("a first observation through Alt+B participates in scalar ambiguity", funct
   local b=materialize_v2_fixture(42,string.rep("b",64))
   local instance=dofile(repo_root .. "/plugin/init.lua")
   local config={}
-  instance.apply_to_config(config,{auto_poll=false,dir=test_dir})
+  instance.apply_to_config(config,{auto_poll=false,dir=test_dir,integration_root=writer_root})
   local pa={id=12011,domain="a",attention=a}
   local pb={id=12012,domain="b",attention=b}
   local wa=window_double({window_id=9022,tabs={{pa}},focused=false})
   local wb=window_double({window_id=9023,tabs={{pb}},focused=false})
   instance.poll(wa,{now_unix_ns=protocol_fixture.state_case.now_unix_ns,call_after=function()end})
   assert(instance.get_attention(42)=="notify")
-  config.keys[#config.keys].action(wb,pane_from_entry(pb))
+  with_plugin_command(reviewing_answer, function()
+    config.keys[#config.keys].action(wb,pane_from_entry(pb))
+  end)
   assert(instance.get_attention_view(pane_from_entry(pb)))
   assert(instance.get_attention(42)==nil,"overlay observation must not select either realm")
   instance.poll(wa,{now_unix_ns=protocol_fixture.state_case.now_unix_ns,call_after=function()end})
   assert(instance.get_attention(42)==nil,"a sibling poll must retain the overlay observation")
 end)
 
-test("identity publication is not pane destruction", function()
-  local id=12003
-  write_marker(id,"thinking","upgrade-marker")
-  write_acknowledgement_file(id,"publication\nupgrade-marker")
-  write_subagents(id,{{id="child",last_ms=1000}})
-  write_review_flag_file(id,"upgrade-review")
-  local instance=dofile(repo_root .. "/plugin/init.lua")
-  instance.apply_to_config({}, {auto_poll=false,dir=test_dir,review_key=false})
-  local before=window_double({window_id=9001,tabs={{{id=id,domain="local"}}},focused=false})
-  instance.poll(before,{now_ms=1000,call_after=function()end})
-  assert(path_exists(test_dir .. "/" .. id .. ".ack"),"ack fixture must survive the first poll")
-  local wire=materialize_v2_fixture(id)
-  local after=window_double({window_id=9001,tabs={{{id=id,domain="local",attention=wire}}},focused=false})
-  instance.poll(after,{now_ms=1000,now_unix_ns=protocol_fixture.state_case.now_unix_ns,call_after=function()end})
-  for _,suffix in ipairs({"",".ack",".agents",".review"}) do
-    assert(path_exists(test_dir .. "/" .. id .. suffix),"identity upgrade deleted " .. suffix)
-  end
-end)
-
-test("Alt+B replaces the same pane identity without deleting sidecars", function()
+test("Alt+B replaces the same pane's earlier identity", function()
   local id=12013
-  write_marker(id,"thinking","overlay-upgrade")
-  write_acknowledgement_file(id,"publication\noverlay-upgrade")
-  write_subagents(id,{{id="child",last_ms=1000}})
-  write_review_flag_file(id,"overlay-review")
   local instance=dofile(repo_root .. "/plugin/init.lua")
   local config={}
-  instance.apply_to_config(config,{auto_poll=false,dir=test_dir})
-  instance.poll(window_double({window_id=9024,tabs={{id}},focused=false}),{now_ms=1000,call_after=function()end})
+  instance.apply_to_config(config,{auto_poll=false,dir=test_dir,integration_root=writer_root})
+  instance.poll(window_double({window_id=9024,tabs={{{id=id,domain="local"}}},focused=false}),
+    {now_ms=1000,call_after=function()end})
   local wire=materialize_v2_fixture(id,string.rep("f",64))
   local entry={id=id,domain="local",attention=wire}
   local window=window_double({window_id=9024,tabs={{entry}},focused=false})
-  config.keys[#config.keys].action(window,pane_from_entry(entry))
+  with_plugin_command(reviewing_answer, function()
+    config.keys[#config.keys].action(window,pane_from_entry(entry))
+  end)
   local view=assert(instance.get_attention_view(pane_from_entry(entry)))
   assert(view.type and instance.get_attention(id)==view.type,"one pane must not count as two scalar owners")
-  for _,suffix in ipairs({"",".ack",".agents",".review"}) do
-    assert(path_exists(test_dir .. "/" .. id .. suffix),"overlay identity change deleted " .. suffix)
-  end
 end)
 
 test("every v2 record has a bounded file read", function()
@@ -5392,28 +4947,6 @@ test("a retry needs a new live observation when inventory fails", function()
   wezterm.background_child_process=old
 end)
 
-test("a missing protocol module logs once and keeps the v1 reader available", function()
-  local module_path = repo_root .. "/plugin/protocol.lua"
-  local hidden_path = module_path .. ".missing"
-  assert(os.rename(module_path, hidden_path))
-  drain_errors()
-  local ok, fallback = pcall(dofile, repo_root .. "/plugin/init.lua")
-  assert(os.rename(hidden_path, module_path))
-  assert(ok and fallback, "the plugin must load without its v2 protocol module")
-  write_marker("9951", "stop", "missing-module-v1")
-  local atype = fallback.get_attention("9951", { dir = test_dir, now_ms = 1000 })
-  assert(atype == "stop", "the missing v2 module must not disable v1 rendering")
-  local sample = fallback._internal.sample_settled_title
-  for _, title in ipairs({ "bell\7", "next\194\133line" }) do
-    sample("fallback-title", "launch", title, nil)
-    assert(sample("fallback-title", "launch", title, nil) == nil,
-      "the fallback text check must refuse control characters too")
-  end
-  local errors = drain_errors()
-  assert(#errors == 1 and errors[1]:find("protocol", 1, true),
-    "the missing module must produce one named log line")
-end)
-
 --- Load a fresh copy of the plugin with the given process environment, which
 --- the plugin reads when it loads.
 local function load_with_environment(environment)
@@ -5444,6 +4977,20 @@ test("an unknown option or a value of the wrong kind is named, and the default u
   assert(#handlers["format-tab-title"] == before + 1,
     "an unrecognised renderer falls back to the default tab renderer")
   assert(instance._active_colors.stop == "#12271c" and instance._active_show_provider == false)
+end)
+
+test("options that went with flat markers are named as ignored, and change nothing", function()
+  local before = #(handlers["format-tab-title"] or {})
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    integration_root = writer_root, stale_after_ms = { thinking = 1 }, format_tab_title = false })
+  local warnings = table.concat(drain_warnings(), "\n")
+  assert(warnings:find("unknown option stale_after_ms is ignored; it applied only to flat marker files", 1, true),
+    "stale_after_ms is named with the reason it went: " .. warnings)
+  assert(warnings:find('unknown option format_tab_title is ignored; the option is renderer = "manual"', 1, true),
+    "format_tab_title is named with the option that replaced it: " .. warnings)
+  assert(#handlers["format-tab-title"] == before + 1, "format_tab_title does not choose the renderer")
+  assert(instance.remove_marker == nil, "remove_marker went with the flat files it removed")
 end)
 
 test("a dir option the writer would refuse is named, and the default used", function()
@@ -5480,7 +5027,7 @@ test("a dir option the writer would refuse is named, and the default used", func
 end)
 
 test("a wrong value inside an option table is named, and its default used", function()
-  write_marker(9760, "thinking")
+  write_activity(9760, "thinking")
   local cases = {
     { indicators = { thinking_frames = "* " }, name = "indicators.thinking_frames" },
     { indicators = { thinking_frames = {} }, name = "indicators.thinking_frames" },
@@ -5501,7 +5048,8 @@ test("a wrong value inside an option table is named, and its default used", func
     local warnings = table.concat(drain_warnings(), "\n")
     assert(warnings:find("option " .. case.name, 1, true) and warnings:find("default", 1, true),
       case.name .. " must be named: " .. warnings)
-    instance.poll(window_double({ tabs = { { 9760 } }, focused = false }))
+    instance.poll(window_double({ tabs = { { 9760 } }, focused = false }),
+      { now_unix_ns = fixture_now })
     local drawn, rendered = pcall(handlers["format-tab-title"][handler], tab(9760, 9761, false))
     assert(drawn, case.name .. ": the tab must still draw: " .. tostring(rendered))
     local text = rendered_text(rendered)
@@ -5510,7 +5058,6 @@ test("a wrong value inside an option table is named, and its default used", func
     local key = config.keys[#config.keys]
     assert(key.key == "b" and key.mods == "ALT", case.name .. ": the review key is Alt+B")
   end
-  os.remove(test_dir .. "/9760")
 end)
 
 test("the state root and tabs directory are created private to the user", function()
@@ -5685,10 +5232,10 @@ test("an explicit integration root is the one whose command runs", function()
   assert(ok, failure)
 end)
 
--- A producer reads WEZTERM_ATTENTION_ROOT as "write through the v2 writer", and
--- falls back to the v1 marker only when it is unset. Exporting it for a checkout
--- whose writer was never built would take the v1 path away from an installation
--- that still depends on it, and every callback would die at the shim instead.
+-- A producer reads WEZTERM_ATTENTION_ROOT as "write through this checkout's
+-- writer". Exporting it for a checkout whose writer was never built would make
+-- every callback die at the shim; without it, a producer says the command is
+-- not installed.
 test("the v2 root is exported only once the writer it selects is installed", function()
   local root = test_dir .. "/integration-root"
   assert(os.execute("mkdir -p " .. shell_quote(root .. "/bin")) == 0)
@@ -5707,9 +5254,9 @@ test("the v2 root is exported only once the writer it selects is installed", fun
   assert(unbuilt_env.WEZTERM_ATTENTION_ROOT == nil,
     "a checkout with no writer must not claim the v2 root")
   assert(unbuilt_env.WEZTERM_ATTENTION_DIR == test_dir,
-    "the v1 producer still needs the state directory")
+    "the state directory is exported all the same")
   assert(#drain_errors() == 0,
-    "running v1 is a supported state and must not be reported as a fault")
+    "a checkout not yet built is named as a warning, not reported as a fault")
 
   local writer = assert(io.open(root .. "/libexec/attention-rs", "w"))
   assert(writer:write("#!/bin/sh\nexit 0\n"))
@@ -5726,16 +5273,16 @@ test("the v2 root is exported only once the writer it selects is installed", fun
   assert(#drain_errors() == 0, "an installed writer must log nothing")
 end)
 
--- A tab that closes between tabs() and panes() used to abort the whole poll, so
--- every tab after it lost its refresh for that tick. Surviving the race is only
--- half of it: the panes of the tab that vanished are then missing from this
--- tick's inventory, and the absence sweep deletes records for panes it cannot
--- see. A partial inventory must not be allowed to drive that deletion.
-test("a tab that vanishes mid-poll costs neither the later tabs nor the records", function()
-  write_marker(7701, "stop")
-  write_marker(7702, "notify")
+-- A tab that closes between tabs() and panes() must not abort the whole poll,
+-- or every tab after it loses its refresh for that tick. Surviving the race is
+-- only half of it: the panes of the tab that vanished are then missing from
+-- this tick's inventory, and the absence check retires the cache entries of
+-- panes it cannot see. A partial inventory must not drive that.
+test("a tab that vanishes mid-poll costs neither the later tabs nor what they show", function()
+  write_activity(7701, "stop")
+  write_activity(7702, "notify")
 
-  -- One window across all three polls: the sweep compares this tick's panes with
+  -- One window across all three polls: the absence check compares this tick's panes with
   -- what the same window reported last tick, so a fresh id would have nothing to
   -- compare against and every assertion below would pass vacuously.
   local window = 7700
@@ -5745,22 +5292,22 @@ test("a tab that vanishes mid-poll costs neither the later tabs nor the records"
   assert(attention.get_attention(7701) == "stop" and attention.get_attention(7702) == "notify",
     "both panes should be cached before the race")
 
-  write_marker(7701, "notify")
+  write_activity(7701, "notify")
   local raced = window_double({ window_id = window, focused = false,
     tabs = { { tab_id = racing, gone = true }, { tab_id = kept, panes = { 7701 } } } })
   local ok, poll_error = pcall(attention.poll, raced)
   assert(ok, "a tab closing mid-poll must not abort the poll: " .. tostring(poll_error))
   assert(attention.get_attention(7701) == "notify",
     "a tab listed after the vanished one must still be refreshed")
-  assert(marker_exists(7702),
+  assert(attention.get_attention(7702) == "notify",
     "a pane absent only because its tab could not be read is not a closed pane")
 
   -- Protection lasts only while the tab is still listed. Once WezTerm drops it,
-  -- the panes it held are absent like any other closed pane, so the sweep takes
-  -- them -- a tab that keeps failing cannot hold the sweep off forever.
+  -- the panes it held are absent like any other closed pane -- a tab that keeps
+  -- failing cannot hold them in the cache forever.
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { { tab_id = kept, panes = { 7701 } } } }))
-  assert(not marker_exists(7702), "a dropped tab's panes must be swept like any other")
+  assert(attention.get_attention(7702) == nil, "a dropped tab's panes must be retired like any other")
 end)
 
 -- WezTerm keeps a window's tabs as objects and drops them from the mux
@@ -5770,30 +5317,30 @@ end)
 -- successful read -- which is why what that tab held before does not bound what
 -- it holds now, and why nothing in the window can be called absent until it
 -- answers. Progress comes from keeping the question, not from answering it early.
-test("an unreadable tab defers the sweep, and answering releases it", function()
-  write_marker(7801, "stop")
-  write_marker(7802, "notify")
-  write_marker(7803, "stop")
+test("an unreadable tab defers retiring its panes, and answering releases it", function()
+  write_activity(7801, "stop")
+  write_activity(7802, "notify")
+  write_activity(7803, "stop")
 
   local window = 7800
   local kept, racing = 81, 82
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { { tab_id = kept, panes = { 7801, 7803 } }, { tab_id = racing, panes = { 7802 } } } }))
-  assert(marker_exists(7803), "the third pane starts present")
+  assert(attention.get_attention(7803) == "stop", "the third pane starts present")
 
   -- 7803 closes for real while the racing tab is still listed and unreadable.
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { { tab_id = racing, gone = true }, { tab_id = kept, panes = { 7801 } } } }))
-  assert(marker_exists(7802), "the unreadable tab's own pane is protected")
-  assert(marker_exists(7803),
+  assert(attention.get_attention(7802) == "notify", "the unreadable tab's own pane is kept")
+  assert(attention.get_attention(7803) == "stop",
     "and so is the closed one: a tab that cannot be read might have gained it")
 
-  -- The obligation is what carries progress, not sweeping during the gap. Once
-  -- every listed tab answers, the pane that really closed is swept -- including
-  -- one that closed while nothing could be concluded.
+  -- The obligation is what carries progress, not retiring during the gap. Once
+  -- every listed tab answers, the pane that really closed is retired --
+  -- including one that closed while nothing could be concluded.
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { { tab_id = kept, panes = { 7801 } } } }))
-  assert(not marker_exists(7803), "a closed pane is swept once the window can be read")
+  assert(attention.get_attention(7803) == nil, "a closed pane is retired once the window can be read")
 end)
 
 -- The tab list captured at the top of a poll is walked again further down, to
@@ -5802,13 +5349,16 @@ end)
 -- rebuilt and before the view callbacks were delivered, so the acknowledgement
 -- and the consumers would both be lost for that tick.
 test("a vanished tab does not stop the focused pane being acknowledged", function()
-  write_marker(7901, "stop")
+  write_activity(7901, "stop")
 
-  local ok = pcall(poll_focused, {
-    window_id = 7900,
-    active_pane_id = 7901,
-    tabs = { { tab_id = 91, gone = true }, { tab_id = 92, panes = { 7901 } } },
-  })
+  local ok
+  with_plugin_command(acknowledging_answer, function()
+    ok = pcall(poll_focused, {
+      window_id = 7900,
+      active_pane_id = 7901,
+      tabs = { { tab_id = 91, gone = true }, { tab_id = 92, panes = { 7901 } } },
+    })
+  end)
   assert(ok, "a tab closing must not abort the acknowledgement walk")
   assert(acknowledgement_exists(7901),
     "the focused pane must still be acknowledged when another tab has gone")
@@ -5851,22 +5401,27 @@ end)
 -- from the inventory rather than by walking the tab list a second time, and this
 -- pins that the two agree.
 test("a pane this tick could not read is not acknowledged", function()
-  write_marker(7951, "stop")
+  write_activity(7951, "stop")
 
   local window, holding = 7950, 95
-  poll_focused({ window_id = window, active_pane_id = 7951,
-    tabs = { { tab_id = holding, panes = { 7951 } } } })
+  with_plugin_command(acknowledging_answer, function()
+    poll_focused({ window_id = window, active_pane_id = 7951,
+      tabs = { { tab_id = holding, panes = { 7951 } } } })
+  end)
   assert(acknowledgement_exists(7951), "a pane that was read and focused is acknowledged")
 
-  assert(os.remove(test_dir .. "/7951.ack"))
-  write_marker(7951, "notify")
-  poll_focused({ window_id = window, active_pane_id = 7951,
-    tabs = { { tab_id = holding, gone = true } } })
-  assert(not acknowledgement_exists(7951),
-    "a marker the poll never read must not be recorded as seen")
+  assert(os.remove(seeded_records_root(7951) .. "/ack.json"))
+  write_activity(7951, "notify")
+  local spawned = with_plugin_command(acknowledging_answer, function()
+    poll_focused({ window_id = window, active_pane_id = 7951,
+      tabs = { { tab_id = holding, gone = true } } })
+  end)
+  assert(#spawned == 0, "an activity the poll never read must not be recorded as seen")
 
-  poll_focused({ window_id = window, active_pane_id = 7951,
-    tabs = { { tab_id = holding, panes = { 7951 } } } })
+  with_plugin_command(acknowledging_answer, function()
+    poll_focused({ window_id = window, active_pane_id = 7951,
+      tabs = { { tab_id = holding, panes = { 7951 } } } })
+  end)
   assert(acknowledgement_exists(7951), "the next tick that can read it acknowledges it")
 end)
 -- Deleting a pane's files needs proof the domain is still attached, because
@@ -5875,32 +5430,27 @@ end)
 -- it says only that the domain was there once. Keeping the two apart is the
 -- whole point -- remembering must prevent a premature deletion without ever
 -- authorising one.
-test("a remembered domain preserves records but cannot authorise deleting them", function()
-  write_marker(7601, "stop")
-  write_marker(7602, "notify")
-  local sidecar = assert(io.open(test_dir .. "/7602.agents", "w"))
-  assert(sidecar:write('{"agents":{}}'))
-  assert(sidecar:close())
+test("a remembered domain keeps what a pane showed but cannot retire it", function()
+  write_activity(7601, "stop")
+  write_activity(7602, "notify")
 
   local window, racing, sibling = 7600, 61, 62
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { { tab_id = racing, panes = { 7601 } }, { tab_id = sibling, panes = { 7602 } } } }))
-  assert(marker_exists(7602) and subagents_exists(7602), "both panes start observed")
+  assert(attention.get_attention(7602) == "notify", "both panes start observed")
 
   -- One tab will not answer; the other answers and holds nothing. No pane is
   -- counted on the domain, so nothing establishes that it is still attached.
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { { tab_id = racing, gone = true }, { tab_id = sibling, panes = {} } } }))
-  assert(marker_exists(7602),
-    "no pane was counted on the domain, so nothing may be deleted for absence")
-  assert(subagents_exists(7602), "the sidecars go with the marker and must survive with it")
+  assert(attention.get_attention(7602) == "notify",
+    "no pane was counted on the domain, so nothing may be retired for absence")
 
   -- Every listed tab answers, and the domain is observed. Now the absent pane is
-  -- swept as it always was -- remembering did not freeze it, it deferred it.
+  -- retired -- remembering did not freeze it, it deferred it.
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { { tab_id = sibling, panes = { 7601 } } } }))
-  assert(not marker_exists(7602), "an observed domain in a readable window authorises the sweep")
-  assert(not subagents_exists(7602), "the sidecars go with the marker")
+  assert(attention.get_attention(7602) == nil, "an observed domain in a readable window retires it")
 end)
 
 -- Acknowledging records that the user was shown a publication, so it needs a
@@ -5910,29 +5460,33 @@ end)
 -- poll leaves exactly the dangerous state: the marker is cached and eligible,
 -- and no acknowledgement has been written yet.
 test("a carried pane is not evidence the user saw it", function()
-  write_marker(7851, "notify")
+  write_activity(7851, "notify")
 
   local window, holding = 7850, 85
   local readable = { { tab_id = holding, panes = { 7851 } } }
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = readable, active_pane_id = 7851 }))
   assert(attention.get_attention(7851) == "notify", "the notification is cached and eligible")
-  assert(not acknowledgement_exists(7851), "an unfocused poll acknowledges nothing")
 
-  poll_focused({ window_id = window, active_pane_id = 7851,
-    tabs = { { tab_id = holding, gone = true } } })
-  assert(not acknowledgement_exists(7851),
+  local spawned = with_plugin_command(acknowledging_answer, function()
+    poll_focused({ window_id = window, active_pane_id = 7851,
+      tabs = { { tab_id = holding, gone = true } } })
+  end)
+  assert(#spawned == 0,
     "a pane carried across a tab that would not answer was not shown to anyone")
 
-  poll_focused({ window_id = window, active_pane_id = 7851, tabs = readable })
+  with_plugin_command(acknowledging_answer, function()
+    poll_focused({ window_id = window, active_pane_id = 7851, tabs = readable })
+  end)
   assert(acknowledgement_exists(7851),
     "a tick that can see the pane acknowledges it, so this is not simply disabled")
 end)
 
--- Deciding to acknowledge and acknowledging are two separate reads of the same
--- record. Anything published in between is something the user has not seen, and
--- dismissing it would retire a notification that was never shown. The v1 path
--- has always compared identities across that gap; this pins the same for v2.
+-- The poll reads the activity it shows, and the acknowledgement is written
+-- later, by the attention command. Anything published in between is something
+-- the user has not seen, and dismissing it would retire a notification that
+-- was never shown: the command is told the event the poll read, and refuses
+-- one that has moved on.
 test("an event published between the two reads is not the one dismissed", function()
   local wire = materialize_v2_fixture(73)
   local samples = protocol_fixture.record_samples
@@ -5945,18 +5499,23 @@ test("an event published between the two reads is not the one dismissed", functi
   local ack_before = assert(read_path(ack_path))
   local pane_spec = { id = 9073, domain = "unix", attention = wire }
   local republished = false
-  attention.poll(window_double({
-    tabs = { { pane_spec } }, focused = true, active_pane_id = pane_spec,
-    -- is_focused() is asked after the inventory is built and before the
-    -- acknowledgement, which is exactly the gap a producer can publish into.
-    on_focus_check = function()
-      if republished then return end
-      republished = true
-      local activity = decode_json(assert(read_path(activity_path)))
-      activity.event_id = "00000000-0000-4000-8000-000000000073"
-      write_json_path(activity_path, activity)
-    end,
-  }), { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+  local spawned = with_plugin_command(acknowledging_answer, function()
+    attention.poll(window_double({
+      tabs = { { pane_spec } }, focused = true, active_pane_id = pane_spec,
+      -- is_focused() is asked after the inventory is built and before the
+      -- acknowledgement, which is exactly the gap a producer can publish into.
+      on_focus_check = function()
+        if republished then return end
+        republished = true
+        local activity = decode_json(assert(read_path(activity_path)))
+        activity.event_id = "00000000-0000-4000-8000-000000000073"
+        write_json_path(activity_path, activity)
+      end,
+    }), { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+  end)
+  assert(#spawned == 1 and plugin_arguments(spawned[1]):find(
+      "--activity-event-id " .. samples.activity.event_id, 1, true),
+    "the command is told the event the poll read")
 
   assert(republished, "the test must have published into the gap")
   assert(read_path(ack_path) == ack_before,
@@ -5974,32 +5533,28 @@ end)
 -- say it is still here -- and a review flag the user set is not rebuilt by the
 -- identity arriving.
 test("an unresolved pane on a domain is not proof an identity there is gone", function()
-  write_marker(8842, "stop")
-  local sidecar = assert(io.open(test_dir .. "/8842.agents", "w"))
-  assert(sidecar:write('{"agents":{}}'))
-  assert(sidecar:close())
+  write_activity(8842, "stop")
 
   local window = 4200
   local anchor_tab = { tab_id = 421, panes = { { id = 900, domain = "local" } } }
   attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { anchor_tab, { tab_id = 422, panes = { { id = 8700, published = 8842, domain = "mux" } } } } }))
-  assert(marker_exists(8842), "the remote pane is observed through its published identity")
+    tabs = { anchor_tab, { tab_id = 422, panes = { { id = 8700, attention = seeded_wire(8842), domain = "mux" } } } } }))
+  assert(attention.get_attention(8842) == "stop", "the remote pane is observed through its published identity")
 
   -- Detached: nothing on that domain is enumerated, so absence cannot be decided.
   attention.poll(window_double({ window_id = window, focused = false, tabs = { anchor_tab } }))
-  assert(marker_exists(8842), "an unobserved domain decides nothing")
+  assert(attention.get_attention(8842) == "stop", "an unobserved domain decides nothing")
 
   -- Reattached, identity not yet published. The domain is back; the question of
   -- which stored identity this pane carries is not yet answerable.
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { anchor_tab, { tab_id = 422, panes = { { id = 8701, domain = "mux" } } } } }))
-  assert(marker_exists(8842), "a pane that has not said who it is cannot say who it is not")
-  assert(subagents_exists(8842), "the sidecars go with the marker")
+  assert(attention.get_attention(8842) == "stop", "a pane that has not said who it is cannot say who it is not")
 
-  -- Every pane on the domain identified, and none of them is 42.
+  -- Every pane on the domain identified, and none of them is 8842.
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { anchor_tab, { tab_id = 422, panes = { { id = 8702, published = 8843, domain = "mux" } } } } }))
-  assert(not marker_exists(8842), "a fully identified domain that excludes it may sweep it")
+  assert(attention.get_attention(8842) == nil, "a fully identified domain that excludes it retires it")
 end)
 
 -- The acknowledgement compares the event the poll saw with the one it is about
@@ -6073,40 +5628,34 @@ end)
 -- has a present domain, no uncertainty, and deletes the very records the
 -- unidentified pane might have turned out to own.
 test("identity uncertainty survives the tab that raised it going quiet", function()
-  write_marker(8844, "stop")
-  local sidecar = assert(io.open(test_dir .. "/8844.agents", "w"))
-  assert(sidecar:write('{"agents":{}}'))
-  assert(sidecar:close())
-  local sidecar_before = assert(read_path(test_dir .. "/8844.agents"))
+  write_activity(8844, "stop")
 
   local window = 4400
   local anchor_tab = { tab_id = 441, panes = { { id = 910, domain = "local" } } }
   local sibling = { tab_id = 443, panes = { { id = 703, published = 8845, domain = "mux" } } }
   attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { anchor_tab, { tab_id = 442, panes = { { id = 8704, published = 8844, domain = "mux" } } } } }))
-  assert(marker_exists(8844), "observed through its published identity")
+    tabs = { anchor_tab, { tab_id = 442, panes = { { id = 8704, attention = seeded_wire(8844), domain = "mux" } } } } }))
+  assert(attention.get_attention(8844) == "stop", "observed through its published identity")
 
   attention.poll(window_double({ window_id = window, focused = false, tabs = { anchor_tab } }))
-  assert(marker_exists(8844), "an unobserved domain decides nothing")
+  assert(attention.get_attention(8844) == "stop", "an unobserved domain decides nothing")
 
   -- Reattached: one tab holds a pane that has not said who it is, another holds
   -- an identified pane on the same domain.
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { anchor_tab, { tab_id = 442, panes = { { id = 8705, domain = "mux" } } }, sibling } }))
-  assert(marker_exists(8844), "an unresolved pane blocks the conclusion while it is enumerated")
+  assert(attention.get_attention(8844) == "stop", "an unresolved pane blocks the conclusion while it is enumerated")
 
   -- The tab holding it stops answering. The sibling still answers, so the domain
-  -- is present -- but nothing has become any more certain about identity 44.
+  -- is present -- but nothing has become any more certain about identity 8844.
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { anchor_tab, { tab_id = 442, gone = true }, sibling } }))
-  assert(marker_exists(8844), "a tab going quiet cannot resolve what it had not resolved")
-  assert(read_path(test_dir .. "/8844.agents") == sidecar_before,
-    "the sidecars are removed with the marker, so they prove preservation too")
+  assert(attention.get_attention(8844) == "stop", "a tab going quiet cannot resolve what it had not resolved")
 
-  -- Every pane on the domain identified, none of them 44.
+  -- Every pane on the domain identified, none of them 8844.
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { anchor_tab, sibling } }))
-  assert(not marker_exists(8844), "a fully identified domain that excludes it may sweep it")
+  assert(attention.get_attention(8844) == nil, "a fully identified domain that excludes it retires it")
 end)
 
 -- Two windows share one display cache. If the acknowledgement takes its expected
@@ -6115,24 +5664,28 @@ end)
 -- read and its decision -- and the comparison then finds the cache and the disk
 -- agreeing about an event this poll never saw.
 test("another window's poll cannot decide what this one acknowledges", function()
-  write_marker(46, "notify", "publication-one")
+  local seen = write_activity(46, "notify")
 
   local watcher = window_double({ window_id = 4602, focused = false,
     tabs = { { tab_id = 461, panes = { 46 } } } })
   local raced = false
-  poll_focused({ window_id = 4601, active_pane_id = 46,
-    tabs = { { tab_id = 461, panes = { 46 } } },
-    on_focus_check = function()
-      if raced then return end
-      raced = true
-      -- A newer publication, and another window reads it into the shared cache
-      -- without acknowledging it.
-      write_marker(46, "notify", "publication-two")
-      attention.poll(watcher)
-    end,
-  })
+  local spawned = with_plugin_command(acknowledging_answer, function()
+    poll_focused({ window_id = 4601, active_pane_id = 46,
+      tabs = { { tab_id = 461, panes = { 46 } } },
+      on_focus_check = function()
+        if raced then return end
+        raced = true
+        -- A newer publication, and another window reads it into the shared cache
+        -- without acknowledging it.
+        write_activity(46, "notify")
+        attention.poll(watcher)
+      end,
+    })
+  end)
 
   assert(raced, "the test must have raced the focus query")
+  assert(#spawned == 1 and plugin_arguments(spawned[1]):find("--activity-event-id " .. seen, 1, true),
+    "the command is told the publication this poll read, not the one in the shared cache")
   assert(not acknowledgement_exists(46),
     "this poll read publication one, so it has no standing to dismiss publication two")
 end)
@@ -6144,55 +5697,55 @@ end)
 -- "enumerated with an unidentified pane" to "could not be read at all", would
 -- turn a refusal to delete into permission.
 test("a tab nobody has ever read bounds nothing, so it settles nothing", function()
-  write_marker(48, "stop")
+  write_activity(48, "stop")
 
   local window = 4800
   local anchor_tab = { tab_id = 481, panes = { { id = 920, domain = "local" } } }
   local sibling = { tab_id = 483, panes = { { id = 706, published = 49, domain = "mux" } } }
   attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { anchor_tab, { tab_id = 482, panes = { { id = 707, published = 48, domain = "mux" } } } } }))
-  assert(marker_exists(48), "observed through its published identity")
+    tabs = { anchor_tab, { tab_id = 482, panes = { { id = 707, attention = seeded_wire(48), domain = "mux" } } } } }))
+  assert(attention.get_attention(48) == "stop", "observed through its published identity")
 
   attention.poll(window_double({ window_id = window, focused = false, tabs = { anchor_tab } }))
-  assert(marker_exists(48), "an unobserved domain decides nothing")
+  assert(attention.get_attention(48) == "stop", "an unobserved domain decides nothing")
 
   -- A tab id this window has never read successfully, failing on its first read,
   -- alongside an identified sibling on the domain.
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { anchor_tab, { tab_id = 484, gone = true }, sibling } }))
-  assert(marker_exists(48),
+  assert(attention.get_attention(48) == "stop",
     "an unread tab could be holding it, and nothing says otherwise")
 
   -- Still unread on the next tick: the answer does not drift with repetition.
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { anchor_tab, { tab_id = 484, gone = true }, sibling } }))
-  assert(marker_exists(48), "repeating an unanswered question does not answer it")
+  assert(attention.get_attention(48) == "stop", "repeating an unanswered question does not answer it")
 
   -- Every listed tab read, none of them holding it.
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { anchor_tab, sibling } }))
-  assert(not marker_exists(48), "a fully read window that excludes it may sweep it")
+  assert(attention.get_attention(48) == nil, "a fully read window that excludes it retires it")
 end)
 
--- A pane that upgrades from a v1 marker id to a full v2 address is the same
--- physical pane under a new storage key. Its files belong to it and must stay.
--- The old key is not thereby still current, though: leaving it in the cache
--- leaves a reading that nothing will ever sweep, because it is no longer in the
--- inventory that the sweep compares against.
-test("a pane that changes storage key keeps its files and gives up the old key", function()
-  write_marker(50, "stop")
+-- A pane that starts publishing another address is the same physical pane
+-- under a new storage key. Its records belong to it and stay. The old key is
+-- not thereby still current, though: leaving it in the cache leaves a reading
+-- nothing will ever retire, because it is no longer in the inventory the
+-- absence check compares against.
+test("a pane that changes storage key keeps its records and gives up the old key", function()
+  write_activity(50, "stop")
 
   local window = 5000
   attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { { tab_id = 501, panes = { { id = 50, domain = "unix", published = 50 } } } } }))
-  assert(attention.get_attention(50) == "stop", "the v1 identity is cached under its scalar key")
+    tabs = { { tab_id = 501, panes = { { id = 50, domain = "unix", attention = seeded_wire(50) } } } } }))
+  assert(attention.get_attention(50) == "stop", "the first identity is cached")
 
-  -- The same GUI pane, now publishing a full address.
+  -- The same GUI pane, now publishing another address.
   local wire = materialize_v2_fixture(5051)
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { { tab_id = 501, panes = { { id = 50, domain = "unix", attention = wire } } } } }),
     { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
-  assert(marker_exists(50), "the pane is alive, so its files stay")
+  assert(activity_exists(50), "the pane is alive, so its records stay")
   assert(attention.get_attention(50) == nil,
     "the old key is not what this pane goes by any more")
 end)
@@ -6205,8 +5758,8 @@ end)
 -- the two any more and its files are deleted while the pane is still running.
 -- The two histories below differ only in whether an unrelated tab answers.
 test("a proven replacement survives uncertainty about something else", function()
-  local function upgrade_then_reconnect(pane_id, unrelated_answers)
-    write_marker(pane_id, "stop")
+  local function upgrade_under(pane_id, unrelated_answers)
+    write_activity(pane_id, "stop")
     local window = 5200 + pane_id
     local anchor_tab = { tab_id = 521, panes = { { id = 930, domain = "local" } } }
     local unrelated = unrelated_answers
@@ -6216,82 +5769,23 @@ test("a proven replacement survives uncertainty about something else", function(
       call_after = function() end }
 
     attention.poll(window_double({ window_id = window, focused = false,
-      tabs = { anchor_tab, { tab_id = 523, panes = { { id = pane_id, domain = "unix", published = pane_id } } } } }),
-      options)
-    assert(marker_exists(pane_id), "the pane starts under its scalar key")
+      tabs = { anchor_tab, { tab_id = 523, panes = { { id = pane_id, domain = "unix",
+        attention = seeded_wire(pane_id) } } } } }), options)
+    assert(attention.get_attention(pane_id) == "stop", "the pane starts under its first key")
 
-    -- The same GUI pane publishes a full address, while the unrelated tab either
-    -- answers or does not.
+    -- The same GUI pane publishes another address, while the unrelated tab
+    -- either answers or does not.
     local wire = materialize_v2_fixture(pane_id + 400)
     attention.poll(window_double({ window_id = window, focused = false,
       tabs = { anchor_tab, unrelated,
         { tab_id = 523, panes = { { id = pane_id, domain = "unix", attention = wire } } } } }),
       options)
-    assert(marker_exists(pane_id), "the pane is alive, so its files stay")
-
-    -- Reconnected: same pane, new GUI-local id, everything readable.
-    attention.poll(window_double({ window_id = window, focused = false,
-      tabs = { anchor_tab,
-        { tab_id = 523, panes = { { id = pane_id + 1, domain = "unix", attention = wire } } } } }),
-      options)
-    return marker_exists(pane_id)
+    return attention.get_attention(pane_id) == nil
   end
 
-  assert(upgrade_then_reconnect(52, true), "files survive when the unrelated tab answers")
-  assert(upgrade_then_reconnect(54, false),
-    "and must survive equally when it does not: the replacement was observed either way")
-end)
-
--- A live pane still occupies that scalar pane id, even after the v1 key
--- retires. The mux walk is what knows it exists, so the files named by that
--- id stay until no pane carries it. Attention no longer projects those names
--- for v2 panes; leaving the files is the walk being conservative about a
--- third-party v1 marker, not a v2 writer still owning them.
-test("a key retiring does not make the files it named unowned", function()
-  local shared_id = 56
-  write_marker(shared_id, "stop")
-  for _, suffix in ipairs({ ".agents", ".review" }) do
-    local file = assert(io.open(test_dir .. "/" .. shared_id .. suffix, "w"))
-    assert(file:write('{}'))
-    assert(file:close())
-  end
-  local before = {}
-  for _, name in ipairs({ "", ".agents", ".review" }) do
-    before[name] = assert(read_path(test_dir .. "/" .. shared_id .. name))
-  end
-
-  local window, options = 5600, { now_unix_ns = protocol_fixture.state_case.now_unix_ns,
-    call_after = function() end }
-  local anchor_tab = { tab_id = 561, panes = { { id = 940, domain = "local" } } }
-
-  attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { anchor_tab,
-      { tab_id = 562, panes = { { id = 800, published = shared_id, domain = "mux" } } } } }),
-    options)
-  assert(marker_exists(shared_id), "observed as a v1 identity")
-
-  -- The upgrade happens unobserved: this window sees nothing on that domain.
-  attention.poll(window_double({ window_id = window, focused = false, tabs = { anchor_tab } }),
-    options)
-
-  -- Reconnected. The same server pane, a new GUI-local id, now carrying a full
-  -- address whose pane id is the one those flat files are named by.
-  local wire = materialize_v2_fixture(shared_id)
-  attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { anchor_tab,
-      { tab_id = 562, panes = { { id = 801, domain = "mux", attention = wire } } } } }),
-    options)
-
-  for _, name in ipairs({ "", ".agents", ".review" }) do
-    assert(read_path(test_dir .. "/" .. shared_id .. name) == before[name],
-      "a pane observed right now still occupies " .. shared_id .. name)
-  end
-
-  -- The progress half: the stale v1 reading is gone. The scalar id still answers,
-  -- because it is the live pane's id now -- with that pane's state rather than
-  -- the "stop" the retired entry was holding.
-  assert(attention.get_attention(shared_id) == "notify",
-    "the id resolves to the pane that owns it now, not to the entry that retired")
+  assert(upgrade_under(52, true), "the old key retires when the unrelated tab answers")
+  assert(upgrade_under(54, false),
+    "and equally when it does not: the replacement was observed either way")
 end)
 
 -- A pane being alive says nothing about which name it answers to now. Only a
@@ -6299,21 +5793,20 @@ end)
 -- who it is leaves the question open, because retiring the key on liveness alone
 -- would drop a reading that is still the right one.
 test("a live pane that has not identified itself retires no name", function()
-  write_marker(58, "stop")
+  write_activity(58, "stop")
   local window = 5800
   local anchor_tab = { tab_id = 581, panes = { { id = 950, domain = "local" } } }
 
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { anchor_tab,
-      { tab_id = 582, panes = { { id = 810, published = 58, domain = "mux" } } } } }))
+      { tab_id = 582, panes = { { id = 810, attention = seeded_wire(58), domain = "mux" } } } } }))
   assert(attention.get_attention(58) == "stop", "observed under its published name")
 
   -- Same GUI pane, still listed, no longer saying who it is.
   attention.poll(window_double({ window_id = window, focused = false,
     tabs = { anchor_tab, { tab_id = 582, panes = { { id = 810, domain = "mux" } } } } }))
-  assert(marker_exists(58), "an unidentified pane cannot disown a name")
   assert(attention.get_attention(58) == "stop",
-    "and the reading stands until something says otherwise")
+    "an unidentified pane cannot disown a name, and the reading stands")
 end)
 
 -- An identity that could not be read leaves the domain's publication status
@@ -6381,42 +5874,6 @@ test("a domain nobody could see this tick keeps its retry", function()
   wezterm.background_child_process = original_background
 end)
 
--- The mux walk, not this window's inventory, is what knows whether any pane
--- still occupies a v1 marker id. Another window may already hold the pane,
--- and looking only for this window's exact key misses it.
-test("another window's pane keeps the files this window is retiring", function()
-  local shared_id = 8862
-  write_marker(shared_id, "stop")
-  local sidecar = assert(io.open(test_dir .. "/" .. shared_id .. ".agents", "w"))
-  assert(sidecar:write('{}'))
-  assert(sidecar:close())
-  local before = assert(read_path(test_dir .. "/" .. shared_id))
-  local options = { now_unix_ns = protocol_fixture.state_case.now_unix_ns,
-    call_after = function() end }
-
-  -- Window A knows it as a v1 identity.
-  attention.poll(window_double({ window_id = 8860, focused = false,
-    tabs = { { tab_id = 881, panes = { { id = 8820, published = shared_id, domain = "mux" } } },
-             { tab_id = 882, panes = { { id = 8821, published = 8863, domain = "mux" } } } } }),
-    options)
-  assert(marker_exists(shared_id), "observed by window A")
-
-  -- It moves to window B and is read there under a full address carrying the
-  -- same pane id, which is what names those flat files.
-  local wire = materialize_v2_fixture(shared_id)
-  attention.poll(window_double({ window_id = 8861, focused = false,
-    tabs = { { tab_id = 883, panes = { { id = 8820, domain = "mux", attention = wire } } } } }),
-    options)
-
-  -- Window A polls again without it, its sibling still identified on the domain.
-  attention.poll(window_double({ window_id = 8860, focused = false,
-    tabs = { { tab_id = 882, panes = { { id = 8821, published = 8863, domain = "mux" } } } } }),
-    options)
-  assert(read_path(test_dir .. "/" .. shared_id) == before,
-    "another window holds a pane that occupies this id")
-  assert(subagents_exists(shared_id), "and its sidecars go with it")
-end)
-
 -- decide_absence refuses for a pane that is alive but identified nowhere, and
 -- this is the case that reaches it. A handle answers with its id while its mux
 -- resolution fails, so its domain reads as unknown and lands in a bucket of its
@@ -6424,120 +5881,22 @@ end)
 -- resolved, with every earlier refusal bypassed.
 test("a pane that answers only with its id decides nothing about its old name", function()
   local target = 8870
-  write_marker(target, "stop")
+  write_activity(target, "stop")
 
   attention.poll(window_double({ window_id = 8871, focused = false,
-    tabs = { { tab_id = 887, panes = { { id = 8872, published = target, domain = "mux" } },  },
+    tabs = { { tab_id = 887, panes = { { id = 8872, attention = seeded_wire(target), domain = "mux" } },  },
              { tab_id = 888, panes = { { id = 8873, published = 8874, domain = "mux" } } } } }))
-  assert(marker_exists(target), "observed under its published name")
+  assert(attention.get_attention(target) == "stop", "observed under its published name")
 
   -- Same handle, now resolving to nothing, beside an identified sibling on the
-  -- domain the old entry was recorded on.
+  -- domain the old entry was recorded on. Deciding nothing keeps the reading;
+  -- calling it replaced would retire it on the word of a pane that never said
+  -- which name replaced it.
   attention.poll(window_double({ window_id = 8871, focused = false,
     tabs = { { tab_id = 887, panes = { { id = 8872, unresolvable = true } } },
              { tab_id = 888, panes = { { id = 8873, published = 8874, domain = "mux" } } } } }))
-  assert(marker_exists(target),
-    "a pane that cannot say where it is cannot say the old name is unused")
-  -- The files survive whether this decides nothing or decides the name was
-  -- replaced, so they do not tell the two apart. The reading does: deciding
-  -- nothing keeps it, and calling it replaced would retire it on the word of a
-  -- pane that never said which name replaced it.
   assert(attention.get_attention(target) == "stop",
     "and the reading stands, because nothing has taken the name over")
-  drain_errors()
-end)
-
--- Moving a pane from one window into another is a supported thing to do. Every
--- source of ownership the sweep had was a saved observation -- what some window
--- saw when it last polled -- so if the source window polls first, the
--- destination has not recorded the pane yet and nothing says it exists. The
--- files would then survive or not depending on whose status callback ran first,
--- which is not a property of the pane.
-test("a pane moving between windows keeps its files whichever window polls first", function()
-  local function move_then_poll(pane_id, source_first)
-    write_marker(pane_id, "stop")
-    local flag = assert(io.open(test_dir .. "/" .. pane_id .. ".review", "w"))
-    assert(flag:write('{}'))
-    assert(flag:close())
-    local source, destination = 9100 + pane_id, 9200 + pane_id
-
-    -- Both windows exist and have been seen before the move.
-    attention.poll(window_double({ window_id = source, focused = false,
-      tabs = { { tab_id = 911, panes = { { id = pane_id, published = pane_id, domain = "mux" },
-                                          { id = 9301, published = 9301, domain = "mux" } } } } }))
-    attention.poll(window_double({ window_id = destination, focused = false,
-      tabs = { { tab_id = 912, panes = { { id = 9302, published = 9302, domain = "mux" } } } } }))
-    assert(marker_exists(pane_id), "observed in the source window")
-
-    -- The pane is now in the destination. Both windows will report that; the
-    -- question is only which of them says so first.
-    local after_source = window_double({ window_id = source, focused = false,
-      tabs = { { tab_id = 911, panes = { { id = 9301, published = 9301, domain = "mux" } } } } })
-    local after_destination = window_double({ window_id = destination, focused = false,
-      tabs = { { tab_id = 912, panes = { { id = 9302, published = 9302, domain = "mux" },
-                                          { id = pane_id, published = pane_id, domain = "mux" } } } } })
-    if source_first then
-      attention.poll(after_source); attention.poll(after_destination)
-    else
-      attention.poll(after_destination); attention.poll(after_source)
-    end
-    return marker_exists(pane_id) and path_exists(test_dir .. "/" .. pane_id .. ".review")
-  end
-
-  assert(move_then_poll(9401, false), "destination first: the pane is recorded before the sweep")
-  assert(move_then_poll(9402, true),
-    "source first: the pane is in no record yet, and the mux is what knows it exists")
-end)
-
--- The complement: with the pane genuinely gone from every window, the same walk
--- says so and the files are collected. Refusing to delete anything would pass
--- the test above on its own.
-test("a pane in no window at all still has its files collected", function()
-  local pane_id = 9403
-  write_marker(pane_id, "stop")
-  local window = 9500
-  attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { { tab_id = 951, panes = { { id = pane_id, published = pane_id, domain = "mux" },
-                                        { id = 9501, published = 9501, domain = "mux" } } } } }))
-  assert(marker_exists(pane_id), "observed first")
-
-  attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { { tab_id = 951, panes = { { id = 9501, published = 9501, domain = "mux" } } } } }))
-  assert(not marker_exists(pane_id), "nothing anywhere holds it, so it is collected")
-end)
-
--- Asking the mux who holds a name only answers when the asking finishes. A pane
--- that will not say who it is could be the one holding it, so the search has not
--- excluded anything -- and a search that could not exclude anything is not a
--- reason to delete. The files and the obligation both stay, for a tick that can
--- finish.
-test("a search that could not finish is not a search that found nothing", function()
-  local pane_id = 9601
-  write_marker(pane_id, "stop")
-  local window = 9600
-
-  attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { { tab_id = 961, panes = { { id = pane_id, published = pane_id, domain = "mux" },
-                                        { id = 9602, published = 9602, domain = "mux" } } } } }))
-  assert(marker_exists(pane_id), "observed first")
-
-  -- Another window exists holding a pane that cannot be identified. It is not
-  -- polled; it only has to be there for the ownership walk to reach it.
-  window_double({ window_id = 9610, focused = false,
-    tabs = { { tab_id = 962, panes = { { id = 9603, unresolvable = true } } } } })
-
-  attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { { tab_id = 961, panes = { { id = 9602, published = 9602, domain = "mux" } } } } }))
-  assert(marker_exists(pane_id),
-    "one pane that would not answer leaves the question open everywhere")
-
-  -- That pane now says who it is, and it is not the one in question. The search
-  -- finishes, excludes the name, and the files are collected.
-  window_double({ window_id = 9610, focused = false,
-    tabs = { { tab_id = 962, panes = { { id = 9603, published = 9603, domain = "mux" } } } } })
-  attention.poll(window_double({ window_id = window, focused = false,
-    tabs = { { tab_id = 961, panes = { { id = 9602, published = 9602, domain = "mux" } } } } }))
-  assert(not marker_exists(pane_id), "a finished search that excludes it does authorise it")
   drain_errors()
 end)
 

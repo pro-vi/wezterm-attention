@@ -1,4 +1,4 @@
-use std::io::{IsTerminal, Read, Write};
+use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
@@ -6,9 +6,10 @@ use serde::Serialize;
 
 use wezterm_attention::protocol::{AttentionError, Diagnostic, Disposition};
 use wezterm_attention::query::read_bindings_timed;
+use wezterm_attention::records::read_bounded;
 use wezterm_attention::wezterm::{
-    Clock, SystemClock, SystemProcessInspector, SystemProcessProbe, SystemTtyWriter,
-    WeztermPaneLister, default_ports,
+    Clock, RuntimePorts, SystemClock, SystemProcessInspector, SystemProcessProbe, SystemTtyWriter,
+    WeztermPaneLister,
 };
 
 #[derive(Debug, Parser)]
@@ -25,8 +26,6 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    #[command(hide = true)]
-    Claim,
     /// Callback entrypoints.
     Hooks {
         #[command(subcommand)]
@@ -39,6 +38,12 @@ enum Command {
     /// Describe a GUI socket for the tab publisher without querying or changing it.
     #[command(hide = true)]
     TabSource(TabSourceArgs),
+    /// The WezTerm plugin's own writes to one pane's records.
+    #[command(hide = true)]
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommand,
+    },
     /// Read one exact canonical scope from JSON stdin without changing state.
     Inspect(InspectArgs),
     /// Set current activity or a source-owned review.
@@ -142,12 +147,10 @@ struct PublishArgs {
     /// Existing socket path.
     #[arg(long)]
     socket: Option<String>,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "quiet")]
     json: bool,
     #[arg(long)]
     quiet: bool,
-    #[arg(long)]
-    all_details: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -192,6 +195,35 @@ fn bindings_help() -> String {
     )
 }
 
+/// A `--realm` value: a realm id, never a socket path.
+fn realm_id(value: &str) -> Result<String, String> {
+    if wezterm_attention::protocol::hex64_text(value) {
+        Ok(value.to_owned())
+    } else {
+        Err("--realm must be 64 lowercase hex characters".to_owned())
+    }
+}
+
+/// A `--provider` value: one the manifest declares.
+fn supported_provider(value: &str) -> Result<String, String> {
+    let providers = &wezterm_attention::protocol::manifest()
+        .map_err(|error| error.to_string())?
+        .enums
+        .providers;
+    if providers.contains(value) {
+        Ok(value.to_owned())
+    } else {
+        Err(format!(
+            "--provider is not supported; expected one of: {}",
+            providers
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    }
+}
+
 fn parse_binding_fields(value: &str) -> Result<Vec<String>, AttentionError> {
     let mut fields = Vec::new();
     for name in value
@@ -219,17 +251,17 @@ struct BindingsArgs {
     #[arg(long)]
     json: bool,
     /// Filter by a 64-character lowercase hex realm ID, not a socket path.
-    #[arg(long)]
+    #[arg(long, value_parser = realm_id)]
     realm: Option<String>,
     /// Restrict discovery to this existing socket's exact incarnation.
     #[arg(long, conflicts_with = "realm")]
     socket: Option<String>,
     /// Filter by a supported provider; see hooks event --help.
-    #[arg(long)]
+    #[arg(long, value_parser = supported_provider)]
     provider: Option<String>,
     /// Maximum returned rows, 1..=1000; truncation sets complete=false.
-    #[arg(long, default_value_t = 100)]
-    limit: usize,
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
+    limit: u16,
     /// Return every matching row instead of limiting output.
     #[arg(long)]
     all: bool,
@@ -246,6 +278,62 @@ struct TabsArgs {
     /// Return the JSON envelope (also the default).
     #[arg(long)]
     json: bool,
+}
+
+/// The plugin is not a process in the pane, so every write names the pane by
+/// its address and the launch it published.
+#[derive(Debug, Subcommand)]
+enum PluginCommand {
+    /// Set the user's review flag.
+    SetReview(PluginPaneArgs),
+    /// Withdraw the user's review flag; other owners' reviews stay.
+    ClearReview(PluginPaneArgs),
+    /// Acknowledge the activity the user saw, if it is still the one shown.
+    Acknowledge(AcknowledgeArgs),
+}
+
+#[derive(Clone, Debug, Args)]
+struct PluginPaneArgs {
+    #[arg(long)]
+    realm_id: String,
+    #[arg(long)]
+    incarnation_id: String,
+    #[arg(long)]
+    pane_id: String,
+    #[arg(long)]
+    launch_id: String,
+}
+
+#[derive(Clone, Debug, Args)]
+struct AcknowledgeArgs {
+    #[command(flatten)]
+    pane: PluginPaneArgs,
+    #[arg(long)]
+    activity_event_id: String,
+}
+
+impl PluginCommand {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::SetReview(_) => "plugin set-review",
+            Self::ClearReview(_) => "plugin clear-review",
+            Self::Acknowledge(_) => "plugin acknowledge",
+        }
+    }
+}
+
+impl PluginPaneArgs {
+    fn scope(&self) -> Result<wezterm_attention::query::PaneScope, AttentionError> {
+        wezterm_attention::query::PaneScope::new(
+            wezterm_attention::identity::PaneAddress {
+                realm_id: self.realm_id.clone(),
+                incarnation_id: self.incarnation_id.clone(),
+                pane_id: self.pane_id.clone(),
+            },
+            self.launch_id.clone(),
+            None,
+        )
+    }
 }
 
 #[derive(Clone, Debug, Args)]
@@ -272,14 +360,14 @@ struct MarkArgs {
 
 #[derive(Clone, Debug, Args)]
 #[command(
-    after_help = "Preview is the default and removes nothing. Example: attention sweep --json\nLeftover <pane_id>, <pane_id>.agents, and <pane_id>.ack stems are always listed in projection_collection; --all-details includes the rest when complete is false.\nApply: attention sweep --apply --json\nEach apply without --operation-id gets a fresh one, reported in result.operation_id.\nPass --operation-id only to replay that operation; it must be a canonical lowercase UUID."
+    after_help = "Preview is the default and removes nothing. Example: attention sweep --json\nTab orders to collect are always listed in full; --all-details includes the rest when complete is false.\nApply: attention sweep --apply --json\nEach apply without --operation-id gets a fresh one, reported in result.operation_id.\nPass --operation-id only to replay that operation; it must be a canonical lowercase UUID."
 )]
 struct SweepArgs {
     #[arg(long)]
     realm: Option<String>,
     #[arg(long)]
     apply: bool,
-    #[arg(long)]
+    #[arg(long, requires = "apply")]
     operation_id: Option<String>,
     #[arg(long)]
     json: bool,
@@ -297,11 +385,48 @@ struct Response<T: Serialize> {
     diagnostics: Vec<Diagnostic>,
 }
 
+impl<T: Serialize> Response<T> {
+    fn new(
+        command: &str,
+        status: &str,
+        complete: bool,
+        diagnostics: Vec<Diagnostic>,
+        result: T,
+    ) -> Self {
+        Self {
+            schema: 1,
+            command: command.to_owned(),
+            status: status.to_owned(),
+            complete,
+            result,
+            diagnostics,
+        }
+    }
+}
+
+/// The envelope of a command that failed. An error answers nothing, so it
+/// is never complete, and its result is empty.
+fn error_response(error: &AttentionError, command: &str) -> Response<serde_json::Value> {
+    let status = if error.exit_code == 2 {
+        "usage_error"
+    } else {
+        "unavailable"
+    };
+    Response::new(
+        command,
+        status,
+        false,
+        vec![error.diagnostic.clone()],
+        serde_json::json!({}),
+    )
+}
+
 fn query_json(command: &str) -> bool {
     matches!(
         command,
         "bindings" | "tabs" | "tab-source" | "inspect" | "hooks describe"
-    )
+    ) || command == "plugin"
+        || command.starts_with("plugin ")
 }
 
 /// `value` as one line of JSON that is safe to print to a terminal.
@@ -358,36 +483,13 @@ fn query_exit(complete: bool) -> ExitCode {
     }
 }
 
-/// An error answers nothing, so its envelope is never complete.
 fn emit_error(error: &AttentionError, as_json: bool, command: &str) -> ExitCode {
-    emit_error_with_complete(error, as_json, command, false)
-}
-
-fn emit_error_with_complete(
-    error: &AttentionError,
-    as_json: bool,
-    command: &str,
-    complete: bool,
-) -> ExitCode {
     let mut error = error.clone();
     if error.exit_code == 2 {
         error.diagnostic.help = format!("attention {command} --help");
     }
     if as_json || query_json(command) {
-        let response = Response {
-            schema: 1,
-            command: command.to_owned(),
-            status: if error.exit_code == 2 {
-                "usage_error"
-            } else {
-                "unavailable"
-            }
-            .to_owned(),
-            complete,
-            result: serde_json::json!({}),
-            diagnostics: vec![error.diagnostic.clone()],
-        };
-        print_out(&printable_json(&response));
+        print_out(&printable_json(&error_response(&error, command)));
     } else {
         print_err(&format!(
             "attention: {}: {}",
@@ -413,20 +515,7 @@ fn is_hook_command(command: &str) -> bool {
 
 fn emit_hook_error(error: &AttentionError, debug: bool, strict: bool, command: &str) -> ExitCode {
     if debug {
-        let response = Response {
-            schema: 1,
-            command: command.to_owned(),
-            status: if error.exit_code == 2 {
-                "usage_error"
-            } else {
-                "unavailable"
-            }
-            .to_owned(),
-            complete: false,
-            result: serde_json::json!({}),
-            diagnostics: vec![error.diagnostic.clone()],
-        };
-        print_err(&printable_json(&response));
+        print_err(&printable_json(&error_response(error, command)));
     } else {
         print_err(&format!(
             "attention: {}: {}",
@@ -440,14 +529,44 @@ fn emit_hook_error(error: &AttentionError, debug: bool, strict: bool, command: &
     }
 }
 
-fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, String)> {
+/// The name a command's answer carries, and whether it is printed as JSON:
+/// what an error it returns is answered with too.
+fn invocation(command: &Option<Command>) -> (&'static str, bool) {
+    match command {
+        None | Some(Command::Hooks { command: None }) => ("attention", false),
+        Some(Command::Hooks {
+            command: Some(command),
+        }) => match command {
+            HookCommand::Describe(args) => ("hooks describe", args.json),
+            HookCommand::Claim(args) => ("hooks claim", args.json),
+            HookCommand::Publish(args) => ("hooks publish", args.json),
+            HookCommand::Event(_) => ("hooks event", false),
+        },
+        Some(Command::Bindings(args)) => ("bindings", args.json),
+        Some(Command::Tabs(args)) => ("tabs", args.json),
+        Some(Command::TabSource(_)) => ("tab-source", true),
+        Some(Command::Plugin { command }) => (command.name(), true),
+        Some(Command::Inspect(args)) => ("inspect", args.json),
+        Some(Command::Mark(args)) => ("mark", args.json),
+        Some(Command::Doctor(args)) => ("doctor", args.json),
+        Some(Command::Sweep(args)) => ("sweep", args.json),
+    }
+}
+
+/// Runs the command `cli` names, whose answer carries the name `name`.
+fn run(cli: Cli, name: &'static str) -> Result<ExitCode, AttentionError> {
     let environment = wezterm_attention::environment();
     let clock = SystemClock;
     let tty = SystemTtyWriter;
     let panes = WeztermPaneLister;
     let processes = SystemProcessProbe;
     let inspector = SystemProcessInspector;
-    let ports = default_ports(&clock, &tty, &panes, &inspector);
+    let ports = RuntimePorts {
+        clock: &clock,
+        tty: &tty,
+        panes: &panes,
+        processes: &inspector,
+    };
     match cli.command {
         None => {
             let mut command = Cli::command();
@@ -462,27 +581,12 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             print_out(&hooks.render_help().to_string());
             Ok(ExitCode::SUCCESS)
         }
-        Some(Command::Claim) => Err((
-            Box::new(AttentionError::usage(
-                "obsolete command; use `attention hooks claim`",
-            )),
-            false,
-            "claim".to_owned(),
-        )),
         Some(Command::Hooks {
             command: Some(HookCommand::Describe(args)),
         }) => {
-            let result = wezterm_attention::providers::describe_hooks(&args.provider)
-                .map_err(|error| (Box::new(error), args.json, "hooks describe".into()))?;
+            let result = wezterm_attention::providers::describe_hooks(&args.provider)?;
             emit(
-                &Response {
-                    schema: 1,
-                    command: "hooks describe".into(),
-                    status: "ok".into(),
-                    complete: true,
-                    result,
-                    diagnostics: vec![],
-                },
+                &Response::new(name, "ok", true, vec![], result),
                 args.json,
                 false,
             );
@@ -491,8 +595,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
         Some(Command::Hooks {
             command: Some(HookCommand::Claim(args)),
         }) => {
-            let result = wezterm_attention::claim_launch(&environment, &ports)
-                .map_err(|error| (Box::new(error), args.json, "hooks claim".to_owned()))?;
+            let result = wezterm_attention::claim_launch(&environment, &ports)?;
             let complete = result.publication_diagnostic.is_none();
             let diagnostics = result
                 .publication_diagnostic
@@ -501,14 +604,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 .collect::<Vec<_>>();
             if args.json {
                 emit(
-                    &Response {
-                        schema: 1,
-                        command: "hooks claim".to_owned(),
-                        status: "ok".to_owned(),
-                        complete,
-                        result,
-                        diagnostics,
-                    },
+                    &Response::new(name, "ok", complete, diagnostics, result),
                     true,
                     false,
                 );
@@ -526,21 +622,11 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
         Some(Command::Hooks {
             command: Some(HookCommand::Publish(args)),
         }) => {
-            if args.json && args.quiet {
-                return Err((
-                    Box::new(AttentionError::usage(
-                        "--json and --quiet are mutually exclusive",
-                    )),
-                    true,
-                    "hooks publish".to_owned(),
-                ));
-            }
             let selected_socket = args.socket.as_deref();
             let mut report = match selected_socket {
                 Some(socket) => wezterm_attention::publish_realm(socket, &environment, &ports),
                 None => wezterm_attention::publish_current(&environment, &ports),
-            }
-            .map_err(|error| (Box::new(error), args.json, "hooks publish".to_owned()))?;
+            }?;
             if selected_socket.is_none() {
                 let inherited = environment
                     .get("WEZTERM_ATTENTION_LAUNCH_ID")
@@ -573,11 +659,8 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             } else {
                 "findings"
             };
-            let diagnostics = if args.all_details {
-                report.diagnostics.clone()
-            } else {
-                report.diagnostics.iter().take(50).cloned().collect()
-            };
+            let diagnostics: Vec<Diagnostic> =
+                report.diagnostics.iter().take(50).cloned().collect();
             let complete = diagnostics.len() == report.diagnostics.len();
             let result = serde_json::json!({
                 "attempted": report.attempted,
@@ -588,14 +671,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 "total_detail_count": report.diagnostics.len(),
             });
             emit(
-                &Response {
-                    schema: 1,
-                    command: "hooks publish".to_owned(),
-                    status: status.to_owned(),
-                    complete,
-                    result,
-                    diagnostics,
-                },
+                &Response::new(name, status, complete, diagnostics, result),
                 args.json,
                 args.quiet,
             );
@@ -608,52 +684,45 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
         Some(Command::Hooks {
             command: Some(HookCommand::Event(args)),
         }) => {
-            let command = "hooks event".to_owned();
             let consumer_timeout = match wezterm_attention::consumer::validate_consumers(
                 &args.consumer,
                 args.consumer_timeout_ms,
             ) {
                 Ok(timeout) => timeout,
                 Err(error) => {
-                    return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
+                    return Ok(emit_hook_error(&error, args.debug, args.strict, name));
                 }
             };
             let observation = match clock.monotonic_ns20() {
                 Ok(observation) => observation,
                 Err(error) => {
-                    return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
+                    return Ok(emit_hook_error(&error, args.debug, args.strict, name));
                 }
             };
             let mut stdin = std::io::stdin();
             if stdin.is_terminal() {
                 let error = AttentionError::usage("hooks event requires JSON on stdin");
-                return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
+                return Ok(emit_hook_error(&error, args.debug, args.strict, name));
             }
             let maximum = match wezterm_attention::protocol::manifest() {
                 Ok(manifest) => manifest.limits.max_json_bytes,
                 Err(error) => {
-                    return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
+                    return Ok(emit_hook_error(&error, args.debug, args.strict, name));
                 }
             };
-            let mut bytes = Vec::new();
-            if stdin
-                .by_ref()
-                .take((maximum + 1) as u64)
-                .read_to_end(&mut bytes)
-                .is_err()
-            {
+            let Ok(bytes) = read_bounded(&mut stdin, maximum) else {
                 let error = AttentionError::usage("hooks event could not read stdin");
-                return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
-            }
+                return Ok(emit_hook_error(&error, args.debug, args.strict, name));
+            };
             let payload: serde_json::Value = if bytes.is_empty() || bytes.len() > maximum {
                 let error = AttentionError::usage("hooks event received empty or oversized stdin");
-                return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
+                return Ok(emit_hook_error(&error, args.debug, args.strict, name));
             } else {
                 match serde_json::from_slice(&bytes) {
                     Ok(payload) => payload,
                     Err(_) => {
                         let error = AttentionError::usage("hooks event received invalid JSON");
-                        return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
+                        return Ok(emit_hook_error(&error, args.debug, args.strict, name));
                     }
                 }
             };
@@ -710,14 +779,13 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 };
                 let result = serde_json::json!({"native": outcome.result.as_ref().ok(), "admission": outcome.admission, "persistence": outcome.persistence, "consumers": consumers});
                 // Prompt/reply bodies and child output never enter this diagnostic projection.
-                print_err(&printable_json(&Response {
-                    schema: 1,
-                    command,
-                    status: if failed { "findings" } else { "ok" }.into(),
-                    complete: true,
-                    result,
+                print_err(&printable_json(&Response::new(
+                    name,
+                    if failed { "findings" } else { "ok" },
+                    true,
                     diagnostics,
-                }));
+                    result,
+                )));
                 return Ok(if args.strict && failed {
                     ExitCode::from(1)
                 } else {
@@ -732,7 +800,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             ) {
                 Ok(result) => result,
                 Err(error) => {
-                    return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
+                    return Ok(emit_hook_error(&error, args.debug, args.strict, name));
                 }
             };
             let failed = matches!(
@@ -740,14 +808,13 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 Disposition::Ignored | Disposition::Conflict | Disposition::Partial
             );
             if args.debug {
-                let response = Response {
-                    schema: 1,
-                    command,
-                    status: if failed { "findings" } else { "ok" }.to_owned(),
-                    complete: true,
-                    diagnostics: result.diagnostic.iter().cloned().collect(),
+                let response = Response::new(
+                    name,
+                    if failed { "findings" } else { "ok" },
+                    true,
+                    result.diagnostic.iter().cloned().collect(),
                     result,
-                };
+                );
                 print_err(&printable_json(&response));
             } else if let Some(diagnostic) = &result.diagnostic {
                 print_err(&format!(
@@ -766,61 +833,11 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 .fields
                 .as_deref()
                 .map(parse_binding_fields)
-                .transpose()
-                .map_err(|error| (Box::new(error), args.json, "bindings".to_owned()))?;
+                .transpose()?;
             if let Some(socket) = &args.socket {
-                wezterm_attention::query::validate_socket_selector(socket)
-                    .map_err(|error| (Box::new(error), args.json, "bindings".to_owned()))?;
+                wezterm_attention::query::validate_socket_selector(socket)?;
             }
-            if !(1..=1000).contains(&args.limit) {
-                return Err((
-                    Box::new(AttentionError::usage("--limit must be between 1 and 1000")),
-                    args.json,
-                    "bindings".to_owned(),
-                ));
-            }
-            if args
-                .realm
-                .as_deref()
-                .is_some_and(|realm| !wezterm_attention::protocol::hex64_text(realm))
-            {
-                return Err((
-                    Box::new(AttentionError::usage(
-                        "--realm must be 64 lowercase hex characters",
-                    )),
-                    args.json,
-                    "bindings".to_owned(),
-                ));
-            }
-            if args.provider.as_ref().is_some_and(|provider| {
-                wezterm_attention::protocol::manifest()
-                    .is_ok_and(|manifest| !manifest.enums.providers.contains(provider))
-            }) {
-                return Err((
-                    Box::new(AttentionError::usage(format!(
-                        "--provider is not supported; expected one of: {}",
-                        wezterm_attention::protocol::manifest()
-                            .expect("manifest was validated above")
-                            .enums
-                            .providers
-                            .iter()
-                            .map(String::as_str)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ))),
-                    args.json,
-                    "bindings".to_owned(),
-                ));
-            }
-            let root = match wezterm_attention::records::state_root(&environment) {
-                Ok(root) => root,
-                Err(error) if args.socket.is_some() => {
-                    return Ok(emit_error_with_complete(
-                        &error, args.json, "bindings", false,
-                    ));
-                }
-                Err(error) => return Err((Box::new(error), args.json, "bindings".to_owned())),
-            };
+            let root = wezterm_attention::records::state_root(&environment)?;
             // A socket answer reports an unreadable directory as a diagnostic,
             // and any diagnostic already makes it incomplete.
             let mut walked_every_directory = true;
@@ -834,9 +851,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     ) {
                         Ok(result) => result,
                         Err(error) => {
-                            return Ok(emit_error_with_complete(
-                                &error, args.json, "bindings", false,
-                            ));
+                            return Ok(emit_error(&error, args.json, name));
                         }
                     };
                 // After the answer, not in its filter: a row filtered out
@@ -854,14 +869,13 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     incarnation_id: None,
                     provider: args.provider.clone(),
                 };
-                let answer = read_bindings_timed(&root, &filter, Some(&panes), Some(&processes))
-                    .map_err(|error| (Box::new(error), args.json, "bindings".to_owned()))?;
+                let answer = read_bindings_timed(&root, &filter, Some(&panes), Some(&processes))?;
                 walked_every_directory = answer.walked_every_directory;
                 (None, answer.rows, answer.diagnostics, answer.timing)
             };
             let scanned = rows.len();
             if !args.all {
-                rows.truncate(args.limit);
+                rows.truncate(usize::from(args.limit));
             }
             let returned = rows.len();
             let truncated = returned < scanned;
@@ -904,133 +918,134 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             let complete =
                 !truncated && walked_every_directory && (!socket_mode || diagnostics.is_empty());
             emit(
-                &Response {
-                    schema: 1,
-                    command: "bindings".to_owned(),
-                    status: if diagnostics.is_empty() {
+                &Response::new(
+                    name,
+                    if diagnostics.is_empty() {
                         "ok"
                     } else {
                         "findings"
-                    }
-                    .to_owned(),
+                    },
                     complete,
+                    shown_diagnostics,
                     result,
-                    diagnostics: shown_diagnostics,
-                },
+                ),
                 args.json,
                 false,
             );
             Ok(query_exit(complete))
         }
         Some(Command::TabSource(args)) => {
-            let source = wezterm_attention::query::read_tab_source(&args.socket)
-                .map_err(|error| (Box::new(error), true, "tab-source".to_owned()))?;
+            let source = wezterm_attention::query::read_tab_source(&args.socket)?;
             emit(
-                &Response {
-                    schema: 1,
-                    command: "tab-source".to_owned(),
-                    status: "ok".to_owned(),
-                    complete: true,
-                    result: source,
-                    diagnostics: Vec::new(),
-                },
+                &Response::new(name, "ok", true, Vec::new(), source),
+                true,
+                false,
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Some(Command::Plugin { command }) => {
+            let pane = match &command {
+                PluginCommand::SetReview(pane) | PluginCommand::ClearReview(pane) => pane,
+                PluginCommand::Acknowledge(args) => &args.pane,
+            };
+            let scope = pane.scope()?;
+            let root = wezterm_attention::records::state_root(&environment)?;
+            let result = match &command {
+                PluginCommand::SetReview(_) => wezterm_attention::lifecycle::set_user_review(
+                    &root,
+                    scope.address(),
+                    scope.launch_id(),
+                ),
+                PluginCommand::ClearReview(_) => {
+                    wezterm_attention::lifecycle::clear_user_review(&root, scope.address())
+                }
+                PluginCommand::Acknowledge(args) => {
+                    let activity_event_id = wezterm_attention::identity::canonical_uuid(
+                        Some(&args.activity_event_id),
+                        "--activity-event-id",
+                    )
+                    .map_err(|error| AttentionError::usage(error.diagnostic.message))?;
+                    wezterm_attention::lifecycle::acknowledge_activity(
+                        &root,
+                        scope.address(),
+                        scope.launch_id(),
+                        &activity_event_id,
+                    )
+                }
+            }?;
+            emit(
+                &Response::new(name, "ok", true, Vec::new(), result),
                 true,
                 false,
             );
             Ok(ExitCode::SUCCESS)
         }
         Some(Command::Tabs(args)) => {
-            let root = wezterm_attention::records::state_root(&environment)
-                .map_err(|error| (Box::new(error), args.json, "tabs".to_owned()))?;
+            let root = wezterm_attention::records::state_root(&environment)?;
             let (windows, diagnostics) = wezterm_attention::query::read_checked_tab_publications(
                 &root,
                 &wezterm_attention::wezterm::ExistingWeztermWindowLister,
                 &clock,
-            )
-            .map_err(|error| (Box::new(error), args.json, "tabs".to_owned()))?;
+            )?;
             emit(
-                &Response {
-                    schema: 1,
-                    command: "tabs".to_owned(),
-                    status: if diagnostics.is_empty() {
+                &Response::new(
+                    name,
+                    if diagnostics.is_empty() {
                         "ok"
                     } else {
                         "findings"
-                    }
-                    .to_owned(),
+                    },
                     // A window that could not be read is a window missing from
                     // the answer, so the answer is not the whole tab bar.
-                    complete: diagnostics.is_empty(),
-                    result: serde_json::json!({
+                    diagnostics.is_empty(),
+                    diagnostics.iter().take(50).cloned().collect(),
+                    serde_json::json!({
                         "windows": windows,
                         "diagnostic_count": diagnostics.len().min(50),
                         "total_diagnostic_count": diagnostics.len(),
                     }),
-                    diagnostics: diagnostics.iter().take(50).cloned().collect(),
-                },
+                ),
                 args.json,
                 false,
             );
             Ok(query_exit(diagnostics.is_empty()))
         }
         Some(Command::Inspect(args)) => {
-            let maximum = wezterm_attention::protocol::manifest()
-                .map_err(|e| (Box::new(e), args.json, "inspect".into()))?
+            let maximum = wezterm_attention::protocol::manifest()?
                 .limits
                 .max_json_bytes;
-            let mut bytes = Vec::new();
-            std::io::stdin()
-                .take((maximum + 1) as u64)
-                .read_to_end(&mut bytes)
-                .map_err(|_| {
-                    (
-                        Box::new(AttentionError::usage("inspect could not read scope stdin")),
-                        args.json,
-                        "inspect".into(),
-                    )
-                })?;
+            let bytes = read_bounded(std::io::stdin(), maximum)
+                .map_err(|_| AttentionError::usage("inspect could not read scope stdin"))?;
             if bytes.len() > maximum {
-                return Err((
-                    Box::new(AttentionError::usage("scope exceeds its byte bound")),
-                    args.json,
-                    "inspect".into(),
-                ));
+                return Err(AttentionError::usage("scope exceeds its byte bound"));
             }
             let scope: wezterm_attention::query::PaneScope = serde_json::from_slice(&bytes)
                 .map_err(|error| {
-                    (
-                        Box::new(AttentionError::usage(match error.classify() {
-                            serde_json::error::Category::Eof if bytes.is_empty() =>
-                                "scope stdin is empty; pipe a scope JSON object or use < scope.json".to_owned(),
-                            serde_json::error::Category::Syntax | serde_json::error::Category::Eof =>
-                                format!("scope JSON syntax is invalid at line {}, column {}", error.line(), error.column()),
-                            _ => "scope requires address (realm_id and incarnation_id: 64 lowercase hex; pane_id: canonical decimal string), launch_id (UUID), and optional binding_id (64 lowercase hex); no extra fields".to_owned(),
-                        })),
-                        args.json,
-                        "inspect".into(),
-                    )
+                    AttentionError::usage(match error.classify() {
+                        serde_json::error::Category::Eof if bytes.is_empty() =>
+                            "scope stdin is empty; pipe a scope JSON object or use < scope.json".to_owned(),
+                        serde_json::error::Category::Syntax | serde_json::error::Category::Eof =>
+                            format!("scope JSON syntax is invalid at line {}, column {}", error.line(), error.column()),
+                        _ => "scope requires address (realm_id and incarnation_id: 64 lowercase hex; pane_id: canonical decimal string), launch_id (UUID), and optional binding_id (64 lowercase hex); no extra fields".to_owned(),
+                    })
                 })?;
             let read = wezterm_attention::records::state_root(&environment)
                 .and_then(|root| wezterm_attention::query::read_pane_facts(&root, &scope));
-            let facts = match read {
-                Ok(facts) => facts,
-                Err(mut error) => {
-                    error.exit_code = 1;
-                    return Ok(emit_error_with_complete(
-                        &error, args.json, "inspect", false,
-                    ));
-                }
-            };
+            // The scope was read, so what failed is the answer, not the
+            // command line.
+            let facts = read.map_err(|mut error| {
+                error.exit_code = 1;
+                error
+            })?;
             let complete = facts.complete();
             emit(
-                &Response {
-                    schema: 1,
-                    command: "inspect".into(),
-                    status: if complete { "ok" } else { "findings" }.into(),
+                &Response::new(
+                    name,
+                    if complete { "ok" } else { "findings" },
                     complete,
-                    diagnostics: facts.diagnostics.clone(),
-                    result: facts,
-                },
+                    facts.diagnostics.clone(),
+                    facts,
+                ),
                 args.json,
                 false,
             );
@@ -1041,11 +1056,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             })
         }
         Some(Command::Mark(args)) => {
-            let observation = || {
-                clock
-                    .monotonic_ns20()
-                    .map_err(|error| (Box::new(error), args.json, "mark".to_owned()))
-            };
+            let observation = || clock.monotonic_ns20();
             let result = match args.state.as_str() {
                 "review" => {
                     wezterm_attention::lifecycle::apply_mark_review(&environment, &args.source)
@@ -1057,9 +1068,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 ),
                 _ => {
                     let observation = observation()?;
-                    let written_at = clock
-                        .unix_ns20()
-                        .map_err(|error| (Box::new(error), args.json, "mark".to_owned()))?;
+                    let written_at = clock.unix_ns20()?;
                     wezterm_attention::lifecycle::apply_mark_activity(
                         &environment,
                         &args.state,
@@ -1071,33 +1080,23 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                         &written_at,
                     )
                 }
-            }
-            .map_err(|error| (Box::new(error), args.json, "mark".to_owned()))?;
+            }?;
             emit(
-                &Response {
-                    schema: 1,
-                    command: "mark".to_owned(),
-                    status: "ok".to_owned(),
-                    complete: true,
-                    result,
-                    diagnostics: Vec::new(),
-                },
+                &Response::new(name, "ok", true, Vec::new(), result),
                 args.json,
                 false,
             );
             Ok(ExitCode::SUCCESS)
         }
         Some(Command::Doctor(args)) => {
-            let root = wezterm_attention::records::state_root(&environment)
-                .map_err(|error| (Box::new(error), args.json, "doctor".to_owned()))?;
+            let root = wezterm_attention::records::state_root(&environment)?;
             let (result, diagnostics) = wezterm_attention::maintenance::doctor_with_environment(
                 &root,
                 &environment,
                 Some(&panes),
                 Some(&processes),
                 &inspector,
-            )
-            .map_err(|error| (Box::new(error), args.json, "doctor".to_owned()))?;
+            )?;
             // A probe that did not answer, or a mux that did not list its
             // panes, which its socket probe reports.
             let unavailable = diagnostics
@@ -1130,29 +1129,20 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             // A probe that did not answer leaves part of the report unknown.
             let complete = !unavailable && diagnostics.len() <= 50;
             emit(
-                &Response {
-                    schema: 1,
-                    command: "doctor".to_owned(),
-                    status: status.to_owned(),
+                &Response::new(
+                    name,
+                    status,
                     complete,
+                    diagnostics.iter().take(50).cloned().collect(),
                     result,
-                    diagnostics: diagnostics.iter().take(50).cloned().collect(),
-                },
+                ),
                 args.json,
                 false,
             );
             Ok(query_exit(complete))
         }
         Some(Command::Sweep(args)) => {
-            if args.operation_id.is_some() && !args.apply {
-                return Err((
-                    Box::new(AttentionError::usage("--operation-id requires --apply")),
-                    args.json,
-                    "sweep".to_owned(),
-                ));
-            }
-            let root = wezterm_attention::records::state_root(&environment)
-                .map_err(|error| (Box::new(error), args.json, "sweep".to_owned()))?;
+            let root = wezterm_attention::records::state_root(&environment)?;
             let (mut result, diagnostics) = wezterm_attention::maintenance::sweep(
                 &root,
                 args.realm.as_deref(),
@@ -1161,8 +1151,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 &clock,
                 &panes,
                 Some(&processes),
-            )
-            .map_err(|error| (Box::new(error), args.json, "sweep".to_owned()))?;
+            )?;
             let (shown, total_details) = wezterm_attention::maintenance::limit_sweep_preview(
                 result.details,
                 args.all_details,
@@ -1192,14 +1181,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 && result.details.len() == total_details
                 && shown_diagnostics.len() == diagnostics.len();
             emit(
-                &Response {
-                    schema: 1,
-                    command: "sweep".to_owned(),
-                    status: status.to_owned(),
-                    complete,
-                    result,
-                    diagnostics: shown_diagnostics,
-                },
+                &Response::new(name, status, complete, shown_diagnostics, result),
                 args.json,
                 false,
             );
@@ -1256,9 +1238,10 @@ fn main() -> ExitCode {
             return ExitCode::from(exit_code as u8);
         }
     };
-    match run(cli) {
+    let (command, as_json) = invocation(&cli.command);
+    match run(cli, command) {
         Ok(code) => code,
-        Err((error, as_json, command)) => emit_error(&error, as_json, &command),
+        Err(error) => emit_error(&error, as_json, command),
     }
 }
 

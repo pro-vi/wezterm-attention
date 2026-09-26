@@ -26,7 +26,7 @@ use wezterm_attention::protocol::{
 };
 use wezterm_attention::query::{read_bindings, read_bindings_with_ports};
 use wezterm_attention::records::{
-    RecordIdentity, RecordRead, atomic_replace, launch_path, pane_path, read_record_typed,
+    RecordIdentity, RecordRead, atomic_replace, launch_dir, pane_dir, read_record_typed,
     state_root, with_lock,
 };
 use wezterm_attention::wezterm::{
@@ -637,7 +637,7 @@ fn claim_is_private_durable_and_published() {
         .expect("claim succeeds");
     let (address, _) = pane_address(&environment).expect("pane address");
     let claim =
-        pane_path(&state_root(&environment).expect("state root"), &address).join("claim.json");
+        pane_dir(&state_root(&environment).expect("state root"), &address).join("claim.json");
     let claim_record: Value =
         serde_json::from_slice(&fs::read(&claim).expect("claim record")).expect("claim JSON");
     assert_eq!(result.disposition, "applied");
@@ -736,7 +736,7 @@ fn committed_claim_reports_pending_when_tty_publication_fails() {
     );
     let (address, _) = pane_address(&environment).expect("pane address");
     let claim_path =
-        pane_path(&state_root(&environment).expect("state root"), &address).join("claim.json");
+        pane_dir(&state_root(&environment).expect("state root"), &address).join("claim.json");
     let claim: Value = serde_json::from_slice(&fs::read(claim_path).expect("claim persisted"))
         .expect("claim JSON");
     assert_eq!(claim["launch_id"], result.launch_id);
@@ -751,7 +751,7 @@ fn duplicate_claim_republishes_without_rewrite() {
         .expect("first claim");
     let (address, _) = pane_address(&environment).expect("pane address");
     let claim =
-        pane_path(&state_root(&environment).expect("state root"), &address).join("claim.json");
+        pane_dir(&state_root(&environment).expect("state root"), &address).join("claim.json");
     let before = fs::read(&claim).expect("claim bytes");
     let modified = fs::metadata(&claim)
         .expect("claim metadata")
@@ -816,7 +816,7 @@ fn delayed_older_claim_loses() {
         newer_environment["WEZTERM_ATTENTION_LAUNCH_ID"]
     );
     let (address, _) = pane_address(&newer_environment).expect("pane address");
-    let claim_path = pane_path(
+    let claim_path = pane_dir(
         &state_root(&newer_environment).expect("state root"),
         &address,
     )
@@ -859,7 +859,7 @@ fn socket_rebirth_before_commit_is_rejected_without_a_claim_write() {
         .expect_err("socket rebirth must reject claim");
     assert_eq!(error.diagnostic.code, "incarnation_changed");
     let old_claim =
-        pane_path(&state_root(&environment).expect("state root"), &old_address).join("claim.json");
+        pane_dir(&state_root(&environment).expect("state root"), &old_address).join("claim.json");
     assert!(!old_claim.exists());
 }
 
@@ -1030,7 +1030,7 @@ fn tty_input_guard_records_zero_stdin_bytes_during_a_real_claim() {
     let (address, _) = pane_address(&environment).expect("pane address");
     let claim_record: Value = serde_json::from_slice(
         &fs::read(
-            pane_path(&state_root(&environment).expect("state root"), &address).join("claim.json"),
+            pane_dir(&state_root(&environment).expect("state root"), &address).join("claim.json"),
         )
         .expect("claim record"),
     )
@@ -1224,7 +1224,7 @@ fn bindings_query_returns_all_identity_axes_and_rejects_path_mismatch() {
     let (address, _) = pane_address(&environment).expect("pane address");
     let launch_id = &environment["WEZTERM_ATTENTION_LAUNCH_ID"];
     let binding_id = "c".repeat(64);
-    let launch = launch_path(&root, &address, launch_id);
+    let launch = launch_dir(&root, &address, launch_id);
     let binding_dir = launch.join("bindings").join(&binding_id);
     atomic_replace(
         &binding_dir.join("binding.json"),
@@ -1274,7 +1274,7 @@ fn bindings_query_rejects_foreign_end_pointer_and_claim_records() {
     let (address, _) = pane_address(&environment).expect("pane address");
     let launch_id = &environment["WEZTERM_ATTENTION_LAUNCH_ID"];
     let binding_id = "c".repeat(64);
-    let launch = launch_path(&root, &address, launch_id);
+    let launch = launch_dir(&root, &address, launch_id);
     let binding_dir = launch.join("bindings").join(&binding_id);
     atomic_replace(
         &binding_dir.join("binding.json"),
@@ -1301,7 +1301,7 @@ fn bindings_query_rejects_foreign_end_pointer_and_claim_records() {
         }),
     )
     .expect("write foreign end");
-    let claim_path = pane_path(&root, &address).join("claim.json");
+    let claim_path = pane_dir(&root, &address).join("claim.json");
     let mut claim: Value =
         serde_json::from_slice(&fs::read(&claim_path).expect("claim")).expect("claim JSON");
     claim["address"]["pane_id"] = json!("99");
@@ -1331,7 +1331,7 @@ fn bindings_query_probes_presence_once_per_pane() {
     let root = state_root(&environment).expect("state root");
     let (address, _) = pane_address(&environment).expect("pane address");
     let launch_id = &environment["WEZTERM_ATTENTION_LAUNCH_ID"];
-    let launch = launch_path(&root, &address, launch_id);
+    let launch = launch_dir(&root, &address, launch_id);
     for binding_id in ["c".repeat(64), "d".repeat(64)] {
         atomic_replace(
             &launch
@@ -1362,7 +1362,7 @@ fn missing_incarnation_manifest_fails_presence_closed() {
     let (address, _) = pane_address(&environment).expect("pane address");
     let launch_id = &environment["WEZTERM_ATTENTION_LAUNCH_ID"];
     let binding_id = "c".repeat(64);
-    let launch = launch_path(&root, &address, launch_id);
+    let launch = launch_dir(&root, &address, launch_id);
     atomic_replace(
         &launch
             .join("bindings")
@@ -1527,7 +1527,7 @@ impl PaneLister for UnavailablePanes {
 
 fn claim_file(environment: &BTreeMap<String, String>) -> PathBuf {
     let (address, _) = pane_address(environment).expect("pane address");
-    pane_path(&state_root(environment).expect("state root"), &address).join("claim.json")
+    pane_dir(&state_root(environment).expect("state root"), &address).join("claim.json")
 }
 
 #[test]
@@ -1605,7 +1605,7 @@ fn a_complete_realm_wide_answer_exits_zero_beside_its_diagnostics() {
     let (address, _) = pane_address(&environment).expect("pane address");
     let launch_id = &environment["WEZTERM_ATTENTION_LAUNCH_ID"];
     let binding_id = "c".repeat(64);
-    let launch = launch_path(&root, &address, launch_id);
+    let launch = launch_dir(&root, &address, launch_id);
     atomic_replace(
         &launch
             .join("bindings")
@@ -1773,7 +1773,7 @@ fn a_claim_names_its_owner_with_all_owner_fields_or_none() {
     let scratch = Scratch::new();
     let address: wezterm_attention::identity::PaneAddress =
         serde_json::from_value(shell["address"].clone()).expect("address");
-    let path = pane_path(&scratch.path, &address).join("claim.json");
+    let path = pane_dir(&scratch.path, &address).join("claim.json");
     let mut partial = self_owned.clone();
     partial
         .as_object_mut()
@@ -1950,7 +1950,7 @@ fn a_publication_that_found_no_claim_never_outlasts_a_new_one() {
     // so the claim waits and is published after it.
     let (_scratch, _listener, environment) = setup();
     let (address, _) = pane_address(&environment).expect("address");
-    let pane = pane_path(&state_root(&environment).expect("state root"), &address);
+    let pane = pane_dir(&state_root(&environment).expect("state root"), &address);
     fs::create_dir_all(&pane).expect("pane state");
     let (waited, writes) = claim_during_publication(&environment, |ports| {
         let report = wezterm_attention::publish_current(&environment, ports).expect("publication");
@@ -1988,7 +1988,7 @@ fn a_publication_that_found_no_claim_never_outlasts_a_new_one() {
     .expect("publication");
     let (address, _) = pane_address(&environment).expect("address");
     assert!(
-        !pane_path(&state_root(&environment).expect("state root"), &address).exists(),
+        !pane_dir(&state_root(&environment).expect("state root"), &address).exists(),
         "publishing to an unclaimed pane leaves no state behind"
     );
 }

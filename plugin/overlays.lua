@@ -1,24 +1,23 @@
 return function(context)
   local wezterm = context.wezterm
   local now_ms = context.now_ms
-  local sha256 = context.sha256
-  local parse_v2_record = context.parse_v2_record
-  local record_matches = context.record_matches
-  local identity_diagnostic = context.identity_diagnostic
-  local read_expected_record = context.read_expected_record
-  local read_marker = context.read_marker
-  local subagents_path = context.subagents_path
-
   local reported_errors = {}
-  local publication_counter = 0
   local publication_session = tostring({}):gsub("[^%w]", "")
-  local report_error_once
 
-  local function next_publication_id()
-    publication_counter = publication_counter + 1
-    return table.concat({
-      tostring(math.floor(now_ms())), publication_session, publication_counter,
-    }, "-")
+  --- Log a message once per key, so a persistent failure does not fill the log
+  --- on every poll tick.
+  local function report_error_once(key, message)
+    if reported_errors[key] then return end
+    reported_errors[key] = true
+    wezterm.log_error("wezterm-attention: " .. message)
+  end
+
+  --- The same, for a setup the plugin works around rather than a failure.
+  local function report_warning_once(key, message)
+    if reported_errors[key] then return end
+    reported_errors[key] = true
+    local log = type(wezterm.log_warn) == "function" and wezterm.log_warn or wezterm.log_error
+    log("wezterm-attention: " .. message)
   end
 
   local function json_string(value)
@@ -29,34 +28,6 @@ return function(context)
       }
       return escapes[char] or string.format("\\u%04x", char:byte())
     end) .. '"'
-  end
-
-  local function json_value(value)
-    local value_type = type(value)
-    if value_type == "string" then return json_string(value) end
-    if value_type == "number" or value_type == "boolean" then return tostring(value) end
-    if value_type ~= "table" then return nil end
-    local keys = {}
-    for key in pairs(value) do
-      if type(key) ~= "string" then return nil end
-      keys[#keys + 1] = key
-    end
-    table.sort(keys)
-    local fields = {}
-    for _, key in ipairs(keys) do
-      local encoded = json_value(value[key])
-      if not encoded then return nil end
-      fields[#fields + 1] = json_string(key) .. ":" .. encoded
-    end
-    return "{" .. table.concat(fields, ",") .. "}"
-  end
-
-  local function next_v2_event_id()
-    local digest = sha256(next_publication_id())
-    return table.concat({
-      digest:sub(1, 8), digest:sub(9, 12), "4" .. digest:sub(14, 16),
-      "8" .. digest:sub(18, 20), digest:sub(21, 32),
-    }, "-")
   end
 
   --- Place `body` at `path` through a temporary file this process owns, so a
@@ -98,52 +69,10 @@ return function(context)
     return true
   end
 
-  --- Move `from` to `to` unless a file is already at `to`. A rename replaces
-  --- whatever it finds, so a write that lands at `to` after a caller looked
-  --- would be lost. A hard link is made only where no name is, and Windows'
-  --- rename already refuses an existing target. Returns "placed", "occupied"
-  --- (`from` is left where it was), or "failed" with an error text.
-  local function place_without_replacing(from, to)
-    if package.config:sub(1, 1) == "\\" then
-      local renamed, err = os.rename(from, to)
-      if renamed then return "placed" end
-      if file_exists(to) then return "occupied" end
-      return "failed", tostring(err)
-    end
-    local function quoted(value) return "'" .. value:gsub("'", [['\'']]) .. "'" end
-    -- LuaJIT answers with the exit status, Lua 5.2 and later with true.
-    local linked = os.execute("ln " .. quoted(from) .. " " .. quoted(to) .. " 2>/dev/null")
-    if linked == true or linked == 0 then
-      os.remove(from)
-      return "placed"
-    end
-    if file_exists(to) then return "occupied" end
-    return "failed", "ln could not link it"
-  end
-
-  local function write_v2_record(path, record, kind, expected)
-    local parsed, parse_diagnostic = parse_v2_record(record, kind)
-    if not parsed or (expected and not record_matches(parsed, expected)) then
-      local item = parse_diagnostic or identity_diagnostic(kind, path)
-      report_error_once("write-v2:" .. path, item.code .. ": " .. item.message)
-      return false
-    end
-    local existing, existing_diagnostic, status = read_expected_record(
-      path, kind, expected, false)
-    if status ~= "missing" and not existing then
-      report_error_once("write-v2-existing:" .. path,
-        existing_diagnostic.code .. ": refusing to replace " .. path)
-      return false
-    end
-    local body = json_value(record)
-    if not body then return false end
-    return replace_file(path, body, "write-v2")
-  end
-
-  --- Spell an integral number the way JSON wants it read back. `json_value`
-  --- renders a number with `tostring`, and what that gives for an integral
-  --- value depends on the Lua the plugin runs under; the reader of the file
-  --- below wants an integer in every one of them.
+  --- Spell an integral number the way JSON wants it read back. What
+  --- `tostring` gives for an integral value depends on the Lua the plugin
+  --- runs under; the reader of the file below wants an integer in every one
+  --- of them.
   local function integer(value)
     return string.format("%d", math.floor(value))
   end
@@ -218,9 +147,9 @@ return function(context)
 
   --- Publish the drawn order under its source incarnation and window ID, or
   --- under the legacy window ID while the source is unknown. It is not a pane
-  --- record and carries its own schema. `marker_ids` are what `gui_tab_pane_ids` returned: a v1 marker id
-  --- or the v2 cache key, already translated, so a reader never repeats that
-  --- translation.
+  --- record and carries its own schema. `marker_ids` are what `gui_tab_pane_ids`
+  --- returned: the panes' cache keys, already translated out of the window's
+  --- local numbering, so a reader never repeats that translation.
   ---
   --- A window keeps the name of its first publication, source or none, for as
   --- long as this module runs, so it has one file here. The caller holds a
@@ -249,11 +178,10 @@ return function(context)
       path = dir .. "/tabs/"
         .. (source and (source.incarnation_id .. "-") or "") .. integer(window_id) .. ".json"
     end
-    -- Keys in sorted order, as json_value writes them.
     local body = table.concat({
       '{"published_at_ms":', integer(drawn_at or now_ms()),
       ',"schema":', source and "2" or "1",
-      source and (',"source":' .. json_value(source)) or "",
+      source and (',"source":' .. wezterm.json_encode(source)) or "",
       ',"tabs":', list,
       ',"window_id":', integer(window_id), "}",
     })
@@ -303,503 +231,10 @@ return function(context)
     end
   end
 
-  local function acknowledgement_path(dir, pane_id)
-    return dir .. "/" .. pane_id .. ".ack"
-  end
-
-  --- The in-flight sidecar this process writes before renaming it into place.
-  --- The name carries this process's session token, so two WezTerm processes
-  --- acknowledging the same pane never delete each other's in-flight file while
-  --- it is being renamed. A bare "<id>.ack.tmp" was shared state.
-  local function acknowledgement_tmp_path(dir, pane_id)
-    return acknowledgement_path(dir, pane_id) .. "." .. publication_session .. ".tmp"
-  end
-
-  local function marker_identity(raw, publication_id)
-    if publication_id then return "publication\n" .. publication_id end
-    return "raw\n" .. (raw or "")
-  end
-
-  local function read_acknowledgement(dir, pane_id)
-    local file = io.open(acknowledgement_path(dir, pane_id), "r")
-    if not file then return nil end
-    local identity = file:read("*a")
-    file:close()
-    return identity
-  end
-
-  --- Log a message once per key, so a persistent failure does not fill the log
-  --- on every poll tick.
-  report_error_once = function(key, message)
-    if reported_errors[key] then return end
-    reported_errors[key] = true
-    wezterm.log_error("wezterm-attention: " .. message)
-  end
-
-  --- The same, for a setup the plugin works around rather than a failure.
-  local function report_warning_once(key, message)
-    if reported_errors[key] then return end
-    reported_errors[key] = true
-    local log = type(wezterm.log_warn) == "function" and wezterm.log_warn or wezterm.log_error
-    log("wezterm-attention: " .. message)
-  end
-
-  local function clear_acknowledgement(dir, pane_id)
-    local path = acknowledgement_path(dir, pane_id)
-    if not file_exists(path) then return true end
-
-    local ok, err = os.remove(path)
-    if ok then return true end
-    report_error_once(
-      "clear:" .. pane_id,
-      "failed to remove acknowledgement " .. path .. ": " .. tostring(err))
-    return false
-  end
-
-  local function write_acknowledgement(dir, pane_id, identity)
-    local path = acknowledgement_path(dir, pane_id)
-    local tmp = acknowledgement_tmp_path(dir, pane_id)
-    os.remove(tmp)
-    local file, open_err = io.open(tmp, "w")
-    if not file then
-      report_error_once(
-        "write:" .. pane_id,
-        "failed to write acknowledgement " .. tmp .. ": " .. tostring(open_err))
-      return false
-    end
-
-    local wrote, write_err = file:write(identity)
-    local closed, close_err = file:close()
-    if not wrote or not closed then
-      os.remove(tmp)
-      report_error_once(
-        "write:" .. pane_id,
-        "failed to finish acknowledgement " .. tmp .. ": " .. tostring(write_err or close_err))
-      return false
-    end
-
-    -- No unlink of `path` here. os.rename replaces an existing file atomically on
-    -- POSIX, so removing the old sidecar first would only open a window in which
-    -- a concurrent reader sees no acknowledgement and re-displays a marker the
-    -- user already looked at.
-    local renamed, rename_err = os.rename(tmp, path)
-    if not renamed then
-      os.remove(tmp)
-      report_error_once(
-        "write:" .. pane_id,
-        "failed to place acknowledgement " .. path .. ": " .. tostring(rename_err))
-      return false
-    end
-    return true
-  end
-
-  local function acknowledgement_matches(dir, pane_id, raw, publication_id)
-    local acknowledged = read_acknowledgement(dir, pane_id)
-    if raw and acknowledged == marker_identity(raw, publication_id) then return true end
-
-    -- Cleanup is best-effort. A stale sidecar never suppresses absent or
-    -- mismatched canonical truth even when it cannot be removed.
-    if acknowledged then clear_acknowledgement(dir, pane_id) end
-    return false
-  end
-
-  local function read_effective_marker(dir, pane_id)
-    -- A crash can strand only this process's own temporary sidecar. It was never
-    -- authoritative. Another process's in-flight temp is not ours to remove: it
-    -- may be one instant away from being renamed into place.
-    os.remove(acknowledgement_tmp_path(dir, pane_id))
-    local atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source =
-      read_marker(dir, pane_id)
-    if acknowledgement_matches(dir, pane_id, raw, publication_id) then return nil end
-    return atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source
-  end
-
-  -- ── Review flag sidecar ─────────────────────────────────────────────────────
-  -- The Alt+B review flag is the user's own, and it lives in its own file:
-  --   <marker id>.review   {"publication_id":"<id>"}
-  -- It used to be written into the marker file as {"type":"review"}, which meant
-  -- it could only ever be set on a pane no process had written to. Every pane an
-  -- agent has run in carries a thinking/stop/notify marker, so on exactly the
-  -- panes the user wants to flag, Alt+B did nothing at all. As a sidecar the flag
-  -- coexists with writer-owned truth instead of competing for the same file.
-
-  local function review_path(dir, pane_id)
-    return dir .. "/" .. pane_id .. ".review"
-  end
-
-  --- The in-flight flag this process writes before renaming it into place. Named
-  --- with this process's session token for the same reason the acknowledgement
-  --- temp is: two WezTerm processes flagging the same pane must not delete each
-  --- other's file mid-rename.
-  local function review_tmp_path(dir, pane_id)
-    return review_path(dir, pane_id) .. "." .. publication_session .. ".tmp"
-  end
-
-  --- Is this pane flagged for review? The file's presence is the flag. Its body
-  --- is read by nothing, so content that no parser would accept still counts as
-  --- flagged: a truncated write must never silently drop a flag the user set by
-  --- hand.
-  local function review_flagged(dir, pane_id)
-    local file = io.open(review_path(dir, pane_id), "r")
-    if not file then return false end
-    file:close()
-    return true
-  end
-
-  local function write_review_flag(dir, pane_id)
-    local path = review_path(dir, pane_id)
-    local tmp = review_tmp_path(dir, pane_id)
-    os.remove(tmp)
-
-    local file, open_err = io.open(tmp, "w")
-    if not file then
-      wezterm.log_error(
-        "wezterm-attention: failed to write review flag " .. tmp .. ": " .. tostring(open_err))
-      return false
-    end
-
-    local wrote, write_err = file:write(
-      '{"publication_id":"' .. next_publication_id() .. '"}')
-    local closed, close_err = file:close()
-    if not wrote or not closed then
-      os.remove(tmp)
-      wezterm.log_error(
-        "wezterm-attention: failed to finish review flag " .. tmp .. ": "
-          .. tostring(write_err or close_err))
-      return false
-    end
-
-    local renamed, rename_err = os.rename(tmp, path)
-    if not renamed then
-      os.remove(tmp)
-      wezterm.log_error(
-        "wezterm-attention: failed to place review flag " .. path .. ": " .. tostring(rename_err))
-      return false
-    end
-    return true
-  end
-
-  local function clear_review_flag(dir, pane_id)
-    os.remove(review_tmp_path(dir, pane_id))
-    local path = review_path(dir, pane_id)
-    if not file_exists(path) then return true end
-
-    local ok, err = os.remove(path)
-    if ok then return true end
-    report_error_once(
-      "clear-review:" .. pane_id,
-      "failed to remove review flag " .. path .. ": " .. tostring(err))
-    return false
-  end
-
-  --- Remove the writer's marker and the acknowledgement that referred to it, and
-  --- nothing else. This is what an expired marker costs: the subagent sidecar and
-  --- the user's review flag have their own lifetimes and neither of them aged out
-  --- because a spinner did.
-  local function remove_expired_marker(dir, pane_id)
-    os.remove(dir .. "/" .. pane_id)
-    clear_acknowledgement(dir, pane_id)
-    os.remove(acknowledgement_tmp_path(dir, pane_id))
-  end
-
-  --- Remove every file this plugin knows a pane by. The subagent sidecar and the
-  --- review flag go with the marker: the pane they described is gone (the absence
-  --- sweep) or the caller asked for that pane's state to be cleared, and a
-  --- surviving sidecar would keep a "+N" or a ◆ on a tab whose pane is no longer
-  --- there to retract it.
-  local function remove_marker(dir, pane_id)
-    remove_expired_marker(dir, pane_id)
-    os.remove(subagents_path(dir, pane_id))
-    clear_review_flag(dir, pane_id)
-  end
-
-
-  local function bind_v2(context)
-    local M = context.M
-    local defaults = context.defaults
-    local protocol = context.protocol
-    local binding_root = context.binding_root
-    local v2_pane_root = context.v2_pane_root
-    local glob_paths = context.glob_paths
-    local read_expected_record = context.read_expected_record
-    local path_stem = context.path_stem
-    local identity_diagnostic = context.identity_diagnostic
-    local read_attention_view = context.read_attention_view
-    local attention_cache = context.attention_cache
-    local wezterm_now_unix_ns20 = context.wezterm_now_unix_ns20
-
-    local function selected_v2_records_root(dir, read, binding_id)
-      if binding_id then
-        return binding_root(dir, read.address, read.launch_id, binding_id), {
-          kind = "binding", binding_id = binding_id,
-        }
-      end
-      return v2_pane_root(dir, read.address) .. "/launches/" .. read.launch_id,
-        { kind = "launch" }
-    end
-
-    --- The pane's valid review files, and the record read from each.
-    local function v2_review_paths(read, dir)
-      local pattern = v2_pane_root(dir, read.address) .. "/reviews/*.json"
-      local paths, glob_diagnostic = glob_paths(pattern)
-      if not paths then
-        report_error_once("review-enumerate:" .. read.cache_key,
-          glob_diagnostic.code .. ": " .. glob_diagnostic.message)
-        return {}, {}
-      end
-      local valid, records = {}, {}
-      for _, path in ipairs(paths) do
-        local record, record_diagnostic = read_expected_record(
-          path, "review", { address = read.address }, true)
-        if record and path_stem(path) == record.owner_key then
-          valid[#valid + 1] = path
-          records[path] = record
-        else
-          local item = record_diagnostic or identity_diagnostic("review", path)
-          report_error_once("review-record:" .. path, item.code .. ": " .. item.message)
-        end
-      end
-      return valid, records
-    end
-
-    local function write_v2_user_review(read, dir)
-      -- A reader shows nothing for a pane whose claim is not the launch the pane
-      -- published, so a flag written now would light nothing; the writer refuses
-      -- its own marks in this state for the same reason.
-      local claim_path = v2_pane_root(dir, read.address) .. "/claim.json"
-      if not read_expected_record(claim_path, "claim",
-          { address = read.address, launch_id = read.launch_id }, true) then
-        report_error_once("review-claim:" .. read.cache_key .. ":" .. read.launch_id,
-          "cannot flag this pane for review: its claim is not the launch the pane published, "
-            .. "so the flag would not show")
-        return false
-      end
-      local owner_id = "user"
-      local owner_key = sha256(owner_id)
-      local path = v2_pane_root(dir, read.address) .. "/reviews/" .. owner_key .. ".json"
-      return write_v2_record(path, {
-        kind = "review",
-        schema = protocol.record_schema,
-        address = read.address,
-        owner_id = owner_id,
-        owner_key = owner_key,
-        event_id = next_v2_event_id(),
-      }, "review", { address = read.address })
-    end
-
-    --- When to look again for a pane's leftovers, in epoch milliseconds, keyed
-    --- by cache key: now for a pane where this process's own clear could not
-    --- put a review back, later for one where another GUI's may still be
-    --- running.
-    local leftover_look_due = {}
-    --- The leftovers this process's own clears could not put back. Nothing
-    --- else here is still working on them, so they need no waiting.
-    local own_leftovers = {}
-
-    --- Longer than any clear takes between moving a review aside and removing
-    --- it. A leftover younger than this may belong to a clear another GUI is
-    --- still running, and putting it back would undo what the user just did.
-    local abandoned_after_ms = 60 * 1000
-
-    --- Remove the reviews this pane showed, and only those. A writer can
-    --- replace a review between the read above and the removal, and removing
-    --- by path would take the newer one, which the user never saw. So each
-    --- file is first moved aside, out of the reader's *.json pattern, and
-    --- read: the record that was shown is deleted, and anything else is put
-    --- back, unless a still newer write has taken the path since, which then
-    --- supersedes both. The aside name carries this process's session token
-    --- and the time it was moved, so another GUI can tell a clear that may
-    --- still be running from one that was abandoned.
-    local function clear_v2_reviews(read, dir)
-      local cleared = false
-      local paths, shown = v2_review_paths(read, dir)
-      for _, path in ipairs(paths) do
-        local taken = path .. "." .. publication_session .. "." .. integer(now_ms()) .. ".clear"
-        local moved, move_err = os.rename(path, taken)
-        if not moved then
-          -- Already gone is the state a clear wants.
-          if file_exists(path) then
-            report_error_once("clear-v2-review:" .. path,
-              "failed to remove review claim " .. path .. ": " .. tostring(move_err))
-          end
-        else
-          local record = read_expected_record(taken, "review", { address = read.address }, true)
-          if record and record.event_id == shown[path].event_id then
-            os.remove(taken)
-            cleared = true
-          elseif file_exists(path) then
-            os.remove(taken)
-          else
-            local placed, place_err = place_without_replacing(taken, path)
-            if placed == "occupied" then
-              -- A write landed after the look above: newer still, as above.
-              os.remove(taken)
-            elseif placed == "failed" then
-              own_leftovers[taken] = true
-              leftover_look_due[read.cache_key] = 0
-              report_error_once("restore-v2-review:" .. path,
-                "cannot put back review " .. path .. " from " .. taken .. ": " .. place_err)
-            end
-          end
-        end
-      end
-      return cleared
-    end
-
-    --- Put back the reviews a clear moved aside and never finished with,
-    --- because its process died between the move and the removal. Each was a
-    --- flag the pane showed, so it goes back to its name when nothing has taken
-    --- that name since. Beside a live review it stays until its pane tree is
-    --- removed: which of the two is newer is not known here. A leftover is put back
-    --- only when this process's own clear left it, or when the time in its
-    --- name is older than any clear takes; a younger one is looked at again
-    --- once it is that old. A name with no time in it stays until its pane
-    --- tree is removed.
-    ---
-    --- Looking costs a directory listing, so it is done only where a leftover
-    --- can be: on this process's first read of the pane (a GUI that died
-    --- mid-clear is replaced by a new process), when a review this process
-    --- showed has gone (another GUI's clear), where this process's own clear
-    --- could not put one back, and where a leftover was too young to take.
-    --- Returns true when a review was put back.
-    local function restore_cleared_reviews(read, dir, previous_view, view, opts)
-      local key = read.cache_key
-      local now = (opts and opts.now_ms) or now_ms()
-      local due = leftover_look_due[key]
-      local look = not previous_view or (due ~= nil and now >= due)
-      if not look then
-        local shown = previous_view._records and previous_view._records.reviews or {}
-        local current = view._records and view._records.reviews or {}
-        for path in pairs(shown) do
-          if not current[path] then look = true; break end
-        end
-      end
-      if not look then return false end
-      leftover_look_due[key] = nil
-      local paths = glob_paths(v2_pane_root(dir, read.address) .. "/reviews/*.clear", opts)
-      if not paths then return false end
-      local restored = false
-      for _, leftover in ipairs(paths) do
-        local path, moved_at = leftover:match("^(.*%.json)%.%w+%.(%d+)%.clear$")
-        moved_at = tonumber(moved_at)
-        local abandoned = moved_at and now - moved_at > abandoned_after_ms
-        if path and (own_leftovers[leftover] or abandoned) then
-          local placed, place_err = place_without_replacing(leftover, path)
-          if placed == "placed" then
-            restored = true
-            own_leftovers[leftover] = nil
-          elseif placed == "occupied" then
-            own_leftovers[leftover] = nil
-          else
-            report_error_once("restore-v2-review:" .. path,
-              "cannot put back review " .. path .. " from " .. leftover .. ": " .. place_err)
-          end
-        elseif path and moved_at then
-          local again = moved_at + abandoned_after_ms + 1
-          if not leftover_look_due[key] or again < leftover_look_due[key] then
-            leftover_look_due[key] = again
-          end
-        end
-      end
-      return restored
-    end
-
-    local function refresh_cached_v2(read, dir, now_unix_ns)
-      local current_now = now_unix_ns
-      if not current_now then current_now = wezterm_now_unix_ns20() end
-      local view = read_attention_view(read, current_now, {
-        dir = dir, previous_view = attention_cache[read.cache_key],
-      })
-      attention_cache[read.cache_key] = view
-      return view
-    end
-
-    local function acknowledge_focused_v2_pane(read, opts)
-      local dir = (opts and opts.dir) or M._active_dir or defaults.dir
-      local acknowledge_set = M._active_acknowledge_set or { stop = true, notify = true }
-      local view = read_attention_view(read, opts and opts.now_unix_ns,
-        { dir = dir, resample_utc = opts and opts.resample_utc })
-      -- Only what the tab shows is seen: when the review flag outranks the
-      -- activity, the tab shows the flag, and the activity stays for later, as
-      -- a v1 marker does.
-      if not (view.activity_type and view.type == view.activity_type
-          and acknowledge_set[view.activity_type] and view.event_id) then
-        attention_cache[read.cache_key] = view
-        return "absent"
-      end
-      -- This read is the second one: the caller already read this pane to decide
-      -- the user is looking at it. If a different event has been published since,
-      -- the user has not seen that one, so take the new state and leave it
-      -- unacknowledged. The v1 path makes the same comparison on its identity.
-      -- Not `if observed_event_id and ...`: a nil observation means the caller saw
-      -- no publication here, which is a reason to refuse rather than a reason to
-      -- skip the check. The read above has already returned when this view has no
-      -- event, so reaching here with nil observed means one appeared in between.
-      local observed_event_id = opts and opts.observed_event_id
-      if observed_event_id ~= view.event_id then
-        attention_cache[read.cache_key] = view
-        return "kept"
-      end
-      local records_root, target = selected_v2_records_root(dir, read, view.binding_id)
-      local path = records_root .. "/ack.json"
-      local record = {
-        kind = "acknowledgement",
-        schema = protocol.record_schema,
-        address = read.address,
-        launch_id = read.launch_id,
-        target = target,
-        activity_event_id = view.event_id,
-        event_id = next_v2_event_id(),
-      }
-      if not write_v2_record(path, record, "acknowledgement", {
-        address = read.address, launch_id = read.launch_id,
-      }) then
-        attention_cache[read.cache_key] = view
-        return "failed"
-      end
-      refresh_cached_v2(read, dir, opts and opts.now_unix_ns)
-      return "acknowledged"
-    end
-
-
-    return {
-      selected_v2_records_root = selected_v2_records_root,
-      v2_review_paths = v2_review_paths,
-      write_v2_user_review = write_v2_user_review,
-      clear_v2_reviews = clear_v2_reviews,
-      restore_cleared_reviews = restore_cleared_reviews,
-      refresh_cached_v2 = refresh_cached_v2,
-      acknowledge_focused_v2_pane = acknowledge_focused_v2_pane,
-    }
-  end
-
   return {
-    bind_v2 = bind_v2,
-    reported_errors = reported_errors,
-    publication_session = publication_session,
     report_error_once = report_error_once,
     report_warning_once = report_warning_once,
-    next_publication_id = next_publication_id,
-    json_string = json_string,
-    json_value = json_value,
-    next_v2_event_id = next_v2_event_id,
-    write_v2_record = write_v2_record,
     publish_tab_order = publish_tab_order,
     withdraw_closed_tab_orders = withdraw_closed_tab_orders,
-    acknowledgement_path = acknowledgement_path,
-    acknowledgement_tmp_path = acknowledgement_tmp_path,
-    marker_identity = marker_identity,
-    read_acknowledgement = read_acknowledgement,
-    clear_acknowledgement = clear_acknowledgement,
-    write_acknowledgement = write_acknowledgement,
-    acknowledgement_matches = acknowledgement_matches,
-    read_effective_marker = read_effective_marker,
-    review_path = review_path,
-    review_tmp_path = review_tmp_path,
-    review_flagged = review_flagged,
-    write_review_flag = write_review_flag,
-    clear_review_flag = clear_review_flag,
-    remove_expired_marker = remove_expired_marker,
-    remove_marker = remove_marker,
   }
 end

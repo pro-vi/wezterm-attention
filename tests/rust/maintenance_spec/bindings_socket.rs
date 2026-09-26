@@ -35,7 +35,7 @@ fn binding_projection_preserves_query_metadata() {
     );
     let root = state_root(&setup.env).unwrap();
     let address = pane_address(&setup.env).unwrap().0;
-    let broken = launch_path(&root, &address, &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"])
+    let broken = launch_dir(&root, &address, &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"])
         .join("bindings")
         .join("f".repeat(64));
     fs::create_dir_all(&broken).unwrap();
@@ -565,7 +565,7 @@ fn realm_wide_diagnostics_are_counted_and_never_make_the_rows_incomplete() {
     setup.claim_and_bind();
     let root = state_root(&setup.env).unwrap();
     let address = pane_address(&setup.env).unwrap().0;
-    let launch = launch_path(&root, &address, &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]);
+    let launch = launch_dir(&root, &address, &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]);
     for index in 0..60 {
         let bad = launch
             .join("bindings")
@@ -614,7 +614,7 @@ fn selected_invalid_future_and_unreadable_binding_records_degrade_the_query() {
     let root = state_root(&setup.env).unwrap();
     let address = pane_address(&setup.env).unwrap().0;
     let launch = &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"];
-    let binding = launch_path(&root, &address, launch)
+    let binding = launch_dir(&root, &address, launch)
         .join("bindings")
         .join(binding_id("claude", "session-a", launch))
         .join("binding.json");
@@ -678,7 +678,7 @@ fn a_record_failure_cannot_hide_another_rows_unavailable_probe() {
     setup.claim_and_bind();
     let root = state_root(&setup.env).unwrap();
     let address = pane_address(&setup.env).unwrap().0;
-    let launch = launch_path(&root, &address, &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]);
+    let launch = launch_dir(&root, &address, &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]);
     let bad = launch
         .join("bindings")
         .join("0".repeat(64))

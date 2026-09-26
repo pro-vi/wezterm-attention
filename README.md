@@ -4,7 +4,9 @@ A WezTerm plugin that turns your tab bar into a notification system. Any CLI too
 
 Two things write those signals. A small Rust command, `attention`, runs as a hook from Claude Code, Codex or Pi and records what a pane's agent is doing against a pane identity that survives detach, reattach and multiple mux sockets. A Lua reader in WezTerm polls those records and renders the tab. Programs other than WezTerm can read the same records: `attention bindings --json`, `attention tabs` and `attention inspect` return validated facts, so a script does not have to scrape a terminal to find out which pane an agent is in.
 
-The records the `attention` command writes are called **v2 records** in these docs. The older format, one small JSON file per pane id, is called **v1 flat markers**. Flat markers still work as input: they were the whole protocol before, several tools still write them, and the reader keeps accepting them. Attention's own writers no longer produce them, and in a pane that has v2 records they are not shown — see [Producer paths](#producer-paths-v2-records-and-v1-flat-markers). These names are for the two record formats, not for versions of this project.
+The records the `attention` command writes are called **v2 records** in these docs, after the manifest that defines them, `protocol/v2.json`; the name is for the record format, not a version of this project. They are the only format the plugin reads, and only the `attention` command writes them: see [Record contract](docs/record-contract.md).
+
+The supported interface is the `attention` command — its JSON envelopes, diagnostic codes and exit codes, specified in the [consumer guide](docs/consumer-guide.md) — and the plugin's [Lua API](#public-api). The Rust crate the command is built from is not supported for use outside this repository; its items may change in any release.
 
 Known compromises are listed in [docs/accepted-limitations.md](docs/accepted-limitations.md).
 
@@ -17,19 +19,19 @@ Known compromises are listed in [docs/accepted-limitations.md](docs/accepted-lim
 | `notify` | ! | Rose | Something needs your attention |
 | `review` | ◆ | Gold | Manually flagged for review (`Alt+B`) |
 
-Tabs light up when a background process writes a marker—even when another pane in that tab is currently focused, and even when the tab itself is not the one you are on. Focusing a pane acknowledges only that pane's `stop` and `notify`; markers from unfocused sibling panes remain visible until you visit them. `thinking` persists until its writer removes it or its TTL expires; a `review` flag persists until you press `Alt+B` again.
+Tabs light up when an agent or script records a state for its pane—even when another pane in that tab is currently focused, and even when the tab itself is not the one you are on. Focusing a pane acknowledges only that pane's `stop` and `notify`; states of unfocused sibling panes remain visible until you visit them. `thinking` persists until its writer replaces or clears it, or until the TTL it was written with expires; a `review` flag persists until you press `Alt+B` again.
 
-Only the active pane of the focused window is acknowledged. The writer-owned marker stays in place; the plugin records the exact displayed identity in a `.ack` sidecar, so unseen notifications remain visible.
+Only the active pane of the focused window is acknowledged. The writer's record stays in place; the plugin has the `attention` command record which activity you were shown, and only while that activity is still the pane's, so an unseen notification remains visible.
 
 When multiple panes in a tab have different states, the highest-priority one wins: **notify > stop > review > thinking**.
 
-The `review` flag is yours, not a writer's: it lives in its own `.review` file beside the marker, so you can flag a pane that is mid-`thinking` or showing a `stop` without touching either. See [The review flag](#the-review-flag-the-review-sidecar).
+The `review` flag is yours, not a writer's: it is a record of its own, so you can flag a pane that is mid-`thinking` or showing a `stop` without touching either. See [The review flag](#the-review-flag).
 
-A pane can also report how many subagents are still working inside it. The tab appends that count to whatever indicator it is already showing — `✓+2` — or shows `+2` on its own when the pane has no marker left. See [Subagent activity](#subagent-activity-the-agents-sidecar).
+A pane can also report how many subagents are still working inside it. The tab appends that count to whatever indicator it is already showing — `✓+2` — or shows `+2` on its own when the pane has nothing else to show. See [Subagent activity](#subagent-activity).
 
 ## Install
 
-There are two parts. The Lua plugin draws the tab bar and reads what writers record. The `attention` command is a small Rust program that agent hooks and scripts call to record what a pane's agent is doing. The plugin works on its own with v1 flat markers; v2 records need the command.
+There are two parts. The Lua plugin draws the tab bar and reads what writers record. The `attention` command is a small Rust program that agent hooks and scripts call to record what a pane's agent is doing. The plugin shows only what the command records, so both are needed.
 
 ### 1. Load the plugin
 
@@ -55,9 +57,9 @@ checkout="$plugins/httpssCssZssZsgithubsDscomsZspro-visZswezterm-attention"
 sh "$checkout/scripts/install-cli.sh"
 ```
 
-If the plugin cannot find the command, it logs once per config load, naming the path it checked: `.../libexec/attention-rs is missing, so panes get no WEZTERM_ATTENTION_ROOT ...`. Open the WezTerm debug overlay (`Ctrl+Shift+L`) to read it.
+If the plugin cannot find the command, it logs once per config load, naming the path it checked: `.../libexec/attention-rs is missing, so panes get no WEZTERM_ATTENTION_ROOT and agents record nothing ...`. Open the WezTerm debug overlay (`Ctrl+Shift+L`) to read it.
 
-Reload the config afterwards. New panes then get `WEZTERM_ATTENTION_ROOT`, the checkout path. The plugin exports it only once the command is built, because a producer that sees it writes through the command instead of writing a v1 flat marker. It always exports `WEZTERM_ATTENTION_DIR`, the state directory.
+Reload the config afterwards. New panes then get `WEZTERM_ATTENTION_ROOT`, the checkout path. The plugin exports it only once the command is built: a producer that sees it runs that checkout's command, which would fail in every callback before the build. It always exports `WEZTERM_ATTENTION_DIR`, the state directory.
 
 `"$checkout/bin/attention" --version` prints the commit the command was built from, with `-dirty` if the tree had uncommitted changes. Compare it with `git -C "$checkout" rev-parse --short=12 HEAD` to see whether the build is current.
 
@@ -192,13 +194,6 @@ attention.apply_to_config(config, {
   -- Visually acknowledge these types when focusing their pane
   auto_clear = { "stop", "notify" },
 
-  -- Stale marker cleanup by type, in milliseconds.
-  -- Prevents zombie busy tabs if a process exits without clearing.
-  -- Set to false to disable the config-driven sweep. Note: markers that carry
-  -- their own ttl_ms (e.g. the Pi extension's `thinking` markers) still expire
-  -- on that embedded TTL — false only turns off this type-based cleanup.
-  stale_after_ms = { thinking = 30 * 60 * 1000 },
-
   -- Review toggle keybind (false to disable). Added to config.keys, so assign
   -- config.keys before calling apply_to_config.
   review_key = { key = "b", mods = "ALT" },
@@ -217,149 +212,85 @@ attention.apply_to_config(config, {
 })
 ```
 
-## Producer paths: v2 records and v1 flat markers
+## Recording attention from your own tools
 
-Write v2 records through the `attention` command; never construct their JSON yourself. Use `attention hooks event PROVIDER EVENT` for provider callbacks, and `attention mark STATE --source NAME` for anything else, where `STATE` is `thinking`, `stop`, `notify`, `review` or `clear`. Both write into the pane's current launch claim. On macOS an agent's registered hooks claim the pane for their agent themselves (see [Claude Code hooks](#claude-code-hooks)). `attention mark`, and every producer on Linux, needs the launch id of a claiming shell, so run it from one: in bash, add its command name to `WEZTERM_ATTENTION_COMMANDS`; in zsh, start it as `wezterm_attention_claim && <command>`. See [Mux setup](docs/mux-setup.md).
+Write records through the `attention` command; never construct their JSON yourself. Use `attention hooks event PROVIDER EVENT` for provider callbacks, and `attention mark STATE --source NAME` for anything else, where `STATE` is `thinking`, `stop`, `notify`, `review` or `clear`. Both write into the pane's current launch claim. On macOS an agent's registered hooks claim the pane for their agent themselves (see [Claude Code hooks](#claude-code-hooks)). `attention mark`, and every producer on Linux, needs the launch id of a claiming shell, so run it from one: in bash, add its command name to `WEZTERM_ATTENTION_COMMANDS`; in zsh, start it as `wezterm_attention_claim && <command>`. See [Mux setup](docs/mux-setup.md).
 
-`--source` defaults to `manual`. `attention mark clear --source NAME` removes that source's review flag and, when the activity the tab currently shows was published by that source, clears that activity too; it reports `applied` when it did either and `skipped` otherwise. The source name `user` belongs to `Alt+B` and every `mark` state refuses it.
-
-**In a pane with v2 records, v1 flat markers are not shown.** Once a launch claim has been published in a pane (the shell integration republishes it at every prompt), the reader takes that pane's state only from v2 records and ignores a flat marker written under the same pane id. A script that writes flat markers into a pane where you also run claimed agents should switch to `attention mark`.
-
-The flat-file format below remains supported for other writers. Attention's writers do not emit it. Installing the `attention` command does not change a hook you registered earlier that writes flat files; re-register it through `attention hooks event` (see [Claude Code hooks](#claude-code-hooks)).
-
-### v1 flat-marker protocol
-
-Any process running inside WezTerm can write a v1 flat marker. The compatibility contract is:
-
-1. **Write** a JSON file to `$WEZTERM_ATTENTION_DIR/<WEZTERM_PANE>`. The plugin exports `WEZTERM_ATTENTION_DIR` to every pane; outside one, use the state directory from [Configure](#configure).
-2. **Contents:** `{"type":"<state>"}` where state is `thinking`, `stop`, `notify`, or `review`
-3. **Optional:** `{"type":"thinking","frame":0}` — `frame` (0-3) controls the spinner position. If omitted for `thinking`, the plugin animates it during polling.
-4. **Recommended:** `publication_id` is a new non-empty string for every publication. It lets an identical `stop` or `notify` payload become visible again after the previous publication was acknowledged. Without it, the plugin uses the exact JSON bytes as the legacy identity.
-5. **Optional:** `updated_at` or `updated_at_ms` records when the marker was refreshed. Seconds and milliseconds are both accepted.
-6. **Optional:** `ttl_ms` overrides stale cleanup for that marker. By default, stale `thinking` markers clear after 30 minutes.
-7. **Optional:** a `<WEZTERM_PANE>.agents` sidecar reports how many subagents are working in the pane — see [Subagent activity](#subagent-activity-the-agents-sidecar) below.
-8. **Plugin-owned:** `<WEZTERM_PANE>.ack` records the marker publication you have already been shown, and `<WEZTERM_PANE>.review` is the `Alt+B` flag — see [The review flag](#the-review-flag-the-review-sidecar). Writers never touch either one.
-9. **Cleanup** is automatic for v1 flat markers the poller still owns. The poller removes a marker whose pane it saw on the previous tick and does not see now (WezTerm emits no pane-close event, so a vanished pane is how a closed pane is detected), and removes a marker whose stale TTL has expired. A closed pane loses everything — marker, `.ack`, `.agents` and `.review`. An expired marker loses only itself and its `.ack`: the subagent sidecar and your review flag keep their own lifetimes and neither of them aged out because a spinner did. Focusing a pane writes an acknowledgement sidecar instead of removing writer-owned state. Flat files that development builds of Attention wrote beside v2 records are collected when exactly one valid v2 claim names that pane id: preview with `attention sweep --json`, then `attention sweep --apply`, which makes up a fresh operation id for the run. Unique claim is not a provenance check and does not ask whether a live writer occupies the number. That command never removes `.review`.
-
-The `WEZTERM_PANE` environment variable is injected by WezTerm into every shell it spawns. That's the pane's unique ID — always a non-negative integer. Validate it (`/^\d+$/`) before building a path from it: a stray `../…` value would otherwise write to, or delete, a file outside the marker directory. Every example and fragment below enforces this.
+`--source` defaults to `manual`. `attention mark clear --source NAME` removes that source's review flag and, when the activity the tab currently shows was published by that source, clears that activity too; it reports `applied` when it did either and `skipped` otherwise. The source name `user` belongs to the plugin's review key, and every `mark` state refuses it.
 
 ### Publishing the pane id
 
-The plugin has to match a marker file to a pane on screen. Inside a pane,
-`$WEZTERM_PANE` is the number the marker is named after. From the config side,
-`pane:pane_id()` usually returns that same number — but not always.
+The plugin has to match a pane's records to a pane on screen. Inside a pane,
+`$WEZTERM_PANE` is the number the records are filed under. From the config
+side, `pane:pane_id()` usually returns that same number — but not always.
 
 A GUI window attached to a mux server through a unix domain numbers the panes it
 displays itself. A process inside one of those panes still reads the *server's*
-id from `$WEZTERM_PANE` and writes its marker under that name, so the id the
-config sees and the id the file is named after are two different numbers. Every
-read, write, acknowledgement and removal the plugin performs for that pane would
-land on the wrong file.
+id from `$WEZTERM_PANE`, so the id the config sees and the id the records are
+filed under are two different numbers.
 
-The fix is for the pane to publish its own id as the `WEZTERM_PANE` user
-variable, which `pane:get_user_vars()` reads back for local and mux-client panes
-alike. In zsh, publish it on every prompt so it survives a reattach:
+So the pane publishes who it is: the `attention` command emits the
+`WEZTERM_PANE` user variable and, once a launch has claimed the pane, the
+`WEZTERM_ATTENTION` identity, and `pane:get_user_vars()` reads them back for
+local and mux-client panes alike. The shell integration republishes them at
+every prompt, which covers a reattach; after a reconnect the plugin also runs
+one realm publication itself (see [How it works](#how-it-works)).
 
-```zsh
-__wezterm_publish_pane() {
-  [[ -n "$WEZTERM_PANE" ]] || return
-  printf '\e]1337;SetUserVar=WEZTERM_PANE=%s\a' "$(printf %s "$WEZTERM_PANE" | base64)"
-}
-precmd_functions+=(__wezterm_publish_pane)
-```
+**A mux-attached pane that has published nothing shows nothing.** The plugin
+reads and acknowledges nothing for it, and it contributes no indicator to its
+tab. Guessing from the local id would be worse than doing nothing, because that
+number names some other pane.
 
-The value is base64-encoded because that is what the OSC 1337 `SetUserVar`
-sequence expects. A hook or agent that writes markers can emit the same sequence
-to `/dev/tty`, which covers panes whose shell has not been reloaded yet.
-
-**Without this, a mux-attached GUI cannot address markers at all.** The plugin
-treats a remote pane that has published nothing as having no marker id: it reads,
-writes, acknowledges and removes nothing for that pane, and the pane contributes
-no indicator to its tab. Guessing from the local id would be worse than doing
-nothing, because that number names some other pane's marker file.
-
-Panes in the GUI's own domains need none of this: the `local` domain, every exec
-domain, every serial port and every WSL domain. There `pane:pane_id()` and
+Panes in the GUI's own domains need no published id: the `local` domain, every
+exec domain, every serial port and every WSL domain. There `pane:pane_id()` and
 `$WEZTERM_PANE` are the same number. Any program that prints to the terminal can set a
 user variable, so on these panes the pane's own id wins: a published `WEZTERM_PANE`
 that disagrees with it is ignored, and a `WEZTERM_ATTENTION` identity naming another
 pane makes the pane invalid (logged once as `record_invalid`) rather than borrowing
 that pane's state.
 
-### Subagent activity: the `.agents` sidecar
+### Subagent activity
 
-A pane can have more than one thing running in it. Beside the marker file, the
-writer maintains `~/.local/state/wezterm-attention/<WEZTERM_PANE>.agents`:
-
-```json
-{
-  "agents": {
-    "agent-4f2a": { "type": "general-purpose", "last_ms": 1756890000000 },
-    "agent-91bd": { "type": "Explore",         "last_ms": 1756890042000 }
-  }
-}
-```
-
-One entry per subagent that has run a tool call from that pane, keyed by
-whatever id the writer uses for it. `last_ms` is when that subagent last ran a
-tool call, in epoch milliseconds. `type` is the writer's own label for the
-subagent; the plugin carries it in the file but does not interpret it.
-
-**The writer owns this file.** The plugin only reads it, and deletes it when the
-pane closes or `remove_marker` is called. A marker that expires by TTL leaves it
-alone — the subagents are still running.
-
-An entry is **live for ten minutes** after its `last_ms`. Older entries are
-ignored, so a writer that never cleans up still stops reporting a subagent that
-has gone quiet. An absent, empty, or unparseable file counts as zero live
-subagents and never disturbs the marker beside it.
-
-The file is **independent of the marker.** A pane can carry live subagents with
-no marker at all — the parent agent stopped and you acknowledged its ✓ — or
-alongside a marker of any type.
+Claude Code and Codex hooks record each subagent that runs a tool call from a
+pane, and when it stops. A subagent counts as live until it stops or ten minutes
+pass without a tool call from it. The count is independent of the pane's own
+activity: a pane can carry live subagents with no activity at all — the parent
+agent stopped and you acknowledged its ✓ — or alongside activity of any type.
 
 The tab renders the live count as `+N`, inside the space the indicator already
 occupies:
 
-| Marker | Live subagents | Tab shows |
-|--------|----------------|-----------|
+| Activity | Live subagents | Tab shows |
+|----------|----------------|-----------|
 | `stop` | 0 | `✓ ` |
 | `stop` | 2 | `✓+2 ` |
 | `thinking` | 3 | `◑+3 ` |
 | `notify` | 1 | `!+1 ` |
 | none | 2 | `+2 ` with default tab colors |
 
-The count never decides which marker wins the tab — priority is settled by the
-markers alone. But a change in the count alone is a visible change, so it
+The count never decides which state wins the tab — priority is settled by the
+states alone. But a change in the count alone is a visible change, so it
 repaints the tab bar on the next poll like any other.
 
-### The review flag: the `.review` sidecar
+### The review flag
 
-`Alt+B` flags a pane for your own attention. The flag is a file of its own:
+`Alt+B` flags the focused pane for your own attention. The flag is a review
+record owned by `user`, which the plugin writes through the `attention` command
+under the same locks as every other review writer. A press on a tab that carries
+your flag on any of its panes clears it from all of them; a press on a tab that
+does not flags the focused pane. The pane needs a launch claim, which the shell
+integration provides; a pane no launch has claimed cannot be flagged.
 
-```
-~/.local/state/wezterm-attention/<WEZTERM_PANE>.review
-{"publication_id":"1756890000000-a1b2c3d4-7"}
-```
+The flag is a record of its own, so it coexists with whatever the pane's agent
+records:
 
-Its **presence is the flag**; nothing reads the body, so a truncated write still
-counts as flagged rather than silently losing a flag you set by hand. The plugin
-writes it the same way it writes an acknowledgement — to a per-process temp name,
-then renamed into place — and removes it when you press `Alt+B` again or when the
-pane closes.
-
-It is a separate file because it is a separate claim. The marker file belongs to
-whatever process runs in the pane, and on a pane you actually want to flag there
-is almost always one there: an agent's `thinking`, or the `stop` it left behind.
-As a sidecar it coexists:
-
-| Marker file | `.review` | Tab shows |
-|-------------|-----------|-----------|
-| none | present | `◆ ` |
-| `thinking` | present | `◆ ` (the flag outranks `thinking`) |
-| `stop` unacknowledged | present | `✓ ` (the marker outranks the flag) |
-| `stop` acknowledged | present | `◆ ` |
-| `notify` | present | `! ` |
+| Activity | Your flag | Tab shows |
+|----------|-----------|-----------|
+| none | set | `◆ ` |
+| `thinking` | set | `◆ ` (the flag outranks `thinking`) |
+| `stop` unacknowledged | set | `✓ ` (the activity outranks the flag) |
+| `stop` acknowledged | set | `◆ ` |
+| `notify` | set | `! ` |
 
 Which one wins is the configured `priority` order, with the flag standing in for
 `review`: by default `notify > stop > review > thinking`. The flag is never
@@ -367,61 +298,13 @@ acknowledged — `auto_clear` does not include `review` — so a flagged pane
 comes back to `◆` once its `stop` or `notify` has been seen, and stays there
 until you clear it.
 
-A marker file whose own type is `review` — written by an older version of this
-plugin, or by a writer that publishes `review` directly — is still read as the
-same flag, and `Alt+B` still clears it.
-
-**Atomic writes recommended:** To avoid partial reads, write to a `.tmp` file then rename:
-
-### Shell (one-liner)
-
-```bash
-case "$WEZTERM_PANE" in '' | *[!0-9]*) exit 0 ;; esac  # numeric pane id only
-MARKER_DIR="${WEZTERM_ATTENTION_DIR:-$HOME/.local/state/wezterm-attention}"
-mkdir -p "$MARKER_DIR"
-if command -v uuidgen >/dev/null 2>&1; then PUBLICATION_ID="$(uuidgen)"; else PUBLICATION_ID="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"; fi
-printf '{"type":"stop","publication_id":"%s","updated_at":%s}\n' "$PUBLICATION_ID" "$(date +%s)" > "$MARKER_DIR/$WEZTERM_PANE.tmp" && mv "$MARKER_DIR/$WEZTERM_PANE.tmp" "$MARKER_DIR/$WEZTERM_PANE"
-```
-
-### TypeScript / Bun
-
-```typescript
-import { mkdir, writeFile, rename } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
-import { join } from "node:path";
-
-const pane = process.env.WEZTERM_PANE;
-if (!pane || !/^\d+$/.test(pane)) process.exit(0); // numeric pane id only
-
-const dir = process.env.WEZTERM_ATTENTION_DIR || join(process.env.HOME!, ".local", "state", "wezterm-attention");
-await mkdir(dir, { recursive: true });
-
-const file = join(dir, pane);
-await writeFile(file + ".tmp", JSON.stringify({ type: "stop", publication_id: randomUUID(), updated_at: Date.now() }));
-await rename(file + ".tmp", file);
-```
-
-### Node.js
-
-```javascript
-const fs = require("fs");
-const path = require("path");
-const { randomUUID } = require("crypto");
-
-const pane = process.env.WEZTERM_PANE;
-if (!pane || !/^\d+$/.test(pane)) process.exit(0); // numeric pane id only
-
-const dir = process.env.WEZTERM_ATTENTION_DIR || path.join(process.env.HOME, ".local", "state", "wezterm-attention");
-fs.mkdirSync(dir, { recursive: true });
-
-const file = path.join(dir, pane);
-fs.writeFileSync(file + ".tmp", JSON.stringify({ type: "stop", publication_id: randomUUID(), updated_at: Date.now() }));
-fs.renameSync(file + ".tmp", file);
-```
+A review is withdrawn only by its owner. A review another source published —
+`attention mark review --source NAME`, or Pi's bus as `pi-bus` — also shows
+`◆`, and `Alt+B` leaves it; `attention mark clear --source NAME` withdraws it.
 
 ## Existing update-status handler?
 
-By default, the plugin registers its own `update-status` handler to poll marker files. If you already have one (e.g., for a git status bar), use manual polling instead:
+By default, the plugin registers its own `update-status` handler to poll pane records. If you already have one (e.g., for a git status bar), use manual polling instead:
 
 ```lua
 attention.apply_to_config(config, { auto_poll = false })
@@ -440,39 +323,28 @@ The plugin exposes functions for use in your own WezTerm Lua code:
 ```lua
 local attention = wezterm.plugin.require("https://github.com/pro-vi/wezterm-attention")
 
--- The id a pane's markers are named after: in one of the GUI's own domains
+-- The id a pane's records are filed under: in one of the GUI's own domains
 -- (local, exec, serial, WSL) its pane id; elsewhere the server pane id it
 -- published (WEZTERM_ATTENTION, else WEZTERM_PANE); nil when it published neither.
 local marker_id = attention.pane_marker_id(pane)
 
 -- Read cached attention state:
 -- returns (type, frame, source, reserved, subagents, review) or nil.
--- source is the marker's JSON "source" string (nil when it carried none);
+-- source is the activity's "source" (nil when it carried none);
 -- reserved is always false; it preserves the positions of later tuple values;
--- subagents is how many of the pane's subagents ran a tool call in the last
--- ten minutes, 0 when none. A pane with live subagents and no marker returns
--- (nil, nil, nil, false, n).
--- review is true when the pane carries the Alt+B flag. state is the effective
--- type: "review" when the flag outranks the marker file, the marker's own type
--- when that outranks the flag -- and then review is still true.
+-- subagents is how many of the pane's subagents are live, 0 when none. A pane
+-- with live subagents and no activity returns (nil, nil, nil, false, n).
+-- review is true when the pane carries a review flag. state is the effective
+-- type: "review" when the flag outranks the activity, the activity's own type
+-- when that outranks the flag -- and then review is still true. nil when the id
+-- is seen at more than one full pane address; get_attention_view tells them apart.
 local state, frame, source, reserved, subagents, review = attention.get_attention(marker_id)
 
 -- Read fifteen cached base fields plus independent lifecycle evidence, without
 -- I/O. Nested returned values do not share mutable state with the plugin cache.
 local view = attention.get_attention_view(pane)
 
--- Clear a v1 flat marker programmatically. This removes the flat marker file and
--- the sidecars beside it; it does not clear a v2 activity record or acknowledge
--- a v2 record's event, even when the id resolves to a pane with v2 records. An
--- id that is not a pane id does nothing.
-attention.remove_marker(marker_id)
-
--- Check the GUI-side identity publication of every pane in a window. Returns a
--- list of diagnostics, empty when every pane is identified. File, socket,
--- process, permission and version checks belong to `attention doctor`.
-local diagnostics = attention.doctor(window)
-
--- Poll markers manually (for auto_poll = false)
+-- Poll manually (for auto_poll = false)
 attention.poll(window, { active_pane = pane })
 
 -- Wrap a title function with attention decoration (for renderer = "manual")
@@ -494,7 +366,7 @@ The extension registers no commands and leaves print mode alone. It forwards `se
 
 Other extensions may emit `thinking`, `stop`, `notify`, `review`, or `clear` on the bus. Review uses the `pi-bus` owner. Clear writes an ordered activity-clear record and clears that owner without hiding newer activity.
 
-Which format Pi writes depends on the pane. Where `WEZTERM_ATTENTION_ROOT` is unset (the `attention` command is not built), it writes v1 flat markers. Where it is set, it writes v2 records through the command, and those need a launch claim. On macOS, Pi's session start claims the pane for the Pi process itself, so `pi` needs no claim step; the extension tells the writer its own pid for that. On Linux, or with self-claim switched off, a pane where `pi` was started without a claim refuses every event, Pi shows one warning, and the tab shows nothing for Pi; start Pi from a shell that claims for it, see [Mux setup](docs/mux-setup.md). Lifecycle observations are kept only for a Pi that inherited a shell's launch id.
+Pi writes through the `attention` command that `WEZTERM_ATTENTION_ROOT` names. Where it is unset in a WezTerm pane (the command is not built, or the pane was opened before it was), Pi records nothing and shows one warning. Outside WezTerm, where `WEZTERM_PANE` is unset, it records nothing and says nothing. Its records need a launch claim. On macOS, Pi's session start claims the pane for the Pi process itself, so `pi` needs no claim step; the extension tells the writer its own pid for that. On Linux, or with self-claim switched off, a pane where `pi` was started without a claim refuses every event, Pi shows one warning, and the tab shows nothing for Pi; start Pi from a shell that claims for it, see [Mux setup](docs/mux-setup.md). Lifecycle observations are kept only for a Pi that inherited a shell's launch id.
 
 For cached lifecycle observations, question-publication evidence and consumer-owned presentation, see the [consumer guide](docs/consumer-guide.md).
 
@@ -586,12 +458,12 @@ A WezTerm window attached to a mux server mirrors the server's tabs under number
   "window_id": 0,
   "published_at_ms": 1789884000123,
   "source": { "socket_path": "/…/gui-sock-4946", "realm_id": "…", "incarnation_id": "…" },
-  "tabs": [ { "number": 11, "text": " 11: ✓ braid ", "marker_ids": ["16"] } ] }
+  "tabs": [ { "number": 11, "text": " 11: ✓ braid ", "marker_ids": ["v2:…:…:16"] } ] }
 ```
 
 `source` names the GUI that drew the window, because a window id means something only inside one GUI process. The plugin learns that identity by asking the `attention` command shortly after startup. A window's first order is held until that answer arrives and then written under its source; when the command is not built, or no answer can come, it is written as a schema-1 file at `tabs/<window id>.json` with no `source`. A window keeps the one file it was first written to for as long as it is open, with one exception: after a config reload that finds the command built, a window first written without a `source` is written under its source, and the plugin removes the schema-1 file it wrote for that window unless another GUI has rewritten it since.
 
-`number` is the number the bar printed, `text` is the whole string it drew (escape sequences and control characters removed, cut to 256 bytes, and a spinner always shown at its first frame so the file does not change every second), and `marker_ids` are the IDs the plugin already uses for those panes — already translated out of the window's local numbering, because only the window could translate them. A pane on v1 flat markers is a canonical decimal marker id; a pane with v2 records is `v2:<realm_id>:<incarnation_id>:<pane_id>` once a poll has identified it. The file is written when a window's composed list changes and at no other time, so `published_at_ms` says when the bar last drew something different.
+`number` is the number the bar printed, `text` is the whole string it drew (escape sequences and control characters removed, cut to 256 bytes, and a spinner always shown at its first frame so the file does not change every second), and `marker_ids` are the IDs the plugin already uses for those panes — already translated out of the window's local numbering, because only the window could translate them. A pane that a launch has claimed is `v2:<realm_id>:<incarnation_id>:<pane_id>`; a pane no launch has claimed is its canonical decimal pane id. A pane appears once a poll has identified it. The file is written when a window's composed list changes and at no other time, so `published_at_ms` says when the bar last drew something different.
 
 Read it with `attention tabs`, which returns every window in the same JSON envelope as `bindings`. **It is honest about when it was written, not guaranteed current**: nothing refreshes it while the bar is idle, and no consumer should act on a number it has not checked. Use it to describe tabs and to resolve "the second `api` tab"; to act on one, ask the GUI, where `mux_window:tabs_with_info()` returns the drawn order live.
 
@@ -603,29 +475,27 @@ Every setup publishes, including a plain local WezTerm where the drawn number eq
 
 The plugin uses a **poller/renderer split** to avoid blocking WezTerm's GUI thread:
 
-1. **Poller** (`update-status` event) — runs on WezTerm's `config.status_update_interval` (default 1000ms). Reads marker files and acknowledgement sidecars, then updates an in-memory cache. It acknowledges the focused window's current active pane and asks WezTerm to rebuild the tab bar when a pane's effective attention changes. It also removes the marker of any pane that was in the window on the previous tick and is gone now — unless every pane of that pane's domain went at once, which is a domain detach rather than a close, and those panes are still alive on the server.
+1. **Poller** (`update-status` event) — runs on WezTerm's `config.status_update_interval` (default 1000ms). Reads each pane's records, then updates an in-memory cache. It acknowledges the focused window's current active pane, by running the `attention` command once for each new activity shown there, and again after a backoff wait when that run could not get the pane's locks or did not answer, and asks WezTerm to rebuild the tab bar when a pane's effective attention changes. It drops the cache entry of any pane that was in the window on the previous tick and is gone now — unless every pane of that pane's domain went at once, which is a domain detach rather than a close, and those panes are still alive on the server. It deletes nothing.
 2. **Renderer** (`format-tab-title` event) — fires on every tab repaint (mouse hover, key press, redraws). Reads only from the cache — no file reads, instant returns. It writes one file, and only when a window's whole bar draws something different from the last time it drew: the [drawn tab order](#the-drawn-tab-order), which no other process can see. A repaint that draws the same thing composes the list, compares it, and touches nothing.
 
-WezTerm rebuilds tab titles when something it knows about changes, and a marker file appearing on disk is not one of those things. When the poller sees a pane's effective attention change, it performs `ActivateTabRelative(0)` on the focused window. That re-activates the already-selected tab and makes WezTerm recompute every tab title. The plugin does not write either status string, the window title, or any user title.
+WezTerm rebuilds tab titles when something it knows about changes, and a record appearing on disk is not one of those things. When the poller sees a pane's effective attention change, it performs `ActivateTabRelative(0)` on the focused window. That re-activates the already-selected tab and makes WezTerm recompute every tab title. The plugin does not write either status string, the window title, or any user title.
 
 Set `request_redraw = false` to switch that request off, for a host whose own `update-status` handler already redraws the titles it owns. The redraw action can pass through WezTerm's normal tab-activation path, including terminal focus reporting. It therefore runs only when the window has keyboard focus and a valid active pane. Generated spinner frames use one-second wall-clock buckets, so polls induced by the action see the same frame and terminate. If an action fails, that window logs once and stops requesting redraws.
 
 For mux domains, the poller also recovers identity after a GUI reconnect. It waits for the pane count to be stable across two polls, runs one realm publication, then retries after 2, 5, 10, and 30 seconds while any pane remains unpublished. The child PATH includes `wezterm.executable_dir`; publication writes terminal output and never pane input.
 
-The Lua implementation is split by responsibility under `plugin/`: protocol validation, record reading, runtime polling, overlays, legacy compatibility, title sampling, and formatting. `plugin/init.lua` owns configuration, composition, callback registration, and the public API.
+The Lua implementation is split by responsibility under `plugin/`: protocol validation, record reading, runtime polling, tab-order publication and error reporting, title sampling, and formatting. `plugin/init.lua` owns configuration, composition, callback registration, and the public API.
 
 ## Troubleshooting
 
-**Markers not showing?**
-- If the window is attached to a mux server (`wezterm connect`, a unix domain), check the pane publishes its id: `wezterm cli list --format json` shows the server-side pane id, and the pane must emit that number as the `WEZTERM_PANE` user var. See [Publishing the pane id](#publishing-the-pane-id). Without it the plugin deliberately does nothing for that pane.
-- Check the directory exists: `ls ~/.local/state/wezterm-attention/`, or `$XDG_STATE_HOME/wezterm-attention` when `XDG_STATE_HOME` is set, or your configured `dir` (see [Configure](#configure) for the order)
-- Verify `WEZTERM_PANE` is set: `echo $WEZTERM_PANE` (should print a number inside WezTerm)
-- Check file contents: `cat ~/.local/state/wezterm-attention/$WEZTERM_PANE` (should be valid JSON)
-- A `+N` with no glyph beside it is the [subagent count](#subagent-activity-the-agents-sidecar) for a pane whose own marker is gone or already acknowledged. `cat ~/.local/state/wezterm-attention/$WEZTERM_PANE.agents` shows the entries; ones older than ten minutes are not counted.
-- A matching `$WEZTERM_PANE.ack` means that publication was already displayed. Removing the sidecar makes it visible again; sidecars are plugin-owned and safe to remove before rolling back to an older plugin version.
-- A ◆ that no marker file explains is the `Alt+B` flag: `ls ~/.local/state/wezterm-attention/$WEZTERM_PANE.review`. Pressing `Alt+B` in that tab clears it, and so does deleting the file.
-- Ensure your hooks write to the same path as the plugin's `dir` setting
-- `status_update_interval` defaults to 1000ms; markers update on this interval. Lower it if indicators feel slow — the redraw request rides on the same tick.
+**Indicators not showing?**
+- Run `attention doctor`: it checks the state directory's permissions and records, the mux socket, the pane's environment, agent processes and the command's version.
+- If the window is attached to a mux server (`wezterm connect`, a unix domain), check the pane publishes its identity: `wezterm cli list --format json` shows the server-side pane id, and the pane must emit it as the `WEZTERM_PANE` user var. See [Publishing the pane id](#publishing-the-pane-id). Without it the plugin deliberately does nothing for that pane.
+- Check the plugin found the command: without it the WezTerm log says `libexec/attention-rs is missing`, and nothing is recorded.
+- Ensure your hooks write to the same state directory as the plugin's `dir` setting (see [Configure](#configure) for the order).
+- A `+N` with no glyph beside it is the [subagent count](#subagent-activity) for a pane whose own activity is gone or already acknowledged.
+- A ◆ that `Alt+B` does not clear is a review another source published; `attention mark clear --source NAME` withdraws it.
+- `status_update_interval` defaults to 1000ms; indicators update on this interval. Lower it if indicators feel slow — the redraw request rides on the same tick.
 
 **Indicators appear only when you switch tabs?**
 - In `renderer = "manual"` mode, pass the event pane: `attention.poll(window, { active_pane = pane })`. The plugin resolves `window:active_pane()` at use time; the event pane is used only when the current pane is unavailable.
@@ -637,9 +507,9 @@ The Lua implementation is split by responsibility under `plugin/`: protocol vali
 
 **Alt+B not working?**
 - Check for keybind conflicts. Set `review_key = false` and bind manually if needed.
-- It does work on a pane that already has a marker — the flag is the separate `$WEZTERM_PANE.review` file. If the tab still shows `✓` or `!` after a press, that marker simply outranks the flag; the ◆ appears once you have seen it.
-- On a mux-attached pane that has not published its `WEZTERM_PANE` user var, the press is refused and logged once, because the plugin cannot tell which pane's files to write. See [Publishing the pane id](#publishing-the-pane-id).
-- On a pane with v2 records whose current launch claim is not the launch the pane last published, the press is refused and logged (`cannot flag this pane for review: ...`), because the flag would not show. The next prompt republishes the claim.
+- It works on a pane an agent is running in: the flag is a record of its own. If the tab still shows `✓` or `!` after a press, that activity outranks the flag; the ◆ appears once you have seen it.
+- On a pane no launch has claimed — no shell integration, or a mux-attached pane that has not published its identity — the press is refused and logged once, because no reader would show the flag.
+- A press runs the `attention` command. When it refuses, the reason is logged once for each kind of refusal on that pane (`attention plugin set-review failed for pane N: ...`) and the tab does not change: `claim_stale` means the pane's launch claim is not the launch the pane last published, which the next prompt republishes. `probe_unavailable` means a hook held the pane's records at that moment; press again. A log line saying the command may predate the plugin means it was built before the plugin was updated: run `scripts/install-cli.sh` again.
 
 ## Type annotations
 

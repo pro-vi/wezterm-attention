@@ -19,7 +19,7 @@ fn mark(setup: &Setup, state: &str, source: &str, observation: &str) {
 
 fn review_path(setup: &Setup, source: &str) -> PathBuf {
     let (address, _) = pane_address(&setup.env).unwrap();
-    pane_path(&state_root(&setup.env).unwrap(), &address)
+    pane_dir(&state_root(&setup.env).unwrap(), &address)
         .join("reviews")
         .join(format!(
             "{}.json",
@@ -131,7 +131,7 @@ fn rust_activity(setup: &Setup) -> (RecordAvailability, Option<String>) {
     let root = state_root(&setup.env).unwrap();
     let (address, _) = pane_address(&setup.env).unwrap();
     let pointer: Option<Value> =
-        fs::read(launch_path(&root, &address, launch_id).join("current-binding.json"))
+        fs::read(launch_dir(&root, &address, launch_id).join("current-binding.json"))
             .ok()
             .map(|bytes| serde_json::from_slice(&bytes).unwrap());
     let scope = PaneScope::new(
@@ -153,6 +153,13 @@ fn rust_activity(setup: &Setup) -> (RecordAvailability, Option<String>) {
 
 /// The line the plugin reader, run inside a real WezTerm, prints for this pane.
 fn lua_activity(setup: &Setup) -> String {
+    plugin_reader_answer(setup, "activity")
+}
+
+/// What the plugin, run inside a real WezTerm, answers about this pane:
+/// `question` is `activity` for what its tab shows, or `user_review` for
+/// whether the review key finds the user's flag there.
+pub(super) fn plugin_reader_answer(setup: &Setup, question: &str) -> String {
     let (address, _) = pane_address(&setup.env).unwrap();
     let wire =
         json!({"wire":2,"address":address,"launch_id":setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]});
@@ -167,6 +174,7 @@ fn lua_activity(setup: &Setup) -> String {
         .env("WEZTERM_ATTENTION_VIEW_RESULT", &result)
         .env("WEZTERM_ATTENTION_VIEW_NOW", setup.clock.unix)
         .env("WEZTERM_ATTENTION_VIEW_WIRE", wire.to_string())
+        .env("WEZTERM_ATTENTION_VIEW_QUESTION", question)
         .arg("--config-file")
         .arg(root.join("tests/lua/support/read_attention_view.lua"))
         .args(["show-keys", "--lua"])
@@ -183,7 +191,7 @@ fn lua_activity(setup: &Setup) -> String {
 fn launch_activity_path(setup: &Setup) -> PathBuf {
     let root = state_root(&setup.env).unwrap();
     let (address, _) = pane_address(&setup.env).unwrap();
-    launch_path(&root, &address, &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]).join("activity.json")
+    launch_dir(&root, &address, &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]).join("activity.json")
 }
 
 // Before any provider session binds, `mark` writes the launch's own activity.

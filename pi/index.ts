@@ -8,11 +8,8 @@ import type {
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { accessSync, constants } from "node:fs";
-import { mkdir, rename, rm, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
-const DEFAULT_TTL_MS = 30 * 60 * 1000;
 const ATTENTION_EVENT = "wezterm-attention:mark";
 // Cap for the session_shutdown drain. Bounds the WHOLE queued backlog, not one
 // write — the drain awaits the tail of the serial chain, so N writes trip it once
@@ -20,16 +17,6 @@ const ATTENTION_EVENT = "wezterm-attention:mark";
 const DRAIN_TIMEOUT_MS = 2000;
 
 type AttentionState = "thinking" | "stop" | "notify" | "review";
-
-type Marker = {
-	type: AttentionState;
-	source: "pi";
-	publication_id: string;
-	updated_at: number;
-	updated_at_ms: number;
-	label?: string;
-	ttl_ms?: number;
-};
 
 type PiStartSource = SessionStartEvent["reason"];
 
@@ -62,12 +49,9 @@ type WriterRequest =
 type Report = (message: string) => void;
 
 type WriterResult =
-	| { kind: "unconfigured" }
 	| { kind: "succeeded" }
+	| { kind: "outside_pane" }
 	| { kind: "failed"; message: string };
-
-// The writer's bound on a root path, `path_max_bytes` in protocol/v2.json.
-const PATH_MAX_BYTES = 4096;
 
 // Node decodes the environment as UTF-8 and puts U+FFFD where the bytes were
 // not, so a value holding it most likely was not UTF-8. A path that really
@@ -76,62 +60,10 @@ function decodedFromBrokenBytes(value: string): boolean {
 	return value.includes("\uFFFD");
 }
 
-// A root the Rust writer would take as well: at most its path bound in UTF-8
-// bytes, UTF-8 in the environment, and no character Rust's char::is_control is
-// true for (C0, DEL, C1).
-function safeRootText(path: string): boolean {
-	return (
-		new TextEncoder().encode(path).length <= PATH_MAX_BYTES &&
-		!decodedFromBrokenBytes(path) &&
-		!/[\u0000-\u001f\u007f-\u009f]/.test(path)
-	);
-}
-
-// The same state root the Rust writer and the WezTerm plugin resolve:
-// WEZTERM_ATTENTION_DIR, else $XDG_STATE_HOME/wezterm-attention, else
-// ~/.local/state/wezterm-attention. An empty or relative value is skipped, never
-// used: a relative root would scatter markers under the cwd and let clear's rm()
-// delete a cwd-relative file. So is a value the writer would refuse; here, as
-// in the plugin, a WEZTERM_ATTENTION_DIR like that, or an XDG_STATE_HOME that
-// is not UTF-8 (the writer refuses only an absolute one), is reported and the
-// next rule applies. writerStateRootRefusal
-// handles the configured writer.
-// The final isAbsolute gate closes the HOME="" hole (homedir() also returns ""
-// for HOME=""), so don't drop it.
-function markerDirectory(report: Report): string | undefined {
-	const override = process.env.WEZTERM_ATTENTION_DIR;
-	if (override) {
-		// Checked first so that the report never repeats a control character.
-		if (!safeRootText(override)) {
-			report(
-				`wezterm-attention: ignoring WEZTERM_ATTENTION_DIR because it is longer than ${PATH_MAX_BYTES} bytes, not UTF-8, or holds a control character`,
-			);
-		} else if (isAbsolute(override)) return override;
-		else report("wezterm-attention: ignoring WEZTERM_ATTENTION_DIR because it is not an absolute path");
-	}
-	const stateHome = process.env.XDG_STATE_HOME;
-	if (stateHome && decodedFromBrokenBytes(stateHome)) {
-		report("wezterm-attention: ignoring XDG_STATE_HOME because it is not UTF-8");
-	} else if (stateHome && isAbsolute(stateHome) && safeRootText(stateHome)) {
-		return join(stateHome, "wezterm-attention");
-	}
-	const dir = join(process.env.HOME || homedir(), ".local", "state", "wezterm-attention");
-	return isAbsolute(dir) ? dir : undefined;
-}
-
-// WezTerm injects WEZTERM_PANE as a non-negative integer pane id. Validate the
-// contract: an unvalidated value like "../../foo" would escape the marker
-// directory, and clearMarker's rm could then delete an arbitrary file.
-function paneId(): string | undefined {
-	const id = process.env.WEZTERM_PANE;
-	if (!id || !/^\d+$/.test(id)) return undefined;
-	return id;
-}
-
 // The drain cap is a wall clock, so a test that asserts the drain finished is
 // really asserting that a process spawn fits inside it. On a loaded machine it
 // does not, and the test fails for a reason that has nothing to do with the
-// extension. Same strict-digits parse as the TTL: a malformed value falls back
+// extension. The parse takes strict digits only: a malformed value falls back
 // rather than collapsing the cap to something near zero.
 //
 // The upper bound is not defensive tidiness. `setTimeout` stores its delay in a
@@ -148,35 +80,15 @@ export function drainTimeoutMs(): number {
 	return parsed > 0 && parsed <= MAX_TIMEOUT_MS ? parsed : DRAIN_TIMEOUT_MS;
 }
 
-function ttlMs(): number {
-	const raw = process.env.PI_WEZTERM_ATTENTION_TTL_MS;
-	if (!raw) return DEFAULT_TTL_MS;
-	// Strict digits only: parseInt("30m") is 30, silently turning a "30 minutes"
-	// typo into a 30ms TTL that expires the spinner almost instantly. Reject
-	// anything that isn't a plain integer and fall back to the default.
-	if (!/^\d+$/.test(raw.trim())) return DEFAULT_TTL_MS;
-	const parsed = Number.parseInt(raw.trim(), 10);
-	return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TTL_MS;
-}
-
-// Maps the states other extensions may request over the event bus (including a
-// few friendly aliases) to a canonical marker state, or "clear".
+// The states other extensions may request over the event bus, or "clear".
 function normalizeState(value: string): AttentionState | "clear" | undefined {
 	switch (value) {
-		case "busy":
 		case "thinking":
-			return "thinking";
-		case "ready":
 		case "stop":
-			return "stop";
-		case "blocked":
-		case "pending":
 		case "notify":
-			return "notify";
 		case "review":
-			return "review";
 		case "clear":
-			return "clear";
+			return value;
 		default:
 			return undefined;
 	}
@@ -184,8 +96,8 @@ function normalizeState(value: string): AttentionState | "clear" | undefined {
 
 // All mutations run through one serial chain so emit order == apply order even
 // for the fire-and-forget event path: a `notify` immediately followed by a
-// `clear` must not race (rm finishing before the write's rename would leave the
-// marker present). The chain is module-local; cross-reload ordering comes from
+// `clear` must not race (the clear landing first would leave the notify
+// showing). The chain is module-local; cross-reload ordering comes from
 // the session_shutdown drain. Results are swallowed so one failure never poisons
 // later operations — that contract is `enqueue`'s own, deliberately independent
 // of whether today's callers happen to be non-rejecting.
@@ -197,85 +109,6 @@ function enqueue(op: () => Promise<void>): Promise<void> {
 		() => undefined,
 	);
 	return run;
-}
-
-// A GUI attached through a mux client numbers panes differently from the
-// server that owns this pty, so it cannot find this pane's marker from its own
-// ids. Publishing $WEZTERM_PANE as a WezTerm user var (OSC 1337 SetUserVar)
-// lets every attached GUI read the exact id with pane:get_user_vars(). Once per
-// process, best-effort: no controlling tty means no publish and no error.
-let panePublished = false;
-async function publishPaneId(id: string): Promise<void> {
-	if (panePublished) return;
-	panePublished = true;
-	try {
-		const { open } = await import("node:fs/promises");
-		const tty = await open("/dev/tty", "w");
-		try {
-			await tty.write(`\u001b]1337;SetUserVar=WEZTERM_PANE=${Buffer.from(id, "utf8").toString("base64")}\u0007`);
-		} finally {
-			await tty.close();
-		}
-	} catch {
-		// no tty (headless run) or the write lost: the GUI simply cannot address this pane yet
-	}
-}
-
-async function writeMarkerNow(report: Report, state: AttentionState, label?: string): Promise<void> {
-	const id = paneId();
-	if (!id) return;
-	await publishPaneId(id);
-
-	const dir = markerDirectory(report);
-	if (!dir) return;
-	const path = join(dir, id);
-	const publicationId = randomUUID();
-	// The flat activity marker carries seconds in `updated_at` and
-	// milliseconds in `updated_at_ms`. Writing milliseconds under `updated_at`
-	// reads as a date tens of thousands of years out to any consumer that
-	// follows the contract.
-	const observedMs = Date.now();
-	const marker: Marker = {
-		type: state,
-		source: "pi",
-		publication_id: publicationId,
-		updated_at: Math.floor(observedMs / 1000),
-		updated_at_ms: observedMs,
-	};
-	if (label) marker.label = label;
-	if (state === "thinking") marker.ttl_ms = ttlMs();
-
-	const tmp = `${path}.tmp.${publicationId}`;
-	try {
-		await mkdir(dir, { recursive: true });
-		await writeFile(tmp, JSON.stringify(marker) + "\n");
-		await rename(tmp, path);
-	} catch {
-		// Best-effort: a marker that fails to write just means the tab doesn't change.
-		// A failed rename (e.g. the destination is a directory) leaves tmp behind —
-		// remove it so failures don't accumulate filesystem residue.
-		await rm(tmp, { force: true }).catch(() => {});
-	}
-}
-
-async function clearMarkerNow(report: Report): Promise<void> {
-	const id = paneId();
-	if (!id) return;
-	const dir = markerDirectory(report);
-	if (!dir) return;
-	try {
-		await rm(join(dir, id), { force: true });
-	} catch {
-		// Best-effort.
-	}
-}
-
-function mark(report: Report, state: AttentionState, label?: string): Promise<void> {
-	return enqueue(() => writeMarkerNow(report, state, label));
-}
-
-function clearMarker(report: Report): Promise<void> {
-	return enqueue(() => clearMarkerNow(report));
 }
 
 function sessionFacts(ctx: ExtensionContext): SessionFacts | undefined {
@@ -290,11 +123,6 @@ function sessionFacts(ctx: ExtensionContext): SessionFacts | undefined {
 		cwd: ctx.cwd,
 		...(model ? { model } : {}),
 	};
-}
-
-function requestFromSessionStart(event: SessionStartEvent, ctx: ExtensionContext): WriterRequest | undefined {
-	const facts = sessionFacts(ctx);
-	return facts ? { kind: "binding", startSource: event.reason, ...facts } : undefined;
 }
 
 // The Rust writer refuses a WEZTERM_ATTENTION_DIR or XDG_STATE_HOME that is
@@ -312,9 +140,21 @@ function writerStateRootRefusal(): string | undefined {
 	return undefined;
 }
 
-function writerExecutable(): { kind: "unconfigured" } | { kind: "ready"; executable: string } | { kind: "failed"; message: string } {
+// Without the attention command nothing records what Pi is doing: the tab
+// shows nothing for it, and the one warning below says why. Outside a WezTerm
+// pane there is no tab, so an unset root there is not worth a warning.
+function writerExecutable():
+	| { kind: "ready"; executable: string }
+	| { kind: "outside_pane" }
+	| { kind: "failed"; message: string } {
 	const root = process.env.WEZTERM_ATTENTION_ROOT;
-	if (root === undefined) return { kind: "unconfigured" };
+	if (root === undefined) {
+		if (!process.env.WEZTERM_PANE) return { kind: "outside_pane" };
+		return {
+			kind: "failed",
+			message: "wezterm-attention: WEZTERM_ATTENTION_ROOT is not set, so nothing is recorded; build the attention command with scripts/install-cli.sh",
+		};
+	}
 	if (!root || !isAbsolute(root)) {
 		return { kind: "failed", message: "wezterm-attention: WEZTERM_ATTENTION_ROOT must name an absolute checkout" };
 	}
@@ -429,38 +269,11 @@ async function invokeWriter(request: WriterRequest, transportId: string): Promis
 	});
 }
 
-async function applyLegacyFallback(request: WriterRequest, report: Report): Promise<void> {
-	switch (request.kind) {
-		case "tool_start":
-			await writeMarkerNow(report, "thinking");
-			return;
-		case "tool_end":
-		case "input":
-		case "attempt_outcome":
-			return;
-		case "compaction":
-			return;
-		case "activity":
-			await writeMarkerNow(report, request.state, request.label);
-			return;
-		case "review":
-			await writeMarkerNow(report, "review");
-			return;
-		case "clear":
-			await clearMarkerNow(report);
-			return;
-		case "binding":
-		case "end":
-			return;
-	}
-}
-
 function enqueueWriter(request: WriterRequest, reportFailure: Report): Promise<void> {
 	const transportId = randomUUID();
 	return enqueue(async () => {
 		const result = await invokeWriter(request, transportId);
-		if (result.kind === "unconfigured") await applyLegacyFallback(request, reportFailure);
-		else if (result.kind === "failed") reportFailure(result.message);
+		if (result.kind === "failed") reportFailure(result.message);
 	});
 }
 
@@ -536,104 +349,73 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 		else console.error(message);
 	};
 
-	pi.on("session_start", (event, ctx) => {
-		const request = requestFromSessionStart(event, ctx);
-		if (!request) return;
-		currentContext = ctx;
-		currentSession = {
-			sessionId: request.sessionId,
-			launchId: request.launchId,
-			...(request.sessionFile ? { sessionFile: request.sessionFile } : {}),
-			cwd: request.cwd,
-			...(request.model ? { model: request.model } : {}),
-		};
-		void enqueueWriter(request, reportWriterFailure).catch(() => {});
-	});
-
-	// Automatic: Pi lifecycle → WezTerm tab state. Lifecycle handlers are per-instance,
-	// replaced wholesale on reload, so they don't accumulate (unlike the shared bus
-	// listener below — no dedup needed here).
+	// Forwards one Pi event to the writer, for the session `ctx` belongs to.
+	// `makeCurrent` makes that session the one bus requests are written into and
+	// its UI the one a warning goes to.
 	//
-	// These do NOT await the write. Pi awaits lifecycle handlers on the agent's own
-	// critical path with no timeout, so awaiting marker I/O here would put the
+	// The write is NOT awaited. Pi awaits lifecycle handlers on the agent's own
+	// critical path with no timeout, so awaiting the writer here would put the
 	// filesystem in the agent's latency budget — and on a mount whose syscalls block
 	// forever (hard NFS/SMB, dead FUSE) it would wedge the host (one stuck op parks
 	// every later event via the shared chain; headless `pi -p` never terminates). A tab
 	// tint is best-effort; host liveness is not. Ordering is unaffected — `enqueue`
 	// chains synchronously at call time, so emit order == apply order regardless of the
-	// await. The session_shutdown drain now guarantees these land before a reload; don't
+	// await. The session_shutdown drain guarantees these land before a reload; don't
 	// weaken it.
-	pi.on("agent_start", (_event, ctx) => {
+	const forward = (
+		ctx: ExtensionContext,
+		request: (facts: SessionFacts) => WriterRequest,
+		{ makeCurrent = false }: { makeCurrent?: boolean } = {},
+	) => {
 		const facts = sessionFacts(ctx);
 		if (!facts) return;
-		currentContext = ctx;
-		currentSession = facts;
-		void enqueueWriter({ kind: "activity", state: "thinking", event: "agent_start", ...facts }, reportWriterFailure).catch(() => {});
-	});
+		if (makeCurrent) {
+			currentContext = ctx;
+			currentSession = facts;
+		}
+		void enqueueWriter(request(facts), reportWriterFailure).catch(() => {});
+	};
 
-	pi.on("tool_execution_start", (event, ctx) => {
-		const facts = sessionFacts(ctx);
-		if (!facts) return;
-		currentContext = ctx;
-		currentSession = facts;
-		void enqueueWriter({ kind: "tool_start", toolName: event.toolName, toolCallId: event.toolCallId, ...facts }, reportWriterFailure).catch(() => {});
-	});
-
-	pi.on("tool_execution_end", (event, ctx) => {
-		const facts = sessionFacts(ctx);
-		if (!facts) return;
-		void enqueueWriter({ kind: "tool_end", toolName: event.toolName, toolCallId: event.toolCallId, isError: event.isError, ...facts }, reportWriterFailure).catch(() => {});
-	});
-	pi.on("input", (event, ctx) => {
-		const facts = sessionFacts(ctx);
-		if (!facts) return;
-		void enqueueWriter({ kind: "input", source: event.source, ...facts }, reportWriterFailure).catch(() => {});
-	});
+	// Automatic: Pi lifecycle → WezTerm tab state. Lifecycle handlers are per-instance,
+	// replaced wholesale on reload, so they don't accumulate (unlike the shared bus
+	// listener below — no dedup needed here).
+	pi.on("session_start", (event, ctx) =>
+		forward(ctx, (facts) => ({ kind: "binding", startSource: event.reason, ...facts }), { makeCurrent: true }));
+	pi.on("agent_start", (_event, ctx) =>
+		forward(ctx, (facts) => ({ kind: "activity", state: "thinking", event: "agent_start", ...facts }), { makeCurrent: true }));
+	pi.on("tool_execution_start", (event, ctx) =>
+		forward(ctx, (facts) => ({ kind: "tool_start", toolName: event.toolName, toolCallId: event.toolCallId, ...facts }), { makeCurrent: true }));
+	pi.on("tool_execution_end", (event, ctx) =>
+		forward(ctx, (facts) => ({ kind: "tool_end", toolName: event.toolName, toolCallId: event.toolCallId, isError: event.isError, ...facts })));
+	pi.on("input", (event, ctx) => forward(ctx, (facts) => ({ kind: "input", source: event.source, ...facts })));
 	pi.on("message_end", (event, ctx) => {
-		if (event.message.role !== "assistant" || (event.message.stopReason !== "error" && event.message.stopReason !== "aborted")) return;
-		const facts = sessionFacts(ctx);
-		if (!facts) return;
-		void enqueueWriter({ kind: "attempt_outcome", stopReason: event.message.stopReason, ...facts }, reportWriterFailure).catch(() => {});
+		const stopReason = event.message.role === "assistant" ? event.message.stopReason : undefined;
+		if (stopReason !== "error" && stopReason !== "aborted") return;
+		forward(ctx, (facts) => ({ kind: "attempt_outcome", stopReason, ...facts }));
 	});
-	pi.on("session_before_compact", (event, ctx) => {
-		const facts = sessionFacts(ctx);
-		if (!facts) return;
-		void enqueueWriter({ kind: "compaction", event: event.type, reason: event.reason, ...facts }, reportWriterFailure).catch(() => {});
-	});
-	pi.on("session_compact", (event, ctx) => {
-		const facts = sessionFacts(ctx);
-		if (!facts) return;
-		void enqueueWriter({ kind: "compaction", event: event.type, reason: event.reason, ...facts }, reportWriterFailure).catch(() => {});
-	});
+	pi.on("session_before_compact", (event, ctx) =>
+		forward(ctx, (facts) => ({ kind: "compaction", event: event.type, reason: event.reason, ...facts })));
+	pi.on("session_compact", (event, ctx) =>
+		forward(ctx, (facts) => ({ kind: "compaction", event: event.type, reason: event.reason, ...facts })));
 
 	// `agent_settled`, NOT `agent_end`: agent_end fires at the end of every
 	// low-level run, but Pi may still auto-retry, auto-compact and retry, or
 	// continue with queued follow-up messages — writing `stop` there flashes a
 	// false ✓ mid-task. agent_settled fires only once Pi will not continue
 	// running automatically. Requires Pi >= 0.80.5.
-	pi.on("agent_settled", (_event, ctx) => {
-		const facts = sessionFacts(ctx);
-		if (!facts) return;
-		currentContext = ctx;
-		currentSession = facts;
-		void enqueueWriter({ kind: "activity", state: "stop", event: "agent_settled", ...facts }, reportWriterFailure).catch(() => {});
-	});
+	pi.on("agent_settled", (_event, ctx) =>
+		forward(ctx, (facts) => ({ kind: "activity", state: "stop", event: "agent_settled", ...facts }), { makeCurrent: true }));
 
 	// Cooperative: any other Pi extension (e.g. an ask-user extension) can emit
 	// this event to request a state — notably `notify` (the "waiting for you" `!`),
 	// which the lifecycle events never produce. Emit a bare string ("notify") or
-	// an object ({ type: "notify", label }); "clear" removes the marker.
+	// an object ({ type: "notify", label }); "clear" withdraws it.
 	// The bus ignores the handler's return value; we return the mutation promise
 	// so callers/tests can await completion deterministically.
 	installBusListener(pi, (data) => {
 		const request = normalizeEventData(data);
 		if (!request) return;
 		if (!currentSession) {
-			if (process.env.WEZTERM_ATTENTION_ROOT === undefined) {
-				return request.state === "clear"
-					? clearMarker(reportWriterFailure)
-					: mark(reportWriterFailure, request.state, request.label);
-			}
 			reportWriterFailure("wezterm-attention: no Pi session is available for the configured writer");
 			return;
 		}
@@ -655,18 +437,18 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 	//      doesn't cancel a write that overruns it, nor an op enqueued after this race
 	//      snapshots the chain (e.g. a later extension emitting `clear` on the bus during
 	//      its own shutdown, which our still-live listener enqueues past the snapshot — a
-	//      pure race, fine on a healthy system). A stale write self-limits (next event or
-	//      ttl_ms); a stale `clear` removes the marker, and ttl_ms can't restore an absent
-	//      file — only a later write does.
+	//      pure race, fine on a healthy system). A stale write self-limits (the next
+	//      event replaces it); a stale `clear` withdraws the state, and only a later
+	//      write restores it.
 	//   2. Memory — only under a *permanently* blocked write (a dead NFS/SMB/FUSE mount,
 	//      not a merely slow one): the chain retains every op queued behind the stuck head
-	//      (a real in-flight fs op is libuv-rooted), growing until the mount recovers or
+	//      (an in-flight writer process is libuv-rooted), growing until the mount recovers or
 	//      the process restarts.
 	//
 	// The obvious fixes are all worse: a sticky abandoned flag → permanent silence after
 	// a failed reload; sharing the chain across generations → a stuck predecessor stalls
 	// or wedges the successor; a per-op generation counter → the gate precedes the
-	// publish, so it can't catch a write already stalling inside rename; a coalescing
+	// publish, so it can't catch a write already stalling inside the writer; a coalescing
 	// mailbox → bounds memory but breaks the FIFO ordering the tests lock. The real fix
 	// is the deferred bus-owned controller (one per bus, owning the listener + mutation
 	// state, re-asserting the last requested state after an abandoned write lands).

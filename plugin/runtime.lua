@@ -1,61 +1,51 @@
 return function()
   local attention_cache = {}
-  local legacy_cache_key_by_marker_id = {}
+  local cache_key_by_marker_id = {}
   local marker_id_by_local = {}
   local seen_marker_ids_by_window = {}
   local callback_views_by_window = {}
   local delivering_views = false
 
+  --- The key a pane the GUI draws is cached under, from its GUI-local number:
+  --- the one the last poll found for it, or nil when that poll found none (a
+  --- mux-client pane that has not published its $WEZTERM_PANE) or none has
+  --- walked the pane yet.
+  local function drawn_pane_key(local_id)
+    return marker_id_by_local[local_id] or nil
+  end
+
   local function bind(context)
     local M = context.M
     local defaults = context.defaults
     local wezterm = context.wezterm
-    local protocol = context.protocol
-    local diagnostic = context.diagnostic
-    local report_error_once = context.report_error_once
-    local report_warning_once = context.report_warning_once
-    local resolve_pane_read = context.resolve_pane_read
-    local read_attention_view = context.read_attention_view
-    local pane_method = context.pane_method
-    local selected_v2_records_root = context.selected_v2_records_root
-    local v2_review_paths = context.v2_review_paths
-    local write_v2_user_review = context.write_v2_user_review
-    local clear_v2_reviews = context.clear_v2_reviews
-    local restore_cleared_reviews = context.restore_cleared_reviews
-    local refresh_cached_v2 = context.refresh_cached_v2
-    local acknowledge_focused_v2_pane = context.acknowledge_focused_v2_pane
-    local read_effective_marker = context.read_effective_marker
-    local read_marker = context.read_marker
-    local withdraw_closed_tab_orders = context.withdraw_closed_tab_orders
-    local marker_identity = context.marker_identity
-    local clear_acknowledgement = context.clear_acknowledgement
-    local write_acknowledgement = context.write_acknowledgement
-    local count_live_subagents = context.count_live_subagents
-    local review_flagged = context.review_flagged
-    local acknowledgement_matches = context.acknowledgement_matches
-    local remove_expired_marker = context.remove_expired_marker
-    local remove_marker = context.remove_marker
-    local clear_review_flag = context.clear_review_flag
-    local write_review_flag = context.write_review_flag
-    local now_ms = context.now_ms
-    local frame_for_now = context.frame_for_now
-    local stale_ttl_ms = context.stale_ttl_ms
-    local format_unix_ns20 = context.format_unix_ns20
-    local wezterm_now_unix_ns20 = context.wezterm_now_unix_ns20
-    local seconds_until_after = context.seconds_until_after
-    local sample_settled_title = context.sample_settled_title
-    local settled_title_state = context.settled_title_state
-    local gui_tab_pane_ids = context.gui_tab_pane_ids
-    local resolve_visible_attention = context.resolve_visible_attention
+    local protocol_api = context.protocol_api
+    local protocol = protocol_api.protocol
+    local diagnostic = protocol_api.diagnostic
+    local v2_pane_root = protocol_api.v2_pane_root
+    local read_expected_record = protocol_api.read_expected_record
+    local now_ms = protocol_api.now_ms
+    local frame_for_now = protocol_api.frame_for_now
+    local format_unix_ns20 = protocol_api.format_unix_ns20
+    local wezterm_now_unix_ns20 = protocol_api.wezterm_now_unix_ns20
+    local seconds_until_after = protocol_api.seconds_until_after
+    local report_error_once = context.overlays.report_error_once
+    local report_warning_once = context.overlays.report_warning_once
+    local withdraw_closed_tab_orders = context.overlays.withdraw_closed_tab_orders
+    local reader = context.reader
+    local resolve_pane_read = reader.resolve_pane_read
+    local read_attention_view = reader.read_attention_view
+    local pane_method = reader.pane_method
+    local sample_settled_title = context.titles.sample_settled_title
+    local settled_title_state = context.titles.settled_title_state
 
     local function rebuild_scalar_projection()
-      for id in pairs(legacy_cache_key_by_marker_id) do legacy_cache_key_by_marker_id[id] = nil end
+      for id in pairs(cache_key_by_marker_id) do cache_key_by_marker_id[id] = nil end
       for _, observations in pairs(seen_marker_ids_by_window) do
         for key, observation in pairs(observations) do
-          local id = type(observation) == "table" and observation.marker_id or key
-          local previous = legacy_cache_key_by_marker_id[id]
-          if previous == nil then legacy_cache_key_by_marker_id[id] = key
-          elseif previous ~= key then legacy_cache_key_by_marker_id[id] = false end
+          local id = observation.marker_id
+          local previous = cache_key_by_marker_id[id]
+          if previous == nil then cache_key_by_marker_id[id] = key
+          elseif previous ~= key then cache_key_by_marker_id[id] = false end
         end
       end
     end
@@ -68,7 +58,7 @@ return function()
     end
 
     local function observe_pane(window, pane, read)
-      if not read.cache_key or (read.kind ~= "v1" and read.kind ~= "v2") then return end
+      if read.kind ~= "claimed" then return end
       local window_key = tostring(window:window_id())
       local local_id = tostring(pane_method(pane, "pane_id"))
       local observations = seen_marker_ids_by_window[window_key] or {}
@@ -120,166 +110,12 @@ return function()
         if not panes_ok or type(panes) ~= "table" then panes = {} end
         for _, pane in ipairs(panes) do
           local read = resolve_pane_read(pane)
-          if read.kind == target.kind
-              and ((read.kind == "v2" and read.cache_key == target.cache_key)
-                or (read.kind == "v1" and read.marker_id == target.marker_id)) then
+          if read.kind == "claimed" and read.cache_key == target.cache_key then
             return panes
           end
         end
       end
       return nil
-    end
-
-    --- Acknowledge the one pane the user is actually looking at: suppress its
-    --- effective attention if disk still says its type is one they configured to acknowledge on
-    --- sight (stop, notify by default). Canonical writer truth is never moved or
-    --- removed; the acknowledged marker identity is written to a sidecar instead.
-    ---
-    --- The caller must already have established that the GUI window has keyboard
-    --- focus and that this is its active pane. Both conditions matter: a marker
-    --- acknowledged while its window is in the background is a notification the user
-    --- never saw.
-    ---
-    --- Does the user's review flag outrank what the marker file says? Absent and
-    --- acknowledged markers (both arrive here as a nil type) are outranked by
-    --- anything, and a marker the configured priority order puts below `review`
-    --- — `thinking` by default — is too. `stop` and `notify` outrank it, so a
-    --- flagged pane that finishes still shows its ✓ first and falls back to the ◆
-    --- once that ✓ has been acknowledged.
-    local function review_outranks(atype)
-      if not atype then return true end
-      local priority = M._active_priority_map or {}
-      return (priority[atype] or 0) < (priority.review or 0)
-    end
-
-    local function cache_marker_values(
-        id, atype, frame, raw, publication_id, observed_now, source, subagents, flagged)
-      subagents = tonumber(subagents) or 0
-      -- A marker file whose own type is "review" was written by an older Alt+B,
-      -- before the flag moved to its own file. It is the same user flag.
-      local review = flagged == true or atype == "review"
-
-      local effective = atype
-      if review and review_outranks(atype) then
-        effective = "review"
-        frame = nil
-      end
-
-      if not effective then
-        -- Nothing to show. A pane whose subagents are still working keeps a
-        -- count-only entry so its tab can render "+N"; with nothing left to say,
-        -- the entry goes away entirely, as it always has.
-        if subagents > 0 then
-          attention_cache[id] = {
-            type        = nil,
-            observed_at = observed_now,
-            subagents   = subagents,
-            review      = review,
-          }
-        else
-          attention_cache[id] = nil
-        end
-        return
-      end
-
-      if effective == "thinking" and frame == nil then
-        local cfg_indicators = M._active_indicators or defaults.indicators
-        local frames = cfg_indicators.thinking_frames or defaults.indicators.thinking_frames
-        frame = frame_for_now(observed_now, #frames)
-      end
-
-      -- `raw`, `identity` and `source` always describe the marker file,
-      -- even when the review flag has taken over `type`. The marker is still the
-      -- thing acknowledgement compares against and TTL ages out; the flag only
-      -- decides what the tab shows.
-      attention_cache[id] = {
-        type        = effective,
-        frame       = frame,
-        observed_at = observed_now,
-        raw         = raw,
-        identity    = marker_identity(raw, publication_id),
-        source      = source,
-        subagents   = subagents,
-        review      = review,
-      }
-    end
-
-    --- Re-read one pane's files and rebuild its cache entry. The Alt+B handler
-    --- changes a pane's state outside the poll loop, and dropping the entry instead
-    --- would blank a sibling's ✓ or a "+N" until the next tick.
-    local function refresh_cached_pane(dir, id, now)
-      local atype, frame, _, _, raw, publication_id, source =
-        read_effective_marker(dir, id)
-      cache_marker_values(
-        id, atype, frame, raw, publication_id, now, source,
-        count_live_subagents(dir, id, now), review_flagged(dir, id))
-    end
-
-    local function acknowledge_focused_pane(pane_id, opts)
-      local dir = (opts and opts.dir) or M._active_dir or defaults.dir
-      local acknowledge_set = M._active_acknowledge_set or { stop = true, notify = true }
-      local observed_now = (opts and opts.now_ms) or now_ms()
-
-      local id = tostring(pane_id)
-      local cached = attention_cache[id]
-      if not (cached and acknowledge_set[cached.type]) then return "absent" end
-      -- The caller's own observation, when it supplied one. Without it this
-      -- compares disk against the shared display cache, which another window's
-      -- poll can replace between this poll's enumeration and its focus query --
-      -- so equality would mean the two reads agree, not that this poll saw what
-      -- it is about to dismiss.
-      local observed_identity = opts and opts.observed_identity
-
-      -- The count this tick's poll already read from disk. Acknowledgement is about
-      -- the marker only, so it must hand the count back unchanged; recomputing zero
-      -- here would drop the "+N" and make every tick a visible change.
-      local subagents = cached.subagents or 0
-      -- The user's review flag survives acknowledgement, and every cache write
-      -- below has to carry it: a flagged pane whose ✓ the user just looked at falls
-      -- back to showing the ◆, it does not go quiet.
-      local flagged = cached.review == true
-
-      local current_type, current_frame, _, _, raw, publication_id, source =
-        read_marker(dir, id)
-      if not current_type then
-        clear_acknowledgement(dir, id)
-        cache_marker_values(id, nil, nil, nil, nil, observed_now, nil, subagents, flagged)
-        return "absent"
-      end
-
-      local current_identity = marker_identity(raw, publication_id)
-      if (observed_identity or cached.identity) ~= current_identity then
-        cache_marker_values(
-          id, current_type, current_frame, raw, publication_id, observed_now, source,
-          subagents, flagged)
-        return "kept"
-      end
-
-      if not acknowledge_set[current_type] then
-        clear_acknowledgement(dir, id)
-        cache_marker_values(
-          id, current_type, current_frame, raw, publication_id, observed_now, source,
-          subagents, flagged)
-        return "kept"
-      end
-
-      local write_ack = (opts and opts.write_acknowledgement) or write_acknowledgement
-      if not write_ack(dir, id, current_identity) then
-        cache_marker_values(
-          id, current_type, current_frame, raw, publication_id, observed_now, source,
-          subagents, flagged)
-        return "failed"
-      end
-
-      -- A writer may replace or clear the marker while the sidecar is being
-      -- written. Re-read effective truth before updating the cache: only the exact
-      -- identity that was viewed is suppressed.
-      local effective_type, effective_frame, _, _, effective_raw, effective_publication_id,
-        effective_source = read_effective_marker(dir, id)
-      cache_marker_values(
-        id, effective_type, effective_frame, effective_raw, effective_publication_id, observed_now,
-        effective_source, subagents, flagged)
-      return effective_type and "kept" or "acknowledged"
     end
 
     -- ── Focus and redraw ────────────────────────────────────────────────────────
@@ -351,14 +187,14 @@ return function()
     local function parse_tab_source_response(stdout)
       if not protocol or type(stdout) ~= "string"
           or #stdout > protocol.limits.max_json_bytes then return nil end
-      local value = context.decode_json(stdout)
+      local value = protocol_api.decode_json(stdout)
       if type(value) ~= "table" or value.schema ~= 1 or value.command ~= "tab-source"
           or value.status ~= "ok" or value.complete ~= true then return nil end
       local source = value.result
       if type(source) ~= "table" or type(source.socket_path) ~= "string"
           or source.socket_path:sub(1, 1) ~= "/" or source.socket_path:find("%z")
-          or not context.is_hex64(source.realm_id) or not context.is_hex64(source.incarnation_id)
-          or context.sha256(source.socket_path) ~= source.realm_id then return nil end
+          or not protocol_api.is_hex64(source.realm_id) or not protocol_api.is_hex64(source.incarnation_id)
+          or protocol_api.sha256(source.socket_path) ~= source.realm_id then return nil end
       for key in pairs(source) do
         if key ~= "socket_path" and key ~= "realm_id" and key ~= "incarnation_id" then return nil end
       end
@@ -411,7 +247,7 @@ return function()
       if not socket or not protocol then return status end
       local realm = realm_by_socket[socket]
       if not realm then
-        realm = context.sha256(socket)
+        realm = protocol_api.sha256(socket)
         realm_by_socket[socket] = realm
       end
       return status, realm
@@ -446,15 +282,13 @@ return function()
       end
     end
 
-    local function spawn_republish(domain, socket, root)
-      if type(wezterm.background_child_process) ~= "function" then
-        report_error_once("publish-spawn:" .. socket,
-          "cannot republish mux identity: background_child_process is unavailable")
-        return false
-      end
-      local argv = {
-        "env", "WEZTERM_ATTENTION_DIR=" .. M._active_dir,
-      }
+    --- The command line that runs `attention` from the integration `root`
+    --- with `arguments`, against the state directory `dir`. The directory is
+    --- handed over rather than left to the child's environment, which is
+    --- this GUI's and may name no root or another one. WezTerm's own
+    --- directory goes first on PATH, for the `wezterm cli` a publication runs.
+    local function attention_argv(root, dir, arguments)
+      local argv = { "env", "WEZTERM_ATTENTION_DIR=" .. dir }
       local executable_dir = wezterm.executable_dir
       if type(executable_dir) == "string" and executable_dir ~= "" then
         local inherited_path = os.getenv("PATH")
@@ -462,11 +296,18 @@ return function()
           .. (inherited_path and inherited_path ~= "" and (":" .. inherited_path) or "")
       end
       argv[#argv + 1] = root .. "/bin/attention"
-      argv[#argv + 1] = "hooks"
-      argv[#argv + 1] = "publish"
-      argv[#argv + 1] = "--socket"
-      argv[#argv + 1] = socket
-      argv[#argv + 1] = "--quiet"
+      for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
+      return argv
+    end
+
+    local function spawn_republish(domain, socket, root)
+      if type(wezterm.background_child_process) ~= "function" then
+        report_error_once("publish-spawn:" .. socket,
+          "cannot republish mux identity: background_child_process is unavailable")
+        return false
+      end
+      local argv = attention_argv(root, M._active_dir,
+        { "hooks", "publish", "--socket", socket, "--quiet" })
       local ok, started = pcall(wezterm.background_child_process, argv)
       if not ok or started == false then
         report_error_once("publish-spawn:" .. socket,
@@ -474,6 +315,130 @@ return function()
         return false
       end
       return true
+    end
+
+    --- Run `attention plugin <action>` for the pane `read` names, and return
+    --- the result of its answer. The plugin is not a process in the pane, so
+    --- the pane's address and the launch it published go on the command line.
+    --- The command takes the locks every writer of these records takes; this
+    --- process writes none of them itself. Nil when it did not answer "ok",
+    --- which is logged once per pane and action, and then whether the failure
+    --- can pass: a lock wait that ran out, or a command that could not start
+    --- or gave no answer. Any other diagnostic is a refusal, which stands
+    --- until what the command reads changes.
+    local function run_plugin_write(action, read, dir, extra)
+      local root = M._active_integration_root
+      -- A failure is logged once per pane, action and kind of failure: a
+      -- different failure on a later run says something the first did not.
+      local failure, kind, passing = nil, nil, false
+      if not root or M._active_writer_installed ~= true then
+        failure, kind = "the attention command is not installed", "not_installed"
+      elseif type(wezterm.run_child_process) ~= "function" then
+        failure, kind = "wezterm.run_child_process is unavailable", "no_spawn"
+      else
+        local arguments = {
+          "plugin", action,
+          "--realm-id", read.address.realm_id,
+          "--incarnation-id", read.address.incarnation_id,
+          "--pane-id", read.address.pane_id,
+          "--launch-id", read.launch_id,
+        }
+        for _, argument in ipairs(extra or {}) do arguments[#arguments + 1] = argument end
+        local ok, success, stdout = pcall(wezterm.run_child_process,
+          attention_argv(root, dir, arguments))
+        local response = ok and type(stdout) == "string" and protocol
+          and #stdout <= protocol.limits.max_json_bytes and protocol_api.decode_json(stdout) or nil
+        if type(response) ~= "table" then response = nil end
+        if ok and success and response and response.status == "ok"
+            and type(response.result) == "table" then
+          return response.result
+        end
+        local item = response and type(response.diagnostics) == "table" and response.diagnostics[1]
+        if type(item) == "table" and type(item.code) == "string" then
+          failure, kind = item.code .. ": " .. tostring(item.message), item.code
+          passing = item.code == "probe_unavailable"
+        elseif not ok then
+          failure, kind, passing = "it could not be started: " .. tostring(success), "spawn", true
+        elseif not success then
+          -- A command built before the plugin's own subcommand existed exits
+          -- with its usage text and prints nothing here.
+          failure = "it gave no answer; the attention command in " .. root
+            .. " may predate this plugin, so run scripts/install-cli.sh there"
+          kind, passing = "exited_silent", true
+        else
+          failure, kind, passing = "it gave no answer", "silent", true
+        end
+      end
+      report_error_once("plugin-" .. action .. ":" .. read.cache_key .. ":" .. kind,
+        "attention plugin " .. action .. " failed for pane " .. read.marker_id .. ": " .. failure)
+      return nil, passing
+    end
+
+    --- Does the pane carry the review its user set with the review key? Read
+    --- from disk, never the cache, which can lag a flag another window's key
+    --- press just wrote.
+    local function user_review_present(read, dir)
+      local owner_key = protocol_api.sha256("user")
+      local record = read_expected_record(
+        v2_pane_root(dir, read.address) .. "/reviews/" .. owner_key .. ".json",
+        "review", { address = read.address }, true)
+      return record ~= nil and record.owner_key == owner_key
+    end
+
+    --- Read one pane again after a write outside the poll, so the tab shows
+    --- it now rather than on the next tick.
+    local function refresh_cached_pane(read, dir, now_unix_ns)
+      local view = read_attention_view(read, now_unix_ns or wezterm_now_unix_ns20(), {
+        dir = dir, previous_view = attention_cache[read.cache_key],
+      })
+      attention_cache[read.cache_key] = view
+      return view
+    end
+
+    --- The acknowledgement of each pane's latest activity event, by cache
+    --- key: the event, and, after a run whose failure can pass, when to try
+    --- again. A poll starts no second run for an event that is running, was
+    --- answered or was refused, and retries a failure that can pass only
+    --- after its backoff wait. An answer stands even when this reader still
+    --- shows the event: asking again on every tick would change nothing. A
+    --- newer event is tried afresh.
+    local acknowledging = {}
+
+    --- Acknowledge what the user is looking at: the activity `candidate`
+    --- names, which this poll read for the active pane of the focused window.
+    --- Both conditions matter: an activity acknowledged while its window is
+    --- in the background is a notification the user never saw. The command
+    --- writes the acknowledgement only while that activity is still the one
+    --- the pane shows, so the check against a newer publication is made
+    --- under the writers' locks rather than by reading again here.
+    local function acknowledge_focused_pane(read, candidate, opts)
+      local dir = (opts and opts.dir) or M._active_dir or defaults.dir
+      local acknowledge_set = M._active_acknowledge_set or { stop = true, notify = true }
+      -- Only what the tab shows is seen: when the review flag outranks the
+      -- activity, the tab shows the flag, and the activity stays for later.
+      if not (candidate and candidate.shown and acknowledge_set[candidate.shown]) then
+        return "absent"
+      end
+      local state = acknowledging[read.cache_key]
+      if state and state.event_id == candidate.event_id then
+        if not state.retry_at or now_ms() < state.retry_at then return "pending" end
+      else
+        state = { event_id = candidate.event_id, retry_index = 1 }
+        acknowledging[read.cache_key] = state
+      end
+      state.retry_at = nil
+      local result, passing = run_plugin_write("acknowledge", read, dir,
+        { "--activity-event-id", candidate.event_id })
+      if not result then
+        if passing then
+          state.retry_at = now_ms() + backoff_delay(state.retry_index) * 1000
+          state.retry_index = state.retry_index + 1
+        end
+        return "failed"
+      end
+      refresh_cached_pane(read, dir, opts and opts.now_unix_ns)
+      if result.disposition == "ignored" then return "kept" end
+      return "acknowledged"
     end
 
     local function publish_call_after(opts)
@@ -496,10 +461,10 @@ return function()
     end
 
     --- May this window conclude that a storage identity it used to see is gone?
-    --- Deleting its records is irreversible, so every way of not knowing answers
-    --- no: the pane is still here, or nobody looked where it was, or the domain
-    --- it lived on went unwatched, or something on that domain has not yet said
-    --- which identity it carries.
+    --- Forgetting it blanks what a still-open pane shows, so every way of not
+    --- knowing answers no: the pane is still here, or nobody looked where it
+    --- was, or the domain it lived on went unwatched, or something on that
+    --- domain has not yet said which identity it carries.
     local function decide_absence(evidence, gone_key, gone, live_local_ids)
         local pane = evidence.panes[gone_key]
         if pane then return "present" end
@@ -542,14 +507,11 @@ return function()
         -- here, so membership is the freshness check. A flag that cannot be false
         -- reads like a guard and guards nothing.
         if not pane then return nil end
-        if pane.kind ~= read.kind then return nil end
         -- No publication read is an answer: there was nothing to dismiss. Saying
         -- so here keeps the contract in the decision rather than leaving the
         -- executor to notice that its expected value is missing.
-        if pane.kind == "v2" and not pane.event_id then return nil end
-        if pane.kind == "v1" and not pane.identity then return nil end
-        return { kind = pane.kind, marker_id = pane.marker_id, event_id = pane.event_id,
-          identity = pane.identity }
+        if not pane.event_id then return nil end
+        return { event_id = pane.event_id, shown = pane.shown }
     end
 
     --- What may be reported about a domain's publication work? A count and a
@@ -702,7 +664,7 @@ return function()
     --- from the tabs that happened to answer.
     local function update_publish_schedule(
         domain, window_key, pane_count, unpublished, opts, partial)
-      local socket = context.unix_domain_socket(domain)
+      local socket = reader.unix_domain_socket(domain)
       local root = M._active_integration_root
       if not socket and unpublished then
         report_warning_once("unpublished-domain:" .. domain, "panes on domain " .. domain
@@ -829,37 +791,22 @@ return function()
 
     --- Read the cached attention state for a marker id (see M.pane_marker_id).
     --- Returns (type, frame, source, reserved, subagents, review) or nil. `source` is
-    --- the marker's JSON `source` string when it carried one; `reserved` is always
+    --- the activity's `source` when it carried one; `reserved` is always
     --- false to retain tuple positions; `subagents` is how many of the pane's
-    --- subagents ran a tool call in the last ten minutes, 0 when none; `review` is
-    --- true when the user has flagged the pane with Alt+B.
+    --- subagents are live, 0 when none; `review` is true when the pane carries
+    --- a review flag.
     ---
     --- `type` is the effective one: it is `review` when the flag outranks the
-    --- marker file, and the marker's own type when that outranks the flag — in
+    --- activity, and the activity's own type when that outranks the flag — in
     --- which case the flag is still reported by the sixth return.
     ---
-    --- A pane with live subagents and no marker returns (nil, nil, nil, false, n):
-    --- the count is real even though there is no marker type to report.
-    --- Without an explicit legacy dir, a scalar observed in multiple full
-    --- addresses returns nil. Use get_attention_view(pane) to disambiguate.
-    function M.get_attention(marker_id, opts)
-      local id = tostring(marker_id)
-      if opts and opts.dir then
-        -- The id becomes a path segment, and the read below can remove a stale
-        -- acknowledgement beside it.
-        if not context.canonical_pane_id(id) then return nil end
-        local atype, frame, _, _, _, _, source = read_effective_marker(opts.dir, id)
-        local now = (opts and opts.now_ms) or now_ms()
-        local flagged = review_flagged(opts.dir, id) or atype == "review"
-        if flagged and review_outranks(atype) then
-          atype, frame = "review", nil
-        end
-        return atype, frame, source, false, count_live_subagents(opts.dir, id, now), flagged
-      end
-      local mapped = legacy_cache_key_by_marker_id[id]
-      if mapped == false then return nil end -- More than one observed full address.
+    --- A pane with live subagents and no activity returns (nil, nil, nil, false, n):
+    --- the count is real even though there is no type to report.
+    --- A scalar observed at more than one full address returns nil. Use
+    --- get_attention_view(pane) to disambiguate.
+    function M.get_attention(marker_id)
+      local mapped = cache_key_by_marker_id[tostring(marker_id)]
       local cached = mapped and attention_cache[mapped] or nil
-      if not cached then cached = attention_cache[id] end
       if cached then
         return cached.type, cached.frame, cached.source, false, cached.subagents or 0,
           cached.review == true
@@ -881,12 +828,12 @@ return function()
         reader_confidence = cached.reader_confidence,
         activity_type = cached.activity_type,
         source = cached.source,
-        address = cached.address and context.deep_copy(cached.address) or nil,
+        address = cached.address and protocol_api.deep_copy(cached.address) or nil,
         launch_id = cached.launch_id,
         marker_id = cached.marker_id,
         pane_presence = cached.pane_presence,
         binding_health = cached.binding_health,
-        lifecycle = cached.lifecycle and context.deep_copy(cached.lifecycle) or nil,
+        lifecycle = cached.lifecycle and protocol_api.deep_copy(cached.lifecycle) or nil,
       }
     end
 
@@ -894,7 +841,7 @@ return function()
       local read = resolve_pane_read(pane)
       local cached = read.cache_key and attention_cache[read.cache_key] or nil
       if not cached then return nil end
-      if read.kind == "v2" and cached.launch_id ~= read.launch_id then return nil end
+      if read.kind == "claimed" and cached.launch_id ~= read.launch_id then return nil end
       return copy_public_view(cached)
     end
 
@@ -941,14 +888,14 @@ return function()
       local previous = callback_views_by_window[window_key] or {}
       local next_views, messages, losses = {}, {}, {}
       local function lost(state, id)
-        losses[#losses + 1] = { kind = "scope_lost", window_id = id, previous_scope = context.deep_copy(state.scope) }
+        losses[#losses + 1] = { kind = "scope_lost", window_id = id, previous_scope = protocol_api.deep_copy(state.scope) }
       end
       for key, read in pairs(entries) do
         local cached = attention_cache[key]
         local old = previous[key]
         if cached and cached.launch_id == read.launch_id then
           local target = cached._records and cached._records.selection_target
-          local scope = target and { address = context.deep_copy(read.address), launch_id = read.launch_id, target = context.deep_copy(target) }
+          local scope = target and { address = protocol_api.deep_copy(read.address), launch_id = read.launch_id, target = protocol_api.deep_copy(target) }
           if not scope and old and old.scope.launch_id == read.launch_id then scope = old.scope end
           if scope then
             local view = copy_public_view(cached)
@@ -956,9 +903,9 @@ return function()
             if replaced then lost(old, window:window_id()) end
             if not old or replaced or not same_public_value(old.view, view) then
               messages[#messages + 1] = { kind = (not old or replaced) and "initial" or "updated",
-                window_id = window:window_id(), scope = context.deep_copy(scope), view = context.deep_copy(view) }
+                window_id = window:window_id(), scope = protocol_api.deep_copy(scope), view = protocol_api.deep_copy(view) }
             end
-            next_views[key] = { scope = context.deep_copy(scope), view = view }
+            next_views[key] = { scope = protocol_api.deep_copy(scope), view = view }
           end
         end
       end
@@ -989,73 +936,29 @@ return function()
       delivering_views = false
     end
 
-    --- Remove the attention marker for a marker id (see M.pane_marker_id).
-    function M.remove_marker(marker_id, opts)
-      local dir = (opts and opts.dir) or M._active_dir or defaults.dir
-      local id = tostring(marker_id)
-      -- The id becomes a segment of every path remove_marker deletes; "../x"
-      -- would reach outside the state directory.
-      if not context.canonical_pane_id(id) then return end
-      remove_marker(dir, id)
-      attention_cache[id] = nil
-    end
-
-    --- Inspect GUI-only identity publication. Filesystem, socket, process,
-    --- permission, and version probes belong to `attention doctor`.
-    function M.doctor(window)
-      local diagnostics = {}
-      if not window or type(window.mux_window) ~= "function" then
-        return { diagnostic("probe_unavailable", "GUI window is unavailable") }
-      end
-      local ok, mux_win = pcall(window.mux_window, window)
-      if not ok or not mux_win or type(mux_win.tabs) ~= "function" then
-        return { diagnostic("probe_unavailable", "GUI mux window is unavailable") }
-      end
-      local tabs_ok, tabs = pcall(mux_win.tabs, mux_win)
-      if not tabs_ok or type(tabs) ~= "table" then
-        return { diagnostic("probe_unavailable", "GUI panes are unavailable") }
-      end
-      for _, tab_value in ipairs(tabs) do
-        local panes_ok, panes = pcall(tab_value.panes, tab_value)
-        if not panes_ok or type(panes) ~= "table" then
-          diagnostics[#diagnostics + 1] = diagnostic("probe_unavailable", "GUI tab panes are unavailable")
-        else
-          for _, pane in ipairs(panes) do
-            local read = resolve_pane_read(pane)
-            if read.kind == "unpublished" then
-              diagnostics[#diagnostics + 1] = diagnostic(
-                "identity_unpublished", "mux pane has not published a trustworthy identity",
-                { domain = read.domain })
-            elseif read.kind == "invalid" then
-              diagnostics[#diagnostics + 1] = read.diagnostic
-            end
-          end
-        end
-      end
-      return diagnostics
-    end
-
-    --- Poll marker files, update the cache, acknowledge what the user is looking
-    --- at, and ask WezTerm to redraw the tab bar if what it shows has changed.
-    --- Call this from your own update-status handler if you set auto_poll = false;
-    --- pass the handler's pane as opts.active_pane.
+    --- Read the window's pane records, update the cache, acknowledge what the
+    --- user is looking at, and ask WezTerm to redraw the tab bar if what it
+    --- shows has changed. Call this from your own update-status handler if you
+    --- set auto_poll = false; pass the handler's pane as opts.active_pane.
     ---
     --- Only refreshes entries for panes in the current window. Cross-window cache
     --- entries are left alone — pruning them here would cause cache thrash when
     --- multiple windows fire update-status (each window would wipe the other's
-    --- entries every tick, producing visible tab-indicator blinking). Stale
-    --- thinking markers are removed here by TTL; a closed pane's marker is removed
-    --- by the observed-then-gone sweep below.
+    --- entries every tick, producing visible tab-indicator blinking). A closed
+    --- pane's entry is retired by the observed-then-gone check below.
+    ---
+    --- Acknowledging runs `attention plugin acknowledge`, once for each new
+    --- activity the user looks at.
     ---
     --- The redraw exists because caching alone is not enough: WezTerm calls
-    --- format-tab-title when something it knows about changes, and a marker file
+    --- format-tab-title when something it knows about changes, and a record
     --- appearing on disk is not one of those things. Without the request below, a
     --- background pane's new state sat in the cache, unrendered, until the user
     --- happened to switch tabs — which is exactly when they no longer needed to be
     --- told.
     function M.poll(window, opts)
       if delivering_views then return end
-      context.refresh_domain_facts()
+      reader.refresh_domain_facts()
       local dir = (opts and opts.dir) or M._active_dir or defaults.dir
       local mux_win = window:mux_window()
       if not mux_win then return end
@@ -1064,7 +967,7 @@ return function()
 
       -- A tab that closes between this listing and its panes() call below is
       -- still in the list and already out of the mux, so panes() raises. That is
-      -- a race with the user, not a fault: M.doctor already treats it that way.
+      -- a race with the user, not a fault.
       local tabs_ok, mux_tabs = pcall(mux_win.tabs, mux_win)
       if not tabs_ok or type(mux_tabs) ~= "table" then return end
       -- The absence sweep below deletes records for panes it cannot see, so a
@@ -1117,7 +1020,7 @@ return function()
       local utc_sampled = false
       local poll_now_unix_ns
       local poll_utc_error
-      local saw_v2 = false
+      local saw_claimed = false
       local earliest_wakeup_unix_ns
 
       --- The time now, for a read that saw a write time ahead of this poll's
@@ -1193,16 +1096,16 @@ return function()
             local item = read.diagnostic or diagnostic("record_invalid", "pane identity is invalid")
             report_error_once("v2-identity:" .. local_id .. ":" .. item.code,
               item.code .. ": " .. item.message)
-          elseif read.kind == "v2" then
+          elseif read.kind == "claimed" then
             callback_entries[key] = read
-            saw_v2 = true
+            saw_claimed = true
             local now_unix_ns, utc_error = sample_utc_once()
             if utc_error then
               report_error_once("v2-clock:" .. local_id,
                 utc_error .. ": WezTerm UTC is unavailable; TTL-bearing v2 state is omitted")
             end
-            seen[key] = { domain = domain, kind = "v2", marker_id = read.marker_id, local_id = local_id }
-            evidence.panes[key] = { kind = "v2", domain = domain,
+            seen[key] = { domain = domain, kind = "claimed", marker_id = read.marker_id, local_id = local_id }
+            evidence.panes[key] = { kind = "claimed", domain = domain,
               marker_id = read.marker_id, local_id = local_id }
             evidence.identified_by_local[local_id] = key
             pane_ids[#pane_ids + 1] = key
@@ -1215,16 +1118,16 @@ return function()
               now_ms = now,
             }
             local view = read_attention_view(read, now_unix_ns, read_opts)
-            if restore_cleared_reviews(read, dir, before[key], view, read_opts) then
-              view = read_attention_view(read, now_unix_ns, read_opts)
-            end
             -- A hook writes no frame, so a thinking view is animated from the
-            -- wall clock, the same way a v1 marker without one is.
+            -- wall clock.
             if view.type == "thinking" and view.frame == nil then
               view.frame = frame_for_now(now, frame_count)
             end
             attention_cache[key] = view
             evidence.panes[key].event_id = view.event_id
+            -- The activity the tab shows for this pane, if it shows one: a
+            -- review flag that outranks it hides it.
+            evidence.panes[key].shown = view.type == view.activity_type and view.activity_type or nil
             for _, item in ipairs(view.diagnostics or {}) do
               report_error_once("v2:" .. key .. ":" .. item.code .. ":" .. item.message,
                 item.code .. ": " .. item.message)
@@ -1233,54 +1136,17 @@ return function()
             if boundary and (not earliest_wakeup_unix_ns or boundary < earliest_wakeup_unix_ns) then
               earliest_wakeup_unix_ns = boundary
             end
-          elseif read.kind == "v1" then
-            local id = read.marker_id
-            seen[id] = { domain = domain, kind = "v1", marker_id = id, local_id = local_id }
-            evidence.panes[id] = { kind = "v1", domain = domain,
-              marker_id = id, local_id = local_id }
-            evidence.identified_by_local[local_id] = id
-            pane_ids[#pane_ids + 1] = id
-            before[id] = attention_cache[id]
-            local atype, frame, updated_at, marker_ttl_ms, raw, publication_id, source =
-              read_marker(dir, id)
-            -- One read of each sidecar per pane per tick, with this tick's clock,
-            -- whether or not the pane has a marker.
-            local subagents = count_live_subagents(dir, id, now)
-            local flagged = review_flagged(dir, id)
-            local acknowledged = acknowledgement_matches(dir, id, raw, publication_id)
-            if atype then
-              -- The publication this poll read, kept with the pane's evidence, and
-              -- only when there was one: marker_identity of nothing still returns
-              -- a string, which would look like a publication to compare against.
-              -- The acknowledgement below compares against this rather than the
-              -- display cache, which another window's poll can replace between
-              -- the enumeration and the focus query.
-              evidence.panes[id].identity = marker_identity(raw, publication_id)
-              local cached = attention_cache[id]
-              local observed_at = now
-              if cached and cached.raw == raw and cached.observed_at then
-                observed_at = cached.observed_at
-              end
-
-              local effective_updated_at = updated_at or observed_at
-              local ttl = stale_ttl_ms(atype, marker_ttl_ms)
-              if ttl and now - effective_updated_at > ttl then
-                remove_expired_marker(dir, id)
-                cache_marker_values(id, nil, nil, nil, nil, now, nil, subagents, flagged)
-              elseif acknowledged then
-                cache_marker_values(
-                  id, nil, nil, nil, nil, observed_at, nil, subagents, flagged)
-              else
-                if atype == "thinking" and frame == nil then
-                  frame = frame_for_now(now, frame_count)
-                end
-                cache_marker_values(
-                  id, atype, frame, raw, publication_id, observed_at, source, subagents,
-                  flagged)
-              end
-            else
-              cache_marker_values(id, nil, nil, nil, nil, now, nil, subagents, flagged)
-            end
+          elseif read.kind == "unclaimed" then
+            -- Published, and with nothing to show: no launch has claimed the
+            -- pane. Its key still carries its settled title.
+            seen[key] = { domain = domain, kind = "unclaimed", marker_id = read.marker_id,
+              local_id = local_id }
+            evidence.panes[key] = { kind = "unclaimed", domain = domain,
+              marker_id = read.marker_id, local_id = local_id }
+            evidence.identified_by_local[local_id] = key
+            pane_ids[#pane_ids + 1] = key
+            before[key] = attention_cache[key]
+            attention_cache[key] = nil
           elseif read.kind == "unpublished" then
             -- Positively unpublished: work to schedule, and a reason nothing on
             -- this domain can be declared absent.
@@ -1348,101 +1214,27 @@ return function()
       end
 
       -- WezTerm emits no pane-destroyed event, so a closed pane is detected by
-      -- absence: an id this window reported on the previous poll and does not
-      -- report now belonged to a pane that is gone, and its marker would otherwise
-      -- outlive it forever.
+      -- absence: a key this window reported on the previous poll and does not
+      -- report now belonged to a pane that is gone, or to a pane that answers
+      -- to another key now. Its cache entry is retired unless another window
+      -- still shows it. Its records are the writer's, and stay.
       --
-      -- One case is not a closed pane. Detaching a mux domain drops every one of
-      -- its panes from this window in a single tick while those panes, and the
-      -- processes writing their markers, keep running on the server. So an id is
-      -- only swept when this window still holds some pane of that id's domain.
-      -- Asked at most once a tick, and only when something is otherwise eligible
-      -- for unlinking. Every other source of ownership is a saved observation --
-      -- what some window saw when it last polled -- and a pane that has just been
-      -- moved into a window appears in no observation until that window polls.
-      -- Which window's status callback runs first would otherwise decide whether
-      -- a moved pane keeps its files. This asks the mux instead of the memories.
-      --
-      -- `complete` is false as soon as any part of the walk fails or any pane
-      -- declines to say who it is, because then some pane that was not read could
-      -- be the owner. Incomplete is not permission.
-      local mux_ownership
-      local function current_marker_owners()
-        if mux_ownership then return mux_ownership end
-        local markers, complete = {}, true
-        local mux = wezterm.mux
-        local windows_ok, windows = pcall(function() return mux and mux.all_windows() end)
-        if not windows_ok or type(windows) ~= "table" then
-          mux_ownership = { markers = markers, complete = false }
-          return mux_ownership
-        end
-        for _, mux_window in ipairs(windows) do
-          local tabs_ok, window_tabs = pcall(mux_window.tabs, mux_window)
-          if not tabs_ok or type(window_tabs) ~= "table" then complete = false
-          else
-            for _, window_tab in ipairs(window_tabs) do
-              local panes_ok, tab_panes = pcall(window_tab.panes, window_tab)
-              if not panes_ok or type(tab_panes) ~= "table" then complete = false
-              else
-                for _, owned in ipairs(tab_panes) do
-                  local owner = resolve_pane_read(owned)
-                  if (owner.kind == "v1" or owner.kind == "v2") and owner.marker_id then
-                    markers[owner.marker_id] = true
-                  else
-                    complete = false
-                  end
-                end
-              end
-            end
-          end
-        end
-        mux_ownership = { markers = markers, complete = complete }
-        return mux_ownership
-      end
-
+      -- A pane this window could not read, or a domain that detached while its
+      -- panes run on in the server, is not known to be gone: decide_absence
+      -- says so, and the key is remembered for a later tick to decide.
       local previously_seen = seen_marker_ids_by_window[window_key]
-      -- A pane the sweep did not observe because its tab could not be read is
-      -- unknown, not closed. It is carried forward as still present, so it is
-      -- neither swept now nor treated as newly arrived next tick.
       if previously_seen then
-        for gone_key, gone_value in pairs(previously_seen) do
-          local gone = type(gone_value) == "table" and gone_value
-            or { domain = gone_value, kind = "v1", marker_id = gone_key }
-          local verdict = decide_absence(evidence, gone_key, gone, live_local_ids)
-          if verdict == "unknown" and not seen[gone_key] then
-            -- Keep remembering it as well as keeping its files. Dropping it here
-            -- would leave the next tick -- which may be able to decide -- nothing
-            -- to compare against, and the record would outlive the pane for good.
-            seen[gone_key] = gone_value
-          elseif verdict == "superseded" and not seen[gone_key] then
-            -- The pane lives on under another key. Retire this one from the cache
-            -- and the inventory, and leave every file alone: they are that pane's.
-            local shared = observed_in_other_window(gone_key, window_key)
-            pane_ids[#pane_ids + 1] = gone_key
-            before[gone_key] = attention_cache[gone_key]
-            if not shared then attention_cache[gone_key] = nil end
-          elseif verdict == "absent" and not seen[gone_key] then
-            local shared = observed_in_other_window(gone_key, window_key)
-            -- The key is retired either way. Unlinking the files it names is a
-            -- separate question: another v1 pane in this window may still be
-            -- writing them. These are the cheap vetoes; each one is a
-            -- positive sighting, and any of them is enough to keep the files.
-            -- No live-local-id term: reaching this verdict already means that
-            -- check passed, since decide_absence answers "unknown" for a pane
-            -- whose handle is still enumerated.
-            local may_unlink = not shared and gone.kind == "v1"
-            local owners = may_unlink and current_marker_owners() or nil
-            if owners and not owners.markers[gone.marker_id] and not owners.complete then
-              -- Nothing sighted, and the search could not finish. Keep the files
-              -- and keep the obligation, so a tick that can finish still decides.
-              seen[gone_key] = gone_value
-            else
+        for gone_key, gone in pairs(previously_seen) do
+          if not seen[gone_key] then
+            local verdict = decide_absence(evidence, gone_key, gone, live_local_ids)
+            if verdict == "unknown" then
+              seen[gone_key] = gone
+            elseif verdict ~= "present" then
               pane_ids[#pane_ids + 1] = gone_key
               before[gone_key] = attention_cache[gone_key]
-              if owners and not owners.markers[gone.marker_id] then
-                remove_marker(dir, gone.marker_id)
+              if not observed_in_other_window(gone_key, window_key) then
+                attention_cache[gone_key] = nil
               end
-              if not shared then attention_cache[gone_key] = nil end
             end
           end
         end
@@ -1452,14 +1244,14 @@ return function()
       -- from all observed windows, rather than letting poll/overlay order win.
       rebuild_scalar_projection()
 
-      if saw_v2 then
+      if saw_claimed then
         schedule_ttl_wakeup(window, earliest_wakeup_unix_ns, poll_now_unix_ns, opts)
       else
         schedule_ttl_wakeup(window, nil, nil, opts)
       end
 
       -- Everything below is about the focused window only. An unfocused window
-      -- must neither acknowledge a marker its user has not seen nor be sent a key
+      -- must neither acknowledge an activity its user has not seen nor be sent a key
       -- action, so an unfocused poll ends here with the cache correct.
       if not window:is_focused() then
         deliver_window_views(window, callback_entries, opts, evidence.gap)
@@ -1470,19 +1262,12 @@ return function()
       if current_active_pane then
         local active_read = resolve_pane_read(current_active_pane)
         local candidate = decide_acknowledgement(evidence, active_read)
-        if candidate and candidate.kind == "v1" then
-          acknowledge_focused_pane(active_read.marker_id, {
-            dir = dir, now_ms = now,
-            -- The publication this poll read, so the helper compares against its
-            -- caller's observation rather than against a display cache another
-            -- window's poll may have replaced in between.
-            observed_identity = candidate.identity,
-          })
-        elseif candidate and candidate.kind == "v2" then
-          acknowledge_focused_v2_pane(active_read, {
+        if candidate then
+          -- The activity this poll read, so what is dismissed is what this
+          -- poll saw, not a display cache another window's poll may have
+          -- replaced in between.
+          acknowledge_focused_pane(active_read, candidate, {
             dir = dir, now_unix_ns = poll_now_unix_ns,
-            observed_event_id = candidate.event_id,
-            resample_utc = resample_utc,
           })
         end
       end
@@ -1507,11 +1292,6 @@ return function()
       if changed then request_tab_bar_redraw(window, action_pane) end
     end
 
-    --- Apply the shared attention indicator and color decoration to a base title.
-    -- `2: ◔ name`: the index first, as WezTerm's own default renders it, then the
-    -- attention indicator, then the base. `show_index` false drops the index the
-    -- way `show_tab_index_in_tab_bar = false` does for the default renderer.
-
     return {
       tab_source = function() return tab_source_state.source end,
       tab_source_status = tab_source_status,
@@ -1522,25 +1302,16 @@ return function()
       same_cached_attention = same_cached_attention,
       observe_pane = observe_pane,
       tab_panes_containing_read = tab_panes_containing_read,
-      review_outranks = review_outranks,
-      cache_marker_values = cache_marker_values,
+      run_plugin_write = run_plugin_write,
+      user_review_present = user_review_present,
       refresh_cached_pane = refresh_cached_pane,
-      acknowledge_focused_pane = acknowledge_focused_pane,
-      redraw_window_key = redraw_window_key,
       request_tab_bar_redraw = request_tab_bar_redraw,
-      spawn_republish = spawn_republish,
-      publish_call_after = publish_call_after,
-      schedule_publish_retry = schedule_publish_retry,
-      update_publish_schedule = update_publish_schedule,
-      schedule_ttl_wakeup = schedule_ttl_wakeup,
     }
   end
 
   return {
     attention_cache = attention_cache,
-    legacy_cache_key_by_marker_id = legacy_cache_key_by_marker_id,
-    marker_id_by_local = marker_id_by_local,
-    seen_marker_ids_by_window = seen_marker_ids_by_window,
+    drawn_pane_key = drawn_pane_key,
     bind = bind,
   }
 end

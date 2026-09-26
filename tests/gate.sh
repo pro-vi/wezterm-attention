@@ -20,7 +20,7 @@ cd "$root"
 # install) and one file from GitHub.
 
 # `sh -n` parses only its first file; the rest become positional arguments.
-for script in bin/attention examples/hook.sh scripts/*.sh tests/gate.sh \
+for script in bin/attention scripts/*.sh tests/gate.sh \
   tests/shell/*.sh tests/fixtures/consumer-migration/*.sh; do
   sh -n "$script"
 done
@@ -75,7 +75,6 @@ fi
 printf 'gate: GUI tab-source test SKIPPED (disposable_gui_publishes_its_own_source opens a WezTerm window; run it with cargo test --test cli_shell_spec -- --ignored disposable_gui_publishes_its_own_source)\n'
 WEZTERM_ATTENTION_TTY_INPUT_GUARD="$root/tests/python/tty_input_guard.py" cargo test -- --test-threads=1
 python3 -m py_compile tests/fixtures/v2/check.py \
-  tests/fixtures/consumer-migration/bridge_reader.py \
   tests/fixtures/consumer-migration/check.py tests/python/provider_contact_hook.py \
   tests/python/measure.py tests/python/measure_spec.py tests/python/interactive_shell.py
 python3 -m unittest tests/python/measure_spec.py
