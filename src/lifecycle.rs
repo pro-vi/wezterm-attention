@@ -2306,7 +2306,7 @@ fn apply_provider_event_inner(
 #[cfg(test)]
 mod lifecycle_write_tests {
     use super::*;
-    use crate::records::{launch_path, pane_path};
+    use crate::records::{launch_dir, pane_dir};
     use std::time::Duration;
     #[test]
     fn failure_of_snapshot_write_reports_partial_state() {
@@ -2346,9 +2346,9 @@ mod lifecycle_write_tests {
             host: None,
             publication_diagnostic: None,
         };
-        let launch = launch_path(&root, &address, &launch_id);
+        let launch = launch_dir(&root, &address, &launch_id);
         crate::records::atomic_replace(
-            &pane_path(&root, &address).join("claim.json"),
+            &pane_dir(&root, &address).join("claim.json"),
             &samples["claim"],
         )
         .unwrap();

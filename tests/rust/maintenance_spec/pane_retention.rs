@@ -11,8 +11,8 @@ pub(super) const OP_2: &str = "00000000-0000-4000-8000-000000000912";
 pub(super) const OP_3: &str = "00000000-0000-4000-8000-000000000913";
 pub(super) const OP_4: &str = "00000000-0000-4000-8000-000000000914";
 
-pub(super) fn pane_dir(setup: &Setup) -> PathBuf {
-    pane_path(&setup.root(), &pane_address(&setup.env).expect("address").0)
+pub(super) fn setup_pane_dir(setup: &Setup) -> PathBuf {
+    pane_dir(&setup.root(), &pane_address(&setup.env).expect("address").0)
 }
 
 pub(super) fn actions<'a>(details: &'a [Value], kind: &str) -> Vec<&'a Value> {
@@ -65,7 +65,7 @@ fn a_binding_on_a_vanished_socket_ends_after_two_observations() {
 fn a_process_still_on_a_vanished_socket_is_not_absence() {
     let setup = Setup::new();
     setup.claim_and_bind();
-    let pane = pane_dir(&setup);
+    let pane = setup_pane_dir(&setup);
     fs::remove_file(&setup.env["WEZTERM_UNIX_SOCKET"]).expect("remove socket");
     setup.processes.set(Presence::Present);
     let (result, _) = setup.run_sweep(true, Some(OP_1));
@@ -84,7 +84,7 @@ fn a_vanished_socket_without_a_process_answer_never_ends_a_binding() {
     let setup = Setup::new();
     setup.claim_and_bind();
     let binding_dir = setup.binding_dir();
-    let pane = pane_dir(&setup);
+    let pane = setup_pane_dir(&setup);
     fs::remove_file(&setup.env["WEZTERM_UNIX_SOCKET"]).expect("remove socket");
     setup.processes.set(Presence::Unavailable);
     let probes: [Option<&dyn ProcessProbe>; 2] = [Some(&setup.processes), None];
@@ -121,7 +121,7 @@ fn a_vanished_socket_without_a_process_answer_keeps_an_old_panes_tree() {
     let setup = Setup::new();
     setup.claim_and_bind();
     end_long_ago(&setup);
-    let pane = pane_dir(&setup);
+    let pane = setup_pane_dir(&setup);
     fs::remove_file(&setup.env["WEZTERM_UNIX_SOCKET"]).expect("remove socket");
     setup.processes.set(Presence::Unavailable);
     let probes: [Option<&dyn ProcessProbe>; 2] = [Some(&setup.processes), None];
@@ -218,7 +218,7 @@ fn a_closed_panes_tree_is_removed_only_by_apply_after_two_observations() {
     end_long_ago(&setup);
     setup.processes.set(Presence::Absent);
     let panes = LockCheckingPanes::for_setup(&setup);
-    let pane = pane_dir(&setup);
+    let pane = setup_pane_dir(&setup);
 
     let preview = sweep_with(&setup, &panes, None);
     assert_eq!(
@@ -313,7 +313,7 @@ fn a_present_pane_is_never_pruned_however_old_its_binding() {
             [&json!("present")]
         );
     }
-    assert!(pane_dir(&setup).join("claim.json").exists());
+    assert!(setup_pane_dir(&setup).join("claim.json").exists());
 }
 
 #[test]
@@ -337,7 +337,7 @@ fn a_binding_ended_recently_keeps_its_pane() {
         let (result, _) = setup.run_sweep(true, Some(operation));
         assert!(actions(&result.details, "pane_retention").is_empty());
     }
-    assert!(pane_dir(&setup).join("claim.json").exists());
+    assert!(setup_pane_dir(&setup).join("claim.json").exists());
 }
 
 /// An absence probe written before the binding ended belongs to the binding's
@@ -349,7 +349,7 @@ fn a_probe_from_before_the_end_does_not_count_toward_removal() {
     setup.claim_and_bind();
     let (address, _) = pane_address(&setup.env).expect("address");
     atomic_replace(
-        &pane_dir(&setup).join("absence-probe.json"),
+        &setup_pane_dir(&setup).join("absence-probe.json"),
         &json!({"kind":"absence_probe","schema":3,"address":address,
             "operation_id":"00000000-0000-4000-8000-000000000910",
             "observed_mono_ns":"00000000000000000250"}),
@@ -366,7 +366,7 @@ fn a_probe_from_before_the_end_does_not_count_toward_removal() {
         actions(&result.details, "pane_retention"),
         [&json!("first_absence")]
     );
-    assert!(pane_dir(&setup).exists());
+    assert!(setup_pane_dir(&setup).exists());
 }
 
 /// A file sweep does not recognise stays, and so does the tree around it.
@@ -377,7 +377,7 @@ fn an_unknown_file_keeps_the_pane_tree() {
     end_long_ago(&setup);
     setup.panes.set(Vec::new());
     setup.processes.set(Presence::Absent);
-    let unknown = pane_dir(&setup).join("notes.txt");
+    let unknown = setup_pane_dir(&setup).join("notes.txt");
     fs::write(&unknown, "keep me").expect("unknown file");
     setup.clock.set_monotonic(1_000);
     setup.run_sweep(true, Some(OP_1));
@@ -386,7 +386,7 @@ fn an_unknown_file_keeps_the_pane_tree() {
         .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
     let (result, diagnostics) = setup.run_sweep(true, Some(OP_2));
     assert!(unknown.exists());
-    assert!(pane_dir(&setup).join("claim.json").exists());
+    assert!(setup_pane_dir(&setup).join("claim.json").exists());
     assert!(
         diagnostics.iter().any(|d| d.code == "record_invalid"),
         "{diagnostics:?}"
@@ -405,7 +405,7 @@ fn a_review_left_mid_clear_does_not_keep_the_pane_tree() {
     end_long_ago(&setup);
     setup.panes.set(Vec::new());
     setup.processes.set(Presence::Absent);
-    let reviews = pane_dir(&setup).join("reviews");
+    let reviews = setup_pane_dir(&setup).join("reviews");
     fs::create_dir_all(&reviews).expect("reviews");
     fs::write(
         reviews.join(format!("{}.json.table0x600003a0c0c0.clear", "a".repeat(64))),
@@ -423,7 +423,7 @@ fn a_review_left_mid_clear_does_not_keep_the_pane_tree() {
         [&json!("prune")],
         "{diagnostics:?}"
     );
-    assert!(!pane_dir(&setup).exists());
+    assert!(!setup_pane_dir(&setup).exists());
 }
 
 /// The monotonic clock restarts at boot. A probe taken before a restart reads
@@ -433,7 +433,7 @@ fn a_review_left_mid_clear_does_not_keep_the_pane_tree() {
 fn a_probe_from_before_a_restart_starts_the_count_again() {
     let setup = Setup::new();
     setup.claim_and_bind();
-    let pane = pane_dir(&setup);
+    let pane = setup_pane_dir(&setup);
     let (address, _) = pane_address(&setup.env).expect("address");
     atomic_replace(
         &pane.join("absence-probe.json"),
@@ -554,7 +554,7 @@ fn a_pane_whose_process_hides_its_environment_is_not_absent_when_its_socket_vani
     let setup = Setup::new();
     setup.claim_and_bind();
     let binding_dir = setup.binding_dir();
-    let pane = pane_dir(&setup);
+    let pane = setup_pane_dir(&setup);
     let socket = fs::canonicalize(&setup.env["WEZTERM_UNIX_SOCKET"]).expect("socket path");
     let _shell = Carrier::spawn(
         Path::new("/bin/sleep"),
@@ -685,7 +685,7 @@ fn a_pane_where_reviews_were_marked_and_cleared_is_removed_once_old() {
     wezterm_attention::lifecycle::apply_mark_review(&setup.env, "build").expect("mark review");
     wezterm_attention::lifecycle::apply_mark_clear(&setup.env, "build", "00000000000000000250")
         .expect("mark clear");
-    let lock = pane_dir(&setup).join("reviews").join(format!(
+    let lock = setup_pane_dir(&setup).join("reviews").join(format!(
         ".{}.lock",
         wezterm_attention::protocol::sha256_hex(b"build")
     ));
@@ -704,7 +704,7 @@ fn a_pane_where_reviews_were_marked_and_cleared_is_removed_once_old() {
         [&json!("prune")],
         "{diagnostics:?}"
     );
-    assert!(!pane_dir(&setup).exists());
+    assert!(!setup_pane_dir(&setup).exists());
 }
 
 /// A review is a record sweep recognises, kept in the pane's own reviews
@@ -715,7 +715,7 @@ fn a_pane_still_flagged_for_review_is_removed_once_old() {
     let setup = Setup::new();
     setup.claim_and_bind();
     wezterm_attention::lifecycle::apply_mark_review(&setup.env, "build").expect("mark review");
-    let review = pane_dir(&setup).join("reviews").join(format!(
+    let review = setup_pane_dir(&setup).join("reviews").join(format!(
         "{}.json",
         wezterm_attention::protocol::sha256_hex(b"build")
     ));
@@ -734,7 +734,7 @@ fn a_pane_still_flagged_for_review_is_removed_once_old() {
         [&json!("prune")],
         "{diagnostics:?}"
     );
-    assert!(!pane_dir(&setup).exists());
+    assert!(!setup_pane_dir(&setup).exists());
 }
 
 /// Only the name the review writer uses is its lock. A lock-like file of any
@@ -754,7 +754,7 @@ fn a_lock_like_file_the_review_writer_does_not_leave_keeps_the_pane_tree() {
         end_long_ago(&setup);
         setup.panes.set(Vec::new());
         setup.processes.set(Presence::Absent);
-        let planted = pane_dir(&setup).join(&relative);
+        let planted = setup_pane_dir(&setup).join(&relative);
         fs::create_dir_all(planted.parent().expect("parent")).expect("create parent");
         fs::write(&planted, "").expect("plant lock-like file");
         setup.clock.set_monotonic(1_000);

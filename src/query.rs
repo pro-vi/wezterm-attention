@@ -18,7 +18,7 @@ use crate::protocol::{
 };
 use crate::records::{
     BindingState, FileRecords, RecordIdentity, RecordRead, RecordReader, agents_dir, binding_path,
-    ends_binding, incarnation_path, read_record, read_record_at, read_record_typed, reviews_dir,
+    ends_binding, incarnation_dir, read_record, read_record_at, read_record_typed, reviews_dir,
     session_dir, session_entry_path, session_index_path,
 };
 use crate::wezterm::{Clock, GuiWindowLister, PaneLister, ProcessProbe};
@@ -1122,7 +1122,7 @@ pub fn read_bindings_for_socket_timed(
         realm_id,
         incarnation_id,
     };
-    let selected = incarnation_path(root, &scope.realm_id, &scope.incarnation_id);
+    let selected = incarnation_dir(root, &scope.realm_id, &scope.incarnation_id);
     let mut files = Vec::new();
     let mut diagnostics = Vec::new();
     collect_selected_binding_files(root, &selected, &mut files, &mut diagnostics, true);

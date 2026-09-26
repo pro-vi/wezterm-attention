@@ -19,7 +19,7 @@ fn mark(setup: &Setup, state: &str, source: &str, observation: &str) {
 
 fn review_path(setup: &Setup, source: &str) -> PathBuf {
     let (address, _) = pane_address(&setup.env).unwrap();
-    pane_path(&state_root(&setup.env).unwrap(), &address)
+    pane_dir(&state_root(&setup.env).unwrap(), &address)
         .join("reviews")
         .join(format!(
             "{}.json",
@@ -131,7 +131,7 @@ fn rust_activity(setup: &Setup) -> (RecordAvailability, Option<String>) {
     let root = state_root(&setup.env).unwrap();
     let (address, _) = pane_address(&setup.env).unwrap();
     let pointer: Option<Value> =
-        fs::read(launch_path(&root, &address, launch_id).join("current-binding.json"))
+        fs::read(launch_dir(&root, &address, launch_id).join("current-binding.json"))
             .ok()
             .map(|bytes| serde_json::from_slice(&bytes).unwrap());
     let scope = PaneScope::new(
@@ -183,7 +183,7 @@ fn lua_activity(setup: &Setup) -> String {
 fn launch_activity_path(setup: &Setup) -> PathBuf {
     let root = state_root(&setup.env).unwrap();
     let (address, _) = pane_address(&setup.env).unwrap();
-    launch_path(&root, &address, &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]).join("activity.json")
+    launch_dir(&root, &address, &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]).join("activity.json")
 }
 
 // Before any provider session binds, `mark` writes the launch's own activity.

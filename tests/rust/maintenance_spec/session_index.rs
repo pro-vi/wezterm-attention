@@ -3,7 +3,7 @@
 //! The index is derived state: a store written before it existed answers the
 //! same by the walk, and `sweep --apply` completes it.
 
-use super::pane_retention::{OP_1, OP_2, OP_3, actions, end_long_ago, pane_dir};
+use super::pane_retention::{OP_1, OP_2, OP_3, actions, end_long_ago, setup_pane_dir};
 use super::*;
 use wezterm_attention::query::read_bindings_for_socket_with_ports;
 use wezterm_attention::records::{session_entry_path, session_index_path};
@@ -33,7 +33,7 @@ fn write_bare_binding(setup: &Setup, pane_id: &str, launch_id: &str, session: &s
     address.pane_id = pane_id.to_owned();
     let binding = binding_id("claude", session, launch_id);
     atomic_replace(
-        &launch_path(&setup.root(), &address, launch_id)
+        &launch_dir(&setup.root(), &address, launch_id)
             .join("bindings")
             .join(&binding)
             .join("binding.json"),
@@ -201,7 +201,7 @@ fn pane_retention_removes_the_entries_of_the_tree_it_removes() {
         actions(&result.details, "pane_retention"),
         [&json!("prune")]
     );
-    assert!(!pane_dir(&setup).exists());
+    assert!(!setup_pane_dir(&setup).exists());
     assert!(!entry.exists());
     // A bind of the same session elsewhere may be creating its entry in
     // this directory right now, so retention leaves the directory in place.
@@ -269,7 +269,7 @@ fn a_bind_that_cannot_write_its_entry_leaves_no_binding() {
     fs::remove_dir(&entry).expect("unblock the entry");
 
     let (address, _) = pane_address(&env).expect("address");
-    let binding = launch_path(&setup.root(), &address, launch_id)
+    let binding = launch_dir(&setup.root(), &address, launch_id)
         .join("bindings")
         .join(binding_id("claude", "session-a", launch_id))
         .join("binding.json");

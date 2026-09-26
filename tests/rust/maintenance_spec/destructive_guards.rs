@@ -195,7 +195,7 @@ fn pane_retention_keeps_a_pane_claimed_again_during_the_decision() {
     setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
     setup.panes.set(Vec::new());
     setup.processes.set(Presence::Absent);
-    let pane = pane_path(&setup.root(), &pane_address(&setup.env).expect("address").0);
+    let pane = pane_dir(&setup.root(), &pane_address(&setup.env).expect("address").0);
     setup.clock.set_monotonic(1_000);
     setup.run_sweep(true, Some(OP_1));
     assert!(pane.join("absence-probe.json").exists());
@@ -261,7 +261,7 @@ fn an_absence_probe_is_never_cleared_through_a_symlinked_state_directory() {
     setup.processes.set(Presence::Absent);
     setup.clock.set_monotonic(1_000);
     setup.run_sweep(true, Some(OP_1));
-    let probe = pane_path(&setup.root(), &pane_address(&setup.env).expect("address").0)
+    let probe = pane_dir(&setup.root(), &pane_address(&setup.env).expect("address").0)
         .join("absence-probe.json");
     assert!(probe.exists());
     let relative = probe
@@ -297,7 +297,7 @@ fn a_retention_probe_is_never_cleared_through_a_symlinked_state_directory() {
         super::pane_retention::actions(&first.details, "pane_retention"),
         [&json!("first_absence")]
     );
-    let probe = pane_path(&setup.root(), &pane_address(&setup.env).expect("address").0)
+    let probe = pane_dir(&setup.root(), &pane_address(&setup.env).expect("address").0)
         .join("absence-probe.json");
     let relative = probe
         .strip_prefix(setup.root().join("v2"))

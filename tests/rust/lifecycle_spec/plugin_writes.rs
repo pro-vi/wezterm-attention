@@ -51,7 +51,7 @@ fn plugin(setup: &Setup, action: &str, launch_id: &str, extra: &[&str]) -> (i32,
 
 fn review_path(setup: &Setup, owner: &str) -> PathBuf {
     let (address, _) = pane_address(&setup.env).unwrap();
-    pane_path(&state_root(&setup.env).unwrap(), &address)
+    pane_dir(&state_root(&setup.env).unwrap(), &address)
         .join("reviews")
         .join(format!(
             "{}.json",
@@ -153,7 +153,7 @@ fn clearing_the_users_review_leaves_another_owners() {
 fn the_users_review_is_written_and_removed_only_under_the_review_locks() {
     let setup = bound();
     let (address, _) = pane_address(&setup.env).unwrap();
-    let pane = pane_path(&state_root(&setup.env).unwrap(), &address);
+    let pane = pane_dir(&state_root(&setup.env).unwrap(), &address);
     let owner_lock = pane.join("reviews").join(format!(
         ".{}.lock",
         wezterm_attention::protocol::sha256_hex(b"user")
@@ -263,8 +263,8 @@ fn an_acknowledgement_is_written_only_under_the_activity_locks() {
     let root = state_root(&setup.env).unwrap();
     let (address, _) = pane_address(&setup.env).unwrap();
     for lock in [
-        launch_path(&root, &address, LAUNCH).join(".lock"),
-        pane_path(&root, &address).join(".claim.lock"),
+        launch_dir(&root, &address, LAUNCH).join(".lock"),
+        pane_dir(&root, &address).join(".claim.lock"),
     ] {
         let (code, response) = with_lock(&lock, Duration::from_secs(5), || {
             Ok(plugin(
@@ -296,17 +296,17 @@ fn a_plugin_write_behind_a_held_lock_answers_at_once() {
     let (address, _) = pane_address(&setup.env).unwrap();
     let cases: [(PathBuf, &str, &[&str]); 3] = [
         (
-            launch_path(&root, &address, LAUNCH).join(".lock"),
+            launch_dir(&root, &address, LAUNCH).join(".lock"),
             "acknowledge",
             &["--activity-event-id", &event_id],
         ),
         (
-            pane_path(&root, &address).join(".claim.lock"),
+            pane_dir(&root, &address).join(".claim.lock"),
             "acknowledge",
             &["--activity-event-id", &event_id],
         ),
         (
-            pane_path(&root, &address).join(".claim.lock"),
+            pane_dir(&root, &address).join(".claim.lock"),
             "set-review",
             &[],
         ),

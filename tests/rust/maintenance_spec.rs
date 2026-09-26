@@ -18,7 +18,7 @@ use wezterm_attention::providers::parse_provider_event;
 use wezterm_attention::query::read_bindings_with_ports;
 use wezterm_attention::query::{PaneScope, read_pane_facts_with_ports};
 use wezterm_attention::records::{
-    FileRecords, atomic_replace, launch_path, pane_path, state_root, with_lock,
+    FileRecords, atomic_replace, launch_dir, pane_dir, state_root, with_lock,
 };
 use wezterm_attention::wezterm::{
     Clock, PaneLister, PaneRow, Presence, ProcessProbe, RuntimePorts, TtyWriter,
@@ -260,7 +260,7 @@ impl Setup {
         let root = self.root();
         let (address, _) = pane_address(&self.env).expect("address");
         let launch_id = &self.env["WEZTERM_ATTENTION_LAUNCH_ID"];
-        launch_path(&root, &address, launch_id)
+        launch_dir(&root, &address, launch_id)
             .join("bindings")
             .join(binding_id("claude", "session-a", launch_id))
     }
@@ -346,7 +346,7 @@ fn doctor_reports_a_future_claim_without_any_binding() {
     let setup = Setup::new();
     wezterm_attention::claim_launch(&setup.env, &setup.ports()).expect("claim");
     let (address, _) = pane_address(&setup.env).expect("address");
-    let claim_path = pane_path(&setup.root(), &address).join("claim.json");
+    let claim_path = pane_dir(&setup.root(), &address).join("claim.json");
     let mut claim: Value =
         serde_json::from_slice(&fs::read(&claim_path).expect("claim")).expect("claim JSON");
     claim["schema"] = json!(999);
@@ -373,7 +373,7 @@ fn sweep_preview_writes_nothing_and_two_absences_end_one_binding() {
     setup.panes.set(Vec::new());
     setup.processes.set(Presence::Absent);
     setup.clock.set_monotonic(300);
-    let pane = pane_path(&setup.root(), &pane_address(&setup.env).expect("address").0);
+    let pane = pane_dir(&setup.root(), &pane_address(&setup.env).expect("address").0);
     let probe = pane.join("absence-probe.json");
     let preview = setup.run_sweep(false, None).0;
     assert!(
@@ -419,7 +419,7 @@ fn unavailable_process_probe_never_counts_as_absence() {
             .iter()
             .any(|item| item.code == "probe_unavailable")
     );
-    let pane = pane_path(&setup.root(), &pane_address(&setup.env).expect("address").0);
+    let pane = pane_dir(&setup.root(), &pane_address(&setup.env).expect("address").0);
     assert!(!pane.join("absence-probe.json").exists());
 }
 
@@ -451,7 +451,7 @@ fn live_pane_clears_the_first_absence_probe() {
     setup.panes.set(Vec::new());
     setup.processes.set(Presence::Absent);
     setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000715"));
-    let pane = pane_path(&setup.root(), &pane_address(&setup.env).expect("address").0);
+    let pane = pane_dir(&setup.root(), &pane_address(&setup.env).expect("address").0);
     assert!(pane.join("absence-probe.json").exists());
     setup.panes.set(vec![PaneRow {
         pane_id: "42".to_owned(),
@@ -632,7 +632,7 @@ fn old_noncurrent_binding_is_pruned_but_current_binding_is_preserved() {
     let root = setup.root();
     let (address, _) = pane_address(&setup.env).expect("address");
     let launch_id = &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"];
-    let current_dir = launch_path(&root, &address, launch_id)
+    let current_dir = launch_dir(&root, &address, launch_id)
         .join("bindings")
         .join(binding_id("claude", "session-b", launch_id));
     setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
@@ -794,7 +794,7 @@ fn sweep_apply_uses_the_binding_reread_after_selection() {
     });
     let (result, diagnostics) = result;
     assert!(
-        !pane_path(&root, &pane_address(&setup.env).expect("address").0)
+        !pane_dir(&root, &pane_address(&setup.env).expect("address").0)
             .join("absence-probe.json")
             .exists()
     );
@@ -828,7 +828,7 @@ fn missing_claim_preserves_old_binding_history() {
         "00000000000000000400",
     );
     let (address, _) = pane_address(&setup.env).expect("address");
-    fs::remove_file(pane_path(&setup.root(), &address).join("claim.json")).expect("remove claim");
+    fs::remove_file(pane_dir(&setup.root(), &address).join("claim.json")).expect("remove claim");
     setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
     let (result, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000725"));
     assert!(old_dir.exists());
@@ -843,7 +843,7 @@ fn malformed_claim_is_contained_to_its_binding_selection() {
     setup.claim_and_bind();
     let (address, _) = pane_address(&setup.env).expect("address");
     fs::write(
-        pane_path(&setup.root(), &address).join("claim.json"),
+        pane_dir(&setup.root(), &address).join("claim.json"),
         b"not json",
     )
     .expect("corrupt claim");
@@ -863,7 +863,7 @@ fn doctor_rejects_a_valid_record_at_the_wrong_depth() {
     let binding_id = binding_id("claude", "session-a", launch_id);
     let agent_key = wezterm_attention::protocol::sha256_hex(b"misplaced");
     atomic_replace(
-        &pane_path(&setup.root(), &address)
+        &pane_dir(&setup.root(), &address)
             .join("agents")
             .join(format!("{agent_key}.json")),
         &json!({
@@ -944,7 +944,7 @@ fn a_session_resumed_in_a_new_pane_conflicts_only_while_both_panes_live() {
     let launch_id = "00000000-0000-4000-8000-000000000702";
     let resumed_binding = binding_id("claude", "session-a", launch_id);
     atomic_replace(
-        &launch_path(&root, &resumed, launch_id)
+        &launch_dir(&root, &resumed, launch_id)
             .join("bindings")
             .join(&resumed_binding)
             .join("binding.json"),
@@ -1480,7 +1480,7 @@ fn a_present_row_from_an_incomplete_bindings_answer_inspects_completely() {
     let (address, _) = pane_address(&setup.env).expect("address");
     let launch_id = setup.env["WEZTERM_ATTENTION_LAUNCH_ID"].clone();
     let other_id = "d".repeat(64);
-    let other_dir = launch_path(&root, &address, &launch_id)
+    let other_dir = launch_dir(&root, &address, &launch_id)
         .join("bindings")
         .join(&other_id);
     fs::create_dir_all(&other_dir).expect("create extra binding");

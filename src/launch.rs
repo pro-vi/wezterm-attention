@@ -15,7 +15,7 @@ use crate::identity::{PaneAddress, pane_address, pane_socket};
 use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, manifest};
 use crate::records::{
     CommitPlan, LOCK_TIMEOUT, RecordIdentity, Replacement, claim_lock, commit, mkdir_private,
-    pane_path, read_claim, reviews_dir, session_index_marker, session_index_path, state_root,
+    pane_dir, read_claim, reviews_dir, session_index_marker, session_index_path, state_root,
 };
 use crate::wezterm::{
     ControllingTerminal, ProcessFacts, ProcessInspector, ProcessRead, ProcessStart, RuntimePorts,
@@ -400,7 +400,7 @@ fn with_pane_claim<T>(
     address: &PaneAddress,
     publish: impl FnOnce(Option<Value>) -> Result<T>,
 ) -> Result<T> {
-    if !pane_path(root, address).is_dir() {
+    if !pane_dir(root, address).is_dir() {
         return publish(None);
     }
     crate::records::with_lock(&claim_lock(root, address), LOCK_TIMEOUT, || {

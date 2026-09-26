@@ -64,7 +64,7 @@ fn doctor_and_sweep_name_a_record_they_could_not_read() {
     setup.claim_and_bind();
     let root = setup.root();
     let (address, _) = pane_address(&setup.env).expect("address");
-    let pane = pane_path(&root, &address);
+    let pane = pane_dir(&root, &address);
     let claim = pane.join("claim.json");
     let review = pane
         .join("reviews")

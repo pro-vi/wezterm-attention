@@ -19,7 +19,7 @@ use wezterm_attention::lifecycle::{
 use wezterm_attention::observations::LifecycleSnapshot;
 use wezterm_attention::providers::{ProviderAction, ProviderEvent, parse_provider_event};
 use wezterm_attention::query::read_bindings;
-use wezterm_attention::records::{atomic_replace, launch_path, pane_path, state_root, with_lock};
+use wezterm_attention::records::{atomic_replace, launch_dir, pane_dir, state_root, with_lock};
 use wezterm_attention::wezterm::{
     Clock, ControllingTerminal, PaneLister, PaneRow, ProcessFacts, ProcessInspector, ProcessRead,
     ProcessStart, RuntimePorts, TtyWriter,
@@ -400,7 +400,7 @@ impl Setup {
         let root = state_root(&self.env).expect("state root");
         let (address, _) = pane_address(&self.env).expect("address");
         let launch_id = &self.env["WEZTERM_ATTENTION_LAUNCH_ID"];
-        launch_path(&root, &address, launch_id)
+        launch_dir(&root, &address, launch_id)
             .join("bindings")
             .join(binding_id(provider, session, launch_id))
     }
@@ -2054,7 +2054,7 @@ fn stale_pi_clear_preserves_newer_activity_and_review() {
     assert_eq!(result.disposition, "ignored");
     let root = state_root(&setup.env).expect("state root");
     let (address, _) = pane_address(&setup.env).expect("address");
-    let review = pane_path(&root, &address).join("reviews").join(format!(
+    let review = pane_dir(&root, &address).join("reviews").join(format!(
         "{}.json",
         wezterm_attention::protocol::sha256_hex(b"pi-bus")
     ));
@@ -2104,9 +2104,9 @@ fn delayed_pi_clear_cannot_remove_a_new_launch_review() {
     );
     let root = state_root(&setup.env).expect("state root");
     let (address, _) = pane_address(&setup.env).expect("address");
-    let pane = pane_path(&root, &address);
+    let pane = pane_dir(&root, &address);
     let launch_id = setup.env["WEZTERM_ATTENTION_LAUNCH_ID"].clone();
-    let launch = launch_path(&root, &address, &launch_id);
+    let launch = launch_dir(&root, &address, &launch_id);
     let old_payload = payload("pi", "bus", "pi-a", json!({"state":"clear"}));
 
     let (child, review_before) = with_lock(&launch.join(".lock"), Duration::from_secs(2), || {
@@ -2207,7 +2207,7 @@ fn future_review_is_never_deleted_or_replaced() {
     );
     let root = state_root(&setup.env).expect("state root");
     let (address, _) = pane_address(&setup.env).expect("address");
-    let pane = pane_path(&root, &address);
+    let pane = pane_dir(&root, &address);
     let owner_key = wezterm_attention::protocol::sha256_hex(b"pi-bus");
     let review_path = pane.join("reviews").join(format!("{owner_key}.json"));
     let future = serde_json::to_vec(&json!({
@@ -2354,7 +2354,7 @@ fn every_review_writer_obeys_claim_and_owner_locks() {
     );
     let root = state_root(&setup.env).expect("state root");
     let (address, _) = pane_address(&setup.env).expect("address");
-    let pane = pane_path(&root, &address);
+    let pane = pane_dir(&root, &address);
     let owner_key = wezterm_attention::protocol::sha256_hex(b"pi-bus");
     let owner_lock = pane.join("reviews").join(format!(".{owner_key}.lock"));
     let review = event("pi", "bus", "pi-a", json!({"state":"review"}));
@@ -2470,7 +2470,7 @@ fn pi_review_and_clear_share_the_current_binding_without_ending_it() {
     );
     let root = state_root(&setup.env).expect("state root");
     let (address, _) = pane_address(&setup.env).expect("address");
-    let review_path = pane_path(&root, &address).join("reviews").join(format!(
+    let review_path = pane_dir(&root, &address).join("reviews").join(format!(
         "{}.json",
         wezterm_attention::protocol::sha256_hex(b"pi-bus")
     ));
@@ -2550,7 +2550,7 @@ fn manual_mark_targets_the_launch_and_a_duplicate_is_skipped() {
     );
     let root = state_root(&setup.env).expect("state root");
     let (address, _) = pane_address(&setup.env).expect("address");
-    let review = pane_path(&root, &address).join("reviews").join(format!(
+    let review = pane_dir(&root, &address).join("reviews").join(format!(
         "{}.json",
         wezterm_attention::protocol::sha256_hex(b"manual")
     ));
@@ -2835,7 +2835,7 @@ fn manual_mark_after_an_acknowledged_mark_publishes_a_fresh_event_id() {
     let acknowledged = first.event_id.clone().expect("mark publishes an event id");
     let root = state_root(&setup.env).expect("state root");
     let (address, _) = pane_address(&setup.env).expect("address");
-    let launch = launch_path(&root, &address, &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]);
+    let launch = launch_dir(&root, &address, &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]);
     let activity: Value =
         serde_json::from_slice(&fs::read(launch.join("activity.json")).expect("read activity"))
             .expect("activity JSON");

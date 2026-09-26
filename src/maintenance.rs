@@ -23,8 +23,8 @@ use crate::query::{
 use crate::records::{
     BINDING_FILE, BindingState, CommitPlan, FileRecords, RecordIdentity, RecordRead, Replacement,
     agents_dir, atomic_replace_if_different, binding_record_kind, binding_session_entry,
-    claim_lock, commit, directory_confined, ends_binding, incarnation_path, launch_lock, lock_file,
-    pane_path, read_bounded, read_record, read_record_at, removal_confined, remove_file_durable,
+    claim_lock, commit, directory_confined, ends_binding, incarnation_dir, launch_lock, lock_file,
+    pane_dir, read_bounded, read_record, read_record_at, removal_confined, remove_file_durable,
     session_index_marker, session_index_path,
 };
 use crate::wezterm::{Clock, PaneLister, Presence, ProcessInspector, ProcessProbe};
@@ -923,7 +923,7 @@ fn fold_kept_history(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
                 json!({
                     "realm_id": realm_id,
                     "incarnation_id": incarnation_id,
-                    "path": incarnation_path(Path::new(""), &realm_id, &incarnation_id),
+                    "path": incarnation_dir(Path::new(""), &realm_id, &incarnation_id),
                     "pane_count": panes.len(),
                 })
             })
@@ -1204,7 +1204,7 @@ fn pane_retention(
             return Ok(true);
         }
     }
-    let pane = pane_path(root, address);
+    let pane = pane_dir(root, address);
     let probe_identity = RecordIdentity::pane(address);
     let probe_path = probe_identity.path(root, "absence_probe")?;
     let probe = match read_record(&probe_path, Some("absence_probe"), &probe_identity) {

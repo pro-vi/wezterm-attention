@@ -238,14 +238,14 @@ impl RecordIdentity {
     /// The directory this identity names below `root`.
     fn directory(&self, root: &Path) -> Option<PathBuf> {
         Some(match self.depth()? {
-            Depth::Realm => realm_path(root, self.realm_id.as_deref()?),
-            Depth::Incarnation => incarnation_path(
+            Depth::Realm => realm_dir(root, self.realm_id.as_deref()?),
+            Depth::Incarnation => incarnation_dir(
                 root,
                 self.realm_id.as_deref()?,
                 self.incarnation_id.as_deref()?,
             ),
-            Depth::Pane => pane_path(root, self.address.as_ref()?),
-            Depth::Launch => launch_path(root, self.address.as_ref()?, self.launch_id.as_deref()?),
+            Depth::Pane => pane_dir(root, self.address.as_ref()?),
+            Depth::Launch => launch_dir(root, self.address.as_ref()?, self.launch_id.as_deref()?),
             Depth::Binding => binding_dir(
                 root,
                 self.address.as_ref()?,
@@ -592,34 +592,34 @@ fn absolute_path(value: &str, name: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(value))
 }
 
-pub fn realm_path(root: &Path, realm_id: &str) -> PathBuf {
+pub fn realm_dir(root: &Path, realm_id: &str) -> PathBuf {
     root.join("v2/realms").join(realm_id)
 }
 
-pub fn incarnation_path(root: &Path, realm_id: &str, incarnation_id: &str) -> PathBuf {
-    realm_path(root, realm_id)
+pub fn incarnation_dir(root: &Path, realm_id: &str, incarnation_id: &str) -> PathBuf {
+    realm_dir(root, realm_id)
         .join("incarnations")
         .join(incarnation_id)
 }
 
-pub fn pane_path(root: &Path, address: &PaneAddress) -> PathBuf {
-    incarnation_path(root, &address.realm_id, &address.incarnation_id)
+pub fn pane_dir(root: &Path, address: &PaneAddress) -> PathBuf {
+    incarnation_dir(root, &address.realm_id, &address.incarnation_id)
         .join("panes")
         .join(&address.pane_id)
 }
 
-pub fn launch_path(root: &Path, address: &PaneAddress, launch_id: &str) -> PathBuf {
-    pane_path(root, address).join("launches").join(launch_id)
+pub fn launch_dir(root: &Path, address: &PaneAddress, launch_id: &str) -> PathBuf {
+    pane_dir(root, address).join("launches").join(launch_id)
 }
 
 /// The lock held while a pane's claim is read or written.
 pub fn claim_lock(root: &Path, address: &PaneAddress) -> PathBuf {
-    pane_path(root, address).join(CLAIM_LOCK)
+    pane_dir(root, address).join(CLAIM_LOCK)
 }
 
 /// The lock every writer of one launch's records holds.
 pub fn launch_lock(root: &Path, address: &PaneAddress, launch_id: &str) -> PathBuf {
-    launch_path(root, address, launch_id).join(LAUNCH_LOCK)
+    launch_dir(root, address, launch_id).join(LAUNCH_LOCK)
 }
 
 /// The lock a writer of one owner's review holds, beside the reviews. The
@@ -649,7 +649,7 @@ pub fn binding_dir(
     launch_id: &str,
     binding_id: &str,
 ) -> PathBuf {
-    launch_path(root, address, launch_id)
+    launch_dir(root, address, launch_id)
         .join("bindings")
         .join(binding_id)
 }
@@ -667,7 +667,7 @@ pub fn binding_path(
 
 /// The directory that holds a pane's reviews, one per owner.
 pub fn reviews_dir(root: &Path, address: &PaneAddress) -> PathBuf {
-    pane_path(root, address).join(REVIEWS)
+    pane_dir(root, address).join(REVIEWS)
 }
 
 /// The directory that holds a binding's sub-agent presences, one per agent.

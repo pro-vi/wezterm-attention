@@ -33,7 +33,7 @@ fn bound() -> Setup {
 
 fn claim_lock(setup: &Setup) -> PathBuf {
     let (address, _) = pane_address(&setup.env).expect("address");
-    pane_path(&state_root(&setup.env).expect("state root"), &address).join(".claim.lock")
+    pane_dir(&state_root(&setup.env).expect("state root"), &address).join(".claim.lock")
 }
 
 /// One writer an event or a mark can reach, run against a pane.
@@ -299,7 +299,7 @@ fn a_claim_change_waits_while_an_admitted_event_writes() {
             .expect("the claim changes afterwards");
     });
     *setup.processes.on_read.lock().unwrap() = None;
-    let binding = launch_path(
+    let binding = launch_dir(
         &state_root(&setup.env).unwrap(),
         &pane_address(&setup.env).unwrap().0,
         &launch_of(&claim),
