@@ -1,26 +1,26 @@
 return function(context)
   local M = context.M
-  local protocol = context.protocol
-  local protocol_load_error = context.protocol_load_error
-  local parse_wire_json = context.parse_wire_json
-  local address_cache_key = context.address_cache_key
-  local same_address = context.same_address
-  local diagnostic = context.diagnostic
-  local invalid = context.invalid
-  local diagnostics_have_unavailable_io = context.diagnostics_have_unavailable_io
-  local health_from_diagnostics = context.health_from_diagnostics
-  local collect_diagnostic = context.collect_diagnostic
-  local v2_pane_root = context.v2_pane_root
-  local binding_root = context.binding_root
-  local read_expected_record_cached = context.read_expected_record_cached
-  local read_record_collection = context.read_record_collection
-  local identity_diagnostic = context.identity_diagnostic
-  local same_target
-  local age_exceeds_ms = context.age_exceeds_ms
-  local eligible_subagent = context.eligible_subagent
-  local deep_copy = context.deep_copy
   local defaults = context.defaults
   local wezterm = context.wezterm
+  local protocol_api = context.protocol_api
+  local protocol = protocol_api.protocol
+  local protocol_load_error = protocol_api.protocol_load_error
+  local parse_wire_json = protocol_api.parse_wire_json
+  local address_cache_key = protocol_api.address_cache_key
+  local same_address = protocol_api.same_address
+  local diagnostic = protocol_api.diagnostic
+  local invalid = protocol_api.invalid
+  local diagnostics_have_unavailable_io = protocol_api.diagnostics_have_unavailable_io
+  local health_from_diagnostics = protocol_api.health_from_diagnostics
+  local collect_diagnostic = protocol_api.collect_diagnostic
+  local v2_pane_root = protocol_api.v2_pane_root
+  local binding_root = protocol_api.binding_root
+  local read_expected_record_cached = protocol_api.read_expected_record_cached
+  local read_record_collection = protocol_api.read_record_collection
+  local identity_diagnostic = protocol_api.identity_diagnostic
+  local age_exceeds_ms = protocol_api.age_exceeds_ms
+  local eligible_subagent = protocol_api.eligible_subagent
+  local deep_copy = protocol_api.deep_copy
 
   local function request_evidence(observations, provider)
     local groups, ordered = {}, {}
@@ -36,7 +36,7 @@ return function(context)
       elseif kind == "approval_requested" or kind == "automatic_denial" then
         request_kind, role = "approval", kind == "approval_requested" and "request" or "denial"
         if kind == "automatic_denial" then
-          local class, mode = context.classify_lifecycle_tool(provider, item.tool_name)
+          local class, mode = protocol_api.classify_lifecycle_tool(provider, item.tool_name)
           if class ~= "generic" then request_kind, question_mode = class, mode end
         end
         namespace, native_id = "tool", c.tool_call_id
@@ -689,20 +689,12 @@ return function(context)
     return nil
   end
 
-
   return {
     lifecycle_facet = lifecycle_facet,
-    is_local_domain = is_local_domain,
     unix_domain_socket = unix_domain_socket,
     refresh_domain_facts = refresh_domain_facts,
-    canonical_pane_id = canonical_pane_id,
-    pane_call = pane_call,
     pane_method = pane_method,
     resolve_pane_read = resolve_pane_read,
-    same_target = same_target,
-    effective_attention_type = effective_attention_type,
-    empty_v2_view = empty_v2_view,
     read_attention_view = read_attention_view,
-    pane_marker_id = M.pane_marker_id,
   }
 end

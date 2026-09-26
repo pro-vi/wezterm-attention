@@ -11,64 +11,9 @@ local function is_absolute_path(path)
   return path:sub(1, 1) == "/" or path:match("^%a:[\\/]") ~= nil or path:sub(1, 2) == "\\\\"
 end
 
---- The writer's bound on a root path, `path_max_bytes` in protocol/v2.json,
---- which loads only after the root is resolved.
-local path_max_bytes = 4096
-
---- titles.lua's UTF-8 repair, which returns well-formed text unchanged. It
---- is set once that module has loaded, and the default state root is
---- resolved only after that.
-local well_formed_utf8
-
---- A root the writer would take as well: at most its path bound in bytes,
---- UTF-8, since the writer reads its environment as text, and no control
---- character, C0, DEL or C1.
-local function safe_root_text(path)
-  return #path <= path_max_bytes and well_formed_utf8(path) == path
-    and not path:find("[%z\1-\31\127]") and not path:find("\194[\128-\159]")
-end
-
---- Why a root the writer would refuse is refused, for the log, which must
---- not repeat the bytes that made it so.
-local unsafe_root_problem = "longer than " .. path_max_bytes
-  .. " bytes, not UTF-8, or holds a control character"
-
---- The state root, resolved in the order the attention CLI and the Pi
---- extension use, so a producer, the writer and this reader agree on one
---- directory: WEZTERM_ATTENTION_DIR, then $XDG_STATE_HOME/wezterm-attention,
---- then ~/.local/state/wezterm-attention. An empty value counts as unset, and a
---- relative XDG_STATE_HOME is ignored as the XDG spec says, as is one the
---- writer would refuse. A WEZTERM_ATTENTION_DIR that is relative or that the
---- writer would refuse, and an absolute XDG_STATE_HOME that is not UTF-8, are
---- errors to the CLI; here they are ignored, and the second return says so for the
---- log.
-local function resolve_state_root()
-  local note
-  local explicit = os.getenv("WEZTERM_ATTENTION_DIR")
-  if explicit and explicit ~= "" then
-    -- Checked first so that the log never repeats a control character.
-    if not safe_root_text(explicit) then
-      note = "WEZTERM_ATTENTION_DIR is " .. unsafe_root_problem .. ", so it is ignored"
-    elseif not is_absolute_path(explicit) then
-      note = "WEZTERM_ATTENTION_DIR is not an absolute path, so it is ignored: " .. explicit
-    else
-      return explicit
-    end
-  end
-  local state_home = os.getenv("XDG_STATE_HOME")
-  if state_home and state_home ~= "" then
-    if well_formed_utf8(state_home) ~= state_home then
-      note = (note and note .. "; " or "") .. "XDG_STATE_HOME is not UTF-8, so it is ignored"
-    elseif is_absolute_path(state_home) and safe_root_text(state_home) then
-      return (state_home:gsub("(.)/+$", "%1")) .. "/wezterm-attention", note
-    end
-  end
-  return home .. "/.local/state/wezterm-attention", note
-end
-
 local defaults = {
-  -- `dir`, the state directory the records are read from, is set once
-  -- titles.lua has loaded, below.
+  -- `dir`, the state directory the records are read from, is set from the
+  -- state root below.
 
   -- Render mode: "tab" | "manual"
   --   tab:    plugin owns format-tab-title (default)
@@ -114,7 +59,7 @@ local defaults = {
   settled_title_fallback = true,
 }
 
--- ── V2 protocol authority ───────────────────────────────────────────────────
+-- ── Modules ─────────────────────────────────────────────────────────────────
 
 local plugin_source = type(module_loader_path) == "string" and module_loader_path or nil
 local debug_library = rawget(_G, "debug")
@@ -137,6 +82,7 @@ if not plugin_root then
     .. 'loadfile(clone .. "/plugin/init.lua")("wezterm-attention", clone .. "/plugin/init.lua"). '
     .. "dofile passes no module path, and WezTerm's Lua has no debug library to find one.", 0)
 end
+
 local loaded_module_errors = {}
 local function load_plugin_module(name)
   local path = plugin_root and (plugin_root .. "/plugin/" .. name .. ".lua") or nil
@@ -195,180 +141,93 @@ else
     end,
   }
 end
-local read_all = protocol_api.read_all
-local decode_json = protocol_api.decode_json
-local protocol = protocol_api.protocol
-local protocol_load_error = protocol_api.protocol_load_error
-local diagnostic = protocol_api.diagnostic
-local invalid = protocol_api.invalid
-local sha256 = protocol_api.sha256
-local parse_wire_value = protocol_api.parse_wire_value
-local parse_wire_json = protocol_api.parse_wire_json
-local parse_v2_record = protocol_api.parse_v2_record
-local parse_v2_record_json = protocol_api.parse_v2_record_json
-local compare_ns20 = protocol_api.compare_ns20
-local unix_ns_parts = protocol_api.unix_ns_parts
-local format_unix_ns20 = protocol_api.format_unix_ns20
-local wezterm_now_unix_ns20 = protocol_api.wezterm_now_unix_ns20
-local add_ms_to_unix_ns = protocol_api.add_ms_to_unix_ns
-local seconds_until_after = protocol_api.seconds_until_after
-local age_exceeds_ms = protocol_api.age_exceeds_ms
-local address_cache_key = protocol_api.address_cache_key
-local v2_pane_root = protocol_api.v2_pane_root
-local binding_root = protocol_api.binding_root
-local read_record_file = protocol_api.read_record_file
-local record_matches = protocol_api.record_matches
-local identity_diagnostic = protocol_api.identity_diagnostic
-local read_expected_record = protocol_api.read_expected_record
-local read_expected_record_cached = protocol_api.read_expected_record_cached
-local path_stem = protocol_api.path_stem
-local glob_paths = protocol_api.glob_paths
-local read_record_collection = protocol_api.read_record_collection
-local collect_diagnostic = protocol_api.collect_diagnostic
-local health_from_diagnostics = protocol_api.health_from_diagnostics
-local diagnostics_have_unavailable_io = protocol_api.diagnostics_have_unavailable_io
-local eligible_subagent = protocol_api.eligible_subagent
-local deep_copy = protocol_api.deep_copy
-local now_ms = protocol_api.now_ms
-local frame_for_now = protocol_api.frame_for_now
-local is_integer = protocol_api.is_integer
-local is_hex64 = protocol_api.is_hex64
-local is_uuid = protocol_api.is_uuid
-local is_ns20 = protocol_api.is_ns20
-local is_canonical_decimal = protocol_api.is_canonical_decimal
-local is_safe_text = protocol_api.is_safe_text
-local same_address = protocol_api.same_address
-local overlays_factory = assert(load_plugin_module("overlays"))
-local overlays_api = overlays_factory({ wezterm = wezterm, now_ms = now_ms })
-local report_error_once = overlays_api.report_error_once
-local report_warning_once = overlays_api.report_warning_once
-local publish_tab_order = overlays_api.publish_tab_order
-local withdraw_closed_tab_orders = overlays_api.withdraw_closed_tab_orders
-local reader_factory = assert(load_plugin_module("reader"))
--- Bound once the runtime below exists; the reader asks it per pane read.
-local own_mux_identity
-local reader_api = reader_factory({
+local overlays = assert(load_plugin_module("overlays"))({ wezterm = wezterm, now_ms = protocol_api.now_ms })
+local runtime_state = assert(load_plugin_module("runtime"))()
+-- The runtime reads panes through the reader, and the reader asks the runtime
+-- which mux this GUI is, so that one question is looked up when it is asked.
+local runtime
+local reader = assert(load_plugin_module("reader"))({
   M = M,
   wezterm = wezterm,
   defaults = defaults,
   home_dir = home,
-  deep_copy = deep_copy,
-  classify_lifecycle_tool = protocol_api.classify_lifecycle_tool,
-  protocol = protocol,
-  protocol_load_error = protocol_load_error,
-  parse_wire_json = parse_wire_json,
-  address_cache_key = address_cache_key,
-  same_address = same_address,
-  diagnostic = diagnostic,
-  invalid = invalid,
-  diagnostics_have_unavailable_io = diagnostics_have_unavailable_io,
-  health_from_diagnostics = health_from_diagnostics,
-  collect_diagnostic = collect_diagnostic,
-  v2_pane_root = v2_pane_root,
-  binding_root = binding_root,
-  read_expected_record_cached = read_expected_record_cached,
-  read_record_collection = read_record_collection,
-  identity_diagnostic = identity_diagnostic,
-  age_exceeds_ms = age_exceeds_ms,
-  eligible_subagent = eligible_subagent,
-  own_mux_identity = function() return own_mux_identity() end,
+  protocol_api = protocol_api,
+  own_mux_identity = function() return runtime.own_mux_identity() end,
 })
-local canonical_pane_id = reader_api.canonical_pane_id
-local pane_call = reader_api.pane_call
-local pane_method = reader_api.pane_method
-local resolve_pane_read = reader_api.resolve_pane_read
-local same_target = reader_api.same_target
-local effective_attention_type = reader_api.effective_attention_type
-local empty_v2_view = reader_api.empty_v2_view
-local read_attention_view = reader_api.read_attention_view
-local runtime_factory = assert(load_plugin_module("runtime"))
-local runtime_state = runtime_factory()
-local attention_cache = runtime_state.attention_cache
-local marker_id_by_local = runtime_state.marker_id_by_local
-local seen_marker_ids_by_window = runtime_state.seen_marker_ids_by_window
--- ── Internal helpers ────────────────────────────────────────────────────────
+local titles = assert(load_plugin_module("titles"))({
+  M = M, protocol_api = protocol_api, overlays = overlays, runtime_state = runtime_state,
+})
+local format = assert(load_plugin_module("format"))({
+  M = M, defaults = defaults, runtime_state = runtime_state, titles = titles,
+})
+runtime = runtime_state.bind({
+  M = M,
+  wezterm = wezterm,
+  defaults = defaults,
+  protocol_api = protocol_api,
+  overlays = overlays,
+  reader = reader,
+  titles = titles,
+})
+local report_error_once = overlays.report_error_once
+local report_warning_once = overlays.report_warning_once
 
---- The key a pane the GUI draws is cached under, from its GUI-local number:
---- the one the last poll found for it, or nil when that poll found none (a
---- mux-client pane that has not published its $WEZTERM_PANE) or none has
---- walked the pane yet.
-local function drawn_pane_key(local_id)
-  return marker_id_by_local[local_id] or nil
+-- ── State root ──────────────────────────────────────────────────────────────
+
+--- The writer's bound on a root path, `path_max_bytes` in protocol/v2.json.
+--- A root is resolved even when that manifest cannot be read, so the bound is
+--- spelled here as well.
+local path_max_bytes = 4096
+
+--- A root the writer would take as well: at most its path bound in bytes,
+--- UTF-8, since the writer reads its environment as text, and no control
+--- character, C0, DEL or C1.
+local function safe_root_text(path)
+  return #path <= path_max_bytes and titles.well_formed_utf8(path) == path
+    and not path:find("[%z\1-\31\127]") and not path:find("\194[\128-\159]")
 end
 
-local titles_factory = assert(load_plugin_module("titles"))
-local titles_api = titles_factory({
-  M = M,
-  defaults = defaults,
-  report_error_once = report_error_once,
-  is_safe_text = is_safe_text,
-  drawn_pane_key = drawn_pane_key,
-})
-well_formed_utf8 = titles_api.well_formed_utf8
+--- Why a root the writer would refuse is refused, for the log, which must
+--- not repeat the bytes that made it so.
+local unsafe_root_problem = "longer than " .. path_max_bytes
+  .. " bytes, not UTF-8, or holds a control character"
+
+--- The state root, resolved in the order the attention CLI and the Pi
+--- extension use, so a producer, the writer and this reader agree on one
+--- directory: WEZTERM_ATTENTION_DIR, then $XDG_STATE_HOME/wezterm-attention,
+--- then ~/.local/state/wezterm-attention. An empty value counts as unset, and a
+--- relative XDG_STATE_HOME is ignored as the XDG spec says, as is one the
+--- writer would refuse. A WEZTERM_ATTENTION_DIR that is relative or that the
+--- writer would refuse, and an absolute XDG_STATE_HOME that is not UTF-8, are
+--- errors to the CLI; here they are ignored, and the second return says so for the
+--- log.
+local function resolve_state_root()
+  local note
+  local explicit = os.getenv("WEZTERM_ATTENTION_DIR")
+  if explicit and explicit ~= "" then
+    -- Checked first so that the log never repeats a control character.
+    if not safe_root_text(explicit) then
+      note = "WEZTERM_ATTENTION_DIR is " .. unsafe_root_problem .. ", so it is ignored"
+    elseif not is_absolute_path(explicit) then
+      note = "WEZTERM_ATTENTION_DIR is not an absolute path, so it is ignored: " .. explicit
+    else
+      return explicit
+    end
+  end
+  local state_home = os.getenv("XDG_STATE_HOME")
+  if state_home and state_home ~= "" then
+    if titles.well_formed_utf8(state_home) ~= state_home then
+      note = (note and note .. "; " or "") .. "XDG_STATE_HOME is not UTF-8, so it is ignored"
+    elseif is_absolute_path(state_home) and safe_root_text(state_home) then
+      return (state_home:gsub("(.)/+$", "%1")) .. "/wezterm-attention", note
+    end
+  end
+  return home .. "/.local/state/wezterm-attention", note
+end
+
 local default_dir_note
 defaults.dir, default_dir_note = resolve_state_root()
-local normalized_pane_title = titles_api.normalized_pane_title
-local sample_settled_title = titles_api.sample_settled_title
-local settled_title_state = titles_api.settled_title_state
-local settled_title_for_tab = titles_api.settled_title_for_tab
-local title_sources = titles_api.title_sources
-local default_title = titles_api.default_title
-local format_factory = assert(load_plugin_module("format"))
-local format_api = format_factory({
-  M = M,
-  defaults = defaults,
-  drawn_pane_key = drawn_pane_key,
-  attention_cache = attention_cache,
-  title_sources = title_sources,
-  display_text = titles_api.display_text,
-})
-local gui_tab_pane_ids = format_api.gui_tab_pane_ids
-local resolve_visible_attention = format_api.resolve_visible_attention
-local decorate_tab_title = format_api.decorate_tab_title
-local drawn_tab_order = format_api.drawn_tab_order
-local build_formatter_context = format_api.build_formatter_context
-local last_base_title_by_tab = format_api.last_base_title_by_tab
-local runtime_api = runtime_state.bind({
-  M = M,
-  deep_copy = deep_copy,
-  defaults = defaults,
-  wezterm = wezterm,
-  protocol = protocol,
-  decode_json = decode_json,
-  sha256 = sha256,
-  is_hex64 = is_hex64,
-  diagnostic = diagnostic,
-  report_error_once = report_error_once,
-  report_warning_once = report_warning_once,
-  resolve_pane_read = resolve_pane_read,
-  read_attention_view = read_attention_view,
-  pane_method = pane_method,
-  unix_domain_socket = reader_api.unix_domain_socket,
-  refresh_domain_facts = reader_api.refresh_domain_facts,
-  v2_pane_root = v2_pane_root,
-  read_expected_record = read_expected_record,
-  withdraw_closed_tab_orders = withdraw_closed_tab_orders,
-  now_ms = now_ms,
-  frame_for_now = frame_for_now,
-  format_unix_ns20 = format_unix_ns20,
-  wezterm_now_unix_ns20 = wezterm_now_unix_ns20,
-  seconds_until_after = seconds_until_after,
-  sample_settled_title = sample_settled_title,
-  settled_title_state = settled_title_state,
-  gui_tab_pane_ids = gui_tab_pane_ids,
-  resolve_visible_attention = resolve_visible_attention,
-})
-own_mux_identity = runtime_api.own_mux_identity
-local same_cached_attention = runtime_api.same_cached_attention
-local tab_panes_containing_read = runtime_api.tab_panes_containing_read
-local acknowledge_focused_pane = runtime_api.acknowledge_focused_pane
-local redraw_window_key = runtime_api.redraw_window_key
-local request_tab_bar_redraw = runtime_api.request_tab_bar_redraw
-local spawn_republish = runtime_api.spawn_republish
-local publish_call_after = runtime_api.publish_call_after
-local schedule_publish_retry = runtime_api.schedule_publish_retry
-local update_publish_schedule = runtime_api.update_publish_schedule
-local schedule_ttl_wakeup = runtime_api.schedule_ttl_wakeup
+
 local function formatter_tab_key(tab)
   return tostring(tab.tab_id or tab.tab_index or tab)
 end
@@ -381,13 +240,13 @@ local function call_title_formatter(base_fn, tab, ctx)
   local key = formatter_tab_key(tab)
   local ok, base = pcall(base_fn, tab, ctx)
   if ok and type(base) == "string" then
-    base = titles_api.display_text(base, math.huge)
-    last_base_title_by_tab[key] = base
+    base = titles.display_text(base, math.huge)
+    format.last_base_title_by_tab[key] = base
     return base
   end
   report_error_once("title-formatter:" .. key,
     "title formatter failed: " .. tostring(ok and "non-string result" or base))
-  return last_base_title_by_tab[key] or ctx.default_title
+  return format.last_base_title_by_tab[key] or ctx.default_title
 end
 
 --- Wrap a user's title function with attention decoration.
@@ -402,13 +261,13 @@ function M.wrap_title_formatter(base_fn)
     -- Read-only. WezTerm may call this at any moment, including for a window
     -- the user is not looking at, so acknowledgement belongs in poll() where
     -- focus is known.
-    local visible = resolve_visible_attention(gui_tab_pane_ids(tab))
+    local visible = format.resolve_visible_attention(format.gui_tab_pane_ids(tab))
 
-    local ctx = build_formatter_context(tab, visible, {
+    local ctx = format.build_formatter_context(tab, visible, {
       tabs = tabs, panes = panes, config = config, hover = hover, max_width = max_width,
     })
     local show_index = not (config and config.show_tab_index_in_tab_bar == false)
-    return decorate_tab_title(tab, visible, call_title_formatter(base_fn, tab, ctx), show_index)
+    return format.decorate_tab_title(tab, visible, call_title_formatter(base_fn, tab, ctx), show_index)
   end
 end
 
@@ -420,25 +279,25 @@ end
 local held_tab_orders = {}
 
 local function publish_drawn_tab_order(dir, window_id, order)
-  local status, source = runtime_api.tab_source_status()
+  local status, source = runtime.tab_source_status()
   if status == "pending" then
-    held_tab_orders[window_id] = { dir = dir, order = order, drawn_at = now_ms() }
+    held_tab_orders[window_id] = { dir = dir, order = order, drawn_at = protocol_api.now_ms() }
     return
   end
   held_tab_orders[window_id] = nil
-  publish_tab_order(dir, window_id, order, source)
+  overlays.publish_tab_order(dir, window_id, order, source)
 end
 
 --- Ask who this GUI is, and publish what the bar drew meanwhile once there
 --- is an answer, or once it is known that none will come.
 local function settle_tab_source(socket)
-  runtime_api.acquire_tab_source(socket)
+  runtime.acquire_tab_source(socket)
   if next(held_tab_orders) == nil then return end
-  local status, source = runtime_api.tab_source_status()
+  local status, source = runtime.tab_source_status()
   if status == "pending" then return end
   for window_id, held in pairs(held_tab_orders) do
     held_tab_orders[window_id] = nil
-    publish_tab_order(held.dir, window_id, held.order, source, held.drawn_at)
+    overlays.publish_tab_order(held.dir, window_id, held.order, source, held.drawn_at)
   end
 end
 
@@ -599,7 +458,7 @@ function M.apply_to_config(config, opts)
   -- Its domain lists are read when a poll first needs them, not now: a config
   -- may set them after this call.
   M._active_config = config
-  reader_api.refresh_domain_facts()
+  reader.refresh_domain_facts()
   local request_redraw = opts.request_redraw
   if request_redraw == nil then request_redraw = defaults.request_redraw end
   M._active_request_redraw = request_redraw ~= false
@@ -611,7 +470,7 @@ function M.apply_to_config(config, opts)
   if settled_fallback == nil then settled_fallback = defaults.settled_title_fallback end
   M._active_settled_title_fallback = settled_fallback ~= false
   if not M._active_settled_title_fallback then
-    for key in pairs(settled_title_state) do settled_title_state[key] = nil end
+    for key in pairs(titles.settled_title_state) do titles.settled_title_state[key] = nil end
   end
 
   -- Once, at config load. The Alt+B handler used to do this on the GUI thread
@@ -633,7 +492,7 @@ function M.apply_to_config(config, opts)
   end
 
   local renderer = opts.renderer or defaults.renderer
-  runtime_api.reset_tab_source()
+  runtime.reset_tab_source()
 
   local title_formatter = opts.title_formatter -- optional user callback
 
@@ -691,13 +550,13 @@ function M.apply_to_config(config, opts)
       --
       -- Resolve what this tab shows, including an unfocused sibling marker
       -- on the active tab.
-      local marker_ids = gui_tab_pane_ids(tab)
-      local visible = resolve_visible_attention(marker_ids)
+      local marker_ids = format.gui_tab_pane_ids(tab)
+      local visible = format.resolve_visible_attention(marker_ids)
       local show_index = not (cfg and cfg.show_tab_index_in_tab_bar == false)
 
       -- Build base title (user callback or default)
       local base
-      local ctx = build_formatter_context(tab, visible, {
+      local ctx = format.build_formatter_context(tab, visible, {
         tabs = tabs, panes = panes, config = cfg, hover = hover, max_width = max_width,
       })
       if title_formatter then
@@ -706,7 +565,7 @@ function M.apply_to_config(config, opts)
         base = ctx.default_title
       end
 
-      local rendered = decorate_tab_title(tab, visible, base, show_index)
+      local rendered = format.decorate_tab_title(tab, visible, base, show_index)
 
       -- Nothing outside this process can see the order the bar draws, so the
       -- bar publishes it. Only a window whose every tab has been drawn, and
@@ -714,9 +573,9 @@ function M.apply_to_config(config, opts)
       -- redraw with the same source touches no file.
       local published = rendered
       if visible.still_indicator ~= visible.indicator then
-        published = decorate_tab_title(tab, visible, base, show_index, visible.still_indicator)
+        published = format.decorate_tab_title(tab, visible, base, show_index, visible.still_indicator)
       end
-      local order, window_id = drawn_tab_order(tab, tabs, marker_ids, published)
+      local order, window_id = format.drawn_tab_order(tab, tabs, marker_ids, published)
       if order then publish_drawn_tab_order(dir, window_id, order) end
 
       return rendered
@@ -743,7 +602,7 @@ function M.apply_to_config(config, opts)
         -- The flag toggled is the user's own: another owner's review is that
         -- owner's to withdraw, and a press leaves it.
         local mux_win = win:mux_window()
-        local target_read = resolve_pane_read(pane)
+        local target_read = reader.resolve_pane_read(pane)
         if target_read.kind ~= "v2" then
           -- Nothing has claimed the pane, or it has not published who it is,
           -- so no reader would show a flag written for it.
@@ -758,14 +617,14 @@ function M.apply_to_config(config, opts)
           -- press that does nothing.
           local tabs_ok, mux_tabs = pcall(mux_win.tabs, mux_win)
           if tabs_ok and type(mux_tabs) == "table" then
-            panes = tab_panes_containing_read(mux_tabs, target_read)
+            panes = runtime.tab_panes_containing_read(mux_tabs, target_read)
           end
         end
         panes = panes or { pane }
         local reads = {}
         for _, observed_pane in ipairs(panes) do
-          local read = resolve_pane_read(observed_pane)
-          runtime_api.observe_pane(win, observed_pane, read)
+          local read = reader.resolve_pane_read(observed_pane)
+          runtime.observe_pane(win, observed_pane, read)
           if read.kind == "v2" then reads[#reads + 1] = read end
         end
 
@@ -775,7 +634,7 @@ function M.apply_to_config(config, opts)
         -- tab lit and unclearable on the next poll.
         local flagged = {}
         for _, read in ipairs(reads) do
-          if runtime_api.user_review_present(read, dir) then flagged[#flagged + 1] = read end
+          if runtime.user_review_present(read, dir) then flagged[#flagged + 1] = read end
         end
 
         -- Tab already flagged → clear the user's flag from all its panes;
@@ -784,16 +643,16 @@ function M.apply_to_config(config, opts)
         local written = {}
         if #flagged > 0 then
           for _, read in ipairs(flagged) do
-            if runtime_api.run_plugin_write("clear-review", read, dir) then
+            if runtime.run_plugin_write("clear-review", read, dir) then
               written[#written + 1] = read
             end
           end
-        elseif runtime_api.run_plugin_write("set-review", target_read, dir) then
+        elseif runtime.run_plugin_write("set-review", target_read, dir) then
           written[1] = target_read
         end
         if #written == 0 then return end
-        for _, read in ipairs(written) do runtime_api.refresh_cached_v2(read, dir) end
-        request_tab_bar_redraw(win, pane)
+        for _, read in ipairs(written) do runtime.refresh_cached_v2(read, dir) end
+        runtime.request_tab_bar_redraw(win, pane)
       end),
     })
   end
@@ -801,36 +660,33 @@ end
 
 -- Internal seams, exposed for the LuaJIT specs only. Not public API.
 M._internal = {
-  tab_source = runtime_api.tab_source,
-  reset_tab_source = runtime_api.reset_tab_source,
+  tab_source = runtime.tab_source,
+  reset_tab_source = runtime.reset_tab_source,
   acquire_tab_source = settle_tab_source,
-  parse_tab_source_response = runtime_api.parse_tab_source_response,
-  lifecycle_facet = reader_api.lifecycle_facet,
-  acknowledge_focused_pane = acknowledge_focused_pane,
-  resolve_visible_attention = resolve_visible_attention,
-  build_formatter_context = build_formatter_context,
-  same_cached_attention = same_cached_attention,
-  sample_settled_title = sample_settled_title,
-  settled_title_state = settled_title_state,
-  protocol = protocol,
+  parse_tab_source_response = runtime.parse_tab_source_response,
+  lifecycle_facet = reader.lifecycle_facet,
+  resolve_visible_attention = format.resolve_visible_attention,
+  same_cached_attention = runtime.same_cached_attention,
+  sample_settled_title = titles.sample_settled_title,
+  settled_title_state = titles.settled_title_state,
   protocol_path = protocol_path,
-  parse_wire_value = parse_wire_value,
-  parse_wire_json = parse_wire_json,
-  parse_v2_record = parse_v2_record,
-  parse_v2_record_json = parse_v2_record_json,
+  parse_wire_value = protocol_api.parse_wire_value,
+  parse_wire_json = protocol_api.parse_wire_json,
+  parse_v2_record = protocol_api.parse_v2_record,
+  parse_v2_record_json = protocol_api.parse_v2_record_json,
   -- Read by the fixture interpreter in tests/lua/support, which drives these
   -- production functions from outside rather than living beside them.
-  deep_copy = deep_copy,
-  eligible_subagent = eligible_subagent,
-  compare_ns20 = compare_ns20,
-  sha256 = sha256,
-  format_unix_ns20 = format_unix_ns20,
-  unix_ns_parts = unix_ns_parts,
-  age_exceeds_ms = age_exceeds_ms,
-  address_cache_key = address_cache_key,
-  resolve_pane_read = resolve_pane_read,
-  read_attention_view = read_attention_view,
-  attention_cache = attention_cache,
+  deep_copy = protocol_api.deep_copy,
+  eligible_subagent = protocol_api.eligible_subagent,
+  compare_ns20 = protocol_api.compare_ns20,
+  sha256 = protocol_api.sha256,
+  format_unix_ns20 = protocol_api.format_unix_ns20,
+  unix_ns_parts = protocol_api.unix_ns_parts,
+  age_exceeds_ms = protocol_api.age_exceeds_ms,
+  address_cache_key = protocol_api.address_cache_key,
+  resolve_pane_read = reader.resolve_pane_read,
+  read_attention_view = reader.read_attention_view,
+  attention_cache = runtime_state.attention_cache,
 }
 
 return M

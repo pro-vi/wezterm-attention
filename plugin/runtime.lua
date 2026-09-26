@@ -6,29 +6,37 @@ return function()
   local callback_views_by_window = {}
   local delivering_views = false
 
+  --- The key a pane the GUI draws is cached under, from its GUI-local number:
+  --- the one the last poll found for it, or nil when that poll found none (a
+  --- mux-client pane that has not published its $WEZTERM_PANE) or none has
+  --- walked the pane yet.
+  local function drawn_pane_key(local_id)
+    return marker_id_by_local[local_id] or nil
+  end
+
   local function bind(context)
     local M = context.M
     local defaults = context.defaults
     local wezterm = context.wezterm
-    local protocol = context.protocol
-    local diagnostic = context.diagnostic
-    local report_error_once = context.report_error_once
-    local report_warning_once = context.report_warning_once
-    local resolve_pane_read = context.resolve_pane_read
-    local read_attention_view = context.read_attention_view
-    local pane_method = context.pane_method
-    local v2_pane_root = context.v2_pane_root
-    local read_expected_record = context.read_expected_record
-    local withdraw_closed_tab_orders = context.withdraw_closed_tab_orders
-    local now_ms = context.now_ms
-    local frame_for_now = context.frame_for_now
-    local format_unix_ns20 = context.format_unix_ns20
-    local wezterm_now_unix_ns20 = context.wezterm_now_unix_ns20
-    local seconds_until_after = context.seconds_until_after
-    local sample_settled_title = context.sample_settled_title
-    local settled_title_state = context.settled_title_state
-    local gui_tab_pane_ids = context.gui_tab_pane_ids
-    local resolve_visible_attention = context.resolve_visible_attention
+    local protocol_api = context.protocol_api
+    local protocol = protocol_api.protocol
+    local diagnostic = protocol_api.diagnostic
+    local v2_pane_root = protocol_api.v2_pane_root
+    local read_expected_record = protocol_api.read_expected_record
+    local now_ms = protocol_api.now_ms
+    local frame_for_now = protocol_api.frame_for_now
+    local format_unix_ns20 = protocol_api.format_unix_ns20
+    local wezterm_now_unix_ns20 = protocol_api.wezterm_now_unix_ns20
+    local seconds_until_after = protocol_api.seconds_until_after
+    local report_error_once = context.overlays.report_error_once
+    local report_warning_once = context.overlays.report_warning_once
+    local withdraw_closed_tab_orders = context.overlays.withdraw_closed_tab_orders
+    local reader = context.reader
+    local resolve_pane_read = reader.resolve_pane_read
+    local read_attention_view = reader.read_attention_view
+    local pane_method = reader.pane_method
+    local sample_settled_title = context.titles.sample_settled_title
+    local settled_title_state = context.titles.settled_title_state
 
     local function rebuild_scalar_projection()
       for id in pairs(cache_key_by_marker_id) do cache_key_by_marker_id[id] = nil end
@@ -179,14 +187,14 @@ return function()
     local function parse_tab_source_response(stdout)
       if not protocol or type(stdout) ~= "string"
           or #stdout > protocol.limits.max_json_bytes then return nil end
-      local value = context.decode_json(stdout)
+      local value = protocol_api.decode_json(stdout)
       if type(value) ~= "table" or value.schema ~= 1 or value.command ~= "tab-source"
           or value.status ~= "ok" or value.complete ~= true then return nil end
       local source = value.result
       if type(source) ~= "table" or type(source.socket_path) ~= "string"
           or source.socket_path:sub(1, 1) ~= "/" or source.socket_path:find("%z")
-          or not context.is_hex64(source.realm_id) or not context.is_hex64(source.incarnation_id)
-          or context.sha256(source.socket_path) ~= source.realm_id then return nil end
+          or not protocol_api.is_hex64(source.realm_id) or not protocol_api.is_hex64(source.incarnation_id)
+          or protocol_api.sha256(source.socket_path) ~= source.realm_id then return nil end
       for key in pairs(source) do
         if key ~= "socket_path" and key ~= "realm_id" and key ~= "incarnation_id" then return nil end
       end
@@ -239,7 +247,7 @@ return function()
       if not socket or not protocol then return status end
       local realm = realm_by_socket[socket]
       if not realm then
-        realm = context.sha256(socket)
+        realm = protocol_api.sha256(socket)
         realm_by_socket[socket] = realm
       end
       return status, realm
@@ -334,7 +342,7 @@ return function()
         local ok, success, stdout = pcall(wezterm.run_child_process,
           attention_argv(root, dir, arguments))
         local response = ok and type(stdout) == "string" and protocol
-          and #stdout <= protocol.limits.max_json_bytes and context.decode_json(stdout) or nil
+          and #stdout <= protocol.limits.max_json_bytes and protocol_api.decode_json(stdout) or nil
         if type(response) ~= "table" then response = nil end
         if ok and success and response and response.status == "ok"
             and type(response.result) == "table" then
@@ -358,7 +366,7 @@ return function()
     --- from disk, never the cache, which can lag a flag another window's key
     --- press just wrote.
     local function user_review_present(read, dir)
-      local owner_key = context.sha256("user")
+      local owner_key = protocol_api.sha256("user")
       local record = read_expected_record(
         v2_pane_root(dir, read.address) .. "/reviews/" .. owner_key .. ".json",
         "review", { address = read.address }, true)
@@ -629,7 +637,7 @@ return function()
     --- from the tabs that happened to answer.
     local function update_publish_schedule(
         domain, window_key, pane_count, unpublished, opts, partial)
-      local socket = context.unix_domain_socket(domain)
+      local socket = reader.unix_domain_socket(domain)
       local root = M._active_integration_root
       if not socket and unpublished then
         report_warning_once("unpublished-domain:" .. domain, "panes on domain " .. domain
@@ -793,12 +801,12 @@ return function()
         reader_confidence = cached.reader_confidence,
         activity_type = cached.activity_type,
         source = cached.source,
-        address = cached.address and context.deep_copy(cached.address) or nil,
+        address = cached.address and protocol_api.deep_copy(cached.address) or nil,
         launch_id = cached.launch_id,
         marker_id = cached.marker_id,
         pane_presence = cached.pane_presence,
         binding_health = cached.binding_health,
-        lifecycle = cached.lifecycle and context.deep_copy(cached.lifecycle) or nil,
+        lifecycle = cached.lifecycle and protocol_api.deep_copy(cached.lifecycle) or nil,
       }
     end
 
@@ -853,14 +861,14 @@ return function()
       local previous = callback_views_by_window[window_key] or {}
       local next_views, messages, losses = {}, {}, {}
       local function lost(state, id)
-        losses[#losses + 1] = { kind = "scope_lost", window_id = id, previous_scope = context.deep_copy(state.scope) }
+        losses[#losses + 1] = { kind = "scope_lost", window_id = id, previous_scope = protocol_api.deep_copy(state.scope) }
       end
       for key, read in pairs(entries) do
         local cached = attention_cache[key]
         local old = previous[key]
         if cached and cached.launch_id == read.launch_id then
           local target = cached._records and cached._records.selection_target
-          local scope = target and { address = context.deep_copy(read.address), launch_id = read.launch_id, target = context.deep_copy(target) }
+          local scope = target and { address = protocol_api.deep_copy(read.address), launch_id = read.launch_id, target = protocol_api.deep_copy(target) }
           if not scope and old and old.scope.launch_id == read.launch_id then scope = old.scope end
           if scope then
             local view = copy_public_view(cached)
@@ -868,9 +876,9 @@ return function()
             if replaced then lost(old, window:window_id()) end
             if not old or replaced or not same_public_value(old.view, view) then
               messages[#messages + 1] = { kind = (not old or replaced) and "initial" or "updated",
-                window_id = window:window_id(), scope = context.deep_copy(scope), view = context.deep_copy(view) }
+                window_id = window:window_id(), scope = protocol_api.deep_copy(scope), view = protocol_api.deep_copy(view) }
             end
-            next_views[key] = { scope = context.deep_copy(scope), view = view }
+            next_views[key] = { scope = protocol_api.deep_copy(scope), view = view }
           end
         end
       end
@@ -958,7 +966,7 @@ return function()
     --- told.
     function M.poll(window, opts)
       if delivering_views then return end
-      context.refresh_domain_facts()
+      reader.refresh_domain_facts()
       local dir = (opts and opts.dir) or M._active_dir or defaults.dir
       local mux_win = window:mux_window()
       if not mux_win then return end
@@ -1292,11 +1300,6 @@ return function()
       if changed then request_tab_bar_redraw(window, action_pane) end
     end
 
-    --- Apply the shared attention indicator and color decoration to a base title.
-    -- `2: ◔ name`: the index first, as WezTerm's own default renders it, then the
-    -- attention indicator, then the base. `show_index` false drops the index the
-    -- way `show_tab_index_in_tab_bar = false` does for the default renderer.
-
     return {
       tab_source = function() return tab_source_state.source end,
       tab_source_status = tab_source_status,
@@ -1310,22 +1313,13 @@ return function()
       run_plugin_write = run_plugin_write,
       user_review_present = user_review_present,
       refresh_cached_v2 = refresh_cached_v2,
-      acknowledge_focused_pane = acknowledge_focused_pane,
-      redraw_window_key = redraw_window_key,
       request_tab_bar_redraw = request_tab_bar_redraw,
-      spawn_republish = spawn_republish,
-      publish_call_after = publish_call_after,
-      schedule_publish_retry = schedule_publish_retry,
-      update_publish_schedule = update_publish_schedule,
-      schedule_ttl_wakeup = schedule_ttl_wakeup,
     }
   end
 
   return {
     attention_cache = attention_cache,
-    cache_key_by_marker_id = cache_key_by_marker_id,
-    marker_id_by_local = marker_id_by_local,
-    seen_marker_ids_by_window = seen_marker_ids_by_window,
+    drawn_pane_key = drawn_pane_key,
     bind = bind,
   }
 end

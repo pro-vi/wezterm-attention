@@ -912,13 +912,19 @@ local function tab_source_response(socket, incarnation)
 end
 
 test("tab source parsing refuses when the plugin manifest is unavailable", function()
-  local degraded = dofile(repo_root .. "/plugin/runtime.lua")().bind({ M = {} })
+  -- A runtime bound to a protocol module whose manifest did not load.
+  local function unloaded_manifest_runtime(values)
+    values.protocol_api = { now_ms = function() return os.time() * 1000 end }
+    values.overlays = { report_error_once = function() end }
+    values.reader, values.titles = {}, {}
+    return dofile(repo_root .. "/plugin/runtime.lua")().bind(values)
+  end
+  local degraded = unloaded_manifest_runtime({ M = {} })
   assert(degraded.parse_tab_source_response(tab_source_response("/test/gui.sock")) == nil)
   -- No answer could be read, so a tab order drawn meanwhile is not held for one.
-  local writer = dofile(repo_root .. "/plugin/runtime.lua")().bind({
+  local writer = unloaded_manifest_runtime({
     M = { _active_integration_root = writer_root, _active_writer_installed = true },
     wezterm = { run_child_process = function() return true, tab_source_response("/test/gui.sock"), "" end },
-    now_ms = function() return os.time() * 1000 end, report_error_once = function() end,
   })
   writer.acquire_tab_source("/test/gui.sock")
   assert(writer.tab_source_status() == "unavailable")
