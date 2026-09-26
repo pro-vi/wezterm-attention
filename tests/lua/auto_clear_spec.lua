@@ -1725,6 +1725,35 @@ test("a command that answers nothing is said to predate the plugin", function()
     "the log names the likely cause and the way out, got " .. tostring(errors[1]))
 end)
 
+test("each different failure of a pane's command is logged once", function()
+  write_activity(9436, "notify")
+  local answers = {
+    function() return acknowledgement_failed("probe_unavailable", "state lock timed out") end,
+    function() return false, "" end,
+    function() return false, "" end,
+  }
+  local runs = 0
+  local real_time = os.time
+  local ok, failure = pcall(function()
+    with_plugin_command(function(argv)
+      runs = runs + 1
+      return answers[runs](argv)
+    end, function()
+      for step = 0, 2 do
+        os.time = function() return real_time() + 60 * step end
+        poll_focused({ tabs = { { 9436 } }, active_pane_id = 9436 })
+      end
+    end)
+  end)
+  os.time = real_time
+  assert(ok, failure)
+  assert(runs == 3, "the command ran on each wait, ran " .. runs)
+  local errors = drain_errors()
+  assert(#errors == 2, "two different failures, each logged once, got " .. #errors)
+  assert(errors[2]:find("may predate this plugin", 1, true),
+    "the later failure is logged too, got " .. tostring(errors[2]))
+end)
+
 test("a pane that vanishes between polls leaves the cache and keeps its records", function()
   seed_pane(940)
   write_activity(945, "notify")

@@ -328,11 +328,13 @@ return function()
     --- until what the command reads changes.
     local function run_plugin_write(action, read, dir, extra)
       local root = M._active_integration_root
-      local failure, passing = nil, false
+      -- A failure is logged once per pane, action and kind of failure: a
+      -- different failure on a later run says something the first did not.
+      local failure, kind, passing = nil, nil, false
       if not root or M._active_writer_installed ~= true then
-        failure = "the attention command is not installed"
+        failure, kind = "the attention command is not installed", "not_installed"
       elseif type(wezterm.run_child_process) ~= "function" then
-        failure = "wezterm.run_child_process is unavailable"
+        failure, kind = "wezterm.run_child_process is unavailable", "no_spawn"
       else
         local arguments = {
           "plugin", action,
@@ -353,21 +355,21 @@ return function()
         end
         local item = response and type(response.diagnostics) == "table" and response.diagnostics[1]
         if type(item) == "table" and type(item.code) == "string" then
-          failure = item.code .. ": " .. tostring(item.message)
+          failure, kind = item.code .. ": " .. tostring(item.message), item.code
           passing = item.code == "probe_unavailable"
         elseif not ok then
-          failure, passing = "it could not be started: " .. tostring(success), true
+          failure, kind, passing = "it could not be started: " .. tostring(success), "spawn", true
         elseif not success then
           -- A command built before the plugin's own subcommand existed exits
           -- with its usage text and prints nothing here.
           failure = "it gave no answer; the attention command in " .. root
             .. " may predate this plugin, so run scripts/install-cli.sh there"
-          passing = true
+          kind, passing = "exited_silent", true
         else
-          failure, passing = "it gave no answer", true
+          failure, kind, passing = "it gave no answer", "silent", true
         end
       end
-      report_error_once("plugin-" .. action .. ":" .. read.cache_key,
+      report_error_once("plugin-" .. action .. ":" .. read.cache_key .. ":" .. kind,
         "attention plugin " .. action .. " failed for pane " .. read.marker_id .. ": " .. failure)
       return nil, passing
     end
