@@ -110,6 +110,29 @@ fn the_users_review_is_refused_where_the_claim_names_another_launch() {
     assert!(!review_path(&setup, "user").exists());
 }
 
+#[test]
+fn the_users_review_leaves_no_trace_on_a_pane_with_no_records() {
+    let setup = Setup::new();
+    let (address, _) = pane_address(&setup.env).unwrap();
+    let pane = pane_dir(&state_root(&setup.env).unwrap(), &address);
+    assert!(!pane.exists(), "the pane starts with no records");
+
+    let (code, response) = plugin(&setup, "set-review", LAUNCH, &[]);
+    assert_eq!(
+        (code, response["diagnostics"][0]["code"].as_str()),
+        (1, Some("claim_stale"))
+    );
+    let (code, response) = plugin(&setup, "clear-review", LAUNCH, &[]);
+    assert_eq!(
+        (code, response["result"]["disposition"].as_str()),
+        (0, Some("skipped"))
+    );
+    assert!(
+        !pane.exists(),
+        "neither command creates the pane's directory or its locks"
+    );
+}
+
 // The command writes the flag and the plugin's review key looks for it, in
 // two languages: each has to name the owner the other does.
 #[test]

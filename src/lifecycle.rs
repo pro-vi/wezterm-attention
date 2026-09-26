@@ -21,8 +21,8 @@ use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, free_of_c
 use crate::providers::{ProviderAction, ProviderEvent};
 use crate::records::{
     CommitPlan, PLUGIN_LOCK_TIMEOUT, PreparedRecordWrite, RecordIdentity, RecordRead, Replacement,
-    agents_dir, claim_lock, commit, commit_waiting, ends_binding, launch_lock, read_claim,
-    read_record, read_record_at, read_record_typed, read_record_typed_at, review_lock,
+    agents_dir, claim_lock, commit, commit_waiting, ends_binding, launch_lock, pane_dir,
+    read_claim, read_record, read_record_at, read_record_typed, read_record_typed_at, review_lock,
     session_entry, session_entry_path, state_root,
 };
 use crate::wezterm::RuntimePorts;
@@ -1596,6 +1596,13 @@ fn commit_user_review(
     change: ReviewChange,
     check_claim: impl FnOnce(Option<&Value>) -> Result<()>,
 ) -> Result<LifecycleResult> {
+    // Taking the locks creates the pane's directory, and sweep reaches a pane
+    // tree only through its bindings, so a pane with no records keeps none:
+    // it has no claim to flag and no review to withdraw.
+    if !pane_dir(root, address).is_dir() {
+        check_claim(None)?;
+        return Ok(LifecycleResult::new(Disposition::Skipped));
+    }
     let review = review_slot(root, address, USER_REVIEW_OWNER)?;
     let (mutation, ()) = commit_waiting(
         root,
