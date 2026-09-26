@@ -679,6 +679,24 @@ fn read_host(processes: &dyn ProcessInspector, expected_parent: i32) -> Result<H
     })
 }
 
+/// The agent process `WEZTERM_ATTENTION_HOST_PID` asserts, read as the
+/// hook's parent, with the boot it runs on.
+fn read_owner(
+    env: &BTreeMap<String, String>,
+    processes: &dyn ProcessInspector,
+) -> Result<(ClaimOwner, HostReading)> {
+    let reading = read_host(processes, asserted_host(env)?)?;
+    let boot_session_id = processes.boot_session().ok_or_else(|| {
+        AttentionError::new("probe_unavailable", "the boot session id could not be read")
+    })?;
+    let owner = ClaimOwner {
+        pid: reading.parent_pid,
+        start: reading.parent_start,
+        boot_session_id,
+    };
+    Ok((owner, reading))
+}
+
 /// What an agent's hook proved about where it runs: the process that owns
 /// it, and the pane terminal that process runs on.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -706,11 +724,7 @@ impl HostProof {
         ports: &RuntimePorts<'_>,
         address: &PaneAddress,
     ) -> Result<Self> {
-        let asserted = asserted_host(env)?;
-        let reading = read_host(ports.processes, asserted)?;
-        let boot_session_id = ports.processes.boot_session().ok_or_else(|| {
-            AttentionError::new("probe_unavailable", "the boot session id could not be read")
-        })?;
+        let (owner, reading) = read_owner(env, ports.processes)?;
         let socket = env.get("WEZTERM_UNIX_SOCKET").ok_or_else(|| {
             AttentionError::new("identity_unpublished", "WEZTERM_UNIX_SOCKET is missing")
         })?;
@@ -740,11 +754,7 @@ impl HostProof {
             ));
         }
         let proof = Self {
-            owner: ClaimOwner {
-                pid: reading.parent_pid,
-                start: reading.parent_start,
-                boot_session_id,
-            },
+            owner,
             tty_path,
             tty_fingerprint,
             terminal: reading.terminal,
@@ -770,16 +780,7 @@ impl HostProof {
         address: &PaneAddress,
         claim: &Value,
     ) -> Result<Self> {
-        let asserted = asserted_host(env)?;
-        let reading = read_host(ports.processes, asserted)?;
-        let boot_session_id = ports.processes.boot_session().ok_or_else(|| {
-            AttentionError::new("probe_unavailable", "the boot session id could not be read")
-        })?;
-        let owner = ClaimOwner {
-            pid: reading.parent_pid,
-            start: reading.parent_start,
-            boot_session_id,
-        };
+        let (owner, reading) = read_owner(env, ports.processes)?;
         if ClaimMode::of(claim)? != ClaimMode::SelfOwned(owner.clone()) {
             return Err(AttentionError::new(
                 "claim_stale",
