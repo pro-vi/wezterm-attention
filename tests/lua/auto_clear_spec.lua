@@ -1713,6 +1713,18 @@ test("an acknowledgement the command answered is not asked again for that event"
   assert(attention.get_attention(9434) == "notify", "an ignored acknowledgement hides nothing")
 end)
 
+test("a command that answers nothing is said to predate the plugin", function()
+  write_activity(9435, "notify")
+  with_plugin_command(function() return false, "" end, function()
+    poll_focused({ tabs = { { 9435 } }, active_pane_id = 9435 })
+  end)
+  local errors = drain_errors()
+  assert(#errors == 1 and errors[1]:find("may predate this plugin", 1, true)
+      and errors[1]:find("scripts/install-cli.sh", 1, true)
+      and errors[1]:find(writer_root, 1, true),
+    "the log names the likely cause and the way out, got " .. tostring(errors[1]))
+end)
+
 test("a pane that vanishes between polls leaves the cache and keeps its records", function()
   seed_pane(940)
   write_activity(945, "notify")

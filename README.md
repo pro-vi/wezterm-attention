@@ -509,7 +509,7 @@ The Lua implementation is split by responsibility under `plugin/`: protocol vali
 - Check for keybind conflicts. Set `review_key = false` and bind manually if needed.
 - It works on a pane an agent is running in: the flag is a record of its own. If the tab still shows `✓` or `!` after a press, that activity outranks the flag; the ◆ appears once you have seen it.
 - On a pane no launch has claimed — no shell integration, or a mux-attached pane that has not published its identity — the press is refused and logged once, because no reader would show the flag.
-- A press runs the `attention` command. When it refuses, the reason is logged once (`attention plugin set-review failed for pane N: ...`) and the tab does not change: `claim_stale` means the pane's launch claim is not the launch the pane last published, which the next prompt republishes. `probe_unavailable` means a hook held the pane's records at that moment; press again.
+- A press runs the `attention` command. When it refuses, the reason is logged once (`attention plugin set-review failed for pane N: ...`) and the tab does not change: `claim_stale` means the pane's launch claim is not the launch the pane last published, which the next prompt republishes. `probe_unavailable` means a hook held the pane's records at that moment; press again. A log line saying the command may predate the plugin means it was built before the plugin was updated: run `scripts/install-cli.sh` again.
 
 ## Type annotations
 

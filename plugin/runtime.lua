@@ -357,6 +357,12 @@ return function()
           passing = item.code == "probe_unavailable"
         elseif not ok then
           failure, passing = "it could not be started: " .. tostring(success), true
+        elseif not success then
+          -- A command built before the plugin's own subcommand existed exits
+          -- with its usage text and prints nothing here.
+          failure = "it gave no answer; the attention command in " .. root
+            .. " may predate this plugin, so run scripts/install-cli.sh there"
+          passing = true
         else
           failure, passing = "it gave no answer", true
         end
