@@ -15,7 +15,7 @@ use crate::identity::{PaneAddress, pane_address};
 use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, manifest};
 use crate::records::{
     CommitPlan, LOCK_TIMEOUT, RecordIdentity, Replacement, claim_lock, commit, mkdir_private,
-    pane_path, read_record_at, reviews_dir, session_index_marker, session_index_path, state_root,
+    pane_path, read_claim, reviews_dir, session_index_marker, session_index_path, state_root,
 };
 use crate::wezterm::{
     ControllingTerminal, ProcessFacts, ProcessInspector, ProcessRead, ProcessStart, RuntimePorts,
@@ -382,15 +382,12 @@ fn with_pane_claim<T>(
     address: &PaneAddress,
     publish: impl FnOnce(Option<Value>) -> Result<T>,
 ) -> Result<T> {
-    let read = || read_record_at(root, "claim", &RecordIdentity::pane(address));
     if !pane_path(root, address).is_dir() {
         return publish(None);
     }
-    crate::records::with_lock(
-        &claim_lock(root, address),
-        LOCK_TIMEOUT,
-        || publish(read()?),
-    )
+    crate::records::with_lock(&claim_lock(root, address), LOCK_TIMEOUT, || {
+        publish(read_claim(root, address)?)
+    })
 }
 
 /// The launch a stored claim publishes to `tty_path`: its own, when it names

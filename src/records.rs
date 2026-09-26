@@ -884,6 +884,12 @@ pub fn read_record_at(root: &Path, kind: &str, identity: &RecordIdentity) -> Res
     read_record(&identity.path(root, kind)?, Some(kind), identity)
 }
 
+/// The claim of the pane at `address`: the record every reader and writer
+/// starts from to learn which launch holds the pane.
+pub fn read_claim(root: &Path, address: &PaneAddress) -> Result<Option<Value>> {
+    read_record_at(root, "claim", &RecordIdentity::pane(address))
+}
+
 /// [`read_record_typed`] of the record of `kind` that `identity` names, where
 /// the layout keeps it below `root`.
 pub fn read_record_typed_at(root: &Path, kind: &str, identity: &RecordIdentity) -> RecordRead {

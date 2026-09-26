@@ -21,8 +21,9 @@ use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, free_of_c
 use crate::providers::{ProviderAction, ProviderEvent};
 use crate::records::{
     CommitPlan, PreparedRecordWrite, RecordIdentity, RecordRead, Replacement, agents_dir,
-    claim_lock, commit, ends_binding, launch_lock, read_record, read_record_at, read_record_typed,
-    read_record_typed_at, review_lock, session_entry, session_entry_path, state_root,
+    claim_lock, commit, ends_binding, launch_lock, read_claim, read_record, read_record_at,
+    read_record_typed, read_record_typed_at, review_lock, session_entry, session_entry_path,
+    state_root,
 };
 use crate::wezterm::RuntimePorts;
 
@@ -83,25 +84,20 @@ fn confirm_native(resolved: &ResolvedLaunch, binding_id: &str, mutation: &Mutati
         return;
     }
     let context = (|| -> Result<Option<AdmittedHook>> {
-        let claim = load_claim(&resolved.root, &resolved.address)?;
         // The claim reread here is never an agent's own with this launch id:
         // an agent's claim is always made with a fresh launch id, and no
         // shell exported that id for this event to inherit.
-        if claim.as_ref().is_none_or(|claim| {
-            !inherited_claim_matches(claim, &resolved.address, &resolved.launch_id)
-        }) {
+        if inherited_claim(&resolved.root, &resolved.address, &resolved.launch_id)?.is_none() {
             return Ok(None);
         }
         let pointer = read_record_at(&resolved.root, "current_binding", &resolved.launch())?;
-        let (_, binding) = read_current(
+        let Some(binding) = read_current(
             &resolved.root,
             pointer,
             &resolved.address,
             &resolved.launch_id,
-        )?;
-        let Some(binding) = binding.filter(|binding| {
-            record_matches_binding(binding, &resolved.address, &resolved.launch_id, binding_id)
-        }) else {
+        )?
+        .filter(|binding| binding["binding_id"].as_str() == Some(binding_id)) else {
             return Ok(None);
         };
         let event = &evidence.event;
@@ -239,7 +235,7 @@ impl ResolvedLaunch<'_> {
 
     /// [`Self::lapsed`] for a caller whose commit did not read the claim.
     fn lapsed_now(&self) -> Result<Option<LifecycleResult>> {
-        Ok(self.lapsed(load_claim(&self.root, &self.address)?.as_ref()))
+        Ok(self.lapsed(read_claim(&self.root, &self.address)?.as_ref()))
     }
 }
 
@@ -282,24 +278,16 @@ fn inherited_claim_matches(claim: &Value, address: &PaneAddress, launch_id: &str
             .is_ok_and(|mode| mode == crate::launch::ClaimMode::Shell)
 }
 
-fn record_matches_binding(
-    record: &Value,
-    address: &PaneAddress,
-    launch_id: &str,
-    binding_id: &str,
-) -> bool {
-    record_matches_launch(record, address, launch_id)
-        && record.get("binding_id").and_then(Value::as_str) == Some(binding_id)
-}
-
+/// The binding a launch's current-binding `pointer` selects, read by the
+/// launch's own identity. A pointer whose binding is missing is an error.
 fn read_current(
     root: &Path,
     pointer: Option<Value>,
     address: &PaneAddress,
     launch_id: &str,
-) -> Result<(Option<Value>, Option<Value>)> {
+) -> Result<Option<Value>> {
     let Some(pointer) = pointer else {
-        return Ok((None, None));
+        return Ok(None);
     };
     let binding_id = pointer
         .get("binding_id")
@@ -307,25 +295,13 @@ fn read_current(
         .ok_or_else(|| {
             AttentionError::new("record_invalid", "current binding pointer is invalid")
         })?;
-    if !record_matches_binding(&pointer, address, launch_id, binding_id) {
-        return Err(AttentionError::new(
-            "record_invalid",
-            "current binding pointer identity mismatches its path",
-        ));
-    }
-    let binding = read_record_at(
+    read_record_at(
         root,
         "binding",
         &RecordIdentity::binding(address, launch_id, binding_id),
     )?
-    .ok_or_else(|| AttentionError::new("record_invalid", "current binding record is missing"))?;
-    if !record_matches_binding(&binding, address, launch_id, binding_id) {
-        return Err(AttentionError::new(
-            "record_invalid",
-            "current binding record identity mismatches its path",
-        ));
-    }
-    Ok((Some(pointer), Some(binding)))
+    .map(Some)
+    .ok_or_else(|| AttentionError::new("record_invalid", "current binding record is missing"))
 }
 
 fn provider_name(event: &ProviderEvent) -> Result<&'static str> {
@@ -343,8 +319,41 @@ fn event_binding_id(event: &ProviderEvent, launch_id: &str) -> Result<String> {
     Ok(binding_id(provider_name(event)?, session, launch_id))
 }
 
-fn load_claim(root: &Path, address: &PaneAddress) -> Result<Option<Value>> {
-    read_record_at(root, "claim", &RecordIdentity::pane(address))
+/// The pane's claim, when it is the shell claim an inherited `launch_id` came
+/// from; see [`inherited_claim_matches`].
+fn inherited_claim(root: &Path, address: &PaneAddress, launch_id: &str) -> Result<Option<Value>> {
+    Ok(read_claim(root, address)?
+        .filter(|claim| inherited_claim_matches(claim, address, launch_id)))
+}
+
+/// The state root, the pane and the launch id a process inherited from the
+/// shell that claimed its pane, as its environment names them.
+fn inherited(env: &BTreeMap<String, String>) -> Result<(PathBuf, PaneAddress, String)> {
+    let root = state_root(env)?;
+    let (address, _) = pane_address(env)?;
+    let launch_id = canonical_uuid(
+        env.get("WEZTERM_ATTENTION_LAUNCH_ID").map(String::as_str),
+        "WEZTERM_ATTENTION_LAUNCH_ID",
+    )?;
+    Ok((root, address, launch_id))
+}
+
+/// The launch a process inherited, resolved against the pane's claim; `None`
+/// when that claim is not the shell claim the launch id came from.
+fn inherited_launch<'a>(env: &BTreeMap<String, String>) -> Result<Option<ResolvedLaunch<'a>>> {
+    let (root, address, launch_id) = inherited(env)?;
+    let Some(claim) = inherited_claim(&root, &address, &launch_id)? else {
+        return Ok(None);
+    };
+    Ok(Some(ResolvedLaunch {
+        evidence: None,
+        root,
+        address,
+        launch_id,
+        claim,
+        host: None,
+        publication_diagnostic: None,
+    }))
 }
 
 /// Resolve the launch an agent event belongs to.
@@ -361,7 +370,7 @@ fn resolve_launch<'a>(
 ) -> Result<ResolvedLaunch<'a>> {
     let root = state_root(env)?;
     let (address, _) = pane_address(env)?;
-    let claim = load_claim(&root, &address)?;
+    let claim = read_claim(&root, &address)?;
     if let Some(inherited) = env.get("WEZTERM_ATTENTION_LAUNCH_ID") {
         let inherited = canonical_uuid(Some(inherited), "WEZTERM_ATTENTION_LAUNCH_ID")?;
         return match claim {
@@ -446,7 +455,7 @@ fn binding_mutation(
             if let Some(lapsed) = resolved.lapsed_now()? {
                 return Ok(CommitPlan::reporting(Mutation::plain(lapsed)));
             }
-            let (_, current) = read_current(
+            let current = read_current(
                 &resolved.root,
                 pointer.clone(),
                 &resolved.address,
@@ -454,19 +463,6 @@ fn binding_mutation(
             )?;
             let existing =
                 read_record_at(&resolved.root, "binding", &resolved.binding(&binding_id))?;
-            if let Some(existing) = &existing
-                && !record_matches_binding(
-                    existing,
-                    &resolved.address,
-                    &resolved.launch_id,
-                    &binding_id,
-                )
-            {
-                return Err(AttentionError::new(
-                    "record_invalid",
-                    "binding identity mismatches its path",
-                ));
-            }
             if let Some(current) = &current
                 && current.get("binding_id").and_then(Value::as_str) != Some(binding_id.as_str())
             {
@@ -713,29 +709,27 @@ fn append_observation(
             return Ok(None);
         };
         let binding_id = event_binding_id(event, &resolved.launch_id)?;
-        let claim = load_claim(&resolved.root, &resolved.address)?;
         // Only an inherited launch reaches here with an observation, and the
         // claim reread under the lock is never an agent's own with its launch
         // id: an agent's claim is always made with a fresh launch id, which no
         // shell exported for this event to inherit.
-        if claim.as_ref().is_none_or(|record| {
-            !inherited_claim_matches(record, &resolved.address, &resolved.launch_id)
-        }) {
+        if inherited_claim(&resolved.root, &resolved.address, &resolved.launch_id)?.is_none() {
             return Err(AttentionError::new(
                 "claim_stale",
                 "lifecycle claim changed",
             ));
         }
         let pointer = read_record_at(&resolved.root, "current_binding", &resolved.launch())?;
-        let (_, binding) = read_current(
+        let binding = read_current(
             &resolved.root,
             pointer,
             &resolved.address,
             &resolved.launch_id,
         )?;
-        if binding.as_ref().is_none_or(|record| {
-            !record_matches_binding(record, &resolved.address, &resolved.launch_id, &binding_id)
-        }) {
+        if binding
+            .as_ref()
+            .is_none_or(|record| record["binding_id"].as_str() != Some(binding_id.as_str()))
+        {
             return Err(AttentionError::new(
                 "claim_stale",
                 "lifecycle binding changed",
@@ -910,7 +904,7 @@ fn apply_activity(
             if let Some(lapsed) = resolved.lapsed_now()? {
                 return Ok(CommitPlan::reporting(Mutation::plain(lapsed)));
             }
-            let (_, current) = read_current(
+            let current = read_current(
                 &resolved.root,
                 pointer,
                 &resolved.address,
@@ -1189,28 +1183,11 @@ pub fn apply_mark_activity(
     {
         return Err(AttentionError::usage("ttl_ms must be positive"));
     }
-    let root = state_root(env)?;
-    let (address, _) = pane_address(env)?;
-    let launch_id = canonical_uuid(
-        env.get("WEZTERM_ATTENTION_LAUNCH_ID").map(String::as_str),
-        "WEZTERM_ATTENTION_LAUNCH_ID",
-    )?;
-    let Some(claim) = load_claim(&root, &address)?
-        .filter(|claim| inherited_claim_matches(claim, &address, &launch_id))
-    else {
+    let Some(resolved) = inherited_launch(env)? else {
         return Err(AttentionError::new(
             "claim_stale",
             "current launch does not match claim",
         ));
-    };
-    let resolved = ResolvedLaunch {
-        evidence: None,
-        root,
-        address,
-        launch_id,
-        claim,
-        host: None,
-        publication_diagnostic: None,
     };
     let (mutation, ()) = commit(
         &resolved.root,
@@ -1224,7 +1201,7 @@ pub fn apply_mark_activity(
                     "current launch does not match claim",
                 ));
             }
-            let (_, current) = read_current(
+            let current = read_current(
                 &resolved.root,
                 pointer,
                 &resolved.address,
@@ -1346,12 +1323,7 @@ pub fn apply_mark_activity(
 
 pub fn apply_mark_review(env: &BTreeMap<String, String>, source: &str) -> Result<LifecycleResult> {
     safe_mark_source(source)?;
-    let root = state_root(env)?;
-    let (address, _) = pane_address(env)?;
-    let launch_id = canonical_uuid(
-        env.get("WEZTERM_ATTENTION_LAUNCH_ID").map(String::as_str),
-        "WEZTERM_ATTENTION_LAUNCH_ID",
-    )?;
+    let (root, address, launch_id) = inherited(env)?;
     let owner_key = crate::protocol::sha256_hex(source.as_bytes());
     let review = RecordIdentity::review(&address, &owner_key);
     let review_path = review.path(&root, "review")?;
@@ -1410,12 +1382,7 @@ pub fn apply_mark_clear(
     observation: &str,
 ) -> Result<LifecycleResult> {
     safe_mark_source(source)?;
-    let root = state_root(env)?;
-    let (address, _) = pane_address(env)?;
-    let launch_id = canonical_uuid(
-        env.get("WEZTERM_ATTENTION_LAUNCH_ID").map(String::as_str),
-        "WEZTERM_ATTENTION_LAUNCH_ID",
-    )?;
+    let (root, address, launch_id) = inherited(env)?;
     let owner_key = crate::protocol::sha256_hex(source.as_bytes());
     let review_identity = RecordIdentity::review(&address, &owner_key);
     let review_path = review_identity.path(&root, "review")?;
@@ -1441,7 +1408,7 @@ pub fn apply_mark_clear(
             }
             let review = read_record(&review_path, Some("review"), &review_identity)?;
             let pointer = read_record_at(&root, "current_binding", &launch)?;
-            let (_, current) = read_current(&root, pointer, &address, &launch_id)?;
+            let current = read_current(&root, pointer, &address, &launch_id)?;
             let mut replacements = Vec::new();
             let mut removals = vec![review_path.clone()];
             let mut cleared = None;
@@ -1593,8 +1560,8 @@ pub fn acknowledge_activity(
         "current_binding",
         &RecordIdentity::launch(address, launch_id),
         |pointer| {
-            plugin_claim_matches(load_claim(root, address)?.as_ref(), address, launch_id)?;
-            let (_, current) = read_current(root, pointer, address, launch_id)?;
+            plugin_claim_matches(read_claim(root, address)?.as_ref(), address, launch_id)?;
+            let current = read_current(root, pointer, address, launch_id)?;
             let binding_id = current
                 .as_ref()
                 .and_then(|record| record["binding_id"].as_str())
@@ -1688,9 +1655,7 @@ fn apply_child(
             if let Some(lapsed) = resolved.lapsed_now()? {
                 return Ok(CommitPlan::reporting(Mutation::plain(lapsed)));
             }
-            if binding.as_ref().is_none_or(|record| {
-                !record_matches_binding(record, &resolved.address, &resolved.launch_id, &binding_id)
-            }) {
+            if binding.is_none() {
                 return Ok(CommitPlan::reporting(Mutation::plain(
                     LifecycleResult::diagnosed(
                         Disposition::Ignored,
@@ -1956,7 +1921,7 @@ fn apply_review_event(
                 return Ok(CommitPlan::reporting(Mutation::plain(lapsed)));
             }
             let pointer = read_record_at(&resolved.root, "current_binding", &resolved.launch())?;
-            let (_, current) = read_current(
+            let current = read_current(
                 &resolved.root,
                 pointer,
                 &resolved.address,
@@ -1977,17 +1942,6 @@ fn apply_review_event(
                 )));
             }
             let existing = read_record(&review_path, Some("review"), &review)?;
-            if let Some(existing) = &existing
-                && (existing.get("address")
-                    != serde_json::to_value(&resolved.address).ok().as_ref()
-                    || existing.get("owner_key").and_then(Value::as_str)
-                        != Some(owner_key.as_str()))
-            {
-                return Err(AttentionError::new(
-                    "record_invalid",
-                    "review record identity mismatches its path",
-                ));
-            }
             if clear {
                 return Ok(CommitPlan {
                     removals: vec![review_path.clone()],
@@ -2085,11 +2039,11 @@ fn apply_clear_event(
                 LifecycleResult::diagnosed(Disposition::Ignored, "claim_stale", message),
             )))
         };
-        let claim = load_claim(&resolved.root, &resolved.address)?;
+        let claim = read_claim(&resolved.root, &resolved.address)?;
         if let Some(lapsed) = resolved.lapsed(claim.as_ref()) {
             return Ok(CommitPlan::reporting(Mutation::plain(lapsed)));
         }
-        let (_, current) = read_current(
+        let current = read_current(
             &resolved.root,
             pointer,
             &resolved.address,
@@ -2151,22 +2105,14 @@ fn apply_clear_event(
 }
 
 pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Result<LifecycleResult> {
-    let root = state_root(env)?;
-    let (address, _) = pane_address(env)?;
-    let launch_id = canonical_uuid(
-        env.get("WEZTERM_ATTENTION_LAUNCH_ID").map(String::as_str),
-        "WEZTERM_ATTENTION_LAUNCH_ID",
-    )?;
-    let Some(claim) = load_claim(&root, &address)?
-        .filter(|claim| inherited_claim_matches(claim, &address, &launch_id))
-    else {
+    let Some(resolved) = inherited_launch(env)? else {
         return Ok(LifecycleResult::diagnosed(
             Disposition::Ignored,
             "claim_stale",
             "prompt return has no matching claim",
         ));
     };
-    clear_at_prompt(root, address, launch_id, claim, observation)
+    clear_at_prompt(resolved, observation)
 }
 
 /// Prompt return in a pane whose shell carries no launch id, as the shell of
@@ -2183,37 +2129,44 @@ pub fn prompt_return_after_agent_exit(
 ) -> Result<Option<LifecycleResult>> {
     let root = state_root(env)?;
     let (address, _) = pane_address(env)?;
-    let Some(claim) = load_claim(&root, &address)? else {
+    let Some(claim) = read_claim(&root, &address)? else {
         return Ok(None);
     };
     if !crate::launch::owner_proven_gone(&claim, ports.processes) {
         return Ok(None);
     }
     let launch_id = crate::launch::claim_launch_id(&claim)?;
-    clear_at_prompt(root, address, launch_id, claim, observation).map(Some)
+    let resolved = ResolvedLaunch {
+        evidence: None,
+        root,
+        address,
+        launch_id,
+        claim,
+        host: None,
+        publication_diagnostic: None,
+    };
+    clear_at_prompt(resolved, observation).map(Some)
 }
 
 /// Clear the lead activity of `launch_id`'s current binding at a prompt,
 /// under the launch lock then the claim lock, while the pane's claim is still
 /// `claim`.
-fn clear_at_prompt(
-    root: PathBuf,
-    address: PaneAddress,
-    launch_id: String,
-    claim: Value,
-    observation: &str,
-) -> Result<LifecycleResult> {
-    let launch = RecordIdentity::launch(&address, &launch_id);
+fn clear_at_prompt(resolved: ResolvedLaunch, observation: &str) -> Result<LifecycleResult> {
+    let ResolvedLaunch {
+        root,
+        address,
+        launch_id,
+        claim,
+        ..
+    } = &resolved;
+    let launch = resolved.launch();
     let (mutation, ()) = commit(
-        &root,
-        &[
-            &launch_lock(&root, &address, &launch_id),
-            &claim_lock(&root, &address),
-        ],
+        root,
+        &[&resolved.launch_lock(), &resolved.claim_lock()],
         "current_binding",
         &launch,
         |pointer| {
-            if load_claim(&root, &address)?.as_ref() != Some(&claim) {
+            if read_claim(root, address)?.as_ref() != Some(claim) {
                 return Ok(CommitPlan::reporting(Mutation::plain(
                     LifecycleResult::diagnosed(
                         Disposition::Ignored,
@@ -2222,15 +2175,15 @@ fn clear_at_prompt(
                     ),
                 )));
             }
-            let (_, current) = read_current(&root, pointer, &address, &launch_id)?;
+            let current = read_current(root, pointer, address, launch_id)?;
             let Some(current) = current else {
                 return Ok(CommitPlan::reporting(Mutation::plain(
                     LifecycleResult::new(Disposition::Applied),
                 )));
             };
             let binding_id = current["binding_id"].as_str().unwrap_or("").to_owned();
-            let identity = RecordIdentity::binding(&address, &launch_id, &binding_id);
-            let clear_path = identity.path(&root, "activity_clear")?;
+            let identity = resolved.binding(&binding_id);
+            let clear_path = identity.path(root, "activity_clear")?;
             let existing = read_record(&clear_path, Some("activity_clear"), &identity)?;
             if let Some(existing) = &existing
                 && observation < existing["observed_mono_ns"].as_str().unwrap_or("")
@@ -2267,24 +2220,12 @@ fn clear_at_prompt(
             })
         },
         |mutation| {
-            let pointer = read_record_at(&root, "current_binding", &launch)?;
+            let pointer = read_record_at(root, "current_binding", &launch)?;
             let current_binding_id = pointer
                 .as_ref()
                 .and_then(|pointer| pointer["binding_id"].as_str())
                 .unwrap_or("");
-            apply_observed_outputs(
-                &ResolvedLaunch {
-                    evidence: None,
-                    root: root.clone(),
-                    address: address.clone(),
-                    launch_id: launch_id.clone(),
-                    claim: claim.clone(),
-                    host: None,
-                    publication_diagnostic: None,
-                },
-                current_binding_id,
-                mutation,
-            )
+            apply_observed_outputs(&resolved, current_binding_id, mutation)
         },
     )?;
     Ok(mutation.result)
