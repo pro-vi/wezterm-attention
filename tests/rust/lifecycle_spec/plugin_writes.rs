@@ -281,3 +281,47 @@ fn the_plugin_command_refuses_a_target_it_cannot_name() {
     assert_eq!(response["status"], "usage_error");
     assert!(!review_path(&setup, "user").exists());
 }
+
+// A record of a newer schema is not this version's to replace or remove.
+#[test]
+fn the_plugin_never_writes_over_a_record_it_cannot_read() {
+    let setup = bound();
+    let future = |mut record: Value| {
+        record["schema"] = json!(999);
+        serde_json::to_vec(&record).unwrap()
+    };
+    let (address, _) = pane_address(&setup.env).unwrap();
+    let review = review_path(&setup, "user");
+    fs::create_dir_all(review.parent().unwrap()).unwrap();
+    let review_bytes = future(json!({
+        "kind": "review", "address": address, "owner_id": "user",
+        "owner_key": wezterm_attention::protocol::sha256_hex(b"user"),
+        "event_id": "00000000-0000-4000-8000-000000000501",
+    }));
+    fs::write(&review, &review_bytes).unwrap();
+    for action in ["set-review", "clear-review"] {
+        let (code, response) = plugin(&setup, action, LAUNCH, &[]);
+        assert_eq!(code, 1, "{response}");
+        assert_eq!(response["diagnostics"][0]["code"], "future_schema");
+        assert_eq!(fs::read(&review).unwrap(), review_bytes);
+    }
+
+    let event_id = stopped(&setup, "00000000000000000300");
+    let ack = setup.binding_dir("claude", "plugin").join("ack.json");
+    let activity = read_json(&setup.binding_dir("claude", "plugin").join("activity.json"));
+    let ack_bytes = future(json!({
+        "kind": "acknowledgement", "address": address, "launch_id": LAUNCH,
+        "target": activity["target"], "activity_event_id": "00000000-0000-4000-8000-000000000502",
+        "event_id": "00000000-0000-4000-8000-000000000503",
+    }));
+    fs::write(&ack, &ack_bytes).unwrap();
+    let (code, response) = plugin(
+        &setup,
+        "acknowledge",
+        LAUNCH,
+        &["--activity-event-id", &event_id],
+    );
+    assert_eq!(code, 1, "{response}");
+    assert_eq!(response["diagnostics"][0]["code"], "future_schema");
+    assert_eq!(fs::read(&ack).unwrap(), ack_bytes);
+}
