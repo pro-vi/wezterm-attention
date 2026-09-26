@@ -686,6 +686,111 @@ fn acknowledged(root: &Path, identity: &RecordIdentity, existing: &Value) -> boo
     ack["target"] == existing["target"] && ack["activity_event_id"].as_str() == Some(event_id)
 }
 
+/// Whether the activity `existing` is still on screen: newer than the clear
+/// watermark of its slot, and not acknowledged by the user.
+fn activity_visible(
+    root: &Path,
+    identity: &RecordIdentity,
+    existing: Option<&Value>,
+    clear: Option<&Value>,
+) -> bool {
+    clear.is_none_or(|clear| {
+        existing.is_some_and(|activity| {
+            activity["observed_mono_ns"].as_str().unwrap_or("")
+                > clear["observed_mono_ns"].as_str().unwrap_or("")
+        })
+    }) && existing.is_none_or(|activity| !acknowledged(root, identity, activity))
+}
+
+/// What an activity does to the slot it is written in: its result, the
+/// activity that stands in the slot afterwards, and the record written when
+/// it takes the slot.
+struct ActivityOutcome {
+    result: LifecycleResult,
+    standing: Option<Value>,
+    written: Option<Value>,
+}
+
+/// The one ordering every activity writer applies. An activity with content
+/// `base`, observed at `observation`, meets the activity `existing` in its
+/// slot and the slot's `clear` watermark. The same content still `visible`
+/// is a replay of it; a `held` activity keeps the slot; otherwise the later
+/// observation takes the slot, unless the clear already covers it. An equal
+/// observation with other content is a conflict.
+fn plan_activity(
+    existing: Option<Value>,
+    clear: Option<&Value>,
+    visible: bool,
+    held: bool,
+    base: &Value,
+    observation: &str,
+    written_at: &str,
+) -> ActivityOutcome {
+    let kept = |result, standing| ActivityOutcome {
+        result,
+        standing,
+        written: None,
+    };
+    let covered = || {
+        clear.is_some_and(|clear| observation <= clear["observed_mono_ns"].as_str().unwrap_or(""))
+    };
+    if let Some(existing) = existing {
+        if visible && semantic_activity(existing.clone()) == *base {
+            let mut result = LifecycleResult::new(Disposition::Skipped);
+            result.event_id = existing["event_id"].as_str().map(str::to_owned);
+            return kept(result, Some(existing));
+        }
+        if held {
+            return kept(LifecycleResult::new(Disposition::Ignored), Some(existing));
+        }
+        let order = existing["observed_mono_ns"].as_str().unwrap_or("");
+        if observation < order {
+            return kept(LifecycleResult::new(Disposition::Ignored), Some(existing));
+        }
+        if observation == order {
+            return kept(
+                LifecycleResult::diagnosed(
+                    Disposition::Conflict,
+                    "record_invalid",
+                    "equal activity order has different content",
+                ),
+                Some(existing),
+            );
+        }
+        if covered() {
+            return kept(
+                LifecycleResult::diagnosed(
+                    Disposition::Ignored,
+                    "binding_conflict",
+                    "activity observation is covered by activity clear",
+                ),
+                Some(existing),
+            );
+        }
+    } else if covered() {
+        return kept(
+            LifecycleResult::diagnosed(
+                Disposition::Ignored,
+                "binding_conflict",
+                "activity observation is covered by activity clear",
+            ),
+            None,
+        );
+    }
+    let event_id = Uuid::new_v4().to_string();
+    let mut record = base.clone();
+    record["event_id"] = json!(event_id);
+    record["observed_mono_ns"] = json!(observation);
+    record["written_at_unix_ns"] = json!(written_at);
+    let mut result = LifecycleResult::new(Disposition::Applied);
+    result.event_id = Some(event_id);
+    ActivityOutcome {
+        result,
+        standing: Some(record.clone()),
+        written: Some(record),
+    }
+}
+
 // Called inside the selected launch's lock. Rich rejection does not discard an
 // independently valid legacy mutation, and the sidecar is always written last.
 fn append_observation(
@@ -928,17 +1033,12 @@ fn apply_activity(
             }
             let existing = read_record(&activity_path, Some("activity"), &identity)?;
             let clear = read_record_at(&resolved.root, "activity_clear", &identity)?;
-            let visible = clear.as_ref().is_none_or(|clear| {
-                existing.as_ref().is_some_and(|activity| {
-                    activity["observed_mono_ns"].as_str().unwrap_or("")
-                        > clear["observed_mono_ns"].as_str().unwrap_or("")
-                })
-            }) && existing
-                .as_ref()
-                .is_none_or(|activity| !acknowledged(&resolved.root, &identity, activity));
+            let visible =
+                activity_visible(&resolved.root, &identity, existing.as_ref(), clear.as_ref());
             // A lead that waits on a sub-agent keeps calling tools, and each
             // call is thinking. While a child that asked for permission is
-            // still waiting, its notify is what the user needs to see. A
+            // still waiting, its notify is what the user needs to see, and
+            // the lead's next tool call is expected, not a conflict. A
             // prompt, or anything but thinking, replaces it as usual.
             let held = event.agent_id.is_none()
                 && base["type"] == "thinking"
@@ -952,75 +1052,23 @@ fn apply_activity(
                             activity["observed_mono_ns"].as_str().unwrap_or(""),
                         )
                 });
-            let mut replacements = Vec::new();
-            let (result, activity) = if let Some(existing) = existing {
-                if visible && semantic_activity(existing.clone()) == base {
-                    let mut result = LifecycleResult::new(Disposition::Skipped);
-                    result.event_id = existing["event_id"].as_str().map(str::to_owned);
-                    (result, Some(existing))
-                } else if held {
-                    // The notify stands for a sub-agent still waiting on the
-                    // user; the lead's next tool call is expected, not a conflict.
-                    (LifecycleResult::new(Disposition::Ignored), Some(existing))
-                } else {
-                    let order = existing["observed_mono_ns"].as_str().unwrap_or("");
-                    if observation < order {
-                        (LifecycleResult::new(Disposition::Ignored), Some(existing))
-                    } else if observation == order {
-                        (
-                            LifecycleResult::diagnosed(
-                                Disposition::Conflict,
-                                "record_invalid",
-                                "equal activity order has different content",
-                            ),
-                            Some(existing),
-                        )
-                    } else if clear.as_ref().is_some_and(|clear| {
-                        observation <= clear["observed_mono_ns"].as_str().unwrap_or("")
-                    }) {
-                        (
-                            LifecycleResult::diagnosed(
-                                Disposition::Ignored,
-                                "binding_conflict",
-                                "activity observation is covered by activity clear",
-                            ),
-                            Some(existing),
-                        )
-                    } else {
-                        let event_id = Uuid::new_v4().to_string();
-                        let mut record = base.clone();
-                        record["event_id"] = json!(event_id);
-                        record["observed_mono_ns"] = json!(observation);
-                        record["written_at_unix_ns"] = json!(written_at);
-                        replacements
-                            .push(Replacement::always(activity_path.clone(), record.clone()));
-                        let mut result = LifecycleResult::new(Disposition::Applied);
-                        result.event_id = Some(event_id);
-                        (result, Some(record))
-                    }
-                }
-            } else if clear.as_ref().is_some_and(|clear| {
-                observation <= clear["observed_mono_ns"].as_str().unwrap_or("")
-            }) {
-                (
-                    LifecycleResult::diagnosed(
-                        Disposition::Ignored,
-                        "binding_conflict",
-                        "activity observation is covered by activity clear",
-                    ),
-                    None,
-                )
-            } else {
-                let event_id = Uuid::new_v4().to_string();
-                let mut record = base.clone();
-                record["event_id"] = json!(event_id);
-                record["observed_mono_ns"] = json!(observation);
-                record["written_at_unix_ns"] = json!(written_at);
-                replacements.push(Replacement::always(activity_path.clone(), record.clone()));
-                let mut result = LifecycleResult::new(Disposition::Applied);
-                result.event_id = Some(event_id);
-                (result, Some(record))
-            };
+            let ActivityOutcome {
+                result,
+                standing: activity,
+                written,
+            } = plan_activity(
+                existing,
+                clear.as_ref(),
+                visible,
+                held,
+                &base,
+                observation,
+                written_at,
+            );
+            let mut replacements: Vec<_> = written
+                .map(|record| Replacement::always(activity_path.clone(), record))
+                .into_iter()
+                .collect();
             // Only a child's permission request reaches here with an agent id.
             // Its presence marks the child as waiting until its next tool call
             // or its stop. The presence only holds the notify against the
@@ -1243,69 +1291,27 @@ pub fn apply_mark_activity(
                 base["ttl_ms"] = json!(ttl_ms);
             }
             let existing = read_record(&path, Some("activity"), &activity_identity)?;
-            let visible = clear.as_ref().is_none_or(|clear| {
-                existing.as_ref().is_some_and(|activity| {
-                    activity["observed_mono_ns"].as_str().unwrap_or("")
-                        > clear["observed_mono_ns"].as_str().unwrap_or("")
-                })
-            }) && existing
-                .as_ref()
-                .is_none_or(|activity| !acknowledged(&resolved.root, &activity_identity, activity));
-            let mut replacements = Vec::new();
-            let result = if let Some(existing) = existing {
-                if visible && semantic_activity(existing.clone()) == base {
-                    let mut result = LifecycleResult::new(Disposition::Skipped);
-                    result.event_id = existing["event_id"].as_str().map(str::to_owned);
-                    result
-                } else {
-                    let order = existing["observed_mono_ns"].as_str().unwrap_or("");
-                    if observation < order {
-                        LifecycleResult::new(Disposition::Ignored)
-                    } else if observation == order {
-                        LifecycleResult::diagnosed(
-                            Disposition::Conflict,
-                            "record_invalid",
-                            "equal activity order has different content",
-                        )
-                    } else if clear.as_ref().is_some_and(|clear| {
-                        observation <= clear["observed_mono_ns"].as_str().unwrap_or("")
-                    }) {
-                        LifecycleResult::diagnosed(
-                            Disposition::Ignored,
-                            "binding_conflict",
-                            "activity observation is covered by activity clear",
-                        )
-                    } else {
-                        let event_id = Uuid::new_v4().to_string();
-                        let mut record = base.clone();
-                        record["event_id"] = json!(event_id);
-                        record["observed_mono_ns"] = json!(observation);
-                        record["written_at_unix_ns"] = json!(written_at);
-                        replacements.push(Replacement::always(path.clone(), record));
-                        let mut result = LifecycleResult::new(Disposition::Applied);
-                        result.event_id = Some(event_id);
-                        result
-                    }
-                }
-            } else if clear.as_ref().is_some_and(|clear| {
-                observation <= clear["observed_mono_ns"].as_str().unwrap_or("")
-            }) {
-                LifecycleResult::diagnosed(
-                    Disposition::Ignored,
-                    "binding_conflict",
-                    "activity observation is covered by activity clear",
-                )
-            } else {
-                let event_id = Uuid::new_v4().to_string();
-                let mut record = base;
-                record["event_id"] = json!(event_id);
-                record["observed_mono_ns"] = json!(observation);
-                record["written_at_unix_ns"] = json!(written_at);
-                replacements.push(Replacement::always(path, record));
-                let mut result = LifecycleResult::new(Disposition::Applied);
-                result.event_id = Some(event_id);
-                result
-            };
+            let visible = activity_visible(
+                &resolved.root,
+                &activity_identity,
+                existing.as_ref(),
+                clear.as_ref(),
+            );
+            let ActivityOutcome {
+                result, written, ..
+            } = plan_activity(
+                existing,
+                clear.as_ref(),
+                visible,
+                false,
+                &base,
+                observation,
+                written_at,
+            );
+            let replacements: Vec<_> = written
+                .map(|record| Replacement::always(path, record))
+                .into_iter()
+                .collect();
             Ok(CommitPlan {
                 replacements,
                 ..CommitPlan::reporting(Mutation::plain(result))
@@ -1347,17 +1353,7 @@ pub fn apply_mark_review(env: &BTreeMap<String, String>, source: &str) -> Result
             // Replaced whatever is there, but never over a review this
             // version cannot read.
             read_record(&review_path, Some("review"), &review)?;
-            let event_id = Uuid::new_v4().to_string();
-            let record = json!({
-                "kind": "review",
-                "schema": manifest()?.record_schema,
-                "address": address,
-                "owner_id": source,
-                "owner_key": owner_key,
-                "event_id": event_id,
-            });
-            let mut result = LifecycleResult::new(Disposition::Applied);
-            result.event_id = Some(event_id);
+            let (record, result) = review_record(&address, source, &owner_key)?;
             Ok(CommitPlan {
                 replacements: vec![Replacement::always(review_path.clone(), record)],
                 ..CommitPlan::reporting(Mutation::plain(result))
@@ -1366,6 +1362,27 @@ pub fn apply_mark_review(env: &BTreeMap<String, String>, source: &str) -> Result
         |_| Ok(()),
     )?;
     Ok(mutation.result)
+}
+
+/// A new review of the pane at `address` by the owner `owner_id`, whose key
+/// is `owner_key`, and the result that reports writing it.
+fn review_record(
+    address: &PaneAddress,
+    owner_id: &str,
+    owner_key: &str,
+) -> Result<(Value, LifecycleResult)> {
+    let event_id = Uuid::new_v4().to_string();
+    let record = json!({
+        "kind": "review",
+        "schema": manifest()?.record_schema,
+        "address": address,
+        "owner_id": owner_id,
+        "owner_key": owner_key,
+        "event_id": event_id,
+    });
+    let mut result = LifecycleResult::new(Disposition::Applied);
+    result.event_id = Some(event_id);
+    Ok((record, result))
 }
 
 /// Withdraws what `source` published in the current launch: its review, and
@@ -1517,17 +1534,7 @@ pub fn apply_user_review(
                     })))
                 });
             }
-            let event_id = Uuid::new_v4().to_string();
-            let record = json!({
-                "kind": "review",
-                "schema": manifest()?.record_schema,
-                "address": address,
-                "owner_id": PLUGIN_REVIEW_OWNER,
-                "owner_key": owner_key,
-                "event_id": event_id,
-            });
-            let mut result = LifecycleResult::new(Disposition::Applied);
-            result.event_id = Some(event_id);
+            let (record, result) = review_record(address, PLUGIN_REVIEW_OWNER, &owner_key)?;
             Ok(CommitPlan {
                 replacements: vec![Replacement::always(review_path.clone(), record)],
                 ..CommitPlan::reporting(Mutation::plain(result))
@@ -1741,40 +1748,10 @@ fn plan_presence(
             ));
         }
     }
-    child_replacement(
-        resolved,
-        event,
-        observation,
-        written_at,
-        binding_id,
-        agent_id,
-        &agent_key,
-        source,
-        status,
-        &presence_path,
-        floor.as_ref(),
-        clear.as_ref(),
-        replacements,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn child_replacement(
-    resolved: &ResolvedLaunch,
-    event: &ProviderEvent,
-    observation: &str,
-    written_at: &str,
-    binding_id: &str,
-    agent_id: &str,
-    agent_key: &str,
-    source: &str,
-    status: &str,
-    presence_path: &Path,
-    floor: Option<&Value>,
-    clear: Option<&Value>,
-    replacements: &mut Vec<Replacement>,
-) -> Result<LifecycleResult> {
-    if floor.is_some_and(|floor| observation <= floor["floor_mono_ns"].as_str().unwrap_or("")) {
+    if floor
+        .as_ref()
+        .is_some_and(|floor| observation <= floor["floor_mono_ns"].as_str().unwrap_or(""))
+    {
         return Ok(LifecycleResult::diagnosed(
             Disposition::Ignored,
             "binding_conflict",
@@ -1783,6 +1760,7 @@ fn child_replacement(
     }
     if status == "active"
         && clear
+            .as_ref()
             .is_some_and(|clear| observation <= clear["observed_mono_ns"].as_str().unwrap_or(""))
     {
         return Ok(LifecycleResult::diagnosed(
@@ -1808,7 +1786,7 @@ fn child_replacement(
         "written_at_unix_ns": written_at,
         "ttl_ms": manifest()?.limits.subagent_ttl_ms,
     });
-    replacements.push(Replacement::always(presence_path.to_path_buf(), record));
+    replacements.push(Replacement::always(presence_path, record));
     let mut result = LifecycleResult::new(Disposition::Applied);
     result.event_id = Some(event_id);
     Ok(result)
@@ -1953,17 +1931,7 @@ fn apply_review_event(
                     )))
                 });
             }
-            let event_id = Uuid::new_v4().to_string();
-            let record = json!({
-                "kind": "review",
-                "schema": manifest()?.record_schema,
-                "address": resolved.address,
-                "owner_id": owner_id,
-                "owner_key": owner_key,
-                "event_id": event_id,
-            });
-            let mut result = LifecycleResult::new(Disposition::Applied);
-            result.event_id = Some(event_id);
+            let (record, result) = review_record(&resolved.address, owner_id, &owner_key)?;
             Ok(CommitPlan {
                 replacements: vec![Replacement::always(review_path.clone(), record)],
                 ..CommitPlan::reporting(Mutation::plain(result))
@@ -2180,41 +2148,11 @@ fn clear_at_prompt(resolved: ResolvedLaunch, observation: &str) -> Result<Lifecy
                     LifecycleResult::new(Disposition::Applied),
                 )));
             };
-            let binding_id = current["binding_id"].as_str().unwrap_or("").to_owned();
-            let identity = resolved.binding(&binding_id);
-            let clear_path = identity.path(root, "activity_clear")?;
-            let existing = read_record(&clear_path, Some("activity_clear"), &identity)?;
-            if let Some(existing) = &existing
-                && observation < existing["observed_mono_ns"].as_str().unwrap_or("")
-            {
-                let mut result = LifecycleResult::new(Disposition::Ignored);
-                result.event_id = existing["event_id"].as_str().map(str::to_owned);
-                return Ok(CommitPlan::reporting(Mutation::plain(result)));
-            }
-            if existing.as_ref().is_some_and(|clear| {
-                observation == clear["observed_mono_ns"].as_str().unwrap_or("")
-            }) {
-                let mut result = LifecycleResult::new(Disposition::Skipped);
-                result.event_id = existing
-                    .as_ref()
-                    .and_then(|clear| clear["event_id"].as_str())
-                    .map(str::to_owned);
-                return Ok(CommitPlan::reporting(Mutation::plain(result)));
-            }
-            let event_id = Uuid::new_v4().to_string();
-            let record = json!({
-                "kind": "activity_clear",
-                "schema": manifest()?.record_schema,
-                "address": address,
-                "launch_id": launch_id,
-                "binding_id": binding_id,
-                "event_id": event_id,
-                "observed_mono_ns": observation,
-            });
-            let mut result = LifecycleResult::new(Disposition::Applied);
-            result.event_id = Some(event_id);
+            let binding_id = current["binding_id"].as_str().unwrap_or("");
+            let (result, replacement) =
+                activity_clear_plan(root, address, launch_id, binding_id, observation)?;
             Ok(CommitPlan {
-                replacements: vec![Replacement::always(clear_path, record)],
+                replacements: replacement.into_iter().collect(),
                 ..CommitPlan::reporting(Mutation::plain(result))
             })
         },
