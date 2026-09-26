@@ -195,23 +195,9 @@ return function(context)
     return value % U32
   end
 
-  local function portable_bit_pair(left, right, want_xor)
-    left, right = u32(left), u32(right)
-    local result, place = 0, 1
-    for _ = 1, 32 do
-      local left_bit, right_bit = left % 2, right % 2
-      if want_xor and left_bit ~= right_bit
-          or not want_xor and left_bit == 1 and right_bit == 1 then
-        result = result + place
-      end
-      left = (left - left_bit) / 2
-      right = (right - right_bit) / 2
-      place = place * 2
-    end
-    return result
-  end
-
-
+  --- 32-bit operators for sha256: LuaJIT's `bit` library, which the specs
+  --- run under, or Lua 5.4's integer operators, which WezTerm embeds. The
+  --- operators are compiled from text because LuaJIT cannot parse them.
   local function load_bit_operators()
     local ok, bit = pcall(require, "bit")
     if ok and type(bit) == "table" then
@@ -223,36 +209,17 @@ return function(context)
         ror = function(a, n) return u32(bit.ror(a, n)) end,
       }
     end
-
-    local loader = rawget(_G, "load") or rawget(_G, "loadstring")
-    if loader then
-      local chunk = loader([[
-        return {
-          band = function(a, b) return (a & b) & 0xffffffff end,
-          bxor = function(a, b) return (a ~ b) & 0xffffffff end,
-          bnot = function(a) return (~a) & 0xffffffff end,
-          rshift = function(a, n) return (a >> n) & 0xffffffff end,
-          ror = function(a, n)
-            return ((a >> n) | ((a << (32 - n)) & 0xffffffff)) & 0xffffffff
-          end,
-        }
-      ]])
-      if chunk then
-        local loaded, native = pcall(chunk)
-        if loaded and type(native) == "table" then return native end
-      end
-    end
-
-    return {
-      band = function(a, b) return portable_bit_pair(a, b, false) end,
-      bxor = function(a, b) return portable_bit_pair(a, b, true) end,
-      bnot = function(a) return 4294967295 - u32(a) end,
-      rshift = function(a, n) return math.floor(u32(a) / 2 ^ n) end,
-      ror = function(a, n)
-        local value = u32(a)
-        return u32(math.floor(value / 2 ^ n) + (value % 2 ^ n) * 2 ^ (32 - n))
-      end,
-    }
+    return assert(load([[
+      return {
+        band = function(a, b) return (a & b) & 0xffffffff end,
+        bxor = function(a, b) return (a ~ b) & 0xffffffff end,
+        bnot = function(a) return (~a) & 0xffffffff end,
+        rshift = function(a, n) return (a >> n) & 0xffffffff end,
+        ror = function(a, n)
+          return ((a >> n) | ((a << (32 - n)) & 0xffffffff)) & 0xffffffff
+        end,
+      }
+    ]]))()
   end
 
   local bit_operators = load_bit_operators()
