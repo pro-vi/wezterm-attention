@@ -1494,6 +1494,8 @@ fn plugin_claim_matches(
 /// pane at `address` whose published launch is `launch_id`. The plugin names
 /// the pane itself, because it is not a process in it. Only that owner's
 /// review is touched: another owner's review is that owner's to withdraw.
+/// Only setting needs the claim: a withdrawal lights nothing, and the key
+/// withdraws whatever flag it finds on disk, whichever launch the claim names.
 pub fn apply_user_review(
     root: &Path,
     address: &PaneAddress,
@@ -1512,7 +1514,9 @@ pub fn apply_user_review(
         "claim",
         &RecordIdentity::pane(address),
         |claim| {
-            plugin_claim_matches(claim.as_ref(), address, launch_id)?;
+            if set {
+                plugin_claim_matches(claim.as_ref(), address, launch_id)?;
+            }
             // Never over, or instead of, a review this version cannot read.
             let existing = read_record(&review_path, Some("review"), &review)?;
             if !set {

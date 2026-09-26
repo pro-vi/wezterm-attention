@@ -110,6 +110,19 @@ fn the_users_review_is_refused_where_the_claim_names_another_launch() {
     assert!(!review_path(&setup, "user").exists());
 }
 
+// A withdrawal lights nothing, so the claim does not gate it: a flag the
+// review key finds on disk is one the key can take back.
+#[test]
+fn the_users_review_is_withdrawn_whatever_launch_the_claim_names() {
+    let setup = bound();
+    let (code, response) = plugin(&setup, "set-review", LAUNCH, &[]);
+    assert_eq!(code, 0, "{response}");
+    let (code, response) = plugin(&setup, "clear-review", OTHER_LAUNCH, &[]);
+    assert_eq!(code, 0, "{response}");
+    assert_eq!(response["result"]["disposition"], "applied");
+    assert!(!review_path(&setup, "user").exists());
+}
+
 // The plugin is not a process in the pane: the launch it names is the one the
 // pane published, whichever kind of claim holds it.
 #[test]

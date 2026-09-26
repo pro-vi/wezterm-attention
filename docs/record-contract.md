@@ -221,16 +221,18 @@ ownership is not an Attention fact.
 The plugin's two writes go through a hidden command, `attention plugin`, which is the only writer
 of these records and is not a public interface. The plugin is not a process in the pane, so every
 call names the pane by `--realm-id`, `--incarnation-id` and `--pane-id`, and the launch the pane
-published by `--launch-id`. Each refuses with `claim_stale` unless the pane's claim names that
-launch, whichever kind of claim it is, and none replaces or removes a record it cannot read. The
+published by `--launch-id`. Each write but a withdrawal refuses with `claim_stale` unless the
+pane's claim names that launch, whichever kind of claim it is, and none replaces or removes a
+record it cannot read. The
 answer is the ordinary JSON envelope, with `result.disposition` and `result.event_id`.
 
 - `attention plugin set-review` and `attention plugin clear-review` set and withdraw the review
   owned by `user`, under the pane's claim lock and then that owner's review lock, as every other
   review writer. The review key sets it on the focused pane of a tab that carries no `user`
   review, and clears it from every pane of a tab that does. A review of any other owner is that
-  owner's to withdraw and is left alone. `mark --source` refuses the `user` owner, so no producer
-  can forge or clear it.
+  owner's to withdraw and is left alone. A withdrawal does not look at the claim: it lights
+  nothing, and the key has to be able to take back any flag it finds. `mark --source` refuses the
+  `user` owner, so no producer can forge or clear it.
 - `attention plugin acknowledge --activity-event-id E` writes the acknowledgement for activity
   `E` under the launch lock and then the claim lock, the scope every activity writer takes, and
   only while `E` is still the activity the pane shows: a newer activity, or an activity clear
