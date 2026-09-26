@@ -1317,11 +1317,7 @@ pub fn apply_mark_activity(
                 ..CommitPlan::reporting(Mutation::plain(result))
             })
         },
-        |mutation| {
-            let binding_id = read_record_at(&resolved.root, "current_binding", &resolved.launch())?
-                .and_then(|pointer| pointer["binding_id"].as_str().map(str::to_owned));
-            apply_observed_outputs(&resolved, binding_id.as_deref().unwrap_or(""), mutation)
-        },
+        |_| Ok(()),
     )?;
     Ok(mutation.result)
 }
@@ -2156,14 +2152,7 @@ fn clear_at_prompt(resolved: ResolvedLaunch, observation: &str) -> Result<Lifecy
                 ..CommitPlan::reporting(Mutation::plain(result))
             })
         },
-        |mutation| {
-            let pointer = read_record_at(root, "current_binding", &launch)?;
-            let current_binding_id = pointer
-                .as_ref()
-                .and_then(|pointer| pointer["binding_id"].as_str())
-                .unwrap_or("");
-            apply_observed_outputs(&resolved, current_binding_id, mutation)
-        },
+        |_| Ok(()),
     )?;
     Ok(mutation.result)
 }
