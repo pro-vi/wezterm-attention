@@ -37,6 +37,12 @@ enum Command {
     /// Describe a GUI socket for the tab publisher without querying or changing it.
     #[command(hide = true)]
     TabSource(TabSourceArgs),
+    /// The WezTerm plugin's own writes to one pane's records.
+    #[command(hide = true)]
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommand,
+    },
     /// Read one exact canonical scope from JSON stdin without changing state.
     Inspect(InspectArgs),
     /// Set current activity or a source-owned review.
@@ -246,6 +252,52 @@ struct TabsArgs {
     json: bool,
 }
 
+/// The plugin is not a process in the pane, so every write names the pane by
+/// its address and the launch it published.
+#[derive(Debug, Subcommand)]
+enum PluginCommand {
+    /// Set the user's review flag.
+    SetReview(PluginPaneArgs),
+    /// Withdraw the user's review flag; other owners' reviews stay.
+    ClearReview(PluginPaneArgs),
+    /// Acknowledge the activity the user saw, if it is still the one shown.
+    Acknowledge(AcknowledgeArgs),
+}
+
+#[derive(Clone, Debug, Args)]
+struct PluginPaneArgs {
+    #[arg(long)]
+    realm_id: String,
+    #[arg(long)]
+    incarnation_id: String,
+    #[arg(long)]
+    pane_id: String,
+    #[arg(long)]
+    launch_id: String,
+}
+
+#[derive(Clone, Debug, Args)]
+struct AcknowledgeArgs {
+    #[command(flatten)]
+    pane: PluginPaneArgs,
+    #[arg(long)]
+    activity_event_id: String,
+}
+
+impl PluginPaneArgs {
+    fn scope(&self) -> Result<wezterm_attention::query::PaneScope, AttentionError> {
+        wezterm_attention::query::PaneScope::new(
+            wezterm_attention::identity::PaneAddress {
+                realm_id: self.realm_id.clone(),
+                incarnation_id: self.incarnation_id.clone(),
+                pane_id: self.pane_id.clone(),
+            },
+            self.launch_id.clone(),
+            None,
+        )
+    }
+}
+
 #[derive(Clone, Debug, Args)]
 struct TabSourceArgs {
     #[arg(long)]
@@ -299,7 +351,8 @@ fn query_json(command: &str) -> bool {
     matches!(
         command,
         "bindings" | "tabs" | "tab-source" | "inspect" | "hooks describe"
-    )
+    ) || command == "plugin"
+        || command.starts_with("plugin ")
 }
 
 /// `value` as one line of JSON that is safe to print to a terminal.
@@ -923,6 +976,54 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     status: "ok".to_owned(),
                     complete: true,
                     result: source,
+                    diagnostics: Vec::new(),
+                },
+                true,
+                false,
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Some(Command::Plugin { command }) => {
+            let (name, pane) = match &command {
+                PluginCommand::SetReview(pane) => ("plugin set-review", pane),
+                PluginCommand::ClearReview(pane) => ("plugin clear-review", pane),
+                PluginCommand::Acknowledge(args) => ("plugin acknowledge", &args.pane),
+            };
+            let failed = |error: AttentionError| (Box::new(error), true, name.to_owned());
+            let scope = pane.scope().map_err(failed)?;
+            let root = wezterm_attention::records::state_root(&environment).map_err(failed)?;
+            let result = match &command {
+                PluginCommand::SetReview(_) | PluginCommand::ClearReview(_) => {
+                    wezterm_attention::lifecycle::apply_user_review(
+                        &root,
+                        scope.address(),
+                        scope.launch_id(),
+                        matches!(command, PluginCommand::SetReview(_)),
+                    )
+                }
+                PluginCommand::Acknowledge(args) => {
+                    let activity_event_id = wezterm_attention::identity::canonical_uuid(
+                        Some(&args.activity_event_id),
+                        "--activity-event-id",
+                    )
+                    .map_err(|error| AttentionError::usage(error.diagnostic.message))
+                    .map_err(failed)?;
+                    wezterm_attention::lifecycle::acknowledge_activity(
+                        &root,
+                        scope.address(),
+                        scope.launch_id(),
+                        &activity_event_id,
+                    )
+                }
+            }
+            .map_err(failed)?;
+            emit(
+                &Response {
+                    schema: 1,
+                    command: name.to_owned(),
+                    status: "ok".to_owned(),
+                    complete: true,
+                    result,
                     diagnostics: Vec::new(),
                 },
                 true,

@@ -58,6 +58,9 @@ mod self_claim;
 #[path = "lifecycle_spec/claim_fence.rs"]
 mod claim_fence;
 
+#[path = "lifecycle_spec/plugin_writes.rs"]
+mod plugin_writes;
+
 struct Scratch(PathBuf);
 
 impl Scratch {

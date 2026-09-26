@@ -1219,8 +1219,9 @@ fn safe_mark_text(value: &str, field: &str, maximum: usize) -> Result<()> {
     Ok(())
 }
 
-/// The plugin's Alt+B owns the review named "user"; a CLI writer that used
-/// the name would share that file and clear or forge the user's own flag.
+/// The plugin's review key owns the review named "user", and only
+/// `attention plugin` writes it; a producer that used the name would share
+/// that file and clear or forge the user's own flag.
 const PLUGIN_REVIEW_OWNER: &str = "user";
 
 fn safe_mark_source(source: &str) -> Result<()> {
@@ -1605,6 +1606,192 @@ pub fn apply_mark_clear(
                 result: Mutation::plain(result),
                 replacements,
                 removals,
+                private_dirs: Vec::new(),
+            })
+        },
+        |_| Ok(()),
+    )?;
+    Ok(mutation.result)
+}
+
+/// The claim a write by the plugin needs: one that names the launch the pane
+/// published, whichever kind of claim holds it. A reader shows nothing for a
+/// pane whose claim names another launch, so a write then would show nothing.
+/// The plugin is not a process in the pane, so the inherited-launch rule a
+/// hook answers to is not its rule.
+fn plugin_claim_matches(
+    claim: Option<&Value>,
+    address: &PaneAddress,
+    launch_id: &str,
+) -> Result<()> {
+    if claim.is_some_and(|claim| record_matches_launch(claim, address, launch_id)) {
+        Ok(())
+    } else {
+        Err(AttentionError::new(
+            "claim_stale",
+            "the pane's claim does not name the launch the pane published",
+        ))
+    }
+}
+
+/// Sets (`set`) or withdraws the review the plugin's review key owns, on the
+/// pane at `address` whose published launch is `launch_id`. The plugin names
+/// the pane itself, because it is not a process in it. Only that owner's
+/// review is touched: another owner's review is that owner's to withdraw.
+pub fn apply_user_review(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    set: bool,
+) -> Result<LifecycleResult> {
+    let owner_key = crate::protocol::sha256_hex(PLUGIN_REVIEW_OWNER.as_bytes());
+    let pane = pane_path(root, address);
+    let review_path = pane.join("reviews").join(format!("{owner_key}.json"));
+    let (mutation, ()) = commit_nested_with(
+        root,
+        &pane.join(".claim.lock"),
+        &pane.join("reviews").join(format!(".{owner_key}.lock")),
+        &pane.join("claim.json"),
+        Some("claim"),
+        &RecordIdentity::pane(address),
+        Duration::from_secs(2),
+        |claim| {
+            plugin_claim_matches(claim.as_ref(), address, launch_id)?;
+            // Never over, or instead of, a review this version cannot read.
+            let existing = read_record(
+                &review_path,
+                Some("review"),
+                &RecordIdentity::review(address, &owner_key),
+            )?;
+            if !set {
+                let removed = existing.is_some();
+                return Ok(CommitPlan {
+                    result: Mutation::plain(LifecycleResult::new(if removed {
+                        Disposition::Applied
+                    } else {
+                        Disposition::Skipped
+                    })),
+                    replacements: Vec::new(),
+                    removals: if removed {
+                        vec![review_path.clone()]
+                    } else {
+                        Vec::new()
+                    },
+                    private_dirs: Vec::new(),
+                });
+            }
+            let event_id = Uuid::new_v4().to_string();
+            let record = json!({
+                "kind": "review",
+                "schema": manifest()?.record_schema,
+                "address": address,
+                "owner_id": PLUGIN_REVIEW_OWNER,
+                "owner_key": owner_key,
+                "event_id": event_id,
+            });
+            let mut result = LifecycleResult::new(Disposition::Applied);
+            result.event_id = Some(event_id);
+            Ok(CommitPlan {
+                result: Mutation::plain(result),
+                replacements: vec![Replacement::always(review_path.clone(), record)],
+                removals: Vec::new(),
+                private_dirs: Vec::new(),
+            })
+        },
+        |_| Ok(()),
+    )?;
+    Ok(mutation.result)
+}
+
+/// Records that the user has seen the activity `activity_event_id` of launch
+/// `launch_id` in the pane at `address`, so the tab stops showing it. It is
+/// decided under the locks every activity writer takes, and written only
+/// while that activity is still the one the pane shows: a newer activity, or
+/// a clear, is something the user has not seen, and the answer is `ignored`
+/// with nothing written.
+pub fn acknowledge_activity(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    activity_event_id: &str,
+) -> Result<LifecycleResult> {
+    let launch = launch_path(root, address, launch_id);
+    let (mutation, ()) = commit_nested_with(
+        root,
+        &launch.join(".lock"),
+        &pane_path(root, address).join(".claim.lock"),
+        &launch.join("current-binding.json"),
+        Some("current_binding"),
+        &RecordIdentity::launch(address, launch_id),
+        Duration::from_secs(2),
+        |pointer| {
+            plugin_claim_matches(load_claim(root, address)?.as_ref(), address, launch_id)?;
+            let (_, current) = read_current(&launch, pointer, address, launch_id)?;
+            let binding_id = current
+                .as_ref()
+                .and_then(|record| record["binding_id"].as_str())
+                .map(str::to_owned);
+            let (directory, target, identity) = match &binding_id {
+                Some(binding_id) => (
+                    launch.join("bindings").join(binding_id),
+                    json!({"kind":"binding","binding_id":binding_id}),
+                    RecordIdentity::binding(address, launch_id, binding_id),
+                ),
+                None => (
+                    launch.clone(),
+                    json!({"kind":"launch"}),
+                    RecordIdentity::launch(address, launch_id),
+                ),
+            };
+            let activity = read_record(
+                &directory.join("activity.json"),
+                Some("activity"),
+                &identity,
+            )?;
+            let clear = match binding_id {
+                Some(_) => read_record(
+                    &directory.join("activity-clear.json"),
+                    Some("activity_clear"),
+                    &identity,
+                )?,
+                None => None,
+            };
+            let shown = activity.as_ref().is_some_and(|activity| {
+                activity["event_id"].as_str() == Some(activity_event_id)
+                    && activity["target"] == target
+                    && clear.as_ref().is_none_or(|clear| {
+                        activity["observed_mono_ns"].as_str().unwrap_or("")
+                            > clear["observed_mono_ns"].as_str().unwrap_or("")
+                    })
+            });
+            if !shown {
+                return Ok(refusal(LifecycleResult::new(Disposition::Ignored)));
+            }
+            let ack_path = directory.join("ack.json");
+            // Never over an acknowledgement this version cannot read.
+            if let Some(existing) = read_record(&ack_path, Some("acknowledgement"), &identity)?
+                && existing["activity_event_id"].as_str() == Some(activity_event_id)
+            {
+                let mut result = LifecycleResult::new(Disposition::Skipped);
+                result.event_id = existing["event_id"].as_str().map(str::to_owned);
+                return Ok(refusal(result));
+            }
+            let event_id = Uuid::new_v4().to_string();
+            let record = json!({
+                "kind": "acknowledgement",
+                "schema": manifest()?.record_schema,
+                "address": address,
+                "launch_id": launch_id,
+                "target": target,
+                "activity_event_id": activity_event_id,
+                "event_id": event_id,
+            });
+            let mut result = LifecycleResult::new(Disposition::Applied);
+            result.event_id = Some(event_id);
+            Ok(CommitPlan {
+                result: Mutation::plain(result),
+                replacements: vec![Replacement::always(ack_path, record)],
+                removals: Vec::new(),
                 private_dirs: Vec::new(),
             })
         },
