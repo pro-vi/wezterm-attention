@@ -17,9 +17,9 @@ use crate::protocol::{
     ns20_text,
 };
 use crate::records::{
-    BindingState, FileRecords, RecordIdentity, RecordRead, RecordReader, agents_dir, binding_path,
-    ends_binding, incarnation_dir, read_record, read_record_at, read_record_typed, reviews_dir,
-    session_dir, session_entry_path, session_index_path,
+    BINDING_FILE, BindingState, FileRecords, RecordIdentity, RecordRead, RecordReader, agents_dir,
+    binding_path, ends_binding, incarnation_dir, read_record, read_record_at, read_record_typed,
+    realms_dir, reviews_dir, session_dir, session_entry_path, session_index_path,
 };
 use crate::wezterm::{Clock, GuiWindowLister, PaneLister, ProcessProbe};
 
@@ -1212,7 +1212,7 @@ fn collect_selected_binding_files(
             }
         };
         match entry.file_type() {
-            Ok(kind) if entry.file_name() == "binding.json" => {
+            Ok(kind) if entry.file_name() == BINDING_FILE => {
                 if kind.is_symlink() {
                     diagnostics.push(symlink(
                         "selected binding record is a symlink",
@@ -1242,8 +1242,8 @@ pub(crate) fn collect_binding_files(
 ) {
     collect_state_files(
         root,
-        &root.join("v2/realms"),
-        &|path| path.file_name().and_then(|name| name.to_str()) == Some("binding.json"),
+        &realms_dir(root),
+        &|path| path.file_name().and_then(|name| name.to_str()) == Some(BINDING_FILE),
         output,
         diagnostics,
     );

@@ -21,11 +21,11 @@ use crate::query::{
     read_bindings_with_ports, read_tab_publications, record_address, state_relative,
 };
 use crate::records::{
-    BINDING_FILE, BindingState, CommitPlan, FileRecords, RecordIdentity, RecordRead, Replacement,
-    agents_dir, atomic_replace_if_different, binding_record_kind, binding_session_entry,
-    claim_lock, commit, directory_confined, ends_binding, incarnation_dir, is_state_lock,
-    launch_lock, pane_dir, read_bounded, read_record, read_record_at, removal_confined,
-    remove_file_durable, session_index_marker, session_index_path,
+    AGENTS, BINDING_FILE, BindingState, CommitPlan, FileRecords, RecordIdentity, RecordRead,
+    Replacement, agents_dir, atomic_replace_if_different, binding_record_kind,
+    binding_session_entry, claim_lock, commit, directory_confined, ends_binding, incarnation_dir,
+    is_state_lock, launch_lock, pane_dir, read_bounded, read_record, read_record_at,
+    removal_confined, remove_file_durable, session_index_marker, session_index_path,
 };
 use crate::wezterm::{Clock, PaneLister, Presence, ProcessInspector, ProcessProbe};
 
@@ -691,7 +691,7 @@ fn binding_known_and_prunable(
             ));
             return false;
         }
-        if path.file_name().and_then(|name| name.to_str()) == Some("agents") && file_type.is_dir() {
+        if path.file_name().and_then(|name| name.to_str()) == Some(AGENTS) && file_type.is_dir() {
             let Ok(children) = fs::read_dir(&path) else {
                 return false;
             };
@@ -1131,7 +1131,7 @@ fn session_entries_below(root: &Path, dir: &Path) -> Vec<PathBuf> {
     collect_state_files(
         root,
         dir,
-        &|path| path.file_name().and_then(|name| name.to_str()) == Some("binding.json"),
+        &|path| path.file_name().and_then(|name| name.to_str()) == Some(BINDING_FILE),
         &mut files,
         &mut Vec::new(),
     );

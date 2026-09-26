@@ -346,7 +346,7 @@ enum Depth {
 
 pub(crate) const BINDING_FILE: &str = "binding.json";
 const REVIEWS: &str = "reviews";
-const AGENTS: &str = "agents";
+pub(crate) const AGENTS: &str = "agents";
 const REVIEW_KEY: &str = "owner_key";
 const AGENT_KEY: &str = "agent_key";
 
@@ -592,8 +592,13 @@ fn absolute_path(value: &str, name: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(value))
 }
 
+/// The directory that holds every realm's records.
+pub fn realms_dir(root: &Path) -> PathBuf {
+    root.join("v2/realms")
+}
+
 pub fn realm_dir(root: &Path, realm_id: &str) -> PathBuf {
-    root.join("v2/realms").join(realm_id)
+    realms_dir(root).join(realm_id)
 }
 
 pub fn incarnation_dir(root: &Path, realm_id: &str, incarnation_id: &str) -> PathBuf {

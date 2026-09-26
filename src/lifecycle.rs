@@ -2336,8 +2336,7 @@ fn apply_provider_event_inner(
 #[cfg(test)]
 mod lifecycle_write_tests {
     use super::*;
-    use crate::records::{launch_dir, pane_dir};
-    use std::time::Duration;
+    use crate::records::LOCK_TIMEOUT;
     #[test]
     fn failure_of_snapshot_write_reports_partial_state() {
         let fixture: Value =
@@ -2376,14 +2375,15 @@ mod lifecycle_write_tests {
             host: None,
             publication_diagnostic: None,
         };
-        let launch = launch_dir(&root, &address, &launch_id);
+        let launch = RecordIdentity::launch(&address, &launch_id);
+        let binding = RecordIdentity::binding(&address, &launch_id, binding_id);
         crate::records::atomic_replace(
-            &pane_dir(&root, &address).join("claim.json"),
+            &RecordIdentity::pane(&address).path(&root, "claim").unwrap(),
             &samples["claim"],
         )
         .unwrap();
         crate::records::atomic_replace(
-            &launch.join("current-binding.json"),
+            &launch.path(&root, "current_binding").unwrap(),
             &samples["current_binding"],
         )
         .unwrap();
@@ -2394,18 +2394,20 @@ mod lifecycle_write_tests {
         let mut snapshot = cases["cases"][1]["value"].clone();
         snapshot["provider"] = json!("claude");
         crate::protocol::validate_record(&snapshot, Some("lifecycle_snapshot")).unwrap();
-        let path = launch
-            .join("bindings")
-            .join(binding_id)
-            .join("lifecycle.json");
-        crate::records::atomic_replace(&path.with_file_name("binding.json"), &samples["binding"])
-            .unwrap();
+        let path = binding.path(&root, "lifecycle_snapshot").unwrap();
+        crate::records::atomic_replace(
+            &binding.path(&root, "binding").unwrap(),
+            &samples["binding"],
+        )
+        .unwrap();
         let mutation = Mutation {
             result: LifecycleResult::new(Disposition::Applied),
             lifecycle_replacement: Some(PreparedRecordWrite::new(path.clone(), &snapshot).unwrap()),
         };
-        let error =
-            crate::records::with_lock(&launch.join(".lock"), Duration::from_secs(2), || {
+        let error = crate::records::with_lock(
+            &launch_lock(&root, &address, &launch_id),
+            LOCK_TIMEOUT,
+            || {
                 apply_observed_outputs_with(&resolved, binding_id, &mutation, |_| {
                     assert!(
                         !root.join("42").exists(),
@@ -2416,8 +2418,9 @@ mod lifecycle_write_tests {
                         "synthetic snapshot write failure",
                     ))
                 })
-            })
-            .unwrap_err();
+            },
+        )
+        .unwrap_err();
         assert!(!error.diagnostic.context.contains_key("legacy_applied"));
         assert_eq!(error.diagnostic.context["lifecycle_write"], "unconfirmed");
         assert!(!path.exists());
