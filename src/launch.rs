@@ -104,7 +104,6 @@ impl ClaimWrite {
         root: &std::path::Path,
         address: &PaneAddress,
         metadata: &crate::identity::SocketMetadata,
-        new_store: bool,
     ) -> Result<Self> {
         let (realm_record, incarnation_record) = manifests(address, metadata)?;
         Ok(Self {
@@ -113,7 +112,7 @@ impl ClaimWrite {
             pane: pane_path(root, address),
             realm_record,
             incarnation_record,
-            new_store,
+            new_store: !root.join("v2").exists(),
         })
     }
 
@@ -251,7 +250,6 @@ pub fn claim_launch_at_tty(
 ) -> Result<ApplyResult> {
     let root = state_root(env)?;
     mkdir_private(&root)?;
-    let new_store = !root.join("v2").exists();
     let (address, metadata) = pane_address(env)?;
     let launch_id = match env.get("WEZTERM_ATTENTION_LAUNCH_ID") {
         Some(value) => crate::identity::canonical_uuid(Some(value), "WEZTERM_ATTENTION_LAUNCH_ID")?,
@@ -260,7 +258,7 @@ pub fn claim_launch_at_tty(
     let fingerprint = ports.tty.fingerprint(tty_path)?;
     let observation = ports.clock.monotonic_ns20()?;
     let proposed = claim_record(&address, &launch_id, tty_path, &fingerprint, &observation);
-    let write = ClaimWrite::new(&root, &address, &metadata, new_store)?;
+    let write = ClaimWrite::new(&root, &address, &metadata)?;
 
     let (mut selected, published) = commit_with(
         &root,
@@ -949,9 +947,8 @@ fn claim_for_host(
 ) -> Result<(Value, Option<Diagnostic>)> {
     let root = state_root(env)?;
     mkdir_private(&root)?;
-    let new_store = !root.join("v2").exists();
     let (_, metadata) = pane_address(env)?;
-    let write = ClaimWrite::new(&root, address, &metadata, new_store)?;
+    let write = ClaimWrite::new(&root, address, &metadata)?;
     let observation = ports.clock.monotonic_ns20()?;
     let (selected, published) = commit_with(
         &root,
