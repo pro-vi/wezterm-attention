@@ -2040,15 +2040,6 @@ test("a mux pane that has published nothing has no marker id and is skipped", fu
     "a tab of unresolvable panes must not borrow another pane's indicator")
 end)
 
-test("GUI doctor reports unpublished mux panes without filesystem probes", function()
-  local pane = mux_pane(7004, { domain = "unix" })
-  local diagnostics = attention.doctor(window_double({
-    tabs = { { pane } }, focused = false,
-  }))
-  assert(#diagnostics == 1 and diagnostics[1].code == "identity_unpublished",
-    "GUI doctor must report the user-var half the CLI cannot observe")
-end)
-
 test("a local pane's own id outranks a WEZTERM_PANE that disagrees with it", function()
   -- Printed by something in the pane -- a catted file, a remote prompt -- not
   -- by the pane's own shell, which reads the same id WezTerm numbered it with.

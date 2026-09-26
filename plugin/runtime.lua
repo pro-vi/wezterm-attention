@@ -909,41 +909,6 @@ return function()
       delivering_views = false
     end
 
-    --- Inspect GUI-only identity publication. Filesystem, socket, process,
-    --- permission, and version probes belong to `attention doctor`.
-    function M.doctor(window)
-      local diagnostics = {}
-      if not window or type(window.mux_window) ~= "function" then
-        return { diagnostic("probe_unavailable", "GUI window is unavailable") }
-      end
-      local ok, mux_win = pcall(window.mux_window, window)
-      if not ok or not mux_win or type(mux_win.tabs) ~= "function" then
-        return { diagnostic("probe_unavailable", "GUI mux window is unavailable") }
-      end
-      local tabs_ok, tabs = pcall(mux_win.tabs, mux_win)
-      if not tabs_ok or type(tabs) ~= "table" then
-        return { diagnostic("probe_unavailable", "GUI panes are unavailable") }
-      end
-      for _, tab_value in ipairs(tabs) do
-        local panes_ok, panes = pcall(tab_value.panes, tab_value)
-        if not panes_ok or type(panes) ~= "table" then
-          diagnostics[#diagnostics + 1] = diagnostic("probe_unavailable", "GUI tab panes are unavailable")
-        else
-          for _, pane in ipairs(panes) do
-            local read = resolve_pane_read(pane)
-            if read.kind == "unpublished" then
-              diagnostics[#diagnostics + 1] = diagnostic(
-                "identity_unpublished", "mux pane has not published a trustworthy identity",
-                { domain = read.domain })
-            elseif read.kind == "invalid" then
-              diagnostics[#diagnostics + 1] = read.diagnostic
-            end
-          end
-        end
-      end
-      return diagnostics
-    end
-
     --- Read the window's pane records, update the cache, acknowledge what the
     --- user is looking at, and ask WezTerm to redraw the tab bar if what it
     --- shows has changed. Call this from your own update-status handler if you
@@ -975,7 +940,7 @@ return function()
 
       -- A tab that closes between this listing and its panes() call below is
       -- still in the list and already out of the mux, so panes() raises. That is
-      -- a race with the user, not a fault: M.doctor already treats it that way.
+      -- a race with the user, not a fault.
       local tabs_ok, mux_tabs = pcall(mux_win.tabs, mux_win)
       if not tabs_ok or type(mux_tabs) ~= "table" then return end
       -- The absence sweep below deletes records for panes it cannot see, so a
