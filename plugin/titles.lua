@@ -152,7 +152,7 @@ return function(context)
 
   local function sample_settled_title(cache_key, launch_id, raw_title, provider)
     if M._active_settled_title_fallback == false then return nil end
-    local scope = tostring(launch_id or "v1")
+    local scope = tostring(launch_id or "unclaimed")
     local title = normalized_pane_title(raw_title)
     local state = settled_title_state[cache_key]
     if not state or state.scope ~= scope then

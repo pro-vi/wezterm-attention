@@ -1,8 +1,6 @@
 return function(context)
   local wezterm = context.wezterm
   local protocol_path = context.protocol_path
-  local M = context.M
-  local defaults = context.defaults
 
   local container_kinds = setmetatable({}, { __mode = "k" })
   local function read_all(path, maximum)
@@ -1002,32 +1000,6 @@ return function(context)
     return math.floor(poll_now_ms / 1000) % frame_count
   end
 
-  local function normalize_epoch_ms(value)
-    local n = tonumber(value)
-    if not n then return nil end
-    -- Accept either seconds or milliseconds. Current Unix seconds are 10 digits;
-    -- current Unix milliseconds are 13 digits.
-    if n < 100000000000 then return n * 1000 end
-    return n
-  end
-
-  local function stale_ttl_ms(atype, marker_ttl_ms)
-    local explicit = tonumber(marker_ttl_ms)
-    if explicit and explicit > 0 then return explicit end
-
-    local cfg = M._active_stale_after_ms
-    if cfg == false then return nil end
-    cfg = cfg or defaults.stale_after_ms
-    if type(cfg) ~= "table" then return nil end
-
-    local ttl = cfg[atype]
-    if ttl == false then return nil end
-    ttl = tonumber(ttl)
-    if ttl and ttl > 0 then return ttl end
-    return nil
-  end
-
-
   return {
     classify_lifecycle_tool = classify_lifecycle_tool,
     is_integer = is_integer,
@@ -1085,7 +1057,5 @@ return function(context)
     deep_copy = deep_copy,
     now_ms = now_ms,
     frame_for_now = frame_for_now,
-    normalize_epoch_ms = normalize_epoch_ms,
-    stale_ttl_ms = stale_ttl_ms,
   }
 end

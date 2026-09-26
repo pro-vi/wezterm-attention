@@ -155,8 +155,8 @@ return function(context)
       server_title = titles.server_title,
       directory = titles.directory,
       settled_title = titles.settled_title,
-      -- One home per fact. `attention` carries the v1 positional entries for
-      -- formatters written against the shipped API, and named fields for the
+      -- One home per fact. `attention` carries the positional entries for
+      -- formatters written against the first API, and named fields for the
       -- rest. There used to be flattened copies of all of them at this level
       -- too, which gave every fact two spellings and no rule for choosing.
       attention = attention,

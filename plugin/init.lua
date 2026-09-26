@@ -67,8 +67,8 @@ local function resolve_state_root()
 end
 
 local defaults = {
-  -- `dir`, where marker files are written (one file per pane ID), is set
-  -- once titles.lua has loaded, below.
+  -- `dir`, the state directory the records are read from, is set once
+  -- titles.lua has loaded, below.
 
   -- Render mode: "tab" | "manual"
   --   tab:    plugin owns format-tab-title (default)
@@ -97,11 +97,7 @@ local defaults = {
   -- These types are acknowledged when their pane becomes active
   acknowledge_types = { "stop", "notify" },
 
-  -- Stale marker cleanup by type, in milliseconds. Prevents zombie busy tabs
-  -- after a process exits without clearing its marker. Set to false to disable.
-  stale_after_ms = { thinking = 30 * 60 * 1000 },
-
-  -- Keybind to toggle "review" marker on active pane (false to disable)
+  -- Keybind to toggle the user's review flag on the active tab (false to disable)
   review_key = { key = "b", mods = "ALT" },
 
   -- Ask WezTerm to rebuild the tab bar when a pane's attention changes.
@@ -117,9 +113,6 @@ local defaults = {
   show_directory = true,
   settled_title_fallback = true,
 }
-
--- Known attention types (reject unknown values from marker files)
-local valid_types = { thinking = true, stop = true, notify = true, review = true }
 
 -- ── V2 protocol authority ───────────────────────────────────────────────────
 
@@ -172,9 +165,7 @@ local protocol_path = plugin_root and (plugin_root .. "/protocol/v2.json") or ni
 local protocol_factory, protocol_module_error = load_plugin_module("protocol")
 local protocol_api
 if protocol_factory then
-  protocol_api = protocol_factory({
-    wezterm = wezterm, protocol_path = protocol_path, M = M, defaults = defaults,
-  })
+  protocol_api = protocol_factory({ wezterm = wezterm, protocol_path = protocol_path })
 else
   local function fallback_diagnostic(code, message, context)
     return { code = code, message = message, context = context or {} }
@@ -182,11 +173,6 @@ else
   local function unavailable()
     return nil, fallback_diagnostic(
       "probe_unavailable", "protocol module is unavailable")
-  end
-  local function fallback_epoch_ms(value)
-    local number = tonumber(value)
-    if not number then return nil end
-    return number < 100000000000 and number * 1000 or number
   end
   protocol_api = {
     protocol = nil,
@@ -199,12 +185,10 @@ else
     parse_wire_json = unavailable,
     parse_v2_record = unavailable,
     parse_v2_record_json = unavailable,
-    normalize_epoch_ms = fallback_epoch_ms,
     now_ms = function() return os.time() * 1000 end,
     frame_for_now = function(poll_now_ms, frame_count)
       return math.floor(poll_now_ms / 1000) % frame_count
     end,
-    stale_ttl_ms = function() return nil end,
     is_safe_text = function(value, maximum)
       return type(value) == "string" and value ~= "" and #value <= maximum
         and not value:find("[%z\1-\31\127]") and not value:find("\194[\128-\159]")
@@ -247,8 +231,6 @@ local eligible_subagent = protocol_api.eligible_subagent
 local deep_copy = protocol_api.deep_copy
 local now_ms = protocol_api.now_ms
 local frame_for_now = protocol_api.frame_for_now
-local normalize_epoch_ms = protocol_api.normalize_epoch_ms
-local stale_ttl_ms = protocol_api.stale_ttl_ms
 local is_integer = protocol_api.is_integer
 local is_hex64 = protocol_api.is_hex64
 local is_uuid = protocol_api.is_uuid
@@ -256,56 +238,12 @@ local is_ns20 = protocol_api.is_ns20
 local is_canonical_decimal = protocol_api.is_canonical_decimal
 local is_safe_text = protocol_api.is_safe_text
 local same_address = protocol_api.same_address
-local legacy_factory = assert(load_plugin_module("legacy"))
-local legacy_api = legacy_factory({
-  wezterm = wezterm,
-  valid_types = valid_types,
-  normalize_epoch_ms = normalize_epoch_ms,
-  protocol = protocol,
-  diagnostic = diagnostic,
-})
-local read_marker = legacy_api.read_marker
-local subagent_live_ms = legacy_api.subagent_live_ms
-local subagents_path = legacy_api.subagents_path
-local count_live_subagents = legacy_api.count_live_subagents
 local overlays_factory = assert(load_plugin_module("overlays"))
-local overlays_api = overlays_factory({
-  wezterm = wezterm,
-  now_ms = now_ms,
-  sha256 = sha256,
-  parse_v2_record = parse_v2_record,
-  record_matches = record_matches,
-  identity_diagnostic = identity_diagnostic,
-  read_expected_record = read_expected_record,
-  read_marker = read_marker,
-  subagents_path = subagents_path,
-})
-local reported_errors = overlays_api.reported_errors
-local publication_session = overlays_api.publication_session
+local overlays_api = overlays_factory({ wezterm = wezterm, now_ms = now_ms })
 local report_error_once = overlays_api.report_error_once
 local report_warning_once = overlays_api.report_warning_once
-local next_publication_id = overlays_api.next_publication_id
-local json_string = overlays_api.json_string
-local json_value = overlays_api.json_value
-local next_v2_event_id = overlays_api.next_v2_event_id
-local write_v2_record = overlays_api.write_v2_record
 local publish_tab_order = overlays_api.publish_tab_order
 local withdraw_closed_tab_orders = overlays_api.withdraw_closed_tab_orders
-local acknowledgement_path = overlays_api.acknowledgement_path
-local acknowledgement_tmp_path = overlays_api.acknowledgement_tmp_path
-local marker_identity = overlays_api.marker_identity
-local read_acknowledgement = overlays_api.read_acknowledgement
-local clear_acknowledgement = overlays_api.clear_acknowledgement
-local write_acknowledgement = overlays_api.write_acknowledgement
-local acknowledgement_matches = overlays_api.acknowledgement_matches
-local read_effective_marker = overlays_api.read_effective_marker
-local review_path = overlays_api.review_path
-local review_tmp_path = overlays_api.review_tmp_path
-local review_flagged = overlays_api.review_flagged
-local write_review_flag = overlays_api.write_review_flag
-local clear_review_flag = overlays_api.clear_review_flag
-local remove_expired_marker = overlays_api.remove_expired_marker
-local remove_marker = overlays_api.remove_marker
 local reader_factory = assert(load_plugin_module("reader"))
 -- Bound once the runtime below exists; the reader asks it per pane read.
 local own_mux_identity
@@ -348,44 +286,14 @@ local runtime_state = runtime_factory()
 local attention_cache = runtime_state.attention_cache
 local marker_id_by_local = runtime_state.marker_id_by_local
 local seen_marker_ids_by_window = runtime_state.seen_marker_ids_by_window
-local v2_overlays = overlays_api.bind_v2({
-  M = M,
-  defaults = defaults,
-  protocol = protocol,
-  binding_root = binding_root,
-  v2_pane_root = v2_pane_root,
-  glob_paths = glob_paths,
-  read_expected_record = read_expected_record,
-  path_stem = path_stem,
-  identity_diagnostic = identity_diagnostic,
-  read_attention_view = read_attention_view,
-  attention_cache = attention_cache,
-  wezterm_now_unix_ns20 = wezterm_now_unix_ns20,
-})
-local selected_v2_records_root = v2_overlays.selected_v2_records_root
-local v2_review_paths = v2_overlays.v2_review_paths
-local write_v2_user_review = v2_overlays.write_v2_user_review
-local clear_v2_reviews = v2_overlays.clear_v2_reviews
-local restore_cleared_reviews = v2_overlays.restore_cleared_reviews
-local refresh_cached_v2 = v2_overlays.refresh_cached_v2
-local acknowledge_focused_v2_pane = v2_overlays.acknowledge_focused_v2_pane
 -- ── Internal helpers ────────────────────────────────────────────────────────
 
 --- The key a pane the GUI draws is cached under, from its GUI-local number:
 --- the one the last poll found for it, or nil when that poll found none (a
---- mux-client pane that has not published its $WEZTERM_PANE). Before any poll
---- has walked the pane, its own number where that is the marker id, in a
---- local-family domain, so single-machine setups render at once; elsewhere
---- the number names some other pane's markers, and the answer is nil.
+--- mux-client pane that has not published its $WEZTERM_PANE) or none has
+--- walked the pane yet.
 local function drawn_pane_key(local_id)
-  local mapped = marker_id_by_local[local_id]
-  if mapped ~= nil then return mapped or nil end
-  local mux = wezterm.mux
-  if not mux or type(mux.get_pane) ~= "function" then return nil end
-  local ok, pane = pcall(mux.get_pane, tonumber(local_id))
-  if not ok or not pane then return nil end
-  if not reader_api.is_local_domain(pane_method(pane, "get_domain_name")) then return nil end
-  return local_id
+  return marker_id_by_local[local_id] or nil
 end
 
 local titles_factory = assert(load_plugin_module("titles"))
@@ -435,32 +343,13 @@ local runtime_api = runtime_state.bind({
   resolve_pane_read = resolve_pane_read,
   read_attention_view = read_attention_view,
   pane_method = pane_method,
-  canonical_pane_id = canonical_pane_id,
   unix_domain_socket = reader_api.unix_domain_socket,
   refresh_domain_facts = reader_api.refresh_domain_facts,
-  selected_v2_records_root = selected_v2_records_root,
-  v2_review_paths = v2_review_paths,
-  write_v2_user_review = write_v2_user_review,
-  clear_v2_reviews = clear_v2_reviews,
-  restore_cleared_reviews = restore_cleared_reviews,
-  refresh_cached_v2 = refresh_cached_v2,
-  acknowledge_focused_v2_pane = acknowledge_focused_v2_pane,
-  read_effective_marker = read_effective_marker,
-  read_marker = read_marker,
+  v2_pane_root = v2_pane_root,
+  read_expected_record = read_expected_record,
   withdraw_closed_tab_orders = withdraw_closed_tab_orders,
-  marker_identity = marker_identity,
-  clear_acknowledgement = clear_acknowledgement,
-  write_acknowledgement = write_acknowledgement,
-  count_live_subagents = count_live_subagents,
-  review_flagged = review_flagged,
-  acknowledgement_matches = acknowledgement_matches,
-  remove_expired_marker = remove_expired_marker,
-  remove_marker = remove_marker,
-  clear_review_flag = clear_review_flag,
-  write_review_flag = write_review_flag,
   now_ms = now_ms,
   frame_for_now = frame_for_now,
-  stale_ttl_ms = stale_ttl_ms,
   format_unix_ns20 = format_unix_ns20,
   wezterm_now_unix_ns20 = wezterm_now_unix_ns20,
   seconds_until_after = seconds_until_after,
@@ -472,9 +361,6 @@ local runtime_api = runtime_state.bind({
 own_mux_identity = runtime_api.own_mux_identity
 local same_cached_attention = runtime_api.same_cached_attention
 local tab_panes_containing_read = runtime_api.tab_panes_containing_read
-local review_outranks = runtime_api.review_outranks
-local cache_marker_values = runtime_api.cache_marker_values
-local refresh_cached_pane = runtime_api.refresh_cached_pane
 local acknowledge_focused_pane = runtime_api.acknowledge_focused_pane
 local redraw_window_key = runtime_api.redraw_window_key
 local request_tab_bar_redraw = runtime_api.request_tab_bar_redraw
@@ -561,16 +447,21 @@ local applied = false
 -- What each option may be. `false` stands for the literal false, which some
 -- options take to mean "off".
 local option_kinds = {
-  dir = { "string" }, renderer = { "string" }, format_tab_title = { "boolean" },
+  dir = { "string" }, renderer = { "string" },
   title_formatter = { "function" }, on_view_change = { "function" },
   colors = { "table" }, indicators = { "table" }, priority = { "table" }, auto_clear = { "table" },
-  stale_after_ms = { "table", false }, review_key = { "table", false },
+  review_key = { "table", false },
   request_redraw = { "boolean" }, auto_poll = { "boolean" }, show_provider = { "boolean" },
   show_directory = { "boolean" }, settled_title_fallback = { "boolean" },
   integration_root = { "string" },
 }
--- Names people have used for an option that exists under another name.
-local option_renames = { acknowledge_types = "auto_clear" }
+-- What to say about a name that is not an option: the option it is spelled
+-- as, or why it went.
+local option_notes = {
+  acknowledge_types = "the option is auto_clear",
+  format_tab_title = 'the option is renderer = "manual"',
+  stale_after_ms = "it applied only to flat marker files, which are not read",
+}
 
 --- The options as given, less any the plugin cannot use: an unknown name, or
 --- a value of the wrong kind, is named once in the log and left out, so the
@@ -581,9 +472,9 @@ local function usable_options(opts)
   for key, value in pairs(opts) do
     local kinds = option_kinds[key]
     if not kinds then
-      local rename = option_renames[key]
+      local note = option_notes[key]
       report_warning_once("option:" .. tostring(key), "unknown option " .. tostring(key)
-        .. (rename and (" is ignored; the option is " .. rename) or " is ignored"))
+        .. " is ignored" .. (note and ("; " .. note) or ""))
     else
       local accepted = false
       for _, kind in ipairs(kinds) do
@@ -679,16 +570,13 @@ function M.apply_to_config(config, opts)
   if type(integration_root) == "string" and integration_root:sub(1, 1) == "/" then
     M._active_integration_root = integration_root
     config.set_environment_variables = config.set_environment_variables or {}
-    -- The state directory is where a v1 producer writes its marker, so it is
-    -- exported whether or not the v2 writer is installed.
+    -- Every writer resolves the state directory from this first, so the
+    -- plugin and they agree on one.
     config.set_environment_variables.WEZTERM_ATTENTION_DIR = dir
-    -- The root is not a location, it is a choice. A producer that sees it spawns
-    -- bin/attention and reports a failure instead of writing a v1 marker, and it
-    -- takes the v1 path only when the root is unset. Exporting the root because
-    -- this checkout was found would make that choice on behalf of an
-    -- installation that never built the writer: every callback would fail at the
-    -- shim's missing-binary guard, and the v1 path the producer still carries
-    -- could not be reached. So export it only once the writer is there.
+    -- A producer that sees the root runs its bin/attention. Exported only once
+    -- the writer is built: before that every callback would fail at the
+    -- shim's missing-binary guard, and a producer without the root says
+    -- instead that the command is not installed.
     local writer_path = integration_root .. "/libexec/attention-rs"
     local writer = io.open(writer_path, "r")
     if writer then
@@ -698,9 +586,9 @@ function M.apply_to_config(config, opts)
     else
       -- Once per config load. The usual cause is an install-cli.sh run in a
       -- clone of the user's own while wezterm.plugin.require loads another
-      -- copy, which leaves every agent on v1 with nothing to say why.
+      -- copy, which leaves every agent writing nothing with nothing to say why.
       report_warning_once("integration-writer", writer_path .. " is missing, so panes get no "
-        .. "WEZTERM_ATTENTION_ROOT and agents write v1 markers. Run scripts/install-cli.sh in "
+        .. "WEZTERM_ATTENTION_ROOT and agents record nothing. Run scripts/install-cli.sh in "
         .. integration_root .. ", or set integration_root to the clone where it was run.")
     end
   else
@@ -744,9 +632,7 @@ function M.apply_to_config(config, opts)
       .. quoted_dir .. "' '" .. quoted_dir .. "/tabs'")
   end
 
-  -- Resolve renderer: support both new "renderer" and legacy "format_tab_title"
   local renderer = opts.renderer or defaults.renderer
-  if opts.format_tab_title == false then renderer = "manual" end
   runtime_api.reset_tab_source()
 
   local title_formatter = opts.title_formatter -- optional user callback
@@ -767,9 +653,6 @@ function M.apply_to_config(config, opts)
 
   local acknowledge_types = opts.auto_clear or defaults.acknowledge_types
   local priority   = opts.priority   or defaults.priority
-  local stale_after_ms = opts.stale_after_ms
-  if stale_after_ms == nil then stale_after_ms = defaults.stale_after_ms end
-  M._active_stale_after_ms = stale_after_ms
 
   -- Build lookup tables
   local acknowledge_set = {}
@@ -788,9 +671,8 @@ function M.apply_to_config(config, opts)
     end)
   end
 
-  -- Nothing registers on "pane-destroyed": WezTerm emits no such event, so the
-  -- handler that used to be here never once fired and closed panes' markers
-  -- were never removed. poll() detects a closed pane by absence instead.
+  -- Nothing registers on "pane-destroyed": WezTerm emits no such event.
+  -- poll() detects a closed pane by absence instead.
 
   -- ── Renderer: format-tab-title ────────────────────────────────────────
 
@@ -858,15 +740,15 @@ function M.apply_to_config(config, opts)
         -- focused pane's tab — toggling only the focused pane leaves a split
         -- tab stuck showing ◆ (the other pane is still flagged) and unclearable.
         -- Panes not in any tab (GUI overlays) fall back to per-pane behavior.
+        -- The flag toggled is the user's own: another owner's review is that
+        -- owner's to withdraw, and a press leaves it.
         local mux_win = win:mux_window()
         local target_read = resolve_pane_read(pane)
-        local target_id = target_read.marker_id
-        if target_read.kind ~= "v1" and target_read.kind ~= "v2" then
-          -- A mux-client pane that has not published its $WEZTERM_PANE. Its
-          -- local id names some other pane's marker file, so there is nothing
-          -- here that can be safely written or removed.
-          report_error_once("review-unknown-pane",
-            "cannot toggle review: this pane has not published its WEZTERM_PANE user var")
+        if target_read.kind ~= "v2" then
+          -- Nothing has claimed the pane, or it has not published who it is,
+          -- so no reader would show a flag written for it.
+          report_error_once("review-unclaimed-pane",
+            "cannot toggle review: this pane has published no agent launch")
           return
         end
         local panes
@@ -880,78 +762,38 @@ function M.apply_to_config(config, opts)
           end
         end
         panes = panes or { pane }
+        local reads = {}
         for _, observed_pane in ipairs(panes) do
-          runtime_api.observe_pane(win, observed_pane, resolve_pane_read(observed_pane))
+          local read = resolve_pane_read(observed_pane)
+          runtime_api.observe_pane(win, observed_pane, read)
+          if read.kind == "v2" then reads[#reads + 1] = read end
         end
 
-        -- Decide and act on disk truth, never the cache. poll() rebuilds the
-        -- cache from files every tick, so the cache can lag a flag another
-        -- window's handler just wrote, and a clear that skipped a pane would
-        -- leave the tab lit and unclearable on the next poll.
-        --
-        -- A pane is flagged if its own sidecar is there, or if its marker file
-        -- itself says "review" — that is how an older version of this plugin
-        -- wrote the flag, and it is still the same user flag. Effective truth
-        -- is what counts for the legacy case: a review marker that was somehow
-        -- acknowledged shows nothing, and a press must then flag the pane
-        -- rather than silently clear what the user cannot see.
-        local function is_flagged(candidate)
-          local read = resolve_pane_read(candidate)
-          if read.kind == "v2" then return #v2_review_paths(read, dir) > 0 end
-          if read.kind ~= "v1" then return false end
-          if review_flagged(dir, read.marker_id) then return true end
-          return read_effective_marker(dir, read.marker_id) == "review"
+        -- Decide on disk truth, never the cache. poll() rebuilds the cache
+        -- from files every tick, so the cache can lag a flag another window's
+        -- handler just wrote, and a clear that skipped a pane would leave the
+        -- tab lit and unclearable on the next poll.
+        local flagged = {}
+        for _, read in ipairs(reads) do
+          if runtime_api.user_review_present(read, dir) then flagged[#flagged + 1] = read end
         end
 
-        local has_flag = false
-        for _, p in ipairs(panes) do
-          if is_flagged(p) then
-            has_flag = true
-            break
-          end
-        end
-
-        -- Tab already flagged → clear the flag from all its panes. Only the
-        -- flag is removed: a sibling's thinking/stop/notify marker belongs to
-        -- its writer, and dropping one would drop a completion or failure the
-        -- user never saw.
-        if has_flag then
-          for _, p in ipairs(panes) do
-            local read = resolve_pane_read(p)
-            if read.kind == "v2" then
-              if clear_v2_reviews(read, dir) then refresh_cached_v2(read, dir) end
-            elseif read.kind == "v1" then
-              local id = read.marker_id
-              local cleared = review_flagged(dir, id) and clear_review_flag(dir, id)
-              if read_effective_marker(dir, id) == "review" then
-                -- The legacy shape. Removing the marker file is the only way to
-                -- clear a flag that was written into it, and a marker whose
-                -- type is "review" can only ever have been this keybind's.
-                remove_expired_marker(dir, id)
-                cleared = true
-              end
-              if cleared then refresh_cached_pane(dir, id, now_ms()) end
+        -- Tab already flagged → clear the user's flag from all its panes;
+        -- otherwise flag the focused pane, the active pane of its tab and
+        -- always a member of `panes`, so flag and clear stay symmetric.
+        local written = {}
+        if #flagged > 0 then
+          for _, read in ipairs(flagged) do
+            if runtime_api.run_plugin_write("clear-review", read, dir) then
+              written[#written + 1] = read
             end
           end
-          request_tab_bar_redraw(win, pane)
-          return
+        elseif runtime_api.run_plugin_write("set-review", target_read, dir) then
+          written[1] = target_read
         end
-
-        -- Tab not flagged → flag the focused pane (the active pane of its tab,
-        -- always a member of `panes`, so flag and clear stay symmetric).
-        --
-        -- The flag is written to its own "<id>.review" file, so it never
-        -- touches writer-owned truth and needs no permission from it. It used
-        -- to be written into the marker file, guarded against overwriting a
-        -- process marker — which meant it could only be set on a pane no agent
-        -- had ever run in, and pressing Alt+B in an agent pane did nothing.
-        if target_read.kind == "v2" and write_v2_user_review(target_read, dir) then
-          refresh_cached_v2(target_read, dir)
-          request_tab_bar_redraw(win, pane)
-        elseif target_read.kind == "v1" and write_review_flag(dir, target_id) then
-          refresh_cached_pane(dir, target_id, now_ms())
-          request_tab_bar_redraw(win, pane)
-        end
+        if #written == 0 then return end
+        for _, read in ipairs(written) do runtime_api.refresh_cached_v2(read, dir) end
+        request_tab_bar_redraw(win, pane)
       end),
     })
   end
@@ -970,8 +812,6 @@ M._internal = {
   same_cached_attention = same_cached_attention,
   sample_settled_title = sample_settled_title,
   settled_title_state = settled_title_state,
-  acknowledgement_tmp_path = acknowledgement_tmp_path,
-  review_tmp_path = review_tmp_path,
   protocol = protocol,
   protocol_path = protocol_path,
   parse_wire_value = parse_wire_value,

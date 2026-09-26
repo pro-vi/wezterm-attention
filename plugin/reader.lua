@@ -121,13 +121,13 @@ return function(context)
   end
 
   -- ── Pane identity ───────────────────────────────────────────────────────────
-  -- A marker file is named by the pane id a process reads from its own
-  -- $WEZTERM_PANE. A GUI attached to a mux server over a unix domain gives its
-  -- client panes fresh local ids, so pane:pane_id() there names a different pane
-  -- than the writer did, and every marker read or write through it addresses the
-  -- wrong file. The fix is a published id: the shell (and any hook) emits its
-  -- $WEZTERM_PANE as the WEZTERM_PANE user var via OSC 1337 SetUserVar, and
-  -- pane:get_user_vars() returns it for local and mux-client panes alike.
+  -- A writer names a pane by the id it reads from its own $WEZTERM_PANE. A GUI
+  -- attached to a mux server over a unix domain gives its client panes fresh
+  -- local ids, so pane:pane_id() there names a different pane than the writer
+  -- did. The fix is a published identity: the attention command emits the
+  -- pane's WEZTERM_PANE and, once a launch has claimed it, WEZTERM_ATTENTION
+  -- user vars via OSC 1337 SetUserVar, and pane:get_user_vars() returns them
+  -- for local and mux-client panes alike.
 
   local function canonical_pane_id(value)
     if type(value) ~= "string" then return nil end
@@ -313,10 +313,11 @@ return function(context)
       }
     end
 
-    if local_id then return { kind = "v1", marker_id = local_id, cache_key = local_id } end
+    -- Known, and with nothing to read: no launch has claimed the pane.
+    if local_id then return { kind = "unclaimed", marker_id = local_id, cache_key = local_id } end
     local published = type(vars) == "table" and canonical_pane_id(vars.WEZTERM_PANE) or nil
     if published then
-      return { kind = "v1", marker_id = published, cache_key = published }
+      return { kind = "unclaimed", marker_id = published, cache_key = published }
     end
     return { kind = "unpublished", domain = domain or "?" }
   end
@@ -680,11 +681,11 @@ return function(context)
     return read_view_at(read, later, again)
   end
 
-  --- The id under which this pane's markers are written, or nil when the pane
-  --- has published nothing and its local id cannot be trusted to name them.
+  --- The pane id writers name this pane by, or nil when the pane has
+  --- published nothing and its local id cannot be trusted to name it.
   function M.pane_marker_id(pane)
     local read = resolve_pane_read(pane)
-    if read.kind == "v1" or read.kind == "v2" then return read.marker_id end
+    if read.kind == "unclaimed" or read.kind == "v2" then return read.marker_id end
     return nil
   end
 
