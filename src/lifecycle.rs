@@ -700,12 +700,12 @@ fn semantic_activity(mut value: Value) -> Value {
     value
 }
 
-// The plugin acknowledges a publication by naming its `event_id` in `ack.json`
-// and shows nothing for that id again, so an acknowledged activity is no longer
-// on screen: repeating the same semantic activity has to publish a fresh
+// An acknowledgement names the `event_id` the user was shown in `ack.json`, and
+// the plugin shows nothing for that id again, so an acknowledged activity is no
+// longer on screen: repeating the same semantic activity has to publish a fresh
 // `event_id` rather than report the acknowledged one as still current. The
-// plugin owns this record, so an unreadable one counts as no acknowledgement
-// instead of failing the event.
+// acknowledgement is the user's record, not a hook's, so an unreadable one
+// counts as no acknowledgement instead of failing the event.
 fn acknowledged(activity_path: &Path, identity: &RecordIdentity, existing: &Value) -> bool {
     let RecordRead::Present(ack) = read_record_typed(
         &activity_path.with_file_name("ack.json"),

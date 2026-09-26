@@ -167,61 +167,13 @@ danger: it wants the canonical rule stated, that write-and-validate round trip i
 place, and raw-JSON fixtures for the integral-float and exponent spellings, since
 a decoded fixture cannot express the difference.
 
-## Cleaning up a pane's records asks the mux, and waits when it cannot answer
-
-A pane's v1 flat marker files are named by its pane id. Deciding that nobody writes
-them any more is not a question about one window. Before unlinking, the plugin
-walks the mux -- every window, every tab, every pane -- and collects the names
-in use. Attention's writers do not project those names for panes with v2 records,
-so the walk runs only for absent panes that used v1 flat markers.
-
-Two consequences are deliberate.
-
-The walk answers only when it finishes. A pane that will not say which identity
-it carries could be the owner, so it makes the search inconclusive, and an
-inconclusive search keeps the files and keeps the obligation to ask again. This
-is the direction the whole sweep errs in: not being able to tell is never a
-reason to delete.
-
-A pane that stays unidentifiable across many polls therefore keeps a pending
-deletion pending, and the walk is repeated on each of those polls. It is bounded
--- once per poll, and only when something is otherwise eligible for removal, with
-one walk serving every candidate in that poll -- but it is work that a quieter
-implementation would not do. Bounding it further would be a performance policy,
-and any such policy has to keep the obligation rather than manufacture an answer
-by giving up.
-
-The cheaper shape, asking the mux for the pane's old local id first, helps only a
-pane that moved without reconnecting: a failed lookup cannot tell a closed pane
-from one that came back under a new local id, so it would still fall through to
-the walk. It is worth adding after measuring a real callback, not before.
-
-## Sweep collection attributes leftover flats by claim, not by live occupancy
-
-`attention sweep` collects `<id>`, `<id>.agents`, and `<id>.ack` when exactly one
-valid v2 claim names that scalar pane id. It does not ask the mux whether a pane
-writing v1 flat markers currently occupies the same number. After pane ids reuse, a leftover claim
-from an old incarnation can name a live third-party or Pi-fallback marker.
-Preview (`attention sweep --json`) lists the stems; `--apply` is opt-in. A pane id shared
-by several v2 addresses still refuses. `.review` is never collected.
-
-Uniqueness is a snapshot under the selected owner's `.claim.lock`. Apply does
-not hold a tree-wide lock, so a second claim at another address can land in the
-same window. Occupancy-blind collection is already opt-in; this snapshot is the
-same class of limitation.
-
-The restat that refuses a replaced leftover compares device, inode, nlink, size,
-and mtime. Rename (Pi fallback) changes the inode and is refused.
-An in-place rewrite of equal size that restores mtime is not.
-
 ## What sweep leaves behind
 
 `attention sweep --apply` removes only ended bindings and closed panes' whole
 trees under the retention rules in the
 [record contract](record-contract.md#trust-boundary), with their session index
-entries; the subagent records a floor advance covers; and the v1 projection
-leftovers and exited GUIs' tab-order files the record contract lists as
-collected. Those rules keep sweep from removing state it cannot prove
+entries; the subagent records a floor advance covers; and exited GUIs'
+tab-order files the record contract lists as collected. Those rules keep sweep from removing state it cannot prove
 abandoned, and they mean four kinds of leftover stay on disk:
 
 - **An exited GUI's tab-order files that name mux panes.** A file is removed
@@ -237,8 +189,8 @@ abandoned, and they mean four kinds of leftover stay on disk:
   `tabs/<incarnation id>-<window id>.json` by hand once no GUI with that
   window is running.
 - **Temporary files from an interrupted write, outside a tree being removed.**
-  So is a review that Alt+B had moved aside to `<review>.json.<session>.clear`
-  when it was interrupted. They do not stop a binding or pane tree from being
+  So is a review that an earlier plugin build had moved aside to
+  `<review>.json.<session>.<ms>.clear` while clearing it, and never finished with. They do not stop a binding or pane tree from being
   pruned, and they go with that tree when it is, but sweep collects none on its
   own.
 - **Subagent records below the retention floor.** A child record older than its
@@ -456,74 +408,24 @@ when it did. `attention mark` reads its clock before taking the launch lock, so
 a mark stamped just before the clear and written just after it shows the
 activity again. A bound pane keeps a clear record and ignores such a mark.
 
-## The acknowledgement write has no compare-and-swap
+## The library is public, and none of it is supported
 
-`write_v2_record` in `plugin/overlays.lua` reads the existing record only to
-check that it is readable, then renames over it unconditionally. Two GUI writers
-acknowledging at the same moment can lose one dismissal. This predates v2 records
-and is not widened by them.
+`src/lib.rs` says the supported interface is the `attention` command and the
+plugin's Lua API, and that no Rust item the crate exports is supported for use
+outside this repository. This section explains why that is a declaration rather
+than an enforced boundary.
 
-The sequence needs two GUI processes on one binding:
-
-1. Activity A (`stop`) is published. GUI process G1 reads A and prepares its
-   acknowledgement, then stalls before the rename.
-2. The Rust writer publishes a different activity B (`notify`) on the same
-   binding.
-3. GUI process G2 focuses the pane and acknowledges B. Focus moves away.
-4. G1 resumes and renames its acknowledgement of A over the acknowledgement of B.
-
-`plugin/reader.lua` suppresses an activity only when the acknowledgement's
-`activity_event_id` equals the activity's `event_id`, so B lights again although
-a human dismissed it. The loss is durable, not a torn read. No live occurrence
-has been observed.
-
-The Rust side reads `ack.json` too, and does not change this. With the
-acknowledgement lost, Rust sees an acknowledgement of A against activity B and
-reaches the same conclusion the plugin does, so a repeat of B is `skipped` while
-B is already displayed. Rust neither adds a failure here nor rescues one.
-
-`docs/record-contract.md` already says a Lua read/check/write sequence is not a
-cross-writer transaction, so closing this is a contract change and not a patch.
-It needs three things: a compare-and-swap or a lock on the acknowledgement write,
-or else one named GUI process that owns it; a decision on whether an older
-acknowledgement may ever replace a newer one; and a Lua fixture that can
-interleave two plugin instances, which the suite does not have.
-
-A fix is done when that fixture holds G1's rename, lets B be published and
-acknowledged by G2, releases G1's rename, and a fresh unfocused read still
-suppresses B.
-
-## The library's public surface is wider than its supported surface
-
-`src/lib.rs` names the supported entry points in its crate documentation and
-classifies everything else as implementation. Read that first: it is the
-declaration, and this section only explains why it is a declaration rather than
-an enforced boundary.
-
-`launch` is private and re-exported, which is the shape the rest of the crate
-should follow. Most other modules are still public, `records` most consequentially
-— it exposes locking, atomic replacement, path construction and durable deletion
-because this crate's own tests drive them.
+The modules are public because the `attention` binary and the integration tests
+under `tests/rust` link the library, and those tests drive storage mechanics --
+locking, atomic replacement, path construction, durable deletion -- in
+`records` directly. Several test files mix such white-box storage tests with
+CLI subprocess tests in one module, so they cannot simply move inward.
 
 Documenting the boundary does not prevent an external program from compiling
-against internals; only privacy does that. `publish = false` in `Cargo.toml`
-keeps the crate off crates.io, so such a program has to build from a checkout. Making `records` private is not a
-one-line change either, because the currently public, unstable
-`read_pane_facts_with_ports` needs
-publicly nameable reader types, and several test files mix white-box storage
-tests with CLI subprocess tests in one module, so they cannot simply move inward.
-The declaration turns an accidental commitment into an explicit unstable one; the
-enforcement is separate work.
-
-`identity` is on the supported list, and its types do not keep the proof its
-functions establish. `PaneAddress` has three public `String` fields and no
-validating constructor, so a linking caller can build an address no environment
-could produce. `socket_identity` returns two positional strings, `realm_id` then
-`incarnation_id`, which the type system lets a caller swap. The path that derives
-these from the environment does validate them. Enforcing it means private fields
-with a validating constructor, and distinct types for the two identifiers. Once
-modules start moving to `pub(crate)`, `clippy::unreachable_pub` becomes a useful
-lint to turn on.
+against the crate; only privacy does that. `publish = false` in `Cargo.toml`
+keeps the crate off crates.io, so such a program has to build from a checkout,
+and it takes whatever the next commit changes. Once modules start moving to
+`pub(crate)`, `clippy::unreachable_pub` becomes a useful lint to turn on.
 
 ## Validated record fields are read as if they could be missing
 

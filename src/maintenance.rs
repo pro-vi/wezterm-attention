@@ -1534,9 +1534,10 @@ fn pane_entries_prunable(
 }
 
 /// A file an interrupted write left beside a record: the writer here names
-/// its temporary `.<record>.<uuid>`, the plugin `<record>.<session>.tmp`, and
-/// the plugin's review clear moves the review aside to
-/// `<record>.<session>.<ms>.clear` before it removes it.
+/// its temporary `.<record>.<uuid>`. Plugin builds that wrote pane records
+/// themselves left `<record>.<session>.tmp`, and a review they were clearing
+/// moved aside to `<record>.<session>.<ms>.clear`; nothing reads either, so
+/// one a crash left goes with its tree.
 fn write_leftover(name: &str) -> bool {
     name.contains(".json.")
         && (name.starts_with('.') || name.ends_with(".tmp") || name.ends_with(".clear"))

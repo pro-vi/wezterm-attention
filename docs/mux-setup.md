@@ -1,6 +1,6 @@
 # Mux setup
 
-This setup keeps attention on the right pane across local and attached WezTerm GUIs. Writing v2 records needs macOS or Linux (glibc, including aarch64), the two tested platforms, and the `attention` command built by `scripts/install-cli.sh` (see [Install](../README.md#install)). Without the command, the plugin still reads and renders v1 flat markers.
+This setup keeps attention on the right pane across local and attached WezTerm GUIs. Writing v2 records needs macOS or Linux (glibc, including aarch64), the two tested platforms, and the `attention` command built by `scripts/install-cli.sh` (see [Install](../README.md#install)). Without the command nothing is recorded, and the plugin has nothing to show.
 
 ## WezTerm configuration
 
@@ -162,4 +162,4 @@ attention sweep --json
 
 `doctor` covers CLI-visible files, sockets, processes, permissions, versions and the environment it runs in. It explicitly does not observe GUI user variables. Run inside a pane, the `environment` probe checks that the pane's socket has a server identity that hooks can find; where an agent can claim its own pane (macOS, unless `WEZTERM_ATTENTION_ENABLE_SELF_CLAIM` switches it off), an identity nothing has published yet is `unobserved`, because the agent's first session start publishes it; outside a pane it says `unobserved`. Any probe that had nothing to check says `unobserved` rather than `healthy`, and is listed in `result.unobserved`; when every probe but `versions` was unobserved and there are no diagnostics, the whole report says `unobserved`. Without `--json`, `doctor` prints the status word on stdout and each diagnostic on stderr as `attention: <code>: <message>`.
 
-`sweep` previews and removes nothing unless `--apply` is given. `attention sweep --apply` makes up a fresh operation id for that run and reports it in `result.operation_id`. Pass `--operation-id` only to retry a run that was interrupted: a run under an id already used is treated as a replay of it. See [Record contract](record-contract.md#compatibility-and-precedence).
+`sweep` previews and removes nothing unless `--apply` is given. `attention sweep --apply` makes up a fresh operation id for that run and reports it in `result.operation_id`. Pass `--operation-id` only to retry a run that was interrupted: a run under an id already used is treated as a replay of it. See [Record contract](record-contract.md#trust-boundary).

@@ -394,9 +394,10 @@ fn an_unknown_file_keeps_the_pane_tree() {
     assert!(!actions(&result.details, "pane_retention").contains(&&json!("prune")));
 }
 
-/// Alt+B moves a review aside to `<review>.<session>.clear` while it clears
-/// it. One left by a crash is the remains of a write, like a temporary file,
-/// and does not keep an old pane's tree.
+/// Plugin builds that cleared reviews themselves moved a review aside to
+/// `<review>.<session>.clear` while they cleared it. One left by a crash is
+/// the remains of a write, like a temporary file, and does not keep an old
+/// pane's tree.
 #[test]
 fn a_review_left_mid_clear_does_not_keep_the_pane_tree() {
     let setup = Setup::new();
