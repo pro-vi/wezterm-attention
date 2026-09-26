@@ -322,10 +322,13 @@ return function()
     --- the pane's address and the launch it published go on the command line.
     --- The command takes the locks every writer of these records takes; this
     --- process writes none of them itself. Nil when it did not answer "ok",
-    --- which is logged once per pane and action.
+    --- which is logged once per pane and action, and then whether the failure
+    --- can pass: a lock wait that ran out, or a command that could not start
+    --- or gave no answer. Any other diagnostic is a refusal, which stands
+    --- until what the command reads changes.
     local function run_plugin_write(action, read, dir, extra)
       local root = M._active_integration_root
-      local failure
+      local failure, passing = nil, false
       if not root or M._active_writer_installed ~= true then
         failure = "the attention command is not installed"
       elseif type(wezterm.run_child_process) ~= "function" then
@@ -351,15 +354,16 @@ return function()
         local item = response and type(response.diagnostics) == "table" and response.diagnostics[1]
         if type(item) == "table" and type(item.code) == "string" then
           failure = item.code .. ": " .. tostring(item.message)
+          passing = item.code == "probe_unavailable"
         elseif not ok then
-          failure = "it could not be started: " .. tostring(success)
+          failure, passing = "it could not be started: " .. tostring(success), true
         else
-          failure = "it gave no answer"
+          failure, passing = "it gave no answer", true
         end
       end
       report_error_once("plugin-" .. action .. ":" .. read.cache_key,
         "attention plugin " .. action .. " failed for pane " .. read.marker_id .. ": " .. failure)
-      return nil
+      return nil, passing
     end
 
     --- Does the pane carry the review its user set with the review key? Read
@@ -383,9 +387,13 @@ return function()
       return view
     end
 
-    --- The activity event whose acknowledgement is running or has failed,
-    --- by cache key, so a poll neither starts a second run for it nor retries
-    --- a failed one on every tick. A newer event is tried afresh.
+    --- The acknowledgement of each pane's latest activity event, by cache
+    --- key: the event, and, after a run whose failure can pass, when to try
+    --- again. A poll starts no second run for an event that is running, was
+    --- answered or was refused, and retries a failure that can pass only
+    --- after its backoff wait. An answer stands even when this reader still
+    --- shows the event: asking again on every tick would change nothing. A
+    --- newer event is tried afresh.
     local acknowledging = {}
 
     --- Acknowledge what the user is looking at: the activity `candidate`
@@ -403,12 +411,23 @@ return function()
       if not (candidate and candidate.shown and acknowledge_set[candidate.shown]) then
         return "absent"
       end
-      if acknowledging[read.cache_key] == candidate.event_id then return "pending" end
-      acknowledging[read.cache_key] = candidate.event_id
-      local result = run_plugin_write("acknowledge", read, dir,
+      local state = acknowledging[read.cache_key]
+      if state and state.event_id == candidate.event_id then
+        if not state.retry_at or now_ms() < state.retry_at then return "pending" end
+      else
+        state = { event_id = candidate.event_id, retry_index = 1 }
+        acknowledging[read.cache_key] = state
+      end
+      state.retry_at = nil
+      local result, passing = run_plugin_write("acknowledge", read, dir,
         { "--activity-event-id", candidate.event_id })
-      if not result then return "failed" end
-      acknowledging[read.cache_key] = nil
+      if not result then
+        if passing then
+          state.retry_at = now_ms() + backoff_delay(state.retry_index) * 1000
+          state.retry_index = state.retry_index + 1
+        end
+        return "failed"
+      end
       refresh_cached_v2(read, dir, opts and opts.now_unix_ns)
       if result.disposition == "ignored" then return "kept" end
       return "acknowledged"

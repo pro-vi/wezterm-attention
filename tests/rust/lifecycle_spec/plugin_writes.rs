@@ -286,6 +286,48 @@ fn an_acknowledgement_is_written_only_under_the_activity_locks() {
     );
 }
 
+// The plugin waits for the answer on the GUI's thread, so a held lock costs
+// it a short wait, not the one a hook's agent can afford.
+#[test]
+fn a_plugin_write_behind_a_held_lock_answers_at_once() {
+    let setup = bound();
+    let event_id = stopped(&setup, "00000000000000000300");
+    let root = state_root(&setup.env).unwrap();
+    let (address, _) = pane_address(&setup.env).unwrap();
+    let cases: [(PathBuf, &str, &[&str]); 3] = [
+        (
+            launch_path(&root, &address, LAUNCH).join(".lock"),
+            "acknowledge",
+            &["--activity-event-id", &event_id],
+        ),
+        (
+            pane_path(&root, &address).join(".claim.lock"),
+            "acknowledge",
+            &["--activity-event-id", &event_id],
+        ),
+        (
+            pane_path(&root, &address).join(".claim.lock"),
+            "set-review",
+            &[],
+        ),
+    ];
+    for (lock, action, extra) in cases {
+        let started = std::time::Instant::now();
+        let (code, response) = with_lock(&lock, Duration::from_secs(5), || {
+            Ok(plugin(&setup, action, LAUNCH, extra))
+        })
+        .unwrap();
+        let waited = started.elapsed();
+        assert_eq!(code, 1, "{response}");
+        assert_eq!(response["diagnostics"][0]["code"], "probe_unavailable");
+        assert!(
+            waited < wezterm_attention::records::LOCK_TIMEOUT / 2,
+            "plugin {action} waited {waited:?} behind {}",
+            lock.display()
+        );
+    }
+}
+
 #[test]
 fn the_plugin_command_refuses_a_target_it_cannot_name() {
     let setup = bound();

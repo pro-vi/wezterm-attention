@@ -237,7 +237,13 @@ answer is the ordinary JSON envelope, with `result.disposition` and `result.even
   `E` under the launch lock and then the claim lock, the scope every activity writer takes, and
   only while `E` is still the activity the pane shows: a newer activity, or an activity clear
   that covers `E`, answers `ignored` and writes nothing. The plugin runs it for the focused
-  window's active pane, with the event id its own poll read, once per event.
+  window's active pane, with the event id its own poll read, once per event. A run that failed in
+  a way that can pass (`probe_unavailable`, a command that did not start or did not answer) is
+  tried again after a backoff wait of 2, 5, 10, then every 30 seconds; a refusal is not.
+
+The plugin waits for each answer on WezTerm's GUI thread, so these commands wait at most 50 ms for
+each lock, where every other writer waits 2 s, and answer `probe_unavailable` when that runs out.
+A press of the review key that meets a held lock is logged once and does nothing more.
 
 Rust validates acknowledgements during reads and never creates or removes one on a read. An
 acknowledgement is removed only with the directory that holds it, when `attention sweep --apply`

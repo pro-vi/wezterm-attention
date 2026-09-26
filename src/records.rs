@@ -1320,6 +1320,13 @@ fn remove_path_durable(path: &Path) -> Result<bool> {
 /// hook's agent waits on the hook meanwhile.
 pub const LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long a write the plugin asks for waits for one state lock. The plugin
+/// waits for the answer on the GUI's thread, which draws nothing meanwhile,
+/// and a write takes two locks. A hook holds a lock for under a millisecond
+/// per write, so this covers a queue of dozens of them; a wait that still
+/// runs out is retried by the plugin, or reported for a key press.
+pub const PLUGIN_LOCK_TIMEOUT: Duration = Duration::from_millis(50);
+
 pub fn with_lock<T>(
     path: &Path,
     timeout: Duration,
@@ -1401,9 +1408,30 @@ pub fn commit<T, P>(
     decide: impl FnOnce(Option<Value>) -> Result<CommitPlan<T>>,
     after_apply: impl FnOnce(&T) -> Result<P>,
 ) -> Result<(T, P)> {
+    commit_waiting(
+        root,
+        locks,
+        LOCK_TIMEOUT,
+        kind,
+        identity,
+        decide,
+        after_apply,
+    )
+}
+
+/// [`commit`], waiting at most `timeout` for each lock.
+pub(crate) fn commit_waiting<T, P>(
+    root: &Path,
+    locks: &[&Path],
+    timeout: Duration,
+    kind: &str,
+    identity: &RecordIdentity,
+    decide: impl FnOnce(Option<Value>) -> Result<CommitPlan<T>>,
+    after_apply: impl FnOnce(&T) -> Result<P>,
+) -> Result<(T, P)> {
     let mut held = HeldLocks(Vec::with_capacity(locks.len()));
     for lock in locks {
-        held.0.push(acquire(lock, LOCK_TIMEOUT)?);
+        held.0.push(acquire(lock, timeout)?);
     }
     let current = read_record_at(root, kind, identity)?;
     let plan = decide(current)?;

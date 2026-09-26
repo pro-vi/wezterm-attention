@@ -1624,18 +1624,32 @@ test("an acknowledgement survives a plugin reload", function()
   assert(reloaded.get_attention(947) == nil, "reload should honor the durable acknowledgement")
 end)
 
-test("a failed acknowledgement leaves the activity visible, says why once, and is not retried", function()
+--- The answer of a `plugin acknowledge` that failed with diagnostic `code`.
+local function acknowledgement_failed(code, message)
+  return false, '{"schema":1,"command":"plugin acknowledge","status":"unavailable",'
+    .. '"complete":false,"result":{},"diagnostics":[{"code":"' .. code .. '",'
+    .. '"message":"' .. message .. '","context":{},"help":""}]}'
+end
+
+test("a refused acknowledgement leaves the activity visible, says why once, and is not retried", function()
   write_activity(943, "notify")
   local function refused()
-    return false, '{"schema":1,"command":"plugin acknowledge","status":"unavailable",'
-      .. '"complete":false,"result":{},"diagnostics":[{"code":"claim_stale",'
-      .. '"message":"the pane\'s claim does not name the launch the pane published",'
-      .. '"context":{},"help":""}]}'
+    return acknowledgement_failed("claim_stale",
+      "the pane's claim does not name the launch the pane published")
   end
-  local spawned = with_plugin_command(refused, function()
-    poll_focused({ tabs = { { 943 } }, active_pane_id = 943 })
-    poll_focused({ tabs = { { 943 } }, active_pane_id = 943 })
+  local real_time = os.time
+  local spawned
+  local ok, failure = pcall(function()
+    spawned = with_plugin_command(refused, function()
+      poll_focused({ tabs = { { 943 } }, active_pane_id = 943 })
+      poll_focused({ tabs = { { 943 } }, active_pane_id = 943 })
+      -- Past every backoff wait: a refusal stands for this event.
+      os.time = function() return real_time() + 600 end
+      poll_focused({ tabs = { { 943 } }, active_pane_id = 943 })
+    end)
   end)
+  os.time = real_time
+  assert(ok, failure)
 
   assert(#spawned == 1, "the same activity is not tried again on every poll, got " .. #spawned)
   assert(attention.get_attention(943) == "notify", "the activity must remain visible")
@@ -1649,6 +1663,54 @@ test("a failed acknowledgement leaves the activity visible, says why once, and i
     poll_focused({ tabs = { { 943 } }, active_pane_id = 943 })
   end)
   assert(#spawned == 1 and attention.get_attention(943) == nil, "the newer activity is acknowledged")
+end)
+
+test("an acknowledgement that failed in a way that can pass is tried again after a wait", function()
+  local failures = {
+    [9431] = function() return acknowledgement_failed("probe_unavailable", "state lock timed out") end,
+    [9432] = function() error("spawn failed") end,
+    [9433] = function() return false, "" end,
+  }
+  local real_time = os.time
+  for pane_id, fail in pairs(failures) do
+    write_activity(pane_id, "notify")
+    local runs = 0
+    local function failing_once(argv)
+      runs = runs + 1
+      if runs == 1 then return fail(argv) end
+      return acknowledging_answer(argv)
+    end
+    local ok, failure = pcall(function()
+      with_plugin_command(failing_once, function()
+        poll_focused({ tabs = { { pane_id } }, active_pane_id = pane_id })
+        poll_focused({ tabs = { { pane_id } }, active_pane_id = pane_id })
+        assert(runs == 1, "pane " .. pane_id .. ": the retry waits for its backoff, ran " .. runs)
+        os.time = function() return real_time() + 60 end
+        poll_focused({ tabs = { { pane_id } }, active_pane_id = pane_id })
+      end)
+    end)
+    os.time = real_time
+    assert(ok, failure)
+    assert(runs == 2, "pane " .. pane_id .. ": the failed run is tried once more, ran " .. runs)
+    assert(attention.get_attention(pane_id) == nil, "pane " .. pane_id .. ": the retry acknowledged it")
+    local errors = drain_errors()
+    assert(#errors == 1, "pane " .. pane_id .. ": the failure is reported once, got " .. #errors)
+  end
+end)
+
+-- The reader and the command can disagree about which activity is shown. An
+-- answer is an answer: asking again on every poll would change nothing.
+test("an acknowledgement the command answered is not asked again for that event", function()
+  write_activity(9434, "notify")
+  local function ignoring()
+    return true, '{"schema":1,"command":"plugin acknowledge","status":"ok","complete":true,'
+      .. '"result":{"disposition":"ignored","diagnostic":null,"event_id":null},"diagnostics":[]}'
+  end
+  local spawned = with_plugin_command(ignoring, function()
+    for _ = 1, 3 do poll_focused({ tabs = { { 9434 } }, active_pane_id = 9434 }) end
+  end)
+  assert(#spawned == 1, "one run for the event, got " .. #spawned)
+  assert(attention.get_attention(9434) == "notify", "an ignored acknowledgement hides nothing")
 end)
 
 test("a pane that vanishes between polls leaves the cache and keeps its records", function()

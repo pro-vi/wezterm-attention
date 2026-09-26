@@ -20,10 +20,10 @@ use crate::observations::{LifecycleSnapshot, ObservationPools};
 use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, free_of_control, manifest};
 use crate::providers::{ProviderAction, ProviderEvent};
 use crate::records::{
-    CommitPlan, PreparedRecordWrite, RecordIdentity, RecordRead, Replacement, agents_dir,
-    claim_lock, commit, ends_binding, launch_lock, read_claim, read_record, read_record_at,
-    read_record_typed, read_record_typed_at, review_lock, session_entry, session_entry_path,
-    state_root,
+    CommitPlan, PLUGIN_LOCK_TIMEOUT, PreparedRecordWrite, RecordIdentity, RecordRead, Replacement,
+    agents_dir, claim_lock, commit, commit_waiting, ends_binding, launch_lock, read_claim,
+    read_record, read_record_at, read_record_typed, read_record_typed_at, review_lock,
+    session_entry, session_entry_path, state_root,
 };
 use crate::wezterm::RuntimePorts;
 
@@ -1505,12 +1505,13 @@ pub fn apply_user_review(
     let owner_key = crate::protocol::sha256_hex(PLUGIN_REVIEW_OWNER.as_bytes());
     let review = RecordIdentity::review(address, &owner_key);
     let review_path = review.path(root, "review")?;
-    let (mutation, ()) = commit(
+    let (mutation, ()) = commit_waiting(
         root,
         &[
             &claim_lock(root, address),
             &review_lock(root, address, &owner_key),
         ],
+        PLUGIN_LOCK_TIMEOUT,
         "claim",
         &RecordIdentity::pane(address),
         |claim| {
@@ -1557,12 +1558,13 @@ pub fn acknowledge_activity(
     launch_id: &str,
     activity_event_id: &str,
 ) -> Result<LifecycleResult> {
-    let (mutation, ()) = commit(
+    let (mutation, ()) = commit_waiting(
         root,
         &[
             &launch_lock(root, address, launch_id),
             &claim_lock(root, address),
         ],
+        PLUGIN_LOCK_TIMEOUT,
         "current_binding",
         &RecordIdentity::launch(address, launch_id),
         |pointer| {
