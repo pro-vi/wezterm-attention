@@ -23,7 +23,7 @@ local function run()
   local wire = assert(internal.parse_wire_json(assert(os.getenv("WEZTERM_ATTENTION_VIEW_WIRE"),
     "WEZTERM_ATTENTION_VIEW_WIRE is required")))
   local view = internal.read_attention_view({
-    kind = "v2",
+    kind = "claimed",
     address = wire.address,
     launch_id = wire.launch_id,
     marker_id = wire.address.pane_id,

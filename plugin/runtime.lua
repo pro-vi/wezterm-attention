@@ -58,7 +58,7 @@ return function()
     end
 
     local function observe_pane(window, pane, read)
-      if read.kind ~= "v2" then return end
+      if read.kind ~= "claimed" then return end
       local window_key = tostring(window:window_id())
       local local_id = tostring(pane_method(pane, "pane_id"))
       local observations = seen_marker_ids_by_window[window_key] or {}
@@ -110,7 +110,7 @@ return function()
         if not panes_ok or type(panes) ~= "table" then panes = {} end
         for _, pane in ipairs(panes) do
           local read = resolve_pane_read(pane)
-          if read.kind == "v2" and read.cache_key == target.cache_key then
+          if read.kind == "claimed" and read.cache_key == target.cache_key then
             return panes
           end
         end
@@ -385,7 +385,7 @@ return function()
 
     --- Read one pane again after a write outside the poll, so the tab shows
     --- it now rather than on the next tick.
-    local function refresh_cached_v2(read, dir, now_unix_ns)
+    local function refresh_cached_pane(read, dir, now_unix_ns)
       local view = read_attention_view(read, now_unix_ns or wezterm_now_unix_ns20(), {
         dir = dir, previous_view = attention_cache[read.cache_key],
       })
@@ -434,7 +434,7 @@ return function()
         end
         return "failed"
       end
-      refresh_cached_v2(read, dir, opts and opts.now_unix_ns)
+      refresh_cached_pane(read, dir, opts and opts.now_unix_ns)
       if result.disposition == "ignored" then return "kept" end
       return "acknowledged"
     end
@@ -839,7 +839,7 @@ return function()
       local read = resolve_pane_read(pane)
       local cached = read.cache_key and attention_cache[read.cache_key] or nil
       if not cached then return nil end
-      if read.kind == "v2" and cached.launch_id ~= read.launch_id then return nil end
+      if read.kind == "claimed" and cached.launch_id ~= read.launch_id then return nil end
       return copy_public_view(cached)
     end
 
@@ -1018,7 +1018,7 @@ return function()
       local utc_sampled = false
       local poll_now_unix_ns
       local poll_utc_error
-      local saw_v2 = false
+      local saw_claimed = false
       local earliest_wakeup_unix_ns
 
       --- The time now, for a read that saw a write time ahead of this poll's
@@ -1094,16 +1094,16 @@ return function()
             local item = read.diagnostic or diagnostic("record_invalid", "pane identity is invalid")
             report_error_once("v2-identity:" .. local_id .. ":" .. item.code,
               item.code .. ": " .. item.message)
-          elseif read.kind == "v2" then
+          elseif read.kind == "claimed" then
             callback_entries[key] = read
-            saw_v2 = true
+            saw_claimed = true
             local now_unix_ns, utc_error = sample_utc_once()
             if utc_error then
               report_error_once("v2-clock:" .. local_id,
                 utc_error .. ": WezTerm UTC is unavailable; TTL-bearing v2 state is omitted")
             end
-            seen[key] = { domain = domain, kind = "v2", marker_id = read.marker_id, local_id = local_id }
-            evidence.panes[key] = { kind = "v2", domain = domain,
+            seen[key] = { domain = domain, kind = "claimed", marker_id = read.marker_id, local_id = local_id }
+            evidence.panes[key] = { kind = "claimed", domain = domain,
               marker_id = read.marker_id, local_id = local_id }
             evidence.identified_by_local[local_id] = key
             pane_ids[#pane_ids + 1] = key
@@ -1242,7 +1242,7 @@ return function()
       -- from all observed windows, rather than letting poll/overlay order win.
       rebuild_scalar_projection()
 
-      if saw_v2 then
+      if saw_claimed then
         schedule_ttl_wakeup(window, earliest_wakeup_unix_ns, poll_now_unix_ns, opts)
       else
         schedule_ttl_wakeup(window, nil, nil, opts)
@@ -1302,7 +1302,7 @@ return function()
       tab_panes_containing_read = tab_panes_containing_read,
       run_plugin_write = run_plugin_write,
       user_review_present = user_review_present,
-      refresh_cached_v2 = refresh_cached_v2,
+      refresh_cached_pane = refresh_cached_pane,
       request_tab_bar_redraw = request_tab_bar_redraw,
     }
   end

@@ -305,7 +305,7 @@ return function(context)
           { pane_id = local_id }) }
       end
       return {
-        kind = "v2",
+        kind = "claimed",
         address = wire.address,
         launch_id = wire.launch_id,
         marker_id = wire.address.pane_id,
@@ -337,7 +337,7 @@ return function(context)
     return activity_type
   end
 
-  local function empty_v2_view(read, diagnostics, records)
+  local function empty_view(read, diagnostics, records)
     local unavailable = diagnostics_have_unavailable_io(diagnostics)
     records = records or {}
     return {
@@ -387,7 +387,7 @@ return function(context)
       collect_diagnostic(diagnostics, diagnostic(
         "probe_unavailable", "v2 protocol manifest is unavailable",
         { detail = tostring(protocol_load_error) }))
-      return empty_v2_view(read, diagnostics, records)
+      return empty_view(read, diagnostics, records)
     end
 
     local dir = (opts and opts.dir) or M._active_dir or defaults.dir
@@ -414,7 +414,7 @@ return function(context)
     records.claim = claim
     collect_diagnostic(diagnostics, claim_diagnostic)
     if not realm or not incarnation or not claim then
-      return empty_v2_view(read, diagnostics, records)
+      return empty_view(read, diagnostics, records)
     end
 
     local launch_root = pane_root .. "/launches/" .. read.launch_id
@@ -425,7 +425,7 @@ return function(context)
     }, false, previous_records.pointer)
     records.pointer = pointer
     collect_diagnostic(diagnostics, pointer_diagnostic)
-    if pointer_diagnostic and not pointer then return empty_v2_view(read, diagnostics, records) end
+    if pointer_diagnostic and not pointer then return empty_view(read, diagnostics, records) end
 
     local binding
     local activity
@@ -456,7 +456,7 @@ return function(context)
       }, true, previous_binding_records.binding)
       records.binding = binding
       collect_diagnostic(diagnostics, binding_diagnostic)
-      if not binding then return empty_v2_view(read, diagnostics, records) end
+      if not binding then return empty_view(read, diagnostics, records) end
 
       local end_diagnostic
       binding_end, end_diagnostic = read_expected_record_cached(
@@ -685,7 +685,7 @@ return function(context)
   --- published nothing and its local id cannot be trusted to name it.
   function M.pane_marker_id(pane)
     local read = resolve_pane_read(pane)
-    if read.kind == "unclaimed" or read.kind == "v2" then return read.marker_id end
+    if read.kind == "unclaimed" or read.kind == "claimed" then return read.marker_id end
     return nil
   end
 

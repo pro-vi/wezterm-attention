@@ -557,7 +557,7 @@ function M.apply_to_config(config, opts)
         -- owner's to withdraw, and a press leaves it.
         local mux_win = win:mux_window()
         local target_read = reader.resolve_pane_read(pane)
-        if target_read.kind ~= "v2" then
+        if target_read.kind ~= "claimed" then
           -- Nothing has claimed the pane, or it has not published who it is,
           -- so no reader would show a flag written for it.
           report_error_once("review-unclaimed-pane",
@@ -579,7 +579,7 @@ function M.apply_to_config(config, opts)
         for _, observed_pane in ipairs(panes) do
           local read = reader.resolve_pane_read(observed_pane)
           runtime.observe_pane(win, observed_pane, read)
-          if read.kind == "v2" then reads[#reads + 1] = read end
+          if read.kind == "claimed" then reads[#reads + 1] = read end
         end
 
         -- Decide on disk truth, never the cache. poll() rebuilds the cache
@@ -605,7 +605,7 @@ function M.apply_to_config(config, opts)
           written[1] = target_read
         end
         if #written == 0 then return end
-        for _, read in ipairs(written) do runtime.refresh_cached_v2(read, dir) end
+        for _, read in ipairs(written) do runtime.refresh_cached_pane(read, dir) end
         runtime.request_tab_bar_redraw(win, pane)
       end),
     })

@@ -1485,7 +1485,7 @@ test("a window id reused after withdrawal publishes again", function()
   poll_with_inventory(9806, { 9806 })
 end)
 
-test("a v2 pane publishes its cache key, not the local pane id", function()
+test("a claimed pane publishes its cache key, not the local pane id", function()
   materialize_state_case(protocol_fixture.state_case)
   attention.poll(window_double({ tabs = { { {
     id = 9850, domain = "unix", attention = protocol_fixture.wire_sample,
@@ -1500,7 +1500,7 @@ test("a v2 pane publishes its cache key, not the local pane id", function()
   local published = assert(read_tab_publication(9805), "the window should be published")
   local key = internal.address_cache_key(protocol_fixture.wire_sample.address)
   assert(published.tabs[1].marker_ids[1] == key,
-    "a v2 pane publishes the cache key the plugin indexes it by, got "
+    "a claimed pane publishes the cache key the plugin indexes it by, got "
       .. tostring(published.tabs[1].marker_ids[1]))
 end)
 
@@ -2141,7 +2141,7 @@ test("a v2 identity naming another pane is refused in a local pane", function()
   local foreign = internal.resolve_pane_read(mux_pane(4299, { attention = wire }))
   assert(foreign.kind == "invalid", "a local pane printed pane 42's identity and was believed")
   local own = internal.resolve_pane_read(mux_pane(tonumber(wire.address.pane_id), { attention = wire }))
-  assert(own.kind == "v2", "a local pane's own identity is still read")
+  assert(own.kind == "claimed", "a local pane's own identity is still read")
 end)
 
 test("exec, WSL and serial domains are local, so their panes need no published id", function()
@@ -3697,7 +3697,7 @@ test("focused v2 acknowledgement targets only the active pane's exact event", fu
   assert(ack.target.kind == "binding" and ack.target.binding_id == samples.binding.binding_id,
     "the acknowledgement must name the selected binding")
   assert(not path_exists(sibling_root .. "/ack.json"),
-    "focusing one v2 pane must not acknowledge its sibling")
+    "focusing one claimed pane must not acknowledge its sibling")
   local key = internal.address_cache_key(wire.address)
   assert(internal.attention_cache[key].activity_type == nil,
     "the exact acknowledged activity must be suppressed on the same poll")
