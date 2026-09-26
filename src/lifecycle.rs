@@ -829,10 +829,12 @@ fn apply_observation(
 const WAITING_FOR_PERMISSION: &str = "permission";
 
 /// Whether a child that asked for permission at or after `since` has not
-/// emitted anything since. A parent clear or the retention floor ends the wait;
-/// the presence TTL does not, because a child blocked on an approval prompt
-/// sends nothing to refresh it. A fence or presence that cannot be read answers
-/// no, which leaves the activity to its usual order.
+/// emitted anything since: the fence of
+/// [`crate::protocol::eligible_subagent_presence`] without its TTL. A parent
+/// clear or the retention floor ends the wait; the presence TTL does not,
+/// because a child blocked on an approval prompt sends nothing to refresh it.
+/// A fence or presence that cannot be read answers no, which leaves the
+/// activity to its usual order.
 fn child_still_waits(resolved: &ResolvedLaunch, binding_id: &str, since: &str) -> bool {
     let identity = resolved.binding(binding_id);
     let fence =

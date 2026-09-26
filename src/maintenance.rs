@@ -14,7 +14,8 @@ use crate::presence::{
     kept_history_code, pane_evidence, reader_presence, recorded_socket,
 };
 use crate::protocol::{
-    AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, hex64_text, manifest, sha256_hex,
+    AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, eligible_subagent_presence, hex64_text,
+    manifest, sha256_hex,
 };
 use crate::query::{
     FileStamp, collect_binding_files, collect_state_files, name_address, naming_record,
@@ -437,25 +438,33 @@ fn wall_age_exceeds(now: &str, written: &str, interval: u128) -> Result<bool> {
     Ok(now > written + interval)
 }
 
+/// Whether a child's presence still counts, by the rule every reader
+/// applies, [`eligible_subagent_presence`]. Compaction keeps a presence it
+/// cannot judge, so a clock that went back is an error here.
 fn presence_eligible(
     presence: &Value,
     clear: Option<&Value>,
     floor: Option<&Value>,
     now: &str,
 ) -> Result<bool> {
-    let order = presence["observed_mono_ns"].as_str().unwrap_or("");
-    if presence["status"] != "active"
-        || clear.is_some_and(|clear| order <= clear["observed_mono_ns"].as_str().unwrap_or(""))
-        || floor.is_some_and(|floor| order <= floor["floor_mono_ns"].as_str().unwrap_or(""))
-    {
-        return Ok(false);
+    let (eligible, problem) = eligible_subagent_presence(
+        presence,
+        clear.and_then(|clear| clear["observed_mono_ns"].as_str()),
+        floor.and_then(|floor| floor["floor_mono_ns"].as_str()),
+        Some(now),
+        manifest()?,
+    );
+    match problem {
+        None => Ok(eligible),
+        Some("clock_skew") => Err(AttentionError::new(
+            "clock_skew",
+            "retention timestamp is newer than current UTC",
+        )),
+        Some(code) => Err(AttentionError::new(
+            code,
+            "subagent presence cannot be judged",
+        )),
     }
-    let ttl = presence["ttl_ms"].as_u64().unwrap_or(0) as u128 * 1_000_000;
-    Ok(!wall_age_exceeds(
-        now,
-        presence["written_at_unix_ns"].as_str().unwrap_or(""),
-        ttl,
-    )?)
 }
 
 #[derive(Clone)]
