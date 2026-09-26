@@ -829,7 +829,7 @@ impl HostProof {
         {
             return Err(AttentionError::new(
                 "unsafe_tty",
-                "the agent's terminal changed while it was being checked",
+                "the agent no longer runs on the terminal the pane was proven to use",
             ));
         }
         let (current, _) = pane_address(env)?;
@@ -1085,7 +1085,7 @@ pub(crate) fn self_owned_launch(
         });
     }
     // Nothing but a session start can make a claim, so there is nothing to
-    // prove this against, and no reason to ask the mux.
+    // prove this against.
     let Some(claim) = claim else {
         return Err(AttentionError::new(
             "claim_stale",
