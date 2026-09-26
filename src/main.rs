@@ -951,13 +951,13 @@ fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
             let scope = pane.scope()?;
             let root = wezterm_attention::records::state_root(&environment)?;
             let result = match &command {
-                PluginCommand::SetReview(_) | PluginCommand::ClearReview(_) => {
-                    wezterm_attention::lifecycle::apply_user_review(
-                        &root,
-                        scope.address(),
-                        scope.launch_id(),
-                        matches!(command, PluginCommand::SetReview(_)),
-                    )
+                PluginCommand::SetReview(_) => wezterm_attention::lifecycle::set_user_review(
+                    &root,
+                    scope.address(),
+                    scope.launch_id(),
+                ),
+                PluginCommand::ClearReview(_) => {
+                    wezterm_attention::lifecycle::clear_user_review(&root, scope.address())
                 }
                 PluginCommand::Acknowledge(args) => {
                     let activity_event_id = wezterm_attention::identity::canonical_uuid(

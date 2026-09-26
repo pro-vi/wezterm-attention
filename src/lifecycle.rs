@@ -1189,14 +1189,14 @@ fn safe_mark_text(value: &str, field: &str, maximum: usize) -> Result<()> {
     Ok(())
 }
 
-/// The plugin's review key owns the review named "user", and only
-/// `attention plugin` writes it; a producer that used the name would share
-/// that file and clear or forge the user's own flag.
-const PLUGIN_REVIEW_OWNER: &str = "user";
+/// The review key owns the review named "user", the user's own flag, and
+/// only `attention plugin` writes it; a producer that used the name would
+/// share that file and clear or forge the user's flag.
+const USER_REVIEW_OWNER: &str = "user";
 
 fn safe_mark_source(source: &str) -> Result<()> {
     safe_mark_text(source, "source", manifest()?.limits.safe_label_max_bytes)?;
-    if source == PLUGIN_REVIEW_OWNER {
+    if source == USER_REVIEW_OWNER {
         return Err(AttentionError::usage(
             "source \"user\" is reserved for the plugin's review key",
         ));
@@ -1325,15 +1325,10 @@ pub fn apply_mark_activity(
 pub fn apply_mark_review(env: &BTreeMap<String, String>, source: &str) -> Result<LifecycleResult> {
     safe_mark_source(source)?;
     let (root, address, launch_id) = inherited(env)?;
-    let owner_key = crate::protocol::sha256_hex(source.as_bytes());
-    let review = RecordIdentity::review(&address, &owner_key);
-    let review_path = review.path(&root, "review")?;
+    let review = review_slot(&root, &address, source)?;
     let (mutation, ()) = commit(
         &root,
-        &[
-            &claim_lock(&root, &address),
-            &review_lock(&root, &address, &owner_key),
-        ],
+        &[&claim_lock(&root, &address), &review.lock],
         "claim",
         &RecordIdentity::pane(&address),
         |claim| {
@@ -1346,39 +1341,87 @@ pub fn apply_mark_review(env: &BTreeMap<String, String>, source: &str) -> Result
                     "current launch does not match claim",
                 ));
             }
-            // Replaced whatever is there, but never over a review this
-            // version cannot read.
-            read_record(&review_path, Some("review"), &review)?;
-            let (record, result) = review_record(&address, source, &owner_key)?;
-            Ok(CommitPlan {
-                replacements: vec![Replacement::always(review_path.clone(), record)],
-                ..CommitPlan::reporting(Mutation::plain(result))
-            })
+            review.plan(ReviewChange::Set)
         },
         |_| Ok(()),
     )?;
     Ok(mutation.result)
 }
 
-/// A new review of the pane at `address` by the owner `owner_id`, whose key
-/// is `owner_key`, and the result that reports writing it.
-fn review_record(
-    address: &PaneAddress,
-    owner_id: &str,
-    owner_key: &str,
-) -> Result<(Value, LifecycleResult)> {
-    let event_id = Uuid::new_v4().to_string();
-    let record = json!({
-        "kind": "review",
-        "schema": manifest()?.record_schema,
-        "address": address,
-        "owner_id": owner_id,
-        "owner_key": owner_key,
-        "event_id": event_id,
-    });
-    let mut result = LifecycleResult::new(Disposition::Applied);
-    result.event_id = Some(event_id);
-    Ok((record, result))
+/// Where the review of one owner on one pane is kept: the owner's key, the
+/// record's identity and path, and the lock its writers take after the
+/// pane's claim lock.
+struct ReviewSlot<'a> {
+    address: &'a PaneAddress,
+    owner_id: &'a str,
+    owner_key: String,
+    identity: RecordIdentity,
+    path: PathBuf,
+    lock: PathBuf,
+}
+
+fn review_slot<'a>(
+    root: &Path,
+    address: &'a PaneAddress,
+    owner_id: &'a str,
+) -> Result<ReviewSlot<'a>> {
+    let owner_key = crate::protocol::sha256_hex(owner_id.as_bytes());
+    let identity = RecordIdentity::review(address, &owner_key);
+    let path = identity.path(root, "review")?;
+    let lock = review_lock(root, address, &owner_key);
+    Ok(ReviewSlot {
+        address,
+        owner_id,
+        owner_key,
+        identity,
+        path,
+        lock,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum ReviewChange {
+    Set,
+    Withdraw,
+}
+
+impl ReviewSlot<'_> {
+    /// The plan that sets the owner's review, replacing whatever is there,
+    /// or withdraws it: `applied` when there was one to withdraw, `skipped`
+    /// when there was none. Never over, or instead of, a review this version
+    /// cannot read.
+    fn plan(&self, change: ReviewChange) -> Result<CommitPlan<Mutation>> {
+        let existing = read_record(&self.path, Some("review"), &self.identity)?;
+        match change {
+            ReviewChange::Set => {
+                let event_id = Uuid::new_v4().to_string();
+                let record = json!({
+                    "kind": "review",
+                    "schema": manifest()?.record_schema,
+                    "address": self.address,
+                    "owner_id": self.owner_id,
+                    "owner_key": self.owner_key,
+                    "event_id": event_id,
+                });
+                let mut result = LifecycleResult::new(Disposition::Applied);
+                result.event_id = Some(event_id);
+                Ok(CommitPlan {
+                    replacements: vec![Replacement::always(self.path.clone(), record)],
+                    ..CommitPlan::reporting(Mutation::plain(result))
+                })
+            }
+            ReviewChange::Withdraw => Ok(CommitPlan {
+                removals: vec![self.path.clone()],
+                ..CommitPlan::reporting(Mutation::plain(LifecycleResult::new(
+                    if existing.is_some() {
+                        Disposition::Applied
+                    } else {
+                        Disposition::Skipped
+                    },
+                )))
+            }),
+        }
+    }
 }
 
 /// Withdraws what `source` published in the current launch: its review, and
@@ -1395,16 +1438,14 @@ pub fn apply_mark_clear(
 ) -> Result<LifecycleResult> {
     safe_mark_source(source)?;
     let (root, address, launch_id) = inherited(env)?;
-    let owner_key = crate::protocol::sha256_hex(source.as_bytes());
-    let review_identity = RecordIdentity::review(&address, &owner_key);
-    let review_path = review_identity.path(&root, "review")?;
+    let review = review_slot(&root, &address, source)?;
     let launch = RecordIdentity::launch(&address, &launch_id);
     let (mutation, ()) = commit(
         &root,
         &[
             &launch_lock(&root, &address, &launch_id),
             &claim_lock(&root, &address),
-            &review_lock(&root, &address, &owner_key),
+            &review.lock,
         ],
         "claim",
         &RecordIdentity::pane(&address),
@@ -1418,11 +1459,11 @@ pub fn apply_mark_clear(
                     "current launch does not match claim",
                 ));
             }
-            let review = read_record(&review_path, Some("review"), &review_identity)?;
+            let withdrawn = review.plan(ReviewChange::Withdraw)?;
             let pointer = read_record_at(&root, "current_binding", &launch)?;
             let current = read_current(&root, pointer, &address, &launch_id)?;
             let mut replacements = Vec::new();
-            let mut removals = vec![review_path.clone()];
+            let mut removals = withdrawn.removals;
             let mut cleared = None;
             if current.is_none() {
                 let activity_path = launch.path(&root, "activity")?;
@@ -1456,7 +1497,9 @@ pub fn apply_mark_clear(
                 }
             }
             let mut result = cleared.unwrap_or_else(|| LifecycleResult::new(Disposition::Skipped));
-            if review.is_some() && result.disposition == Disposition::Skipped {
+            if withdrawn.result.result.disposition == Disposition::Applied
+                && result.disposition == Disposition::Skipped
+            {
                 result.disposition = Disposition::Applied;
             }
             Ok(CommitPlan {
@@ -1490,56 +1533,44 @@ fn require_plugin_claim(
     }
 }
 
-/// Sets (`set`) or withdraws the review the plugin's review key owns, on the
-/// pane at `address` whose published launch is `launch_id`. The plugin names
-/// the pane itself, because it is not a process in it. Only that owner's
-/// review is touched: another owner's review is that owner's to withdraw.
-/// Only setting needs the claim: a withdrawal lights nothing, and the key
-/// withdraws whatever flag it finds on disk, whichever launch the claim names.
-pub fn apply_user_review(
+/// Sets the user's review, the flag the review key owns, on the pane at
+/// `address` whose published launch is `launch_id`. The plugin names the
+/// pane itself, because it is not a process in it.
+pub fn set_user_review(
     root: &Path,
     address: &PaneAddress,
     launch_id: &str,
-    set: bool,
 ) -> Result<LifecycleResult> {
-    let owner_key = crate::protocol::sha256_hex(PLUGIN_REVIEW_OWNER.as_bytes());
-    let review = RecordIdentity::review(address, &owner_key);
-    let review_path = review.path(root, "review")?;
+    commit_user_review(root, address, ReviewChange::Set, |claim| {
+        require_plugin_claim(claim, address, launch_id)
+    })
+}
+
+/// Withdraws the user's review from the pane at `address`. It does not look
+/// at the claim: a withdrawal lights nothing, and the key withdraws whatever
+/// flag it finds on disk, whichever launch the claim names. Only that
+/// owner's review is touched: another owner's review is that owner's to
+/// withdraw.
+pub fn clear_user_review(root: &Path, address: &PaneAddress) -> Result<LifecycleResult> {
+    commit_user_review(root, address, ReviewChange::Withdraw, |_| Ok(()))
+}
+
+fn commit_user_review(
+    root: &Path,
+    address: &PaneAddress,
+    change: ReviewChange,
+    check_claim: impl FnOnce(Option<&Value>) -> Result<()>,
+) -> Result<LifecycleResult> {
+    let review = review_slot(root, address, USER_REVIEW_OWNER)?;
     let (mutation, ()) = commit_waiting(
         root,
-        &[
-            &claim_lock(root, address),
-            &review_lock(root, address, &owner_key),
-        ],
+        &[&claim_lock(root, address), &review.lock],
         PLUGIN_LOCK_TIMEOUT,
         "claim",
         &RecordIdentity::pane(address),
         |claim| {
-            if set {
-                require_plugin_claim(claim.as_ref(), address, launch_id)?;
-            }
-            // Never over, or instead of, a review this version cannot read.
-            let existing = read_record(&review_path, Some("review"), &review)?;
-            if !set {
-                let removed = existing.is_some();
-                return Ok(CommitPlan {
-                    removals: if removed {
-                        vec![review_path.clone()]
-                    } else {
-                        Vec::new()
-                    },
-                    ..CommitPlan::reporting(Mutation::plain(LifecycleResult::new(if removed {
-                        Disposition::Applied
-                    } else {
-                        Disposition::Skipped
-                    })))
-                });
-            }
-            let (record, result) = review_record(address, PLUGIN_REVIEW_OWNER, &owner_key)?;
-            Ok(CommitPlan {
-                replacements: vec![Replacement::always(review_path.clone(), record)],
-                ..CommitPlan::reporting(Mutation::plain(result))
-            })
+            check_claim(claim.as_ref())?;
+            review.plan(change)
         },
         |_| Ok(()),
     )?;
@@ -1882,16 +1913,13 @@ fn apply_review_event(
     clear: bool,
 ) -> Result<LifecycleResult> {
     let binding_id = event_binding_id(event, &resolved.launch_id)?;
-    let owner_id = "pi-bus";
-    let owner_key = crate::protocol::sha256_hex(owner_id.as_bytes());
-    let review = RecordIdentity::review(&resolved.address, &owner_key);
-    let review_path = review.path(&resolved.root, "review")?;
+    let review = review_slot(&resolved.root, &resolved.address, "pi-bus")?;
     let (mutation, ()) = commit(
         &resolved.root,
         &[
             &resolved.launch_lock(),
             &resolved.claim_lock(),
-            &review_lock(&resolved.root, &resolved.address, &owner_key),
+            &review.lock,
         ],
         "claim",
         &RecordIdentity::pane(&resolved.address),
@@ -1920,23 +1948,10 @@ fn apply_review_event(
                     ),
                 )));
             }
-            let existing = read_record(&review_path, Some("review"), &review)?;
-            if clear {
-                return Ok(CommitPlan {
-                    removals: vec![review_path.clone()],
-                    ..CommitPlan::reporting(Mutation::plain(LifecycleResult::new(
-                        if existing.is_some() {
-                            Disposition::Applied
-                        } else {
-                            Disposition::Skipped
-                        },
-                    )))
-                });
-            }
-            let (record, result) = review_record(&resolved.address, owner_id, &owner_key)?;
-            Ok(CommitPlan {
-                replacements: vec![Replacement::always(review_path.clone(), record)],
-                ..CommitPlan::reporting(Mutation::plain(result))
+            review.plan(if clear {
+                ReviewChange::Withdraw
+            } else {
+                ReviewChange::Set
             })
         },
         |mutation| {
