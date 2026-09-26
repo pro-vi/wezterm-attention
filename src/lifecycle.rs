@@ -86,6 +86,9 @@ fn confirm_native(resolved: &ResolvedLaunch, binding_id: &str, mutation: &Mutati
     }
     let context = (|| -> Result<Option<AdmittedHook>> {
         let claim = load_claim(&resolved.root, &resolved.address)?;
+        // The claim reread here is never an agent's own with this launch id:
+        // an agent's claim is always made with a fresh launch id, and no
+        // shell exported that id for this event to inherit.
         if claim.as_ref().is_none_or(|claim| {
             !inherited_claim_matches(claim, &resolved.address, &resolved.launch_id)
         }) {
@@ -745,6 +748,10 @@ fn append_observation(
         let binding_id = event_binding_id(event, &resolved.launch_id)?;
         let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
         let claim = load_claim(&resolved.root, &resolved.address)?;
+        // Only an inherited launch reaches here with an observation, and the
+        // claim reread under the lock is never an agent's own with its launch
+        // id: an agent's claim is always made with a fresh launch id, which no
+        // shell exported for this event to inherit.
         if claim.as_ref().is_none_or(|record| {
             !inherited_claim_matches(record, &resolved.address, &resolved.launch_id)
         }) {
