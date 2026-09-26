@@ -686,6 +686,56 @@ fn acknowledged(root: &Path, identity: &RecordIdentity, existing: &Value) -> boo
     ack["target"] == existing["target"] && ack["activity_event_id"].as_str() == Some(event_id)
 }
 
+/// Whether the clear watermark `clear` covers what was observed at
+/// `observation`: it was observed at or before the clear. No clear covers
+/// nothing.
+fn covered_by_clear(observation: &str, clear: Option<&Value>) -> bool {
+    clear.is_some_and(|clear| observation <= clear["observed_mono_ns"].as_str().unwrap_or(""))
+}
+
+/// Whether `activity` is newer than the clear watermark `clear` of its slot.
+fn uncleared(activity: &Value, clear: Option<&Value>) -> bool {
+    !covered_by_clear(activity["observed_mono_ns"].as_str().unwrap_or(""), clear)
+}
+
+/// Where the activity of launch `launch_id` in the pane at `address` is
+/// kept, as the launch's current binding record `current` decides: that
+/// binding's slot, with the slot's clear watermark, or without a binding the
+/// launch's own slot, which has none.
+struct ActivitySlot {
+    identity: RecordIdentity,
+    target: Value,
+    clear: Option<Value>,
+}
+
+fn activity_slot(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    current: Option<&Value>,
+) -> Result<ActivitySlot> {
+    Ok(
+        match current
+            .and_then(|record| record.get("binding_id"))
+            .and_then(Value::as_str)
+        {
+            Some(binding_id) => {
+                let identity = RecordIdentity::binding(address, launch_id, binding_id);
+                ActivitySlot {
+                    clear: read_record_at(root, "activity_clear", &identity)?,
+                    identity,
+                    target: json!({"kind":"binding","binding_id":binding_id}),
+                }
+            }
+            None => ActivitySlot {
+                identity: RecordIdentity::launch(address, launch_id),
+                target: json!({"kind":"launch"}),
+                clear: None,
+            },
+        },
+    )
+}
+
 /// Whether the activity `existing` is still on screen: newer than the clear
 /// watermark of its slot, and not acknowledged by the user.
 fn activity_visible(
@@ -694,12 +744,10 @@ fn activity_visible(
     existing: Option<&Value>,
     clear: Option<&Value>,
 ) -> bool {
-    clear.is_none_or(|clear| {
-        existing.is_some_and(|activity| {
-            activity["observed_mono_ns"].as_str().unwrap_or("")
-                > clear["observed_mono_ns"].as_str().unwrap_or("")
-        })
-    }) && existing.is_none_or(|activity| !acknowledged(root, identity, activity))
+    match existing {
+        Some(activity) => uncleared(activity, clear) && !acknowledged(root, identity, activity),
+        None => clear.is_none(),
+    }
 }
 
 /// What an activity does to the slot it is written in: its result, the
@@ -731,9 +779,7 @@ fn plan_activity(
         standing,
         written: None,
     };
-    let covered = || {
-        clear.is_some_and(|clear| observation <= clear["observed_mono_ns"].as_str().unwrap_or(""))
-    };
+    let covered = || covered_by_clear(observation, clear);
     if let Some(existing) = existing {
         if visible && semantic_activity(existing.clone()) == *base {
             let mut result = LifecycleResult::new(Disposition::Skipped);
@@ -1254,23 +1300,16 @@ pub fn apply_mark_activity(
                 &resolved.address,
                 &resolved.launch_id,
             )?;
-            let binding_id = current
-                .as_ref()
-                .and_then(|record| record.get("binding_id"))
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            let (activity_identity, target, clear) = match &binding_id {
-                Some(binding_id) => (
-                    resolved.binding(binding_id),
-                    json!({"kind":"binding","binding_id":binding_id}),
-                    read_record_at(
-                        &resolved.root,
-                        "activity_clear",
-                        &resolved.binding(binding_id),
-                    )?,
-                ),
-                None => (resolved.launch(), json!({"kind":"launch"}), None),
-            };
+            let ActivitySlot {
+                identity: activity_identity,
+                target,
+                clear,
+            } = activity_slot(
+                &resolved.root,
+                &resolved.address,
+                &resolved.launch_id,
+                current.as_ref(),
+            )?;
             let path = activity_identity.path(&resolved.root, "activity")?;
             let mut base = json!({
                 "kind": "activity",
@@ -1483,11 +1522,7 @@ pub fn apply_mark_clear(
                 let activity = read_record_at(&root, "activity", &identity)?;
                 let clear = read_record_at(&root, "activity_clear", &identity)?;
                 let published = activity.as_ref().is_some_and(|activity| {
-                    activity["source"] == source
-                        && clear.as_ref().is_none_or(|clear| {
-                            activity["observed_mono_ns"].as_str()
-                                > clear["observed_mono_ns"].as_str()
-                        })
+                    activity["source"] == source && uncleared(activity, clear.as_ref())
                 });
                 if published {
                     let (result, replacement) =
@@ -1601,32 +1636,16 @@ pub fn acknowledge_activity(
         |pointer| {
             require_plugin_claim(read_claim(root, address)?.as_ref(), address, launch_id)?;
             let current = read_current(root, pointer, address, launch_id)?;
-            let binding_id = current
-                .as_ref()
-                .and_then(|record| record["binding_id"].as_str())
-                .map(str::to_owned);
-            let (target, identity) = match &binding_id {
-                Some(binding_id) => (
-                    json!({"kind":"binding","binding_id":binding_id}),
-                    RecordIdentity::binding(address, launch_id, binding_id),
-                ),
-                None => (
-                    json!({"kind":"launch"}),
-                    RecordIdentity::launch(address, launch_id),
-                ),
-            };
+            let ActivitySlot {
+                identity,
+                target,
+                clear,
+            } = activity_slot(root, address, launch_id, current.as_ref())?;
             let activity = read_record_at(root, "activity", &identity)?;
-            let clear = match binding_id {
-                Some(_) => read_record_at(root, "activity_clear", &identity)?,
-                None => None,
-            };
             let shown = activity.as_ref().is_some_and(|activity| {
                 activity["event_id"].as_str() == Some(activity_event_id)
                     && activity["target"] == target
-                    && clear.as_ref().is_none_or(|clear| {
-                        activity["observed_mono_ns"].as_str().unwrap_or("")
-                            > clear["observed_mono_ns"].as_str().unwrap_or("")
-                    })
+                    && uncleared(activity, clear.as_ref())
             });
             if !shown {
                 return Ok(CommitPlan::reporting(Mutation::plain(
@@ -1791,11 +1810,7 @@ fn plan_presence(
             "child observation is covered by retention floor",
         ));
     }
-    if status == "active"
-        && clear
-            .as_ref()
-            .is_some_and(|clear| observation <= clear["observed_mono_ns"].as_str().unwrap_or(""))
-    {
+    if status == "active" && covered_by_clear(observation, clear.as_ref()) {
         return Ok(LifecycleResult::diagnosed(
             Disposition::Ignored,
             "binding_conflict",
