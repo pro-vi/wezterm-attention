@@ -6,7 +6,6 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -21,8 +20,8 @@ use crate::observations::{LifecycleSnapshot, ObservationPools};
 use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, free_of_control, manifest};
 use crate::providers::{ProviderAction, ProviderEvent};
 use crate::records::{
-    CommitPlan, PreparedRecordWrite, RecordIdentity, RecordRead, Replacement, commit_nested_with,
-    commit_triple_with, ends_binding, launch_path, pane_path, read_record, read_record_typed,
+    CommitPlan, PreparedRecordWrite, RecordIdentity, RecordRead, Replacement, claim_lock, commit,
+    ends_binding, launch_lock, launch_path, pane_path, read_record, read_record_typed, review_lock,
     session_entry, session_entry_path, state_root,
 };
 use crate::wezterm::RuntimePorts;
@@ -198,7 +197,11 @@ struct HostCheck<'a> {
 
 impl ResolvedLaunch<'_> {
     fn claim_lock(&self) -> PathBuf {
-        pane_path(&self.root, &self.address).join(".claim.lock")
+        claim_lock(&self.root, &self.address)
+    }
+
+    fn launch_lock(&self) -> PathBuf {
+        launch_lock(&self.root, &self.address, &self.launch_id)
     }
 
     /// Why this event may no longer write, given the pane's claim as read
@@ -227,16 +230,6 @@ impl ResolvedLaunch<'_> {
     /// [`Self::lapsed`] for a caller whose commit did not read the claim.
     fn lapsed_now(&self) -> Result<Option<LifecycleResult>> {
         Ok(self.lapsed(load_claim(&self.root, &self.address)?.as_ref()))
-    }
-}
-
-/// A plan that writes nothing and reports `result`.
-fn refusal(result: LifecycleResult) -> CommitPlan<Mutation> {
-    CommitPlan {
-        result: Mutation::plain(result),
-        replacements: Vec::new(),
-        removals: Vec::new(),
-        private_dirs: Vec::new(),
     }
 }
 
@@ -443,17 +436,15 @@ fn binding_mutation(
         .join(&binding_id)
         .join("binding.json");
     let pointer_path = launch.join("current-binding.json");
-    let (mutation, _) = commit_nested_with(
+    let (mutation, _) = commit(
         &resolved.root,
-        &launch.join(".lock"),
-        &resolved.claim_lock(),
+        &[&resolved.launch_lock(), &resolved.claim_lock()],
         &pointer_path,
-        Some("current_binding"),
+        "current_binding",
         &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
-        Duration::from_secs(2),
         |pointer| {
             if let Some(lapsed) = resolved.lapsed_now()? {
-                return Ok(refusal(lapsed));
+                return Ok(CommitPlan::reporting(Mutation::plain(lapsed)));
             }
             let (_, current) = read_current(
                 &launch,
@@ -484,28 +475,22 @@ fn binding_mutation(
             {
                 let current_order = current["observed_mono_ns"].as_str().unwrap_or("");
                 if observation < current_order {
-                    return Ok(CommitPlan {
-                        result: Mutation::plain(LifecycleResult::diagnosed(
+                    return Ok(CommitPlan::reporting(Mutation::plain(
+                        LifecycleResult::diagnosed(
                             Disposition::Ignored,
                             "binding_conflict",
                             "older binding selection was ignored",
-                        )),
-                        replacements: Vec::new(),
-                        removals: Vec::new(),
-                        private_dirs: Vec::new(),
-                    });
+                        ),
+                    )));
                 }
                 if observation == current_order {
-                    return Ok(CommitPlan {
-                        result: Mutation::plain(LifecycleResult::diagnosed(
+                    return Ok(CommitPlan::reporting(Mutation::plain(
+                        LifecycleResult::diagnosed(
                             Disposition::Conflict,
                             "binding_conflict",
                             "equal binding order names a different binding",
-                        )),
-                        replacements: Vec::new(),
-                        removals: Vec::new(),
-                        private_dirs: Vec::new(),
-                    });
+                        ),
+                    )));
                 }
                 let current_id = current["binding_id"].as_str().unwrap_or("");
                 let current_end = read_record(
@@ -522,16 +507,13 @@ fn binding_mutation(
                     _ => false,
                 };
                 if matches!(source, "compact" | "reload") || (!current_ended && !replace) {
-                    return Ok(CommitPlan {
-                        result: Mutation::plain(LifecycleResult::diagnosed(
+                    return Ok(CommitPlan::reporting(Mutation::plain(
+                        LifecycleResult::diagnosed(
                             Disposition::Conflict,
                             "binding_conflict",
                             "provider start cannot replace the active binding",
-                        )),
-                        replacements: Vec::new(),
-                        removals: Vec::new(),
-                        private_dirs: Vec::new(),
-                    });
+                        ),
+                    )));
                 }
             }
 
@@ -643,10 +625,8 @@ fn binding_mutation(
                 );
             }
             Ok(CommitPlan {
-                result: Mutation::plain(result),
                 replacements,
-                removals: Vec::new(),
-                private_dirs: Vec::new(),
+                ..CommitPlan::reporting(Mutation::plain(result))
             })
         },
         |mutation| {
@@ -838,29 +818,22 @@ fn apply_observation(
     written_at: &str,
 ) -> Result<LifecycleResult> {
     let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
-    let (mutation, _) = commit_nested_with(
+    let (mutation, _) = commit(
         &resolved.root,
-        &launch.join(".lock"),
-        &resolved.claim_lock(),
+        &[&resolved.launch_lock(), &resolved.claim_lock()],
         &launch.join("current-binding.json"),
-        Some("current_binding"),
+        "current_binding",
         &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
-        Duration::from_secs(2),
         |_| {
             if let Some(lapsed) = resolved.lapsed_now()? {
-                return Ok(refusal(lapsed));
+                return Ok(CommitPlan::reporting(Mutation::plain(lapsed)));
             }
             Ok(append_observation(
                 resolved,
                 event,
                 observation,
                 written_at,
-                CommitPlan {
-                    result: Mutation::plain(LifecycleResult::new(Disposition::Applied)),
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                },
+                CommitPlan::reporting(Mutation::plain(LifecycleResult::new(Disposition::Applied))),
             ))
         },
         |mutation| {
@@ -955,17 +928,15 @@ fn apply_activity(
     let activity_path = binding_dir.join("activity.json");
     let pointer_path = launch.join("current-binding.json");
     let base = activity_base(resolved, event, &binding_id)?;
-    let (mutation, ()) = commit_nested_with(
+    let (mutation, ()) = commit(
         &resolved.root,
-        &launch.join(".lock"),
-        &resolved.claim_lock(),
+        &[&resolved.launch_lock(), &resolved.claim_lock()],
         &pointer_path,
-        Some("current_binding"),
+        "current_binding",
         &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
-        Duration::from_secs(2),
         |pointer| {
             if let Some(lapsed) = resolved.lapsed_now()? {
-                return Ok(refusal(lapsed));
+                return Ok(CommitPlan::reporting(Mutation::plain(lapsed)));
             }
             let (_, current) =
                 read_current(&launch, pointer, &resolved.address, &resolved.launch_id)?;
@@ -975,16 +946,13 @@ fn apply_activity(
                 .and_then(Value::as_str)
                 != Some(binding_id.as_str())
             {
-                return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::diagnosed(
+                return Ok(CommitPlan::reporting(Mutation::plain(
+                    LifecycleResult::diagnosed(
                         Disposition::Ignored,
                         "claim_stale",
                         "activity event is not for the current binding",
-                    )),
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                });
+                    ),
+                )));
             }
             let identity =
                 RecordIdentity::binding(&resolved.address, &resolved.launch_id, &binding_id);
@@ -1137,16 +1105,13 @@ fn apply_activity(
                     current["observed_mono_ns"].as_str().unwrap_or("") == surviving_order
                         && current != &desired
                 }) {
-                    return Ok(CommitPlan {
-                        result: Mutation::plain(LifecycleResult::diagnosed(
+                    return Ok(CommitPlan::reporting(Mutation::plain(
+                        LifecycleResult::diagnosed(
                             Disposition::Conflict,
                             "record_invalid",
                             "equal parent-clear order has different content",
-                        )),
-                        replacements: Vec::new(),
-                        removals: Vec::new(),
-                        private_dirs: Vec::new(),
-                    });
+                        ),
+                    )));
                 }
             }
             let mut plan = append_observation(
@@ -1155,13 +1120,8 @@ fn apply_activity(
                 observation,
                 written_at,
                 CommitPlan {
-                    result: Mutation {
-                        result,
-                        lifecycle_replacement: None,
-                    },
                     replacements,
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
+                    ..CommitPlan::reporting(Mutation::plain(result))
                 },
             );
             if let Some(error) = presence_error {
@@ -1285,14 +1245,12 @@ pub fn apply_mark_activity(
     };
     let launch = launch_path(&resolved.root, &resolved.address, &resolved.launch_id);
     let pointer_path = launch.join("current-binding.json");
-    let (mutation, ()) = commit_nested_with(
+    let (mutation, ()) = commit(
         &resolved.root,
-        &launch.join(".lock"),
-        &resolved.claim_lock(),
+        &[&resolved.launch_lock(), &resolved.claim_lock()],
         &pointer_path,
-        Some("current_binding"),
+        "current_binding",
         &RecordIdentity::launch(&resolved.address, &resolved.launch_id),
-        Duration::from_secs(2),
         |pointer| {
             if resolved.lapsed_now()?.is_some() {
                 return Err(AttentionError::new(
@@ -1415,13 +1373,8 @@ pub fn apply_mark_activity(
                 result
             };
             Ok(CommitPlan {
-                result: Mutation {
-                    result,
-                    lifecycle_replacement: None,
-                },
                 replacements,
-                removals: Vec::new(),
-                private_dirs: Vec::new(),
+                ..CommitPlan::reporting(Mutation::plain(result))
             })
         },
         |mutation| {
@@ -1448,14 +1401,15 @@ pub fn apply_mark_review(env: &BTreeMap<String, String>, source: &str) -> Result
     let owner_key = crate::protocol::sha256_hex(source.as_bytes());
     let pane = pane_path(&root, &address);
     let review_path = pane.join("reviews").join(format!("{owner_key}.json"));
-    let (mutation, ()) = commit_nested_with(
+    let (mutation, ()) = commit(
         &root,
-        &pane.join(".claim.lock"),
-        &pane.join("reviews").join(format!(".{owner_key}.lock")),
+        &[
+            &claim_lock(&root, &address),
+            &review_lock(&root, &address, &owner_key),
+        ],
         &pane.join("claim.json"),
-        Some("claim"),
+        "claim",
         &RecordIdentity::pane(&address),
-        Duration::from_secs(2),
         |claim| {
             if claim
                 .as_ref()
@@ -1485,10 +1439,8 @@ pub fn apply_mark_review(env: &BTreeMap<String, String>, source: &str) -> Result
             let mut result = LifecycleResult::new(Disposition::Applied);
             result.event_id = Some(event_id);
             Ok(CommitPlan {
-                result: Mutation::plain(result),
                 replacements: vec![Replacement::always(review_path.clone(), record)],
-                removals: Vec::new(),
-                private_dirs: Vec::new(),
+                ..CommitPlan::reporting(Mutation::plain(result))
             })
         },
         |_| Ok(()),
@@ -1519,15 +1471,16 @@ pub fn apply_mark_clear(
     let pane = pane_path(&root, &address);
     let review_path = pane.join("reviews").join(format!("{owner_key}.json"));
     let launch = launch_path(&root, &address, &launch_id);
-    let (mutation, ()) = commit_triple_with(
+    let (mutation, ()) = commit(
         &root,
-        &launch.join(".lock"),
-        &pane.join(".claim.lock"),
-        &pane.join("reviews").join(format!(".{owner_key}.lock")),
+        &[
+            &launch_lock(&root, &address, &launch_id),
+            &claim_lock(&root, &address),
+            &review_lock(&root, &address, &owner_key),
+        ],
         &pane.join("claim.json"),
-        Some("claim"),
+        "claim",
         &RecordIdentity::pane(&address),
-        Duration::from_secs(2),
         |claim| {
             if claim
                 .as_ref()
@@ -1603,10 +1556,9 @@ pub fn apply_mark_clear(
                 result.disposition = Disposition::Applied;
             }
             Ok(CommitPlan {
-                result: Mutation::plain(result),
                 replacements,
                 removals,
-                private_dirs: Vec::new(),
+                ..CommitPlan::reporting(Mutation::plain(result))
             })
         },
         |_| Ok(()),
@@ -1647,14 +1599,15 @@ pub fn apply_user_review(
     let owner_key = crate::protocol::sha256_hex(PLUGIN_REVIEW_OWNER.as_bytes());
     let pane = pane_path(root, address);
     let review_path = pane.join("reviews").join(format!("{owner_key}.json"));
-    let (mutation, ()) = commit_nested_with(
+    let (mutation, ()) = commit(
         root,
-        &pane.join(".claim.lock"),
-        &pane.join("reviews").join(format!(".{owner_key}.lock")),
+        &[
+            &claim_lock(root, address),
+            &review_lock(root, address, &owner_key),
+        ],
         &pane.join("claim.json"),
-        Some("claim"),
+        "claim",
         &RecordIdentity::pane(address),
-        Duration::from_secs(2),
         |claim| {
             plugin_claim_matches(claim.as_ref(), address, launch_id)?;
             // Never over, or instead of, a review this version cannot read.
@@ -1666,18 +1619,16 @@ pub fn apply_user_review(
             if !set {
                 let removed = existing.is_some();
                 return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::new(if removed {
-                        Disposition::Applied
-                    } else {
-                        Disposition::Skipped
-                    })),
-                    replacements: Vec::new(),
                     removals: if removed {
                         vec![review_path.clone()]
                     } else {
                         Vec::new()
                     },
-                    private_dirs: Vec::new(),
+                    ..CommitPlan::reporting(Mutation::plain(LifecycleResult::new(if removed {
+                        Disposition::Applied
+                    } else {
+                        Disposition::Skipped
+                    })))
                 });
             }
             let event_id = Uuid::new_v4().to_string();
@@ -1692,10 +1643,8 @@ pub fn apply_user_review(
             let mut result = LifecycleResult::new(Disposition::Applied);
             result.event_id = Some(event_id);
             Ok(CommitPlan {
-                result: Mutation::plain(result),
                 replacements: vec![Replacement::always(review_path.clone(), record)],
-                removals: Vec::new(),
-                private_dirs: Vec::new(),
+                ..CommitPlan::reporting(Mutation::plain(result))
             })
         },
         |_| Ok(()),
@@ -1716,14 +1665,15 @@ pub fn acknowledge_activity(
     activity_event_id: &str,
 ) -> Result<LifecycleResult> {
     let launch = launch_path(root, address, launch_id);
-    let (mutation, ()) = commit_nested_with(
+    let (mutation, ()) = commit(
         root,
-        &launch.join(".lock"),
-        &pane_path(root, address).join(".claim.lock"),
+        &[
+            &launch_lock(root, address, launch_id),
+            &claim_lock(root, address),
+        ],
         &launch.join("current-binding.json"),
-        Some("current_binding"),
+        "current_binding",
         &RecordIdentity::launch(address, launch_id),
-        Duration::from_secs(2),
         |pointer| {
             plugin_claim_matches(load_claim(root, address)?.as_ref(), address, launch_id)?;
             let (_, current) = read_current(&launch, pointer, address, launch_id)?;
@@ -1765,7 +1715,9 @@ pub fn acknowledge_activity(
                     })
             });
             if !shown {
-                return Ok(refusal(LifecycleResult::new(Disposition::Ignored)));
+                return Ok(CommitPlan::reporting(Mutation::plain(
+                    LifecycleResult::new(Disposition::Ignored),
+                )));
             }
             let ack_path = directory.join("ack.json");
             // Never over an acknowledgement this version cannot read.
@@ -1774,7 +1726,7 @@ pub fn acknowledge_activity(
             {
                 let mut result = LifecycleResult::new(Disposition::Skipped);
                 result.event_id = existing["event_id"].as_str().map(str::to_owned);
-                return Ok(refusal(result));
+                return Ok(CommitPlan::reporting(Mutation::plain(result)));
             }
             let event_id = Uuid::new_v4().to_string();
             let record = json!({
@@ -1789,10 +1741,8 @@ pub fn acknowledge_activity(
             let mut result = LifecycleResult::new(Disposition::Applied);
             result.event_id = Some(event_id);
             Ok(CommitPlan {
-                result: Mutation::plain(result),
                 replacements: vec![Replacement::always(ack_path, record)],
-                removals: Vec::new(),
-                private_dirs: Vec::new(),
+                ..CommitPlan::reporting(Mutation::plain(result))
             })
         },
         |_| Ok(()),
@@ -1826,31 +1776,26 @@ fn apply_child(
     } else {
         "stopped"
     };
-    let (mutation, ()) = commit_nested_with(
+    let (mutation, ()) = commit(
         &resolved.root,
-        &launch.join(".lock"),
-        &resolved.claim_lock(),
+        &[&resolved.launch_lock(), &resolved.claim_lock()],
         &binding_path,
-        Some("binding"),
+        "binding",
         &RecordIdentity::binding(&resolved.address, &resolved.launch_id, &binding_id),
-        Duration::from_secs(2),
         |binding| {
             if let Some(lapsed) = resolved.lapsed_now()? {
-                return Ok(refusal(lapsed));
+                return Ok(CommitPlan::reporting(Mutation::plain(lapsed)));
             }
             if binding.as_ref().is_none_or(|record| {
                 !record_matches_binding(record, &resolved.address, &resolved.launch_id, &binding_id)
             }) {
-                return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::diagnosed(
+                return Ok(CommitPlan::reporting(Mutation::plain(
+                    LifecycleResult::diagnosed(
                         Disposition::Ignored,
                         "claim_stale",
                         "child event has no matching binding",
-                    )),
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                });
+                    ),
+                )));
             }
             let mut replacements = Vec::new();
             let result = plan_presence(
@@ -1870,13 +1815,8 @@ fn apply_child(
                 observation,
                 written_at,
                 CommitPlan {
-                    result: Mutation {
-                        lifecycle_replacement: None,
-                        result,
-                    },
                     replacements,
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
+                    ..CommitPlan::reporting(Mutation::plain(result))
                 },
             ))
         },
@@ -2033,41 +1973,33 @@ fn apply_end(
     let binding_dir = launch.join("bindings").join(&binding_id);
     let binding_path = binding_dir.join("binding.json");
     let end_path = binding_dir.join("end.json");
-    let (mutation, ()) = commit_nested_with(
+    let (mutation, ()) = commit(
         &resolved.root,
-        &launch.join(".lock"),
-        &resolved.claim_lock(),
+        &[&resolved.launch_lock(), &resolved.claim_lock()],
         &binding_path,
-        Some("binding"),
+        "binding",
         &RecordIdentity::binding(&resolved.address, &resolved.launch_id, &binding_id),
-        Duration::from_secs(2),
         |binding| {
             if let Some(lapsed) = resolved.lapsed_now()? {
-                return Ok(refusal(lapsed));
+                return Ok(CommitPlan::reporting(Mutation::plain(lapsed)));
             }
             let Some(binding) = binding else {
-                return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::diagnosed(
+                return Ok(CommitPlan::reporting(Mutation::plain(
+                    LifecycleResult::diagnosed(
                         Disposition::Ignored,
                         "claim_stale",
                         "end event has no matching binding",
-                    )),
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                });
+                    ),
+                )));
             };
             if observation < binding["observed_mono_ns"].as_str().unwrap_or("") {
-                return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::diagnosed(
+                return Ok(CommitPlan::reporting(Mutation::plain(
+                    LifecycleResult::diagnosed(
                         Disposition::Ignored,
                         "binding_conflict",
                         "end observation predates binding",
-                    )),
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                });
+                    ),
+                )));
             }
             let existing = read_record(
                 &end_path,
@@ -2088,12 +2020,7 @@ fn apply_end(
                 if disposition != Disposition::Applied {
                     let mut result = LifecycleResult::new(disposition);
                     result.event_id = existing["event_id"].as_str().map(str::to_owned);
-                    return Ok(CommitPlan {
-                        result: Mutation::plain(result),
-                        replacements: Vec::new(),
-                        removals: Vec::new(),
-                        private_dirs: Vec::new(),
-                    });
+                    return Ok(CommitPlan::reporting(Mutation::plain(result)));
                 }
             }
             let event_id = Uuid::new_v4().to_string();
@@ -2112,10 +2039,8 @@ fn apply_end(
             let mut result = LifecycleResult::new(Disposition::Applied);
             result.event_id = Some(event_id);
             Ok(CommitPlan {
-                result: Mutation::plain(result),
                 replacements: vec![Replacement::always(end_path.clone(), record)],
-                removals: Vec::new(),
-                private_dirs: Vec::new(),
+                ..CommitPlan::reporting(Mutation::plain(result))
             })
         },
         |mutation| {
@@ -2139,20 +2064,19 @@ fn apply_review_event(
     let review_path = pane_path(&resolved.root, &resolved.address)
         .join("reviews")
         .join(format!("{owner_key}.json"));
-    let (mutation, ()) = commit_triple_with(
+    let (mutation, ()) = commit(
         &resolved.root,
-        &launch.join(".lock"),
-        &pane_path(&resolved.root, &resolved.address).join(".claim.lock"),
-        &pane_path(&resolved.root, &resolved.address)
-            .join("reviews")
-            .join(format!(".{owner_key}.lock")),
+        &[
+            &resolved.launch_lock(),
+            &resolved.claim_lock(),
+            &review_lock(&resolved.root, &resolved.address, &owner_key),
+        ],
         &claim_path,
-        Some("claim"),
+        "claim",
         &RecordIdentity::pane(&resolved.address),
-        Duration::from_secs(2),
         |claim| {
             if let Some(lapsed) = resolved.lapsed(claim.as_ref()) {
-                return Ok(refusal(lapsed));
+                return Ok(CommitPlan::reporting(Mutation::plain(lapsed)));
             }
             let pointer = read_record(
                 &launch.join("current-binding.json"),
@@ -2167,16 +2091,13 @@ fn apply_review_event(
                 .and_then(Value::as_str)
                 != Some(binding_id.as_str())
             {
-                return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::diagnosed(
+                return Ok(CommitPlan::reporting(Mutation::plain(
+                    LifecycleResult::diagnosed(
                         Disposition::Ignored,
                         "claim_stale",
                         "Pi review is not for the current binding",
-                    )),
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                });
+                    ),
+                )));
             }
             let existing = read_record(
                 &review_path,
@@ -2196,14 +2117,14 @@ fn apply_review_event(
             }
             if clear {
                 return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::new(if existing.is_some() {
-                        Disposition::Applied
-                    } else {
-                        Disposition::Skipped
-                    })),
-                    replacements: Vec::new(),
                     removals: vec![review_path.clone()],
-                    private_dirs: Vec::new(),
+                    ..CommitPlan::reporting(Mutation::plain(LifecycleResult::new(
+                        if existing.is_some() {
+                            Disposition::Applied
+                        } else {
+                            Disposition::Skipped
+                        },
+                    )))
                 });
             }
             let event_id = Uuid::new_v4().to_string();
@@ -2218,10 +2139,8 @@ fn apply_review_event(
             let mut result = LifecycleResult::new(Disposition::Applied);
             result.event_id = Some(event_id);
             Ok(CommitPlan {
-                result: Mutation::plain(result),
                 replacements: vec![Replacement::always(review_path.clone(), record)],
-                removals: Vec::new(),
-                private_dirs: Vec::new(),
+                ..CommitPlan::reporting(Mutation::plain(result))
             })
         },
         |mutation| {
@@ -2297,16 +2216,9 @@ fn apply_clear_event(
         .then(|| pane.join("reviews").join(format!("{owner_key}.json")));
     let decide = |pointer: Option<Value>| {
         let ignored = |message| {
-            Ok(CommitPlan {
-                result: Mutation::plain(LifecycleResult::diagnosed(
-                    Disposition::Ignored,
-                    "claim_stale",
-                    message,
-                )),
-                replacements: Vec::new(),
-                removals: Vec::new(),
-                private_dirs: Vec::new(),
-            })
+            Ok(CommitPlan::reporting(Mutation::plain(
+                LifecycleResult::diagnosed(Disposition::Ignored, "claim_stale", message),
+            )))
         };
         let claim = read_record(
             &claim_path,
@@ -2314,7 +2226,7 @@ fn apply_clear_event(
             &RecordIdentity::pane(&resolved.address),
         )?;
         if let Some(lapsed) = resolved.lapsed(claim.as_ref()) {
-            return Ok(refusal(lapsed));
+            return Ok(CommitPlan::reporting(Mutation::plain(lapsed)));
         }
         let (_, current) = read_current(&launch, pointer, &resolved.address, &resolved.launch_id)?;
         if current
@@ -2347,41 +2259,30 @@ fn apply_clear_event(
             observation,
             written_at,
             CommitPlan {
-                result: Mutation::plain(result),
                 replacements: replacement.into_iter().collect(),
                 removals,
-                private_dirs: Vec::new(),
+                ..CommitPlan::reporting(Mutation::plain(result))
             },
         ))
     };
     let after_apply = |mutation: &Mutation| apply_observed_outputs(resolved, &binding_id, mutation);
     let identity = RecordIdentity::launch(&resolved.address, &resolved.launch_id);
-    let (mutation, ()) = if review_path.is_some() {
-        commit_triple_with(
-            &resolved.root,
-            &launch.join(".lock"),
-            &pane.join(".claim.lock"),
-            &pane.join("reviews").join(format!(".{owner_key}.lock")),
-            &pointer_path,
-            Some("current_binding"),
-            &identity,
-            Duration::from_secs(2),
-            decide,
-            after_apply,
-        )?
+    let (launch_lock, claim_lock) = (resolved.launch_lock(), resolved.claim_lock());
+    let review_lock = review_lock(&resolved.root, &resolved.address, &owner_key);
+    let locks: &[&Path] = if review_path.is_some() {
+        &[&launch_lock, &claim_lock, &review_lock]
     } else {
-        commit_nested_with(
-            &resolved.root,
-            &launch.join(".lock"),
-            &pane.join(".claim.lock"),
-            &pointer_path,
-            Some("current_binding"),
-            &identity,
-            Duration::from_secs(2),
-            decide,
-            after_apply,
-        )?
+        &[&launch_lock, &claim_lock]
     };
+    let (mutation, ()) = commit(
+        &resolved.root,
+        locks,
+        &pointer_path,
+        "current_binding",
+        &identity,
+        decide,
+        after_apply,
+    )?;
     Ok(mutation.result)
 }
 
@@ -2440,30 +2341,30 @@ fn clear_at_prompt(
 ) -> Result<LifecycleResult> {
     let launch = launch_path(&root, &address, &launch_id);
     let pointer_path = launch.join("current-binding.json");
-    let (mutation, ()) = commit_nested_with(
+    let (mutation, ()) = commit(
         &root,
-        &launch.join(".lock"),
-        &pane_path(&root, &address).join(".claim.lock"),
+        &[
+            &launch_lock(&root, &address, &launch_id),
+            &claim_lock(&root, &address),
+        ],
         &pointer_path,
-        Some("current_binding"),
+        "current_binding",
         &RecordIdentity::launch(&address, &launch_id),
-        Duration::from_secs(2),
         |pointer| {
             if load_claim(&root, &address)?.as_ref() != Some(&claim) {
-                return Ok(refusal(LifecycleResult::diagnosed(
-                    Disposition::Ignored,
-                    "claim_stale",
-                    "prompt return has no matching claim",
+                return Ok(CommitPlan::reporting(Mutation::plain(
+                    LifecycleResult::diagnosed(
+                        Disposition::Ignored,
+                        "claim_stale",
+                        "prompt return has no matching claim",
+                    ),
                 )));
             }
             let (_, current) = read_current(&launch, pointer, &address, &launch_id)?;
             let Some(current) = current else {
-                return Ok(CommitPlan {
-                    result: Mutation::plain(LifecycleResult::new(Disposition::Applied)),
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                });
+                return Ok(CommitPlan::reporting(Mutation::plain(
+                    LifecycleResult::new(Disposition::Applied),
+                )));
             };
             let binding_id = current["binding_id"].as_str().unwrap_or("").to_owned();
             let binding_dir = launch.join("bindings").join(&binding_id);
@@ -2478,12 +2379,7 @@ fn clear_at_prompt(
             {
                 let mut result = LifecycleResult::new(Disposition::Ignored);
                 result.event_id = existing["event_id"].as_str().map(str::to_owned);
-                return Ok(CommitPlan {
-                    result: Mutation::plain(result),
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                });
+                return Ok(CommitPlan::reporting(Mutation::plain(result)));
             }
             if existing.as_ref().is_some_and(|clear| {
                 observation == clear["observed_mono_ns"].as_str().unwrap_or("")
@@ -2493,15 +2389,7 @@ fn clear_at_prompt(
                     .as_ref()
                     .and_then(|clear| clear["event_id"].as_str())
                     .map(str::to_owned);
-                return Ok(CommitPlan {
-                    result: Mutation {
-                        lifecycle_replacement: None,
-                        result,
-                    },
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                });
+                return Ok(CommitPlan::reporting(Mutation::plain(result)));
             }
             let event_id = Uuid::new_v4().to_string();
             let record = json!({
@@ -2516,13 +2404,8 @@ fn clear_at_prompt(
             let mut result = LifecycleResult::new(Disposition::Applied);
             result.event_id = Some(event_id);
             Ok(CommitPlan {
-                result: Mutation {
-                    lifecycle_replacement: None,
-                    result,
-                },
                 replacements: vec![Replacement::always(clear_path, record)],
-                removals: Vec::new(),
-                private_dirs: Vec::new(),
+                ..CommitPlan::reporting(Mutation::plain(result))
             })
         },
         |mutation| {
@@ -2696,6 +2579,7 @@ fn apply_provider_event_inner(
 #[cfg(test)]
 mod lifecycle_write_tests {
     use super::*;
+    use std::time::Duration;
     #[test]
     fn failure_of_snapshot_write_reports_partial_state() {
         let fixture: Value =

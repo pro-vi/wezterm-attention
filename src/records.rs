@@ -364,6 +364,18 @@ pub struct CommitPlan<T> {
     pub private_dirs: Vec<PathBuf>,
 }
 
+impl<T> CommitPlan<T> {
+    /// A plan that changes nothing and reports `result`.
+    pub fn reporting(result: T) -> Self {
+        Self {
+            result,
+            replacements: Vec::new(),
+            removals: Vec::new(),
+            private_dirs: Vec::new(),
+        }
+    }
+}
+
 /// The variables that can name the state root, in the order they decide it.
 pub(crate) const STATE_ROOT_VARIABLES: [&str; 2] = ["WEZTERM_ATTENTION_DIR", "XDG_STATE_HOME"];
 
@@ -440,6 +452,38 @@ pub fn pane_path(root: &Path, address: &PaneAddress) -> PathBuf {
 
 pub fn launch_path(root: &Path, address: &PaneAddress, launch_id: &str) -> PathBuf {
     pane_path(root, address).join("launches").join(launch_id)
+}
+
+/// The lock held while a pane's claim is read or written.
+pub fn claim_lock(root: &Path, address: &PaneAddress) -> PathBuf {
+    pane_path(root, address).join(CLAIM_LOCK)
+}
+
+/// The lock every writer of one launch's records holds.
+pub fn launch_lock(root: &Path, address: &PaneAddress, launch_id: &str) -> PathBuf {
+    launch_path(root, address, launch_id).join(LAUNCH_LOCK)
+}
+
+/// The lock a writer of one owner's review holds, beside the reviews. The
+/// owner key is the SHA-256 of the review's source in lowercase hex.
+pub fn review_lock(root: &Path, address: &PaneAddress, owner_key: &str) -> PathBuf {
+    pane_path(root, address)
+        .join("reviews")
+        .join(format!(".{owner_key}.lock"))
+}
+
+const CLAIM_LOCK: &str = ".claim.lock";
+const LAUNCH_LOCK: &str = ".lock";
+
+/// Whether the file `name` in `directory`, inside the tree of the pane at
+/// `pane`, is named as one of the locks above, which a writer leaves in place.
+pub(crate) fn lock_file(pane: &Path, directory: &Path, name: &str) -> bool {
+    matches!(name, CLAIM_LOCK | LAUNCH_LOCK)
+        || (directory == pane.join("reviews")
+            && name
+                .strip_prefix('.')
+                .and_then(|name| name.strip_suffix(".lock"))
+                .is_some_and(crate::protocol::hex64_text))
 }
 
 /// Where a binding record is kept. Below an empty root it is the path the
@@ -952,11 +996,41 @@ fn remove_path_durable(path: &Path) -> Result<bool> {
     }
 }
 
+/// How long every writer waits for one state lock before it gives up. A
+/// hook's agent waits on the hook meanwhile.
+pub const LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+
 pub fn with_lock<T>(
     path: &Path,
     timeout: Duration,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    let _held = acquire(path, timeout)?;
+    operation()
+}
+
+/// A state lock this process holds, released when it is dropped.
+struct HeldLock(File);
+
+impl Drop for HeldLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+/// Locks held together, released in the reverse of the order they were
+/// taken, also when taking a later one failed.
+struct HeldLocks(Vec<HeldLock>);
+
+impl Drop for HeldLocks {
+    fn drop(&mut self) {
+        while let Some(lock) = self.0.pop() {
+            drop(lock);
+        }
+    }
+}
+
+fn acquire(path: &Path, timeout: Duration) -> Result<HeldLock> {
     let parent = path
         .parent()
         .ok_or_else(|| AttentionError::new("state_permissions", "lock path has no parent"))?;
@@ -972,7 +1046,7 @@ pub fn with_lock<T>(
     let deadline = Instant::now() + timeout;
     loop {
         match file.try_lock() {
-            Ok(()) => break,
+            Ok(()) => return Ok(HeldLock(file)),
             Err(std::fs::TryLockError::WouldBlock) => {
                 if Instant::now() >= deadline {
                     return Err(AttentionError::new(
@@ -990,29 +1064,33 @@ pub fn with_lock<T>(
             }
         }
     }
-    let result = operation();
-    let _ = file.unlock();
-    result
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn commit_with<T, P>(
+/// Decide and apply one change to the state below `root`.
+///
+/// The locks are taken in the order `locks` lists them, each waiting at most
+/// [`LOCK_TIMEOUT`], and released in the reverse order. Under all of them the
+/// record at `read_path` is read, `decide` plans from it, the plan is
+/// applied, and `after_apply` runs on the plan's result before any lock is
+/// released.
+pub fn commit<T, P>(
     root: &Path,
-    lock_path: &Path,
+    locks: &[&Path],
     read_path: &Path,
-    expected_kind: Option<&str>,
-    expected_identity: &RecordIdentity,
-    timeout: Duration,
+    kind: &str,
+    identity: &RecordIdentity,
     decide: impl FnOnce(Option<Value>) -> Result<CommitPlan<T>>,
     after_apply: impl FnOnce(&T) -> Result<P>,
 ) -> Result<(T, P)> {
-    with_lock(lock_path, timeout, || {
-        let current = read_record(read_path, expected_kind, expected_identity)?;
-        let plan = decide(current)?;
-        apply_plan(root, &plan)?;
-        let post_result = after_apply(&plan.result)?;
-        Ok((plan.result, post_result))
-    })
+    let mut held = HeldLocks(Vec::with_capacity(locks.len()));
+    for lock in locks {
+        held.0.push(acquire(lock, LOCK_TIMEOUT)?);
+    }
+    let current = read_record(read_path, Some(kind), identity)?;
+    let plan = decide(current)?;
+    apply_plan(root, &plan)?;
+    let post_result = after_apply(&plan.result)?;
+    Ok((plan.result, post_result))
 }
 
 /// Applies a plan under its locks. A removal below a symlinked directory, or
@@ -1037,55 +1115,6 @@ fn apply_plan<T>(root: &Path, plan: &CommitPlan<T>) -> Result<()> {
         remove_path_durable(path)?;
     }
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn commit_nested_with<T, P>(
-    root: &Path,
-    outer_lock: &Path,
-    inner_lock: &Path,
-    read_path: &Path,
-    expected_kind: Option<&str>,
-    expected_identity: &RecordIdentity,
-    timeout: Duration,
-    decide: impl FnOnce(Option<Value>) -> Result<CommitPlan<T>>,
-    after_apply: impl FnOnce(&T) -> Result<P>,
-) -> Result<(T, P)> {
-    with_lock(outer_lock, timeout, || {
-        with_lock(inner_lock, timeout, || {
-            let current = read_record(read_path, expected_kind, expected_identity)?;
-            let plan = decide(current)?;
-            apply_plan(root, &plan)?;
-            let post_result = after_apply(&plan.result)?;
-            Ok((plan.result, post_result))
-        })
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn commit_triple_with<T, P>(
-    root: &Path,
-    outer_lock: &Path,
-    middle_lock: &Path,
-    inner_lock: &Path,
-    read_path: &Path,
-    expected_kind: Option<&str>,
-    expected_identity: &RecordIdentity,
-    timeout: Duration,
-    decide: impl FnOnce(Option<Value>) -> Result<CommitPlan<T>>,
-    after_apply: impl FnOnce(&T) -> Result<P>,
-) -> Result<(T, P)> {
-    with_lock(outer_lock, timeout, || {
-        with_lock(middle_lock, timeout, || {
-            with_lock(inner_lock, timeout, || {
-                let current = read_record(read_path, expected_kind, expected_identity)?;
-                let plan = decide(current)?;
-                apply_plan(root, &plan)?;
-                let post_result = after_apply(&plan.result)?;
-                Ok((plan.result, post_result))
-            })
-        })
-    })
 }
 
 #[cfg(test)]

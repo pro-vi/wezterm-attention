@@ -14,8 +14,9 @@ use uuid::Uuid;
 use crate::identity::{PaneAddress, pane_address};
 use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, manifest};
 use crate::records::{
-    CommitPlan, RecordIdentity, Replacement, commit_with, incarnation_path, mkdir_private,
-    pane_path, read_record, realm_path, session_index_marker, session_index_path, state_root,
+    CommitPlan, LOCK_TIMEOUT, RecordIdentity, Replacement, claim_lock, commit, incarnation_path,
+    mkdir_private, pane_path, read_record, realm_path, session_index_marker, session_index_path,
+    state_root,
 };
 use crate::wezterm::{
     ControllingTerminal, ProcessFacts, ProcessInspector, ProcessRead, ProcessStart, RuntimePorts,
@@ -121,7 +122,7 @@ impl ClaimWrite {
     }
 
     fn lock_path(&self) -> std::path::PathBuf {
-        self.pane.join(".claim.lock")
+        claim_lock(&self.root, &self.address)
     }
 
     /// Refuse a stored claim whose interior address is not this pane's.
@@ -260,13 +261,12 @@ pub fn claim_launch_at_tty(
     let proposed = claim_record(&address, &launch_id, tty_path, &fingerprint, &observation);
     let write = ClaimWrite::new(&root, &address, &metadata)?;
 
-    let (mut selected, published) = commit_with(
+    let (mut selected, published) = commit(
         &root,
-        &write.lock_path(),
+        &[&write.lock_path()],
         &write.claim_path(),
-        Some("claim"),
+        "claim",
         &RecordIdentity::pane(&address),
-        std::time::Duration::from_secs(2),
         |existing| {
             let (locked_address, _) = pane_address(env)?;
             if locked_address != address {
@@ -401,8 +401,8 @@ fn with_pane_claim<T>(
         return publish(None);
     }
     crate::records::with_lock(
-        &pane.join(".claim.lock"),
-        std::time::Duration::from_secs(2),
+        &claim_lock(root, address),
+        LOCK_TIMEOUT,
         || publish(read()?),
     )
 }
@@ -950,13 +950,12 @@ fn claim_for_host(
     let (_, metadata) = pane_address(env)?;
     let write = ClaimWrite::new(&root, address, &metadata)?;
     let observation = ports.clock.monotonic_ns20()?;
-    let (selected, published) = commit_with(
+    let (selected, published) = commit(
         &root,
-        &write.lock_path(),
+        &[&write.lock_path()],
         &write.claim_path(),
-        Some("claim"),
+        "claim",
         &RecordIdentity::pane(address),
-        std::time::Duration::from_secs(2),
         |existing| {
             let foreground = proof.confirm(env, ports.processes, ports.tty, address)?;
             if let Some(current) = &existing {

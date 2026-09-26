@@ -3,7 +3,6 @@ use std::fs;
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -21,9 +20,9 @@ use crate::query::{
 };
 use crate::records::{
     CommitPlan, RecordIdentity, Replacement, atomic_replace_if_different, binding_session_entry,
-    commit_nested_with, directory_confined, ends_binding, incarnation_path, launch_path, pane_path,
-    read_record, realm_path, removal_confined, remove_file_durable, session_index_marker,
-    session_index_path,
+    claim_lock, commit, directory_confined, ends_binding, incarnation_path, launch_lock,
+    launch_path, lock_file, pane_path, read_record, realm_path, removal_confined,
+    remove_file_durable, session_index_marker, session_index_path,
 };
 use crate::wezterm::{Clock, PaneLister, Presence, ProcessInspector, ProcessProbe};
 
@@ -1361,21 +1360,20 @@ fn pane_retention(
         .join("end.json");
     // The presence above was taken before the locks, as for a binding's own
     // absence. Under them only the records are checked again.
-    let applied = commit_nested_with(
+    let applied = commit(
         root,
-        &launch_path(root, address, launch_id).join(".lock"),
-        &pane.join(".claim.lock"),
+        &[
+            &launch_lock(root, address, launch_id),
+            &claim_lock(root, address),
+        ],
         binding_path,
-        Some("binding"),
+        "binding",
         &binding_identity,
-        Duration::from_secs(2),
         |locked_binding| {
             let plan = |action: &str, removals: Vec<PathBuf>, diagnostics: Vec<Diagnostic>| {
                 Ok(CommitPlan {
-                    result: (action.to_owned(), diagnostics),
-                    replacements: Vec::new(),
                     removals,
-                    private_dirs: Vec::new(),
+                    ..CommitPlan::reporting((action.to_owned(), diagnostics))
                 })
             };
             let locked_end = read_record(&end_path, Some("binding_end"), &binding_identity)?;
@@ -1414,13 +1412,11 @@ fn pane_retention(
                 ),
                 "clear_absence" => plan(action, vec![probe_path.clone()], Vec::new()),
                 "first_absence" => Ok(CommitPlan {
-                    result: (action.to_owned(), Vec::new()),
                     replacements: vec![Replacement::always(
                         probe_path.clone(),
                         json!({"kind":"absence_probe","schema":manifest()?.record_schema,"address":address,"operation_id":operation,"observed_mono_ns":run.observation}),
                     )],
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
+                    ..CommitPlan::reporting((action.to_owned(), Vec::new()))
                 }),
                 "end" => {
                     let mut kept = Vec::new();
@@ -1469,15 +1465,6 @@ fn pane_tree_prunable(root: &Path, pane: &Path, diagnostics: &mut Vec<Diagnostic
     pane_entries_prunable(root, pane, pane, diagnostics)
 }
 
-/// The lock a review writer takes beside the review it writes and leaves in
-/// place: `reviews/.<owner key>.lock`, where the owner key is the SHA-256 of
-/// the review's source in lowercase hex.
-fn review_lock_name(name: &str) -> bool {
-    name.strip_prefix('.')
-        .and_then(|name| name.strip_suffix(".lock"))
-        .is_some_and(hex64_text)
-}
-
 fn pane_entries_prunable(
     root: &Path,
     pane: &Path,
@@ -1512,10 +1499,7 @@ fn pane_entries_prunable(
                 }
             }
             Ok(kind) if kind.is_file() => {
-                if matches!(name.as_str(), ".lock" | ".claim.lock")
-                    || write_leftover(&name)
-                    || (directory == pane.join("reviews") && review_lock_name(&name))
-                {
+                if lock_file(pane, directory, &name) || write_leftover(&name) {
                     continue;
                 }
                 let recognised = state_kind(&path).is_some_and(|kind| {
@@ -1649,7 +1633,6 @@ pub fn sweep(
         let launch_id = binding["launch_id"].as_str().unwrap_or("");
         let binding_id = binding["binding_id"].as_str().unwrap_or("");
         let binding_dir = binding_path.parent().expect("binding parent");
-        let launch = launch_path(root, &address, launch_id);
         let pane = pane_path(root, &address);
         let current = match binding_selection(root, &address, launch_id, binding_id) {
             Ok(Some(current)) => current,
@@ -1698,34 +1681,30 @@ pub fn sweep(
         if current {
             if apply {
                 let operation = operation_id.as_deref().expect("apply operation id");
-                let applied = commit_nested_with(
+                let applied = commit(
                     root,
-                    &launch.join(".lock"),
-                    &pane.join(".claim.lock"),
+                    &[
+                        &launch_lock(root, &address, launch_id),
+                        &claim_lock(root, &address),
+                    ],
                     binding_path,
-                    Some("binding"),
+                    "binding",
                     &binding_identity,
-                    Duration::from_secs(2),
                     |locked_binding| {
                         if locked_binding.as_ref() != Some(&binding)
                             || binding_selection(root, &address, launch_id, binding_id)?
                                 != Some(true)
                         {
-                            return Ok(CommitPlan {
-                                result: CompactionOutcome {
-                                    action: "changed".to_owned(),
-                                    floor: None,
-                                    covered: 0,
-                                    deleted: 0,
-                                    diagnostics: vec![diagnostic(
-                                        "record_invalid",
-                                        "binding changed before sweep apply",
-                                    )],
-                                },
-                                replacements: Vec::new(),
-                                removals: Vec::new(),
-                                private_dirs: Vec::new(),
-                            });
+                            return Ok(CommitPlan::reporting(CompactionOutcome {
+                                action: "changed".to_owned(),
+                                floor: None,
+                                covered: 0,
+                                deleted: 0,
+                                diagnostics: vec![diagnostic(
+                                    "record_invalid",
+                                    "binding changed before sweep apply",
+                                )],
+                            }));
                         }
                         let plan = compaction_plan(
                             root,
@@ -1760,17 +1739,17 @@ pub fn sweep(
                         } else {
                             plan.candidates.len()
                         };
+                        let deleted = removals.len();
                         Ok(CommitPlan {
-                            result: CompactionOutcome {
+                            replacements,
+                            removals,
+                            ..CommitPlan::reporting(CompactionOutcome {
                                 action: plan.action.to_owned(),
                                 floor: plan.floor,
                                 covered,
-                                deleted: removals.len(),
+                                deleted,
                                 diagnostics: plan.diagnostics,
-                            },
-                            replacements,
-                            removals,
-                            private_dirs: Vec::new(),
+                            })
                         })
                     },
                     |_| Ok(()),
@@ -1901,30 +1880,26 @@ pub fn sweep(
             processes,
             &mut diagnostics,
         );
-        let applied = commit_nested_with(
+        let applied = commit(
             root,
-            &launch.join(".lock"),
-            &pane.join(".claim.lock"),
+            &[
+                &launch_lock(root, &address, launch_id),
+                &claim_lock(root, &address),
+            ],
             binding_path,
-            Some("binding"),
+            "binding",
             &binding_identity,
-            Duration::from_secs(2),
             |locked_binding| {
                 if locked_binding.as_ref() != Some(&binding)
                     || binding_selection(root, &address, launch_id, binding_id)? != Some(true)
                 {
-                    return Ok(CommitPlan {
-                        result: AbsenceOutcome {
-                            action: "changed".to_owned(),
-                            diagnostic: Some(diagnostic(
-                                "record_invalid",
-                                "binding changed before sweep apply",
-                            )),
-                        },
-                        replacements: Vec::new(),
-                        removals: Vec::new(),
-                        private_dirs: Vec::new(),
-                    });
+                    return Ok(CommitPlan::reporting(AbsenceOutcome {
+                        action: "changed".to_owned(),
+                        diagnostic: Some(diagnostic(
+                            "record_invalid",
+                            "binding changed before sweep apply",
+                        )),
+                    }));
                 }
                 let locked_probe = read_record(
                     &probe_path,
@@ -1941,18 +1916,13 @@ pub fn sweep(
                 let mut removals = Vec::new();
                 if action == "clear_absence" {
                     if !removal_confined(root, &probe_path) {
-                        return Ok(CommitPlan {
-                            result: AbsenceOutcome {
-                                action: "keep".to_owned(),
-                                diagnostic: Some(diagnostic(
-                                    "record_invalid",
-                                    "absence probe outside the state root is preserved",
-                                )),
-                            },
-                            replacements,
-                            removals,
-                            private_dirs: Vec::new(),
-                        });
+                        return Ok(CommitPlan::reporting(AbsenceOutcome {
+                            action: "keep".to_owned(),
+                            diagnostic: Some(diagnostic(
+                                "record_invalid",
+                                "absence probe outside the state root is preserved",
+                            )),
+                        }));
                     }
                     removals.push(probe_path.clone());
                 } else if action == "first_absence" {
@@ -1978,13 +1948,12 @@ pub fn sweep(
                     }
                 }
                 Ok(CommitPlan {
-                    result: AbsenceOutcome {
-                        action: action.to_owned(),
-                        diagnostic: None,
-                    },
                     replacements,
                     removals,
-                    private_dirs: Vec::new(),
+                    ..CommitPlan::reporting(AbsenceOutcome {
+                        action: action.to_owned(),
+                        diagnostic: None,
+                    })
                 })
             },
             |_| Ok(()),
@@ -2063,16 +2032,15 @@ pub fn sweep(
         };
         let launch_id = binding["launch_id"].as_str().unwrap_or("");
         let binding_id = binding["binding_id"].as_str().unwrap_or("");
-        let launch = launch_path(root, &address, launch_id);
-        let pane = pane_path(root, &address);
-        let outcome = commit_nested_with(
+        let outcome = commit(
             root,
-            &launch.join(".lock"),
-            &pane.join(".claim.lock"),
+            &[
+                &launch_lock(root, &address, launch_id),
+                &claim_lock(root, &address),
+            ],
             &binding_path,
-            Some("binding"),
+            "binding",
             &identity,
-            Duration::from_secs(2),
             |locked_binding| {
                 let mut local_diagnostics = Vec::new();
                 let Some(locked_binding) = locked_binding else {
@@ -2080,15 +2048,10 @@ pub fn sweep(
                         "record_invalid",
                         "binding changed before retention apply",
                     ));
-                    return Ok(CommitPlan {
-                        result: RetentionOutcome {
-                            pruned: false,
-                            diagnostics: local_diagnostics,
-                        },
-                        replacements: Vec::new(),
-                        removals: Vec::new(),
-                        private_dirs: Vec::new(),
-                    });
+                    return Ok(CommitPlan::reporting(RetentionOutcome {
+                        pruned: false,
+                        diagnostics: local_diagnostics,
+                    }));
                 };
                 if locked_binding != binding {
                     local_diagnostics.push(diagnostic(
@@ -2102,30 +2065,20 @@ pub fn sweep(
                                 "record_invalid",
                                 "pane claim changed before retention apply",
                             ));
-                            return Ok(CommitPlan {
-                                result: RetentionOutcome {
-                                    pruned: false,
-                                    diagnostics: local_diagnostics,
-                                },
-                                replacements: Vec::new(),
-                                removals: Vec::new(),
-                                private_dirs: Vec::new(),
-                            });
+                            return Ok(CommitPlan::reporting(RetentionOutcome {
+                                pruned: false,
+                                diagnostics: local_diagnostics,
+                            }));
                         }
                         Some(true) => {
                             local_diagnostics.push(diagnostic(
                                 "binding_conflict",
                                 "current binding was preserved during retention",
                             ));
-                            return Ok(CommitPlan {
-                                result: RetentionOutcome {
-                                    pruned: false,
-                                    diagnostics: local_diagnostics,
-                                },
-                                replacements: Vec::new(),
-                                removals: Vec::new(),
-                                private_dirs: Vec::new(),
-                            });
+                            return Ok(CommitPlan::reporting(RetentionOutcome {
+                                pruned: false,
+                                diagnostics: local_diagnostics,
+                            }));
                         }
                         Some(false) => {}
                     }
@@ -2163,25 +2116,18 @@ pub fn sweep(
                         let mut removals = vec![binding_dir.clone()];
                         removals.extend(session_entries_below(root, &binding_dir));
                         return Ok(CommitPlan {
-                            result: RetentionOutcome {
+                            removals,
+                            ..CommitPlan::reporting(RetentionOutcome {
                                 pruned: true,
                                 diagnostics: local_diagnostics,
-                            },
-                            replacements: Vec::new(),
-                            removals,
-                            private_dirs: Vec::new(),
+                            })
                         });
                     }
                 }
-                Ok(CommitPlan {
-                    result: RetentionOutcome {
-                        pruned: false,
-                        diagnostics: local_diagnostics,
-                    },
-                    replacements: Vec::new(),
-                    removals: Vec::new(),
-                    private_dirs: Vec::new(),
-                })
+                Ok(CommitPlan::reporting(RetentionOutcome {
+                    pruned: false,
+                    diagnostics: local_diagnostics,
+                }))
             },
             |_| Ok(()),
         );
