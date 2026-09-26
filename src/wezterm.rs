@@ -1908,9 +1908,11 @@ mod tests {
 
     /// Start `/bin/sleep` in a session of its own, with `terminal` as its
     /// standard input and, when given, its controlling terminal, and wait
-    /// until the kernel shows it there.
+    /// until the kernel shows it there. A `traced` sleeper asks this process
+    /// to trace it before it execs, and stops at the exec; the stop is taken
+    /// here, so what the kernel reports is read only once it is traced.
     #[cfg(target_os = "macos")]
-    fn sleeper_in_its_own_session(terminal: Option<i32>) -> std::process::Child {
+    fn sleeper_in_its_own_session(terminal: Option<i32>, traced: bool) -> std::process::Child {
         use super::{ControllingTerminal, ProcessInspector, ProcessRead, SystemProcessInspector};
         use std::os::fd::FromRawFd;
         use std::os::unix::process::CommandExt;
@@ -1927,6 +1929,7 @@ mod tests {
             command.pre_exec(move || {
                 if libc::setsid() < 0
                     || (controlling && libc::ioctl(0, libc::TIOCSCTTY.into(), 0) < 0)
+                    || (traced && libc::ptrace(libc::PT_TRACE_ME, 0, std::ptr::null_mut(), 0) < 0)
                 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -1935,6 +1938,11 @@ mod tests {
         }
         let child = command.spawn().expect("start the sleeper");
         let pid = i32::try_from(child.id()).expect("pid");
+        if traced {
+            let mut status = 0;
+            assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+            assert!(libc::WIFSTOPPED(status), "the sleeper stops at its exec");
+        }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !matches!(
             SystemProcessInspector.process(pid),
@@ -1949,6 +1957,7 @@ mod tests {
         }
         child
     }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn the_kernel_record_agrees_with_proc_pidinfo() {
@@ -1960,11 +1969,24 @@ mod tests {
         assert!(inspector.boot_session().is_some());
         assert!(inspector.self_claim_supported());
 
-        let mut detached = sleeper_in_its_own_session(None);
+        let mut detached = sleeper_in_its_own_session(None, false);
         let facts = agrees_with_proc_pidinfo(i32::try_from(detached.id()).expect("pid"));
         assert_eq!(facts.terminal, ControllingTerminal::Absent);
+        assert!(!facts.traced, "{facts:?}");
         detached.kill().expect("stop the detached sleeper");
         detached.wait().expect("reap the detached sleeper");
+
+        let mut traced = sleeper_in_its_own_session(None, true);
+        let pid = i32::try_from(traced.id()).expect("pid");
+        let facts = agrees_with_proc_pidinfo(pid);
+        assert!(facts.traced, "{facts:?}");
+        // Stopped under this process as its tracer, it is ended by the
+        // tracer: a plain kill stays pending until it runs again.
+        assert_eq!(
+            unsafe { libc::ptrace(libc::PT_KILL, pid, std::ptr::null_mut(), 0) },
+            0
+        );
+        traced.wait().expect("reap the traced sleeper");
 
         let (mut master, mut slave) = (0, 0);
         assert_eq!(
@@ -1979,7 +2001,7 @@ mod tests {
             },
             0
         );
-        let mut attached = sleeper_in_its_own_session(Some(slave));
+        let mut attached = sleeper_in_its_own_session(Some(slave), false);
         let pid = i32::try_from(attached.id()).expect("pid");
         let facts = agrees_with_proc_pidinfo(pid);
         assert!(
