@@ -11,7 +11,9 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::identity::PaneAddress;
-use crate::protocol::{AttentionError, Result, free_of_control, manifest, validate_record};
+use crate::protocol::{
+    AttentionError, Diagnostic, Result, free_of_control, manifest, validate_record,
+};
 
 #[derive(Clone, Debug, Default)]
 pub struct RecordIdentity {
@@ -1456,6 +1458,104 @@ fn apply_plan<T>(root: &Path, plan: &CommitPlan<T>) -> Result<()> {
         remove_path_durable(path)?;
     }
     Ok(())
+}
+
+pub(crate) fn collect_binding_files(
+    root: &Path,
+    output: &mut Vec<PathBuf>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    collect_state_files(
+        root,
+        &realms_dir(root),
+        &|path| path.file_name().and_then(|name| name.to_str()) == Some(BINDING_FILE),
+        output,
+        diagnostics,
+    );
+}
+
+/// Every file below `path` that `wanted` accepts, without following a symlink.
+///
+/// A directory or entry that cannot be read is reported, not skipped: whatever
+/// is below it is missing from the answer, and an answer that looks complete
+/// hides that. The diagnostic names the path relative to the state root. A
+/// starting directory that does not exist is an empty store, and one removed
+/// mid-walk was removed by its owner.
+pub(crate) fn collect_state_files(
+    root: &Path,
+    path: &Path,
+    wanted: &dyn Fn(&Path) -> bool,
+    output: &mut Vec<PathBuf>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(_) => {
+            diagnostics.push(unreadable_state(root, path));
+            return;
+        }
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            diagnostics.push(unreadable_state(root, path));
+            continue;
+        };
+        let candidate = entry.path();
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => {
+                collect_state_files(root, &candidate, wanted, output, diagnostics)
+            }
+            Ok(_) if wanted(&candidate) => output.push(candidate),
+            Ok(_) => {}
+            Err(_) => diagnostics.push(unreadable_state(root, &candidate)),
+        }
+    }
+}
+
+/// The diagnostic for a state path a walk could not read.
+pub(crate) fn unreadable_state(root: &Path, path: &Path) -> Diagnostic {
+    let mut item = Diagnostic::new("state_permissions", "state directory could not be read");
+    name_path(&mut item, root, path);
+    item
+}
+
+/// A state path as the diagnostic context names it: relative to the state
+/// root, so a diagnostic never carries the local home directory.
+pub(crate) fn state_relative(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Put `path` in `item`'s context, relative to the state root, so a reader
+/// can find the file or directory it is about.
+pub(crate) fn name_path(item: &mut Diagnostic, root: &Path, path: &Path) {
+    item.set("path", state_relative(root, path));
+}
+
+/// `error` naming the record at `path`; see [`name_path`].
+pub(crate) fn naming_record(root: &Path, path: &Path, mut error: AttentionError) -> AttentionError {
+    name_path(&mut error.diagnostic, root, path);
+    error
+}
+
+/// Names the pane each diagnostic is about: its realm, incarnation and id.
+pub(crate) fn name_address(items: &mut [Diagnostic], address: &PaneAddress) {
+    for item in items {
+        for (field, value) in [
+            ("realm_id", &address.realm_id),
+            ("incarnation_id", &address.incarnation_id),
+            ("pane_id", &address.pane_id),
+        ] {
+            item.set(field, value.as_str());
+        }
+    }
+}
+
+pub(crate) fn record_address(record: &Value) -> Option<PaneAddress> {
+    serde_json::from_value(record.get("address")?.clone()).ok()
 }
 
 #[cfg(test)]

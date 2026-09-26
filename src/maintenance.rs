@@ -16,16 +16,15 @@ use crate::protocol::{
     AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, elapsed_beyond,
     eligible_subagent_presence, hex64_text, manifest, ns20_text, sha256_hex,
 };
-use crate::query::{
-    FileStamp, collect_binding_files, collect_state_files, name_address, naming_record,
-    read_bindings_with_ports, read_tab_publications, record_address, state_relative,
-};
+use crate::query::{FileStamp, read_bindings_with_ports, read_tab_publications};
 use crate::records::{
     AGENTS, BINDING_FILE, BindingState, CommitPlan, FileRecords, RecordIdentity, RecordRead,
     Replacement, agents_dir, atomic_replace_if_different, binding_record_kind,
-    binding_session_entry, claim_lock, commit, directory_confined, ends_binding, incarnation_dir,
-    is_state_lock, launch_lock, pane_dir, read_bounded, read_record, read_record_at,
+    binding_session_entry, claim_lock, collect_binding_files, collect_state_files, commit,
+    directory_confined, ends_binding, incarnation_dir, is_state_lock, launch_lock, name_address,
+    naming_record, pane_dir, read_bounded, read_record, read_record_at, record_address,
     removal_confined, remove_file_durable, session_index_marker, session_index_path,
+    state_relative,
 };
 use crate::wezterm::{Clock, PaneLister, Presence, ProcessInspector, ProcessProbe};
 

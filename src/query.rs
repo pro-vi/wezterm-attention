@@ -18,8 +18,9 @@ use crate::protocol::{
 };
 use crate::records::{
     BINDING_FILE, BindingState, FileRecords, RecordIdentity, RecordRead, RecordReader, agents_dir,
-    binding_ended, binding_path, ends_binding, incarnation_dir, read_record, read_record_typed,
-    realms_dir, reviews_dir, session_dir, session_entry_path, session_index_path,
+    binding_ended, binding_path, collect_binding_files, ends_binding, incarnation_dir,
+    name_address, name_path, naming_record, read_record, read_record_typed, record_address,
+    reviews_dir, session_dir, session_entry_path, session_index_path, unreadable_state,
 };
 use crate::wezterm::{Clock, GuiWindowLister, PaneLister, ProcessProbe};
 
@@ -1235,20 +1236,6 @@ fn collect_selected_binding_files(
     }
 }
 
-pub(crate) fn collect_binding_files(
-    root: &Path,
-    output: &mut Vec<PathBuf>,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    collect_state_files(
-        root,
-        &realms_dir(root),
-        &|path| path.file_name().and_then(|name| name.to_str()) == Some(BINDING_FILE),
-        output,
-        diagnostics,
-    );
-}
-
 /// The binding records of one provider session, from the session index, or
 /// None when the index cannot answer and the caller has to walk every
 /// binding: it is not marked complete, or a directory or entry of it could
@@ -1308,73 +1295,6 @@ fn session_candidates(root: &Path, sessions: &Sessions) -> Vec<PathBuf> {
     files
 }
 
-/// Every file below `path` that `wanted` accepts, without following a symlink.
-///
-/// A directory or entry that cannot be read is reported, not skipped: whatever
-/// is below it is missing from the answer, and an answer that looks complete
-/// hides that. The diagnostic names the path relative to the state root. A
-/// starting directory that does not exist is an empty store, and one removed
-/// mid-walk was removed by its owner.
-pub(crate) fn collect_state_files(
-    root: &Path,
-    path: &Path,
-    wanted: &dyn Fn(&Path) -> bool,
-    output: &mut Vec<PathBuf>,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    let entries = match fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-        Err(_) => {
-            diagnostics.push(unreadable_state(root, path));
-            return;
-        }
-    };
-    for entry in entries {
-        let Ok(entry) = entry else {
-            diagnostics.push(unreadable_state(root, path));
-            continue;
-        };
-        let candidate = entry.path();
-        match entry.file_type() {
-            Ok(kind) if kind.is_dir() => {
-                collect_state_files(root, &candidate, wanted, output, diagnostics)
-            }
-            Ok(_) if wanted(&candidate) => output.push(candidate),
-            Ok(_) => {}
-            Err(_) => diagnostics.push(unreadable_state(root, &candidate)),
-        }
-    }
-}
-
-/// The diagnostic for a state path a walk could not read.
-pub(crate) fn unreadable_state(root: &Path, path: &Path) -> Diagnostic {
-    let mut item = Diagnostic::new("state_permissions", "state directory could not be read");
-    name_path(&mut item, root, path);
-    item
-}
-
-/// A state path as the diagnostic context names it: relative to the state
-/// root, so a diagnostic never carries the local home directory.
-pub(crate) fn state_relative(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .into_owned()
-}
-
-/// Put `path` in `item`'s context, relative to the state root, so a reader
-/// can find the file or directory it is about.
-pub(crate) fn name_path(item: &mut Diagnostic, root: &Path, path: &Path) {
-    item.set("path", state_relative(root, path));
-}
-
-/// `error` naming the record at `path`; see [`name_path`].
-pub(crate) fn naming_record(root: &Path, path: &Path, mut error: AttentionError) -> AttentionError {
-    name_path(&mut error.diagnostic, root, path);
-    error
-}
-
 fn string(record: &Value, field: &str) -> Option<String> {
     record.get(field).and_then(Value::as_str).map(str::to_owned)
 }
@@ -1430,19 +1350,6 @@ impl Serialize for BindingTiming {
     }
 }
 
-/// Names the pane each diagnostic is about: its realm, incarnation and id.
-pub(crate) fn name_address(items: &mut [Diagnostic], address: &PaneAddress) {
-    for item in items {
-        for (field, value) in [
-            ("realm_id", &address.realm_id),
-            ("incarnation_id", &address.incarnation_id),
-            ("pane_id", &address.pane_id),
-        ] {
-            item.set(field, value.as_str());
-        }
-    }
-}
-
 /// Whether another pane address holds a binding of this provider session that
 /// competes with the inspected one, by the rule `bindings` applies across its
 /// rows. Only same-session bindings have their end read and their pane probed,
@@ -1491,10 +1398,6 @@ fn session_key(binding: &Value) -> (String, String) {
         string(binding, "provider").unwrap_or_default(),
         string(binding, "provider_session_id").unwrap_or_default(),
     )
-}
-
-pub(crate) fn record_address(record: &Value) -> Option<PaneAddress> {
-    serde_json::from_value(record.get("address")?.clone()).ok()
 }
 
 pub fn read_bindings_with_ports(
