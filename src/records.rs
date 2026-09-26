@@ -978,12 +978,15 @@ impl BindingState {
     /// the binding `binding_id`. A record that is absent or could not be
     /// read selects nothing.
     pub fn current(&self, launch_id: &str, binding_id: &str) -> bool {
-        selects_binding(
-            self.claim.record(),
-            self.pointer.record(),
-            launch_id,
-            binding_id,
-        )
+        self.claim
+            .record()
+            .and_then(|claim| claim["launch_id"].as_str())
+            == Some(launch_id)
+            && self
+                .pointer
+                .record()
+                .and_then(|pointer| pointer["binding_id"].as_str())
+                == Some(binding_id)
     }
 
     /// Whether the end record ends `binding`, by [`ends_binding`]. One that
@@ -1007,19 +1010,6 @@ fn read_with(
         Ok(path) => reader.read(&path, Some(kind), identity),
         Err(error) => RecordRead::Invalid(error),
     }
-}
-
-/// Whether a pane's `claim` and its launch's current-binding `pointer`
-/// select the binding `binding_id` of `launch_id`: the claim names the
-/// launch and the pointer names the binding.
-pub fn selects_binding(
-    claim: Option<&Value>,
-    pointer: Option<&Value>,
-    launch_id: &str,
-    binding_id: &str,
-) -> bool {
-    claim.and_then(|claim| claim["launch_id"].as_str()) == Some(launch_id)
-        && pointer.and_then(|pointer| pointer["binding_id"].as_str()) == Some(binding_id)
 }
 
 /// Injectable filesystem boundary for scoped, read-only fact assembly.
@@ -1345,18 +1335,6 @@ impl Drop for HeldLock {
     }
 }
 
-/// Locks held together, released in the reverse of the order they were
-/// taken, also when taking a later one failed.
-struct HeldLocks(Vec<HeldLock>);
-
-impl Drop for HeldLocks {
-    fn drop(&mut self) {
-        while let Some(lock) = self.0.pop() {
-            drop(lock);
-        }
-    }
-}
-
 fn acquire(path: &Path, timeout: Duration) -> Result<HeldLock> {
     let parent = path
         .parent()
@@ -1396,7 +1374,8 @@ fn acquire(path: &Path, timeout: Duration) -> Result<HeldLock> {
 /// Decide and apply one change to the state below `root`.
 ///
 /// The locks are taken in the order `locks` lists them, each waiting at most
-/// [`LOCK_TIMEOUT`], and released in the reverse order. Under all of them the
+/// [`LOCK_TIMEOUT`], and all are released when the change is done or taking
+/// one failed. Under all of them the
 /// record of `kind` that `identity` names is read, `decide` plans from it,
 /// the plan is applied, and `after_apply` runs on the plan's result before
 /// any lock is released.
@@ -1429,10 +1408,10 @@ pub(crate) fn commit_waiting<T, P>(
     decide: impl FnOnce(Option<Value>) -> Result<CommitPlan<T>>,
     after_apply: impl FnOnce(&T) -> Result<P>,
 ) -> Result<(T, P)> {
-    let mut held = HeldLocks(Vec::with_capacity(locks.len()));
-    for lock in locks {
-        held.0.push(acquire(lock, timeout)?);
-    }
+    let _held = locks
+        .iter()
+        .map(|lock| acquire(lock, timeout))
+        .collect::<Result<Vec<_>>>()?;
     let current = read_record_at(root, kind, identity)?;
     let plan = decide(current)?;
     apply_plan(root, &plan)?;
