@@ -172,14 +172,12 @@ impl PaneProcessSet {
     }
 
     /// Note that a process was listed whose environment could not be read.
-    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     fn missed_one(&mut self) {
         self.missed = true;
     }
 
     /// Add the pairs one process's environment holds, given as `NAME=value`
     /// entries.
-    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     fn add_environment<'a>(&mut self, entries: impl Iterator<Item = &'a [u8]>) {
         let mut sockets = Vec::new();
         let mut panes = Vec::new();
@@ -1278,28 +1276,13 @@ fn own_pane_processes() -> Option<PaneProcessSet> {
     read_own.then_some(processes)
 }
 
-/// Elsewhere only `ps` offers environments, and it prints them after the
-/// arguments on one line, so lines are kept only for this user's processes.
+// A pane's absence is proven from the environments of this user's
+// processes, which only the macOS and Linux kernels are read for here.
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn own_pane_processes() -> Option<PaneProcessSet> {
-    let ps = ["/bin/ps", "/usr/bin/ps"]
-        .into_iter()
-        .map(Path::new)
-        .find(|path| is_executable(path))?;
-    let mut command = Command::new(ps);
-    command.args(["axeww", "-o", "uid=,command="]);
-    let output = run_bounded(&mut command, 8 * 1024 * 1024, CHILD_DEADLINE).ok()?;
-    let uid = unsafe { libc::geteuid() }.to_string();
-    let listing = String::from_utf8_lossy(&output)
-        .lines()
-        .filter_map(|line| {
-            let (owner, rest) = line.trim_start().split_once(' ')?;
-            (owner == uid).then_some(rest)
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    Some(PaneProcessSet::from_process_listing(&listing))
-}
+compile_error!(
+    "wezterm-attention builds for macOS and Linux only: it proves a pane gone by reading \
+     process environments from the kernel, and knows how on those two alone"
+);
 
 /// The environment strings in a `KERN_PROCARGS2` buffer.
 ///
