@@ -347,6 +347,42 @@ struct Response<T: Serialize> {
     diagnostics: Vec<Diagnostic>,
 }
 
+impl<T: Serialize> Response<T> {
+    fn new(
+        command: &str,
+        status: &str,
+        complete: bool,
+        diagnostics: Vec<Diagnostic>,
+        result: T,
+    ) -> Self {
+        Self {
+            schema: 1,
+            command: command.to_owned(),
+            status: status.to_owned(),
+            complete,
+            result,
+            diagnostics,
+        }
+    }
+}
+
+/// The envelope of a command that failed. An error answers nothing, so it
+/// is never complete, and its result is empty.
+fn error_response(error: &AttentionError, command: &str) -> Response<serde_json::Value> {
+    let status = if error.exit_code == 2 {
+        "usage_error"
+    } else {
+        "unavailable"
+    };
+    Response::new(
+        command,
+        status,
+        false,
+        vec![error.diagnostic.clone()],
+        serde_json::json!({}),
+    )
+}
+
 fn query_json(command: &str) -> bool {
     matches!(
         command,
@@ -409,36 +445,13 @@ fn query_exit(complete: bool) -> ExitCode {
     }
 }
 
-/// An error answers nothing, so its envelope is never complete.
 fn emit_error(error: &AttentionError, as_json: bool, command: &str) -> ExitCode {
-    emit_error_with_complete(error, as_json, command, false)
-}
-
-fn emit_error_with_complete(
-    error: &AttentionError,
-    as_json: bool,
-    command: &str,
-    complete: bool,
-) -> ExitCode {
     let mut error = error.clone();
     if error.exit_code == 2 {
         error.diagnostic.help = format!("attention {command} --help");
     }
     if as_json || query_json(command) {
-        let response = Response {
-            schema: 1,
-            command: command.to_owned(),
-            status: if error.exit_code == 2 {
-                "usage_error"
-            } else {
-                "unavailable"
-            }
-            .to_owned(),
-            complete,
-            result: serde_json::json!({}),
-            diagnostics: vec![error.diagnostic.clone()],
-        };
-        print_out(&printable_json(&response));
+        print_out(&printable_json(&error_response(&error, command)));
     } else {
         print_err(&format!(
             "attention: {}: {}",
@@ -464,20 +477,7 @@ fn is_hook_command(command: &str) -> bool {
 
 fn emit_hook_error(error: &AttentionError, debug: bool, strict: bool, command: &str) -> ExitCode {
     if debug {
-        let response = Response {
-            schema: 1,
-            command: command.to_owned(),
-            status: if error.exit_code == 2 {
-                "usage_error"
-            } else {
-                "unavailable"
-            }
-            .to_owned(),
-            complete: false,
-            result: serde_json::json!({}),
-            diagnostics: vec![error.diagnostic.clone()],
-        };
-        print_err(&printable_json(&response));
+        print_err(&printable_json(&error_response(error, command)));
     } else {
         print_err(&format!(
             "attention: {}: {}",
@@ -519,14 +519,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             let result = wezterm_attention::providers::describe_hooks(&args.provider)
                 .map_err(|error| (Box::new(error), args.json, "hooks describe".into()))?;
             emit(
-                &Response {
-                    schema: 1,
-                    command: "hooks describe".into(),
-                    status: "ok".into(),
-                    complete: true,
-                    result,
-                    diagnostics: vec![],
-                },
+                &Response::new("hooks describe", "ok", true, vec![], result),
                 args.json,
                 false,
             );
@@ -545,14 +538,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 .collect::<Vec<_>>();
             if args.json {
                 emit(
-                    &Response {
-                        schema: 1,
-                        command: "hooks claim".to_owned(),
-                        status: "ok".to_owned(),
-                        complete,
-                        result,
-                        diagnostics,
-                    },
+                    &Response::new("hooks claim", "ok", complete, diagnostics, result),
                     true,
                     false,
                 );
@@ -632,14 +618,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 "total_detail_count": report.diagnostics.len(),
             });
             emit(
-                &Response {
-                    schema: 1,
-                    command: "hooks publish".to_owned(),
-                    status: status.to_owned(),
-                    complete,
-                    result,
-                    diagnostics,
-                },
+                &Response::new("hooks publish", status, complete, diagnostics, result),
                 args.json,
                 args.quiet,
             );
@@ -754,14 +733,13 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 };
                 let result = serde_json::json!({"native": outcome.result.as_ref().ok(), "admission": outcome.admission, "persistence": outcome.persistence, "consumers": consumers});
                 // Prompt/reply bodies and child output never enter this diagnostic projection.
-                print_err(&printable_json(&Response {
-                    schema: 1,
-                    command,
-                    status: if failed { "findings" } else { "ok" }.into(),
-                    complete: true,
-                    result,
+                print_err(&printable_json(&Response::new(
+                    &command,
+                    if failed { "findings" } else { "ok" },
+                    true,
                     diagnostics,
-                }));
+                    result,
+                )));
                 return Ok(if args.strict && failed {
                     ExitCode::from(1)
                 } else {
@@ -784,14 +762,13 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 Disposition::Ignored | Disposition::Conflict | Disposition::Partial
             );
             if args.debug {
-                let response = Response {
-                    schema: 1,
-                    command,
-                    status: if failed { "findings" } else { "ok" }.to_owned(),
-                    complete: true,
-                    diagnostics: result.diagnostic.iter().cloned().collect(),
+                let response = Response::new(
+                    &command,
+                    if failed { "findings" } else { "ok" },
+                    true,
+                    result.diagnostic.iter().cloned().collect(),
                     result,
-                };
+                );
                 print_err(&printable_json(&response));
             } else if let Some(diagnostic) = &result.diagnostic {
                 print_err(&format!(
@@ -859,9 +836,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             let root = match wezterm_attention::records::state_root(&environment) {
                 Ok(root) => root,
                 Err(error) if args.socket.is_some() => {
-                    return Ok(emit_error_with_complete(
-                        &error, args.json, "bindings", false,
-                    ));
+                    return Ok(emit_error(&error, args.json, "bindings"));
                 }
                 Err(error) => return Err((Box::new(error), args.json, "bindings".to_owned())),
             };
@@ -878,9 +853,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                     ) {
                         Ok(result) => result,
                         Err(error) => {
-                            return Ok(emit_error_with_complete(
-                                &error, args.json, "bindings", false,
-                            ));
+                            return Ok(emit_error(&error, args.json, "bindings"));
                         }
                     };
                 // After the answer, not in its filter: a row filtered out
@@ -948,19 +921,17 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             let complete =
                 !truncated && walked_every_directory && (!socket_mode || diagnostics.is_empty());
             emit(
-                &Response {
-                    schema: 1,
-                    command: "bindings".to_owned(),
-                    status: if diagnostics.is_empty() {
+                &Response::new(
+                    "bindings",
+                    if diagnostics.is_empty() {
                         "ok"
                     } else {
                         "findings"
-                    }
-                    .to_owned(),
+                    },
                     complete,
+                    shown_diagnostics,
                     result,
-                    diagnostics: shown_diagnostics,
-                },
+                ),
                 args.json,
                 false,
             );
@@ -970,14 +941,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             let source = wezterm_attention::query::read_tab_source(&args.socket)
                 .map_err(|error| (Box::new(error), true, "tab-source".to_owned()))?;
             emit(
-                &Response {
-                    schema: 1,
-                    command: "tab-source".to_owned(),
-                    status: "ok".to_owned(),
-                    complete: true,
-                    result: source,
-                    diagnostics: Vec::new(),
-                },
+                &Response::new("tab-source", "ok", true, Vec::new(), source),
                 true,
                 false,
             );
@@ -1018,14 +982,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             }
             .map_err(failed)?;
             emit(
-                &Response {
-                    schema: 1,
-                    command: name.to_owned(),
-                    status: "ok".to_owned(),
-                    complete: true,
-                    result,
-                    diagnostics: Vec::new(),
-                },
+                &Response::new(name, "ok", true, Vec::new(), result),
                 true,
                 false,
             );
@@ -1041,25 +998,23 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             )
             .map_err(|error| (Box::new(error), args.json, "tabs".to_owned()))?;
             emit(
-                &Response {
-                    schema: 1,
-                    command: "tabs".to_owned(),
-                    status: if diagnostics.is_empty() {
+                &Response::new(
+                    "tabs",
+                    if diagnostics.is_empty() {
                         "ok"
                     } else {
                         "findings"
-                    }
-                    .to_owned(),
+                    },
                     // A window that could not be read is a window missing from
                     // the answer, so the answer is not the whole tab bar.
-                    complete: diagnostics.is_empty(),
-                    result: serde_json::json!({
+                    diagnostics.is_empty(),
+                    diagnostics.iter().take(50).cloned().collect(),
+                    serde_json::json!({
                         "windows": windows,
                         "diagnostic_count": diagnostics.len().min(50),
                         "total_diagnostic_count": diagnostics.len(),
                     }),
-                    diagnostics: diagnostics.iter().take(50).cloned().collect(),
-                },
+                ),
                 args.json,
                 false,
             );
@@ -1108,21 +1063,18 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 Ok(facts) => facts,
                 Err(mut error) => {
                     error.exit_code = 1;
-                    return Ok(emit_error_with_complete(
-                        &error, args.json, "inspect", false,
-                    ));
+                    return Ok(emit_error(&error, args.json, "inspect"));
                 }
             };
             let complete = facts.complete();
             emit(
-                &Response {
-                    schema: 1,
-                    command: "inspect".into(),
-                    status: if complete { "ok" } else { "findings" }.into(),
+                &Response::new(
+                    "inspect",
+                    if complete { "ok" } else { "findings" },
                     complete,
-                    diagnostics: facts.diagnostics.clone(),
-                    result: facts,
-                },
+                    facts.diagnostics.clone(),
+                    facts,
+                ),
                 args.json,
                 false,
             );
@@ -1166,14 +1118,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             }
             .map_err(|error| (Box::new(error), args.json, "mark".to_owned()))?;
             emit(
-                &Response {
-                    schema: 1,
-                    command: "mark".to_owned(),
-                    status: "ok".to_owned(),
-                    complete: true,
-                    result,
-                    diagnostics: Vec::new(),
-                },
+                &Response::new("mark", "ok", true, Vec::new(), result),
                 args.json,
                 false,
             );
@@ -1222,14 +1167,13 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             // A probe that did not answer leaves part of the report unknown.
             let complete = !unavailable && diagnostics.len() <= 50;
             emit(
-                &Response {
-                    schema: 1,
-                    command: "doctor".to_owned(),
-                    status: status.to_owned(),
+                &Response::new(
+                    "doctor",
+                    status,
                     complete,
+                    diagnostics.iter().take(50).cloned().collect(),
                     result,
-                    diagnostics: diagnostics.iter().take(50).cloned().collect(),
-                },
+                ),
                 args.json,
                 false,
             );
@@ -1284,14 +1228,7 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
                 && result.details.len() == total_details
                 && shown_diagnostics.len() == diagnostics.len();
             emit(
-                &Response {
-                    schema: 1,
-                    command: "sweep".to_owned(),
-                    status: status.to_owned(),
-                    complete,
-                    result,
-                    diagnostics: shown_diagnostics,
-                },
+                &Response::new("sweep", status, complete, shown_diagnostics, result),
                 args.json,
                 false,
             );
