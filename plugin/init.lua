@@ -83,70 +83,24 @@ if not plugin_root then
     .. "dofile passes no module path, and WezTerm's Lua has no debug library to find one.", 0)
 end
 
-local loaded_module_errors = {}
+--- The factory plugin/<name>.lua returns. The modules are factories loaded
+--- from this file's own checkout rather than tables loaded with `require`,
+--- so each load of the plugin, as a config reload is, gets modules with state
+--- of their own.
 local function load_plugin_module(name)
-  local path = plugin_root and (plugin_root .. "/plugin/" .. name .. ".lua") or nil
-  if not path then return nil, "plugin root is unavailable" end
-  local chunk, load_error = loadfile(path)
-  if not chunk then
-    if not loaded_module_errors[name] then
-      loaded_module_errors[name] = true
-      wezterm.log_error("wezterm-attention: cannot load " .. name .. ": " .. tostring(load_error))
-    end
-    return nil, load_error
-  end
-  local ok, module = pcall(chunk)
-  if not ok or type(module) ~= "function" then
-    local message = ok and "module did not return a factory" or module
-    if not loaded_module_errors[name] then
-      loaded_module_errors[name] = true
-      wezterm.log_error("wezterm-attention: cannot load " .. name .. ": " .. tostring(message))
-    end
-    return nil, message
-  end
-  return module
+  local chunk, load_error = loadfile(plugin_root .. "/plugin/" .. name .. ".lua")
+  if not chunk then error("wezterm-attention: cannot load " .. name .. ": " .. tostring(load_error), 0) end
+  return chunk()
 end
-local protocol_path = plugin_root and (plugin_root .. "/protocol/v2.json") or nil
+local protocol_path = plugin_root .. "/protocol/v2.json"
 
-local protocol_factory, protocol_module_error = load_plugin_module("protocol")
-local protocol_api
-if protocol_factory then
-  protocol_api = protocol_factory({ wezterm = wezterm, protocol_path = protocol_path })
-else
-  local function fallback_diagnostic(code, message, context)
-    return { code = code, message = message, context = context or {} }
-  end
-  local function unavailable()
-    return nil, fallback_diagnostic(
-      "probe_unavailable", "protocol module is unavailable")
-  end
-  protocol_api = {
-    protocol = nil,
-    protocol_load_error = protocol_module_error,
-    diagnostic = fallback_diagnostic,
-    invalid = function(message, context)
-      return fallback_diagnostic("record_invalid", message, context)
-    end,
-    parse_wire_value = unavailable,
-    parse_wire_json = unavailable,
-    parse_v2_record = unavailable,
-    parse_v2_record_json = unavailable,
-    now_ms = function() return os.time() * 1000 end,
-    frame_for_now = function(poll_now_ms, frame_count)
-      return math.floor(poll_now_ms / 1000) % frame_count
-    end,
-    is_safe_text = function(value, maximum)
-      return type(value) == "string" and value ~= "" and #value <= maximum
-        and not value:find("[%z\1-\31\127]") and not value:find("\194[\128-\159]")
-    end,
-  }
-end
-local overlays = assert(load_plugin_module("overlays"))({ wezterm = wezterm, now_ms = protocol_api.now_ms })
-local runtime_state = assert(load_plugin_module("runtime"))()
+local protocol_api = load_plugin_module("protocol")({ wezterm = wezterm, protocol_path = protocol_path })
+local overlays = load_plugin_module("overlays")({ wezterm = wezterm, now_ms = protocol_api.now_ms })
+local runtime_state = load_plugin_module("runtime")()
 -- The runtime reads panes through the reader, and the reader asks the runtime
 -- which mux this GUI is, so that one question is looked up when it is asked.
 local runtime
-local reader = assert(load_plugin_module("reader"))({
+local reader = load_plugin_module("reader")({
   M = M,
   wezterm = wezterm,
   defaults = defaults,
@@ -154,10 +108,10 @@ local reader = assert(load_plugin_module("reader"))({
   protocol_api = protocol_api,
   own_mux_identity = function() return runtime.own_mux_identity() end,
 })
-local titles = assert(load_plugin_module("titles"))({
+local titles = load_plugin_module("titles")({
   M = M, protocol_api = protocol_api, overlays = overlays, runtime_state = runtime_state,
 })
-local format = assert(load_plugin_module("format"))({
+local format = load_plugin_module("format")({
   M = M, defaults = defaults, runtime_state = runtime_state, titles = titles,
 })
 runtime = runtime_state.bind({

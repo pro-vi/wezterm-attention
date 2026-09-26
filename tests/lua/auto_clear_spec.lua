@@ -4842,25 +4842,6 @@ test("a retry needs a new live observation when inventory fails", function()
   wezterm.background_child_process=old
 end)
 
-test("a missing protocol module logs once and the plugin still loads", function()
-  local module_path = repo_root .. "/plugin/protocol.lua"
-  local hidden_path = module_path .. ".missing"
-  assert(os.rename(module_path, hidden_path))
-  drain_errors()
-  local ok, fallback = pcall(dofile, repo_root .. "/plugin/init.lua")
-  assert(os.rename(hidden_path, module_path))
-  assert(ok and fallback, "the plugin must load without its v2 protocol module")
-  local sample = fallback._internal.sample_settled_title
-  for _, title in ipairs({ "bell\7", "next\194\133line" }) do
-    sample("fallback-title", "launch", title, nil)
-    assert(sample("fallback-title", "launch", title, nil) == nil,
-      "the fallback text check must refuse control characters too")
-  end
-  local errors = drain_errors()
-  assert(#errors == 1 and errors[1]:find("protocol", 1, true),
-    "the missing module must produce one named log line")
-end)
-
 --- Load a fresh copy of the plugin with the given process environment, which
 --- the plugin reads when it loads.
 local function load_with_environment(environment)
