@@ -4,9 +4,12 @@
 -- own rule.
 --
 -- Run as `wezterm --config-file <this file> show-keys --lua`. The answer is
--- one line in WEZTERM_ATTENTION_VIEW_RESULT:
+-- one line in WEZTERM_ATTENTION_VIEW_RESULT. WEZTERM_ATTENTION_VIEW_QUESTION
+-- picks it: `activity` (the default) for what the tab shows,
 --   ok activity=<type or none> source=<source or none>
--- or `not ok - <error>`.
+-- or `user_review` for whether the review key finds the user's flag,
+--   ok user_review=<true or false>
+-- and a failure is `not ok - <error>`.
 
 local wezterm = require("wezterm")
 
@@ -22,13 +25,17 @@ local function run()
   local internal = assert(require("plugin")._internal, "plugin test seams are unavailable")
   local wire = assert(internal.parse_wire_json(assert(os.getenv("WEZTERM_ATTENTION_VIEW_WIRE"),
     "WEZTERM_ATTENTION_VIEW_WIRE is required")))
-  local view = internal.read_attention_view({
+  local read = {
     kind = "claimed",
     address = wire.address,
     launch_id = wire.launch_id,
     marker_id = wire.address.pane_id,
     cache_key = internal.address_cache_key(wire.address),
-  }, now, { dir = dir, glob = wezterm.glob })
+  }
+  if os.getenv("WEZTERM_ATTENTION_VIEW_QUESTION") == "user_review" then
+    return "user_review=" .. tostring(internal.user_review_present(read, dir))
+  end
+  local view = internal.read_attention_view(read, now, { dir = dir, glob = wezterm.glob })
   return string.format("activity=%s source=%s",
     tostring(view.activity_type or "none"), tostring(view.source or "none"))
 end

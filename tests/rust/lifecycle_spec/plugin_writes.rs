@@ -110,6 +110,23 @@ fn the_users_review_is_refused_where_the_claim_names_another_launch() {
     assert!(!review_path(&setup, "user").exists());
 }
 
+// The command writes the flag and the plugin's review key looks for it, in
+// two languages: each has to name the owner the other does.
+#[test]
+fn the_review_key_finds_the_flag_the_command_sets() {
+    let setup = bound();
+    assert_eq!(
+        mark_clear::plugin_reader_answer(&setup, "user_review"),
+        "user_review=false"
+    );
+    let (code, response) = plugin(&setup, "set-review", LAUNCH, &[]);
+    assert_eq!(code, 0, "{response}");
+    assert_eq!(
+        mark_clear::plugin_reader_answer(&setup, "user_review"),
+        "user_review=true"
+    );
+}
+
 // A withdrawal lights nothing, so the claim does not gate it: a flag the
 // review key finds on disk is one the key can take back.
 #[test]

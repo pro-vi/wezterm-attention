@@ -153,6 +153,13 @@ fn rust_activity(setup: &Setup) -> (RecordAvailability, Option<String>) {
 
 /// The line the plugin reader, run inside a real WezTerm, prints for this pane.
 fn lua_activity(setup: &Setup) -> String {
+    plugin_reader_answer(setup, "activity")
+}
+
+/// What the plugin, run inside a real WezTerm, answers about this pane:
+/// `question` is `activity` for what its tab shows, or `user_review` for
+/// whether the review key finds the user's flag there.
+pub(super) fn plugin_reader_answer(setup: &Setup, question: &str) -> String {
     let (address, _) = pane_address(&setup.env).unwrap();
     let wire =
         json!({"wire":2,"address":address,"launch_id":setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]});
@@ -167,6 +174,7 @@ fn lua_activity(setup: &Setup) -> String {
         .env("WEZTERM_ATTENTION_VIEW_RESULT", &result)
         .env("WEZTERM_ATTENTION_VIEW_NOW", setup.clock.unix)
         .env("WEZTERM_ATTENTION_VIEW_WIRE", wire.to_string())
+        .env("WEZTERM_ATTENTION_VIEW_QUESTION", question)
         .arg("--config-file")
         .arg(root.join("tests/lua/support/read_attention_view.lua"))
         .args(["show-keys", "--lua"])

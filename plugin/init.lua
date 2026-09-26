@@ -640,6 +640,7 @@ M._internal = {
   address_cache_key = protocol_api.address_cache_key,
   resolve_pane_read = reader.resolve_pane_read,
   read_attention_view = reader.read_attention_view,
+  user_review_present = runtime.user_review_present,
   attention_cache = runtime_state.attention_cache,
 }
 
