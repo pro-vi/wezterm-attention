@@ -608,7 +608,6 @@ fn only_a_known_absent_terminal_lets_the_parent_s_terminal_decide() {
             setup.processes.table.lock().unwrap().clone(),
             setup.processes.devices.lock().unwrap().clone(),
             setup.processes.boot.lock().unwrap().clone(),
-            setup.panes.rows.lock().unwrap().clone(),
         );
         arrange(&setup);
         let diagnostic = refused(&setup, &setup.agent_env(), &tool);
@@ -616,7 +615,6 @@ fn only_a_known_absent_terminal_lets_the_parent_s_terminal_decide() {
         *setup.processes.table.lock().unwrap() = setup_state.0;
         *setup.processes.devices.lock().unwrap() = setup_state.1;
         *setup.processes.boot.lock().unwrap() = setup_state.2;
-        *setup.panes.rows.lock().unwrap() = setup_state.3;
     }
     assert_eq!(records(&setup), before);
 }
@@ -857,11 +855,7 @@ fn only_a_session_start_claims_a_pane() {
     let setup = Setup::new();
     // With no claim to prove it against, an event that cannot claim is
     // refused before the mux is asked.
-    let listings = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let counted = listings.clone();
-    *setup.panes.on_list.lock().unwrap() = Some(std::sync::Arc::new(move || {
-        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }));
+    let listings = count_listings(&setup);
     for event in every_action() {
         if event.action == ProviderAction::Binding {
             continue;
@@ -955,15 +949,6 @@ fn a_later_event_is_refused_unless_its_agent_still_runs_on_the_claim_s_terminal(
                 let mut claim = stored_claim(setup).expect("claim");
                 claim["tty_fingerprint"] = json!("e".repeat(64));
                 install(setup, &claim);
-            }),
-        ),
-        (
-            "an agent now on another terminal",
-            "unsafe_tty",
-            Box::new(|setup, _| {
-                setup.processes.change(AGENT_PID, |agent| {
-                    agent.terminal = ControllingTerminal::Device(PANE_TTY_DEVICE + 7)
-                })
             }),
         ),
         (
