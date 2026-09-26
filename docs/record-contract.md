@@ -127,7 +127,9 @@ A provider event finds its launch in this order, and stops at the first rule tha
    device at the claim's `tty_path`, with the claim's `tty_fingerprint` (`unsafe_tty`); and the
    socket must still be the incarnation the claim was made on (`incarnation_changed`). The listing
    that made the claim proved that terminal is the pane's, and while its owner still runs on it,
-   nothing that listing would add has changed.
+   the one thing a listing would add is whether the pane is still open: an agent that outlives its
+   closed pane keeps writing to that pane's records until its terminal goes away, and nothing
+   displays them.
 4. A session start then claims, under the pane's claim lock and no other lock, after reading the
    same host again. No claim: a new self-owned claim with a new launch id. The same process's own
    claim: kept as it is, not rewritten. Another process's claim: replaced with a new launch id only
