@@ -91,25 +91,6 @@ return function(context)
     end
     return true
   end
-  local function valid_native_hooks(parsed)
-    if type(parsed.native_hooks) ~= "table" then return false end
-    local providers = {}
-    for _, provider in ipairs(parsed.enums.providers) do
-      providers[provider] = true
-      if type(parsed.native_hooks[provider]) ~= "table" or next(parsed.native_hooks[provider]) == nil then return false end
-    end
-    for provider, hooks in pairs(parsed.native_hooks) do
-      if not providers[provider] then return false end
-      for event, declaration in pairs(hooks) do
-        if type(event) ~= "string" or #event == 0 or #event > parsed.limits.safe_label_max_bytes
-            or has_control_character(event) or type(declaration) ~= "table"
-            or type(declaration.native_event) ~= "string" or #declaration.native_event == 0
-            or (declaration.registration ~= "register" and declaration.registration ~= "ignored") then return false end
-        for key in pairs(declaration) do if key ~= "native_event" and key ~= "registration" then return false end end
-      end
-    end
-    return true
-  end
   if protocol_path then
     local raw, read_err = read_all(protocol_path)
     if raw then
@@ -127,7 +108,7 @@ return function(context)
           and type(parsed.limits.canonical_decimal_max_digits) == "number"
           and type(parsed.limits.safe_label_max_bytes) == "number"
           and type(parsed.enums.providers) == "table"
-          and valid_tool_classification(parsed) and valid_native_hooks(parsed) then
+          and valid_tool_classification(parsed) then
         protocol = parsed
       else
         protocol_load_error = parse_err or "manifest is not a protocol object"
