@@ -50,6 +50,7 @@ type Report = (message: string) => void;
 
 type WriterResult =
 	| { kind: "succeeded" }
+	| { kind: "outside_pane" }
 	| { kind: "failed"; message: string };
 
 // Node decodes the environment as UTF-8 and puts U+FFFD where the bytes were
@@ -140,10 +141,15 @@ function writerStateRootRefusal(): string | undefined {
 }
 
 // Without the attention command nothing records what Pi is doing: the tab
-// shows nothing for it, and the one warning below says why.
-function writerExecutable(): { kind: "ready"; executable: string } | { kind: "failed"; message: string } {
+// shows nothing for it, and the one warning below says why. Outside a WezTerm
+// pane there is no tab, so an unset root there is not worth a warning.
+function writerExecutable():
+	| { kind: "ready"; executable: string }
+	| { kind: "outside_pane" }
+	| { kind: "failed"; message: string } {
 	const root = process.env.WEZTERM_ATTENTION_ROOT;
 	if (root === undefined) {
+		if (!process.env.WEZTERM_PANE) return { kind: "outside_pane" };
 		return {
 			kind: "failed",
 			message: "wezterm-attention: WEZTERM_ATTENTION_ROOT is not set, so nothing is recorded; build the attention command with scripts/install-cli.sh",

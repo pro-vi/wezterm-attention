@@ -335,6 +335,18 @@ test("writer: an unset checkout root records nothing and says so once", async ()
 	expect(notifications[0]?.level).toBe("warning");
 });
 
+// Pi runs in other terminals too, where there is no tab to show anything on.
+test("writer: outside a WezTerm pane an unset checkout root records nothing and says nothing", async () => {
+	const dir = freshDir("wez-outside-pane-");
+	const { lifecycle, emit } = loadExt();
+	await lifecycle["session_start"]!();
+	await lifecycle["agent_start"]!();
+	await emit("notify");
+	await lifecycle["session_shutdown"]!();
+	expect(readdirSync(dir)).toEqual([]);
+	expect(notifications).toEqual([]);
+});
+
 test("writer: a configured checkout without a writer logs once", async () => {
 	process.env.WEZTERM_ATTENTION_ROOT = tempDir("wez-root-missing-");
 	const { lifecycle } = loadExt();
