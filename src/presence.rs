@@ -173,7 +173,7 @@ pub(crate) fn pane_evidence(
     let Some(panes) = panes else {
         return unavailable();
     };
-    let socket_path = match recorded_socket(root, address) {
+    let socket_path = match recorded_socket(root, &address.realm_id, &address.incarnation_id) {
         Ok(Some(socket_path)) => socket_path,
         Ok(None) => return unavailable(),
         Err(error) => {
@@ -194,17 +194,21 @@ pub(crate) fn pane_evidence(
     presence_at_socket(socket_path, address, Some(panes), processes, diagnostics)
 }
 
-/// The socket a pane's realm record names, when both the realm and this
-/// incarnation are recorded.
-pub(crate) fn recorded_socket(root: &Path, address: &PaneAddress) -> Result<Option<String>> {
-    let Some(realm) = read_record_at(root, "realm", &RecordIdentity::realm(&address.realm_id))?
-    else {
+/// The socket a realm's record names, when both the realm and its
+/// incarnation `incarnation_id` are recorded: the server identity a pane's
+/// hooks publish, and every reader starts from.
+pub(crate) fn recorded_socket(
+    root: &Path,
+    realm_id: &str,
+    incarnation_id: &str,
+) -> Result<Option<String>> {
+    let Some(realm) = read_record_at(root, "realm", &RecordIdentity::realm(realm_id))? else {
         return Ok(None);
     };
     let incarnation = read_record_at(
         root,
         "incarnation",
-        &RecordIdentity::incarnation(&address.realm_id, &address.incarnation_id),
+        &RecordIdentity::incarnation(realm_id, incarnation_id),
     )?;
     Ok(incarnation.and(realm["socket_path"].as_str().map(str::to_owned)))
 }
@@ -213,7 +217,7 @@ pub(crate) fn recorded_socket(root: &Path, address: &PaneAddress) -> Result<Opti
 /// recorded socket, when it still carries this incarnation. None when it would
 /// answer without listing.
 pub(crate) fn realm_socket(root: &Path, address: &PaneAddress) -> Option<String> {
-    let socket = recorded_socket(root, address).ok()??;
+    let socket = recorded_socket(root, &address.realm_id, &address.incarnation_id).ok()??;
     matches!(
         recorded_server(&socket, &address.realm_id, &address.incarnation_id),
         RecordedServer::Current

@@ -2307,7 +2307,7 @@ fn apply_provider_event_inner(
         result.diagnostic = event.diagnostic.clone();
         return Ok(result);
     }
-    if observation.len() != 20 || !observation.bytes().all(|byte| byte.is_ascii_digit()) {
+    if !crate::protocol::ns20_text(observation) {
         return Err(AttentionError::new(
             "record_invalid",
             "observation is invalid",

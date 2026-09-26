@@ -8,14 +8,14 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::identity::{PaneAddress, socket_identity};
+use crate::identity::{PaneAddress, parse_marker_id, socket_identity};
 use crate::presence::{
     FailedListingOncePerSocket, ListOncePerSocket, PaneEvidence, ProbeOncePerAssembly,
     kept_history_code, pane_evidence, reader_presence, recorded_socket,
 };
 use crate::protocol::{
-    AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, eligible_subagent_presence, hex64_text,
-    manifest, sha256_hex,
+    AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, elapsed_beyond,
+    eligible_subagent_presence, hex64_text, manifest, ns20_text, sha256_hex,
 };
 use crate::query::{
     FileStamp, collect_binding_files, collect_state_files, name_address, naming_record,
@@ -396,15 +396,10 @@ fn environment_probe(
             return "finding";
         }
     };
-    let published = read_record_at(root, "realm", &RecordIdentity::realm(&realm_id))
-        .is_ok_and(|record| record.is_some())
-        && read_record_at(
-            root,
-            "incarnation",
-            &RecordIdentity::incarnation(&realm_id, &incarnation_id),
-        )
-        .is_ok_and(|record| record.is_some());
-    if published {
+    if matches!(
+        recorded_socket(root, &realm_id, &incarnation_id),
+        Ok(Some(_))
+    ) {
         "healthy"
     } else if crate::launch::self_claim_refusal(environment, inspector).is_none() {
         "unobserved"
@@ -418,7 +413,7 @@ fn environment_probe(
 }
 
 fn ns20(value: &str, code: &str) -> Result<u128> {
-    if value.len() != 20 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+    if !ns20_text(value) {
         return Err(AttentionError::new(code, "timestamp is invalid"));
     }
     value
@@ -427,15 +422,14 @@ fn ns20(value: &str, code: &str) -> Result<u128> {
 }
 
 fn wall_age_exceeds(now: &str, written: &str, interval: u128) -> Result<bool> {
-    let now = ns20(now, "record_invalid")?;
-    let written = ns20(written, "record_invalid")?;
-    if now < written {
-        return Err(AttentionError::new(
+    ns20(now, "record_invalid")?;
+    ns20(written, "record_invalid")?;
+    elapsed_beyond(now, written, interval).ok_or_else(|| {
+        AttentionError::new(
             "clock_skew",
             "retention timestamp is newer than current UTC",
-        ));
-    }
-    Ok(now > written + interval)
+        )
+    })
 }
 
 /// Whether a child's presence still counts, by the rule every reader
@@ -978,7 +972,7 @@ fn collect_tab_orders(
         let mut addresses: BTreeSet<PaneAddress> = BTreeSet::new();
         let mut without_address = false;
         for marker_id in window.tabs.iter().flat_map(|tab| tab.marker_ids.iter()) {
-            match v2_marker_address(marker_id) {
+            match parse_marker_id(marker_id) {
                 Some(address) => {
                     addresses.insert(address);
                 }
@@ -1000,7 +994,10 @@ fn collect_tab_orders(
                         // decided on. A pane that leaves undecided leaves this
                         // file's fate undecided too; a server that may be
                         // gone is kept history, which decides nothing.
-                        let observed = if matches!(recorded_socket(root, address), Ok(None)) {
+                        let observed = if matches!(
+                            recorded_socket(root, &address.realm_id, &address.incarnation_id),
+                            Ok(None)
+                        ) {
                             NOT_RECORDED.to_owned()
                         } else {
                             let (observed, server_gone) =
@@ -1092,20 +1089,6 @@ fn collect_tab_orders(
         details.push(detail);
     }
     failed
-}
-
-/// The address a published `v2:<realm>:<incarnation>:<pane>` marker id names.
-/// The reader has already checked the shape; a bare decimal id has no address.
-fn v2_marker_address(marker_id: &str) -> Option<PaneAddress> {
-    let mut parts = marker_id.strip_prefix("v2:")?.splitn(3, ':');
-    let realm_id = parts.next()?.to_owned();
-    let incarnation_id = parts.next()?.to_owned();
-    let pane_id = parts.next()?.to_owned();
-    Some(PaneAddress {
-        realm_id,
-        incarnation_id,
-        pane_id,
-    })
 }
 
 /// Gives every binding in `files` its session index entry, and marks the index

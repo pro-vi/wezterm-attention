@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::identity::{PaneAddress, pane_address};
+use crate::identity::{PaneAddress, pane_address, pane_socket};
 use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, manifest};
 use crate::records::{
     CommitPlan, LOCK_TIMEOUT, RecordIdentity, Replacement, claim_lock, commit, mkdir_private,
@@ -261,13 +261,12 @@ pub fn claim_launch_at_tty(
         "claim",
         &write.identity(),
         |existing| {
-            let (locked_address, _) = pane_address(env)?;
-            if locked_address != address {
-                return Err(AttentionError::new(
-                    "incarnation_changed",
-                    "mux socket changed before claim commit",
-                ));
-            }
+            same_incarnation(
+                pane_socket(env)?,
+                &address.realm_id,
+                &address.incarnation_id,
+                "before claim commit",
+            )?;
             let (disposition, selected, writes) = match existing {
                 Some(current) => {
                     write.check_address(&current)?;
@@ -347,6 +346,26 @@ pub fn claim_launch_at_tty(
     Ok(selected)
 }
 
+/// Refuse to go on once the mux socket at `socket_path` no longer carries the
+/// incarnation `realm_id` and `incarnation_id` name: a server that took the
+/// socket's place is another server, and what was checked or decided for the
+/// old one says nothing of it. `moment` says when the change was found.
+fn same_incarnation(
+    socket_path: &str,
+    realm_id: &str,
+    incarnation_id: &str,
+    moment: &str,
+) -> Result<()> {
+    let (current_realm, current_incarnation, _) = crate::identity::socket_identity(socket_path)?;
+    if current_realm != realm_id || current_incarnation != incarnation_id {
+        return Err(AttentionError::new(
+            "incarnation_changed",
+            format!("mux socket changed {moment}"),
+        ));
+    }
+    Ok(())
+}
+
 /// Publish a committed claim to the terminal, leaving the caller to decide what
 /// a failure means for the claim it already wrote.
 fn publish_claim(
@@ -357,13 +376,12 @@ fn publish_claim(
     fingerprint: &str,
     launch_id: &str,
 ) -> Result<()> {
-    let (current_address, _) = pane_address(env)?;
-    if current_address != *address {
-        return Err(AttentionError::new(
-            "incarnation_changed",
-            "mux socket changed before publication",
-        ));
-    }
+    same_incarnation(
+        pane_socket(env)?,
+        &address.realm_id,
+        &address.incarnation_id,
+        "before publication",
+    )?;
     let bytes = publication_bytes(address, Some(launch_id))?;
     ports.tty.write(tty_path, &bytes, fingerprint)
 }
@@ -418,13 +436,12 @@ pub fn publish_current(
     let fingerprint = ports.tty.fingerprint(&tty_path)?;
     let launch_id = with_pane_claim(&root, &address, |claim| {
         let launch_id = claimed_launch(claim.as_ref(), &address, &tty_path, &fingerprint);
-        let (current_address, _) = pane_address(env)?;
-        if current_address != address {
-            return Err(AttentionError::new(
-                "incarnation_changed",
-                "mux socket changed before publication",
-            ));
-        }
+        same_incarnation(
+            pane_socket(env)?,
+            &address.realm_id,
+            &address.incarnation_id,
+            "before publication",
+        )?;
         ports.tty.write(
             &tty_path,
             &publication_bytes(&address, launch_id.as_deref())?,
@@ -449,13 +466,12 @@ pub fn publish_realm(
     let root = state_root(env)?;
     let (realm_id, incarnation_id, _) = crate::identity::socket_identity(socket_path)?;
     let rows = ports.panes.list(socket_path)?;
-    let (current_realm, current_incarnation, _) = crate::identity::socket_identity(socket_path)?;
-    if (current_realm, current_incarnation) != (realm_id.clone(), incarnation_id.clone()) {
-        return Err(AttentionError::new(
-            "incarnation_changed",
-            "mux socket changed during enumeration",
-        ));
-    }
+    same_incarnation(
+        socket_path,
+        &realm_id,
+        &incarnation_id,
+        "during enumeration",
+    )?;
     let mut report = PublishReport {
         attempted: rows.len(),
         published: 0,
@@ -478,14 +494,12 @@ pub fn publish_realm(
             };
             with_pane_claim(&root, &address, |claim| {
                 let launch_id = claimed_launch(claim.as_ref(), &address, tty_name, &fingerprint);
-                let (current_realm, current_incarnation, _) =
-                    crate::identity::socket_identity(socket_path)?;
-                if current_realm != realm_id || current_incarnation != incarnation_id {
-                    return Err(AttentionError::new(
-                        "incarnation_changed",
-                        "mux socket changed before pane publication",
-                    ));
-                }
+                same_incarnation(
+                    socket_path,
+                    &realm_id,
+                    &incarnation_id,
+                    "before pane publication",
+                )?;
                 ports.tty.write(
                     tty_name,
                     &publication_bytes(&address, launch_id.as_deref())?,
@@ -567,7 +581,7 @@ fn asserted_host(env: &BTreeMap<String, String>) -> Result<i32> {
              `WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event ...`",
         )
     })?;
-    if value.is_empty() || value.starts_with('0') || !value.bytes().all(|b| b.is_ascii_digit()) {
+    if !crate::protocol::pid_text(value) {
         return Err(parent_unverified("WEZTERM_ATTENTION_HOST_PID is not a pid"));
     }
     value
@@ -706,10 +720,7 @@ impl HostProof {
         address: &PaneAddress,
     ) -> Result<Self> {
         let (owner, reading) = read_owner(env, ports.processes)?;
-        let socket = env.get("WEZTERM_UNIX_SOCKET").ok_or_else(|| {
-            AttentionError::new("identity_unpublished", "WEZTERM_UNIX_SOCKET is missing")
-        })?;
-        let rows = ports.panes.list(socket)?;
+        let rows = ports.panes.list(pane_socket(env)?)?;
         let mut listed = rows.iter().filter(|row| row.pane_id == address.pane_id);
         let (Some(row), None) = (listed.next(), listed.next()) else {
             return Err(AttentionError::new(
@@ -727,13 +738,12 @@ impl HostProof {
             ));
         }
         let tty_fingerprint = ports.tty.fingerprint(&tty_path)?;
-        let (current, _) = pane_address(env)?;
-        if current != *address {
-            return Err(AttentionError::new(
-                "incarnation_changed",
-                "mux socket changed while the agent was being checked",
-            ));
-        }
+        same_incarnation(
+            pane_socket(env)?,
+            &address.realm_id,
+            &address.incarnation_id,
+            "while the agent was being checked",
+        )?;
         let proof = Self {
             owner,
             tty_path,
@@ -815,13 +825,12 @@ impl HostProof {
                 "the agent no longer runs on the terminal the pane was proven to use",
             ));
         }
-        let (current, _) = pane_address(env)?;
-        if current != *address {
-            return Err(AttentionError::new(
-                "incarnation_changed",
-                "mux socket changed while the agent was being checked",
-            ));
-        }
+        same_incarnation(
+            pane_socket(env)?,
+            &address.realm_id,
+            &address.incarnation_id,
+            "while the agent was being checked",
+        )?;
         Ok(reading.foreground)
     }
 

@@ -936,9 +936,7 @@ pub(crate) fn gui_process_exited(socket_path: &str) -> bool {
         .file_name()
         .and_then(OsStr::to_str)
         .and_then(|name| name.strip_prefix("gui-sock-"))
-        .filter(|pid| {
-            !pid.is_empty() && !pid.starts_with('0') && pid.bytes().all(|b| b.is_ascii_digit())
-        })
+        .filter(|pid| crate::protocol::pid_text(pid))
         .and_then(|pid| pid.parse::<libc::pid_t>().ok())
     else {
         return false;

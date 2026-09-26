@@ -6,14 +6,16 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::identity::PaneAddress;
-use crate::identity::socket_identity;
+use crate::identity::{PaneAddress, parse_marker_id, socket_identity};
 use crate::observations::{LifecycleAvailability, LifecycleSnapshot, LifecycleView};
 use crate::presence::{
     AssemblyListings, PaneEvidence, RecordedServer, ServerState, SocketChange, SpawnSpend,
     presence_at_socket, reader_presence, realm_socket, recorded_server, server_state,
 };
-use crate::protocol::{AttentionError, Diagnostic, Result, hex64_text};
+use crate::protocol::{
+    AttentionError, Diagnostic, Result, canonical_decimal_text, elapsed_beyond, hex64_text,
+    ns20_text,
+};
 use crate::records::{
     BindingState, FileRecords, RecordIdentity, RecordRead, RecordReader, agents_dir, binding_path,
     ends_binding, incarnation_path, read_record, read_record_at, read_record_typed, reviews_dir,
@@ -548,7 +550,7 @@ fn read_pane_facts_once(
         ));
     }
     let now = match clock.unix_ns20() {
-        Ok(value) if value.len() == 20 && value.bytes().all(|b| b.is_ascii_digit()) => Some(value),
+        Ok(value) if ns20_text(&value) => Some(value),
         _ => {
             diagnostics.push(
                 Diagnostic::new("probe_unavailable", "inspection UTC is unavailable")
@@ -594,15 +596,16 @@ fn read_pane_facts_once(
         } else if let Some(record) = &activity.record
             && let Some(ttl) = record["ttl_ms"].as_u64()
         {
-            match now.as_deref().zip(record["written_at_unix_ns"].as_str()) {
-                Some((now, written)) if now >= written => {
-                    if now.parse::<u128>().unwrap()
-                        > written.parse::<u128>().unwrap() + u128::from(ttl) * 1_000_000
-                    {
-                        activity.availability = A::Expired;
-                    }
-                }
-                _ => {
+            let expired = now
+                .as_deref()
+                .zip(record["written_at_unix_ns"].as_str())
+                .and_then(|(now, written)| {
+                    elapsed_beyond(now, written, u128::from(ttl) * 1_000_000)
+                });
+            match expired {
+                Some(true) => activity.availability = A::Expired,
+                Some(false) => {}
+                None => {
                     activity = RecordFacet::empty(A::Unavailable);
                     activity.diagnostics.push(
                         Diagnostic::new("clock_skew", "activity age is unavailable or negative")
@@ -1839,20 +1842,11 @@ fn assemble_bindings(
     let mut admitted_rows = admitted_rows.into_iter();
     rows.retain(|_| admitted_rows.next().unwrap_or(false));
     rows.sort_by(|left, right| {
-        (
-            &left.address.realm_id,
-            &left.address.incarnation_id,
-            &left.address.pane_id,
-            &left.launch_id,
-            &left.binding_id,
-        )
-            .cmp(&(
-                &right.address.realm_id,
-                &right.address.incarnation_id,
-                &right.address.pane_id,
-                &right.launch_id,
-                &right.binding_id,
-            ))
+        (&left.address, &left.launch_id, &left.binding_id).cmp(&(
+            &right.address,
+            &right.launch_id,
+            &right.binding_id,
+        ))
     });
     Ok((rows, diagnostics, listings.spent()))
 }
@@ -2154,7 +2148,7 @@ fn read_tab_publication(
         None => (None, stem),
         _ => (None, ""),
     };
-    let window_id = canonical_decimal(id, limits.canonical_decimal_max_digits)
+    let window_id = canonical_decimal_text(id, limits.canonical_decimal_max_digits)
         .then(|| id.parse::<u64>().ok())
         .flatten();
     let Some(window_id) = window_id else {
@@ -2185,34 +2179,10 @@ fn read_tab_publication(
     }
 }
 
-/// Digits with no leading zero, the way every ID this project writes is spelled.
-fn canonical_decimal(text: &str, max_digits: usize) -> bool {
-    !text.is_empty()
-        && text.len() <= max_digits
-        && text.bytes().all(|byte| byte.is_ascii_digit())
-        && (text.len() == 1 || !text.starts_with('0'))
-}
-
 /// What `gui_tab_pane_ids` publishes: a v1 marker id, or the v2 cache key
 /// `address_cache_key` builds after a poll has identified the pane.
 fn published_marker_id(text: &str, pane_id_max_digits: usize) -> bool {
-    if canonical_decimal(text, pane_id_max_digits) {
-        return true;
-    }
-    const HEX: usize = 64;
-    let Some(rest) = text.strip_prefix("v2:") else {
-        return false;
-    };
-    let realm_end = HEX;
-    let incarnation_start = HEX + 1;
-    let incarnation_end = incarnation_start + HEX;
-    let pane_start = incarnation_end + 1;
-    rest.len() >= pane_start
-        && rest.as_bytes()[realm_end] == b':'
-        && rest.as_bytes()[incarnation_end] == b':'
-        && hex64_text(&rest[..realm_end])
-        && hex64_text(&rest[incarnation_start..incarnation_end])
-        && canonical_decimal(&rest[pane_start..], pane_id_max_digits)
+    canonical_decimal_text(text, pane_id_max_digits) || parse_marker_id(text).is_some()
 }
 
 fn tab_publication(
