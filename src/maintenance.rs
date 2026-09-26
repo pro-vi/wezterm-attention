@@ -9,14 +9,16 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::identity::{PaneAddress, socket_identity};
+use crate::presence::{
+    FailedListingOncePerSocket, ListOncePerSocket, PaneEvidence, ProbeOncePerAssembly,
+    kept_history_code, pane_evidence, reader_presence, recorded_socket,
+};
 use crate::protocol::{
     AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, hex64_text, manifest, sha256_hex,
 };
 use crate::query::{
-    FileStamp, ListOncePerSocket, PaneEvidence, ProbeOncePerAssembly, collect_binding_files,
-    collect_state_files, kept_history_code, name_address, naming_record, pane_evidence,
-    read_bindings_with_ports, read_tab_publications, reader_presence, record_address,
-    recorded_socket, state_relative,
+    FileStamp, collect_binding_files, collect_state_files, name_address, naming_record,
+    read_bindings_with_ports, read_tab_publications, record_address, state_relative,
 };
 use crate::records::{
     BINDING_FILE, BindingState, CommitPlan, FileRecords, RecordIdentity, RecordRead, Replacement,
@@ -1164,35 +1166,6 @@ fn session_entries_below(root: &Path, dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// An apply's pane lister: a listing that failed answers every later ask
-/// about that socket for the rest of the run, and one that answered is taken
-/// fresh each time. A failed listing leaves a pane undecided and so removes
-/// nothing, while each ask against a mux that accepts and never answers
-/// waits out the listing deadline; asking once per pane would make an apply's
-/// wait grow with the panes on that socket.
-struct FailedListingOncePerSocket<'a> {
-    inner: &'a dyn PaneLister,
-    failed: std::sync::Mutex<BTreeMap<String, AttentionError>>,
-}
-
-impl PaneLister for FailedListingOncePerSocket<'_> {
-    fn list(&self, socket_path: &str) -> Result<Vec<crate::wezterm::PaneRow>> {
-        if let Some(error) = self
-            .failed
-            .lock()
-            .ok()
-            .and_then(|failed| failed.get(socket_path).cloned())
-        {
-            return Err(error);
-        }
-        let answer = self.inner.list(socket_path);
-        if let (Err(error), Ok(mut failed)) = (&answer, self.failed.lock()) {
-            failed.insert(socket_path.to_owned(), error.clone());
-        }
-        answer
-    }
-}
-
 /// What one sweep run decides with, for the steps that take it whole.
 struct SweepRun<'a> {
     root: &'a Path,
@@ -1495,10 +1468,7 @@ pub fn sweep(
     // takes a fresh look for each decision, except where a socket's listing
     // already failed.
     let listed_once = ListOncePerSocket::new(panes);
-    let failed_once = FailedListingOncePerSocket {
-        inner: panes,
-        failed: std::sync::Mutex::new(BTreeMap::new()),
-    };
+    let failed_once = FailedListingOncePerSocket::new(panes);
     let probed_once = processes.filter(|_| !apply).map(ProbeOncePerAssembly::new);
     let panes: &dyn PaneLister = if apply { &failed_once } else { &listed_once };
     let processes = probed_once
