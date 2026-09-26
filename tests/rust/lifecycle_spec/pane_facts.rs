@@ -69,7 +69,7 @@ fn inspect_is_scoped_read_only_and_keeps_raw_activity_after_acknowledgement() {
         &event("claude", "Stop", "facts", json!({})),
         "00000000000000000400",
     );
-    apply_mark_review(&setup.env, "fixture-owner", false).unwrap();
+    apply_mark_review(&setup.env, "fixture-owner").unwrap();
     setup.apply(
         &event("claude", "SessionEnd", "facts", json!({"reason":"other"})),
         "00000000000000000500",
@@ -123,7 +123,10 @@ fn inspect_is_scoped_read_only_and_keeps_raw_activity_after_acknowledgement() {
         read(&setup).binding_end.record.unwrap()["operation_id"],
         operation
     );
+    // The end of an earlier binding of the same id: older, and naming that
+    // binding's event rather than this one's.
     end["observed_mono_ns"] = json!("00000000000000000001");
+    end["binding_event_id"] = json!(Uuid::new_v4().to_string());
     atomic_replace(&dir.join("end.json"), &end).unwrap();
     assert_eq!(
         read(&setup).binding_end.availability,
@@ -372,7 +375,7 @@ fn inspector_cli_validates_scope_before_io_and_uses_public_shapes() {
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
     let run = |scope: &Value| {
         let mut child = rust_command(&setup)
-            .env("WEZTERM_EXECUTABLE", &fake)
+            .env("PATH", fake.parent().unwrap())
             .args(["inspect", "--scope", "-", "--json"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

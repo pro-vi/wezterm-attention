@@ -62,6 +62,14 @@ return function(context)
     return value
   end
 
+  --- Rust's char::is_control: U+0000-U+001F, U+007F and U+0080-U+009F. In
+  --- UTF-8 every C1 character is 0xC2 followed by 0x80-0x9F, and 0xC2 is never
+  --- a continuation byte, so the byte test cannot match inside another
+  --- character.
+  local function has_control_character(value)
+    return value:find("[%z\1-\31\127]") ~= nil or value:find("\194[\128-\159]") ~= nil
+  end
+
   local protocol
   local protocol_load_error
   local function valid_tool_classification(parsed)
@@ -76,7 +84,7 @@ return function(context)
       if not providers[provider] or type(tools) ~= "table" then return false end
       for name, class in pairs(tools) do
         if type(name) ~= "string" or #name == 0 or #name > parsed.limits.safe_label_max_bytes
-            or name:find("[%z\1-\31\127]") or type(class) ~= "table" then return false end
+            or has_control_character(name) or type(class) ~= "table" then return false end
         for key in pairs(class) do if key ~= "tool_class" and key ~= "question_mode" then return false end end
         if class.tool_class == "question" then
           if class.question_mode ~= "blocking" and class.question_mode ~= "nonblocking" then return false end
@@ -96,7 +104,7 @@ return function(context)
       if not providers[provider] then return false end
       for event, declaration in pairs(hooks) do
         if type(event) ~= "string" or #event == 0 or #event > parsed.limits.safe_label_max_bytes
-            or event:find("[%z\1-\31\127]") or type(declaration) ~= "table"
+            or has_control_character(event) or type(declaration) ~= "table"
             or type(declaration.native_event) ~= "string" or #declaration.native_event == 0
             or (declaration.registration ~= "register" and declaration.registration ~= "ignored") then return false end
         for key in pairs(declaration) do if key ~= "native_event" and key ~= "registration" then return false end end
@@ -180,7 +188,7 @@ return function(context)
     return type(value) == "string"
       and #value > 0
       and #value <= max_bytes
-      and not value:find("[%z\1-\31\127]")
+      and not has_control_character(value)
   end
 
   local U32 = 4294967296
@@ -582,10 +590,19 @@ return function(context)
     return parsed
   end
 
-  local function parse_wire_json(content)
-    if type(content) ~= "string" or content == "" then
-      return nil, invalid("WEZTERM_ATTENTION must be non-empty JSON")
-    end
+  -- Every wire field is fixed-width, so the writer's value is a few hundred
+  -- bytes. A user var is whatever the pane last printed, though, and it is read
+  -- on every poll; this bound stops a printed megabyte from being scanned each
+  -- time while leaving room for any whitespace a JSON encoder might add.
+  local wire_max_bytes = 4096
+
+  -- Every pane's user var is parsed on every poll, and it changes only when the
+  -- pane publishes again. The answer depends on nothing but the text, so it is
+  -- kept per text; the table is emptied when it grows past any plausible
+  -- number of panes rather than tracking which texts are still in use.
+  local parsed_wires, parsed_wire_count = {}, 0
+
+  local function parse_wire_text(content)
     if json_contains_null_literal(content) then
       return nil, invalid("WEZTERM_ATTENTION contains unsupported null")
     end
@@ -594,6 +611,42 @@ return function(context)
       return nil, invalid("WEZTERM_ATTENTION is not valid JSON", { detail = tostring(parse_err) })
     end
     return parse_wire_value(value)
+  end
+
+  local function parse_wire_json(content)
+    if type(content) ~= "string" or content == "" then
+      return nil, invalid("WEZTERM_ATTENTION must be non-empty JSON")
+    end
+    if #content > wire_max_bytes then
+      return nil, invalid("WEZTERM_ATTENTION is longer than any identity")
+    end
+    local known = parsed_wires[content]
+    if known then return known.wire, known.diagnostic end
+    local wire, wire_diagnostic = parse_wire_text(content)
+    if parsed_wire_count >= 1024 then parsed_wires, parsed_wire_count = {}, 0 end
+    parsed_wires[content] = { wire = wire, diagnostic = wire_diagnostic }
+    parsed_wire_count = parsed_wire_count + 1
+    return wire, wire_diagnostic
+  end
+
+  -- A claim names the process that owns it with all four owner fields or
+  -- none. One with only some is neither a shell claim nor a self-owned one.
+  local claim_owner_fields = { "owner_pid", "owner_started_sec", "owner_started_usec", "owner_boot_session_id" }
+
+  local function claim_owner_is_whole(value)
+    local present = 0
+    for _, field in ipairs(claim_owner_fields) do
+      if value[field] ~= nil then present = present + 1 end
+    end
+    if present == 0 then return true end
+    if present ~= #claim_owner_fields then return false end
+    -- Canonical decimals have no leading zeros, so length orders them first.
+    local function at_most(token, maximum)
+      return #token < #maximum or (#token == #maximum and token <= maximum)
+    end
+    return value.owner_pid ~= "0" and at_most(value.owner_pid, "2147483647")
+      and at_most(value.owner_started_sec, "18446744073709551615")
+      and at_most(value.owner_started_usec, "999999")
   end
 
   local function parse_v2_record(value, expected_kind)
@@ -623,6 +676,9 @@ return function(context)
     end
     if kind == "review" and sha256(parsed.owner_id) ~= parsed.owner_key then
       return nil, invalid("review owner_key does not match owner_id")
+    end
+    if kind == "claim" and not claim_owner_is_whole(parsed) then
+      return nil, invalid("claim names only part of its owner")
     end
     if kind == "lifecycle_snapshot" and not validate_lifecycle(parsed) then return nil, invalid("lifecycle snapshot violates its contract") end
     return parsed
@@ -763,7 +819,16 @@ return function(context)
     }, "/")
   end
 
-  local function read_record_file(path, expected_kind)
+  -- The bytes, and the kind they were parsed as, that each parsed record came
+  -- from. A poll reads every record of every pane again, and nearly all of them
+  -- are unchanged since the last poll; handing back the previous record for the
+  -- same bytes skips the parse and validation, which for a full lifecycle
+  -- snapshot is most of what a poll costs. Weak keys: a record nobody holds any
+  -- more takes its bytes with it.
+  local record_source_text = setmetatable({}, { __mode = "k" })
+  local record_source_kind = setmetatable({}, { __mode = "k" })
+
+  local function read_record_file(path, expected_kind, previous)
     local limits = protocol and protocol.limits
     if not limits then return nil, diagnostic("probe_unavailable", "protocol limits unavailable"), "unavailable" end
     local maximum = expected_kind == "lifecycle_snapshot" and limits.lifecycle_max_json_bytes or limits.max_json_bytes
@@ -778,8 +843,14 @@ return function(context)
         path = path, detail = message,
       }), "unavailable"
     end
+    if previous and record_source_text[previous] == content
+        and record_source_kind[previous] == expected_kind then
+      return previous, nil, "valid"
+    end
     local record, parse_diagnostic = parse_v2_record_json(content, expected_kind)
     if not record then return nil, parse_diagnostic, "invalid" end
+    record_source_text[record] = content
+    record_source_kind[record] = expected_kind
     return record, nil, "valid"
   end
 
@@ -795,8 +866,8 @@ return function(context)
     return invalid(kind .. " record interior identity does not match its path", { path = path })
   end
 
-  local function read_expected_record(path, kind, expected, required)
-    local record, read_diagnostic, status = read_record_file(path, kind)
+  local function read_expected_record(path, kind, expected, required, previous)
+    local record, read_diagnostic, status = read_record_file(path, kind, previous)
     if status == "missing" and not required then return nil, nil, status end
     if not record then
       return nil,
@@ -810,7 +881,7 @@ return function(context)
   end
 
   local function read_expected_record_cached(path, kind, expected, required, cached)
-    local record, read_diagnostic, status = read_expected_record(path, kind, expected, required)
+    local record, read_diagnostic, status = read_expected_record(path, kind, expected, required, cached)
     if record or status ~= "unavailable" or not cached then
       return record, read_diagnostic, status
     end

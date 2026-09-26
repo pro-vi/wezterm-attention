@@ -746,6 +746,7 @@ impl LifecycleSnapshot {
         pool.observations
             .retain(|item| item.storage_key_parts() != key);
         next.written_at_unix_ns = candidate.written_at_unix_ns.clone();
+        let candidate_id = candidate.observation_id.clone();
         pool.observations.push(candidate);
         pool.observations.sort_by(|a, b| {
             (&a.observed_mono_ns, &a.observation_id).cmp(&(&b.observed_mono_ns, &b.observation_id))
@@ -762,6 +763,16 @@ impl LifecycleSnapshot {
             pool.observations
                 .retain(|item| item.observed_mono_ns > floor);
             pool.retention_floor_mono_ns = Some(floor);
+        }
+        // Older than everything a full pool keeps, so the insertion evicted
+        // the candidate itself. Nothing was stored, and the pool as it was is
+        // still within its bounds.
+        if !pool
+            .observations
+            .iter()
+            .any(|item| item.observation_id == candidate_id)
+        {
+            return Ok(false);
         }
         next.snapshot_id = Uuid::new_v4().to_string();
         next.validate_semantics()?;
@@ -861,5 +872,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_candidate_evicted_by_its_own_insertion_is_not_reported_stored() {
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/lifecycle/observations.json"
+        ))
+        .unwrap();
+        let mut snapshot: LifecycleSnapshot =
+            serde_json::from_value(fixtures["cases"][1]["value"].clone()).unwrap();
+        let template = snapshot.pools.general.observations[0].clone();
+        snapshot.pools.general.observations.clear();
+        let maximum = manifest().unwrap().limits.lifecycle_pool_max_count;
+        for index in 0..maximum {
+            let mut item = template.clone();
+            item.observation_id = Uuid::new_v4().to_string();
+            item.observed_mono_ns = format!("{:020}", 1000 + index);
+            assert!(snapshot.reduce(item).unwrap());
+        }
+        assert!(snapshot.pools.general.retention_floor_mono_ns.is_none());
+        let full = snapshot.clone();
+        let mut late = template;
+        late.observation_id = Uuid::new_v4().to_string();
+        late.observed_mono_ns = format!("{:020}", 500);
+        assert!(!snapshot.reduce(late).unwrap());
+        assert_eq!(snapshot, full);
     }
 }

@@ -8,7 +8,7 @@ use crate::observations::{
     Actor, AttemptOutcome, ElicitationMode, LifecycleObservation, NativeCorrelation, NoticeSubtype,
     ObservationBody, QuestionMode, ResultSurface, SelectionAction, classify_tool,
 };
-use crate::protocol::{AttentionError, Diagnostic, manifest};
+use crate::protocol::{AttentionError, Diagnostic, free_of_control, manifest};
 
 // Which agents exist is a contract fact — the manifest declares the same set
 // as `enums.providers`, and `parse_manifest` checks the two agree.
@@ -197,12 +197,7 @@ fn safe_label(value: &Value, field: &str) -> std::result::Result<String, Diagnos
         )
         .diagnostic);
     };
-    if text.is_empty()
-        || text.len() > maximum
-        || text
-            .chars()
-            .any(|character| character < ' ' || character == '\u{7f}')
-    {
+    if text.is_empty() || text.len() > maximum || !free_of_control(text) {
         return Err(AttentionError::new(
             "record_invalid",
             format!("{field} is missing or too long"),
@@ -219,10 +214,38 @@ fn optional_label(payload: &Value, field: &str) -> std::result::Result<Option<St
     }
 }
 
-fn optional_lenient_label(payload: &Value, field: &str) -> Option<String> {
-    payload
-        .get(field)
-        .and_then(|value| safe_label(value, field).ok())
+/// Optional metadata that fails its check is dropped, not fatal: the event
+/// still means what its name says. Each dropped field is remembered so one
+/// diagnostic can name them all.
+#[derive(Default)]
+struct DroppedFields(Vec<&'static str>);
+
+impl DroppedFields {
+    fn keep(
+        &mut self,
+        field: &'static str,
+        checked: std::result::Result<Option<String>, Diagnostic>,
+    ) -> Option<String> {
+        checked.unwrap_or_else(|_| {
+            self.0.push(field);
+            None
+        })
+    }
+
+    fn diagnostic(self) -> Option<Diagnostic> {
+        if self.0.is_empty() {
+            return None;
+        }
+        let mut diagnostic = AttentionError::new(
+            "record_invalid",
+            format!("optional fields were dropped: {}", self.0.join(", ")),
+        )
+        .diagnostic;
+        diagnostic
+            .context
+            .insert("dropped_fields".into(), serde_json::json!(self.0));
+        Some(diagnostic)
+    }
 }
 
 fn optional_path(payload: &Value, field: &str) -> std::result::Result<Option<String>, Diagnostic> {
@@ -243,9 +266,7 @@ fn optional_path(payload: &Value, field: &str) -> std::result::Result<Option<Str
         .path_max_bytes;
     if path.is_empty()
         || path.len() > maximum
-        || path
-            .chars()
-            .any(|character| character < ' ' || character == '\u{7f}')
+        || !free_of_control(path)
         || !Path::new(path).is_absolute()
     {
         return Err(
@@ -270,9 +291,7 @@ fn environment_path(
             .map_err(|error| error.diagnostic)?
             .limits
             .path_max_bytes
-        || value
-            .chars()
-            .any(|character| character < ' ' || character == '\u{7f}')
+        || !free_of_control(value)
         || !Path::new(value).is_absolute()
     {
         return Err(
@@ -284,6 +303,7 @@ fn environment_path(
 
 fn parse_provider_common(
     provider: Provider,
+    event_name: &str,
     payload: &Value,
     env: &BTreeMap<String, String>,
 ) -> std::result::Result<ProviderEvent, Diagnostic> {
@@ -308,6 +328,18 @@ fn parse_provider_common(
         )?),
         None => None,
     };
+    let mut dropped = DroppedFields::default();
+    let agent_type = dropped.keep("agent_type", optional_label(payload, "agent_type"));
+    let transcript_path = dropped.keep(transcript_field, optional_path(payload, transcript_field));
+    let cwd = dropped.keep("cwd", optional_path(payload, "cwd"));
+    let config_dir = dropped.keep(config_field, environment_path(env, config_field));
+    let model = dropped.keep("model", optional_label(payload, "model"));
+    // Only Pi's bus carries a badge label.
+    let label = if provider == Provider::Pi && event_name == "bus" {
+        dropped.keep("label", optional_label(payload, "label"))
+    } else {
+        None
+    };
     let event = ProviderEvent {
         source_event: String::new(),
         observation: None,
@@ -317,16 +349,19 @@ fn parse_provider_common(
         provider_session_id: Some(provider_session_id),
         start_source: None,
         activity_type: None,
-        label: None,
-        agent_id: optional_lenient_label(payload, "agent_id"),
-        agent_type: optional_lenient_label(payload, "agent_type"),
+        label,
+        // Checked before dispatch: a bad child identity ignores the event.
+        agent_id: payload
+            .get("agent_id")
+            .and_then(|value| safe_label(value, "agent_id").ok()),
+        agent_type,
         child_source: None,
-        transcript_path: optional_path(payload, transcript_field)?,
-        cwd: optional_path(payload, "cwd")?,
-        config_dir: environment_path(env, config_field)?,
-        model: optional_label(payload, "model")?,
+        transcript_path,
+        cwd,
+        config_dir,
+        model,
         expected_session_id,
-        diagnostic: None,
+        diagnostic: dropped.diagnostic(),
     };
     Ok(event)
 }
@@ -373,7 +408,7 @@ fn parse_claude_or_codex(
             "hook event name does not match the callback",
         );
     }
-    let mut event = match parse_provider_common(provider, payload, env) {
+    let mut event = match parse_provider_common(provider, event_name, payload, env) {
         Ok(event) => event,
         Err(diagnostic) => {
             let mut event =
@@ -400,6 +435,24 @@ fn parse_claude_or_codex(
         event.action = ProviderAction::Activity;
         event.activity_type = Some("thinking".to_owned());
         return event;
+    }
+    // Claude sends StopFailure in place of Stop when an API error ends the
+    // turn, and Codex runs no Stop after an interrupt. Either way the turn is
+    // over and the prompt's thinking must not outlive it: a failed turn needs
+    // the user, and an interrupted one has nothing left to report.
+    if event.agent_id.is_none() {
+        match event_name {
+            "StopFailure" => {
+                event.action = ProviderAction::Activity;
+                event.activity_type = Some("notify".to_owned());
+                return event;
+            }
+            "Interrupt" => {
+                event.action = ProviderAction::Clear;
+                return event;
+            }
+            _ => {}
+        }
     }
     if matches!(
         event_name,
@@ -443,16 +496,18 @@ fn parse_claude_or_codex(
         event.child_source = Some("subagent_stop".to_owned());
         return event;
     }
-    if matches!(event_name, "PreToolUse" | "PermissionRequest") && event.agent_id.is_some() {
+    if event_name == "PreToolUse" && event.agent_id.is_some() {
         event.action = ProviderAction::ChildActive;
-        event.child_source = Some(
-            if event_name == "PreToolUse" {
-                "tool"
-            } else {
-                "permission"
-            }
-            .to_owned(),
-        );
+        event.child_source = Some("tool".to_owned());
+        return event;
+    }
+    // A child blocked on a permission prompt waits for the user as the lead
+    // would, and Codex has no Notification hook to say so another way. The
+    // lifecycle also refreshes the child's presence, so the lead's own tool
+    // calls do not repaint the notify while that child still waits.
+    if event_name == "PermissionRequest" && event.agent_id.is_some() {
+        event.action = ProviderAction::Activity;
+        event.activity_type = Some("notify".to_owned());
         return event;
     }
     if event.agent_id.is_some() {
@@ -471,7 +526,7 @@ fn parse_claude_or_codex(
                     "SessionStart source is not supported",
                 );
             };
-            if !["startup", "resume", "clear", "compact"].contains(&source) {
+            if !["startup", "resume", "clear", "compact", "fork"].contains(&source) {
                 return ProviderEvent::ignored(
                     Some(provider),
                     "integration_version_mismatch",
@@ -577,7 +632,7 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
             "Pi event is not supported",
         );
     }
-    let mut event = match parse_provider_common(Provider::Pi, payload, env) {
+    let mut event = match parse_provider_common(Provider::Pi, event_name, payload, env) {
         Ok(event) => event,
         Err(diagnostic) => {
             let mut event =
@@ -585,22 +640,6 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
             event.diagnostic = Some(diagnostic);
             return event;
         }
-    };
-    let bus_label = if event_name == "bus" {
-        match optional_label(payload, "label") {
-            Ok(label) => label,
-            Err(diagnostic) => {
-                let mut ignored = ProviderEvent::ignored(
-                    Some(Provider::Pi),
-                    &diagnostic.code,
-                    &diagnostic.message,
-                );
-                ignored.diagnostic = Some(diagnostic);
-                return ignored;
-            }
-        }
-    } else {
-        None
     };
     match event_name {
         "input" | "session_before_compact" | "session_compact" => {
@@ -676,7 +715,6 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
             Some(state @ ("thinking" | "stop" | "notify")) => {
                 event.action = ProviderAction::Activity;
                 event.activity_type = Some(state.to_owned());
-                event.label = bus_label;
             }
             _ => {
                 return ProviderEvent::ignored(
@@ -777,6 +815,11 @@ pub fn reply_content(
         || event.agent_id.is_some()
     {
         return HookContent::Unsupported;
+    }
+    // Codex declares this field nullable and sends null when a turn ends
+    // without final text; that is a turn with no reply, not a malformed one.
+    if payload.get("last_assistant_message") == Some(&Value::Null) {
+        return HookContent::Absent;
     }
     text_content(payload, "last_assistant_message")
 }
@@ -1045,16 +1088,17 @@ fn optional_observation_enum(
     vocabulary: &str,
 ) -> std::result::Result<Option<String>, Diagnostic> {
     let value = strict_optional_label(payload, field)?;
-    if value.as_ref().is_some_and(|value| {
-        !manifest().expect("manifest was validated").lifecycle_enums[vocabulary].contains(value)
-    }) {
-        return Err(AttentionError::new(
-            "integration_version_mismatch",
-            "native lifecycle enum is unsupported",
-        )
-        .diagnostic);
-    }
-    Ok(value)
+    let known = &manifest().expect("manifest was validated").lifecycle_enums[vocabulary];
+    // Providers add values before this writer learns them. The observation is
+    // still true without the detail, so an unknown value becomes "unknown"
+    // where the vocabulary has that word and is left out where it does not.
+    Ok(value.and_then(|value| {
+        if known.contains(&value) {
+            Some(value)
+        } else {
+            known.get("unknown").cloned()
+        }
+    }))
 }
 
 fn parse_run_observation(

@@ -267,10 +267,12 @@ fn reply_availability_and_optionality_are_exact() {
             json!({"availability":"not_requested"}),
         ),
         (json!({}), true, json!({"availability":"absent"})),
+        // Codex declares the field nullable and sends null for a turn that
+        // ended without final text, which is a normal turn, not bad input.
         (
             json!({"last_assistant_message":null}),
             true,
-            json!({"availability":"invalid"}),
+            json!({"availability":"absent"}),
         ),
         (
             json!({"last_assistant_message":3}),
@@ -711,7 +713,7 @@ fn malformed_consumer_arguments_fail_before_native_application() {
         ("/missing", vec!["--consumer-timeout-ms", "0"]),
     ] {
         let output = hook(&setup, "claude", &payload, &[PathBuf::from(path)], &extra);
-        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(output.status.code(), Some(0));
         assert!(output.stdout.is_empty());
         assert!(
             !setup

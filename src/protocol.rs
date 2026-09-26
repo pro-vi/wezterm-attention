@@ -9,12 +9,14 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub const EMBEDDED_MANIFEST: &str = include_str!("../protocol/v2.json");
-pub const EMITTED_DIAGNOSTIC_CODES: [&str; 13] = [
+pub const EMITTED_DIAGNOSTIC_CODES: [&str; 16] = [
     "identity_unpublished",
     "claim_stale",
     "unsafe_tty",
     "realm_unavailable",
     "incarnation_changed",
+    "socket_gone",
+    "socket_refused",
     "record_invalid",
     "future_schema",
     "binding_conflict",
@@ -23,6 +25,7 @@ pub const EMITTED_DIAGNOSTIC_CODES: [&str; 13] = [
     "integration_version_mismatch",
     "state_permissions",
     "bad_usage",
+    "self_claim_parent_unverified",
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -251,6 +254,8 @@ pub struct DigestRecipes {
     pub incarnation_id_input: String,
     pub tty_fingerprint_input: String,
     pub binding_id_input: String,
+    pub session_key_input: String,
+    pub session_entry_key_input: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -381,13 +386,10 @@ pub fn parse_manifest(source: &str) -> Result<Manifest> {
                 || hooks.iter().any(|(name, declaration)| {
                     name.is_empty()
                         || name.len() > parsed.limits.safe_label_max_bytes
-                        || name.chars().any(|c| c < ' ' || c == '\u{7f}')
+                        || !free_of_control(name)
                         || declaration.native_event.is_empty()
                         || declaration.native_event.len() > parsed.limits.safe_label_max_bytes
-                        || declaration
-                            .native_event
-                            .chars()
-                            .any(|c| c < ' ' || c == '\u{7f}')
+                        || !free_of_control(&declaration.native_event)
                 })
         })
     {
@@ -406,7 +408,7 @@ pub fn parse_manifest(source: &str) -> Result<Manifest> {
             tools.iter().any(|(name, class)| {
                 name.is_empty()
                     || name.len() > parsed.limits.safe_label_max_bytes
-                    || name.chars().any(|c| c < ' ' || c == '\u{7f}')
+                    || !free_of_control(name)
                     || (class.tool_class == ToolClass::Question) != class.question_mode.is_some()
             })
         })
@@ -452,23 +454,45 @@ pub fn manifest() -> Result<&'static Manifest> {
     }
 }
 
+/// Whether text holds no control character: C0 (U+0000-U+001F), DEL and C1
+/// (U+0080-U+009F). C1 matters as much as C0 because a terminal reads U+009B
+/// as CSI and U+009D as OSC, so a stored C1 byte printed raw can retitle a
+/// window, clear the screen or write the clipboard. Every text check in the
+/// writer, the plugin and the independent checker uses this one rule.
+pub fn free_of_control(text: &str) -> bool {
+    !text.chars().any(char::is_control)
+}
+
+/// `text` as a terminal may print it: every character [`free_of_control`]
+/// refuses becomes `?`, so a message cannot restyle the terminal reading it.
+pub fn terminal_safe(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_control() {
+                '?'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 fn safe_text(value: &Value, maximum: usize) -> bool {
-    value.as_str().is_some_and(|text| {
-        !text.is_empty()
-            && text.len() <= maximum
-            && !text
-                .chars()
-                .any(|character| character < ' ' || character == '\u{7f}')
-    })
+    value
+        .as_str()
+        .is_some_and(|text| !text.is_empty() && text.len() <= maximum && free_of_control(text))
 }
 
 fn hex64(value: &Value) -> bool {
-    value.as_str().is_some_and(|text| {
-        text.len() == 64
-            && text
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    })
+    value.as_str().is_some_and(hex64_text)
+}
+
+/// Whether `text` is 64 lowercase hex digits, the form every digest here takes.
+pub fn hex64_text(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn decimal_ns20(value: &Value) -> bool {
@@ -701,12 +725,49 @@ pub fn parse_record_value(value: &Value, protocol: &Manifest) -> Verdict {
             .and_then(Value::as_str)
             .zip(value.get("owner_key").and_then(Value::as_str))
             .is_some_and(|(id, key)| sha256_hex(id.as_bytes()) == key),
+        "claim" => claim_owner(value).is_ok(),
         _ => true,
     };
     if digest_matches {
         Verdict::Valid
     } else {
         Verdict::RecordInvalid
+    }
+}
+
+/// The fields of a claim that name the process owning it. A claim holds all of
+/// them or none: one with none is a shell claim, made by a shell for the
+/// commands it starts; one with all is self-owned, made by an agent's own hook.
+pub const CLAIM_OWNER_FIELDS: [&str; 4] = [
+    "owner_pid",
+    "owner_started_sec",
+    "owner_started_usec",
+    "owner_boot_session_id",
+];
+
+/// A claim's owner as its owner fields name it: the pid, the start time's
+/// seconds and microseconds, and the boot session id.
+pub(crate) type ClaimOwnerFields<'a> = (i32, u64, u32, &'a str);
+
+/// The owner a claim's owner fields name: `None` when all are absent, and an
+/// error unless all are present with values a process can have, a positive
+/// pid and a start time whose microseconds are less than a second.
+pub(crate) fn claim_owner(value: &Value) -> std::result::Result<Option<ClaimOwnerFields<'_>>, ()> {
+    let [pid, seconds, microseconds, boot] =
+        CLAIM_OWNER_FIELDS.map(|field| value.get(field).map(Value::as_str));
+    match (pid, seconds, microseconds, boot) {
+        (None, None, None, None) => Ok(None),
+        (Some(Some(pid)), Some(Some(seconds)), Some(Some(microseconds)), Some(Some(boot))) => {
+            let pid = pid.parse::<i32>().ok().filter(|pid| *pid > 0).ok_or(())?;
+            let seconds = seconds.parse::<u64>().map_err(|_| ())?;
+            let microseconds = microseconds
+                .parse::<u32>()
+                .ok()
+                .filter(|microseconds| *microseconds < 1_000_000)
+                .ok_or(())?;
+            Ok(Some((pid, seconds, microseconds, boot)))
+        }
+        _ => Err(()),
     }
 }
 
@@ -801,6 +862,24 @@ pub fn eligible_subagent_presence(
     (now <= written + ttl, None)
 }
 
+/// Serialize a document for a terminal to show. serde_json escapes C0 and
+/// leaves C1 raw, so a C1 character that entered a record through another
+/// writer would reach the terminal as a control sequence. JSON structure is
+/// ASCII, so every C1 character in the text sits inside a string and its
+/// `\u00XX` escape decodes to the same value.
+pub fn printable_json<T: Serialize + ?Sized>(value: &T) -> serde_json::Result<String> {
+    let text = serde_json::to_string(value)?;
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if ('\u{80}'..='\u{9f}').contains(&character) {
+            escaped.push_str(&format!("\\u{:04x}", u32::from(character)));
+        } else {
+            escaped.push(character);
+        }
+    }
+    Ok(escaped)
+}
+
 pub fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -839,5 +918,30 @@ mod consumer_manifest_tests {
         invalid["tool_classification"]["codex"]["request_permissions"]["question_mode"] =
             Value::from("blocking");
         assert!(parse_manifest(&invalid.to_string()).is_err());
+    }
+
+    #[test]
+    fn manifest_names_refuse_c1_controls() {
+        let baseline: Value = serde_json::from_str(EMBEDDED_MANIFEST).unwrap();
+        let mut hook = baseline.clone();
+        hook["native_hooks"]["claude"]["Stop"]["native_event"] = Value::from("Stop\u{9b}");
+        assert!(parse_manifest(&hook.to_string()).is_err());
+        let mut tool = baseline;
+        let class = tool["tool_classification"]["codex"]["request_permissions"].clone();
+        tool["tool_classification"]["codex"]["request\u{85}permissions"] = class;
+        assert!(parse_manifest(&tool.to_string()).is_err());
+        assert!(free_of_control("caf\u{e9}\u{a0}"));
+    }
+
+    #[test]
+    fn printable_json_escapes_c1_and_keeps_the_value() {
+        let value = serde_json::json!({"cwd": "/tmp/a\u{9b}2J\u{85}b\u{a0}c", "n": 1});
+        let text = printable_json(&value).unwrap();
+        assert!(!text.chars().any(char::is_control));
+        assert!(text.contains("\\u009b2J\\u0085b"));
+        assert!(text.contains('\u{a0}'));
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), value);
+        let plain = serde_json::json!({"cwd": "/tmp/plain"});
+        assert_eq!(printable_json(&plain).unwrap(), plain.to_string());
     }
 }

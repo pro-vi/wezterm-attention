@@ -1,26 +1,16 @@
 return function(context)
   local M = context.M
   local defaults = context.defaults
-  local marker_id_by_local = context.marker_id_by_local
+  local drawn_pane_key = context.drawn_pane_key
   local attention_cache = context.attention_cache
   local title_sources = context.title_sources
+  local display_text = context.display_text
 
   local function gui_tab_pane_ids(tab)
     local ids = {}
     for _, p in ipairs(tab.panes) do
-      local local_id = tostring(p.pane_id)
-      local mapped = marker_id_by_local[local_id]
-      if mapped then
-        ids[#ids + 1] = mapped
-      elseif mapped == nil then
-        -- No poll has walked this pane yet. The cache is empty for it either
-        -- way, and on a local pane the local id is the marker id, so the
-        -- untranslated id keeps single-machine setups rendering immediately.
-        ids[#ids + 1] = local_id
-      end
-      -- mapped == false: a mux-client pane that has not published its
-      -- $WEZTERM_PANE. Its local id names some other pane's markers, so it
-      -- contributes nothing rather than something wrong.
+      local key = drawn_pane_key(tostring(p.pane_id))
+      if key then ids[#ids + 1] = key end
     end
     return ids
   end
@@ -87,26 +77,33 @@ return function(context)
       }
     end
 
+    -- The count rides inside the indicator's own trailing space: "✓ " with two
+    -- subagents renders "✓+2 ", which adds only the "+2".
+    local function with_count(glyph)
+      if subagents > 0 then return glyph:gsub("%s+$", "") .. "+" .. subagents .. " " end
+      return glyph
+    end
+
     local indicator = ""
+    -- What the bar draws for this state whatever the frame. The published copy
+    -- of the bar uses it, so a spinner does not rewrite that file every second.
+    local still_indicator
     if best_type == "thinking" then
       local frames = cfg_indicators.thinking_frames
       if frames and #frames > 0 then
         indicator = frames[((best_frame or 0) % #frames) + 1]
+        still_indicator = with_count(frames[1])
       end
     elseif cfg_indicators[best_type] then
       indicator = cfg_indicators[best_type]
     end
-
-    -- The count rides inside the indicator's own trailing space, so "✓ " with two
-    -- subagents renders "✓+2 " and the tab gains one column, not four.
-    if subagents > 0 then
-      indicator = indicator:gsub("%s+$", "") .. "+" .. subagents .. " "
-    end
+    indicator = with_count(indicator)
 
     local show_provider = M._active_show_provider == true
     local provider_display = { claude = "Claude", codex = "Codex", pi = "Pi" }
     return {
       indicator = indicator,
+      still_indicator = still_indicator or indicator,
       type = best_type,
       color = cfg_colors[best_type],
       subagents = subagents,
@@ -119,11 +116,12 @@ return function(context)
   end
 
 
-  local function decorate_tab_title(tab, visible, base, show_index)
+  --- `indicator` replaces the visible one when given.
+  local function decorate_tab_title(tab, visible, base, show_index, indicator)
     local index = ""
     if show_index ~= false then index = (tab.tab_index + 1) .. ": " end
     local suffix = visible.agent_suffix and (" · " .. visible.agent_suffix) or ""
-    local text = " " .. index .. visible.indicator .. base .. suffix .. " "
+    local text = " " .. index .. (indicator or visible.indicator) .. base .. suffix .. " "
     if visible.color then
       return {
         { Background = { Color = visible.color } },
@@ -198,8 +196,11 @@ return function(context)
       drawn = {}
       drawn_by_window[window_id] = drawn
     end
+    -- The published copy is read by `attention tabs`, which refuses a whole
+    -- window's file over one tab text longer than a label or holding a control
+    -- character. A user formatter can return either.
     drawn[tab_id] = {
-      number = tab.tab_index + 1, text = text, marker_ids = marker_ids,
+      number = tab.tab_index + 1, text = display_text(text, 256), marker_ids = marker_ids,
     }
     local order, present = {}, {}
     for index, entry in ipairs(tabs) do

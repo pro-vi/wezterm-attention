@@ -18,11 +18,21 @@ case $self in
   */*) script_dir=${self%/*} ;;
   *) script_dir=. ;;
 esac
-ROOT=$(CDPATH= cd -- "$script_dir/.." && pwd)
+# -P, because a symlinked bin directory's logical parent is not the checkout.
+ROOT=$(CDPATH= cd -P -- "$script_dir/.." && pwd -P)
 
 if [ ! -x "$ROOT/libexec/attention-rs" ]; then
-  printf '%s\n' 'attention: Rust binary is missing; run scripts/install-cli.sh and retry.' >&2
-  exit 3
+  printf 'attention: Rust binary is missing; run %s/scripts/install-cli.sh and retry.\n' "$ROOT" >&2
+  # Provider hooks are registered globally and run wherever the agent runs. A
+  # hook that cannot run here says so and exits 0, or 1 under --strict, as a
+  # hook event with no pane identity does.
+  if [ "${1:-}" = hooks ]; then
+    for argument in "$@"; do
+      [ "$argument" != --strict ] || exit 1
+    done
+    exit 0
+  fi
+  exit 1
 fi
 
 exec "$ROOT/libexec/attention-rs" "$@"

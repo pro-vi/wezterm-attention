@@ -58,7 +58,7 @@ fn binding_projection_preserves_query_metadata() {
                 command
                     .env_clear()
                     .envs(&setup.env)
-                    .env("WEZTERM_EXECUTABLE", &executable)
+                    .env("PATH", executable.parent().unwrap())
                     .arg("bindings")
                     .args(&selection);
                 if socket_mode {
@@ -337,7 +337,7 @@ fn socket_queries_never_autostart_and_preserve_legacy_transport() {
     let output = Command::new(env!("CARGO_BIN_EXE_attention"))
         .env_clear()
         .envs(&setup.env)
-        .env("WEZTERM_EXECUTABLE", &executable)
+        .env("PATH", executable.parent().unwrap())
         .args([
             "bindings",
             "--socket",
@@ -346,7 +346,7 @@ fn socket_queries_never_autostart_and_preserve_legacy_transport() {
         ])
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(1));
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap()["complete"],
         false
@@ -380,7 +380,7 @@ fn socket_selector_conflicts_are_usage_errors_and_resolution_is_incomplete() {
         .args(["bindings", "--socket", "/missing", "--json"])
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(1));
     let response: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["complete"], false);
     assert!(response["result"].get("scope").is_none());
@@ -429,7 +429,7 @@ fn publish_socket_writes_identity_to_selected_tty() {
     let output = Command::new(env!("CARGO_BIN_EXE_attention"))
         .env_clear()
         .envs(&setup.env)
-        .env("WEZTERM_EXECUTABLE", &executable)
+        .env("PATH", executable.parent().unwrap())
         .args([
             "hooks",
             "publish",
@@ -468,7 +468,7 @@ fn publish_rejects_the_removed_realm_selector() {
         ])
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(1));
 }
 
 #[test]
@@ -493,13 +493,13 @@ fn socket_truncation_is_explicit_and_legacy_shape_is_preserved() {
         command
             .env_clear()
             .envs(&setup.env)
-            .env("WEZTERM_EXECUTABLE", &executable)
+            .env("PATH", executable.parent().unwrap())
             .args(["bindings", "--limit", "1", "--json"]);
         if socket_mode {
             command.args(["--socket", &setup.env["WEZTERM_UNIX_SOCKET"]]);
         }
         let output = command.output().unwrap();
-        assert!(output.status.success());
+        assert_eq!(output.status.code(), Some(1));
         let response: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(response["complete"], false);
         assert_eq!(response["result"]["scanned"], 2);
@@ -540,7 +540,7 @@ fn only_a_query_that_dropped_rows_says_so_on_stderr() {
         let output = Command::new(env!("CARGO_BIN_EXE_attention"))
             .env_clear()
             .envs(&setup.env)
-            .env("WEZTERM_EXECUTABLE", &executable)
+            .env("PATH", executable.parent().unwrap())
             .args(["bindings", "--json"])
             .args(&args)
             .output()
@@ -800,7 +800,7 @@ fn the_envelope_says_where_the_time_went() {
         command
             .env_clear()
             .envs(&setup.env)
-            .env("WEZTERM_EXECUTABLE", &executable)
+            .env("PATH", executable.parent().unwrap())
             .args(["bindings", "--all", "--json"]);
         if socket_mode {
             command.args(["--socket", &setup.env["WEZTERM_UNIX_SOCKET"]]);

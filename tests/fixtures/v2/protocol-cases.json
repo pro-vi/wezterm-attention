@@ -15,7 +15,7 @@
       "schema": 3,
       "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "socket_path": "/tmp/attention-v2/socket",
-      "writer_version": "2.0.0"
+      "writer_version": "1.0.0"
     },
     "incarnation": {
       "kind": "incarnation",
@@ -26,7 +26,7 @@
       "socket_device": "16777234",
       "socket_inode": "1234567",
       "socket_ctime_ns": "01788401900000000000",
-      "writer_version": "2.0.0",
+      "writer_version": "1.0.0",
       "server_pid": "43210"
     },
     "claim": {
@@ -63,7 +63,7 @@
       "start_source": "startup",
       "observed_mono_ns": "00000000002000000000",
       "written_at_unix_ns": "00000000010000000000",
-      "writer_version": "2.0.0"
+      "writer_version": "1.0.0"
     },
     "current_binding": {
       "kind": "current_binding",
@@ -208,6 +208,21 @@
       "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "floor_mono_ns": "00000000150000000000",
       "operation_id": "00000000-0000-4000-8000-000000000011"
+    },
+    "session_binding": {
+      "kind": "session_binding",
+      "schema": 3,
+      "address": {
+        "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pane_id": "42"
+      },
+      "launch_id": "00000000-0000-4000-8000-000000000001",
+      "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "session_index": {
+      "kind": "session_index",
+      "schema": 3
     }
   },
   "parse_cases": [
@@ -220,20 +235,37 @@
     { "id": "wire_unknown_field", "parser": "wire", "patch": { "extra": true }, "expected": "record_invalid" },
     { "id": "wire_unknown_null_field", "parser": "wire_json", "raw": "{\"wire\":2,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\"},\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"unknown\":null}", "expected": "record_invalid" },
     { "id": "realm_valid", "parser": "record", "sample": "realm", "expected": "valid" },
-    { "id": "record_unknown_null_field", "parser": "record_json", "raw": "{\"kind\":\"realm\",\"schema\":3,\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"socket_path\":\"/tmp/attention-v2/socket\",\"writer_version\":\"2.0.0\",\"unknown\":null}", "expected": "record_invalid" },
+    { "id": "record_unknown_null_field", "parser": "record_json", "raw": "{\"kind\":\"realm\",\"schema\":3,\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"socket_path\":\"/tmp/attention-v2/socket\",\"writer_version\":\"1.0.0\",\"unknown\":null}", "expected": "record_invalid" },
     { "id": "incarnation_valid", "parser": "record", "sample": "incarnation", "expected": "valid" },
     { "id": "claim_valid", "parser": "record", "sample": "claim", "expected": "valid" },
+    { "id": "claim_self_owned_valid", "parser": "record", "sample": "claim", "patch": {"owner_pid": "4242", "owner_started_sec": "1700000000", "owner_started_usec": "123456", "owner_boot_session_id": "0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b"}, "expected": "valid" },
+    { "id": "claim_owner_pid_must_be_a_decimal_string", "parser": "record", "sample": "claim", "patch": {"owner_pid": 4242, "owner_started_sec": "1700000000", "owner_started_usec": "123456", "owner_boot_session_id": "0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b"}, "expected": "record_invalid" },
+    { "id": "claim_owner_boot_session_must_be_a_uuid", "parser": "record", "sample": "claim", "patch": {"owner_pid": "4242", "owner_started_sec": "1700000000", "owner_started_usec": "123456", "owner_boot_session_id": "0F9A7C3E-51B2-4D6E-8A1B-2C3D4E5F6A7B"}, "expected": "record_invalid" },
+    { "id": "claim_without_owner_pid_alone_is_invalid", "parser": "record", "sample": "claim", "patch": {"owner_started_sec": "1700000000", "owner_started_usec": "123456", "owner_boot_session_id": "0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b"}, "expected": "record_invalid" },
+    { "id": "claim_without_owner_started_sec_alone_is_invalid", "parser": "record", "sample": "claim", "patch": {"owner_pid": "4242", "owner_started_usec": "123456", "owner_boot_session_id": "0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b"}, "expected": "record_invalid" },
+    { "id": "claim_without_owner_started_usec_alone_is_invalid", "parser": "record", "sample": "claim", "patch": {"owner_pid": "4242", "owner_started_sec": "1700000000", "owner_boot_session_id": "0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b"}, "expected": "record_invalid" },
+    { "id": "claim_without_owner_boot_session_id_alone_is_invalid", "parser": "record", "sample": "claim", "patch": {"owner_pid": "4242", "owner_started_sec": "1700000000", "owner_started_usec": "123456"}, "expected": "record_invalid" },
+    { "id": "claim_owner_pid_zero_is_invalid", "parser": "record", "sample": "claim", "patch": {"owner_pid": "0", "owner_started_sec": "1700000000", "owner_started_usec": "123456", "owner_boot_session_id": "0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b"}, "expected": "record_invalid" },
+    { "id": "claim_owner_pid_above_i32_is_invalid", "parser": "record", "sample": "claim", "patch": {"owner_pid": "2147483648", "owner_started_sec": "1700000000", "owner_started_usec": "123456", "owner_boot_session_id": "0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b"}, "expected": "record_invalid" },
+    { "id": "claim_owner_microseconds_must_stay_below_a_second", "parser": "record", "sample": "claim", "patch": {"owner_pid": "4242", "owner_started_sec": "1700000000", "owner_started_usec": "1000000", "owner_boot_session_id": "0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b"}, "expected": "record_invalid" },
+    { "id": "claim_owner_microseconds_just_below_a_second_are_valid", "parser": "record", "sample": "claim", "patch": {"owner_pid": "4242", "owner_started_sec": "1700000000", "owner_started_usec": "999999", "owner_boot_session_id": "0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b"}, "expected": "valid" },
+    { "id": "claim_owner_seconds_at_the_u64_maximum_are_valid", "parser": "record", "sample": "claim", "patch": {"owner_pid": "4242", "owner_started_sec": "18446744073709551615", "owner_started_usec": "123456", "owner_boot_session_id": "0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b"}, "expected": "valid" },
+    { "id": "claim_owner_seconds_past_the_u64_maximum_are_invalid", "parser": "record", "sample": "claim", "patch": {"owner_pid": "4242", "owner_started_sec": "18446744073709551616", "owner_started_usec": "123456", "owner_boot_session_id": "0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b"}, "expected": "record_invalid" },
     { "id": "binding_valid", "parser": "record", "sample": "binding", "expected": "valid" },
     { "id": "current_binding_valid", "parser": "record", "sample": "current_binding", "expected": "valid" },
     { "id": "activity_valid", "parser": "record", "sample": "activity", "expected": "valid" },
     { "id": "activity_clear_valid", "parser": "record", "sample": "activity_clear", "expected": "valid" },
     { "id": "review_valid_without_clock", "parser": "record", "sample": "review", "expected": "valid" },
     { "id": "binding_end_valid", "parser": "record", "sample": "binding_end", "expected": "valid" },
+    { "id": "binding_end_names_its_binding_event", "parser": "record", "sample": "binding_end", "patch": { "binding_event_id": "00000000-0000-4000-8000-000000000003" }, "expected": "valid" },
+    { "id": "binding_end_binding_event_must_be_uuid", "parser": "record", "sample": "binding_end", "patch": { "binding_event_id": "not-a-uuid" }, "expected": "record_invalid" },
     { "id": "acknowledgement_valid", "parser": "record", "sample": "acknowledgement", "expected": "valid" },
     { "id": "absence_probe_valid", "parser": "record", "sample": "absence_probe", "expected": "valid" },
     { "id": "subagent_presence_valid", "parser": "record", "sample": "subagent_presence", "expected": "valid" },
     { "id": "subagent_clear_valid", "parser": "record", "sample": "subagent_clear", "expected": "valid" },
     { "id": "subagent_retention_floor_valid", "parser": "record", "sample": "subagent_retention_floor", "expected": "valid" },
+    { "id": "session_binding_valid", "parser": "record", "sample": "session_binding", "expected": "valid" },
+    { "id": "session_index_valid", "parser": "record", "sample": "session_index", "expected": "valid" },
     { "id": "record_future", "parser": "record", "sample": "activity", "patch": { "schema": 4 }, "expected": "future_schema" },
     { "id": "record_missing_required", "parser": "record", "sample": "activity", "remove": ["written_at_unix_ns"], "expected": "record_invalid" },
     { "id": "record_unknown_field", "parser": "record", "sample": "claim", "patch": { "unknown": "value" }, "expected": "record_invalid" },
@@ -241,6 +273,9 @@
     { "id": "record_pane_id_must_be_string", "parser": "record", "sample": "claim", "patch": { "address.pane_id": 42 }, "expected": "record_invalid" },
     { "id": "record_bad_uuid", "parser": "record", "sample": "claim", "patch": { "launch_id": "not-a-uuid" }, "expected": "record_invalid" },
     { "id": "record_tty_path_rejects_control", "parser": "record", "sample": "claim", "patch": { "tty_path": "/dev/tty\nreplacement" }, "expected": "record_invalid" },
+    { "id": "record_label_rejects_c1_control", "parser": "record_json", "raw": "{\"kind\":\"activity\",\"schema\":3,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\" },\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"target\":{\"kind\":\"binding\",\"binding_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\" },\"event_id\":\"00000000-0000-4000-8000-000000000003\",\"type\":\"notify\",\"source\":\"claude\",\"label\":\"readynow\",\"observed_mono_ns\":\"00000000003000000000\",\"written_at_unix_ns\":\"00000000010000000000\"}", "expected": "record_invalid" },
+    { "id": "record_path_rejects_first_c1_control", "parser": "record_json", "raw": "{\"kind\":\"claim\",\"schema\":3,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\" },\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"tty_path\":\"/dev/tty\",\"tty_fingerprint\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"observed_mono_ns\":\"00000000001000000000\"}", "expected": "record_invalid" },
+    { "id": "record_label_accepts_first_character_after_c1", "parser": "record_json", "raw": "{\"kind\":\"activity\",\"schema\":3,\"address\":{\"realm_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"incarnation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"pane_id\":\"42\" },\"launch_id\":\"00000000-0000-4000-8000-000000000001\",\"target\":{\"kind\":\"binding\",\"binding_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\" },\"event_id\":\"00000000-0000-4000-8000-000000000003\",\"type\":\"notify\",\"source\":\"claude\",\"label\":\"ready now\",\"observed_mono_ns\":\"00000000003000000000\",\"written_at_unix_ns\":\"00000000010000000000\"}", "expected": "valid" },
     { "id": "record_tty_path_rejects_more_than_4096_bytes", "parser": "record", "sample": "claim", "repeat_patch": { "tty_path": { "prefix": "/", "text": "x", "count": 4096 } }, "expected": "record_invalid" },
     { "id": "record_bad_unix_width", "parser": "record", "sample": "activity", "patch": { "written_at_unix_ns": "1788401900000000000" }, "expected": "record_invalid" },
     { "id": "record_socket_inode_too_wide", "parser": "record", "sample": "incarnation", "patch": { "socket_inode": "123456789012345678901" }, "expected": "record_invalid" },

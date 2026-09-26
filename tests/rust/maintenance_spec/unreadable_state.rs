@@ -1,0 +1,148 @@
+//! A directory in the state tree that cannot be read hides whatever is below
+//! it. Every walk says so, rather than answering as if it were empty.
+
+use super::*;
+use std::os::unix::fs::PermissionsExt;
+
+/// Makes a directory unreadable for the life of the guard, and readable again
+/// on drop so the scratch tree can be removed.
+struct Unreadable(PathBuf);
+
+impl Unreadable {
+    fn new(path: PathBuf) -> Self {
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod 000");
+        Self(path)
+    }
+}
+
+impl Drop for Unreadable {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+    }
+}
+
+fn hide_bindings(setup: &Setup) -> Unreadable {
+    Unreadable::new(
+        setup
+            .binding_dir()
+            .parent()
+            .expect("bindings directory")
+            .to_path_buf(),
+    )
+}
+
+/// A fake `wezterm` first on PATH, so the CLI never reaches a real one.
+pub(super) fn fake_wezterm_path(setup: &Setup, rows: &str) -> PathBuf {
+    let directory = setup._scratch.0.join("fake-bin");
+    fs::create_dir_all(&directory).expect("fake bin directory");
+    let executable = directory.join("wezterm");
+    fs::write(&executable, format!("#!/bin/sh\nprintf '%s\\n' '{rows}'\n")).expect("fake wezterm");
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).expect("chmod");
+    directory
+}
+
+#[test]
+fn doctor_reports_a_directory_it_could_not_read() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let _hidden = hide_bindings(&setup);
+    let (result, diagnostics) = setup.doctor();
+    assert!(
+        diagnostics.iter().any(|d| d.code == "state_permissions"),
+        "{diagnostics:?}"
+    );
+    let probe = |name: &str| {
+        result["probes"]
+            .as_array()
+            .expect("probes")
+            .iter()
+            .find(|probe| probe["name"] == name)
+            .expect("probe")["status"]
+            .clone()
+    };
+    assert_eq!(probe("state_files"), "finding");
+    assert_eq!(probe("permissions"), "finding");
+}
+
+#[test]
+fn a_realm_wide_listing_says_rows_may_be_missing() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let _hidden = hide_bindings(&setup);
+    let (rows, diagnostics) =
+        read_bindings_with_ports(&setup.root(), Some(&setup.panes), Some(&setup.processes))
+            .expect("bindings");
+    assert!(rows.is_empty());
+    assert!(
+        diagnostics.iter().any(|d| d.code == "state_permissions"),
+        "{diagnostics:?}"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .env_clear()
+        .envs(&setup.env)
+        .env("PATH", fake_wezterm_path(&setup, r#"[{"pane_id":"42"}]"#))
+        .args(["bindings", "--all", "--json"])
+        .output()
+        .expect("run bindings");
+    let response: Value = serde_json::from_slice(&output.stdout).expect("bindings JSON");
+    assert_eq!(response["complete"], false, "{response}");
+    assert_eq!(response["status"], "findings");
+}
+
+#[test]
+fn sweep_reports_a_directory_it_could_not_read() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let _hidden = hide_bindings(&setup);
+    let (_, diagnostics) = setup.run_sweep(false, None);
+    assert!(
+        diagnostics.iter().any(|d| d.code == "state_permissions"),
+        "{diagnostics:?}"
+    );
+}
+
+/// An apply that could not read a binding record has not swept that binding.
+/// It counts the step as failed, which makes the answer incomplete; the
+/// preview decides nothing and counts none.
+#[test]
+fn an_apply_that_could_not_read_a_binding_counts_a_failed_step() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let _hidden = Unreadable::new(setup.binding_dir().join("binding.json"));
+    let (preview, _) = setup.run_sweep(false, None);
+    assert_eq!(preview.failed_steps, 0);
+    let (applied, diagnostics) =
+        setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000921"));
+    assert_eq!(applied.failed_steps, 1, "{diagnostics:?}");
+}
+
+/// Scoped to one server or realm-wide, a directory that could not be read is
+/// reported the same way: `state_permissions`, naming the directory relative
+/// to the state root.
+#[test]
+fn a_socket_scoped_listing_names_the_directory_it_could_not_read() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let root = setup.root();
+    let hidden = hide_bindings(&setup);
+    let expected = json!(hidden.0.strip_prefix(&root).unwrap().to_str().unwrap());
+    let (_, _, diagnostics) = wezterm_attention::query::read_bindings_for_socket_with_ports(
+        &root,
+        &setup.env["WEZTERM_UNIX_SOCKET"],
+        Some(&setup.panes),
+        Some(&setup.processes),
+    )
+    .expect("socket bindings");
+    let (_, realm_wide) =
+        read_bindings_with_ports(&root, Some(&setup.panes), Some(&setup.processes))
+            .expect("bindings");
+    for (mode, diagnostics) in [("socket", &diagnostics), ("realm-wide", &realm_wide)] {
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == "state_permissions" && d.context.get("path") == Some(&expected)),
+            "{mode}: {diagnostics:?}"
+        );
+    }
+}

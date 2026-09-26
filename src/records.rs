@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -11,7 +11,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::identity::PaneAddress;
-use crate::protocol::{AttentionError, Result, manifest, validate_record};
+use crate::protocol::{AttentionError, Result, free_of_control, manifest, validate_record};
 
 #[derive(Clone, Debug, Default)]
 pub struct RecordIdentity {
@@ -140,6 +140,20 @@ impl RecordIdentity {
             .collect();
         let invalid =
             || AttentionError::new("record_invalid", "state record path has the wrong shape");
+        if parts.first() == Some(&Some("v2")) && parts.get(1) == Some(&Some("sessions")) {
+            // The index names each entry by what it holds, which the reader
+            // checks; the path fixes no field of the record.
+            let shaped = match kind {
+                "session_index" => parts.len() == 3 && parts[2] == Some("complete.json"),
+                "session_binding" => parts.len() == 4,
+                _ => false,
+            };
+            return if shaped {
+                Ok(Self::unscoped())
+            } else {
+                Err(invalid())
+            };
+        }
         if parts.len() < 4 || parts[0] != Some("v2") || parts[1] != Some("realms") {
             return Err(invalid());
         }
@@ -350,12 +364,43 @@ pub struct CommitPlan<T> {
     pub private_dirs: Vec<PathBuf>,
 }
 
+/// The variables that can name the state root, in the order they decide it.
+pub(crate) const STATE_ROOT_VARIABLES: [&str; 2] = ["WEZTERM_ATTENTION_DIR", "XDG_STATE_HOME"];
+
+/// What [`crate::environment`] gives a state-root variable whose value is not
+/// UTF-8 and could decide the root. The environment is handed on as text, and a value it cannot hold
+/// still has to decide the root, as it does for the plugin, which reads the
+/// raw bytes; no path holds a NUL, so this can stand for nothing else.
+pub(crate) const NOT_UTF8: &str = "\0";
+
+/// The plugin and the Pi extension resolve the same root in the same order.
+/// An empty WEZTERM_ATTENTION_DIR counts as unset; any other value must be a
+/// safe absolute path. XDG_STATE_HOME is used only when it is one, because the
+/// XDG spec says a relative or empty value is to be ignored. Either one that
+/// is not UTF-8 is refused where it decides the root: this writer cannot name
+/// that directory, and another root would hide every record from the plugin.
 pub fn state_root(env: &BTreeMap<String, String>) -> Result<PathBuf> {
-    if let Some(path) = env.get("WEZTERM_ATTENTION_DIR") {
+    if let Some(name) = STATE_ROOT_VARIABLES
+        .into_iter()
+        .find(|name| env.get(*name).is_some_and(|value| !value.is_empty()))
+        && env[name] == NOT_UTF8
+    {
+        return Err(AttentionError::new(
+            "record_invalid",
+            format!("{name} is not UTF-8"),
+        ));
+    }
+    if let Some(path) = env
+        .get("WEZTERM_ATTENTION_DIR")
+        .filter(|path| !path.is_empty())
+    {
         return absolute_path(path, "WEZTERM_ATTENTION_DIR");
     }
-    if let Some(path) = env.get("XDG_STATE_HOME") {
-        return Ok(absolute_path(path, "XDG_STATE_HOME")?.join("wezterm-attention"));
+    if let Some(path) = env
+        .get("XDG_STATE_HOME")
+        .and_then(|path| absolute_path(path, "XDG_STATE_HOME").ok())
+    {
+        return Ok(path.join("wezterm-attention"));
     }
     let home = env
         .get("HOME")
@@ -366,9 +411,7 @@ pub fn state_root(env: &BTreeMap<String, String>) -> Result<PathBuf> {
 fn absolute_path(value: &str, name: &str) -> Result<PathBuf> {
     if value.is_empty()
         || value.len() > manifest()?.limits.path_max_bytes
-        || value
-            .chars()
-            .any(|character| character < ' ' || character == '\u{7f}')
+        || !free_of_control(value)
         || !Path::new(value).is_absolute()
     {
         return Err(AttentionError::new(
@@ -379,17 +422,146 @@ fn absolute_path(value: &str, name: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(value))
 }
 
-pub fn pane_path(root: &Path, address: &PaneAddress) -> PathBuf {
-    root.join("v2/realms")
-        .join(&address.realm_id)
+pub fn realm_path(root: &Path, realm_id: &str) -> PathBuf {
+    root.join("v2/realms").join(realm_id)
+}
+
+pub fn incarnation_path(root: &Path, realm_id: &str, incarnation_id: &str) -> PathBuf {
+    realm_path(root, realm_id)
         .join("incarnations")
-        .join(&address.incarnation_id)
+        .join(incarnation_id)
+}
+
+pub fn pane_path(root: &Path, address: &PaneAddress) -> PathBuf {
+    incarnation_path(root, &address.realm_id, &address.incarnation_id)
         .join("panes")
         .join(&address.pane_id)
 }
 
 pub fn launch_path(root: &Path, address: &PaneAddress, launch_id: &str) -> PathBuf {
     pane_path(root, address).join("launches").join(launch_id)
+}
+
+/// Where a binding record is kept. Below an empty root it is the path the
+/// session index keys the binding's entry by.
+pub fn binding_path(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+) -> PathBuf {
+    launch_path(root, address, launch_id)
+        .join("bindings")
+        .join(binding_id)
+        .join("binding.json")
+}
+
+/// The session index: `v2/sessions/<session key>/<entry key>.json` names
+/// each binding of one provider session, so finding a session's other
+/// bindings reads one directory instead of walking every binding. The keys
+/// are the manifest's `session_key_input` and `session_entry_key_input`
+/// digests. It is derived state: a binding is written with its entry in the
+/// same commit, and never depends on it.
+///
+/// A reader trusts the index only while `v2/sessions/complete.json` says it
+/// holds every binding. A store that had bindings before its writer wrote
+/// entries has none until `sweep --apply` has written an entry for each.
+pub fn session_dir(root: &Path, provider: &str, provider_session_id: &str) -> PathBuf {
+    let mut input = provider.as_bytes().to_vec();
+    input.push(0);
+    input.extend_from_slice(provider_session_id.as_bytes());
+    root.join("v2/sessions")
+        .join(crate::protocol::sha256_hex(&input))
+}
+
+/// Where the session index names one binding: under its session, by the
+/// digest of the binding record's path below the state root, which no other
+/// binding shares.
+pub fn session_entry_path(
+    root: &Path,
+    provider: &str,
+    provider_session_id: &str,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+) -> PathBuf {
+    let binding = binding_path(Path::new(""), address, launch_id, binding_id);
+    let key = crate::protocol::sha256_hex(binding.to_string_lossy().as_bytes());
+    session_dir(root, provider, provider_session_id).join(format!("{key}.json"))
+}
+
+/// A binding record's session index entry and where it goes.
+pub fn binding_session_entry(root: &Path, binding: &Value) -> Result<(PathBuf, Value)> {
+    let invalid = || AttentionError::new("record_invalid", "binding record is invalid");
+    let text = |field: &str| {
+        binding
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(invalid)
+    };
+    let address: PaneAddress = binding
+        .get("address")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .ok_or_else(invalid)?;
+    let (launch_id, binding_id) = (text("launch_id")?, text("binding_id")?);
+    Ok((
+        session_entry_path(
+            root,
+            text("provider")?,
+            text("provider_session_id")?,
+            &address,
+            launch_id,
+            binding_id,
+        ),
+        session_entry(&address, launch_id, binding_id)?,
+    ))
+}
+
+/// The session index entry for one binding.
+pub fn session_entry(address: &PaneAddress, launch_id: &str, binding_id: &str) -> Result<Value> {
+    Ok(serde_json::json!({
+        "kind": "session_binding",
+        "schema": manifest()?.record_schema,
+        "address": address,
+        "launch_id": launch_id,
+        "binding_id": binding_id,
+    }))
+}
+
+/// The record that says the session index holds every binding.
+pub fn session_index_path(root: &Path) -> PathBuf {
+    root.join("v2/sessions/complete.json")
+}
+
+pub fn session_index_marker() -> Result<Value> {
+    Ok(serde_json::json!({"kind": "session_index", "schema": manifest()?.record_schema}))
+}
+
+/// Whether an end record ends this binding record, the one rule every reader
+/// and writer applies.
+///
+/// An end ends the binding event it names in `binding_event_id`, whatever the
+/// clocks say: the monotonic clock restarts at boot, so an end sweep writes
+/// after a reboot carries a smaller stamp than a binding recorded before it.
+/// An end observed at or after the binding ends it too, which covers an end
+/// that names no event and one whose event raced a resumed start. Any other
+/// end belongs to an earlier binding of the same id, which a resume replaced.
+pub fn ends_binding(end: &Value, binding: &Value) -> bool {
+    let named = end
+        .get("binding_event_id")
+        .and_then(Value::as_str)
+        .is_some_and(|event| binding.get("event_id").and_then(Value::as_str) == Some(event));
+    let observed = |record: &Value| {
+        record
+            .get("observed_mono_ns")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    named
+        || observed(end)
+            .zip(observed(binding))
+            .is_some_and(|(end, binding)| end >= binding)
 }
 
 pub fn mkdir_private(path: &Path) -> Result<()> {
@@ -402,9 +574,20 @@ pub fn mkdir_private(path: &Path) -> Result<()> {
         })?;
     }
     for directory in missing.iter().rev() {
-        fs::create_dir(directory).map_err(|_| {
-            AttentionError::new("state_permissions", "state directory could not be created")
-        })?;
+        // Created private rather than chmod-ed afterwards, so it is never
+        // briefly open to the umask. Another writer creating the same
+        // directory first, as two claims after a mux restart do, is success.
+        match DirBuilder::new().mode(0o700).create(directory) {
+            Ok(()) => {}
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AlreadyExists && directory.is_dir() => {}
+            Err(_) => {
+                return Err(AttentionError::new(
+                    "state_permissions",
+                    "state directory could not be created",
+                ));
+            }
+        }
         fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).map_err(|_| {
             AttentionError::new(
                 "state_permissions",
@@ -716,6 +899,39 @@ pub fn remove_file_durable(path: &Path) -> Result<bool> {
     }
 }
 
+/// Whether `directory` and every directory between it and the state root is
+/// a directory in its own right, not a symlink, so a removal there cannot
+/// reach through a link to somewhere outside the root. The root itself may be
+/// reached through a link: where it lives is the user's choice.
+pub(crate) fn directory_confined(root: &Path, directory: &Path) -> bool {
+    let Ok(relative) = directory.strip_prefix(root) else {
+        return false;
+    };
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return false;
+        };
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.is_dir() => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Whether removing `path` removes something inside the state root: its
+/// directory is confined, and it names an entry of that directory.
+pub(crate) fn removal_confined(root: &Path, path: &Path) -> bool {
+    matches!(
+        path.components().next_back(),
+        Some(std::path::Component::Normal(_))
+    ) && path
+        .parent()
+        .is_some_and(|parent| directory_confined(root, parent))
+}
+
 fn remove_path_durable(path: &Path) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
@@ -779,27 +995,9 @@ pub fn with_lock<T>(
     result
 }
 
-pub fn commit<T>(
-    lock_path: &Path,
-    read_path: &Path,
-    expected_kind: Option<&str>,
-    expected_identity: &RecordIdentity,
-    timeout: Duration,
-    decide: impl FnOnce(Option<Value>) -> Result<CommitPlan<T>>,
-) -> Result<T> {
-    let (result, ()) = commit_with(
-        lock_path,
-        read_path,
-        expected_kind,
-        expected_identity,
-        timeout,
-        decide,
-        |_| Ok(()),
-    )?;
-    Ok(result)
-}
-
+#[allow(clippy::too_many_arguments)]
 pub fn commit_with<T, P>(
+    root: &Path,
     lock_path: &Path,
     read_path: &Path,
     expected_kind: Option<&str>,
@@ -811,13 +1009,16 @@ pub fn commit_with<T, P>(
     with_lock(lock_path, timeout, || {
         let current = read_record(read_path, expected_kind, expected_identity)?;
         let plan = decide(current)?;
-        apply_plan(&plan)?;
+        apply_plan(root, &plan)?;
         let post_result = after_apply(&plan.result)?;
         Ok((plan.result, post_result))
     })
 }
 
-fn apply_plan<T>(plan: &CommitPlan<T>) -> Result<()> {
+/// Applies a plan under its locks. A removal below a symlinked directory, or
+/// not below the state root at all, is kept, and the rest of the plan still
+/// lands: what stands there is not a record this writer made.
+fn apply_plan<T>(root: &Path, plan: &CommitPlan<T>) -> Result<()> {
     for directory in &plan.private_dirs {
         mkdir_private(directory)?;
     }
@@ -828,7 +1029,11 @@ fn apply_plan<T>(plan: &CommitPlan<T>) -> Result<()> {
             atomic_replace(&replacement.path, &replacement.value)?;
         }
     }
-    for path in &plan.removals {
+    for path in plan
+        .removals
+        .iter()
+        .filter(|path| removal_confined(root, path))
+    {
         remove_path_durable(path)?;
     }
     Ok(())
@@ -836,6 +1041,7 @@ fn apply_plan<T>(plan: &CommitPlan<T>) -> Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 pub fn commit_nested_with<T, P>(
+    root: &Path,
     outer_lock: &Path,
     inner_lock: &Path,
     read_path: &Path,
@@ -849,7 +1055,7 @@ pub fn commit_nested_with<T, P>(
         with_lock(inner_lock, timeout, || {
             let current = read_record(read_path, expected_kind, expected_identity)?;
             let plan = decide(current)?;
-            apply_plan(&plan)?;
+            apply_plan(root, &plan)?;
             let post_result = after_apply(&plan.result)?;
             Ok((plan.result, post_result))
         })
@@ -858,6 +1064,7 @@ pub fn commit_nested_with<T, P>(
 
 #[allow(clippy::too_many_arguments)]
 pub fn commit_triple_with<T, P>(
+    root: &Path,
     outer_lock: &Path,
     middle_lock: &Path,
     inner_lock: &Path,
@@ -873,7 +1080,7 @@ pub fn commit_triple_with<T, P>(
             with_lock(inner_lock, timeout, || {
                 let current = read_record(read_path, expected_kind, expected_identity)?;
                 let plan = decide(current)?;
-                apply_plan(&plan)?;
+                apply_plan(root, &plan)?;
                 let post_result = after_apply(&plan.result)?;
                 Ok((plan.result, post_result))
             })
@@ -886,7 +1093,100 @@ mod tests {
     use std::io;
     use std::path::Path;
 
-    use super::{PreparedRecordWrite, sync_parent_directory_with};
+    use std::collections::BTreeMap;
+
+    use super::{PreparedRecordWrite, ends_binding, state_root, sync_parent_directory_with};
+
+    #[test]
+    fn an_end_ends_the_binding_it_names_or_one_it_was_observed_after() {
+        let binding = serde_json::json!({
+            "event_id": "00000000-0000-4000-8000-000000000001",
+            "observed_mono_ns": "00000000000000000500",
+        });
+        let end = |event: Option<&str>, observed: &str| {
+            let mut end = serde_json::json!({"observed_mono_ns": observed});
+            if let Some(event) = event {
+                end["binding_event_id"] = serde_json::json!(event);
+            }
+            end
+        };
+        let named = Some("00000000-0000-4000-8000-000000000001");
+        let other = Some("00000000-0000-4000-8000-000000000002");
+        // Written after a reboot: a smaller stamp, and the binding's own event.
+        assert!(ends_binding(&end(named, "00000000000000000100"), &binding));
+        assert!(ends_binding(&end(None, "00000000000000000500"), &binding));
+        assert!(ends_binding(&end(other, "00000000000000000600"), &binding));
+        // An earlier binding of the same id, which a resume replaced.
+        assert!(!ends_binding(&end(other, "00000000000000000100"), &binding));
+        assert!(!ends_binding(&end(None, "00000000000000000499"), &binding));
+    }
+
+    #[test]
+    fn concurrent_writers_creating_one_directory_all_succeed() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Barrier};
+        let root = std::env::temp_dir().join(format!("attention-mkdir-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        for attempt in 0..40 {
+            let target = root.join(format!("{attempt}/panes/42/launches"));
+            let barrier = Arc::new(Barrier::new(8));
+            let writers: Vec<_> = (0..8)
+                .map(|_| {
+                    let (target, barrier) = (target.clone(), barrier.clone());
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        super::mkdir_private(&target)
+                    })
+                })
+                .collect();
+            for writer in writers {
+                writer
+                    .join()
+                    .unwrap()
+                    .expect("a racing writer still succeeds");
+            }
+            for directory in [root.join(attempt.to_string()), target] {
+                let mode = std::fs::metadata(directory).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o700);
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn state_root_skips_empty_and_relative_locations_it_may_ignore() {
+        let env = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect()
+        };
+        let home = [("HOME", "/home/a")];
+        let fallback = Path::new("/home/a/.local/state/wezterm-attention");
+        assert_eq!(state_root(&env(&home)).unwrap(), fallback);
+        for ignored in ["", "relative/state"] {
+            let mut pairs = home.to_vec();
+            pairs.push(("XDG_STATE_HOME", ignored));
+            assert_eq!(state_root(&env(&pairs)).unwrap(), fallback, "{ignored:?}");
+        }
+        let mut pairs = home.to_vec();
+        pairs.push(("XDG_STATE_HOME", "/xdg"));
+        assert_eq!(
+            state_root(&env(&pairs)).unwrap(),
+            Path::new("/xdg/wezterm-attention")
+        );
+        pairs.push(("WEZTERM_ATTENTION_DIR", ""));
+        assert_eq!(
+            state_root(&env(&pairs)).unwrap(),
+            Path::new("/xdg/wezterm-attention")
+        );
+        pairs.pop();
+        pairs.push(("WEZTERM_ATTENTION_DIR", "/explicit"));
+        assert_eq!(state_root(&env(&pairs)).unwrap(), Path::new("/explicit"));
+        pairs.pop();
+        pairs.push(("WEZTERM_ATTENTION_DIR", "relative"));
+        assert!(state_root(&env(&pairs)).is_err());
+    }
 
     #[test]
     fn prepared_record_freezes_validated_bytes_before_filesystem_effects() {

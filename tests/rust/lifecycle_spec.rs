@@ -13,13 +13,17 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 use wezterm_attention::identity::pane_address;
 use wezterm_attention::lifecycle::{
-    apply_mark_activity, apply_mark_review, apply_provider_event, binding_id, prompt_return,
+    apply_mark_activity, apply_mark_clear, apply_mark_review, apply_provider_event, binding_id,
+    prompt_return,
 };
 use wezterm_attention::observations::LifecycleSnapshot;
 use wezterm_attention::providers::{ProviderAction, ProviderEvent, parse_provider_event};
 use wezterm_attention::query::read_bindings;
 use wezterm_attention::records::{atomic_replace, launch_path, pane_path, state_root, with_lock};
-use wezterm_attention::wezterm::{Clock, PaneLister, PaneRow, RuntimePorts, TtyWriter};
+use wezterm_attention::wezterm::{
+    Clock, ControllingTerminal, PaneLister, PaneRow, ProcessFacts, ProcessInspector, ProcessRead,
+    ProcessStart, RuntimePorts, TtyWriter,
+};
 
 #[path = "support/executables.rs"]
 mod executables;
@@ -33,10 +37,31 @@ mod pane_facts;
 #[path = "lifecycle_spec/consumer_recipes.rs"]
 mod consumer_recipes;
 
+#[path = "lifecycle_spec/untrusted_text.rs"]
+mod untrusted_text;
+
+#[path = "lifecycle_spec/session_starts.rs"]
+mod session_starts;
+
+#[path = "lifecycle_spec/turn_endings.rs"]
+mod turn_endings;
+
+#[path = "lifecycle_spec/metadata_fields.rs"]
+mod metadata_fields;
+
+#[path = "lifecycle_spec/mark_clear.rs"]
+mod mark_clear;
+
+#[path = "lifecycle_spec/self_claim.rs"]
+mod self_claim;
+
+#[path = "lifecycle_spec/claim_fence.rs"]
+mod claim_fence;
+
 struct Scratch(PathBuf);
 
 #[test]
-fn c2_plain_text_marker_is_left_alone() {
+fn a_plain_text_file_where_a_v1_marker_goes_is_left_alone() {
     let setup = Setup::new();
     setup.claim();
     setup.apply(
@@ -96,6 +121,8 @@ struct FakeTty {
     path: String,
     fingerprint: String,
     writes: Mutex<Vec<Vec<u8>>>,
+    /// Whether a write fails, as one to a terminal whose queue stays full does.
+    refuses_writes: std::sync::atomic::AtomicBool,
 }
 
 impl FakeTty {
@@ -104,6 +131,7 @@ impl FakeTty {
             path: "/dev/ttys777".to_owned(),
             fingerprint: "f".repeat(64),
             writes: Mutex::new(Vec::new()),
+            refuses_writes: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -127,17 +155,184 @@ impl TtyWriter for FakeTty {
         data: &[u8],
         _expected_fingerprint: &str,
     ) -> wezterm_attention::protocol::Result<()> {
+        if self
+            .refuses_writes
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(wezterm_attention::protocol::AttentionError::new(
+                "unsafe_tty",
+                "synthetic terminal write failure",
+            ));
+        }
         self.writes.lock().expect("writes lock").push(data.to_vec());
         Ok(())
     }
 }
 
-#[derive(Default)]
-struct FakePanes(Vec<PaneRow>);
+/// The panes a mux lists, or `None` for a listing that fails.
+struct FakePanes {
+    rows: Mutex<Option<Vec<PaneRow>>>,
+    /// Runs as each listing is taken, before it answers.
+    on_list: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+}
+
+impl FakePanes {
+    fn new(rows: Vec<PaneRow>) -> Self {
+        Self {
+            rows: Mutex::new(Some(rows)),
+            on_list: Mutex::new(None),
+        }
+    }
+
+    fn set(&self, rows: Option<Vec<PaneRow>>) {
+        *self.rows.lock().expect("rows lock") = rows;
+    }
+}
 
 impl PaneLister for FakePanes {
     fn list(&self, _socket_path: &str) -> wezterm_attention::protocol::Result<Vec<PaneRow>> {
-        Ok(self.0.clone())
+        let hook = self.on_list.lock().expect("hook lock").clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+        self.rows.lock().expect("rows lock").clone().ok_or_else(|| {
+            wezterm_attention::protocol::AttentionError::new(
+                "realm_unavailable",
+                "synthetic listing failure",
+            )
+        })
+    }
+}
+
+/// The process ids a fake agent tree uses: the shell that started the agent,
+/// the agent, and the hook the agent runs.
+const SHELL_PID: i32 = 3000;
+const AGENT_PID: i32 = 4000;
+const HOOK_PID: i32 = 5000;
+const USER_ID: u32 = 501;
+const PANE_TTY_DEVICE: u64 = 0x1000_0777;
+const BOOT_SESSION: &str = "0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b";
+
+fn process_facts(pid: i32, parent_pid: i32, terminal: ControllingTerminal) -> ProcessFacts {
+    ProcessFacts {
+        parent_pid,
+        process_group: pid,
+        terminal,
+        terminal_foreground_group: AGENT_PID,
+        uid: USER_ID,
+        start: ProcessStart {
+            seconds: 1_700_000_000,
+            microseconds: u32::try_from(pid).expect("small pid"),
+        },
+        traced: false,
+        zombie: false,
+    }
+}
+
+type ReadHook = std::sync::Arc<dyn Fn(i32) -> Option<ProcessRead> + Send + Sync>;
+
+/// A process table an agent's hook reads. By default the agent leads the
+/// pane terminal's foreground job, and its hook runs detached from any
+/// terminal, the way Claude Code starts one.
+struct FakeProcesses {
+    supported: Mutex<bool>,
+    own: Mutex<i32>,
+    table: Mutex<BTreeMap<i32, ProcessRead>>,
+    boot: Mutex<Option<String>>,
+    devices: Mutex<BTreeMap<String, u64>>,
+    /// Runs on every process read, with the pid read; an answer it gives
+    /// replaces the table's.
+    on_read: Mutex<Option<ReadHook>>,
+}
+
+impl FakeProcesses {
+    fn new(tty_path: &str) -> Self {
+        let table = BTreeMap::from([
+            (
+                SHELL_PID,
+                ProcessRead::Found(process_facts(
+                    SHELL_PID,
+                    1,
+                    ControllingTerminal::Device(PANE_TTY_DEVICE),
+                )),
+            ),
+            (
+                AGENT_PID,
+                ProcessRead::Found(process_facts(
+                    AGENT_PID,
+                    SHELL_PID,
+                    ControllingTerminal::Device(PANE_TTY_DEVICE),
+                )),
+            ),
+            (
+                HOOK_PID,
+                ProcessRead::Found(process_facts(
+                    HOOK_PID,
+                    AGENT_PID,
+                    ControllingTerminal::Absent,
+                )),
+            ),
+        ]);
+        Self {
+            supported: Mutex::new(true),
+            own: Mutex::new(HOOK_PID),
+            table: Mutex::new(table),
+            boot: Mutex::new(Some(BOOT_SESSION.to_owned())),
+            devices: Mutex::new(BTreeMap::from([(tty_path.to_owned(), PANE_TTY_DEVICE)])),
+            on_read: Mutex::new(None),
+        }
+    }
+
+    fn set(&self, pid: i32, read: ProcessRead) {
+        self.table.lock().expect("table lock").insert(pid, read);
+    }
+
+    fn facts(&self, pid: i32) -> ProcessFacts {
+        match self.table.lock().expect("table lock").get(&pid) {
+            Some(ProcessRead::Found(facts)) => facts.clone(),
+            other => panic!("pid {pid} is not a live process here: {other:?}"),
+        }
+    }
+
+    fn change(&self, pid: i32, change: impl FnOnce(&mut ProcessFacts)) {
+        let mut facts = self.facts(pid);
+        change(&mut facts);
+        self.set(pid, ProcessRead::Found(facts));
+    }
+}
+
+impl ProcessInspector for FakeProcesses {
+    fn self_claim_supported(&self) -> bool {
+        *self.supported.lock().expect("supported lock")
+    }
+
+    fn own_pid(&self) -> i32 {
+        *self.own.lock().expect("own lock")
+    }
+
+    fn process(&self, pid: i32) -> ProcessRead {
+        let hook = self.on_read.lock().expect("hook lock").clone();
+        if let Some(read) = hook.and_then(|hook| hook(pid)) {
+            return read;
+        }
+        self.table
+            .lock()
+            .expect("table lock")
+            .get(&pid)
+            .cloned()
+            .unwrap_or(ProcessRead::Gone)
+    }
+
+    fn boot_session(&self) -> Option<String> {
+        self.boot.lock().expect("boot lock").clone()
+    }
+
+    fn terminal_device(&self, path: &str) -> Option<u64> {
+        self.devices
+            .lock()
+            .expect("devices lock")
+            .get(path)
+            .copied()
     }
 }
 
@@ -147,6 +342,7 @@ struct Setup {
     env: BTreeMap<String, String>,
     tty: FakeTty,
     panes: FakePanes,
+    processes: FakeProcesses,
     clock: FixedClock,
 }
 
@@ -156,10 +352,11 @@ impl Setup {
         let socket_path = scratch.0.join("mux.sock");
         let socket = UnixListener::bind(&socket_path).expect("bind disposable socket");
         let tty = FakeTty::new();
-        let panes = FakePanes(vec![PaneRow {
+        let panes = FakePanes::new(vec![PaneRow {
             pane_id: "42".to_owned(),
             tty_name: Some(tty.path.clone()),
         }]);
+        let processes = FakeProcesses::new(&tty.path);
         let env = BTreeMap::from([
             ("HOME".to_owned(), scratch.0.to_string_lossy().into_owned()),
             (
@@ -182,6 +379,7 @@ impl Setup {
             env,
             tty,
             panes,
+            processes,
             clock: FixedClock {
                 monotonic: "00000000000000000100",
                 unix: "00000000012345678900",
@@ -194,7 +392,21 @@ impl Setup {
             clock: &self.clock,
             tty: &self.tty,
             panes: &self.panes,
+            processes: &self.processes,
         }
+    }
+
+    /// The environment an agent's hook runs in when its agent was started
+    /// without a claim: no launch id, and the agent's pid asserted by the
+    /// hook entry.
+    fn agent_env(&self) -> BTreeMap<String, String> {
+        let mut env = self.env.clone();
+        env.remove("WEZTERM_ATTENTION_LAUNCH_ID");
+        env.insert(
+            "WEZTERM_ATTENTION_HOST_PID".to_owned(),
+            AGENT_PID.to_string(),
+        );
+        env
     }
 
     fn claim(&self) {
@@ -401,7 +613,7 @@ fn rich_rejection_preserves_legacy_contract() {
 
 #[test]
 fn tty_presence_is_not_execution_identity() {
-    let mut setup = Setup::new();
+    let setup = Setup::new();
     setup.claim();
     setup.apply(
         &event(
@@ -413,13 +625,19 @@ fn tty_presence_is_not_execution_identity() {
         "00000000000000000200",
     );
     let directory = setup.binding_dir("codex", "facts");
-    setup.env.remove("WEZTERM_ATTENTION_LAUNCH_ID");
-    let result = setup.apply(
+    let result = apply_provider_event(
         &event("codex", "PreToolUse", "facts", json!({"tool_name":"shell"})),
+        &setup.agent_env(),
         "00000000000000000300",
+        &setup.ports(),
+    )
+    .expect("a refusal is a result");
+    assert_eq!(result.disposition, "ignored");
+    assert_eq!(
+        result.diagnostic.as_ref().map(|item| item.code.as_str()),
+        Some("claim_stale")
     );
-    assert_eq!(result.disposition, "partial");
-    assert!(directory.join("activity.json").exists());
+    assert!(!directory.join("activity.json").exists());
     assert!(!directory.join("lifecycle.json").exists());
 }
 
@@ -524,17 +742,23 @@ fn same_key_order_conflict_and_equal_time_eviction() {
     let mut conflict = item.clone();
     conflict.source_version = Some("conflict".into());
     assert!(snapshot.reduce(conflict).is_err());
-    for _ in 0..64 {
+    for _ in 0..63 {
         let mut sibling = item.clone();
         sibling.observation_id = Uuid::new_v4().to_string();
         sibling.correlation = None;
-        snapshot.reduce(sibling).unwrap();
+        assert!(snapshot.reduce(sibling).unwrap());
     }
-    assert!(snapshot.pools.general.observations.is_empty());
-    assert_eq!(
-        snapshot.pools.general.retention_floor_mono_ns,
-        Some(item.observed_mono_ns)
-    );
+    // A full pool evicts everything at its oldest instant. When that instant
+    // is the candidate's own, the candidate goes too, so nothing is stored
+    // and the full pool stays as it was.
+    let full = snapshot.clone();
+    let mut sibling = item.clone();
+    sibling.observation_id = Uuid::new_v4().to_string();
+    sibling.correlation = None;
+    assert!(!snapshot.reduce(sibling).unwrap());
+    assert_eq!(snapshot, full);
+    assert_eq!(snapshot.pools.general.observations.len(), 64);
+    assert!(snapshot.pools.general.retention_floor_mono_ns.is_none());
     assert!(snapshot.pools.requests.retention_floor_mono_ns.is_none());
 }
 
@@ -1180,10 +1404,21 @@ fn every_active_lifecycle_row_reaches_the_production_writer() {
                 .find(|item| item.body.kind() == case["kind"].as_str().unwrap())
                 .unwrap();
             assert_eq!(observation.source_event, name);
-            if row["id"] == "H18" {
+            // A case with an agent id is a subagent's event.
+            let from_child = case["patch"].get("agent_id").is_some();
+            if from_child && name == "PreToolUse" {
                 assert!(
                     !directory.join("activity.json").exists(),
                     "child work cannot become lead activity"
+                );
+            }
+            if from_child && name == "PermissionRequest" {
+                let activity: Value =
+                    serde_json::from_slice(&fs::read(directory.join("activity.json")).unwrap())
+                        .unwrap();
+                assert_eq!(
+                    activity["type"], "notify",
+                    "a child waiting for permission waits for the user"
                 );
             }
             if case["patch"]["notification_type"] == "elicitation_url_dialog" {
@@ -1229,6 +1464,8 @@ fn launch_rotation_after_resolution_cannot_add_old_execution_facts() {
     );
     let path = setup.binding_dir("codex", "old").join("lifecycle.json");
     let before = fs::read(&path).unwrap();
+    let activity = setup.binding_dir("codex", "old").join("activity.json");
+    let activity_before = fs::read(&activity).unwrap();
     let clock = PausingClock {
         entered: std::sync::Barrier::new(2),
         released: std::sync::Barrier::new(2),
@@ -1239,6 +1476,7 @@ fn launch_rotation_after_resolution_cannot_add_old_execution_facts() {
                 clock: &clock,
                 tty: &setup.tty,
                 panes: &setup.panes,
+                processes: &setup.processes,
             };
             apply_provider_event(
                 &event(
@@ -1267,15 +1505,21 @@ fn launch_rotation_after_resolution_cannot_add_old_execution_facts() {
             clock: &newer_clock,
             tty: &setup.tty,
             panes: &setup.panes,
+            processes: &setup.processes,
         };
         let claimed = wezterm_attention::claim_launch(&newer, &ports);
         clock.released.wait();
         claimed.unwrap();
         let result = pending.join().unwrap();
-        assert_eq!(result.disposition, "partial");
+        assert_eq!(result.disposition, "ignored");
         assert_eq!(result.diagnostic.unwrap().code, "claim_stale");
     });
     assert_eq!(fs::read(path).unwrap(), before);
+    assert_eq!(
+        fs::read(activity).unwrap(),
+        activity_before,
+        "a refused event writes nothing into the launch it was resolved against"
+    );
 }
 
 fn run_hook(setup: &Setup, arguments: &[&str], payload: &Value) -> std::process::Output {
@@ -1934,22 +2178,10 @@ fn delayed_pi_clear_cannot_remove_a_new_launch_review() {
                     .as_bytes(),
             )
             .expect("write delayed clear");
-        let lock_name = format!(
-            "n{}",
-            fs::canonicalize(launch.join(".lock"))
-                .expect("canonical lock path")
-                .display()
-        );
+        let lock = fs::canonicalize(launch.join(".lock")).expect("canonical lock path");
         let mut opened = false;
         for _ in 0..60 {
-            let output = Command::new("/usr/sbin/lsof")
-                .args(["-a", "-p", &child.id().to_string(), "-Fn"])
-                .output()
-                .expect("inspect delayed clear");
-            if String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .any(|line| line == lock_name)
-            {
+            if process_has_open(child.id(), &lock) {
                 opened = true;
                 break;
             }
@@ -2051,8 +2283,8 @@ fn future_review_is_never_deleted_or_replaced() {
         future
     );
 
-    let delete_error =
-        apply_mark_review(&setup.env, "pi-bus", true).expect_err("future review cannot be deleted");
+    let delete_error = apply_mark_clear(&setup.env, "pi-bus", "00000000000000000400")
+        .expect_err("future review cannot be deleted");
     assert_eq!(delete_error.diagnostic.code, "future_schema");
     assert_eq!(fs::read(review_path).expect("review after delete"), future);
 }
@@ -2100,6 +2332,32 @@ fn fresh_manual_activity_is_fenced_by_an_existing_clear() {
     );
 }
 
+/// Whether process `pid` holds `path` open. Linux lists a process's
+/// descriptors under /proc; macOS has no /proc, so there lsof answers.
+fn process_has_open(pid: u32, path: &std::path::Path) -> bool {
+    let descriptors = PathBuf::from(format!("/proc/{pid}/fd"));
+    if descriptors.is_dir() {
+        return fs::read_dir(descriptors).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| fs::read_link(entry.path()).is_ok_and(|target| target == path))
+        });
+    }
+    let output = Command::new(executables::resolve("lsof"))
+        .args(["-a", "-p", &pid.to_string(), "-Fn"])
+        .output()
+        .expect("inspect open files");
+    let name = format!("n{}", path.display());
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line == name)
+}
+
+// macOS answers ttyname on an open /dev/tty with "/dev/tty" itself, a clone
+// device owned by root, which must not become a pane identity. Linux answers
+// with the real /dev/pts path, so the case this test guards does not arise
+// there, and util-linux script takes different arguments.
+#[cfg(target_os = "macos")]
 #[test]
 fn real_macos_controlling_tty_path_is_rejected_in_a_pty_child() {
     const CHILD: &str = "WEZTERM_ATTENTION_REAL_TTY_CHILD";
@@ -2167,7 +2425,7 @@ fn every_review_writer_obeys_claim_and_owner_locks() {
 
     let claim_lock = pane.join(".claim.lock");
     let error = with_lock(&claim_lock, Duration::from_secs(1), || {
-        apply_mark_review(&setup.env, "pi-bus", false)
+        apply_mark_review(&setup.env, "pi-bus")
     })
     .expect_err("manual review must honor the claim lock");
     assert_eq!(error.diagnostic.code, "probe_unavailable");
@@ -2222,60 +2480,9 @@ fn same_session_resume_reopens_an_older_end() {
 }
 
 #[test]
-fn session_start_self_claims_only_when_the_standin_gate_is_enabled() {
-    let mut enabled = Setup::new();
-    enabled.env.remove("WEZTERM_ATTENTION_LAUNCH_ID");
-    enabled.env.insert(
-        "WEZTERM_ATTENTION_ENABLE_SELF_CLAIM".to_owned(),
-        "1".to_owned(),
-    );
-    let start = event(
-        "claude",
-        "SessionStart",
-        "session-a",
-        json!({"source":"startup"}),
-    );
-    let result = enabled.apply(&start, "00000000000000000200");
-    assert_eq!(result.disposition, "applied");
-    let root = state_root(&enabled.env).expect("state root");
-    let (address, _) = pane_address(&enabled.env).expect("address");
-    assert!(pane_path(&root, &address).join("claim.json").exists());
-    assert_eq!(read_bindings(&root).expect("bindings").0.len(), 1);
-
-    let mut disabled = Setup::new();
-    disabled.env.remove("WEZTERM_ATTENTION_LAUNCH_ID");
-    let disabled_result = disabled.apply(&start, "00000000000000000200");
-    assert_eq!(disabled_result.disposition, "ignored");
-    assert_eq!(
-        disabled_result
-            .diagnostic
-            .as_ref()
-            .map(|item| item.code.as_str()),
-        Some("claim_stale")
-    );
-}
-
-#[test]
-fn tty_matching_claim_resolves_without_an_inherited_launch() {
-    let mut setup = Setup::new();
-    setup.claim();
-    setup.env.remove("WEZTERM_ATTENTION_LAUNCH_ID");
-    let start = event(
-        "claude",
-        "SessionStart",
-        "session-a",
-        json!({"source":"startup"}),
-    );
-    assert_eq!(
-        setup.apply(&start, "00000000000000000200").disposition,
-        "applied"
-    );
-}
-
-#[test]
 fn non_start_without_a_claim_is_stale_for_every_provider() {
     let mut setup = Setup::new();
-    setup.env.remove("WEZTERM_ATTENTION_LAUNCH_ID");
+    setup.env = setup.agent_env();
     for event in [
         event(
             "claude",
@@ -2397,7 +2604,7 @@ fn manual_mark_targets_the_launch_and_a_duplicate_is_skipped() {
     );
 
     assert_eq!(
-        apply_mark_review(&setup.env, "manual", false)
+        apply_mark_review(&setup.env, "manual")
             .expect("set review")
             .disposition,
         "applied"
@@ -2408,7 +2615,7 @@ fn manual_mark_targets_the_launch_and_a_duplicate_is_skipped() {
         wezterm_attention::protocol::sha256_hex(b"manual")
     ));
     assert!(review.exists());
-    apply_mark_review(&setup.env, "manual", true).expect("clear review");
+    apply_mark_clear(&setup.env, "manual", "00000000000000000500").expect("clear review");
     assert!(!review.exists());
 }
 
@@ -2463,7 +2670,7 @@ fn hooks_event_debug_uses_stderr_and_lifecycle_errors_are_non_strict() {
         &["hooks", "event", "claude", "PreToolUse", "--strict"],
         &payload,
     );
-    assert_eq!(strict.status.code(), Some(3));
+    assert_eq!(strict.status.code(), Some(1));
 }
 
 #[test]

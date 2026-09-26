@@ -14,17 +14,19 @@ file is the maintained public account, and it is the one to read first.
 
 `Cargo.toml` denies `dbg_macro`, `todo`, `unimplemented`, `unsafe_op_in_unsafe_fn`
 and `unused_must_use`. It does not deny `clippy::unwrap_used` or
-`clippy::expect_used`, which fire at 23 sites in the library.
+`clippy::expect_used`, which fire at 25 sites in the library.
 
-Denying them today would mean adding 23 allow attributes, which announces an
+Denying them today would mean adding 25 allow attributes, which announces an
 intention while changing nothing. The sites need reading individually: some are
 genuinely infallible and want a comment, some want an error path. Until that pass
 happens, the table locks in the lints the crate already satisfies and says
 nothing about the ones it does not.
 
 To reproduce the count, run `cargo clippy --lib -- -W clippy::unwrap_used
--W clippy::expect_used`. Seventeen of the 23 are `expect` and six are `unwrap`;
-`src/query.rs` holds eleven of them. Each site is one of three things, and they
+-W clippy::expect_used`. Nineteen of the 25 are `expect` and six are `unwrap`;
+`src/query.rs` holds eleven of them. The command also lints `build.rs`, and
+reports its one `expect` (cargo sets `CARGO_MANIFEST_DIR`) as a 26th warning,
+which is not a library site. Each site is one of three things, and they
 need separating before the lint can go on:
 
 1. A genuine invariant. It keeps the call and gains an `#[allow]` with a
@@ -131,7 +133,7 @@ number in all three implementations, but not the same rule about its encoding.
 Rust and accepted by the other two, and the disagreement is lexical -- it exists
 only in the JSON text, and disappears once the value is decoded.
 
-The branch already draws this distinction where it decided it mattered: the Lua
+The project already draws this distinction where it decided it mattered: the Lua
 side scans lifecycle snapshots for canonical integers before decoding, and the
 Python checker asserts the lifecycle schema's integer type. Ordinary records and
 wire identity did not get the same treatment.
@@ -167,11 +169,11 @@ a decoded fixture cannot express the difference.
 
 ## Cleaning up a pane's records asks the mux, and waits when it cannot answer
 
-A v1 pane's flat files are named by its pane id. Deciding that nobody writes
+A pane's v1 flat marker files are named by its pane id. Deciding that nobody writes
 them any more is not a question about one window. Before unlinking, the plugin
 walks the mux -- every window, every tab, every pane -- and collects the names
-in use. Attention's writers no longer project those names for v2 panes, so the
-walk's trigger population is v1-only absent panes.
+in use. Attention's writers do not project those names for panes with v2 records,
+so the walk runs only for absent panes that used v1 flat markers.
 
 Two consequences are deliberate.
 
@@ -194,14 +196,14 @@ pane that moved without reconnecting: a failed lookup cannot tell a closed pane
 from one that came back under a new local id, so it would still fall through to
 the walk. It is worth adding after measuring a real callback, not before.
 
-## Sweep collection attributes leftover flats by claim, not by live v1 occupancy
+## Sweep collection attributes leftover flats by claim, not by live occupancy
 
 `attention sweep` collects `<id>`, `<id>.agents`, and `<id>.ack` when exactly one
-valid v2 claim names that scalar pane id. It does not ask the mux whether a v1
-pane currently occupies the same number. After pane ids reuse, a leftover claim
+valid v2 claim names that scalar pane id. It does not ask the mux whether a pane
+writing v1 flat markers currently occupies the same number. After pane ids reuse, a leftover claim
 from an old incarnation can name a live third-party or Pi-fallback marker.
-Preview (`attention sweep --json`) lists the stems; `--apply` is opt-in. Shared
-v2 addresses still refuse. `.review` is never collected.
+Preview (`attention sweep --json`) lists the stems; `--apply` is opt-in. A pane id shared
+by several v2 addresses still refuses. `.review` is never collected.
 
 Uniqueness is a snapshot under the selected owner's `.claim.lock`. Apply does
 not hold a tree-wide lock, so a second claim at another address can land in the
@@ -212,12 +214,254 @@ The restat that refuses a replaced leftover compares device, inode, nlink, size,
 and mtime. Rename (Pi fallback) changes the inode and is refused.
 An in-place rewrite of equal size that restores mtime is not.
 
+## What sweep leaves behind
+
+`attention sweep --apply` removes only ended bindings and closed panes' whole
+trees under the retention rules in the
+[record contract](record-contract.md#trust-boundary), with their session index
+entries; the subagent records a floor advance covers; and the v1 projection
+leftovers and exited GUIs' tab-order files the record contract lists as
+collected. Those rules keep sweep from removing state it cannot prove
+abandoned, and they mean four kinds of leftover stay on disk:
+
+- **An exited GUI's tab-order files that name mux panes.** A file is removed
+  only when it names no tab, or when every pane it names is verified absent.
+  The GUI's own local panes are, once it has exited (see the next section), so
+  a file naming only those goes. A window attached to a mux server names that
+  server's panes, which are usually still running, or gone together with their
+  socket with nothing to show the server gone, which a reader reports as
+  unavailable rather than absent. So that file stays until you remove it. So
+  does a file naming a pane whose realm or incarnation records are gone, as
+  after you remove a server's records by hand; with no socket to ask, it
+  leaves sweep complete. It is safe to delete
+  `tabs/<incarnation id>-<window id>.json` by hand once no GUI with that
+  window is running.
+- **Temporary files from an interrupted write, outside a tree being removed.**
+  So is a review that Alt+B had moved aside to `<review>.json.<session>.clear`
+  when it was interrupted. They do not stop a binding or pane tree from being
+  pruned, and they go with that tree when it is, but sweep collects none on its
+  own.
+- **Subagent records below the retention floor.** A child record older than its
+  binding's floor is already ignored by every reader. It stays until its binding
+  or pane tree is removed.
+- **A half-removed binding directory in a live pane.** A crash while a binding
+  directory was being removed can leave part of it behind. While the pane is
+  live, retention does not touch its tree, so the remainder stays.
+
+Collecting any of these would be a new deletion, and would need the same
+evidence rule the others have.
+
+## A mux server whose socket was removed, replaced or refuses keeps its records
+
+Sweep reclaims the panes of a server it can show has exited. A GUI that quit is
+one: its socket is its own `gui-sock-<pid>`, and no process with that pid exists,
+whether its socket file was left behind or not. So the records of GUI-local
+panes are reclaimed by the two-observation rule, and after the retention age
+their pane trees go too.
+
+A server whose socket file no longer exists, whose path now holds a different
+socket, or whose socket refuses connections, is another matter. It may still
+run with its socket file deleted, or with another server bound over the same
+path (WezTerm removes a socket file in its way before binding), and a `chmod`
+or `touch` on a live socket changes its identity too. A refusal does not show
+it gone either: macOS refuses a connection to a live listener whose accept
+queue is full, which a server that stopped accepting fills with each listing
+that timed out, and WezTerm stops accepting after its first accept error while
+the server and its panes run on. Only one thing outside the server tells a
+stopped one from a running one: the process listing, when it read every process
+of this user and none carries that socket and pane id. When it cannot say that,
+the records are kept: sweep neither ends those bindings nor removes those pane
+trees, readers report the panes `unavailable` with a `socket_gone`,
+`incarnation_changed` or `socket_refused` diagnostic, and `doctor` and `sweep`
+report the whole kept history once per code, listing each incarnation with its
+`path` and `pane_count`. That is a finding, not an unanswered probe, so `sweep`
+and `doctor` still give a complete answer and exit 0 however much of it there
+is.
+
+The listing rarely says it. macOS hides the environment of its own system
+binaries, Apple's `/bin/zsh` and `/bin/bash` among them, and every Mac runs some
+of them as the user, so there the listing never reads every process. On Linux,
+one process of the user that has made itself non-dumpable is enough to leave
+the listing incomplete, and ssh-agent does that by default, so Linux usually
+behaves the same.
+
+Once you know such a server is gone, remove its records yourself: the `path`
+each incarnation carries in that diagnostic is relative to the state root, as
+in `<state root>/v2/realms/<realm id>/incarnations/<incarnation id>`.
+
+## Empty session directories stay in the index
+
+The session index keeps one directory per provider session, `v2/sessions/<session key>/`.
+Retention removes a binding's entry but never the directory, even once it is empty: a bind of
+the same session in another pane may be creating its entry there at that moment, and removing
+the directory under it would refuse that bind. So one empty directory stays for every provider
+session ever bound. Each is an empty directory; remove the empty ones by hand if their number
+matters to you.
+
+An entry whose binding is gone stays too. Retention finds an entry only through the binding it
+names, so the entry left by a bind that stopped after writing it and before writing its binding,
+or by removing an incarnation's records by hand, is never removed. Readers skip such an entry, as
+a walk would find no binding there. `doctor` walks every directory the index keeps, so its cost
+grows with the number of provider sessions ever started, not with the live store.
+
+## After a reboot, pane retention can wait without bound
+
+Absence sightings are ordered by the monotonic clock, which restarts at boot. A
+sighting recorded before a reboot reads as later than now and restarts the
+count, which costs a minute. An end sweep writes after a reboot names the
+binding event it ends, so it ends that binding whatever its stamp, and the
+pane's retention counts from it as usual. A binding end recorded before a reboot
+is worse: no sighting from the new boot can be shown to follow it until the new
+uptime passes the uptime at which the end was recorded, so retention of that
+pane's tree waits until then. A machine rebooted more often than that never
+removes the tree. This errs toward keeping records: nothing is removed early.
+
+## The session index trusts every writer to keep it
+
+Once `v2/sessions/complete.json` exists, `bindings --socket` and `inspect` look
+for the other bindings of a session only where the session index names them.
+Every binding this version writes gets its entry in the same commit. A binding
+written without one -- by an older `attention` still running hooks after the
+store was marked, or by hand -- is not found as a rival, so a conflict with it
+is not reported, until an entry is written for it. `attention sweep --apply`
+without `--realm` writes a missing entry for every binding it reads; with
+`--realm` it writes none. Realm-wide `bindings` walks
+every binding and is not affected. Nothing is removed on the index's word.
+
+## Removing a pane tree removes the lock files it holds
+
+Pane retention removes the pane's whole directory while it holds the pane's
+claim lock and the launch lock, and those lock files are inside that directory. A
+writer that opened the old lock file and is waiting on it takes the lock on the
+removed file once sweep lets go, and a later writer creates a new lock file at
+the same path and takes that one, so both can hold "the" lock at once. This can
+only happen on a pane whose binding ended more than 30 days ago and that sweep
+has since seen absent twice, where no writer is expected.
+
+## Before the GUI knows its own mux, a local pane's realm is checked by socket path only
+
+Any program that prints to a pane can set that pane's `WEZTERM_ATTENTION` user
+variable. On a pane in the GUI's own domains, the plugin refuses an identity
+whose pane id differs from the pane's own, and once the `attention tab-source`
+answer has arrived it also refuses an identity whose realm or incarnation is not
+the GUI's own mux. Until that answer arrives, shortly after startup, the realm is
+compared with a digest of the GUI's `WEZTERM_UNIX_SOCKET` as the plugin sees it:
+the incarnation cannot be checked yet, and the digest equals the writer's realm
+only when that path is already canonical. A mismatch in that window is held back,
+not refused, until the answer arrives.
+
+## bash-preexec loaded after the first prompt
+
+The bash integration decides at the first prompt whether bash-preexec is
+present. When bash-preexec is loaded later in the same shell, the integration's
+DEBUG trap is wrapped by bash-preexec's own and no command in that shell is
+claimed again. Load bash-preexec before this file, or start a new shell after
+loading it.
+
+## Ctrl-C during a claim under bash-preexec on bash 3.2
+
+When bash-preexec is loaded, the claim runs inside its DEBUG trap. On bash 3.2,
+the macOS `/bin/bash`, a Ctrl-C there leaves the interrupted functions' names
+behind, and current bash-preexec checks that list to decide whether a command
+line was typed at the top level. From then on it runs no preexec function in
+that shell: not the claim, and not any other tool's hook. Without bash-preexec,
+and in zsh, the integration recovers. Start a new shell after interrupting a
+claim there. Catching the interrupt instead would let the interrupted command
+line run, unclaimed, which is not what Ctrl-C asks for.
+
+## Two GUIs without a writer closing same-numbered windows
+
+A GUI with no working `attention` writer, or whose `tab-source` did not answer
+through its whole retry backoff, publishes tab orders under the shared name
+`tabs/<window id>.json`, and window ids restart with every mux. When a window
+closes, the plugin removes that file only if it still holds the bytes this GUI
+wrote, but the check and the removal are two steps. If another such GUI writes
+the same name between them, its file is removed, and it is written again only
+when that GUI's bar changes. Only GUIs without a source answer share a name.
+
+## A second agent in one launch after the first died without ending
+
+A launch claim covers one command line, so two agents can start under one
+claim: `claude; claude` on one line, or a wrapper that restarts the agent.
+When the first agent dies without its session-end hook running (killed, or
+crashed), its binding is never ended. The second agent's fresh session start is
+then refused (`binding_conflict`, "provider start cannot replace the active
+binding"), and its later events are ignored (`claim_stale`), so its tab shows no
+indicator for that session. The writer cannot tell a dead first agent from one
+still running beside the second, as in `claude & claude`, and replacing a live
+agent's binding would take over its tab. Nothing is lost: the next command line
+gets a fresh claim and binds normally.
+
+## On Linux, only a shell claims a pane
+
+An agent claims its own pane only on macOS in 1.0. The proof reads a process's
+controlling terminal, parent and start time from the kernel through `sysctl`,
+and 1.0 has that reader for macOS only, so elsewhere the writer refuses
+before reading anything. On Linux an agent's events need a
+launch id inherited from a claiming shell, as before; an agent started without
+one records nothing. The hook command's `WEZTERM_ATTENTION_HOST_PID=$PPID exec`
+prefix is harmless there.
+
+## An agent's claim belongs to its process, not to one run of it
+
+A self-owned claim names a process: its pid, its start time and the boot it
+started in. Everything that process does is one launch. Several sessions in one
+agent process, as after `/clear` or a resume, are successive bindings of that
+launch, and a process that `exec`s another program keeps its pid and start time,
+so the claim goes with it. A claim passes to a new agent only when its owner is
+proven gone. Telling one invocation from the next inside a process would need
+evidence the kernel does not keep, and a guess would let one run take over
+another's pane.
+
+## An agent that claimed its own pane can leave its last activity behind
+
+In a pane an agent claimed for itself, the shell integration's prompt hook
+clears the agent's standing activity once the agent's process is proven gone.
+Without the shell integration nothing runs at the prompt, so an agent that ends
+without a hook of its own ending that activity, because it was killed, crashed
+or cut its turn short, leaves its last activity on the tab until the next agent
+claims the pane or the pane closes.
+
+## A pane a shell has claimed refuses agents started without its launch id
+
+Once a shell has claimed a pane, whether the bash integration for a listed
+command or zsh's `wezterm_attention_claim`, an agent started in that pane
+without the claim's launch id is refused on every event (`claim_stale`) and
+shows nothing. The shell claim belongs to the commands its shell starts; letting
+an agent it did not start write into it is how one agent's work was reported as
+another's. Such an agent does not claim the pane for itself either, since that
+would take the pane from the shell's commands. Open a new pane to go back to
+agents claiming for themselves, or start the agent through the shell's claim.
+
+## A hook run through a relay or a compound command is refused
+
+The writer accepts an agent's own claim only when its direct parent is the
+process `WEZTERM_ATTENTION_HOST_PID` names, which the registered hook command
+sets from `$PPID` and then replaces itself with `attention` through `exec`. A
+hook command that keeps its shell, such as `...; true`, `a && b`, or a wrapper
+script that runs `attention` without `exec`, leaves that shell as the parent. A
+relay that receives the callback and starts `attention` itself, forwarding the
+value or not, leaves itself as the parent or drops the value. Each of these is
+refused with `self_claim_parent_unverified` and records nothing, where accepting
+it would record the relay or the shell as the agent. This holds against
+programs that cooperate with the hook entry; a same-user program that sets the
+value to its own pid can still claim a pane for itself, as it can already
+forge any record (see the [record contract](record-contract.md#trust-boundary)).
+
+## A mark stamped before an unbound clear
+
+`attention mark clear --source NAME` in a claimed launch that no provider
+session has bound yet removes the launch's activity, but leaves no record of
+when it did. `attention mark` reads its clock before taking the launch lock, so
+a mark stamped just before the clear and written just after it shows the
+activity again. A bound pane keeps a clear record and ignores such a mark.
+
 ## The acknowledgement write has no compare-and-swap
 
 `write_v2_record` in `plugin/overlays.lua` reads the existing record only to
 check that it is readable, then renames over it unconditionally. Two GUI writers
-acknowledging at the same moment can lose one dismissal. This predates the v2
-work and is not widened by it.
+acknowledging at the same moment can lose one dismissal. This predates v2 records
+and is not widened by them.
 
 The sequence needs two GUI processes on one binding:
 
@@ -251,7 +495,7 @@ suppresses B.
 
 ## The library's public surface is wider than its supported surface
 
-`src/lib.rs` now names the supported entry points in its crate documentation and
+`src/lib.rs` names the supported entry points in its crate documentation and
 classifies everything else as implementation. Read that first: it is the
 declaration, and this section only explains why it is a declaration rather than
 an enforced boundary.
@@ -262,7 +506,8 @@ should follow. Most other modules are still public, `records` most consequential
 because this crate's own tests drive them.
 
 Documenting the boundary does not prevent an external program from compiling
-against internals; only privacy does that. Making `records` private is not a
+against internals; only privacy does that. `publish = false` in `Cargo.toml`
+keeps the crate off crates.io, so such a program has to build from a checkout. Making `records` private is not a
 one-line change either, because the currently public, unstable
 `read_pane_facts_with_ports` needs
 publicly nameable reader types, and several test files mix white-box storage

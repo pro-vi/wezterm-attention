@@ -12,8 +12,8 @@ return function()
     local wezterm = context.wezterm
     local protocol = context.protocol
     local diagnostic = context.diagnostic
-    local plugin_root = context.plugin_root
     local report_error_once = context.report_error_once
+    local report_warning_once = context.report_warning_once
     local resolve_pane_read = context.resolve_pane_read
     local read_attention_view = context.read_attention_view
     local pane_method = context.pane_method
@@ -21,6 +21,7 @@ return function()
     local v2_review_paths = context.v2_review_paths
     local write_v2_user_review = context.write_v2_user_review
     local clear_v2_reviews = context.clear_v2_reviews
+    local restore_cleared_reviews = context.restore_cleared_reviews
     local refresh_cached_v2 = context.refresh_cached_v2
     local acknowledge_focused_v2_pane = context.acknowledge_focused_v2_pane
     local read_effective_marker = context.read_effective_marker
@@ -333,6 +334,20 @@ return function()
       tab_source_state = { retry_index = 1, retry_at = 0 }
     end
 
+    --- The wait before retry number `index`; the last wait repeats.
+    local function backoff_delay(index)
+      return publish_backoff_seconds[math.min(index, #publish_backoff_seconds)]
+    end
+
+    --- The socket of this GUI's own mux: the one the tab source was asked
+    --- about, else the one in this GUI's environment. Nil unless it is an
+    --- absolute path.
+    local function own_socket()
+      local socket = tab_source_state.socket or os.getenv("WEZTERM_UNIX_SOCKET")
+      if type(socket) == "string" and socket:sub(1, 1) == "/" then return socket end
+      return nil
+    end
+
     local function parse_tab_source_response(stdout)
       if not protocol or type(stdout) ~= "string"
           or #stdout > protocol.limits.max_json_bytes then return nil end
@@ -350,9 +365,61 @@ return function()
       return source
     end
 
+    --- Can this GUI ask the attention command who it is? Without the writer
+    --- the shim can only fail, and the backoff would run it every thirty
+    --- seconds for as long as the GUI lives. Without the manifest no answer
+    --- can be read.
+    local function can_acquire_tab_source(socket)
+      return type(socket) == "string" and socket:sub(1, 1) == "/"
+        and protocol ~= nil
+        and M._active_integration_root ~= nil and M._active_writer_installed == true
+        and type(wezterm.run_child_process) == "function"
+    end
+
+    --- Has the first run failed, and then the retry after each backoff wait?
+    --- Retries go on every thirty seconds, but a window held past this point
+    --- would stay out of `attention tabs` for as long as no answer comes.
+    local function retries_used_up(state)
+      return state.retry_index > #publish_backoff_seconds + 1
+    end
+
+    --- What a tab order is published under now: "ready" with the source,
+    --- "unavailable" when no answer can come or none came through the whole
+    --- backoff, and "pending" while one still can. A failed run schedules
+    --- its retry, so until the backoff is used up it is still "pending".
+    local function tab_source_status()
+      local state = tab_source_state
+      if state.source then return "ready", state.source end
+      if retries_used_up(state) or not can_acquire_tab_source(own_socket()) then
+        return "unavailable"
+      end
+      return "pending"
+    end
+
+    local realm_by_socket = {}
+
+    --- What this GUI knows of its own mux, the one its local panes run in:
+    --- the tab-source status, then the realm and incarnation the answer named.
+    --- Before an answer the realm is the hash of this GUI's socket path as its
+    --- environment spells it, which is the writer's realm whenever that path
+    --- is already canonical; the incarnation is not known. Nil realm when this
+    --- GUI has no socket to go by.
+    local function own_mux_identity()
+      local status, source = tab_source_status()
+      if source then return status, source.realm_id, source.incarnation_id end
+      local socket = own_socket()
+      if not socket or not protocol then return status end
+      local realm = realm_by_socket[socket]
+      if not realm then
+        realm = context.sha256(socket)
+        realm_by_socket[socket] = realm
+      end
+      return status, realm
+    end
+
     local function acquire_tab_source(socket)
-      if type(socket) ~= "string" or socket:sub(1, 1) ~= "/" or not plugin_root
-          or type(wezterm.run_child_process) ~= "function" then return end
+      local root = M._active_integration_root
+      if not can_acquire_tab_source(socket) then return end
       if tab_source_state.socket ~= socket then
         tab_source_state = { socket = socket, retry_index = 1, retry_at = 0 }
       end
@@ -361,18 +428,21 @@ return function()
       local token = {}
       state.pending = token
       local ok, success, stdout = pcall(wezterm.run_child_process,
-        { plugin_root .. "/bin/attention", "tab-source", "--socket", socket })
+        { root .. "/bin/attention", "tab-source", "--socket", socket })
       if tab_source_state ~= state or state.pending ~= token then return end
       state.pending = nil
       local source = ok and success and parse_tab_source_response(stdout) or nil
       if source then
         state.source = source
       else
-        local delay = publish_backoff_seconds[math.min(state.retry_index, #publish_backoff_seconds)]
-        state.retry_at = now_ms() + delay * 1000
+        state.retry_at = now_ms() + backoff_delay(state.retry_index) * 1000
         state.retry_index = state.retry_index + 1
         report_error_once("tab-source:" .. socket,
-          "cannot identify the tab publisher's GUI socket; publishing without source identity")
+          "cannot identify the tab publisher's GUI socket yet; unpublished tab orders wait for a retry")
+        if retries_used_up(state) then
+          report_error_once("tab-source-used-up:" .. socket,
+            "no tab-source answer through the whole backoff; publishing tab orders without source identity")
+        end
       end
     end
 
@@ -515,6 +585,17 @@ return function()
       end
     end
 
+    --- The ids of `windows`, GUI or mux, as a set of decimal strings. A window
+    --- whose id cannot be read is left out.
+    local function window_keys(windows)
+      local keys = {}
+      for _, window in ipairs(windows) do
+        local ok, id = pcall(window.window_id, window)
+        if ok and id ~= nil then keys[tostring(id)] = true end
+      end
+      return keys
+    end
+
     local function gui_window_keys(opts)
       local inventory = opts and opts.gui_windows
       if inventory == nil and wezterm.gui then inventory = wezterm.gui.gui_windows end
@@ -524,12 +605,31 @@ return function()
         inventory = windows
       end
       if type(inventory) ~= "table" then return nil end
-      local keys = {}
-      for _, gui_window in ipairs(inventory) do
-        local ok, id = pcall(gui_window.window_id, gui_window)
-        if ok and id ~= nil then keys[tostring(id)] = true end
-      end
-      return keys
+      return window_keys(inventory)
+    end
+
+    --- Mux windows that exist, by id as a decimal string, whether or not a GUI
+    --- window shows them. Nil when the mux cannot be listed.
+    local function mux_window_keys()
+      local mux = wezterm.mux
+      if not mux or type(mux.all_windows) ~= "function" then return nil end
+      local ok, windows = pcall(mux.all_windows)
+      if not ok or type(windows) ~= "table" then return nil end
+      return window_keys(windows)
+    end
+
+    --- Windows that are still open. A workspace switch makes the GUI window
+    --- show another workspace's mux window, so the one it showed leaves
+    --- gui_windows() while it still exists, with its tabs, to be shown again.
+    --- Only a window gone from both has closed. Without the mux listing it is
+    --- the GUI inventory alone, so a window another workspace shows counts as
+    --- closed. `live` is the GUI inventory the caller took; it is not changed.
+    local function open_window_keys(live)
+      if not live then return nil end
+      local open = {}
+      for key in pairs(live) do open[key] = true end
+      for key in pairs(mux_window_keys() or {}) do open[key] = true end
+      return open
     end
 
     local function prune_closed_publish_windows(current_window_key, opts, dir)
@@ -538,10 +638,13 @@ return function()
       -- The callback's window is authoritative even if WezTerm's inventory is
       -- between insertion and publication for a newly created GUI window.
       live[current_window_key] = true
-      withdraw_closed_tab_orders(dir, live)
+      local open = open_window_keys(live)
+      withdraw_closed_tab_orders(dir, open)
       for window_key in pairs(seen_marker_ids_by_window) do
-        if not live[window_key] then seen_marker_ids_by_window[window_key] = nil end
+        if not open[window_key] then seen_marker_ids_by_window[window_key] = nil end
       end
+      -- Publication work is about what a poll can see: a hidden window is not
+      -- polled, so it cannot renew or conclude an observation.
       for window_key in pairs(publish_domains_by_window) do
         if not live[window_key] then publish_domains_by_window[window_key] = nil end
       end
@@ -564,8 +667,7 @@ return function()
           "cannot retry mux identity publication: call_after is unavailable")
         return false
       end
-      local index = math.min(schedule.retry_index, #publish_backoff_seconds)
-      local delay = publish_backoff_seconds[index]
+      local delay = backoff_delay(schedule.retry_index)
       schedule.token = schedule.token + 1
       local token = schedule.token
       call_after(delay, function()
@@ -600,9 +702,15 @@ return function()
     --- from the tabs that happened to answer.
     local function update_publish_schedule(
         domain, window_key, pane_count, unpublished, opts, partial)
-      local socket = M._active_unix_domains and M._active_unix_domains[domain]
+      local socket = context.unix_domain_socket(domain)
       local root = M._active_integration_root
-      if not socket or not root then return false end
+      if not socket and unpublished then
+        report_warning_once("unpublished-domain:" .. domain, "panes on domain " .. domain
+          .. " have not published their identity, and there is no socket on this machine to "
+          .. "republish it through; they show no attention until something in the pane "
+          .. "publishes it, as the shell integration does at each prompt")
+      end
+      if not socket or not root or not M._active_writer_installed then return false end
       local schedule = publish_schedule_by_realm[socket]
       if not schedule then
         -- A partial look cannot start one either: its count is the count of the
@@ -737,6 +845,9 @@ return function()
     function M.get_attention(marker_id, opts)
       local id = tostring(marker_id)
       if opts and opts.dir then
+        -- The id becomes a path segment, and the read below can remove a stale
+        -- acknowledgement beside it.
+        if not context.canonical_pane_id(id) then return nil end
         local atype, frame, _, _, _, _, source = read_effective_marker(opts.dir, id)
         local now = (opts and opts.now_ms) or now_ms()
         local flagged = review_flagged(opts.dir, id) or atype == "review"
@@ -795,10 +906,34 @@ return function()
       return true
     end
 
+    --- Once per distinct error, so a consumer's bug is visible with its own
+    --- words and a failure on every poll is still one line. The count of
+    --- distinct errors is bounded too: text that changes on every call would
+    --- otherwise be a line per poll.
+    local view_change_failures, distinct_view_change_failures = {}, 0
+    local function report_view_change_failure(failure)
+      local text = tostring(failure):sub(1, 512)
+      if view_change_failures[text] then return end
+      view_change_failures[text] = true
+      distinct_view_change_failures = distinct_view_change_failures + 1
+      if distinct_view_change_failures > 16 then
+        report_error_once("on-view-change-error-cap",
+          "on_view_change keeps failing with new errors; further ones are not logged")
+        return
+      end
+      report_error_once("on-view-change-error:" .. text,
+        "on_view_change failed: " .. text .. "; future polls remain enabled")
+    end
+
     --- `unsettled` says a tab in this window could not be read. A scope nobody
     --- could look at has not been lost, and reporting it so would have a consumer
     --- discard state it still needs -- a dismissal, a policy -- and rebuild it as
     --- new when the pane comes back.
+    ---
+    --- Baselines are per window, and each window delivers from its own poll. A
+    --- pane moved between windows is therefore scope_lost in one and initial in
+    --- the other, in whichever order the two windows happen to poll; nothing
+    --- orders messages across windows.
     local function deliver_window_views(window, entries, opts, unsettled)
       local callback = M._on_view_change
       if not callback then return end
@@ -834,7 +969,7 @@ return function()
         end
       end
       callback_views_by_window[window_key] = next_views
-      local live = gui_window_keys(opts)
+      local live = open_window_keys(gui_window_keys(opts))
       if live then
         live[window_key] = true
         for other, states in pairs(callback_views_by_window) do
@@ -847,8 +982,8 @@ return function()
       delivering_views = true
       for _, batch in ipairs({ losses, messages }) do
         for _, message in ipairs(batch) do
-          local ok = pcall(callback, message)
-          if not ok then report_error_once("on-view-change-error", "on_view_change failed; future polls remain enabled") end
+          local ok, failure = pcall(callback, message)
+          if not ok then report_view_change_failure(failure) end
         end
       end
       delivering_views = false
@@ -858,6 +993,9 @@ return function()
     function M.remove_marker(marker_id, opts)
       local dir = (opts and opts.dir) or M._active_dir or defaults.dir
       local id = tostring(marker_id)
+      -- The id becomes a segment of every path remove_marker deletes; "../x"
+      -- would reach outside the state directory.
+      if not context.canonical_pane_id(id) then return end
       remove_marker(dir, id)
       attention_cache[id] = nil
     end
@@ -917,6 +1055,7 @@ return function()
     --- told.
     function M.poll(window, opts)
       if delivering_views then return end
+      context.refresh_domain_facts()
       local dir = (opts and opts.dir) or M._active_dir or defaults.dir
       local mux_win = window:mux_window()
       if not mux_win then return end
@@ -981,6 +1120,18 @@ return function()
       local saw_v2 = false
       local earliest_wakeup_unix_ns
 
+      --- The time now, for a read that saw a write time ahead of this poll's
+      --- sample. Nil when the caller fixed the poll's time.
+      local function resample_utc()
+        if opts and type(opts.utc_now) == "function" then
+          local ok, value = pcall(opts.utc_now)
+          return ok and format_unix_ns20(value) or nil
+        elseif opts and opts.now_unix_ns then
+          return nil
+        end
+        return (wezterm_now_unix_ns20())
+      end
+
       local function sample_utc_once()
         if utc_sampled then return poll_now_unix_ns, poll_utc_error end
         utc_sampled = true
@@ -1038,8 +1189,8 @@ return function()
             before_titles[key] = prior_title and prior_title.settled or nil
           end
 
-          if read.kind == "invalid" then
-            local item = read.diagnostic or invalid("pane identity is invalid")
+          if read.kind == "invalid" and not read.deferred then
+            local item = read.diagnostic or diagnostic("record_invalid", "pane identity is invalid")
             report_error_once("v2-identity:" .. local_id .. ":" .. item.code,
               item.code .. ": " .. item.message)
           elseif read.kind == "v2" then
@@ -1056,11 +1207,22 @@ return function()
             evidence.identified_by_local[local_id] = key
             pane_ids[#pane_ids + 1] = key
             before[key] = attention_cache[key]
-            local view = read_attention_view(read, now_unix_ns, {
+            local read_opts = {
               dir = dir,
               glob = opts and opts.glob,
               previous_view = before[key],
-            })
+              resample_utc = resample_utc,
+              now_ms = now,
+            }
+            local view = read_attention_view(read, now_unix_ns, read_opts)
+            if restore_cleared_reviews(read, dir, before[key], view, read_opts) then
+              view = read_attention_view(read, now_unix_ns, read_opts)
+            end
+            -- A hook writes no frame, so a thinking view is animated from the
+            -- wall clock, the same way a v1 marker without one is.
+            if view.type == "thinking" and view.frame == nil then
+              view.frame = frame_for_now(now, frame_count)
+            end
             attention_cache[key] = view
             evidence.panes[key].event_id = view.event_id
             for _, item in ipairs(view.diagnostics or {}) do
@@ -1320,6 +1482,7 @@ return function()
           acknowledge_focused_v2_pane(active_read, {
             dir = dir, now_unix_ns = poll_now_unix_ns,
             observed_event_id = candidate.event_id,
+            resample_utc = resample_utc,
           })
         end
       end
@@ -1351,6 +1514,8 @@ return function()
 
     return {
       tab_source = function() return tab_source_state.source end,
+      tab_source_status = tab_source_status,
+      own_mux_identity = own_mux_identity,
       reset_tab_source = reset_tab_source,
       acquire_tab_source = acquire_tab_source,
       parse_tab_source_response = parse_tab_source_response,

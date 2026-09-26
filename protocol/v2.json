@@ -2,7 +2,7 @@
   "manifest_schema": 2,
   "wire_version": 2,
   "record_schema": 3,
-  "writer_version": "2.0.0",
+  "writer_version": "1.0.0",
   "native_hooks": {
     "claude": {
       "SessionStart": {
@@ -192,7 +192,9 @@
     "realm_id_input": "utf8(canonical_socket_path)",
     "incarnation_id_input": "lp64be(realm_id,socket_device,socket_inode,socket_ctime_ns_decimal)",
     "tty_fingerprint_input": "lp64be(tty_device,tty_inode,tty_rdevice)",
-    "binding_id_input": "utf8(provider) || 0x00 || utf8(provider_session_id) || 0x00 || utf8(launch_id)"
+    "binding_id_input": "utf8(provider) || 0x00 || utf8(provider_session_id) || 0x00 || utf8(launch_id)",
+    "session_key_input": "utf8(provider) || 0x00 || utf8(provider_session_id)",
+    "session_entry_key_input": "utf8(v2/realms/<realm_id>/incarnations/<incarnation_id>/panes/<pane_id>/launches/<launch_id>/bindings/<binding_id>/binding.json)"
   },
   "limits": {
     "pane_id_max_digits": 20,
@@ -222,6 +224,8 @@
       "unsafe_tty",
       "realm_unavailable",
       "incarnation_changed",
+      "socket_gone",
+      "socket_refused",
       "record_invalid",
       "future_schema",
       "binding_conflict",
@@ -229,7 +233,8 @@
       "clock_skew",
       "integration_version_mismatch",
       "state_permissions",
-      "bad_usage"
+      "bad_usage",
+      "self_claim_parent_unverified"
     ],
     "end_reasons": ["session_end", "sweep_absent"],
     "pane_presence": ["present", "verified_absent", "unavailable"],
@@ -861,7 +866,7 @@
     },
     "claim": {
       "required": ["kind", "schema", "address", "launch_id", "tty_path", "tty_fingerprint", "observed_mono_ns"],
-      "optional": [],
+      "optional": ["owner_pid", "owner_started_sec", "owner_started_usec", "owner_boot_session_id"],
       "types": {
         "kind": "record_kind",
         "schema": "record_schema",
@@ -869,7 +874,11 @@
         "launch_id": "uuid",
         "tty_path": "absolute_path",
         "tty_fingerprint": "hex64",
-        "observed_mono_ns": "monotonic_ns20"
+        "observed_mono_ns": "monotonic_ns20",
+        "owner_pid": "canonical_decimal",
+        "owner_started_sec": "canonical_decimal",
+        "owner_started_usec": "canonical_decimal",
+        "owner_boot_session_id": "uuid"
       }
     },
     "binding": {
@@ -952,7 +961,7 @@
     },
     "binding_end": {
       "required": ["kind", "schema", "address", "launch_id", "binding_id", "reason", "event_id", "observed_mono_ns", "written_at_unix_ns"],
-      "optional": ["operation_id"],
+      "optional": ["operation_id", "binding_event_id"],
       "types": {
         "kind": "record_kind",
         "schema": "record_schema",
@@ -963,7 +972,8 @@
         "event_id": "uuid",
         "observed_mono_ns": "monotonic_ns20",
         "written_at_unix_ns": "unix_ns20",
-        "operation_id": "uuid"
+        "operation_id": "uuid",
+        "binding_event_id": "uuid"
       }
     },
     "acknowledgement": {
@@ -1034,6 +1044,25 @@
         "binding_id": "hex64",
         "floor_mono_ns": "monotonic_ns20",
         "operation_id": "uuid"
+      }
+    },
+    "session_binding": {
+      "required": ["kind", "schema", "address", "launch_id", "binding_id"],
+      "optional": [],
+      "types": {
+        "kind": "record_kind",
+        "schema": "record_schema",
+        "address": "pane_address",
+        "launch_id": "uuid",
+        "binding_id": "hex64"
+      }
+    },
+    "session_index": {
+      "required": ["kind", "schema"],
+      "optional": [],
+      "types": {
+        "kind": "record_kind",
+        "schema": "record_schema"
       }
     }
   }

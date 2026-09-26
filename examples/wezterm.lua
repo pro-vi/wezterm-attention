@@ -8,22 +8,10 @@ local resurrect = wezterm.plugin.require("https://github.com/MLFlexer/resurrect.
 
 local act = wezterm.action
 local config = wezterm.config_builder()
--- Copy examples/follow-up.lua beside this config. This consumer only chooses
--- a local display state; it performs no action when a view first appears.
-local follow_up = dofile(wezterm.config_dir .. "/follow-up.lua").for_windows()
-
--- ── Attention plugin ────────────────────────────────────────────────────────
--- Tab indicators for CLI tools (Claude Code, Codex, builds, scripts).
--- See: https://github.com/pro-vi/wezterm-attention
-
-attention.apply_to_config(config, {
-  auto_poll = false,
-  -- Optional closed provider suffix: " · Claude", " · Codex", or " · Pi".
-  show_provider = true,
-  on_view_change = follow_up.on_view_change,
-})
 
 -- ── Keybindings ─────────────────────────────────────────────────────────────
+-- Assigned before attention.apply_to_config below, which adds its Alt+B review
+-- toggle to config.keys; assigning config.keys after it would drop that key.
 
 config.keys = {
   -- Tab navigation
@@ -162,10 +150,47 @@ for i = 1, 8 do
   })
 end
 
+-- ── Attention plugin ────────────────────────────────────────────────────────
+-- Tab indicators for CLI tools (Claude Code, Codex, builds, scripts).
+-- See: https://github.com/pro-vi/wezterm-attention
+
+-- Optional: copy examples/follow-up.lua beside this config. It keeps, per
+-- window and pane scope, a display choice ("follow_up", "base" or "unknown")
+-- that your own rendering reads with follow_up.appearance(window_id, scope).
+-- It performs no action when a view first appears. Without the file the rest
+-- of this config still loads; an error inside the file is still reported.
+local follow_up_path = wezterm.config_dir .. "/follow-up.lua"
+local follow_up_file = io.open(follow_up_path, "r")
+local follow_up = nil
+if follow_up_file then
+  follow_up_file:close()
+  follow_up = dofile(follow_up_path).for_windows()
+end
+
+attention.apply_to_config(config, {
+  auto_poll = false,
+  -- Optional closed provider suffix: " · Claude", " · Codex", or " · Pi".
+  show_provider = true,
+  on_view_change = follow_up and follow_up.on_view_change or nil,
+})
+
 -- ── Git status bar ──────────────────────────────────────────────────────────
 -- Right status: branch +N/-N ?N ↑N | battery | time
 
 config.status_update_interval = 5000
+
+-- The directory comes from the shell (OSC 7), which any program writing to the
+-- pane can set, so git runs in whatever repository the pane reports. These
+-- options stop three kinds of program that repository's config can start (the
+-- fsmonitor hook, an external diff and text conversion) and skip optional
+-- index writes. They do not stop a filter driver the repository assigns in
+-- .gitattributes: `git diff` and `git status` below run its clean command on
+-- changed files each time the status bar refreshes.
+local function git(cwd, ...)
+  return pcall(wezterm.run_child_process, {
+    "git", "-c", "core.fsmonitor=false", "--no-optional-locks", "-C", cwd, ...
+  })
+end
 
 local git_cache = { cwd = "", diff = "", branch = "", untracked = 0, ahead = 0, is_repo = false, last = 0 }
 
@@ -190,26 +215,18 @@ wezterm.on('update-status', function(window, pane)
       git_cache.untracked = 0
       git_cache.ahead = 0
 
-      local ok, success = pcall(wezterm.run_child_process, {
-        "git", "-C", cwd, "rev-parse", "--is-inside-work-tree"
-      })
+      local ok, success = git(cwd, "rev-parse", "--is-inside-work-tree")
       if ok and success then
         git_cache.is_repo = true
-        local ok_b, success_b, branch_out = pcall(wezterm.run_child_process, {
-          "git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"
-        })
+        local ok_b, success_b, branch_out = git(cwd, "rev-parse", "--abbrev-ref", "HEAD")
         if ok_b and success_b and branch_out then
           git_cache.branch = branch_out:gsub("%s+", "")
         end
-        local ok2, success2, stdout2 = pcall(wezterm.run_child_process, {
-          "git", "-C", cwd, "diff", "HEAD", "--shortstat"
-        })
+        local ok2, success2, stdout2 = git(cwd, "diff", "--no-ext-diff", "--no-textconv", "HEAD", "--shortstat")
         if ok2 and success2 then
           git_cache.diff = stdout2 or ""
         end
-        local ok3, success3, stdout3 = pcall(wezterm.run_child_process, {
-          "git", "-C", cwd, "status", "--porcelain"
-        })
+        local ok3, success3, stdout3 = git(cwd, "status", "--porcelain")
         if ok3 and success3 and stdout3 then
           local count = 0
           for line in stdout3:gmatch("[^\n]+") do
@@ -217,9 +234,7 @@ wezterm.on('update-status', function(window, pane)
           end
           git_cache.untracked = count
         end
-        local ok4, success4, stdout4 = pcall(wezterm.run_child_process, {
-          "git", "-C", cwd, "rev-list", "--count", "@{upstream}..HEAD"
-        })
+        local ok4, success4, stdout4 = git(cwd, "rev-list", "--count", "@{upstream}..HEAD")
         if ok4 and success4 and stdout4 then
           git_cache.ahead = tonumber(stdout4:match("(%d+)")) or 0
         end
@@ -228,7 +243,11 @@ wezterm.on('update-status', function(window, pane)
 
     if git_cache.is_repo then
       local branch = git_cache.branch
-      if #branch > 20 then branch = branch:sub(1, 18) .. ".." end
+      -- By cell width, on a character boundary: a cut by bytes can split a
+      -- character, and wezterm.format refuses text that is not UTF-8.
+      if wezterm.column_width(branch) > 20 then
+        branch = wezterm.truncate_right(branch, 18) .. ".."
+      end
       git_cells_prefix = {
         { Foreground = { Color = "#8BA4B8" } },
         { Text = " " .. branch .. " " },
@@ -325,14 +344,17 @@ config.quick_select_patterns = {
   "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", -- UUIDs
 }
 
--- Copy mode: vim-style / and ? search
-local key_tables = wezterm.gui.default_key_tables()
-table.insert(key_tables.copy_mode, { key = '/', mods = 'NONE', action = act.CopyMode 'EditPattern' })
-table.insert(key_tables.copy_mode, { key = '?', mods = 'NONE', action = act.CopyMode 'EditPattern' })
-table.insert(key_tables.copy_mode, { key = 'n', mods = 'NONE', action = act.CopyMode 'NextMatch' })
-table.insert(key_tables.copy_mode, { key = 'N', mods = 'NONE', action = act.CopyMode 'PriorMatch' })
-table.insert(key_tables.copy_mode, { key = 'N', mods = 'SHIFT', action = act.CopyMode 'PriorMatch' })
-config.key_tables = key_tables
+-- Copy mode: vim-style / and ? search. wezterm-mux-server reads this file
+-- too, and it has no wezterm.gui; key tables are the GUI's alone.
+if wezterm.gui then
+  local key_tables = wezterm.gui.default_key_tables()
+  table.insert(key_tables.copy_mode, { key = '/', mods = 'NONE', action = act.CopyMode 'EditPattern' })
+  table.insert(key_tables.copy_mode, { key = '?', mods = 'NONE', action = act.CopyMode 'EditPattern' })
+  table.insert(key_tables.copy_mode, { key = 'n', mods = 'NONE', action = act.CopyMode 'NextMatch' })
+  table.insert(key_tables.copy_mode, { key = 'N', mods = 'NONE', action = act.CopyMode 'PriorMatch' })
+  table.insert(key_tables.copy_mode, { key = 'N', mods = 'SHIFT', action = act.CopyMode 'PriorMatch' })
+  config.key_tables = key_tables
+end
 
 -- Auto-save session every 15 minutes
 resurrect.state_manager.periodic_save()

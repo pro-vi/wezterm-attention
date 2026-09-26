@@ -91,6 +91,36 @@ return function(context)
     return true
   end
 
+  local function file_exists(path)
+    local file = io.open(path, "r")
+    if not file then return false end
+    file:close()
+    return true
+  end
+
+  --- Move `from` to `to` unless a file is already at `to`. A rename replaces
+  --- whatever it finds, so a write that lands at `to` after a caller looked
+  --- would be lost. A hard link is made only where no name is, and Windows'
+  --- rename already refuses an existing target. Returns "placed", "occupied"
+  --- (`from` is left where it was), or "failed" with an error text.
+  local function place_without_replacing(from, to)
+    if package.config:sub(1, 1) == "\\" then
+      local renamed, err = os.rename(from, to)
+      if renamed then return "placed" end
+      if file_exists(to) then return "occupied" end
+      return "failed", tostring(err)
+    end
+    local function quoted(value) return "'" .. value:gsub("'", [['\'']]) .. "'" end
+    -- LuaJIT answers with the exit status, Lua 5.2 and later with true.
+    local linked = os.execute("ln " .. quoted(from) .. " " .. quoted(to) .. " 2>/dev/null")
+    if linked == true or linked == 0 then
+      os.remove(from)
+      return "placed"
+    end
+    if file_exists(to) then return "occupied" end
+    return "failed", "ln could not link it"
+  end
+
   local function write_v2_record(path, record, kind, expected)
     local parsed, parse_diagnostic = parse_v2_record(record, kind)
     if not parsed or (expected and not record_matches(parsed, expected)) then
@@ -121,7 +151,48 @@ return function(context)
   --- The composed list last written for each window, so an unchanged bar costs
   --- no file work. Keyed by path, because that is what a write would replace.
   local published_tab_lists = {}
-  local drawn_tab_lists = {}
+  --- The one path each window's order is written to by this process. It is
+  --- chosen at the window's first publication and kept for as long as the
+  --- window is open, so no window ever has two files of this process's.
+  local published_path_by_window = {}
+
+  --- The bytes of every tab order this GUI process has published, by path.
+  --- A config reload starts this module afresh, and `wezterm.GLOBAL` is what
+  --- WezTerm keeps across one, so this is how a reloaded plugin still knows
+  --- which files are its own. GLOBAL takes only UTF-8 text; a path or body it
+  --- refuses leaves that file unremembered, which only ever keeps a file.
+  local function remember_tab_order(path, body)
+    pcall(function()
+      local global = wezterm.GLOBAL
+      if global.wezterm_attention_tab_orders == nil then
+        global.wezterm_attention_tab_orders = {}
+      end
+      global.wezterm_attention_tab_orders[path] = body
+    end)
+  end
+
+  local function remembered_tab_order(path)
+    local ok, body = pcall(function()
+      return wezterm.GLOBAL.wezterm_attention_tab_orders[path]
+    end)
+    return ok and type(body) == "string" and body or nil
+  end
+
+  --- Remove a tab order this process published, but only while the file still
+  --- holds the bytes this process wrote there. The unsourced name is shared by
+  --- every GUI process, because window ids restart in each one: a file another
+  --- process has rewritten since is that process's, and stays. Returns an error
+  --- text only for a file of ours that could not be removed.
+  local function remove_own_tab_order(path, body)
+    local file = io.open(path, "rb")
+    if not file then return nil end
+    local current = file:read("*a")
+    file:close()
+    if current ~= body then return nil end
+    local removed, err = os.remove(path)
+    if removed or not file_exists(path) then return nil end
+    return tostring(err)
+  end
 
   --- One encoding per drawn tab. The formatter is called once per tab, so
   --- without this every tab's text would be escaped again on every one of those
@@ -151,40 +222,69 @@ return function(context)
   --- or the v2 cache key, already translated, so a reader never repeats that
   --- translation.
   ---
+  --- A window keeps the name of its first publication, source or none, for as
+  --- long as this module runs, so it has one file here. The caller holds a
+  --- window's first publication until the source is answered, so the
+  --- unsourced name is used only where no source will come. A config reload
+  --- starts the module afresh, and the plugin before it may have had no
+  --- writer to ask: a window it published unsourced gets its sourced name
+  --- now, and the unsourced file is removed while it still holds the bytes
+  --- this process wrote.
+  ---
   --- Honest about when it was written, not guaranteed current: nothing
   --- refreshes `published_at_ms` while the bar draws the same thing. The write
-  --- happens when the composed list or its source changes. Attaching a source
-  --- preserves the content timestamp because the caller is publishing the same draw.
-  local function publish_tab_order(dir, window_id, tabs, source)
+  --- happens when the composed list changes. `drawn_at` is when the bar drew
+  --- it, for a caller that held the draw back; it defaults to now.
+  local function publish_tab_order(dir, window_id, tabs, source, drawn_at)
     local rows = {}
     for index, entry in ipairs(tabs) do rows[index] = encode_tab(entry) end
     local list = "[" .. table.concat(rows, ",") .. "]"
     local window_key = dir .. "/tabs/" .. integer(window_id)
-    local path = dir .. "/tabs/"
-      .. (source and (source.incarnation_id .. "-") or "") .. integer(window_id) .. ".json"
-    if published_tab_lists[path] and published_tab_lists[path].list == list then return false end
-    local previous = drawn_tab_lists[window_key]
-    local written_at = previous and previous.list == list and previous.written_at or now_ms()
+    local path = published_path_by_window[window_key]
+    local held = path and published_tab_lists[path]
+    if held then
+      if held.list == list then return false end
+      source = held.source or nil
+    else
+      path = dir .. "/tabs/"
+        .. (source and (source.incarnation_id .. "-") or "") .. integer(window_id) .. ".json"
+    end
     -- Keys in sorted order, as json_value writes them.
     local body = table.concat({
-      '{"published_at_ms":', integer(written_at),
+      '{"published_at_ms":', integer(drawn_at or now_ms()),
       ',"schema":', source and "2" or "1",
       source and (',"source":' .. json_value(source)) or "",
       ',"tabs":', list,
       ',"window_id":', integer(window_id), "}",
     })
     if not replace_file(path, body, "publish-tabs") then return false end
-    published_tab_lists[path] = { list = list, window_id = tostring(window_id), window_key = window_key }
-    drawn_tab_lists[window_key] = { list = list, written_at = written_at }
+    published_tab_lists[path] = {
+      list = list, body = body .. "\n", window_id = tostring(window_id), window_key = window_key,
+      source = source or false,
+    }
+    published_path_by_window[window_key] = path
+    remember_tab_order(path, body .. "\n")
+    if source and not held then
+      local unsourced = window_key .. ".json"
+      local earlier = remembered_tab_order(unsourced)
+      if earlier then
+        remember_tab_order(unsourced, nil)
+        local err = remove_own_tab_order(unsourced, earlier)
+        if err then
+          report_error_once("replace-tabs:" .. unsourced,
+            "cannot remove the unsourced tab order " .. unsourced .. ": " .. err)
+        end
+      end
+    end
     return true
   end
 
   --- Remove the tab orders this process published for windows no longer in
   --- `live`, a set keyed by window id as a decimal string. A closed window's
   --- bar never redraws, so nothing else would ever take its file back. Only a
-  --- file this process wrote is touched: another GUI process's file, or one
-  --- left behind by a process that has exited, is `attention sweep`'s to
-  --- collect. Forgetting the path is what lets a window that later reuses the
+  --- file this process wrote, still holding what it wrote, is touched: another
+  --- GUI process's file, or one left behind by a process that has exited, is
+  --- `attention sweep`'s to collect. Forgetting the path is what lets a window that later reuses the
   --- id publish again.
   local function withdraw_closed_tab_orders(dir, live)
     local prefix = dir .. "/tabs/"
@@ -192,17 +292,12 @@ return function(context)
       local window_id = path:sub(1, #prefix) == prefix and publication.window_id
       if window_id and not live[window_id] then
         published_tab_lists[path] = nil
-        drawn_tab_lists[publication.window_key] = nil
-        local removed, err = os.remove(path)
-        if not removed then
-          -- A file already gone is the wanted state; only a file that stays is
-          -- worth a line in the log.
-          local still_there = io.open(path, "r")
-          if still_there then
-            still_there:close()
-            report_error_once("withdraw-tabs:" .. path,
-              "cannot withdraw closed window's tab order " .. path .. ": " .. tostring(err))
-          end
+        published_path_by_window[publication.window_key] = nil
+        remember_tab_order(path, nil)
+        local err = remove_own_tab_order(path, publication.body)
+        if err then
+          report_error_once("withdraw-tabs:" .. path,
+            "cannot withdraw closed window's tab order " .. path .. ": " .. err)
         end
       end
     end
@@ -241,11 +336,17 @@ return function(context)
     wezterm.log_error("wezterm-attention: " .. message)
   end
 
+  --- The same, for a setup the plugin works around rather than a failure.
+  local function report_warning_once(key, message)
+    if reported_errors[key] then return end
+    reported_errors[key] = true
+    local log = type(wezterm.log_warn) == "function" and wezterm.log_warn or wezterm.log_error
+    log("wezterm-attention: " .. message)
+  end
+
   local function clear_acknowledgement(dir, pane_id)
     local path = acknowledgement_path(dir, pane_id)
-    local existing = io.open(path, "r")
-    if not existing then return true end
-    existing:close()
+    if not file_exists(path) then return true end
 
     local ok, err = os.remove(path)
     if ok then return true end
@@ -381,9 +482,7 @@ return function(context)
   local function clear_review_flag(dir, pane_id)
     os.remove(review_tmp_path(dir, pane_id))
     local path = review_path(dir, pane_id)
-    local existing = io.open(path, "r")
-    if not existing then return true end
-    existing:close()
+    if not file_exists(path) then return true end
 
     local ok, err = os.remove(path)
     if ok then return true end
@@ -439,29 +538,42 @@ return function(context)
         { kind = "launch" }
     end
 
+    --- The pane's valid review files, and the record read from each.
     local function v2_review_paths(read, dir)
       local pattern = v2_pane_root(dir, read.address) .. "/reviews/*.json"
       local paths, glob_diagnostic = glob_paths(pattern)
       if not paths then
         report_error_once("review-enumerate:" .. read.cache_key,
           glob_diagnostic.code .. ": " .. glob_diagnostic.message)
-        return {}
+        return {}, {}
       end
-      local valid = {}
+      local valid, records = {}, {}
       for _, path in ipairs(paths) do
         local record, record_diagnostic = read_expected_record(
           path, "review", { address = read.address }, true)
         if record and path_stem(path) == record.owner_key then
           valid[#valid + 1] = path
+          records[path] = record
         else
           local item = record_diagnostic or identity_diagnostic("review", path)
           report_error_once("review-record:" .. path, item.code .. ": " .. item.message)
         end
       end
-      return valid
+      return valid, records
     end
 
     local function write_v2_user_review(read, dir)
+      -- A reader shows nothing for a pane whose claim is not the launch the pane
+      -- published, so a flag written now would light nothing; the writer refuses
+      -- its own marks in this state for the same reason.
+      local claim_path = v2_pane_root(dir, read.address) .. "/claim.json"
+      if not read_expected_record(claim_path, "claim",
+          { address = read.address, launch_id = read.launch_id }, true) then
+        report_error_once("review-claim:" .. read.cache_key .. ":" .. read.launch_id,
+          "cannot flag this pane for review: its claim is not the launch the pane published, "
+            .. "so the flag would not show")
+        return false
+      end
       local owner_id = "user"
       local owner_key = sha256(owner_id)
       local path = v2_pane_root(dir, read.address) .. "/reviews/" .. owner_key .. ".json"
@@ -475,18 +587,121 @@ return function(context)
       }, "review", { address = read.address })
     end
 
+    --- When to look again for a pane's leftovers, in epoch milliseconds, keyed
+    --- by cache key: now for a pane where this process's own clear could not
+    --- put a review back, later for one where another GUI's may still be
+    --- running.
+    local leftover_look_due = {}
+    --- The leftovers this process's own clears could not put back. Nothing
+    --- else here is still working on them, so they need no waiting.
+    local own_leftovers = {}
+
+    --- Longer than any clear takes between moving a review aside and removing
+    --- it. A leftover younger than this may belong to a clear another GUI is
+    --- still running, and putting it back would undo what the user just did.
+    local abandoned_after_ms = 60 * 1000
+
+    --- Remove the reviews this pane showed, and only those. A writer can
+    --- replace a review between the read above and the removal, and removing
+    --- by path would take the newer one, which the user never saw. So each
+    --- file is first moved aside, out of the reader's *.json pattern, and
+    --- read: the record that was shown is deleted, and anything else is put
+    --- back, unless a still newer write has taken the path since, which then
+    --- supersedes both. The aside name carries this process's session token
+    --- and the time it was moved, so another GUI can tell a clear that may
+    --- still be running from one that was abandoned.
     local function clear_v2_reviews(read, dir)
       local cleared = false
-      for _, path in ipairs(v2_review_paths(read, dir)) do
-        local removed, remove_err = os.remove(path)
-        if removed then
-          cleared = true
+      local paths, shown = v2_review_paths(read, dir)
+      for _, path in ipairs(paths) do
+        local taken = path .. "." .. publication_session .. "." .. integer(now_ms()) .. ".clear"
+        local moved, move_err = os.rename(path, taken)
+        if not moved then
+          -- Already gone is the state a clear wants.
+          if file_exists(path) then
+            report_error_once("clear-v2-review:" .. path,
+              "failed to remove review claim " .. path .. ": " .. tostring(move_err))
+          end
         else
-          report_error_once("clear-v2-review:" .. path,
-            "failed to remove review claim " .. path .. ": " .. tostring(remove_err))
+          local record = read_expected_record(taken, "review", { address = read.address }, true)
+          if record and record.event_id == shown[path].event_id then
+            os.remove(taken)
+            cleared = true
+          elseif file_exists(path) then
+            os.remove(taken)
+          else
+            local placed, place_err = place_without_replacing(taken, path)
+            if placed == "occupied" then
+              -- A write landed after the look above: newer still, as above.
+              os.remove(taken)
+            elseif placed == "failed" then
+              own_leftovers[taken] = true
+              leftover_look_due[read.cache_key] = 0
+              report_error_once("restore-v2-review:" .. path,
+                "cannot put back review " .. path .. " from " .. taken .. ": " .. place_err)
+            end
+          end
         end
       end
       return cleared
+    end
+
+    --- Put back the reviews a clear moved aside and never finished with,
+    --- because its process died between the move and the removal. Each was a
+    --- flag the pane showed, so it goes back to its name when nothing has taken
+    --- that name since. Beside a live review it stays until its pane tree is
+    --- removed: which of the two is newer is not known here. A leftover is put back
+    --- only when this process's own clear left it, or when the time in its
+    --- name is older than any clear takes; a younger one is looked at again
+    --- once it is that old. A name with no time in it stays until its pane
+    --- tree is removed.
+    ---
+    --- Looking costs a directory listing, so it is done only where a leftover
+    --- can be: on this process's first read of the pane (a GUI that died
+    --- mid-clear is replaced by a new process), when a review this process
+    --- showed has gone (another GUI's clear), where this process's own clear
+    --- could not put one back, and where a leftover was too young to take.
+    --- Returns true when a review was put back.
+    local function restore_cleared_reviews(read, dir, previous_view, view, opts)
+      local key = read.cache_key
+      local now = (opts and opts.now_ms) or now_ms()
+      local due = leftover_look_due[key]
+      local look = not previous_view or (due ~= nil and now >= due)
+      if not look then
+        local shown = previous_view._records and previous_view._records.reviews or {}
+        local current = view._records and view._records.reviews or {}
+        for path in pairs(shown) do
+          if not current[path] then look = true; break end
+        end
+      end
+      if not look then return false end
+      leftover_look_due[key] = nil
+      local paths = glob_paths(v2_pane_root(dir, read.address) .. "/reviews/*.clear", opts)
+      if not paths then return false end
+      local restored = false
+      for _, leftover in ipairs(paths) do
+        local path, moved_at = leftover:match("^(.*%.json)%.%w+%.(%d+)%.clear$")
+        moved_at = tonumber(moved_at)
+        local abandoned = moved_at and now - moved_at > abandoned_after_ms
+        if path and (own_leftovers[leftover] or abandoned) then
+          local placed, place_err = place_without_replacing(leftover, path)
+          if placed == "placed" then
+            restored = true
+            own_leftovers[leftover] = nil
+          elseif placed == "occupied" then
+            own_leftovers[leftover] = nil
+          else
+            report_error_once("restore-v2-review:" .. path,
+              "cannot put back review " .. path .. " from " .. leftover .. ": " .. place_err)
+          end
+        elseif path and moved_at then
+          local again = moved_at + abandoned_after_ms + 1
+          if not leftover_look_due[key] or again < leftover_look_due[key] then
+            leftover_look_due[key] = again
+          end
+        end
+      end
+      return restored
     end
 
     local function refresh_cached_v2(read, dir, now_unix_ns)
@@ -502,8 +717,13 @@ return function(context)
     local function acknowledge_focused_v2_pane(read, opts)
       local dir = (opts and opts.dir) or M._active_dir or defaults.dir
       local acknowledge_set = M._active_acknowledge_set or { stop = true, notify = true }
-      local view = read_attention_view(read, opts and opts.now_unix_ns, { dir = dir })
-      if not (view.activity_type and acknowledge_set[view.activity_type] and view.event_id) then
+      local view = read_attention_view(read, opts and opts.now_unix_ns,
+        { dir = dir, resample_utc = opts and opts.resample_utc })
+      -- Only what the tab shows is seen: when the review flag outranks the
+      -- activity, the tab shows the flag, and the activity stays for later, as
+      -- a v1 marker does.
+      if not (view.activity_type and view.type == view.activity_type
+          and acknowledge_set[view.activity_type] and view.event_id) then
         attention_cache[read.cache_key] = view
         return "absent"
       end
@@ -547,6 +767,7 @@ return function(context)
       v2_review_paths = v2_review_paths,
       write_v2_user_review = write_v2_user_review,
       clear_v2_reviews = clear_v2_reviews,
+      restore_cleared_reviews = restore_cleared_reviews,
       refresh_cached_v2 = refresh_cached_v2,
       acknowledge_focused_v2_pane = acknowledge_focused_v2_pane,
     }
@@ -557,6 +778,7 @@ return function(context)
     reported_errors = reported_errors,
     publication_session = publication_session,
     report_error_once = report_error_once,
+    report_warning_once = report_warning_once,
     next_publication_id = next_publication_id,
     json_string = json_string,
     json_value = json_value,

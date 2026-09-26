@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Adapted copy of bootstrap's bridge marker reader."""
+"""Adapted copy of a downstream bridge marker reader."""
 
 from __future__ import annotations
 

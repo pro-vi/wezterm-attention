@@ -39,11 +39,18 @@ def enum_set(manifest: dict[str, Any], name: str) -> set[str]:
     return set(manifest["enums"][name])
 
 
+def is_control(char: str) -> bool:
+    # C0, DEL and C1: the characters Rust's char::is_control rejects. A C1
+    # character such as U+009B is a terminal control sequence on its own.
+    code = ord(char)
+    return code < 32 or 127 <= code <= 159
+
+
 def is_safe_text(value: Any, maximum: int) -> bool:
     return (
         isinstance(value, str)
         and 0 < len(value.encode("utf-8")) <= maximum
-        and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+        and not any(is_control(char) for char in value)
     )
 
 
@@ -246,7 +253,26 @@ def parse_record(value: Any, manifest: dict[str, Any]) -> str:
         "owner_key"
     ]:
         return "record_invalid"
+    if kind == "claim" and not claim_owner_is_whole(value):
+        return "record_invalid"
     return "valid"
+
+
+CLAIM_OWNER_FIELDS = ("owner_pid", "owner_started_sec", "owner_started_usec", "owner_boot_session_id")
+
+
+def claim_owner_is_whole(value: dict[str, Any]) -> bool:
+    """A claim names its owning process with all four owner fields or none."""
+    present = [field for field in CLAIM_OWNER_FIELDS if field in value]
+    if not present:
+        return True
+    if len(present) != len(CLAIM_OWNER_FIELDS):
+        return False
+    return (
+        0 < int(value["owner_pid"]) <= 2**31 - 1
+        and int(value["owner_started_sec"]) < 2**64
+        and int(value["owner_started_usec"]) < 1_000_000
+    )
 
 
 def compact_size(value: Any) -> int:
@@ -473,6 +499,8 @@ def run(render: bool) -> int:
         "incarnation_id_input": "lp64be(realm_id,socket_device,socket_inode,socket_ctime_ns_decimal)",
         "tty_fingerprint_input": "lp64be(tty_device,tty_inode,tty_rdevice)",
         "binding_id_input": "utf8(provider) || 0x00 || utf8(provider_session_id) || 0x00 || utf8(launch_id)",
+        "session_key_input": "utf8(provider) || 0x00 || utf8(provider_session_id)",
+        "session_entry_key_input": "utf8(v2/realms/<realm_id>/incarnations/<incarnation_id>/panes/<pane_id>/launches/<launch_id>/bindings/<binding_id>/binding.json)",
     }:
         failures.append("manifest digest contract is not the supported SHA-256 relationship")
 

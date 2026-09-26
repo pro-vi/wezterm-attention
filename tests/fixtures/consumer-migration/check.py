@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the adapted bootstrap consumer copies without installing them."""
+"""Exercise the adapted downstream consumer copies without installing them."""
 
 from __future__ import annotations
 

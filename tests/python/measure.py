@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import pathlib
+import platform
 import pty
 import socket
 import statistics
@@ -272,7 +273,7 @@ def main() -> None:
         rust_file_bytes = rust["state"].pop("_file_bytes")
         all_records = sorted(set(python_file_bytes) | set(rust_file_bytes))
         report = {
-            "machine": "M5 Max, macOS, local disposable state",
+            "machine": f"{platform.machine()}, {platform.system()} {platform.release()}, local disposable state",
             "implementation_identities": identities,
             "python": python,
             "rust": rust,

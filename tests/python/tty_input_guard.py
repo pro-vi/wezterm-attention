@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Disposable P4 pane process: record whether reattach publication reached stdin."""
+"""Disposable pane process: record whether reattach publication reached stdin."""
 
 import base64
 import json

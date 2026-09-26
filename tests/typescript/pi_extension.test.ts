@@ -90,12 +90,18 @@ function loadExt() {
 // are iterating on a red test, and leaving WEZTERM_PANE set to a traversal path
 // after the traversal tests.
 const tempDirs: string[] = [];
+const originalHome = process.env.HOME;
 function clearAttentionEnvironment(): void {
 	delete process.env.WEZTERM_PANE;
 	delete process.env.WEZTERM_ATTENTION_DIR;
+	delete process.env.XDG_STATE_HOME;
+	if (originalHome === undefined) delete process.env.HOME;
+	else process.env.HOME = originalHome;
 	delete process.env.PI_WEZTERM_ATTENTION_TTL_MS;
 	delete process.env.WEZTERM_ATTENTION_ROOT;
 	delete process.env.WEZTERM_ATTENTION_TEST_LOG;
+	delete process.env.WEZTERM_ATTENTION_HOST_PID;
+	delete process.env.WEZTERM_ATTENTION_LAUNCH_ID;
 	// Every writer in this file is a local fake, so the shipped 2s drain cap is
 	// only ever measuring how long this machine takes to spawn a shell. Under the
 	// gate's parallel load that exceeded 2s and two tests failed on a property
@@ -277,6 +283,33 @@ test("v2 dispatch: Pi lifecycle and bus requests use the serialized attention pr
 	expect(payloads[7]?.reason).toBe("quit");
 });
 
+test("v2 dispatch: the writer is told Pi's own pid as its host, whatever Pi inherited", async () => {
+	const root = tempDir("wez-v2-host-");
+	const bin = join(root, "bin");
+	const log = join(root, "calls.log");
+	mkdirSync(bin);
+	writeFileSync(
+		join(bin, "attention"),
+		'#!/bin/sh\nprintf "%s %s\\n" "${WEZTERM_ATTENTION_HOST_PID-unset}" "${WEZTERM_ATTENTION_LAUNCH_ID-unset}" >> "$WEZTERM_ATTENTION_TEST_LOG"\ncat > /dev/null\n',
+	);
+	chmodSync(join(bin, "attention"), 0o755);
+	process.env.WEZTERM_ATTENTION_ROOT = root;
+	process.env.WEZTERM_ATTENTION_TEST_LOG = log;
+	// A value Pi inherited names whoever started Pi, not Pi.
+	process.env.WEZTERM_ATTENTION_HOST_PID = "1";
+	const h = loadExt();
+
+	await h.lifecycle["session_start"]!();
+	await h.lifecycle["agent_start"]!();
+	await h.lifecycle["session_shutdown"]!();
+
+	expect(readFileSync(log, "utf8").trim().split("\n")).toEqual([
+		`${process.pid} unset`,
+		`${process.pid} unset`,
+		`${process.pid} unset`,
+	]);
+});
+
 test("v2 dispatch: Pi reload drains queued writes without sending an end event or warning", async () => {
 	const root = tempDir("wez-v2-reload-");
 	const bin = join(root, "bin");
@@ -339,7 +372,29 @@ test("fallback: an invoked writer exit never creates a v1 marker and logs once",
 	await lifecycle["session_shutdown"]!();
 	expect(existsSync(join(dir, "42"))).toBe(false);
 	expect(await reportedNotifications(1)).toHaveLength(1);
-	expect(notifications[0]?.message).toContain("status 3");
+	expect(notifications[0]?.message).toBe("wezterm-attention: writer exited with status 3");
+});
+
+test("fallback: the writer's first diagnostic line is reported without control characters", async () => {
+	freshDir("wez-fallback-line-");
+	process.env.WEZTERM_PANE = "42";
+	const root = tempDir("wez-root-line-");
+	mkdirSync(join(root, "bin"));
+	writeFileSync(
+		join(root, "bin", "attention"),
+		`#!/bin/sh\nIFS= read -r payload || :\nprintf 'attention: claim_stale: \\033]0;title\\007%s\\r\\nhelp: attention doctor\\n' '${"x".repeat(300)}' >&2\nexit 1\n`,
+	);
+	chmodSync(join(root, "bin", "attention"), 0o755);
+	process.env.WEZTERM_ATTENTION_ROOT = root;
+	const { lifecycle } = loadExt();
+	await lifecycle["session_start"]!();
+	await lifecycle["session_shutdown"]!();
+	expect(await reportedNotifications(1)).toHaveLength(1);
+	const message = notifications[0]?.message ?? "";
+	expect(message.startsWith("wezterm-attention: writer exited with status 1: attention: claim_stale: ]0;title")).toBe(true);
+	expect(message).not.toMatch(/\p{Cc}/u);
+	expect(message).not.toContain("help: attention doctor");
+	expect(message.length).toBeLessThan(300);
 });
 
 test("fallback: an exit-zero hook diagnostic is reported and never treated as success", async () => {
@@ -359,7 +414,9 @@ test("fallback: an exit-zero hook diagnostic is reported and never treated as su
 	await lifecycle["session_shutdown"]!();
 	expect(existsSync(join(dir, "42"))).toBe(false);
 	expect(await reportedNotifications(1)).toHaveLength(1);
-	expect(notifications[0]?.message).toContain("rejected the event");
+	expect(notifications[0]?.message).toBe(
+		"wezterm-attention: writer rejected the event: attention: identity_unpublished: test rejection",
+	);
 });
 
 test("event: emitting a notify object writes a labeled notify marker", async () => {
@@ -552,7 +609,7 @@ test("missing pane: lifecycle write is a silent no-op that creates no file", asy
 });
 
 test('env: a unit-suffixed TTL ("30m") is rejected, not parsed as 30', async () => {
-	// F7: parseInt("30m") === 30 silently produced a 30ms TTL. Strict parse must
+	// parseInt("30m") === 30 silently produced a 30ms TTL. Strict parse must
 	// reject it and fall back to the 30-minute default.
 	const dir = freshDir("wez-ttl-");
 	process.env.WEZTERM_PANE = "42";
@@ -564,20 +621,152 @@ test('env: a unit-suffixed TTL ("30m") is rejected, not parsed as 30', async () 
 	expect(m.ttl_ms).toBe(30 * 60 * 1000); // default, NOT 30
 });
 
-test("env: a relative WEZTERM_ATTENTION_DIR is rejected (no cwd scatter, no cwd delete)", async () => {
-	// F2: markerDirectory requires an absolute result. A relative override would
-	// otherwise write markers under cwd (scatter) and let clear rm() a cwd file.
+test("env: a relative WEZTERM_ATTENTION_DIR is skipped with one warning, never used as a cwd path", async () => {
+	// A relative override would write markers under cwd (scatter) and let clear
+	// rm() a cwd file. It is skipped for the next rule, as the plugin skips it.
 	const relDir = join(process.cwd(), "wez-rel-marker-dir");
 	rmSync(relDir, { recursive: true, force: true });
+	const home = tempDir("wez-rel-home-");
+	process.env.HOME = home;
 	process.env.WEZTERM_ATTENTION_DIR = "wez-rel-marker-dir";
 	process.env.WEZTERM_PANE = "42";
 	const { lifecycle, emit } = loadExt();
-	await lifecycle["agent_start"]!(); // write path: guarded → no file created
+	await lifecycle["agent_start"]!();
 	await lifecycle["session_shutdown"]!(); // lifecycle no longer awaits I/O; drain it
-	await emit("clear"); // clear path shares the same guard → no rm of a cwd file
-	expect(existsSync(join(relDir, "42"))).toBe(false);
+	expect(readMarker(join(home, ".local", "state", "wezterm-attention")).type).toBe("thinking");
+	await emit("clear"); // clear path resolves the same way → no rm of a cwd file
+	expect(existsSync(join(home, ".local", "state", "wezterm-attention", "42"))).toBe(false);
 	expect(existsSync(relDir)).toBe(false); // dir never even created
+	expect(notifications).toHaveLength(1);
+	expect(notifications[0]?.message).toContain("WEZTERM_ATTENTION_DIR");
 	rmSync(relDir, { recursive: true, force: true });
+});
+
+test("env: the default root is $XDG_STATE_HOME/wezterm-attention when that is absolute, else ~/.local/state", async () => {
+	const home = tempDir("wez-xdg-home-");
+	const stateHome = tempDir("wez-xdg-state-");
+	process.env.HOME = home;
+	process.env.WEZTERM_PANE = "42";
+	process.env.XDG_STATE_HOME = stateHome;
+	let { lifecycle } = loadExt();
+	await lifecycle["agent_start"]!();
+	await lifecycle["session_shutdown"]!();
+	expect(readMarker(join(stateHome, "wezterm-attention")).type).toBe("thinking");
+	for (const ignored of ["", "relative/state"]) {
+		process.env.XDG_STATE_HOME = ignored;
+		({ lifecycle } = loadExt());
+		await lifecycle["agent_settled"]!();
+		await lifecycle["session_shutdown"]!();
+		expect(readMarker(join(home, ".local", "state", "wezterm-attention")).type).toBe("stop");
+		rmSync(join(home, ".local"), { recursive: true, force: true });
+	}
+	expect(existsSync(join(process.cwd(), "relative"))).toBe(false);
+	expect(notifications).toEqual([]);
+});
+
+test("env: a root the writer would refuse, too long or holding a control character, is skipped", async () => {
+	// The writer takes a root only when it is at most the manifest's path bound
+	// in bytes and holds no character Rust's char::is_control is true for.
+	const manifest = parseRecord(readFileSync(join(import.meta.dir, "../../protocol/v2.json"), "utf8"));
+	const limits = manifest.limits as Record<string, number>;
+	const limit = limits.path_max_bytes!;
+	const home = tempDir("wez-unsafe-home-");
+	const scratch = tempDir("wez-unsafe-root-");
+	const homeRoot = join(home, ".local", "state", "wezterm-attention");
+	process.env.HOME = home;
+	process.env.WEZTERM_PANE = "42";
+	const tooLong = "/" + "a".repeat(limit);
+	const unsafe = [join(scratch, "x\u0001y"), join(scratch, "x\u007fy"), join(scratch, "x\u0085y"), tooLong];
+	let expectedNotifications = 0;
+	for (const name of ["XDG_STATE_HOME", "WEZTERM_ATTENTION_DIR"]) {
+		for (const value of unsafe) {
+			process.env[name] = value;
+			const { lifecycle } = loadExt();
+			await lifecycle["agent_start"]!();
+			await lifecycle["session_shutdown"]!();
+			expect(readMarker(homeRoot).type).toBe("thinking");
+			rmSync(join(home, ".local"), { recursive: true, force: true });
+			delete process.env[name];
+			if (name === "WEZTERM_ATTENTION_DIR") expectedNotifications++;
+			expect(notifications).toHaveLength(expectedNotifications);
+		}
+	}
+	expect(readdirSync(scratch)).toEqual([]);
+	for (const message of notifications.map((entry) => entry.message)) {
+		expect(message).toContain("WEZTERM_ATTENTION_DIR");
+		expect(message).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+	}
+});
+
+test("env: a root that is not UTF-8 is skipped and named, as the writer refuses it", async () => {
+	// Node decodes the environment as UTF-8 and puts U+FFFD where the bytes were
+	// not; the writer refuses a WEZTERM_ATTENTION_DIR or XDG_STATE_HOME like that.
+	const home = tempDir("wez-utf8-home-");
+	const scratch = tempDir("wez-utf8-root-");
+	const homeRoot = join(home, ".local", "state", "wezterm-attention");
+	process.env.HOME = home;
+	process.env.WEZTERM_PANE = "42";
+	for (const name of ["XDG_STATE_HOME", "WEZTERM_ATTENTION_DIR"]) {
+		process.env[name] = join(scratch, "x\uFFFDy");
+		const { lifecycle } = loadExt();
+		await lifecycle["agent_start"]!();
+		await lifecycle["session_shutdown"]!();
+		expect(readMarker(homeRoot).type).toBe("thinking");
+		rmSync(join(home, ".local"), { recursive: true, force: true });
+		delete process.env[name];
+	}
+	expect(readdirSync(scratch)).toEqual([]);
+	const messages = notifications.map((entry) => entry.message);
+	expect(messages).toHaveLength(2);
+	expect(messages[0]).toContain("XDG_STATE_HOME");
+	expect(messages[1]).toContain("WEZTERM_ATTENTION_DIR");
+	for (const message of messages) expect(message).not.toContain("\uFFFD");
+});
+
+test("env: a configured writer is never started with a root that is not UTF-8", async () => {
+	// The child is given the decoded text, U+FFFD encoded as valid UTF-8, so the
+	// writer would take it as a root that no reader resolves.
+	const root = tempDir("wez-utf8-writer-");
+	const log = join(root, "calls.log");
+	const scratch = tempDir("wez-utf8-writer-root-");
+	mkdirSync(join(root, "bin"));
+	writeFileSync(join(root, "bin", "attention"), '#!/bin/sh\nIFS= read -r payload || :\nprintf "%s\\n" "$*" >> "$WEZTERM_ATTENTION_TEST_LOG"\n');
+	chmodSync(join(root, "bin", "attention"), 0o755);
+	process.env.WEZTERM_ATTENTION_ROOT = root;
+	process.env.WEZTERM_ATTENTION_TEST_LOG = log;
+	process.env.WEZTERM_PANE = "42";
+	const broken = join(scratch, "x�y");
+	const cases: Array<{ dir?: string; stateHome?: string; refused?: string }> = [
+		{ dir: broken, refused: "WEZTERM_ATTENTION_DIR" },
+		{ stateHome: broken, refused: "XDG_STATE_HOME" },
+		{ dir: "", stateHome: broken, refused: "XDG_STATE_HOME" },
+		{ dir: scratch, stateHome: broken },
+		// A relative XDG_STATE_HOME is ignored by the writer, as by every reader.
+		{ stateHome: "x\uFFFDy" },
+	];
+	for (const { dir, stateHome, refused } of cases) {
+		delete process.env.WEZTERM_ATTENTION_DIR;
+		delete process.env.XDG_STATE_HOME;
+		if (dir !== undefined) process.env.WEZTERM_ATTENTION_DIR = dir;
+		if (stateHome !== undefined) process.env.XDG_STATE_HOME = stateHome;
+		rmSync(log, { force: true });
+		notifications.length = 0;
+		const { lifecycle } = loadExt();
+		await lifecycle["session_start"]!();
+		await lifecycle["session_shutdown"]!();
+		if (refused) {
+			expect(existsSync(log)).toBe(false);
+			expect(await reportedNotifications(1)).toHaveLength(1);
+			expect(notifications[0]?.message).toBe(`wezterm-attention: ${refused} is not UTF-8`);
+		} else {
+			expect(readFileSync(log, "utf8").trim().split("\n")).toEqual([
+				"hooks event pi session_start",
+				"hooks event pi session_shutdown",
+			]);
+			expect(notifications).toEqual([]);
+		}
+	}
+	expect(readdirSync(scratch)).toEqual([]);
 });
 
 test('env: TTL_MS="0" falls back to the default, not an instantly-stale marker', async () => {

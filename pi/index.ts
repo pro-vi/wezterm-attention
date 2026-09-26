@@ -58,18 +58,64 @@ type WriterRequest =
 	| ({ kind: "clear" } & SessionFacts)
 	| ({ kind: "end"; reason: SessionShutdownEvent["reason"] } & SessionFacts);
 
+// Tells the user one warning; the extension passes a Pi UI notification.
+type Report = (message: string) => void;
+
 type WriterResult =
 	| { kind: "unconfigured" }
 	| { kind: "succeeded" }
 	| { kind: "failed"; message: string };
 
-// Resolve the marker dir and require it absolute — closes two degenerate-env holes:
-// WEZTERM_ATTENTION_DIR="" would make clear's rm() delete a cwd-relative file, and
-// HOME="" resolves to a relative ".local/..." that scatters markers. `||` (not `??`)
-// so an empty override falls through to the HOME default; the isAbsolute gate is what
-// closes the HOME hole (homedir() also returns "" for HOME=""), so don't drop it.
-function markerDirectory(): string | undefined {
-	const dir = process.env.WEZTERM_ATTENTION_DIR || join(process.env.HOME || homedir(), ".local", "state", "wezterm-attention");
+// The writer's bound on a root path, `path_max_bytes` in protocol/v2.json.
+const PATH_MAX_BYTES = 4096;
+
+// Node decodes the environment as UTF-8 and puts U+FFFD where the bytes were
+// not, so a value holding it most likely was not UTF-8. A path that really
+// contains U+FFFD is refused too.
+function decodedFromBrokenBytes(value: string): boolean {
+	return value.includes("\uFFFD");
+}
+
+// A root the Rust writer would take as well: at most its path bound in UTF-8
+// bytes, UTF-8 in the environment, and no character Rust's char::is_control is
+// true for (C0, DEL, C1).
+function safeRootText(path: string): boolean {
+	return (
+		new TextEncoder().encode(path).length <= PATH_MAX_BYTES &&
+		!decodedFromBrokenBytes(path) &&
+		!/[\u0000-\u001f\u007f-\u009f]/.test(path)
+	);
+}
+
+// The same state root the Rust writer and the WezTerm plugin resolve:
+// WEZTERM_ATTENTION_DIR, else $XDG_STATE_HOME/wezterm-attention, else
+// ~/.local/state/wezterm-attention. An empty or relative value is skipped, never
+// used: a relative root would scatter markers under the cwd and let clear's rm()
+// delete a cwd-relative file. So is a value the writer would refuse; here, as
+// in the plugin, a WEZTERM_ATTENTION_DIR like that, or an XDG_STATE_HOME that
+// is not UTF-8 (the writer refuses only an absolute one), is reported and the
+// next rule applies. writerStateRootRefusal
+// handles the configured writer.
+// The final isAbsolute gate closes the HOME="" hole (homedir() also returns ""
+// for HOME=""), so don't drop it.
+function markerDirectory(report: Report): string | undefined {
+	const override = process.env.WEZTERM_ATTENTION_DIR;
+	if (override) {
+		// Checked first so that the report never repeats a control character.
+		if (!safeRootText(override)) {
+			report(
+				`wezterm-attention: ignoring WEZTERM_ATTENTION_DIR because it is longer than ${PATH_MAX_BYTES} bytes, not UTF-8, or holds a control character`,
+			);
+		} else if (isAbsolute(override)) return override;
+		else report("wezterm-attention: ignoring WEZTERM_ATTENTION_DIR because it is not an absolute path");
+	}
+	const stateHome = process.env.XDG_STATE_HOME;
+	if (stateHome && decodedFromBrokenBytes(stateHome)) {
+		report("wezterm-attention: ignoring XDG_STATE_HOME because it is not UTF-8");
+	} else if (stateHome && isAbsolute(stateHome) && safeRootText(stateHome)) {
+		return join(stateHome, "wezterm-attention");
+	}
+	const dir = join(process.env.HOME || homedir(), ".local", "state", "wezterm-attention");
 	return isAbsolute(dir) ? dir : undefined;
 }
 
@@ -175,12 +221,12 @@ async function publishPaneId(id: string): Promise<void> {
 	}
 }
 
-async function writeMarkerNow(state: AttentionState, label?: string): Promise<void> {
+async function writeMarkerNow(report: Report, state: AttentionState, label?: string): Promise<void> {
 	const id = paneId();
 	if (!id) return;
 	await publishPaneId(id);
 
-	const dir = markerDirectory();
+	const dir = markerDirectory(report);
 	if (!dir) return;
 	const path = join(dir, id);
 	const publicationId = randomUUID();
@@ -212,10 +258,10 @@ async function writeMarkerNow(state: AttentionState, label?: string): Promise<vo
 	}
 }
 
-async function clearMarkerNow(): Promise<void> {
+async function clearMarkerNow(report: Report): Promise<void> {
 	const id = paneId();
 	if (!id) return;
-	const dir = markerDirectory();
+	const dir = markerDirectory(report);
 	if (!dir) return;
 	try {
 		await rm(join(dir, id), { force: true });
@@ -224,12 +270,12 @@ async function clearMarkerNow(): Promise<void> {
 	}
 }
 
-function mark(state: AttentionState, label?: string): Promise<void> {
-	return enqueue(() => writeMarkerNow(state, label));
+function mark(report: Report, state: AttentionState, label?: string): Promise<void> {
+	return enqueue(() => writeMarkerNow(report, state, label));
 }
 
-function clearMarker(): Promise<void> {
-	return enqueue(() => clearMarkerNow());
+function clearMarker(report: Report): Promise<void> {
+	return enqueue(() => clearMarkerNow(report));
 }
 
 function sessionFacts(ctx: ExtensionContext): SessionFacts | undefined {
@@ -251,12 +297,29 @@ function requestFromSessionStart(event: SessionStartEvent, ctx: ExtensionContext
 	return facts ? { kind: "binding", startSource: event.reason, ...facts } : undefined;
 }
 
+// The Rust writer refuses a WEZTERM_ATTENTION_DIR or XDG_STATE_HOME that is
+// not UTF-8 where it decides the root: the first of the two that is not empty,
+// and XDG_STATE_HOME only when absolute, since a relative one is ignored.
+// The child is given the decoded text, U+FFFD encoded as valid UTF-8, so it
+// would take that as a root no reader resolves; the refusal is made here.
+function writerStateRootRefusal(): string | undefined {
+	for (const name of ["WEZTERM_ATTENTION_DIR", "XDG_STATE_HOME"]) {
+		const value = process.env[name];
+		if (!value) continue;
+		const decides = name !== "XDG_STATE_HOME" || isAbsolute(value);
+		return decides && decodedFromBrokenBytes(value) ? `wezterm-attention: ${name} is not UTF-8` : undefined;
+	}
+	return undefined;
+}
+
 function writerExecutable(): { kind: "unconfigured" } | { kind: "ready"; executable: string } | { kind: "failed"; message: string } {
 	const root = process.env.WEZTERM_ATTENTION_ROOT;
 	if (root === undefined) return { kind: "unconfigured" };
 	if (!root || !isAbsolute(root)) {
 		return { kind: "failed", message: "wezterm-attention: WEZTERM_ATTENTION_ROOT must name an absolute checkout" };
 	}
+	const refusal = writerStateRootRefusal();
+	if (refusal) return { kind: "failed", message: refusal };
 	const executable = join(root, "bin", "attention");
 	try {
 		accessSync(executable, constants.X_OK);
@@ -302,6 +365,16 @@ function writerInvocation(request: WriterRequest): { event: string; payload: Rec
 	}
 }
 
+// The first line of the writer's stderr, for the warning that reports it. It
+// comes from another process and is shown in Pi's interface, so control
+// characters are dropped and the length is capped.
+const DIAGNOSTIC_BYTES = 4096;
+const DIAGNOSTIC_CHARACTERS = 200;
+function firstDiagnosticLine(stderr: Buffer): string {
+	const line = stderr.toString("utf8").split("\n", 1)[0] ?? "";
+	return line.replace(/\p{Cc}/gu, "").trim().slice(0, DIAGNOSTIC_CHARACTERS);
+}
+
 async function invokeWriter(request: WriterRequest, transportId: string): Promise<WriterResult> {
 	const target = writerExecutable();
 	if (target.kind !== "ready") return target;
@@ -309,27 +382,45 @@ async function invokeWriter(request: WriterRequest, transportId: string): Promis
 	return new Promise<WriterResult>((resolve) => {
 		let settled = false;
 		let diagnosticReceived = false;
+		let diagnostic = Buffer.alloc(0);
 		const finish = (result: WriterResult) => {
 			if (settled) return;
 			settled = true;
 			resolve(result);
 		};
 		try {
+			// The writer's direct parent is this Pi process, and a pane it claims is
+			// claimed for the process this names, so a value Pi inherited is replaced.
+			// The launch id is the one captured with the request; unset when there
+			// was none.
 			const child = spawn(
 				target.executable,
 				["hooks", "event", "pi", invocation.event],
-				{ env: { ...process.env, WEZTERM_ATTENTION_LAUNCH_ID: request.launchId }, stdio: ["pipe", "ignore", "pipe"] },
+				{
+					env: {
+						...process.env,
+						WEZTERM_ATTENTION_HOST_PID: String(process.pid),
+						WEZTERM_ATTENTION_LAUNCH_ID: request.launchId,
+					},
+					stdio: ["pipe", "ignore", "pipe"],
+				},
 			);
 			child.once("error", () => finish({ kind: "failed", message: "wezterm-attention: writer process could not start" }));
 			child.stderr.on("data", (chunk: Buffer | string) => {
 				if (chunk.length > 0) diagnosticReceived = true;
+				if (diagnostic.length < DIAGNOSTIC_BYTES) {
+					diagnostic = Buffer.concat([diagnostic, Buffer.from(chunk)]).subarray(0, DIAGNOSTIC_BYTES);
+				}
 			});
 			child.stderr.once("error", () => finish({ kind: "failed", message: "wezterm-attention: writer diagnostics failed" }));
-			child.once("close", (code) => finish(code === 0 && !diagnosticReceived
-				? { kind: "succeeded" }
-				: { kind: "failed", message: code === 0
+			child.once("close", (code) => {
+				if (code === 0 && !diagnosticReceived) return finish({ kind: "succeeded" });
+				const summary = code === 0
 					? "wezterm-attention: writer rejected the event"
-					: `wezterm-attention: writer exited with status ${code ?? "signal"}` }));
+					: `wezterm-attention: writer exited with status ${code ?? "signal"}`;
+				const line = firstDiagnosticLine(diagnostic);
+				finish({ kind: "failed", message: line ? `${summary}: ${line}` : summary });
+			});
 			child.stdin.once("error", () => finish({ kind: "failed", message: "wezterm-attention: writer input failed" }));
 			child.stdin.end(JSON.stringify({ ...invocation.payload, transport_id: transportId }));
 		} catch {
@@ -338,10 +429,10 @@ async function invokeWriter(request: WriterRequest, transportId: string): Promis
 	});
 }
 
-async function applyLegacyFallback(request: WriterRequest): Promise<void> {
+async function applyLegacyFallback(request: WriterRequest, report: Report): Promise<void> {
 	switch (request.kind) {
 		case "tool_start":
-			await writeMarkerNow("thinking");
+			await writeMarkerNow(report, "thinking");
 			return;
 		case "tool_end":
 		case "input":
@@ -350,13 +441,13 @@ async function applyLegacyFallback(request: WriterRequest): Promise<void> {
 		case "compaction":
 			return;
 		case "activity":
-			await writeMarkerNow(request.state, request.label);
+			await writeMarkerNow(report, request.state, request.label);
 			return;
 		case "review":
-			await writeMarkerNow("review");
+			await writeMarkerNow(report, "review");
 			return;
 		case "clear":
-			await clearMarkerNow();
+			await clearMarkerNow(report);
 			return;
 		case "binding":
 		case "end":
@@ -364,11 +455,11 @@ async function applyLegacyFallback(request: WriterRequest): Promise<void> {
 	}
 }
 
-function enqueueWriter(request: WriterRequest, reportFailure: (message: string) => void): Promise<void> {
+function enqueueWriter(request: WriterRequest, reportFailure: Report): Promise<void> {
 	const transportId = randomUUID();
 	return enqueue(async () => {
 		const result = await invokeWriter(request, transportId);
-		if (result.kind === "unconfigured") await applyLegacyFallback(request);
+		if (result.kind === "unconfigured") await applyLegacyFallback(request, reportFailure);
 		else if (result.kind === "failed") reportFailure(result.message);
 	});
 }
@@ -539,7 +630,9 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 		if (!request) return;
 		if (!currentSession) {
 			if (process.env.WEZTERM_ATTENTION_ROOT === undefined) {
-				return request.state === "clear" ? clearMarker() : mark(request.state, request.label);
+				return request.state === "clear"
+					? clearMarker(reportWriterFailure)
+					: mark(reportWriterFailure, request.state, request.label);
 			}
 			reportWriterFailure("wezterm-attention: no Pi session is available for the configured writer");
 			return;

@@ -12,8 +12,7 @@ use uuid::Uuid;
 use wezterm_attention::identity::{PaneAddress, pane_address};
 use wezterm_attention::lifecycle::{apply_provider_event, binding_id};
 use wezterm_attention::maintenance::{
-    ABSENCE_INTERVAL_NS, RETENTION_AGE_NS, binding_cap_paths_by_realm, doctor, limit_sweep_preview,
-    sweep,
+    ABSENCE_INTERVAL_NS, RETENTION_AGE_NS, binding_cap_paths_by_realm, limit_sweep_preview, sweep,
 };
 use wezterm_attention::providers::parse_provider_event;
 use wezterm_attention::query::read_bindings_with_ports;
@@ -118,6 +117,7 @@ impl FakeProcesses {
                 Presence::Present => 1,
                 Presence::Absent => 2,
                 Presence::Unavailable => 3,
+                Presence::Unseen => 4,
             },
             Ordering::SeqCst,
         );
@@ -137,6 +137,7 @@ impl ProcessProbe for FakeProcesses {
         match self.state.load(Ordering::SeqCst) {
             1 => Presence::Present,
             2 => Presence::Absent,
+            4 => Presence::Unseen,
             _ => Presence::Unavailable,
         }
     }
@@ -144,7 +145,8 @@ impl ProcessProbe for FakeProcesses {
 
 struct Setup {
     _scratch: Scratch,
-    _socket: UnixListener,
+    /// The mux server's socket, listening until [`Setup::stop_listening`].
+    listener: Mutex<Option<UnixListener>>,
     env: BTreeMap<String, String>,
     clock: MutableClock,
     tty: FakeTty,
@@ -154,8 +156,13 @@ struct Setup {
 
 impl Setup {
     fn new() -> Self {
+        Self::with_socket_name("mux.sock")
+    }
+
+    /// The fixture with its mux socket at `<scratch>/<name>`.
+    fn with_socket_name(name: &str) -> Self {
         let scratch = Scratch::new();
-        let socket_path = scratch.0.join("mux.sock");
+        let socket_path = scratch.0.join(name);
         let socket = UnixListener::bind(&socket_path).expect("bind socket");
         let tty = FakeTty {
             path: "/dev/ttys888".to_owned(),
@@ -178,7 +185,7 @@ impl Setup {
         ]);
         Self {
             _scratch: scratch,
-            _socket: socket,
+            listener: Mutex::new(Some(socket)),
             env,
             clock: MutableClock {
                 monotonic: AtomicU64::new(100),
@@ -196,11 +203,18 @@ impl Setup {
         }
     }
 
+    /// Closes the mux socket and leaves its file behind, as a server that
+    /// exited without removing its socket does.
+    fn stop_listening(&self) {
+        self.listener.lock().expect("listener lock").take();
+    }
+
     fn ports(&self) -> RuntimePorts<'_> {
         RuntimePorts {
             clock: &self.clock,
             tty: &self.tty,
             panes: &self.panes,
+            processes: &wezterm_attention::wezterm::SystemProcessInspector,
         }
     }
 
@@ -275,6 +289,18 @@ impl Setup {
         path
     }
 
+    /// Doctor as run inside this fixture's pane, whatever pane runs the tests.
+    fn doctor(&self) -> (Value, Vec<wezterm_attention::protocol::Diagnostic>) {
+        wezterm_attention::maintenance::doctor_with_environment(
+            &self.root(),
+            &self.env,
+            Some(&self.panes),
+            Some(&self.processes),
+            &wezterm_attention::wezterm::SystemProcessInspector,
+        )
+        .expect("doctor")
+    }
+
     fn run_sweep(
         &self,
         apply: bool,
@@ -300,8 +326,7 @@ impl Setup {
 fn doctor_reports_embedded_manifest_digest_and_confirmed_binding() {
     let setup = Setup::new();
     setup.claim_and_bind();
-    let (result, diagnostics) =
-        doctor(&setup.root(), Some(&setup.panes), Some(&setup.processes)).expect("doctor");
+    let (result, diagnostics) = setup.doctor();
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     assert_eq!(result["manifest"]["matches"], true);
     assert_eq!(
@@ -330,8 +355,7 @@ fn doctor_reports_a_future_claim_without_any_binding() {
         serde_json::to_vec(&claim).expect("future claim JSON"),
     )
     .expect("write future claim");
-    let (result, diagnostics) =
-        doctor(&setup.root(), Some(&setup.panes), Some(&setup.processes)).expect("doctor");
+    let (result, diagnostics) = setup.doctor();
     assert!(diagnostics.iter().any(|item| item.code == "future_schema"));
     assert!(
         result["probes"]
@@ -852,8 +876,7 @@ fn doctor_rejects_a_valid_record_at_the_wrong_depth() {
         }),
     )
     .expect("write misplaced record");
-    let (_, diagnostics) =
-        doctor(&setup.root(), Some(&setup.panes), Some(&setup.processes)).expect("doctor");
+    let (_, diagnostics) = setup.doctor();
     assert!(diagnostics.iter().any(|item| item.code == "record_invalid"));
 }
 
@@ -930,7 +953,7 @@ fn a_session_resumed_in_a_new_pane_conflicts_only_while_both_panes_live() {
             "binding_id":resumed_binding,"event_id":Uuid::new_v4().to_string(),
             "provider":"claude","provider_session_id":"session-a","start_source":"resume",
             "observed_mono_ns":"00000000000000000300",
-            "written_at_unix_ns":"00000000001000000000","writer_version":"2.0.0"
+            "written_at_unix_ns":"00000000001000000000","writer_version":"1.0.0"
         }),
     )
     .expect("write resumed binding");
@@ -950,11 +973,15 @@ fn a_session_resumed_in_a_new_pane_conflicts_only_while_both_panes_live() {
             .expect("bindings with both panes live");
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|row| row.binding_health == "conflicted"));
-    assert!(
-        diagnostics
-            .iter()
-            .any(|item| item.code == "binding_conflict")
-    );
+    let conflict = diagnostics
+        .iter()
+        .find(|item| item.code == "binding_conflict")
+        .expect("conflict diagnostic");
+    // The diagnostic names the session and every address that holds it, so
+    // a reader that dropped `binding_health` can still find the rows.
+    assert_eq!(conflict.context["provider"], "claude");
+    assert_eq!(conflict.context["provider_session_id"], "session-a");
+    assert_eq!(conflict.context["addresses"], json!([address, resumed]));
 
     // The old pane is gone. One live claim remains, so it is not a conflict.
     setup.panes.set(vec![PaneRow {
@@ -1160,54 +1187,6 @@ fn an_incomplete_claim_walk_does_not_grant_collection() {
         assert!(collection_details(&applied.0.details).is_empty());
         assert!(root.join("42").exists());
     }
-}
-
-#[test]
-fn a_replaced_marker_is_refused_not_collected() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let root = setup.root();
-    plant_flat_files(&root, "42");
-    let (address, _) = pane_address(&setup.env).expect("address");
-    let lock = pane_path(&root, &address).join(".claim.lock");
-    let locked = Arc::new(Barrier::new(2));
-    let release = Arc::new(Barrier::new(2));
-    let (details, diagnostics) = std::thread::scope(|scope| {
-        let holder = scope.spawn(|| {
-            with_lock(&lock, std::time::Duration::from_secs(5), || {
-                locked.wait();
-                release.wait();
-                Ok(())
-            })
-            .expect("hold claim lock")
-        });
-        locked.wait();
-        let sweep =
-            scope.spawn(|| setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000805")));
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        let next = root.join("42.agents.next");
-        fs::write(&next, "thinking\n").expect("write replacement");
-        fs::rename(&next, root.join("42.agents")).expect("replace agents");
-        release.wait();
-        holder.join().expect("holder");
-        sweep.join().expect("sweep")
-    });
-    assert!(collection_details(&details.details).is_empty());
-    assert!(
-        diagnostics
-            .iter()
-            .any(|item| item.code == "record_invalid" && item.message.contains("changed")),
-        "{diagnostics:?}"
-    );
-    assert_eq!(
-        fs::read_to_string(root.join("42")).expect("marker"),
-        "stop\n"
-    );
-    assert_eq!(
-        fs::read_to_string(root.join("42.agents")).expect("agents"),
-        "thinking\n"
-    );
-    assert!(root.join("42.ack").exists());
 }
 
 fn write_tab_order(root: &Path, window_id: u64, marker_ids: &[&str]) -> PathBuf {
@@ -1529,6 +1508,43 @@ fn sweep_keeps_a_tab_order_whose_panes_could_not_be_probed() {
     assert!(unknown.exists());
 }
 
+/// A tab order can outlive the records of the server it names, as when a
+/// server's incarnation records are removed by hand. There is no socket to
+/// ask, so the file is kept, but no probe failed and no later sweep could
+/// decide more, so the sweep stays complete.
+#[test]
+fn sweep_keeps_a_tab_order_naming_an_unrecorded_pane_without_calling_it_unprobed() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let root = setup.root();
+    let (address, _) = pane_address(&setup.env).expect("address");
+    let unrecorded_incarnation = format!("v2:{}:{}:7", address.realm_id, "b".repeat(64));
+    let unrecorded_realm = format!("v2:{}:{}:7", "c".repeat(64), address.incarnation_id);
+    let only_unrecorded = write_tab_order(&root, 9, &[&unrecorded_incarnation, &unrecorded_realm]);
+    // Sorts before the listed pane, so it is looked at first.
+    let before_present = format!("v2:{}:{}:7", address.realm_id, "0".repeat(64));
+    let present = format!("v2:{}:{}:42", address.realm_id, address.incarnation_id);
+    let with_present = write_tab_order(&root, 10, &[&before_present, &present]);
+    for operation in [
+        "00000000-0000-4000-8000-000000000724",
+        "00000000-0000-4000-8000-000000000725",
+    ] {
+        let (applied, diagnostics) = setup.run_sweep(true, Some(operation));
+        assert_eq!(tab_order_detail(&applied.details, 9)["action"], "keep");
+        assert_eq!(
+            tab_order_detail(&applied.details, 9)["reason"],
+            "not_recorded"
+        );
+        assert_eq!(tab_order_detail(&applied.details, 10)["reason"], "present");
+        assert!(
+            diagnostics.iter().all(|d| d.code != "probe_unavailable"),
+            "{diagnostics:?}"
+        );
+        assert_eq!(applied.failed_steps, 0);
+    }
+    assert!(only_unrecorded.exists() && with_present.exists());
+}
+
 #[test]
 fn a_realm_filtered_sweep_leaves_tab_orders_alone() {
     let setup = Setup::new();
@@ -1629,7 +1645,7 @@ fn a_present_row_from_an_incomplete_bindings_answer_inspects_completely() {
             "binding_id":other_id,"event_id":"00000000-0000-4000-8000-000000000702",
             "provider":"claude","provider_session_id":"session-b",
             "start_source":"startup","observed_mono_ns":"00000000000000000702",
-            "written_at_unix_ns":"00000000001000000000","writer_version":"2.0.0"
+            "written_at_unix_ns":"00000000001000000000","writer_version":"1.0.0"
         }),
     )
     .expect("write extra binding");
@@ -1669,3 +1685,42 @@ fn a_present_row_from_an_incomplete_bindings_answer_inspects_completely() {
         wezterm_attention::query::PanePresence::Present
     );
 }
+
+#[path = "maintenance_spec/tab_orders.rs"]
+mod tab_orders;
+
+#[path = "maintenance_spec/row_agreement.rs"]
+mod row_agreement;
+
+#[path = "maintenance_spec/unreadable_state.rs"]
+mod unreadable_state;
+
+#[path = "maintenance_spec/diagnostic_context.rs"]
+mod diagnostic_context;
+
+#[path = "maintenance_spec/realm_filters.rs"]
+mod realm_filters;
+
+#[path = "maintenance_spec/doctor_probes.rs"]
+mod doctor_probes;
+
+#[path = "maintenance_spec/lock_scope.rs"]
+mod lock_scope;
+
+#[path = "maintenance_spec/pane_retention.rs"]
+mod pane_retention;
+
+#[path = "maintenance_spec/binding_retention.rs"]
+mod binding_retention;
+
+#[path = "maintenance_spec/destructive_guards.rs"]
+mod destructive_guards;
+
+#[path = "maintenance_spec/recorded_servers.rs"]
+mod recorded_servers;
+
+#[path = "maintenance_spec/reboot_ends.rs"]
+mod reboot_ends;
+
+#[path = "maintenance_spec/session_index.rs"]
+mod session_index;

@@ -1,8 +1,11 @@
 [package]
 name = "wezterm-attention"
-version = "2.0.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.94"
+license = "MIT"
+publish = false
+repository = "https://github.com/pro-vi/wezterm-attention"
 
 [lib]
 name = "wezterm_attention"
@@ -39,7 +42,7 @@ uuid = { version = "1", features = ["v4"] }
 # Denied because the crate is already clean of them, so the table locks that in
 # rather than announcing an intention. `clippy::unwrap_used` and
 # `clippy::expect_used` are the two worth adding next and are deliberately absent:
-# they fire at 23 sites in the library today, and silencing them with an allow
+# they fire at 25 sites in the library today, and silencing them with an allow
 # would be worse than not declaring them. See docs/accepted-limitations.md.
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

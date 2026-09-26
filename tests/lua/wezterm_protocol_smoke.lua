@@ -123,6 +123,17 @@ assert(joined == seconds .. fractional, "UTC %s%9f did not preserve seconds plus
 assert(padded and #padded == 20 and padded:match("^%d+$"),
   "UTC value did not left-pad to UnixNs20")
 
+  -- A GUI draws a pane by its own number only once it knows the pane is in a
+  -- local domain, and a config evaluated outside a GUI has no mux to ask, so
+  -- the pane is walked by a poll first. The poll reads a directory that does
+  -- not exist, so it can neither see nor change any real state.
+  local unused_dir = os.tmpname()
+  os.remove(unused_dir)
+  local local_pane = { pane_id = function() return 9001 end, get_domain_name = function() return "local" end,
+    get_user_vars = function() return {} end, get_title = function() return "pane" end }
+  local local_window = { window_id = function() return 91003 end, is_focused = function() return false end,
+    mux_window = function() return { tabs = function() return {{panes = function() return {local_pane} end}} end } end }
+  attention.poll(local_window, { dir = unused_dir, gui_windows = { local_window }, call_after = function() end })
   internal.attention_cache["9001"] = { type = nil, subagents = 2 }
   local visible = internal.resolve_visible_attention({ "9001" }, {
     colors = { stop = "SENTINEL" },

@@ -7,9 +7,68 @@ local M = {}
 
 local home = wezterm.home_dir or os.getenv("HOME") or os.getenv("USERPROFILE") or "/tmp"
 
+local function is_absolute_path(path)
+  return path:sub(1, 1) == "/" or path:match("^%a:[\\/]") ~= nil or path:sub(1, 2) == "\\\\"
+end
+
+--- The writer's bound on a root path, `path_max_bytes` in protocol/v2.json,
+--- which loads only after the root is resolved.
+local path_max_bytes = 4096
+
+--- titles.lua's UTF-8 repair, which returns well-formed text unchanged. It
+--- is set once that module has loaded, and the default state root is
+--- resolved only after that.
+local well_formed_utf8
+
+--- A root the writer would take as well: at most its path bound in bytes,
+--- UTF-8, since the writer reads its environment as text, and no control
+--- character, C0, DEL or C1.
+local function safe_root_text(path)
+  return #path <= path_max_bytes and well_formed_utf8(path) == path
+    and not path:find("[%z\1-\31\127]") and not path:find("\194[\128-\159]")
+end
+
+--- Why a root the writer would refuse is refused, for the log, which must
+--- not repeat the bytes that made it so.
+local unsafe_root_problem = "longer than " .. path_max_bytes
+  .. " bytes, not UTF-8, or holds a control character"
+
+--- The state root, resolved in the order the attention CLI and the Pi
+--- extension use, so a producer, the writer and this reader agree on one
+--- directory: WEZTERM_ATTENTION_DIR, then $XDG_STATE_HOME/wezterm-attention,
+--- then ~/.local/state/wezterm-attention. An empty value counts as unset, and a
+--- relative XDG_STATE_HOME is ignored as the XDG spec says, as is one the
+--- writer would refuse. A WEZTERM_ATTENTION_DIR that is relative or that the
+--- writer would refuse, and an absolute XDG_STATE_HOME that is not UTF-8, are
+--- errors to the CLI; here they are ignored, and the second return says so for the
+--- log.
+local function resolve_state_root()
+  local note
+  local explicit = os.getenv("WEZTERM_ATTENTION_DIR")
+  if explicit and explicit ~= "" then
+    -- Checked first so that the log never repeats a control character.
+    if not safe_root_text(explicit) then
+      note = "WEZTERM_ATTENTION_DIR is " .. unsafe_root_problem .. ", so it is ignored"
+    elseif not is_absolute_path(explicit) then
+      note = "WEZTERM_ATTENTION_DIR is not an absolute path, so it is ignored: " .. explicit
+    else
+      return explicit
+    end
+  end
+  local state_home = os.getenv("XDG_STATE_HOME")
+  if state_home and state_home ~= "" then
+    if well_formed_utf8(state_home) ~= state_home then
+      note = (note and note .. "; " or "") .. "XDG_STATE_HOME is not UTF-8, so it is ignored"
+    elseif is_absolute_path(state_home) and safe_root_text(state_home) then
+      return (state_home:gsub("(.)/+$", "%1")) .. "/wezterm-attention", note
+    end
+  end
+  return home .. "/.local/state/wezterm-attention", note
+end
+
 local defaults = {
-  -- Where marker files are written (one file per pane ID)
-  dir = home .. "/.local/state/wezterm-attention",
+  -- `dir`, where marker files are written (one file per pane ID), is set
+  -- once titles.lua has loaded, below.
 
   -- Render mode: "tab" | "manual"
   --   tab:    plugin owns format-tab-title (default)
@@ -53,7 +112,8 @@ local defaults = {
   show_provider = false,
 
   -- Base-title sources: server name, then directory, then a two-poll settled
-  -- process title. The raw process title is never read by the formatter.
+  -- process title, and the title as it is right now only when none of those
+  -- has anything to say.
   show_directory = true,
   settled_title_fallback = true,
 }
@@ -73,8 +133,16 @@ local plugin_root = plugin_source and plugin_source:match("^(.*)/plugin/init%.lu
 if plugin_root and plugin_root:sub(1, 1) ~= "/" then
   local working_directory = os.getenv("PWD")
   if working_directory and working_directory:sub(1, 1) == "/" then
-    plugin_root = (working_directory .. "/" .. plugin_root):gsub("/%./", "/")
+    plugin_root = (working_directory .. "/" .. plugin_root):gsub("/%./", "/"):gsub("/%.$", "")
   end
+end
+if not plugin_root then
+  -- Every other module is loaded from beside this file, so without its path
+  -- nothing below can work. Say how to give it one.
+  error("wezterm-attention: cannot tell which directory the plugin was loaded from. Load it with "
+    .. 'wezterm.plugin.require("https://github.com/pro-vi/wezterm-attention"), or from a clone with '
+    .. 'loadfile(clone .. "/plugin/init.lua")("wezterm-attention", clone .. "/plugin/init.lua"). '
+    .. "dofile passes no module path, and WezTerm's Lua has no debug library to find one.", 0)
 end
 local loaded_module_errors = {}
 local function load_plugin_module(name)
@@ -139,6 +207,7 @@ else
     stale_ttl_ms = function() return nil end,
     is_safe_text = function(value, maximum)
       return type(value) == "string" and value ~= "" and #value <= maximum
+        and not value:find("[%z\1-\31\127]") and not value:find("\194[\128-\159]")
     end,
   }
 end
@@ -214,6 +283,7 @@ local overlays_api = overlays_factory({
 local reported_errors = overlays_api.reported_errors
 local publication_session = overlays_api.publication_session
 local report_error_once = overlays_api.report_error_once
+local report_warning_once = overlays_api.report_warning_once
 local next_publication_id = overlays_api.next_publication_id
 local json_string = overlays_api.json_string
 local json_value = overlays_api.json_value
@@ -237,8 +307,13 @@ local clear_review_flag = overlays_api.clear_review_flag
 local remove_expired_marker = overlays_api.remove_expired_marker
 local remove_marker = overlays_api.remove_marker
 local reader_factory = assert(load_plugin_module("reader"))
+-- Bound once the runtime below exists; the reader asks it per pane read.
+local own_mux_identity
 local reader_api = reader_factory({
   M = M,
+  wezterm = wezterm,
+  defaults = defaults,
+  home_dir = home,
   deep_copy = deep_copy,
   classify_lifecycle_tool = protocol_api.classify_lifecycle_tool,
   protocol = protocol,
@@ -258,6 +333,7 @@ local reader_api = reader_factory({
   identity_diagnostic = identity_diagnostic,
   age_exceeds_ms = age_exceeds_ms,
   eligible_subagent = eligible_subagent,
+  own_mux_identity = function() return own_mux_identity() end,
 })
 local canonical_pane_id = reader_api.canonical_pane_id
 local pane_call = reader_api.pane_call
@@ -290,9 +366,27 @@ local selected_v2_records_root = v2_overlays.selected_v2_records_root
 local v2_review_paths = v2_overlays.v2_review_paths
 local write_v2_user_review = v2_overlays.write_v2_user_review
 local clear_v2_reviews = v2_overlays.clear_v2_reviews
+local restore_cleared_reviews = v2_overlays.restore_cleared_reviews
 local refresh_cached_v2 = v2_overlays.refresh_cached_v2
 local acknowledge_focused_v2_pane = v2_overlays.acknowledge_focused_v2_pane
 -- ── Internal helpers ────────────────────────────────────────────────────────
+
+--- The key a pane the GUI draws is cached under, from its GUI-local number:
+--- the one the last poll found for it, or nil when that poll found none (a
+--- mux-client pane that has not published its $WEZTERM_PANE). Before any poll
+--- has walked the pane, its own number where that is the marker id, in a
+--- local-family domain, so single-machine setups render at once; elsewhere
+--- the number names some other pane's markers, and the answer is nil.
+local function drawn_pane_key(local_id)
+  local mapped = marker_id_by_local[local_id]
+  if mapped ~= nil then return mapped or nil end
+  local mux = wezterm.mux
+  if not mux or type(mux.get_pane) ~= "function" then return nil end
+  local ok, pane = pcall(mux.get_pane, tonumber(local_id))
+  if not ok or not pane then return nil end
+  if not reader_api.is_local_domain(pane_method(pane, "get_domain_name")) then return nil end
+  return local_id
+end
 
 local titles_factory = assert(load_plugin_module("titles"))
 local titles_api = titles_factory({
@@ -300,8 +394,11 @@ local titles_api = titles_factory({
   defaults = defaults,
   report_error_once = report_error_once,
   is_safe_text = is_safe_text,
-  marker_id_by_local = marker_id_by_local,
+  drawn_pane_key = drawn_pane_key,
 })
+well_formed_utf8 = titles_api.well_formed_utf8
+local default_dir_note
+defaults.dir, default_dir_note = resolve_state_root()
 local normalized_pane_title = titles_api.normalized_pane_title
 local sample_settled_title = titles_api.sample_settled_title
 local settled_title_state = titles_api.settled_title_state
@@ -312,9 +409,10 @@ local format_factory = assert(load_plugin_module("format"))
 local format_api = format_factory({
   M = M,
   defaults = defaults,
-  marker_id_by_local = marker_id_by_local,
+  drawn_pane_key = drawn_pane_key,
   attention_cache = attention_cache,
   title_sources = title_sources,
+  display_text = titles_api.display_text,
 })
 local gui_tab_pane_ids = format_api.gui_tab_pane_ids
 local resolve_visible_attention = format_api.resolve_visible_attention
@@ -331,16 +429,20 @@ local runtime_api = runtime_state.bind({
   decode_json = decode_json,
   sha256 = sha256,
   is_hex64 = is_hex64,
-  plugin_root = plugin_root,
   diagnostic = diagnostic,
   report_error_once = report_error_once,
+  report_warning_once = report_warning_once,
   resolve_pane_read = resolve_pane_read,
   read_attention_view = read_attention_view,
   pane_method = pane_method,
+  canonical_pane_id = canonical_pane_id,
+  unix_domain_socket = reader_api.unix_domain_socket,
+  refresh_domain_facts = reader_api.refresh_domain_facts,
   selected_v2_records_root = selected_v2_records_root,
   v2_review_paths = v2_review_paths,
   write_v2_user_review = write_v2_user_review,
   clear_v2_reviews = clear_v2_reviews,
+  restore_cleared_reviews = restore_cleared_reviews,
   refresh_cached_v2 = refresh_cached_v2,
   acknowledge_focused_v2_pane = acknowledge_focused_v2_pane,
   read_effective_marker = read_effective_marker,
@@ -367,6 +469,7 @@ local runtime_api = runtime_state.bind({
   gui_tab_pane_ids = gui_tab_pane_ids,
   resolve_visible_attention = resolve_visible_attention,
 })
+own_mux_identity = runtime_api.own_mux_identity
 local same_cached_attention = runtime_api.same_cached_attention
 local tab_panes_containing_read = runtime_api.tab_panes_containing_read
 local review_outranks = runtime_api.review_outranks
@@ -384,10 +487,15 @@ local function formatter_tab_key(tab)
   return tostring(tab.tab_id or tab.tab_index or tab)
 end
 
+--- The user's base title, repaired the way every text the bar draws is: a
+--- formatter often returns a pane's title as the program set it, escape
+--- sequences and all, or cuts one by bytes inside a character, which WezTerm
+--- then refuses to draw at all. Not cut to a length: that is the bar's to do.
 local function call_title_formatter(base_fn, tab, ctx)
   local key = formatter_tab_key(tab)
   local ok, base = pcall(base_fn, tab, ctx)
   if ok and type(base) == "string" then
+    base = titles_api.display_text(base, math.huge)
     last_base_title_by_tab[key] = base
     return base
   end
@@ -420,24 +528,154 @@ end
 
 -- ── apply_to_config ─────────────────────────────────────────────────────────
 
+--- Tab orders drawn while this GUI is still asking who it is, by window id. A
+--- window keeps the name of its first file for as long as it is open, so a
+--- file written now would stay at the unsourced name every GUI shares.
+local held_tab_orders = {}
+
+local function publish_drawn_tab_order(dir, window_id, order)
+  local status, source = runtime_api.tab_source_status()
+  if status == "pending" then
+    held_tab_orders[window_id] = { dir = dir, order = order, drawn_at = now_ms() }
+    return
+  end
+  held_tab_orders[window_id] = nil
+  publish_tab_order(dir, window_id, order, source)
+end
+
+--- Ask who this GUI is, and publish what the bar drew meanwhile once there
+--- is an answer, or once it is known that none will come.
+local function settle_tab_source(socket)
+  runtime_api.acquire_tab_source(socket)
+  if next(held_tab_orders) == nil then return end
+  local status, source = runtime_api.tab_source_status()
+  if status == "pending" then return end
+  for window_id, held in pairs(held_tab_orders) do
+    held_tab_orders[window_id] = nil
+    publish_tab_order(held.dir, window_id, held.order, source, held.drawn_at)
+  end
+end
+
 local applied = false
+
+-- What each option may be. `false` stands for the literal false, which some
+-- options take to mean "off".
+local option_kinds = {
+  dir = { "string" }, renderer = { "string" }, format_tab_title = { "boolean" },
+  title_formatter = { "function" }, on_view_change = { "function" },
+  colors = { "table" }, indicators = { "table" }, priority = { "table" }, auto_clear = { "table" },
+  stale_after_ms = { "table", false }, review_key = { "table", false },
+  request_redraw = { "boolean" }, auto_poll = { "boolean" }, show_provider = { "boolean" },
+  show_directory = { "boolean" }, settled_title_fallback = { "boolean" },
+  integration_root = { "string" },
+}
+-- Names people have used for an option that exists under another name.
+local option_renames = { acknowledge_types = "auto_clear" }
+
+--- The options as given, less any the plugin cannot use: an unknown name, or
+--- a value of the wrong kind, is named once in the log and left out, so the
+--- default applies instead of a typo silently changing nothing or a wrong
+--- kind failing the whole config.
+local function usable_options(opts)
+  local usable = {}
+  for key, value in pairs(opts) do
+    local kinds = option_kinds[key]
+    if not kinds then
+      local rename = option_renames[key]
+      report_warning_once("option:" .. tostring(key), "unknown option " .. tostring(key)
+        .. (rename and (" is ignored; the option is " .. rename) or " is ignored"))
+    else
+      local accepted = false
+      for _, kind in ipairs(kinds) do
+        if (kind == false and value == false) or type(value) == kind then accepted = true end
+      end
+      if accepted then
+        usable[key] = value
+      else
+        local names = {}
+        for index, kind in ipairs(kinds) do names[index] = kind == false and "false" or ("a " .. kind) end
+        report_warning_once("option:" .. key, "option " .. key .. " must be " .. table.concat(names, " or ")
+          .. ", not " .. type(value) .. "; the default is used")
+      end
+    end
+  end
+  if usable.renderer ~= nil and usable.renderer ~= "tab" and usable.renderer ~= "manual" then
+    report_warning_once("option:renderer", 'option renderer must be "tab" or "manual", not "'
+      .. usable.renderer .. '"; the default "tab" is used')
+    usable.renderer = nil
+  end
+  -- Exported to every pane, where the attention command refuses a root it
+  -- would not write to; the same rule as for WEZTERM_ATTENTION_DIR.
+  if usable.dir ~= nil then
+    local problem
+    -- Checked first so that the log never repeats a control character.
+    if not safe_root_text(usable.dir) then
+      problem = unsafe_root_problem
+    elseif not is_absolute_path(usable.dir) then
+      problem = "not an absolute path: " .. usable.dir
+    end
+    if problem then
+      report_warning_once("option:dir", "option dir is " .. problem
+        .. ", so the attention command would refuse it; the default is used")
+      usable.dir = nil
+    end
+  end
+  -- Values inside the option tables, each checked where it is used: a wrong
+  -- one is named and left out, so the default for that one entry applies.
+  local function usable_entries(name, value, rules)
+    if value == nil then return nil end
+    local kept = {}
+    for key, entry in pairs(value) do
+      local rule = rules[key]
+      if rule and not rule.check(entry) then
+        report_warning_once("option:" .. name .. "." .. tostring(key), "option " .. name .. "."
+          .. tostring(key) .. " must be " .. rule.kind .. ", not " .. type(entry) .. "; the default is used")
+      else
+        kept[key] = entry
+      end
+    end
+    return kept
+  end
+  local function is_string(entry) return type(entry) == "string" end
+  local text = { kind = "a string", check = is_string }
+  usable.indicators = usable_entries("indicators", usable.indicators, {
+    thinking_frames = { kind = "a non-empty list of strings", check = function(entry)
+      if type(entry) ~= "table" or #entry == 0 then return false end
+      local count = 0
+      for _, frame in pairs(entry) do
+        count = count + 1
+        if type(frame) ~= "string" then return false end
+      end
+      return count == #entry
+    end },
+    stop = text, notify = text, review = text,
+  })
+  usable.colors = usable_entries("colors", usable.colors,
+    { thinking = text, stop = text, notify = text, review = text })
+  local review_key = usable.review_key
+  if review_key and (type(review_key.key) ~= "string"
+      or (review_key.mods ~= nil and type(review_key.mods) ~= "string")) then
+    report_warning_once("option:review_key", 'option review_key must be a table like '
+      .. '{ key = "b", mods = "ALT" }, with key a string and mods a string or absent; the default is used')
+    usable.review_key = nil
+  end
+  return usable
+end
 
 function M.apply_to_config(config, opts)
   if applied then return end
   applied = true
 
-  opts = opts or {}
-  if opts.on_view_change ~= nil and type(opts.on_view_change) ~= "function" then
-    report_error_once("on-view-change-option", "on_view_change must be a function")
-  else
-    M._on_view_change = opts.on_view_change
-  end
+  opts = usable_options(opts or {})
+  M._on_view_change = opts.on_view_change
 
   -- Merge options with defaults
   local dir = opts.dir or defaults.dir
+  if not opts.dir and default_dir_note then report_warning_once("state-root", default_dir_note) end
   local auto_poll = opts.auto_poll ~= false
   M._active_dir = dir
   local integration_root = opts.integration_root or plugin_root
+  M._active_writer_installed = false
   if type(integration_root) == "string" and integration_root:sub(1, 1) == "/" then
     M._active_integration_root = integration_root
     config.set_environment_variables = config.set_environment_variables or {}
@@ -451,29 +689,29 @@ function M.apply_to_config(config, opts)
     -- installation that never built the writer: every callback would fail at the
     -- shim's missing-binary guard, and the v1 path the producer still carries
     -- could not be reached. So export it only once the writer is there.
-    local writer = io.open(integration_root .. "/libexec/attention-rs", "r")
+    local writer_path = integration_root .. "/libexec/attention-rs"
+    local writer = io.open(writer_path, "r")
     if writer then
       writer:close()
+      M._active_writer_installed = true
       config.set_environment_variables.WEZTERM_ATTENTION_ROOT = integration_root
+    else
+      -- Once per config load. The usual cause is an install-cli.sh run in a
+      -- clone of the user's own while wezterm.plugin.require loads another
+      -- copy, which leaves every agent on v1 with nothing to say why.
+      report_warning_once("integration-writer", writer_path .. " is missing, so panes get no "
+        .. "WEZTERM_ATTENTION_ROOT and agents write v1 markers. Run scripts/install-cli.sh in "
+        .. integration_root .. ", or set integration_root to the clone where it was run.")
     end
-    -- Nothing is logged when it is absent. Running v1 is a supported state, not
-    -- a fault, and a line on every config evaluation about a configuration the
-    -- user may have chosen is how a log stops being read. Anything that then
-    -- genuinely fails -- a realm publication, a producer invoking the shim --
-    -- reports itself, and the README says what installing the writer changes.
   else
     M._active_integration_root = nil
     report_error_once("integration-root", "v2 integration root is unavailable")
   end
 
-  local unix_domains = {}
-  for _, domain in ipairs(config.unix_domains or {}) do
-    if type(domain) == "table" and type(domain.name) == "string"
-        and type(domain.socket_path) == "string" and domain.socket_path:sub(1, 1) == "/" then
-      unix_domains[domain.name] = domain.socket_path
-    end
-  end
-  M._active_unix_domains = unix_domains
+  -- Its domain lists are read when a poll first needs them, not now: a config
+  -- may set them after this call.
+  M._active_config = config
+  reader_api.refresh_domain_facts()
   local request_redraw = opts.request_redraw
   if request_redraw == nil then request_redraw = defaults.request_redraw end
   M._active_request_redraw = request_redraw ~= false
@@ -490,10 +728,21 @@ function M.apply_to_config(config, opts)
 
   -- Once, at config load. The Alt+B handler used to do this on the GUI thread
   -- on every press; the directory does not change between presses.
-  local quoted_dir = dir:gsub("'", [['\'']])
   -- `tabs/` holds one file per GUI window, so it is made with the state
   -- directory rather than on the tab formatter's own thread.
-  os.execute("mkdir -p '" .. quoted_dir .. "' '" .. quoted_dir .. "/tabs'")
+  if package.config:sub(1, 1) == "\\" then
+    -- cmd.exe has no -p: its mkdir makes the missing parents itself, and fails
+    -- on a directory that is already there.
+    local tabs_dir = (dir .. "/tabs"):gsub("/", "\\")
+    os.execute('if not exist "' .. tabs_dir .. '" mkdir "' .. tabs_dir .. '"')
+  else
+    -- Private from the first moment, not from the writer's first chmod: the
+    -- GUI's umask would otherwise leave the root and every file the plugin
+    -- writes readable by other users until an agent first claims a pane.
+    local quoted_dir = dir:gsub("'", [['\'']])
+    os.execute("umask 077; mkdir -p '" .. quoted_dir .. "/tabs' && chmod 700 '"
+      .. quoted_dir .. "' '" .. quoted_dir .. "/tabs'")
+  end
 
   -- Resolve renderer: support both new "renderer" and legacy "format_tab_title"
   local renderer = opts.renderer or defaults.renderer
@@ -545,11 +794,14 @@ function M.apply_to_config(config, opts)
 
   -- ── Renderer: format-tab-title ────────────────────────────────────────
 
+  -- Whatever the renderer: a local pane's published identity is checked
+  -- against this answer as well as the bar publishing under it.
+  -- This callback may yield; pane-state polling has already finished in its own callback.
+  wezterm.on("update-status", function()
+    settle_tab_source(os.getenv("WEZTERM_UNIX_SOCKET"))
+  end)
+
   if renderer == "tab" then
-    -- This callback may yield; pane-state polling has already finished in its own callback.
-    wezterm.on("update-status", function()
-      runtime_api.acquire_tab_source(os.getenv("WEZTERM_UNIX_SOCKET"))
-    end)
     wezterm.on("format-tab-title", function(tab, tabs, panes, cfg, hover, max_width)
       -- Read-only. WezTerm may call this at any moment, including for a window
       -- the user is not looking at, so acknowledgement belongs in poll() where
@@ -578,8 +830,12 @@ function M.apply_to_config(config, opts)
       -- bar publishes it. Only a window whose every tab has been drawn, and
       -- only when the drawn list or its source identity changes: an ordinary
       -- redraw with the same source touches no file.
-      local order, window_id = drawn_tab_order(tab, tabs, marker_ids, rendered)
-      if order then publish_tab_order(dir, window_id, order, runtime_api.tab_source()) end
+      local published = rendered
+      if visible.still_indicator ~= visible.indicator then
+        published = decorate_tab_title(tab, visible, base, show_index, visible.still_indicator)
+      end
+      local order, window_id = drawn_tab_order(tab, tabs, marker_ids, published)
+      if order then publish_drawn_tab_order(dir, window_id, order) end
 
       return rendered
     end)
@@ -705,7 +961,7 @@ end
 M._internal = {
   tab_source = runtime_api.tab_source,
   reset_tab_source = runtime_api.reset_tab_source,
-  acquire_tab_source = runtime_api.acquire_tab_source,
+  acquire_tab_source = settle_tab_source,
   parse_tab_source_response = runtime_api.parse_tab_source_response,
   lifecycle_facet = reader_api.lifecycle_facet,
   acknowledge_focused_pane = acknowledge_focused_pane,
