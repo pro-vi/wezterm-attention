@@ -124,11 +124,6 @@ function sessionFacts(ctx: ExtensionContext): SessionFacts | undefined {
 	};
 }
 
-function requestFromSessionStart(event: SessionStartEvent, ctx: ExtensionContext): WriterRequest | undefined {
-	const facts = sessionFacts(ctx);
-	return facts ? { kind: "binding", startSource: event.reason, ...facts } : undefined;
-}
-
 // The Rust writer refuses a WEZTERM_ATTENTION_DIR or XDG_STATE_HOME that is
 // not UTF-8 where it decides the root: the first of the two that is not empty,
 // and XDG_STATE_HOME only when absolute, since a relative one is ignored.
@@ -348,88 +343,58 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 		else console.error(message);
 	};
 
-	pi.on("session_start", (event, ctx) => {
-		const request = requestFromSessionStart(event, ctx);
-		if (!request) return;
-		currentContext = ctx;
-		currentSession = {
-			sessionId: request.sessionId,
-			launchId: request.launchId,
-			...(request.sessionFile ? { sessionFile: request.sessionFile } : {}),
-			cwd: request.cwd,
-			...(request.model ? { model: request.model } : {}),
-		};
-		void enqueueWriter(request, reportWriterFailure).catch(() => {});
-	});
-
-	// Automatic: Pi lifecycle → WezTerm tab state. Lifecycle handlers are per-instance,
-	// replaced wholesale on reload, so they don't accumulate (unlike the shared bus
-	// listener below — no dedup needed here).
+	// Forwards one Pi event to the writer, for the session `ctx` belongs to.
+	// `remember` makes that session the one bus requests are written into and
+	// its UI the one a warning goes to.
 	//
-	// These do NOT await the write. Pi awaits lifecycle handlers on the agent's own
+	// The write is NOT awaited. Pi awaits lifecycle handlers on the agent's own
 	// critical path with no timeout, so awaiting the writer here would put the
 	// filesystem in the agent's latency budget — and on a mount whose syscalls block
 	// forever (hard NFS/SMB, dead FUSE) it would wedge the host (one stuck op parks
 	// every later event via the shared chain; headless `pi -p` never terminates). A tab
 	// tint is best-effort; host liveness is not. Ordering is unaffected — `enqueue`
 	// chains synchronously at call time, so emit order == apply order regardless of the
-	// await. The session_shutdown drain now guarantees these land before a reload; don't
+	// await. The session_shutdown drain guarantees these land before a reload; don't
 	// weaken it.
-	pi.on("agent_start", (_event, ctx) => {
+	const forward = (ctx: ExtensionContext, request: (facts: SessionFacts) => WriterRequest, remember = false) => {
 		const facts = sessionFacts(ctx);
 		if (!facts) return;
-		currentContext = ctx;
-		currentSession = facts;
-		void enqueueWriter({ kind: "activity", state: "thinking", event: "agent_start", ...facts }, reportWriterFailure).catch(() => {});
-	});
+		if (remember) {
+			currentContext = ctx;
+			currentSession = facts;
+		}
+		void enqueueWriter(request(facts), reportWriterFailure).catch(() => {});
+	};
 
-	pi.on("tool_execution_start", (event, ctx) => {
-		const facts = sessionFacts(ctx);
-		if (!facts) return;
-		currentContext = ctx;
-		currentSession = facts;
-		void enqueueWriter({ kind: "tool_start", toolName: event.toolName, toolCallId: event.toolCallId, ...facts }, reportWriterFailure).catch(() => {});
-	});
-
-	pi.on("tool_execution_end", (event, ctx) => {
-		const facts = sessionFacts(ctx);
-		if (!facts) return;
-		void enqueueWriter({ kind: "tool_end", toolName: event.toolName, toolCallId: event.toolCallId, isError: event.isError, ...facts }, reportWriterFailure).catch(() => {});
-	});
-	pi.on("input", (event, ctx) => {
-		const facts = sessionFacts(ctx);
-		if (!facts) return;
-		void enqueueWriter({ kind: "input", source: event.source, ...facts }, reportWriterFailure).catch(() => {});
-	});
+	// Automatic: Pi lifecycle → WezTerm tab state. Lifecycle handlers are per-instance,
+	// replaced wholesale on reload, so they don't accumulate (unlike the shared bus
+	// listener below — no dedup needed here).
+	pi.on("session_start", (event, ctx) =>
+		forward(ctx, (facts) => ({ kind: "binding", startSource: event.reason, ...facts }), true));
+	pi.on("agent_start", (_event, ctx) =>
+		forward(ctx, (facts) => ({ kind: "activity", state: "thinking", event: "agent_start", ...facts }), true));
+	pi.on("tool_execution_start", (event, ctx) =>
+		forward(ctx, (facts) => ({ kind: "tool_start", toolName: event.toolName, toolCallId: event.toolCallId, ...facts }), true));
+	pi.on("tool_execution_end", (event, ctx) =>
+		forward(ctx, (facts) => ({ kind: "tool_end", toolName: event.toolName, toolCallId: event.toolCallId, isError: event.isError, ...facts })));
+	pi.on("input", (event, ctx) => forward(ctx, (facts) => ({ kind: "input", source: event.source, ...facts })));
 	pi.on("message_end", (event, ctx) => {
-		if (event.message.role !== "assistant" || (event.message.stopReason !== "error" && event.message.stopReason !== "aborted")) return;
-		const facts = sessionFacts(ctx);
-		if (!facts) return;
-		void enqueueWriter({ kind: "attempt_outcome", stopReason: event.message.stopReason, ...facts }, reportWriterFailure).catch(() => {});
+		const stopReason = event.message.role === "assistant" ? event.message.stopReason : undefined;
+		if (stopReason !== "error" && stopReason !== "aborted") return;
+		forward(ctx, (facts) => ({ kind: "attempt_outcome", stopReason, ...facts }));
 	});
-	pi.on("session_before_compact", (event, ctx) => {
-		const facts = sessionFacts(ctx);
-		if (!facts) return;
-		void enqueueWriter({ kind: "compaction", event: event.type, reason: event.reason, ...facts }, reportWriterFailure).catch(() => {});
-	});
-	pi.on("session_compact", (event, ctx) => {
-		const facts = sessionFacts(ctx);
-		if (!facts) return;
-		void enqueueWriter({ kind: "compaction", event: event.type, reason: event.reason, ...facts }, reportWriterFailure).catch(() => {});
-	});
+	pi.on("session_before_compact", (event, ctx) =>
+		forward(ctx, (facts) => ({ kind: "compaction", event: event.type, reason: event.reason, ...facts })));
+	pi.on("session_compact", (event, ctx) =>
+		forward(ctx, (facts) => ({ kind: "compaction", event: event.type, reason: event.reason, ...facts })));
 
 	// `agent_settled`, NOT `agent_end`: agent_end fires at the end of every
 	// low-level run, but Pi may still auto-retry, auto-compact and retry, or
 	// continue with queued follow-up messages — writing `stop` there flashes a
 	// false ✓ mid-task. agent_settled fires only once Pi will not continue
 	// running automatically. Requires Pi >= 0.80.5.
-	pi.on("agent_settled", (_event, ctx) => {
-		const facts = sessionFacts(ctx);
-		if (!facts) return;
-		currentContext = ctx;
-		currentSession = facts;
-		void enqueueWriter({ kind: "activity", state: "stop", event: "agent_settled", ...facts }, reportWriterFailure).catch(() => {});
-	});
+	pi.on("agent_settled", (_event, ctx) =>
+		forward(ctx, (facts) => ({ kind: "activity", state: "stop", event: "agent_settled", ...facts }), true));
 
 	// Cooperative: any other Pi extension (e.g. an ask-user extension) can emit
 	// this event to request a state — notably `notify` (the "waiting for you" `!`),
