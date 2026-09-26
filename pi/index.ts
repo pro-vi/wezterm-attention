@@ -79,24 +79,15 @@ export function drainTimeoutMs(): number {
 	return parsed > 0 && parsed <= MAX_TIMEOUT_MS ? parsed : DRAIN_TIMEOUT_MS;
 }
 
-// Maps the states other extensions may request over the event bus (including a
-// few friendly aliases) to a canonical state, or "clear".
+// The states other extensions may request over the event bus, or "clear".
 function normalizeState(value: string): AttentionState | "clear" | undefined {
 	switch (value) {
-		case "busy":
 		case "thinking":
-			return "thinking";
-		case "ready":
 		case "stop":
-			return "stop";
-		case "blocked":
-		case "pending":
 		case "notify":
-			return "notify";
 		case "review":
-			return "review";
 		case "clear":
-			return "clear";
+			return value;
 		default:
 			return undefined;
 	}

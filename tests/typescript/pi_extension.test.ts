@@ -551,27 +551,18 @@ test("env: a configured writer is never started with a root that is not UTF-8", 
 	expect(readdirSync(scratch)).toEqual([]);
 });
 
-// The alias table README.md advertises to other extension authors. It is a public
-// cross-extension contract, so every row is locked here rather than left to the
-// lifecycle path, which exercises none of the mapping.
-const ALIAS_CASES: Array<[string, string]> = [
-	["busy", "thinking"],
-	["thinking", "thinking"],
-	["ready", "stop"],
-	["stop", "stop"],
-	["blocked", "notify"],
-	["pending", "notify"],
-	["notify", "notify"],
-	["review", "review"],
-];
+// The states README.md lists for other extensions to emit. It is a public
+// cross-extension contract, so every one is locked here rather than left to the
+// lifecycle path, which emits none of them over the bus.
+const BUS_STATES = ["thinking", "stop", "notify", "review"];
 
-test("event: every documented alias maps to its canonical state", async () => {
-	for (const [alias, expected] of ALIAS_CASES) {
-		const log = fakeWriter("wez-alias-");
+test("event: every documented state reaches the writer as itself", async () => {
+	for (const state of BUS_STATES) {
+		const log = fakeWriter("wez-state-");
 		const h = loadExt();
 		await h.lifecycle["session_start"]!();
-		await h.emit(alias);
-		expect(loggedCalls(log).at(-1)?.payload.state).toBe(expected); // `${alias}` → `${expected}`
+		await h.emit(state);
+		expect(loggedCalls(log).at(-1)?.payload.state).toBe(state);
 	}
 });
 
