@@ -180,7 +180,7 @@ impl ProviderEvent {
             config_dir: None,
             model: None,
             expected_session_id: None,
-            diagnostic: Some(AttentionError::new(code, message).diagnostic),
+            diagnostic: Some(Diagnostic::new(code, message)),
         }
     }
 }
@@ -191,18 +191,16 @@ fn safe_label(value: &Value, field: &str) -> std::result::Result<String, Diagnos
         .limits
         .safe_label_max_bytes;
     let Some(text) = value.as_str() else {
-        return Err(AttentionError::new(
+        return Err(Diagnostic::new(
             "record_invalid",
             format!("{field} is missing or too long"),
-        )
-        .diagnostic);
+        ));
     };
     if text.is_empty() || text.len() > maximum || !free_of_control(text) {
-        return Err(AttentionError::new(
+        return Err(Diagnostic::new(
             "record_invalid",
             format!("{field} is missing or too long"),
-        )
-        .diagnostic);
+        ));
     }
     Ok(text.to_owned())
 }
@@ -236,15 +234,13 @@ impl DroppedFields {
         if self.0.is_empty() {
             return None;
         }
-        let mut diagnostic = AttentionError::new(
-            "record_invalid",
-            format!("optional fields were dropped: {}", self.0.join(", ")),
+        Some(
+            Diagnostic::new(
+                "record_invalid",
+                format!("optional fields were dropped: {}", self.0.join(", ")),
+            )
+            .with("dropped_fields", serde_json::json!(self.0)),
         )
-        .diagnostic;
-        diagnostic
-            .context
-            .insert("dropped_fields".into(), serde_json::json!(self.0));
-        Some(diagnostic)
     }
 }
 
@@ -256,9 +252,10 @@ fn optional_path(payload: &Value, field: &str) -> std::result::Result<Option<Str
         return Ok(None);
     }
     let Some(path) = value.as_str() else {
-        return Err(
-            AttentionError::new("record_invalid", format!("{field} must be absolute")).diagnostic,
-        );
+        return Err(Diagnostic::new(
+            "record_invalid",
+            format!("{field} must be absolute"),
+        ));
     };
     let maximum = manifest()
         .map_err(|error| error.diagnostic)?
@@ -269,9 +266,10 @@ fn optional_path(payload: &Value, field: &str) -> std::result::Result<Option<Str
         || !free_of_control(path)
         || !Path::new(path).is_absolute()
     {
-        return Err(
-            AttentionError::new("record_invalid", format!("{field} must be absolute")).diagnostic,
-        );
+        return Err(Diagnostic::new(
+            "record_invalid",
+            format!("{field} must be absolute"),
+        ));
     }
     Ok(Some(path.to_owned()))
 }
@@ -294,9 +292,10 @@ fn environment_path(
         || !free_of_control(value)
         || !Path::new(value).is_absolute()
     {
-        return Err(
-            AttentionError::new("record_invalid", format!("{field} must be absolute")).diagnostic,
-        );
+        return Err(Diagnostic::new(
+            "record_invalid",
+            format!("{field} must be absolute"),
+        ));
     }
     Ok(Some(value.clone()))
 }
@@ -887,8 +886,7 @@ fn parse_tool_observation(
                     .get("is_error")
                     .and_then(Value::as_bool)
                     .ok_or_else(|| {
-                        AttentionError::new("record_invalid", "Pi tool result requires is_error")
-                            .diagnostic
+                        Diagnostic::new("record_invalid", "Pi tool result requires is_error")
                     })?,
             )
         } else if event_name == "PostToolUseFailure" {
@@ -900,8 +898,7 @@ fn parse_tool_observation(
             .get("is_interrupt")
             .map(|value| {
                 value.as_bool().ok_or_else(|| {
-                    AttentionError::new("record_invalid", "tool interruption flag is invalid")
-                        .diagnostic
+                    Diagnostic::new("record_invalid", "tool interruption flag is invalid")
                 })
             })
             .transpose()?;
@@ -913,11 +910,10 @@ fn parse_tool_observation(
                     .is_some_and(|value| value != &Value::Bool(false))
                 || !accepted_async_receipt(&payload["tool_response"]))
         {
-            return Err(AttentionError::new(
+            return Err(Diagnostic::new(
                 "record_invalid",
                 "async question publication receipt is invalid",
-            )
-            .diagnostic);
+            ));
         }
         ObservationBody::ToolResult {
             tool_name,
@@ -983,11 +979,10 @@ fn observation_for_body(
             .map(|value| {
                 let id = safe_label(value, "transport_id")?;
                 if !uuid::Uuid::parse_str(&id).is_ok_and(|parsed| parsed.to_string() == id) {
-                    return Err(AttentionError::new(
+                    return Err(Diagnostic::new(
                         "record_invalid",
                         "Pi transport ID is invalid",
-                    )
-                    .diagnostic);
+                    ));
                 }
                 Ok(id)
             })
@@ -1024,9 +1019,7 @@ fn parse_request_observation(
     payload: &Value,
     event: &ProviderEvent,
 ) -> std::result::Result<Option<LifecycleObservation>, Diagnostic> {
-    let invalid = || {
-        AttentionError::new("record_invalid", "request observation metadata is invalid").diagnostic
-    };
+    let invalid = || Diagnostic::new("record_invalid", "request observation metadata is invalid");
     let body = match event_name {
         "PermissionRequest" => ObservationBody::ApprovalRequested {
             tool_name: strict_optional_label(payload, "tool_name")?,
@@ -1117,8 +1110,7 @@ fn parse_run_observation(
                 .get("stop_hook_active")
                 .map(|value| {
                     value.as_bool().ok_or_else(|| {
-                        AttentionError::new("record_invalid", "stop continuation flag is invalid")
-                            .diagnostic
+                        Diagnostic::new("record_invalid", "stop continuation flag is invalid")
                     })
                 })
                 .transpose()?,
@@ -1164,11 +1156,10 @@ fn parse_compaction_observation(
             !["manual", "auto"].contains(&value.as_str())
         }
     }) {
-        return Err(AttentionError::new(
+        return Err(Diagnostic::new(
             "integration_version_mismatch",
             "provider compaction trigger is unsupported",
-        )
-        .diagnostic);
+        ));
     }
     let body = if matches!(name, "PreCompact" | "session_before_compact") {
         ObservationBody::CompactionAttempted { trigger }

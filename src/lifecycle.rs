@@ -157,7 +157,7 @@ impl LifecycleResult {
 
     fn diagnosed(disposition: Disposition, code: &str, message: &str) -> Self {
         let mut result = Self::new(disposition);
-        result.diagnostic = Some(AttentionError::new(code, message).diagnostic);
+        result.diagnostic = Some(Diagnostic::new(code, message));
         result
     }
 
@@ -1120,10 +1120,7 @@ fn apply_observed_outputs_with(
     confirm_native(resolved, binding_id, mutation);
     if let Some(replacement) = &mutation.lifecycle_replacement {
         replace(replacement).map_err(|mut error| {
-            error
-                .diagnostic
-                .context
-                .insert("lifecycle_write".into(), json!("unconfirmed"));
+            error.diagnostic.set("lifecycle_write", "unconfirmed");
             error
         })?;
         if let Some(cell) = &resolved.evidence {

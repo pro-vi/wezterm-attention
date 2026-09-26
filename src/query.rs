@@ -151,13 +151,7 @@ impl RecordFacet {
         };
         let diagnostics = error
             .into_iter()
-            .map(|mut error| {
-                error
-                    .diagnostic
-                    .context
-                    .insert("facet".into(), Value::String(facet.into()));
-                error.diagnostic
-            })
+            .map(|error| error.diagnostic.with("facet", facet))
             .collect();
         Self {
             availability,
@@ -351,24 +345,18 @@ impl PaneFacts {
     }
     /// An answer with no row because the scope's server could not be read
     /// or may be gone, which `diagnostic` says, in the `scope` facet.
-    fn scope_unavailable(scope: &PaneScope, mut diagnostic: Diagnostic) -> Self {
-        diagnostic
-            .context
-            .insert("facet".into(), Value::String("scope".into()));
-        Self::unavailable(scope, ScopeRelation::Unavailable, vec![diagnostic], None)
+    fn scope_unavailable(scope: &PaneScope, diagnostic: Diagnostic) -> Self {
+        Self::unavailable(
+            scope,
+            ScopeRelation::Unavailable,
+            vec![diagnostic.with("facet", "scope")],
+            None,
+        )
     }
 
     pub fn complete(&self) -> bool {
         self.scope_relation == ScopeRelation::Matched && self.diagnostics.is_empty()
     }
-}
-
-fn facet_diagnostic(code: &str, facet: &str, message: &str) -> Diagnostic {
-    let mut diagnostic = diagnostic(code, message);
-    diagnostic
-        .context
-        .insert("facet".into(), Value::String(facet.into()));
-    diagnostic
 }
 
 pub fn read_pane_facts(root: &Path, scope: &PaneScope) -> Result<PaneFacts> {
@@ -450,11 +438,13 @@ fn read_pane_facts_once(
         .as_ref()
         .and_then(|r| r["socket_path"].as_str());
     let Some(socket) = socket.filter(|_| incarnation.record.is_some()) else {
-        diagnostics.push(facet_diagnostic(
-            "identity_unpublished",
-            "scope",
-            "requested server identity is not available",
-        ));
+        diagnostics.push(
+            Diagnostic::new(
+                "identity_unpublished",
+                "requested server identity is not available",
+            )
+            .with("facet", "scope"),
+        );
         return Ok(PaneFacts::unavailable(
             scope,
             ScopeRelation::Unavailable,
@@ -489,11 +479,10 @@ fn read_pane_facts_once(
             scope,
             ScopeRelation::Unavailable,
             if claim.diagnostics.is_empty() {
-                vec![facet_diagnostic(
-                    "identity_unpublished",
-                    "claim",
-                    "claim is absent",
-                )]
+                vec![
+                    Diagnostic::new("identity_unpublished", "claim is absent")
+                        .with("facet", "claim"),
+                ]
             } else {
                 claim.diagnostics.clone()
             },
@@ -504,11 +493,10 @@ fn read_pane_facts_once(
         return Ok(PaneFacts::unavailable(
             scope,
             ScopeRelation::LaunchChanged,
-            vec![facet_diagnostic(
-                "claim_stale",
-                "claim",
-                "requested launch is no longer current",
-            )],
+            vec![
+                Diagnostic::new("claim_stale", "requested launch is no longer current")
+                    .with("facet", "claim"),
+            ],
             None,
         ));
     }
@@ -539,11 +527,10 @@ fn read_pane_facts_once(
         return Ok(PaneFacts::unavailable(
             scope,
             ScopeRelation::BindingChanged,
-            vec![facet_diagnostic(
-                "claim_stale",
-                "binding_selection",
-                "requested binding is no longer current",
-            )],
+            vec![
+                Diagnostic::new("claim_stale", "requested binding is no longer current")
+                    .with("facet", "binding_selection"),
+            ],
             None,
         ));
     }
@@ -558,11 +545,10 @@ fn read_pane_facts_once(
     diagnostics.extend(binding.diagnostics.clone());
     if selected.is_some() && binding.record.is_none() {
         if !binding.failed() {
-            diagnostics.push(facet_diagnostic(
-                "record_invalid",
-                "binding",
-                "selected binding record is absent",
-            ));
+            diagnostics.push(
+                Diagnostic::new("record_invalid", "selected binding record is absent")
+                    .with("facet", "binding"),
+            );
         }
         let failed = binding.failure_code().unwrap_or("record_invalid");
         return Ok(PaneFacts::unavailable(
@@ -575,11 +561,10 @@ fn read_pane_facts_once(
     let now = match clock.unix_ns20() {
         Ok(value) if value.len() == 20 && value.bytes().all(|b| b.is_ascii_digit()) => Some(value),
         _ => {
-            diagnostics.push(facet_diagnostic(
-                "probe_unavailable",
-                "clock",
-                "inspection UTC is unavailable",
-            ));
+            diagnostics.push(
+                Diagnostic::new("probe_unavailable", "inspection UTC is unavailable")
+                    .with("facet", "clock"),
+            );
             None
         }
     };
@@ -594,11 +579,13 @@ fn read_pane_facts_once(
         .is_some_and(|r| r["target"] != target)
     {
         activity = RecordFacet::empty(A::Invalid);
-        activity.diagnostics.push(facet_diagnostic(
-            "record_invalid",
-            "activity",
-            "activity target differs from selected scope",
-        ));
+        activity.diagnostics.push(
+            Diagnostic::new(
+                "record_invalid",
+                "activity target differs from selected scope",
+            )
+            .with("facet", "activity"),
+        );
     }
     let clear = if selected.is_some() {
         RecordFacet::at(reader, root, "activity_clear", &identity, "activity_clear")
@@ -628,11 +615,10 @@ fn read_pane_facts_once(
                 }
                 _ => {
                     activity = RecordFacet::empty(A::Unavailable);
-                    activity.diagnostics.push(facet_diagnostic(
-                        "clock_skew",
-                        "activity",
-                        "activity age is unavailable or negative",
-                    ));
+                    activity.diagnostics.push(
+                        Diagnostic::new("clock_skew", "activity age is unavailable or negative")
+                            .with("facet", "activity"),
+                    );
                 }
             }
         }
@@ -747,8 +733,7 @@ fn read_pane_facts_once(
         }
     };
     for item in &mut diagnostics[before_presence..] {
-        item.context
-            .insert("facet".into(), Value::String("pane_presence".into()));
+        item.set("facet", "pane_presence");
     }
     // The claim names this launch and the pointer this binding, or the scope
     // would not have matched, so the row is the pane's current one.
@@ -822,11 +807,13 @@ fn read_pane_facts_once(
         return Ok(PaneFacts::unavailable(
             scope,
             ScopeRelation::Unavailable,
-            vec![facet_diagnostic(
-                "claim_stale",
-                "scope",
-                "scope changed or became unavailable during inspection",
-            )],
+            vec![
+                Diagnostic::new(
+                    "claim_stale",
+                    "scope changed or became unavailable during inspection",
+                )
+                .with("facet", "scope"),
+            ],
             None,
         ));
     }
@@ -868,19 +855,19 @@ fn lifecycle_from_read(
     if let Some(record) = read.record {
         if record["provider"].as_str() != provider {
             view.availability = LifecycleAvailability::Invalid;
-            view.diagnostics.push(facet_diagnostic(
-                "record_invalid",
-                "lifecycle",
-                "lifecycle provider differs from selected binding",
-            ));
+            view.diagnostics.push(
+                Diagnostic::new(
+                    "record_invalid",
+                    "lifecycle provider differs from selected binding",
+                )
+                .with("facet", "lifecycle"),
+            );
         } else {
             let snapshot: LifecycleSnapshot =
                 serde_json::from_value(record).map_err(AttentionError::record_json)?;
             view = LifecycleView::from_snapshot(&snapshot, now)?;
             for diagnostic in &mut view.diagnostics {
-                diagnostic
-                    .context
-                    .insert("facet".into(), Value::String("lifecycle".into()));
+                diagnostic.set("facet", "lifecycle");
             }
         }
     }
@@ -928,28 +915,25 @@ fn read_fact_collection(
     }
     let paths = match reader.entries(directory) {
         Ok(paths) => paths,
-        Err(mut error) => {
+        Err(error) => {
             result.availability = if error.diagnostic.code == "record_invalid" {
                 A::Invalid
             } else {
                 A::Unavailable
             };
-            error
-                .diagnostic
-                .context
-                .insert("facet".into(), Value::String(facet.into()));
-            result.diagnostics.push(error.diagnostic);
+            result
+                .diagnostics
+                .push(error.diagnostic.with("facet", facet));
             return result;
         }
     };
     for path in paths {
         let Some(key) = path.file_stem().and_then(|s| s.to_str()) else {
             result.availability = A::Invalid;
-            result.diagnostics.push(facet_diagnostic(
-                "record_invalid",
-                facet,
-                "record filename is invalid",
-            ));
+            result.diagnostics.push(
+                Diagnostic::new("record_invalid", "record filename is invalid")
+                    .with("facet", facet),
+            );
             continue;
         };
         let identity = match &child {
@@ -976,21 +960,22 @@ fn read_fact_collection(
         }
         let Some(record) = record.record else {
             result.availability = A::Unavailable;
-            result.diagnostics.push(facet_diagnostic(
-                "probe_unavailable",
-                facet,
-                "record disappeared during enumeration",
-            ));
+            result.diagnostics.push(
+                Diagnostic::new("probe_unavailable", "record disappeared during enumeration")
+                    .with("facet", facet),
+            );
             continue;
         };
         if let Some(child) = &child {
             if record["provider"].as_str() != Some(child.provider) {
                 result.availability = A::Invalid;
-                result.diagnostics.push(facet_diagnostic(
-                    "record_invalid",
-                    facet,
-                    "child provider differs from selected binding",
-                ));
+                result.diagnostics.push(
+                    Diagnostic::new(
+                        "record_invalid",
+                        "child provider differs from selected binding",
+                    )
+                    .with("facet", facet),
+                );
                 continue;
             }
             let (eligible, problem) = crate::protocol::eligible_subagent_presence(
@@ -1010,11 +995,9 @@ fn read_fact_collection(
             );
             if let Some(code) = problem {
                 result.availability = A::Unavailable;
-                result.diagnostics.push(facet_diagnostic(
-                    code,
-                    facet,
-                    "child eligibility is unavailable",
-                ));
+                result.diagnostics.push(
+                    Diagnostic::new(code, "child eligibility is unavailable").with("facet", facet),
+                );
             }
             if !eligible {
                 continue;
@@ -1224,7 +1207,7 @@ fn collect_selected_binding_files(
         }
     };
     let symlink = |message: &str, path: &Path| {
-        let mut item = diagnostic("record_invalid", message);
+        let mut item = Diagnostic::new("record_invalid", message);
         name_path(&mut item, root, path);
         item
     };
@@ -1374,7 +1357,7 @@ pub(crate) fn collect_state_files(
 
 /// The diagnostic for a state path a walk could not read.
 pub(crate) fn unreadable_state(root: &Path, path: &Path) -> Diagnostic {
-    let mut item = diagnostic("state_permissions", "state directory could not be read");
+    let mut item = Diagnostic::new("state_permissions", "state directory could not be read");
     name_path(&mut item, root, path);
     item
 }
@@ -1391,8 +1374,7 @@ pub(crate) fn state_relative(root: &Path, path: &Path) -> String {
 /// Put `path` in `item`'s context, relative to the state root, so a reader
 /// can find the file or directory it is about.
 pub(crate) fn name_path(item: &mut Diagnostic, root: &Path, path: &Path) {
-    item.context
-        .insert("path".into(), Value::String(state_relative(root, path)));
+    item.set("path", state_relative(root, path));
 }
 
 /// `error` naming the record at `path`; see [`name_path`].
@@ -1403,10 +1385,6 @@ pub(crate) fn naming_record(root: &Path, path: &Path, mut error: AttentionError)
 
 fn string(record: &Value, field: &str) -> Option<String> {
     record.get(field).and_then(Value::as_str).map(str::to_owned)
-}
-
-fn diagnostic(code: &str, message: &str) -> Diagnostic {
-    AttentionError::new(code, message).diagnostic
 }
 
 pub fn read_bindings(root: &Path) -> Result<(Vec<BindingRow>, Vec<Diagnostic>)> {
@@ -1502,8 +1480,7 @@ pub(crate) fn name_address(items: &mut [Diagnostic], address: &PaneAddress) {
             ("incarnation_id", &address.incarnation_id),
             ("pane_id", &address.pane_id),
         ] {
-            item.context
-                .insert(field.into(), Value::String(value.clone()));
+            item.set(field, value.as_str());
         }
     }
 }
@@ -1541,9 +1518,9 @@ impl SocketChange {
     /// What a reader reports of it when nothing shows the server gone.
     fn diagnostic(&self) -> Diagnostic {
         match self {
-            Self::Gone => diagnostic("socket_gone", "mux socket no longer exists"),
+            Self::Gone => Diagnostic::new("socket_gone", "mux socket no longer exists"),
             Self::IdentityChanged => {
-                diagnostic("incarnation_changed", "realm socket identity changed")
+                Diagnostic::new("incarnation_changed", "realm socket identity changed")
             }
         }
     }
@@ -1772,7 +1749,10 @@ fn presence_at_socket(
     let pane_id = address.pane_id.as_str();
     let observed = |presence: &str| PaneEvidence::Observed(presence.to_owned());
     let Some(panes) = panes else {
-        diagnostics.push(diagnostic("probe_unavailable", "pane probe is unavailable"));
+        diagnostics.push(Diagnostic::new(
+            "probe_unavailable",
+            "pane probe is unavailable",
+        ));
         return observed("unavailable");
     };
     let listing = panes.list(socket_path);
@@ -1788,7 +1768,7 @@ fn presence_at_socket(
                 Some(Presence::Present) => observed("present"),
                 Some(Presence::Absent | Presence::Unseen) => observed("verified_absent"),
                 _ => {
-                    diagnostics.push(diagnostic(
+                    diagnostics.push(Diagnostic::new(
                         "probe_unavailable",
                         "identity-scoped process probe is unavailable",
                     ));
@@ -1821,7 +1801,7 @@ fn presence_at_socket(
             return observed("verified_absent");
         }
         return PaneEvidence::ServerGone {
-            diagnostic: diagnostic("socket_refused", "mux socket refuses connections"),
+            diagnostic: Diagnostic::new("socket_refused", "mux socket refuses connections"),
         };
     }
     diagnostics.push(error.diagnostic);
@@ -2109,7 +2089,8 @@ fn assemble_bindings(
         for path in files {
             let Some(identity) = RecordIdentity::from_state_path(root, &path, "binding").ok()
             else {
-                let mut item = diagnostic("record_invalid", "binding path has the wrong shape");
+                let mut item =
+                    Diagnostic::new("record_invalid", "binding path has the wrong shape");
                 name_path(&mut item, root, &path);
                 diagnostics.push(item);
                 continue;
@@ -2231,7 +2212,7 @@ fn assemble_bindings(
             let before_presence = diagnostics.len();
             let observed = reader_presence(root, &address, panes, processes, diagnostics);
             if typed && observed.0 == "unavailable" && diagnostics.len() == before_presence {
-                diagnostics.push(diagnostic(
+                diagnostics.push(Diagnostic::new(
                     "probe_unavailable",
                     "selected binding presence is unavailable",
                 ));
@@ -2294,33 +2275,16 @@ fn assemble_bindings(
             if !indices.iter().any(|index| admitted_rows[*index]) {
                 continue;
             }
-            let mut item = diagnostic(
-                "binding_conflict",
-                "provider session is bound to multiple pane addresses",
-            );
             let first = &rows[indices[0]];
-            item.context
-                .insert("provider".into(), Value::String(first.provider.clone()));
-            item.context.insert(
-                "provider_session_id".into(),
-                Value::String(first.provider_session_id.clone()),
+            diagnostics.push(
+                Diagnostic::new(
+                    "binding_conflict",
+                    "provider session is bound to multiple pane addresses",
+                )
+                .with("provider", first.provider.as_str())
+                .with("provider_session_id", first.provider_session_id.as_str())
+                .with("addresses", serde_json::json!(addresses)),
             );
-            item.context.insert(
-                "addresses".into(),
-                Value::Array(
-                    addresses
-                        .iter()
-                        .map(|address| {
-                            serde_json::json!({
-                                "realm_id": address.realm_id,
-                                "incarnation_id": address.incarnation_id,
-                                "pane_id": address.pane_id,
-                            })
-                        })
-                        .collect(),
-                ),
-            );
-            diagnostics.push(item);
         }
     }
     let mut admitted_rows = admitted_rows.into_iter();
@@ -2591,7 +2555,7 @@ pub fn read_tab_publications(root: &Path) -> Result<(Vec<TabPublication>, Vec<Di
     };
     for entry in entries {
         let Ok(entry) = entry else {
-            diagnostics.push(diagnostic(
+            diagnostics.push(Diagnostic::new(
                 "probe_unavailable",
                 "tab publication entry is unavailable",
             ));
@@ -2626,13 +2590,16 @@ fn read_tab_publication(
     }
     match entry.file_type() {
         Ok(kind) if kind.is_symlink() => {
-            diagnostics.push(diagnostic("record_invalid", "tab publication is a symlink"));
+            diagnostics.push(Diagnostic::new(
+                "record_invalid",
+                "tab publication is a symlink",
+            ));
             return;
         }
         Ok(kind) if !kind.is_file() => return,
         Ok(_) => {}
         Err(_) => {
-            diagnostics.push(diagnostic(
+            diagnostics.push(Diagnostic::new(
                 "probe_unavailable",
                 "tab publication entry type is unavailable",
             ));
@@ -2652,7 +2619,7 @@ fn read_tab_publication(
         .then(|| id.parse::<u64>().ok())
         .flatten();
     let Some(window_id) = window_id else {
-        diagnostics.push(diagnostic(
+        diagnostics.push(Diagnostic::new(
             "record_invalid",
             "tab publication is not named by a window ID",
         ));

@@ -42,19 +42,38 @@ pub struct AttentionError {
     pub exit_code: i32,
 }
 
-impl AttentionError {
+impl Diagnostic {
+    /// A diagnostic with one of the declared codes and nothing in its
+    /// context, pointing at `attention doctor` for help.
     pub fn new(code: &str, message: impl Into<String>) -> Self {
         assert!(
             EMITTED_DIAGNOSTIC_CODES.contains(&code),
             "undeclared diagnostic code: {code}"
         );
         Self {
-            diagnostic: Diagnostic {
-                code: code.to_owned(),
-                message: message.into(),
-                context: BTreeMap::new(),
-                help: "attention doctor".to_owned(),
-            },
+            code: code.to_owned(),
+            message: message.into(),
+            context: BTreeMap::new(),
+            help: "attention doctor".to_owned(),
+        }
+    }
+
+    /// This diagnostic with `value` under `field` in its context.
+    pub fn with(mut self, field: &str, value: impl Into<Value>) -> Self {
+        self.set(field, value);
+        self
+    }
+
+    /// Put `value` under `field` in this diagnostic's context.
+    pub fn set(&mut self, field: &str, value: impl Into<Value>) {
+        self.context.insert(field.to_owned(), value.into());
+    }
+}
+
+impl AttentionError {
+    pub fn new(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            diagnostic: Diagnostic::new(code, message),
             exit_code: 3,
         }
     }

@@ -16,7 +16,7 @@ use crate::query::{
     FileStamp, ListOncePerSocket, PaneEvidence, ProbeOncePerAssembly, collect_binding_files,
     collect_state_files, kept_history_code, name_address, naming_record, pane_evidence,
     read_bindings_with_ports, read_tab_publications, reader_presence, record_address,
-    recorded_socket,
+    recorded_socket, state_relative,
 };
 use crate::records::{
     BINDING_FILE, BindingState, CommitPlan, FileRecords, RecordIdentity, RecordRead, Replacement,
@@ -66,10 +66,6 @@ pub fn limit_sweep_preview(details: Vec<Value>, all_details: bool) -> (Vec<Value
     rest.truncate(50);
     leftover.extend(rest);
     (leftover, total)
-}
-
-fn diagnostic(code: &str, message: &str) -> Diagnostic {
-    AttentionError::new(code, message).diagnostic
 }
 
 /// Every JSON file below `path`, with a diagnostic for each directory that
@@ -223,14 +219,14 @@ pub fn doctor_with_environment(
         match fs::metadata(root) {
             Ok(metadata) if metadata.permissions().mode() & 0o077 == 0 => "healthy",
             Ok(_) => {
-                diagnostics.push(diagnostic(
+                diagnostics.push(Diagnostic::new(
                     "state_permissions",
                     "state directory is accessible to other users",
                 ));
                 "finding"
             }
             Err(_) => {
-                diagnostics.push(diagnostic(
+                diagnostics.push(Diagnostic::new(
                     "probe_unavailable",
                     "state directory cannot be inspected",
                 ));
@@ -288,7 +284,7 @@ pub fn doctor_with_environment(
             .iter()
             .any(|item| item.code == "probe_unavailable")
     {
-        diagnostics.push(diagnostic(
+        diagnostics.push(Diagnostic::new(
             "probe_unavailable",
             "identity-scoped process evidence is unavailable",
         ));
@@ -298,7 +294,7 @@ pub fn doctor_with_environment(
     let disk_bytes = match runtime_manifest_bytes() {
         Ok(Some(bytes)) => Some(bytes),
         Ok(None) => {
-            diagnostics.push(diagnostic(
+            diagnostics.push(Diagnostic::new(
                 "probe_unavailable",
                 "installed manifest was not found",
             ));
@@ -314,7 +310,7 @@ pub fn doctor_with_environment(
         .as_deref()
         .is_some_and(|bytes| bytes == EMBEDDED_MANIFEST.as_bytes());
     if disk_bytes.is_some() && !manifest_matches {
-        diagnostics.push(diagnostic(
+        diagnostics.push(Diagnostic::new(
             "integration_version_mismatch",
             "on-disk manifest differs from the embedded manifest",
         ));
@@ -410,7 +406,7 @@ fn environment_probe(
     } else if crate::launch::self_claim_refusal(environment, inspector).is_none() {
         "unobserved"
     } else {
-        diagnostics.push(diagnostic(
+        diagnostics.push(Diagnostic::new(
             "identity_unpublished",
             "this pane's mux server identity is not published",
         ));
@@ -509,7 +505,7 @@ fn compaction_plan(
             action: "blocked",
             floor: None,
             candidates: Vec::new(),
-            diagnostics: vec![diagnostic(
+            diagnostics: vec![Diagnostic::new(
                 "record_invalid",
                 "symlinked subagent directory is preserved",
             )],
@@ -520,7 +516,7 @@ fn compaction_plan(
             action: "blocked",
             floor: None,
             candidates: Vec::new(),
-            diagnostics: vec![diagnostic(
+            diagnostics: vec![Diagnostic::new(
                 "record_invalid",
                 "subagent directory outside the state root is preserved",
             )],
@@ -536,7 +532,7 @@ fn compaction_plan(
                     action: "blocked",
                     floor: None,
                     candidates: Vec::new(),
-                    diagnostics: vec![diagnostic(
+                    diagnostics: vec![Diagnostic::new(
                         "record_invalid",
                         "unknown subagent state file is preserved",
                     )],
@@ -559,7 +555,7 @@ fn compaction_plan(
                     action: "blocked",
                     floor: None,
                     candidates: Vec::new(),
-                    diagnostics: vec![diagnostic(
+                    diagnostics: vec![Diagnostic::new(
                         "record_invalid",
                         "subagent path identity mismatch",
                     )],
@@ -629,7 +625,7 @@ fn compaction_plan(
         let cap_candidate = candidates.len() < excess;
         if eligible {
             if cap_candidate {
-                diagnostics.push(diagnostic(
+                diagnostics.push(Diagnostic::new(
                     "binding_conflict",
                     "eligible active child blocks unsafe cap pruning",
                 ));
@@ -668,7 +664,10 @@ fn binding_known_and_prunable(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> bool {
     let Some(address) = record_address(binding) else {
-        diagnostics.push(diagnostic("record_invalid", "binding address is invalid"));
+        diagnostics.push(Diagnostic::new(
+            "record_invalid",
+            "binding address is invalid",
+        ));
         return false;
     };
     let Some(launch_id) = binding.get("launch_id").and_then(Value::as_str) else {
@@ -687,7 +686,7 @@ fn binding_known_and_prunable(
             return false;
         };
         if file_type.is_symlink() {
-            diagnostics.push(diagnostic(
+            diagnostics.push(Diagnostic::new(
                 "record_invalid",
                 "symlinked binding state is preserved",
             ));
@@ -708,7 +707,7 @@ fn binding_known_and_prunable(
                 if !file_type.is_file()
                     || child_path.extension().and_then(|value| value.to_str()) != Some("json")
                 {
-                    diagnostics.push(diagnostic(
+                    diagnostics.push(Diagnostic::new(
                         "record_invalid",
                         "unknown binding state is preserved",
                     ));
@@ -727,7 +726,7 @@ fn binding_known_and_prunable(
                 .flatten()
                 .is_none()
                 {
-                    diagnostics.push(diagnostic(
+                    diagnostics.push(Diagnostic::new(
                         "record_invalid",
                         "subagent path identity mismatch",
                     ));
@@ -744,7 +743,7 @@ fn binding_known_and_prunable(
             .and_then(|name| name.to_str())
             .and_then(binding_record_kind);
         let (true, Some(kind)) = (path.is_file(), kind) else {
-            diagnostics.push(diagnostic(
+            diagnostics.push(Diagnostic::new(
                 "record_invalid",
                 "unknown binding state is preserved",
             ));
@@ -753,7 +752,7 @@ fn binding_known_and_prunable(
         match read_record(&path, Some(kind), &identity) {
             Ok(Some(_)) => {}
             _ => {
-                diagnostics.push(diagnostic(
+                diagnostics.push(Diagnostic::new(
                     "record_invalid",
                     "binding child identity mismatch",
                 ));
@@ -769,7 +768,7 @@ fn binding_known_and_prunable(
 fn binding_confined(root: &Path, binding_dir: &Path, diagnostics: &mut Vec<Diagnostic>) -> bool {
     let confined = directory_confined(root, binding_dir);
     if !confined {
-        diagnostics.push(diagnostic(
+        diagnostics.push(Diagnostic::new(
             "record_invalid",
             "binding removal target is outside the state root",
         ));
@@ -867,14 +866,14 @@ fn absence_presence(
 fn name_pane(items: &mut [Diagnostic], address: &PaneAddress, binding_id: &str) {
     name_address(items, address);
     for item in items {
-        item.context.insert("binding_id".into(), json!(binding_id));
+        item.set("binding_id", binding_id);
     }
 }
 
 /// The diagnostic for a pane whose absence could not be established, named
 /// by the pane and binding it is about.
 fn absence_unavailable(message: &str, address: &PaneAddress, binding_id: &str) -> Diagnostic {
-    let mut item = diagnostic("probe_unavailable", message);
+    let mut item = Diagnostic::new("probe_unavailable", message);
     name_pane(std::slice::from_mut(&mut item), address, binding_id);
     item
 }
@@ -996,7 +995,7 @@ fn collect_tab_orders(
                             let (observed, server_gone) =
                                 reader_presence(root, address, Some(panes), processes, diagnostics);
                             if observed == "unavailable" && !server_gone {
-                                diagnostics.push(diagnostic(
+                                diagnostics.push(Diagnostic::new(
                                     "probe_unavailable",
                                     "tab order pane presence cannot be established",
                                 ));
@@ -1007,7 +1006,7 @@ fn collect_tab_orders(
                         // about, as a bindings answer names its panes.
                         name_address(&mut diagnostics[before..], address);
                         for item in &mut diagnostics[before..] {
-                            item.context.insert("path".into(), json!(relative));
+                            item.set("path", relative.as_str());
                         }
                         presence_cache.insert(address.clone(), observed.clone());
                         observed
@@ -1056,12 +1055,13 @@ fn collect_tab_orders(
                 })
             }
             None if !removal_confined(root, &root.join(&relative)) => {
-                let mut item = diagnostic(
-                    "record_invalid",
-                    "tab order outside the state root is preserved",
+                diagnostics.push(
+                    Diagnostic::new(
+                        "record_invalid",
+                        "tab order outside the state root is preserved",
+                    )
+                    .with("path", relative.as_str()),
                 );
-                item.context.insert("path".into(), json!(relative));
-                diagnostics.push(item);
                 continue;
             }
             None => match remove_file_durable(&root.join(&relative)) {
@@ -1314,7 +1314,7 @@ fn pane_retention(
                 return plan(
                     "changed",
                     Vec::new(),
-                    vec![diagnostic(
+                    vec![Diagnostic::new(
                         "record_invalid",
                         "binding changed before pane retention",
                     )],
@@ -1335,7 +1335,7 @@ fn pane_retention(
                 "clear_absence" if !removal_confined(root, &probe_path) => plan(
                     "keep",
                     Vec::new(),
-                    vec![diagnostic(
+                    vec![Diagnostic::new(
                         "record_invalid",
                         "absence probe outside the state root is preserved",
                     )],
@@ -1351,7 +1351,7 @@ fn pane_retention(
                 "end" => {
                     let mut kept = Vec::new();
                     if !directory_confined(root, &pane) {
-                        kept.push(diagnostic(
+                        kept.push(Diagnostic::new(
                             "record_invalid",
                             "pane removal target is outside the state root",
                         ));
@@ -1402,12 +1402,9 @@ fn pane_entries_prunable(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> bool {
     let preserved = |diagnostics: &mut Vec<Diagnostic>, message: &str, path: &Path| {
-        let mut item = diagnostic("record_invalid", message);
-        item.context.insert(
-            "path".into(),
-            json!(path.strip_prefix(root).unwrap_or(path).to_string_lossy()),
+        diagnostics.push(
+            Diagnostic::new("record_invalid", message).with("path", state_relative(root, path)),
         );
-        diagnostics.push(item);
         false
     };
     let Ok(entries) = fs::read_dir(directory) else {
@@ -1635,7 +1632,7 @@ pub fn sweep(
                                 floor: None,
                                 covered: 0,
                                 deleted: 0,
-                                diagnostics: vec![diagnostic(
+                                diagnostics: vec![Diagnostic::new(
                                     "record_invalid",
                                     "binding changed before sweep apply",
                                 )],
@@ -1822,7 +1819,7 @@ pub fn sweep(
                 {
                     return Ok(CommitPlan::reporting(AbsenceOutcome {
                         action: "changed".to_owned(),
-                        diagnostic: Some(diagnostic(
+                        diagnostic: Some(Diagnostic::new(
                             "record_invalid",
                             "binding changed before sweep apply",
                         )),
@@ -1842,7 +1839,7 @@ pub fn sweep(
                     if !removal_confined(root, &probe_path) {
                         return Ok(CommitPlan::reporting(AbsenceOutcome {
                             action: "keep".to_owned(),
-                            diagnostic: Some(diagnostic(
+                            diagnostic: Some(Diagnostic::new(
                                 "record_invalid",
                                 "absence probe outside the state root is preserved",
                             )),
@@ -1967,7 +1964,7 @@ pub fn sweep(
             |locked_binding| {
                 let mut local_diagnostics = Vec::new();
                 let Some(locked_binding) = locked_binding else {
-                    local_diagnostics.push(diagnostic(
+                    local_diagnostics.push(Diagnostic::new(
                         "record_invalid",
                         "binding changed before retention apply",
                     ));
@@ -1977,7 +1974,7 @@ pub fn sweep(
                     }));
                 };
                 if locked_binding != binding {
-                    local_diagnostics.push(diagnostic(
+                    local_diagnostics.push(Diagnostic::new(
                         "record_invalid",
                         "binding changed before retention apply",
                     ));
@@ -1985,7 +1982,7 @@ pub fn sweep(
                     let state = binding_state(root, &address, launch_id, binding_id);
                     match binding_selection(root, &address, launch_id, binding_id, &state)? {
                         None => {
-                            local_diagnostics.push(diagnostic(
+                            local_diagnostics.push(Diagnostic::new(
                                 "record_invalid",
                                 "pane claim changed before retention apply",
                             ));
@@ -1995,7 +1992,7 @@ pub fn sweep(
                             }));
                         }
                         Some(true) => {
-                            local_diagnostics.push(diagnostic(
+                            local_diagnostics.push(Diagnostic::new(
                                 "binding_conflict",
                                 "current binding was preserved during retention",
                             ));
@@ -2020,7 +2017,7 @@ pub fn sweep(
                         .transpose()?
                         .unwrap_or(false);
                     if !end_is_current || (!still_old && !cap_paths.contains(&binding_dir)) {
-                        local_diagnostics.push(diagnostic(
+                        local_diagnostics.push(Diagnostic::new(
                             "record_invalid",
                             "binding changed before retention apply",
                         ));
