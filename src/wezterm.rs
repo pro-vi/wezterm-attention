@@ -1914,9 +1914,6 @@ mod tests {
         use super::{ControllingTerminal, ProcessInspector, ProcessRead, SystemProcessInspector};
         use std::os::fd::FromRawFd;
         use std::os::unix::process::CommandExt;
-        // `_IO('t', 97)` from <sys/ttycom.h>; the libc crate does not carry it
-        // for Apple targets.
-        const TIOCSCTTY: libc::c_ulong = 0x2000_7461;
         let mut command = std::process::Command::new("/bin/sleep");
         command.arg("30");
         if let Some(fd) = terminal {
@@ -1928,7 +1925,9 @@ mod tests {
         let controlling = terminal.is_some();
         unsafe {
             command.pre_exec(move || {
-                if libc::setsid() < 0 || (controlling && libc::ioctl(0, TIOCSCTTY, 0) < 0) {
+                if libc::setsid() < 0
+                    || (controlling && libc::ioctl(0, libc::TIOCSCTTY.into(), 0) < 0)
+                {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())
