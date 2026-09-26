@@ -1,4 +1,4 @@
-use std::io::{IsTerminal, Read, Write};
+use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use wezterm_attention::protocol::{AttentionError, Diagnostic, Disposition};
 use wezterm_attention::query::read_bindings_timed;
+use wezterm_attention::records::read_bounded;
 use wezterm_attention::wezterm::{
     Clock, RuntimePorts, SystemClock, SystemProcessInspector, SystemProcessProbe, SystemTtyWriter,
     WeztermPaneLister,
@@ -714,16 +715,10 @@ fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
                     return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
                 }
             };
-            let mut bytes = Vec::new();
-            if stdin
-                .by_ref()
-                .take((maximum + 1) as u64)
-                .read_to_end(&mut bytes)
-                .is_err()
-            {
+            let Ok(bytes) = read_bounded(&mut stdin, maximum) else {
                 let error = AttentionError::usage("hooks event could not read stdin");
                 return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
-            }
+            };
             let payload: serde_json::Value = if bytes.is_empty() || bytes.len() > maximum {
                 let error = AttentionError::usage("hooks event received empty or oversized stdin");
                 return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
@@ -1024,10 +1019,7 @@ fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
             let maximum = wezterm_attention::protocol::manifest()?
                 .limits
                 .max_json_bytes;
-            let mut bytes = Vec::new();
-            std::io::stdin()
-                .take((maximum + 1) as u64)
-                .read_to_end(&mut bytes)
+            let bytes = read_bounded(std::io::stdin(), maximum)
                 .map_err(|_| AttentionError::usage("inspect could not read scope stdin"))?;
             if bytes.len() > maximum {
                 return Err(AttentionError::usage("scope exceeds its byte bound"));

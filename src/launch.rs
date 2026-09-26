@@ -426,6 +426,37 @@ fn claimed_launch(
         .map(str::to_owned)
 }
 
+/// Publish the pane at `address` to its terminal at `tty_path`: the pane's
+/// address, and the launch of its claim when that
+/// claim was made at this terminal. The pane's claim lock is held from
+/// reading the claim through the write, and the mux socket must still carry
+/// the pane's incarnation. Returns the launch published, if any.
+fn publish_pane(
+    root: &std::path::Path,
+    address: &PaneAddress,
+    socket_path: &str,
+    tty_path: &str,
+    fingerprint: &str,
+    tty: &dyn TtyWriter,
+    moment: &str,
+) -> Result<Option<String>> {
+    with_pane_claim(root, address, |claim| {
+        let launch_id = claimed_launch(claim.as_ref(), address, tty_path, fingerprint);
+        same_incarnation(
+            socket_path,
+            &address.realm_id,
+            &address.incarnation_id,
+            moment,
+        )?;
+        tty.write(
+            tty_path,
+            &publication_bytes(address, launch_id.as_deref())?,
+            fingerprint,
+        )?;
+        Ok(launch_id)
+    })
+}
+
 pub fn publish_current(
     env: &BTreeMap<String, String>,
     ports: &RuntimePorts<'_>,
@@ -434,21 +465,15 @@ pub fn publish_current(
     let (address, _) = pane_address(env)?;
     let tty_path = ports.tty.current_path()?;
     let fingerprint = ports.tty.fingerprint(&tty_path)?;
-    let launch_id = with_pane_claim(&root, &address, |claim| {
-        let launch_id = claimed_launch(claim.as_ref(), &address, &tty_path, &fingerprint);
-        same_incarnation(
-            pane_socket(env)?,
-            &address.realm_id,
-            &address.incarnation_id,
-            "before publication",
-        )?;
-        ports.tty.write(
-            &tty_path,
-            &publication_bytes(&address, launch_id.as_deref())?,
-            &fingerprint,
-        )?;
-        Ok(launch_id)
-    })?;
+    let launch_id = publish_pane(
+        &root,
+        &address,
+        pane_socket(env)?,
+        &tty_path,
+        &fingerprint,
+        ports.tty,
+        "before publication",
+    )?;
     Ok(PublishReport {
         attempted: 1,
         published: 1,
@@ -492,21 +517,16 @@ pub fn publish_realm(
                 incarnation_id: incarnation_id.clone(),
                 pane_id,
             };
-            with_pane_claim(&root, &address, |claim| {
-                let launch_id = claimed_launch(claim.as_ref(), &address, tty_name, &fingerprint);
-                same_incarnation(
-                    socket_path,
-                    &realm_id,
-                    &incarnation_id,
-                    "before pane publication",
-                )?;
-                ports.tty.write(
-                    tty_name,
-                    &publication_bytes(&address, launch_id.as_deref())?,
-                    &fingerprint,
-                )?;
-                Ok(launch_id.is_some())
-            })
+            publish_pane(
+                &root,
+                &address,
+                socket_path,
+                tty_name,
+                &fingerprint,
+                ports.tty,
+                "before pane publication",
+            )
+            .map(|launch_id| launch_id.is_some())
         })();
         match result {
             Ok(has_v2) => {

@@ -1085,7 +1085,6 @@ pub fn read_record_typed(
             ));
         }
     };
-    let mut bytes = Vec::new();
     let protocol = match manifest() {
         Ok(protocol) => protocol,
         Err(error) => return RecordRead::Unsupported(error),
@@ -1095,21 +1094,28 @@ pub fn read_record_typed(
     } else {
         protocol.limits.max_json_bytes
     };
-    if file
-        .take((maximum + 1) as u64)
-        .read_to_end(&mut bytes)
-        .is_err()
-    {
+    let Ok(bytes) = read_bounded(file, maximum) else {
         return RecordRead::Unavailable(AttentionError::new(
             "probe_unavailable",
             "state record could not be read",
         ));
-    }
+    };
     match decode_record(&bytes, maximum, expected_kind, expected_identity) {
         Ok(value) => RecordRead::Present(value),
         Err(error) if error.diagnostic.code == "future_schema" => RecordRead::Unsupported(error),
         Err(error) => RecordRead::Invalid(error),
     }
+}
+
+/// What `reader` holds, read up to one byte past `maximum`, so a caller
+/// can tell a whole input within its bound from one that exceeds it without
+/// reading the rest.
+pub fn read_bounded(reader: impl Read, maximum: usize) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(maximum as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map(|_| bytes)
 }
 
 fn decode_record(

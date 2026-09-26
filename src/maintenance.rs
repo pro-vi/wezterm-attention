@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -25,7 +24,7 @@ use crate::records::{
     BINDING_FILE, BindingState, CommitPlan, FileRecords, RecordIdentity, RecordRead, Replacement,
     agents_dir, atomic_replace_if_different, binding_record_kind, binding_session_entry,
     claim_lock, commit, directory_confined, ends_binding, incarnation_path, launch_lock, lock_file,
-    pane_path, read_record, read_record_at, removal_confined, remove_file_durable,
+    pane_path, read_bounded, read_record, read_record_at, removal_confined, remove_file_durable,
     session_index_marker, session_index_path,
 };
 use crate::wezterm::{Clock, PaneLister, Presence, ProcessInspector, ProcessProbe};
@@ -71,28 +70,20 @@ pub fn limit_sweep_preview(details: Vec<Value>, all_details: bool) -> (Vec<Value
     (leftover, total)
 }
 
-/// Every JSON file below `path`, with a diagnostic for each directory that
-/// could not be read.
-fn collect_json(
-    root: &Path,
-    path: &Path,
-    output: &mut Vec<PathBuf>,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    collect_state_files(
-        root,
-        path,
-        &|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"),
-        output,
-        diagnostics,
-    );
-}
-
-fn binding_files(root: &Path, diagnostics: &mut Vec<Diagnostic>) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    collect_binding_files(root, &mut files, diagnostics);
-    files.sort();
-    files
+/// The first absence probe of the pane at `address`, taken by the sweep
+/// `operation` at `observation`.
+fn absence_probe_record(
+    address: &PaneAddress,
+    operation: &str,
+    observation: &str,
+) -> Result<Value> {
+    Ok(json!({
+        "kind": "absence_probe",
+        "schema": manifest()?.record_schema,
+        "address": address,
+        "operation_id": operation,
+        "observed_mono_ns": observation,
+    }))
 }
 
 /// A binding's state as sweep reads it, from the files themselves.
@@ -136,7 +127,13 @@ fn binding_selection(
 fn audit_state(root: &Path) -> (Vec<Value>, Vec<Diagnostic>) {
     let mut files = Vec::new();
     let mut diagnostics = Vec::new();
-    collect_json(root, &root.join("v2"), &mut files, &mut diagnostics);
+    collect_state_files(
+        root,
+        &root.join("v2"),
+        &|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"),
+        &mut files,
+        &mut diagnostics,
+    );
     files.sort();
     let mut records = Vec::new();
     for path in files {
@@ -178,12 +175,9 @@ fn runtime_manifest_bytes() -> Result<Option<Vec<u8>>> {
         AttentionError::new("probe_unavailable", "installed manifest is unreadable")
     })?;
     let maximum = manifest()?.limits.max_json_bytes;
-    let mut bytes = Vec::new();
-    file.take((maximum + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| {
-            AttentionError::new("probe_unavailable", "installed manifest is unreadable")
-        })?;
+    let bytes = read_bounded(file, maximum).map_err(|_| {
+        AttentionError::new("probe_unavailable", "installed manifest is unreadable")
+    })?;
     if bytes.len() > maximum {
         return Err(AttentionError::new(
             "probe_unavailable",
@@ -1244,7 +1238,7 @@ fn pane_retention(
     if !run.apply {
         details.push(if action != "end" {
             detail(action)
-        } else if pane_tree_prunable(root, &pane, diagnostics) {
+        } else if pane_entries_prunable(root, &pane, &pane, diagnostics) {
             detail("prune")
         } else {
             detail("keep")
@@ -1309,7 +1303,7 @@ fn pane_retention(
                 "first_absence" => Ok(CommitPlan {
                     replacements: vec![Replacement::always(
                         probe_path.clone(),
-                        json!({"kind":"absence_probe","schema":manifest()?.record_schema,"address":address,"operation_id":operation,"observed_mono_ns":run.observation}),
+                        absence_probe_record(address, operation, run.observation)?,
                     )],
                     ..CommitPlan::reporting((action.to_owned(), Vec::new()))
                 }),
@@ -1322,7 +1316,7 @@ fn pane_retention(
                         ));
                         return plan("keep", Vec::new(), kept);
                     }
-                    if !pane_tree_prunable(root, &pane, &mut kept) {
+                    if !pane_entries_prunable(root, &pane, &pane, &mut kept) {
                         return plan("keep", Vec::new(), kept);
                     }
                     // The tree first: an entry left behind names a binding
@@ -1351,15 +1345,11 @@ fn pane_retention(
     }
 }
 
-/// Whether every entry under a pane directory is state sweep recognises, so
-/// removing the tree removes nothing else: records that read as valid for
-/// their path, the two lock files, the lock a review writer leaves beside
-/// the reviews, and the temporary files an interrupted write leaves beside a
-/// record. A symlink anywhere keeps the tree.
-fn pane_tree_prunable(root: &Path, pane: &Path, diagnostics: &mut Vec<Diagnostic>) -> bool {
-    pane_entries_prunable(root, pane, pane, diagnostics)
-}
-
+/// Whether every entry under `directory`, in the tree of the pane directory
+/// `pane`, is state sweep recognises, so removing the tree removes nothing
+/// else: records that read as valid for their path, the locks a writer
+/// leaves in place, and the temporary files an interrupted write leaves
+/// beside a record. A symlink anywhere keeps the tree.
 fn pane_entries_prunable(
     root: &Path,
     pane: &Path,
@@ -1469,7 +1459,9 @@ pub fn sweep(
         .or(processes);
     let mut details = Vec::new();
     let mut diagnostics = Vec::new();
-    let files = binding_files(root, &mut diagnostics);
+    let mut files = Vec::new();
+    collect_binding_files(root, &mut files, &mut diagnostics);
+    files.sort();
     // A directory the walk could not read hides the bindings below it.
     let mut failed = diagnostics.len();
     if apply && realm_filter.is_none() {
@@ -1811,7 +1803,7 @@ pub fn sweep(
                 } else if action == "first_absence" {
                     replacements.push(Replacement::always(
                         probe_path.clone(),
-                        json!({"kind":"absence_probe","schema":manifest()?.record_schema,"address":address,"operation_id":operation,"observed_mono_ns":observation}),
+                        absence_probe_record(&address, operation, &observation)?,
                     ));
                 } else if action == "end" {
                     let locked_end =

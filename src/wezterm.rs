@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -1064,12 +1064,7 @@ fn run_bounded(
     };
     let (sender, receiver) = channel();
     thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let read = stdout
-            .take(maximum as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes);
-        let _ = sender.send(read);
+        let _ = sender.send(crate::records::read_bounded(stdout, maximum));
     });
     let mut output = None;
     let mut status = None;
@@ -1342,20 +1337,6 @@ fn next_variable_boundary(text: &str) -> usize {
     text.len()
 }
 
-pub fn default_ports<'a>(
-    clock: &'a SystemClock,
-    tty: &'a SystemTtyWriter,
-    panes: &'a WeztermPaneLister,
-    processes: &'a SystemProcessInspector,
-) -> RuntimePorts<'a> {
-    RuntimePorts {
-        clock,
-        tty,
-        panes,
-        processes,
-    }
-}
-
 fn base64(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -1413,15 +1394,8 @@ pub fn publication_bytes(address: &PaneAddress, launch_id: Option<&str>) -> Resu
     Ok(bytes)
 }
 
-pub fn file_from_fd(fd: libc::c_int) -> File {
-    unsafe { File::from_raw_fd(fd) }
-}
-
 pub fn tty_path_from_fd(fd: libc::c_int) -> Result<String> {
-    let file = file_from_fd(fd);
-    let name = ttyname(file.as_raw_fd());
-    std::mem::forget(file);
-    name.ok_or_else(|| AttentionError::new("unsafe_tty", "descriptor is not a tty"))?
+    ttyname(fd).ok_or_else(|| AttentionError::new("unsafe_tty", "descriptor is not a tty"))?
 }
 
 #[cfg(test)]
