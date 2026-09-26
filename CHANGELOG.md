@@ -17,7 +17,10 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - **The flat format is neither read nor collected.** The plugin reads only v2 records. The v1 flat markers at the top of the state directory, `<id>`, `<id>.ack`, `<id>.agents` and `<id>.review`, are ignored, and `attention sweep` no longer collects them: its `projection_collection` detail kind is gone. A producer that writes flat markers shows nothing; use `attention mark`. The plugin deletes nothing when a pane closes. `remove_marker`, the `dir` option of `get_attention`, and the `stale_after_ms` and `format_tab_title = false` options are removed; `apply_to_config` names the two options as ignored, with the reason. Remove the files 0.6 left behind by hand, as step 4 of "Upgrading from 0.6" shows.
 - **The Pi extension writes only through the `attention` command.** Where `WEZTERM_ATTENTION_ROOT` is unset (the command is not built, or the pane was opened before it was), Pi records nothing and shows one warning saying so; `PI_WEZTERM_ATTENTION_TTL_MS` is gone with the flat writer. The plugin exports `WEZTERM_ATTENTION_ROOT` to new panes once the command is built. Pi's writes need a launch claim. On macOS Pi claims its own pane (see Added); elsewhere Pi started in a pane without a shell claim is refused and shows nothing.
 - **The `review` flag is a review record owned by `user`**, which the plugin writes through the `attention` command. `Alt+B` works on a pane in any state, and toggles only that owner's review: a press on a tab where any pane carries your flag clears it from all of them, and otherwise flags the focused pane. A review another source published (`attention mark review --source NAME`, or Pi's bus as `pi-bus`) also shows ◆, and `Alt+B` leaves it; `attention mark clear --source NAME` withdraws it. A pane no launch has claimed cannot be flagged.
-- **`examples/hook.sh` writes only through the `attention` command**, and needs a launch claim. It no longer writes a flat marker; a copy of the 0.6 script still does.
+- **`examples/hook.sh` and `examples/hook.ts` are removed.** Register `attention hooks event PROVIDER EVENT`, or run `attention mark STATE --source NAME`, from the `attention` link on PATH. A copy of the 0.6 `hook.sh` still writes flat markers, which nothing reads.
+- **The Pi extension no longer accepts `busy`, `ready`, `blocked` or `pending` on the `wezterm-attention:mark` bus.** 0.6 documented them as aliases; emit `thinking`, `stop` or `notify` instead.
+- **`attention hooks publish --all-details` is removed.** `hooks publish` reports at most 50 diagnostics, and `complete` says whether they all fit. Passing the flag is a usage error.
+- **The crate builds only for macOS and Linux.** Other targets fail to compile; the `ps axeww` process-probe fallback is removed.
 - **The Rust crate is not a supported interface.** The supported interface is the `attention` command, with its JSON envelopes, diagnostic codes and exit codes, and the plugin's Lua API. A program that links the crate takes whatever the next commit changes.
 - **The hidden `attention claim` command is gone.** It only said to use `attention hooks claim`. The results of `mark --json` and `hooks event --debug` no longer carry `repaired_projection`, which was always `false`, and `repaired_projection` is no longer a disposition.
 - **The default state directory follows `XDG_STATE_HOME`.** The order is `WEZTERM_ATTENTION_DIR`, then `$XDG_STATE_HOME/wezterm-attention` when `XDG_STATE_HOME` is set, non-empty and absolute, then `~/.local/state/wezterm-attention`. 0.6 always used the last. If `XDG_STATE_HOME` is set where WezTerm starts, the directory moves; set `dir` to keep the old one. A `dir` option or `WEZTERM_ATTENTION_DIR` that is not UTF-8 is ignored with a warning by the plugin.
@@ -46,10 +49,11 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - `attention sweep`, which previews by default and, with `--apply`, ends bindings whose panes are verified gone, removes a closed pane's whole tree once its binding ended more than 30 days ago and its absence is confirmed again, and collects leftover files. A server counts as gone only when that is shown: its `gui-sock-<pid>` process has exited, whether or not the GUI left its socket file behind, or the process probe read every process of this user and none carries the pane. A socket that was removed, replaced (including by `chmod` or `touch` on a live socket) or refuses connections is never a sighting by itself: a live server whose accept queue is full refuses too. So on macOS, and on Linux whenever a process of the user is non-dumpable, a mux server's records stay after its socket is removed, until you remove them by hand.
 - A `doctor` probe named `environment`, which checks inside a pane that the pane's socket has a server identity hooks can find. Where an agent can claim its own pane, an identity nothing has published yet is `unobserved` rather than a finding, because the agent's first session start publishes it.
 - `result.timing_ms` on `inspect` as on `bindings`, and `result.diagnostic_count` / `total_diagnostic_count` on `tabs`.
-- Options `show_directory`, `settled_title_fallback`, `show_provider`, `on_view_change` and `integration_root`; `attention.doctor(window)` in the Lua API.
+- Options `show_directory`, `settled_title_fallback`, `show_provider`, `on_view_change` and `integration_root`.
 
 ### Changed
 
+- Usage errors for `bindings --limit`, `--realm` and `--provider`, `sweep --operation-id` without `--apply`, and `hooks publish --json --quiet` carry clap's message text. The `bad_usage` code, exit codes and JSON envelopes are unchanged; without `--json`, `sweep` prints clap's error text instead of `attention: bad_usage: …`.
 - A prompt tints the pane `thinking` straight away, instead of waiting for the first tool call.
 - `thinking` from v2 records animates like the v1 spinner.
 - The tab text published in `tabs/*.json` always shows the spinner's first frame, so a spinning tab does not rewrite that file every second. The bar on screen still animates.
@@ -74,6 +78,7 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 
 ### Fixed
 
+- `attention mark` and the prompt-return activity clear no longer report an error after their write was applied, when the re-read of the current-binding pointer fails.
 - `attention mark clear --source NAME` also withdraws an activity that `attention mark` wrote before any provider session bound the launch. Another source's activity stays.
 - A sub-agent waiting for permission keeps the tab on `notify` while the lead keeps calling tools, for example Codex polling `wait_agent`. The notify ends when that sub-agent calls its next tool or stops, when the user prompts, or when the lead's turn ends, however long the sub-agent waits. A sub-agent record that cannot be read does not stop the notify; the hook reports `partial`.
 - Sourcing the bash integration again from an rc file that assigns `PROMPT_COMMAND` puts its prompt hook back.
@@ -94,7 +99,8 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - A long or control-character tab title no longer drops its whole window from `attention tabs`.
 - Concurrent writers creating the same state directory no longer fail.
 - A Codex `Stop` with `last_assistant_message: null` reports the reply as `absent`, not `invalid`.
-- `examples/wezterm.lua` keeps `Alt+B`, loads without `follow-up.lua`, and runs git without repository hooks.
+- `examples/wezterm.lua` holds only the Attention setup: loading the plugin, the optional `follow-up.lua` view callback, `apply_to_config` with its options, and an `update-status` handler that polls. It loads without `follow-up.lua`.
+- In bash, a command word whose quotes are kept by a backslash (`\"claude\"`) is not claimed as `claude`: bash runs a program with that literal name.
 - A query against a stale socket no longer starts a new mux server, and a missing `wezterm` on PATH no longer leads to running the mux server in its place.
 - On Linux, closed panes can be verified absent; the crate builds on aarch64 Linux.
 - A non-UTF-8 environment variable is skipped instead of stopping every command. A non-UTF-8 `WEZTERM_ATTENTION_DIR` is refused as a relative one is, rather than skipped in favour of the default state root.

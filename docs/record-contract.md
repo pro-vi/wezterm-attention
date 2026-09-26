@@ -356,11 +356,10 @@ deadline, not one per pane.
 
 On macOS and Linux the process probe reads environments, never command-line arguments. On macOS it reads each of
 this user's processes' environment with `KERN_PROCARGS2`; on Linux it reads `/proc/<pid>/environ`
-for processes this user owns; elsewhere it runs `ps axeww -o uid=,command=` from `/bin` or
-`/usr/bin` and keeps this user's lines. If it cannot read its own process's environment, the whole
+for processes this user owns. The crate builds for macOS and Linux only. If it cannot read its own process's environment, the whole
 listing counts as failed, so a permission problem never reads as every pane absent. A process
 it lists and cannot read makes the listing incomplete: macOS hides the environment of its own
-system binaries, such as `/bin/zsh` and `/bin/bash`, from both `ps` and `sysctl`, `KERN_PROCARGS2`
+system binaries, such as `/bin/zsh` and `/bin/bash`, from `sysctl`, `KERN_PROCARGS2`
 can refuse a running process, and Linux can refuse `/proc/<pid>/environ`. An incomplete listing
 still shows a pane present by a process it read; it never shows a pane absent where it is the
 only evidence. On macOS a listing is in practice always incomplete, so there it never shows the

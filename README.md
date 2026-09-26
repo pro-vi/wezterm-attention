@@ -214,7 +214,7 @@ attention.apply_to_config(config, {
 
 ## Recording attention from your own tools
 
-Write records through the `attention` command; never construct their JSON yourself. Use `attention hooks event PROVIDER EVENT` for provider callbacks, and `attention mark STATE --source NAME` for anything else, where `STATE` is `thinking`, `stop`, `notify`, `review` or `clear`. Both write into the pane's current launch claim. On macOS an agent's registered hooks claim the pane for their agent themselves (see [Claude Code hooks](#claude-code-hooks)). `attention mark`, and every producer on Linux, needs the launch id of a claiming shell, so run it from one: in bash, add its command name to `WEZTERM_ATTENTION_COMMANDS`; in zsh, start it as `wezterm_attention_claim && <command>`. See [Mux setup](docs/mux-setup.md). [`examples/hook.sh`](examples/hook.sh) and [`examples/hook.ts`](examples/hook.ts) are starting points.
+Write records through the `attention` command; never construct their JSON yourself. Use `attention hooks event PROVIDER EVENT` for provider callbacks, and `attention mark STATE --source NAME` for anything else, where `STATE` is `thinking`, `stop`, `notify`, `review` or `clear`. Both write into the pane's current launch claim. On macOS an agent's registered hooks claim the pane for their agent themselves (see [Claude Code hooks](#claude-code-hooks)). `attention mark`, and every producer on Linux, needs the launch id of a claiming shell, so run it from one: in bash, add its command name to `WEZTERM_ATTENTION_COMMANDS`; in zsh, start it as `wezterm_attention_claim && <command>`. See [Mux setup](docs/mux-setup.md).
 
 `--source` defaults to `manual`. `attention mark clear --source NAME` removes that source's review flag and, when the activity the tab currently shows was published by that source, clears that activity too; it reports `applied` when it did either and `skipped` otherwise. The source name `user` belongs to the plugin's review key, and every `mark` state refuses it.
 
@@ -343,11 +343,6 @@ local state, frame, source, reserved, subagents, review = attention.get_attentio
 -- Read fifteen cached base fields plus independent lifecycle evidence, without
 -- I/O. Nested returned values do not share mutable state with the plugin cache.
 local view = attention.get_attention_view(pane)
-
--- Check the GUI-side identity publication of every pane in a window. Returns a
--- list of diagnostics, empty when every pane is identified. File, socket,
--- process, permission and version checks belong to `attention doctor`.
-local diagnostics = attention.doctor(window)
 
 -- Poll manually (for auto_poll = false)
 attention.poll(window, { active_pane = pane })

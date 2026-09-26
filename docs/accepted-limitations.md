@@ -141,31 +141,17 @@ wire identity did not get the same treatment.
 The Rust writer serialises through serde, which writes an integer, so it never
 emits the disputed spelling.
 
-The plugin also writes records, through the local `json_value` in
-`plugin/overlays.lua` rather than `wezterm.json_encode`, and that renders a
-number as `tostring(value)`. Those records carry `schema`, so what the plugin
-emits depends on whether it is holding an integer or a float.
+The plugin writes no records. The one file it writes, a tab order, spells its
+integers with `string.format("%d")` and its schema as a literal, and encodes the
+`source` object with `wezterm.json_encode`, so it never emits `3.0`.
 
-It is holding an integer. WezTerm converts a JSON number in
-`lua-api-crates/serde-funcs/src/lib.rs`, trying `as_i64()` first and producing
-`LuaValue::Integer`, and reaching `as_f64()` and `LuaValue::Number` only when
-that fails. The manifest spells `record_schema` as `3`, so the plugin holds an
-integer and `tostring` gives `3` under any Lua version. The float rendering that
-would produce `3.0` does not arise here.
+That leaves the divergence real but harmless: two readers accept a spelling the
+third rejects, and nothing this project ships produces it.
 
-That leaves the divergence real but close to harmless: two readers accept a
-spelling the third rejects, and nothing this project ships produces it. What is
-still unverified is the installed WezTerm on a given machine, since the check
-above was read from source rather than run, and there is no test that writes a
-record through a real WezTerm and validates the resulting bytes with the Rust
-validator. That round trip is the missing evidence, and the existing smoke does
-not cover it -- it exercises reading and formatting, not the writer boundary.
-
-Tightening the Lua and Python readers to match Rust is therefore a reasonable
-change rather than a risky one, and it is deferred for sequencing rather than
-danger: it wants the canonical rule stated, that write-and-validate round trip in
-place, and raw-JSON fixtures for the integral-float and exponent spellings, since
-a decoded fixture cannot express the difference.
+Tightening the Lua and Python readers to match Rust is a reasonable change
+rather than a risky one, and it is deferred for sequencing rather than danger:
+it wants the canonical rule stated and raw-JSON fixtures for the integral-float
+and exponent spellings, since a decoded fixture cannot express the difference.
 
 ## What sweep leaves behind
 
