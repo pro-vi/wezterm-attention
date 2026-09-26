@@ -18,7 +18,7 @@ use crate::protocol::{
 };
 use crate::records::{
     BINDING_FILE, BindingState, FileRecords, RecordIdentity, RecordRead, RecordReader, agents_dir,
-    binding_path, ends_binding, incarnation_dir, read_record, read_record_at, read_record_typed,
+    binding_ended, binding_path, ends_binding, incarnation_dir, read_record, read_record_typed,
     realms_dir, reviews_dir, session_dir, session_entry_path, session_index_path,
 };
 use crate::wezterm::{Clock, GuiWindowLister, PaneLister, ProcessProbe};
@@ -1495,15 +1495,6 @@ fn session_key(binding: &Value) -> (String, String) {
 
 pub(crate) fn record_address(record: &Value) -> Option<PaneAddress> {
     serde_json::from_value(record.get("address")?.clone()).ok()
-}
-
-/// Whether the end record beside a binding ends it, by [`ends_binding`]. An
-/// unreadable one ends nothing.
-fn binding_ended(root: &Path, binding: &Value, identity: &RecordIdentity) -> bool {
-    read_record_at(root, "binding_end", identity)
-        .ok()
-        .flatten()
-        .is_some_and(|end| ends_binding(&end, binding))
 }
 
 pub fn read_bindings_with_ports(

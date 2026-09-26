@@ -793,6 +793,16 @@ pub fn ends_binding(end: &Value, binding: &Value) -> bool {
             .is_some_and(|(end, binding)| end >= binding)
 }
 
+/// Whether the end record of the binding `identity` names ends `binding`,
+/// the rule [`BindingState::ended`] applies, for a binding read without its
+/// claim and pointer. An end that is absent or could not be read ends
+/// nothing.
+pub(crate) fn binding_ended(root: &Path, binding: &Value, identity: &RecordIdentity) -> bool {
+    read_record_typed_at(root, "binding_end", identity)
+        .record()
+        .is_some_and(|end| ends_binding(end, binding))
+}
+
 pub fn mkdir_private(path: &Path) -> Result<()> {
     let mut missing = Vec::new();
     let mut cursor = path;
