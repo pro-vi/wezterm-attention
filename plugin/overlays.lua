@@ -3,7 +3,22 @@ return function(context)
   local now_ms = context.now_ms
   local reported_errors = {}
   local publication_session = tostring({}):gsub("[^%w]", "")
-  local report_error_once
+
+  --- Log a message once per key, so a persistent failure does not fill the log
+  --- on every poll tick.
+  local function report_error_once(key, message)
+    if reported_errors[key] then return end
+    reported_errors[key] = true
+    wezterm.log_error("wezterm-attention: " .. message)
+  end
+
+  --- The same, for a setup the plugin works around rather than a failure.
+  local function report_warning_once(key, message)
+    if reported_errors[key] then return end
+    reported_errors[key] = true
+    local log = type(wezterm.log_warn) == "function" and wezterm.log_warn or wezterm.log_error
+    log("wezterm-attention: " .. message)
+  end
 
   local function json_string(value)
     return '"' .. value:gsub('[%z\1-\31\\"]', function(char)
@@ -237,29 +252,9 @@ return function(context)
     end
   end
 
-  --- Log a message once per key, so a persistent failure does not fill the log
-  --- on every poll tick.
-  report_error_once = function(key, message)
-    if reported_errors[key] then return end
-    reported_errors[key] = true
-    wezterm.log_error("wezterm-attention: " .. message)
-  end
-
-  --- The same, for a setup the plugin works around rather than a failure.
-  local function report_warning_once(key, message)
-    if reported_errors[key] then return end
-    reported_errors[key] = true
-    local log = type(wezterm.log_warn) == "function" and wezterm.log_warn or wezterm.log_error
-    log("wezterm-attention: " .. message)
-  end
-
   return {
-    reported_errors = reported_errors,
-    publication_session = publication_session,
     report_error_once = report_error_once,
     report_warning_once = report_warning_once,
-    json_string = json_string,
-    json_value = json_value,
     publish_tab_order = publish_tab_order,
     withdraw_closed_tab_orders = withdraw_closed_tab_orders,
   }
