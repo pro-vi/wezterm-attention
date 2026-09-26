@@ -12,10 +12,10 @@ use crate::identity::socket_identity;
 use crate::observations::{LifecycleAvailability, LifecycleSnapshot, LifecycleView};
 use crate::protocol::{AttentionError, Diagnostic, Result, hex64_text};
 use crate::records::{
-    FileRecords, RecordReader, binding_path, ends_binding, incarnation_path, launch_path,
-    pane_path, realm_path, session_dir, session_entry_path, session_index_path,
+    FileRecords, RecordIdentity, RecordRead, RecordReader, agents_dir, binding_path, ends_binding,
+    incarnation_path, read_record, read_record_at, read_record_typed, reviews_dir, session_dir,
+    session_entry_path, session_index_path,
 };
-use crate::records::{RecordIdentity, RecordRead, read_record, read_record_typed};
 use crate::wezterm::Clock;
 use crate::wezterm::{GuiWindowLister, PaneLister, Presence, ProcessListing, ProcessProbe};
 
@@ -119,6 +119,19 @@ impl RecordFacet {
             diagnostics: vec![],
         }
     }
+    /// The record of `kind` that `identity` names below `root`, as `facet`.
+    fn at(
+        reader: &dyn RecordReader,
+        root: &Path,
+        kind: &str,
+        identity: &RecordIdentity,
+        facet: &str,
+    ) -> Self {
+        match identity.path(root, kind) {
+            Ok(path) => Self::read(reader, &path, kind, identity, facet),
+            Err(error) => Self::from_read(RecordRead::Invalid(error), facet),
+        }
+    }
     fn read(
         reader: &dyn RecordReader,
         path: &Path,
@@ -126,7 +139,10 @@ impl RecordFacet {
         identity: &RecordIdentity,
         facet: &str,
     ) -> Self {
-        let (availability, record, error) = match reader.read(path, Some(kind), identity) {
+        Self::from_read(reader.read(path, Some(kind), identity), facet)
+    }
+    fn from_read(read: RecordRead, facet: &str) -> Self {
+        let (availability, record, error) = match read {
             RecordRead::Present(record) => (RecordAvailability::Present, Some(record), None),
             RecordRead::Missing => (RecordAvailability::Absent, None, None),
             RecordRead::Unavailable(error) => (RecordAvailability::Unavailable, None, Some(error)),
@@ -414,17 +430,16 @@ fn read_pane_facts_once(
     use RecordAvailability as A;
     // Scope is constructed/decoded through validation before any record or process I/O.
     let address = &scope.address;
-    let realm = RecordFacet::read(
+    let realm = RecordFacet::at(
         reader,
-        &realm_path(root, &address.realm_id).join("realm.json"),
+        root,
         "realm",
         &RecordIdentity::realm(&address.realm_id),
         "realm",
     );
-    let incarnation = RecordFacet::read(
+    let incarnation = RecordFacet::at(
         reader,
-        &incarnation_path(root, &address.realm_id, &address.incarnation_id)
-            .join("incarnation.json"),
+        root,
         "incarnation",
         &RecordIdentity::incarnation(&address.realm_id, &address.incarnation_id),
         "incarnation",
@@ -462,11 +477,9 @@ fn read_pane_facts_once(
         Ok(exited) => exited,
         Err(diagnostic) => return Ok(PaneFacts::scope_unavailable(scope, diagnostic)),
     };
-    let pane = pane_path(root, address);
-    let launch = launch_path(root, address, &scope.launch_id);
-    let claim = RecordFacet::read(
+    let claim = RecordFacet::at(
         reader,
-        &pane.join("claim.json"),
+        root,
         "claim",
         &RecordIdentity::pane(address),
         "claim",
@@ -499,9 +512,9 @@ fn read_pane_facts_once(
             None,
         ));
     }
-    let pointer = RecordFacet::read(
+    let pointer = RecordFacet::at(
         reader,
-        &launch.join("current-binding.json"),
+        root,
         "current_binding",
         &RecordIdentity::launch(address, &scope.launch_id),
         "binding_selection",
@@ -534,20 +547,11 @@ fn read_pane_facts_once(
             None,
         ));
     }
-    let selected_root = selected
-        .map(|id| launch.join("bindings").join(id))
-        .unwrap_or_else(|| launch.clone());
     let identity = selected
         .map(|id| RecordIdentity::binding(address, &scope.launch_id, id))
         .unwrap_or_else(|| RecordIdentity::launch(address, &scope.launch_id));
     let binding = if selected.is_some() {
-        RecordFacet::read(
-            reader,
-            &selected_root.join("binding.json"),
-            "binding",
-            &identity,
-            "binding",
-        )
+        RecordFacet::at(reader, root, "binding", &identity, "binding")
     } else {
         RecordFacet::empty(A::Absent)
     };
@@ -579,13 +583,7 @@ fn read_pane_facts_once(
             None
         }
     };
-    let raw_activity = RecordFacet::read(
-        reader,
-        &selected_root.join("activity.json"),
-        "activity",
-        &identity,
-        "activity",
-    );
+    let raw_activity = RecordFacet::at(reader, root, "activity", &identity, "activity");
     let target = selected
         .map(|id| serde_json::json!({"kind":"binding","binding_id":id}))
         .unwrap_or_else(|| serde_json::json!({"kind":"launch"}));
@@ -603,13 +601,7 @@ fn read_pane_facts_once(
         ));
     }
     let clear = if selected.is_some() {
-        RecordFacet::read(
-            reader,
-            &selected_root.join("activity-clear.json"),
-            "activity_clear",
-            &identity,
-            "activity_clear",
-        )
+        RecordFacet::at(reader, root, "activity_clear", &identity, "activity_clear")
     } else {
         RecordFacet::empty(A::Absent)
     };
@@ -646,13 +638,7 @@ fn read_pane_facts_once(
         }
     }
     let mut end = if selected.is_some() {
-        RecordFacet::read(
-            reader,
-            &selected_root.join("end.json"),
-            "binding_end",
-            &identity,
-            "binding_end",
-        )
+        RecordFacet::at(reader, root, "binding_end", &identity, "binding_end")
     } else {
         RecordFacet::empty(A::Absent)
     };
@@ -665,13 +651,7 @@ fn read_pane_facts_once(
         end = RecordFacet::empty(A::Absent);
     }
     let mut lifecycle = if selected.is_some() {
-        let read = RecordFacet::read(
-            reader,
-            &selected_root.join("lifecycle.json"),
-            "lifecycle_snapshot",
-            &identity,
-            "lifecycle",
-        );
+        let read = RecordFacet::at(reader, root, "lifecycle_snapshot", &identity, "lifecycle");
         lifecycle_from_read(
             read,
             binding.record.as_ref().and_then(|r| r["provider"].as_str()),
@@ -680,9 +660,9 @@ fn read_pane_facts_once(
     } else {
         LifecycleView::empty(LifecycleAvailability::Absent)
     };
-    let ack = RecordFacet::read(
+    let ack = RecordFacet::at(
         reader,
-        &selected_root.join("ack.json"),
+        root,
         "acknowledgement",
         &identity,
         "badge_acknowledgement",
@@ -697,18 +677,18 @@ fn read_pane_facts_once(
             serde_json::json!({"activity_event_id":ack_record["activity_event_id"],"event_id":ack_record["event_id"],"target":ack_record["target"]}),
         );
     }
-    let review = read_fact_collection(reader, &pane.join("reviews"), scope, None, now.as_deref());
+    let review = read_fact_collection(
+        reader,
+        &reviews_dir(root, address),
+        scope,
+        None,
+        now.as_deref(),
+    );
     let children = if let Some(selected_binding) = selected {
-        let child_clear = RecordFacet::read(
+        let child_clear = RecordFacet::at(reader, root, "subagent_clear", &identity, "children");
+        let floor = RecordFacet::at(
             reader,
-            &selected_root.join("agents-clear.json"),
-            "subagent_clear",
-            &identity,
-            "children",
-        );
-        let floor = RecordFacet::read(
-            reader,
-            &selected_root.join("agents-floor.json"),
+            root,
             "subagent_retention_floor",
             &identity,
             "children",
@@ -724,7 +704,7 @@ fn read_pane_facts_once(
         } else {
             read_fact_collection(
                 reader,
-                &selected_root.join("agents"),
+                &agents_dir(root, address, &scope.launch_id, selected_binding),
                 scope,
                 Some(ChildSelection {
                     binding_id: selected_binding,
@@ -809,16 +789,16 @@ fn read_pane_facts_once(
         model: string(record, "model"),
         start_source: string(record, "start_source"),
     });
-    let after_claim = RecordFacet::read(
+    let after_claim = RecordFacet::at(
         reader,
-        &pane.join("claim.json"),
+        root,
         "claim",
         &RecordIdentity::pane(address),
         "claim",
     );
-    let after_pointer = RecordFacet::read(
+    let after_pointer = RecordFacet::at(
         reader,
-        &launch.join("current-binding.json"),
+        root,
         "current_binding",
         &RecordIdentity::launch(address, &scope.launch_id),
         "binding_selection",
@@ -1138,8 +1118,10 @@ pub fn read_bindings_for_socket_timed(
     // read there is not part of this server's answer.
     let rivals = |sessions: &Sessions| {
         let mut elsewhere = session_candidates(root, sessions);
-        elsewhere
-            .retain(|path| !path.starts_with(&selected) && path_identity(root, path).is_some());
+        elsewhere.retain(|path| {
+            !path.starts_with(&selected)
+                && RecordIdentity::from_state_path(root, path, "binding").is_ok()
+        });
         elsewhere
     };
     let (rows, mut read_diagnostics, spawns) =
@@ -1377,33 +1359,6 @@ pub(crate) fn naming_record(root: &Path, path: &Path, mut error: AttentionError)
 
 fn string(record: &Value, field: &str) -> Option<String> {
     record.get(field).and_then(Value::as_str).map(str::to_owned)
-}
-
-fn path_identity(root: &Path, path: &Path) -> Option<(String, String, String, String, String)> {
-    let parts: Vec<_> = path
-        .strip_prefix(root)
-        .ok()?
-        .iter()
-        .map(|part| part.to_str())
-        .collect();
-    if parts.len() != 12
-        || parts[0] != Some("v2")
-        || parts[1] != Some("realms")
-        || parts[3] != Some("incarnations")
-        || parts[5] != Some("panes")
-        || parts[7] != Some("launches")
-        || parts[9] != Some("bindings")
-        || parts[11] != Some("binding.json")
-    {
-        return None;
-    }
-    Some((
-        parts[2]?.to_owned(),
-        parts[4]?.to_owned(),
-        parts[6]?.to_owned(),
-        parts[8]?.to_owned(),
-        parts[10]?.to_owned(),
-    ))
 }
 
 fn diagnostic(code: &str, message: &str) -> Diagnostic {
@@ -1687,20 +1642,12 @@ fn session_live_elsewhere(
 ) -> bool {
     let sessions = BTreeSet::from([(provider.to_owned(), session.to_owned())]);
     for path in session_candidates(root, &sessions) {
-        let Some((realm_id, incarnation_id, pane_id, launch_id, binding_id)) =
-            path_identity(root, &path)
-        else {
+        let Ok(identity) = RecordIdentity::from_state_path(root, &path, "binding") else {
             continue;
         };
-        let other = PaneAddress {
-            realm_id,
-            incarnation_id,
-            pane_id,
-        };
-        if other == *address {
+        let Some(other) = identity.address().filter(|other| *other != address) else {
             continue;
-        }
-        let identity = RecordIdentity::binding(&other, &launch_id, &binding_id);
+        };
         let Ok(Some(binding)) = read_record(&path, Some("binding"), &identity) else {
             continue;
         };
@@ -1710,9 +1657,9 @@ fn session_live_elsewhere(
             continue;
         }
         let (presence, server_gone) =
-            reader_presence(root, &other, panes, processes, &mut Vec::new());
+            reader_presence(root, other, panes, processes, &mut Vec::new());
         if competes(
-            binding_ended(&path, &binding, &identity),
+            binding_ended(root, &binding, &identity),
             server_gone,
             &presence,
         ) {
@@ -1736,18 +1683,13 @@ pub(crate) fn record_address(record: &Value) -> Option<PaneAddress> {
 /// The socket a pane's realm record names, when both the realm and this
 /// incarnation are recorded.
 pub(crate) fn recorded_socket(root: &Path, address: &PaneAddress) -> Result<Option<String>> {
-    let Some(realm) = read_record(
-        &realm_path(root, &address.realm_id).join("realm.json"),
-        Some("realm"),
-        &RecordIdentity::realm(&address.realm_id),
-    )?
+    let Some(realm) = read_record_at(root, "realm", &RecordIdentity::realm(&address.realm_id))?
     else {
         return Ok(None);
     };
-    let incarnation = read_record(
-        &incarnation_path(root, &address.realm_id, &address.incarnation_id)
-            .join("incarnation.json"),
-        Some("incarnation"),
+    let incarnation = read_record_at(
+        root,
+        "incarnation",
         &RecordIdentity::incarnation(&address.realm_id, &address.incarnation_id),
     )?;
     Ok(incarnation.and(string(&realm, "socket_path")))
@@ -1767,14 +1709,10 @@ fn realm_socket(root: &Path, address: &PaneAddress) -> Option<String> {
 
 /// Whether the end record beside a binding ends it, by [`ends_binding`]. An
 /// unreadable one ends nothing.
-fn binding_ended(binding_path: &Path, binding: &Value, identity: &RecordIdentity) -> bool {
-    binding_path
-        .parent()
-        .and_then(|dir| {
-            read_record(&dir.join("end.json"), Some("binding_end"), identity)
-                .ok()
-                .flatten()
-        })
+fn binding_ended(root: &Path, binding: &Value, identity: &RecordIdentity) -> bool {
+    read_record_at(root, "binding_end", identity)
+        .ok()
+        .flatten()
         .is_some_and(|end| ends_binding(&end, binding))
 }
 
@@ -2120,25 +2058,17 @@ fn assemble_bindings(
                     read: &mut Vec<(PathBuf, Value)>,
                     diagnostics: &mut Vec<Diagnostic>| {
         for path in files {
-            let Some((path_realm, path_incarnation, path_pane, path_launch, path_binding)) =
-                path_identity(root, &path)
+            let Some(identity) = RecordIdentity::from_state_path(root, &path, "binding").ok()
             else {
                 let mut item = diagnostic("record_invalid", "binding path has the wrong shape");
                 name_path(&mut item, root, &path);
                 diagnostics.push(item);
                 continue;
             };
-            let ruled_out = !filter.admits_path(&path_realm, &path_incarnation);
-            let path_address = PaneAddress {
-                realm_id: path_realm,
-                incarnation_id: path_incarnation,
-                pane_id: path_pane,
-            };
-            match read_record(
-                &path,
-                Some("binding"),
-                &RecordIdentity::binding(&path_address, &path_launch, &path_binding),
-            ) {
+            let ruled_out = identity.address().is_none_or(|address| {
+                !filter.admits_path(&address.realm_id, &address.incarnation_id)
+            });
+            match read_record(&path, Some("binding"), &identity) {
                 Ok(Some(binding)) => read.push((path, binding)),
                 Ok(None) => {}
                 // A realm or server the filter rules out is not part of the
@@ -2189,7 +2119,7 @@ fn assemble_bindings(
     let mut ignored = Vec::new();
     let mut presence_cache: BTreeMap<PaneAddress, (String, bool)> = BTreeMap::new();
     let mut claim_cache: BTreeMap<PathBuf, (Option<Value>, Option<String>)> = BTreeMap::new();
-    for (path, binding, admitted) in assessed {
+    for (_, binding, admitted) in assessed {
         let diagnostics = if admitted {
             &mut diagnostics
         } else {
@@ -2207,19 +2137,10 @@ fn assemble_bindings(
         let Some(binding_id) = string(&binding, "binding_id") else {
             continue;
         };
-        let binding_dir = path.parent().expect("binding file has parent");
-        let launch_dir = binding_dir
-            .parent()
-            .and_then(Path::parent)
-            .expect("binding path has launch parent");
-        let pane_dir = launch_dir
-            .parent()
-            .and_then(Path::parent)
-            .expect("launch path has pane parent");
         let identity = RecordIdentity::binding(&address, &launch_id, &binding_id);
         let mut end_health = None;
         let end = match read_record(
-            &binding_dir.join("end.json"),
+            &identity.path(root, "binding_end")?,
             Some("binding_end"),
             &identity,
         ) {
@@ -2235,10 +2156,11 @@ fn assemble_bindings(
             }
         };
         let mut pointer_health = None;
+        let launch = RecordIdentity::launch(&address, &launch_id);
         let pointer = match read_record(
-            &launch_dir.join("current-binding.json"),
+            &launch.path(root, "current_binding")?,
             Some("current_binding"),
-            &RecordIdentity::launch(&address, &launch_id),
+            &launch,
         ) {
             Ok(value) => value,
             Err(error) => {
@@ -2251,23 +2173,23 @@ fn assemble_bindings(
                 None
             }
         };
-        let claim_path = pane_dir.join("claim.json");
+        let pane = RecordIdentity::pane(&address);
+        let claim_path = pane.path(root, "claim")?;
         let (claim, claim_health) = if let Some(cached) = claim_cache.get(&claim_path) {
             cached.clone()
         } else {
-            let loaded =
-                match read_record(&claim_path, Some("claim"), &RecordIdentity::pane(&address)) {
-                    Ok(value) => (value, None),
-                    Err(error) => {
-                        let health = Some(if error.diagnostic.code == "future_schema" {
-                            "future_schema".to_owned()
-                        } else {
-                            "invalid".to_owned()
-                        });
-                        diagnostics.push(error.diagnostic);
-                        (None, health)
-                    }
-                };
+            let loaded = match read_record(&claim_path, Some("claim"), &pane) {
+                Ok(value) => (value, None),
+                Err(error) => {
+                    let health = Some(if error.diagnostic.code == "future_schema" {
+                        "future_schema".to_owned()
+                    } else {
+                        "invalid".to_owned()
+                    });
+                    diagnostics.push(error.diagnostic);
+                    (None, health)
+                }
+            };
             claim_cache.insert(claim_path.clone(), loaded.clone());
             loaded
         };

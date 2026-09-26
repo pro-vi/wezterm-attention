@@ -19,10 +19,10 @@ use crate::query::{
     recorded_socket,
 };
 use crate::records::{
-    CommitPlan, RecordIdentity, Replacement, atomic_replace_if_different, binding_session_entry,
-    claim_lock, commit, directory_confined, ends_binding, incarnation_path, launch_lock,
-    launch_path, lock_file, pane_path, read_record, realm_path, removal_confined,
-    remove_file_durable, session_index_marker, session_index_path,
+    BINDING_FILE, CommitPlan, RecordIdentity, Replacement, agents_dir, atomic_replace_if_different,
+    binding_record_kind, binding_session_entry, claim_lock, commit, directory_confined,
+    ends_binding, incarnation_path, launch_lock, lock_file, pane_path, read_record, read_record_at,
+    removal_confined, remove_file_durable, session_index_marker, session_index_path,
 };
 use crate::wezterm::{Clock, PaneLister, Presence, ProcessInspector, ProcessProbe};
 
@@ -95,70 +95,23 @@ fn binding_files(root: &Path, diagnostics: &mut Vec<Diagnostic>) -> Vec<PathBuf>
     files
 }
 
-fn state_kind(path: &Path) -> Option<&'static str> {
-    let ancestor = |up: usize| {
-        path.ancestors()
-            .nth(up)
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-    };
-    if ancestor(2) == Some("sessions") {
-        return Some("session_binding");
-    }
-    if ancestor(1) == Some("sessions") && ancestor(0) == Some("complete.json") {
-        return Some("session_index");
-    }
-    if path
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|name| name.to_str())
-        == Some("reviews")
-    {
-        return Some("review");
-    }
-    if path
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|name| name.to_str())
-        == Some("agents")
-    {
-        return Some("subagent_presence");
-    }
-    match path.file_name().and_then(|name| name.to_str())? {
-        "realm.json" => Some("realm"),
-        "incarnation.json" => Some("incarnation"),
-        "claim.json" => Some("claim"),
-        "current-binding.json" => Some("current_binding"),
-        "binding.json" => Some("binding"),
-        "activity.json" => Some("activity"),
-        "activity-clear.json" => Some("activity_clear"),
-        "lifecycle.json" => Some("lifecycle_snapshot"),
-        "end.json" => Some("binding_end"),
-        "ack.json" => Some("acknowledgement"),
-        "absence-probe.json" => Some("absence_probe"),
-        "agents-clear.json" => Some("subagent_clear"),
-        "agents-floor.json" => Some("subagent_retention_floor"),
-        _ => None,
-    }
-}
-
 fn binding_selection(
     root: &Path,
     address: &PaneAddress,
     launch_id: &str,
     binding_id: &str,
 ) -> Result<Option<bool>> {
-    let claim_path = pane_path(root, address).join("claim.json");
-    let claim = read_record(&claim_path, Some("claim"), &RecordIdentity::pane(address))
-        .map_err(|error| naming_record(root, &claim_path, error))?;
-    let Some(claim) = claim else { return Ok(None) };
-    let pointer_path = launch_path(root, address, launch_id).join("current-binding.json");
-    let pointer = read_record(
-        &pointer_path,
-        Some("current_binding"),
+    let read = |kind: &str, identity: &RecordIdentity| {
+        let path = identity.path(root, kind)?;
+        read_record(&path, Some(kind), identity).map_err(|error| naming_record(root, &path, error))
+    };
+    let Some(claim) = read("claim", &RecordIdentity::pane(address))? else {
+        return Ok(None);
+    };
+    let pointer = read(
+        "current_binding",
         &RecordIdentity::launch(address, launch_id),
-    )
-    .map_err(|error| naming_record(root, &pointer_path, error))?;
+    )?;
     Ok(Some(
         claim.get("launch_id").and_then(Value::as_str) == Some(launch_id)
             && pointer
@@ -176,14 +129,13 @@ fn audit_state(root: &Path) -> (Vec<Value>, Vec<Diagnostic>) {
     files.sort();
     let mut records = Vec::new();
     for path in files {
-        let Some(kind) = state_kind(&path) else {
+        let Some((kind, identity)) = RecordIdentity::locate(root, &path) else {
             let error =
                 AttentionError::new("record_invalid", "unknown v2 state file is uninspected");
             diagnostics.push(naming_record(root, &path, error).diagnostic);
             continue;
         };
-        let read = RecordIdentity::from_state_path(root, &path, kind)
-            .and_then(|identity| read_record(&path, Some(kind), &identity));
+        let read = identity.and_then(|identity| read_record(&path, Some(kind), &identity));
         match read {
             Ok(Some(record)) => records.push(record),
             Ok(None) => {}
@@ -433,15 +385,11 @@ fn environment_probe(
             return "finding";
         }
     };
-    let published = read_record(
-        &realm_path(root, &realm_id).join("realm.json"),
-        Some("realm"),
-        &RecordIdentity::realm(&realm_id),
-    )
-    .is_ok_and(|record| record.is_some())
-        && read_record(
-            &incarnation_path(root, &realm_id, &incarnation_id).join("incarnation.json"),
-            Some("incarnation"),
+    let published = read_record_at(root, "realm", &RecordIdentity::realm(&realm_id))
+        .is_ok_and(|record| record.is_some())
+        && read_record_at(
+            root,
+            "incarnation",
             &RecordIdentity::incarnation(&realm_id, &incarnation_id),
         )
         .is_ok_and(|record| record.is_some());
@@ -533,25 +481,17 @@ struct RetentionOutcome {
 
 fn compaction_plan(
     root: &Path,
-    binding_dir: &Path,
     address: &PaneAddress,
     launch_id: &str,
     binding_id: &str,
     now: &str,
     operation_id: Option<&str>,
 ) -> Result<Compaction> {
-    let floor = read_record(
-        &binding_dir.join("agents-floor.json"),
-        Some("subagent_retention_floor"),
-        &RecordIdentity::binding(address, launch_id, binding_id),
-    )?;
-    let clear = read_record(
-        &binding_dir.join("agents-clear.json"),
-        Some("subagent_clear"),
-        &RecordIdentity::binding(address, launch_id, binding_id),
-    )?;
+    let identity = RecordIdentity::binding(address, launch_id, binding_id);
+    let floor = read_record_at(root, "subagent_retention_floor", &identity)?;
+    let clear = read_record_at(root, "subagent_clear", &identity)?;
     let mut records = Vec::new();
-    let agents = binding_dir.join("agents");
+    let agents = agents_dir(root, address, launch_id, binding_id);
     if fs::symlink_metadata(&agents).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return Ok(Compaction {
             action: "blocked",
@@ -726,18 +666,6 @@ fn binding_known_and_prunable(
         return false;
     };
     let identity = RecordIdentity::binding(&address, launch_id, binding_id);
-    let known: BTreeSet<_> = [
-        "binding.json",
-        "lifecycle.json",
-        "activity.json",
-        "activity-clear.json",
-        "end.json",
-        "ack.json",
-        "agents-clear.json",
-        "agents-floor.json",
-    ]
-    .into_iter()
-    .collect();
     let Ok(entries) = fs::read_dir(binding_dir) else {
         return false;
     };
@@ -799,20 +727,15 @@ fn binding_known_and_prunable(
         if file_type.is_file() && write_leftover(&entry.file_name().to_string_lossy()) {
             continue;
         }
-        if !path.is_file()
-            || !known.contains(
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or(""),
-            )
-        {
+        let kind = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(binding_record_kind);
+        let (true, Some(kind)) = (path.is_file(), kind) else {
             diagnostics.push(diagnostic(
                 "record_invalid",
                 "unknown binding state is preserved",
             ));
-            return false;
-        }
-        let Some(kind) = state_kind(&path) else {
             return false;
         };
         match read_record(&path, Some(kind), &identity) {
@@ -1292,7 +1215,6 @@ fn retention_probe(probe: Option<Value>, end: &Value, observation: &str) -> Opti
 /// Returns whether a step failed.
 fn pane_retention(
     run: &SweepRun<'_>,
-    binding_path: &Path,
     binding: &Value,
     address: &PaneAddress,
     end: &Value,
@@ -1312,8 +1234,8 @@ fn pane_retention(
         }
     }
     let pane = pane_path(root, address);
-    let probe_path = pane.join("absence-probe.json");
     let probe_identity = RecordIdentity::pane(address);
+    let probe_path = probe_identity.path(root, "absence_probe")?;
     let probe = match read_record(&probe_path, Some("absence_probe"), &probe_identity) {
         Ok(probe) => retention_probe(probe, end, run.observation),
         Err(error) => {
@@ -1354,10 +1276,6 @@ fn pane_retention(
     }
     let operation = run.operation_id.expect("apply operation id");
     let binding_identity = RecordIdentity::binding(address, launch_id, binding_id);
-    let end_path = binding_path
-        .parent()
-        .expect("binding parent")
-        .join("end.json");
     // The presence above was taken before the locks, as for a binding's own
     // absence. Under them only the records are checked again.
     let applied = commit(
@@ -1366,7 +1284,6 @@ fn pane_retention(
             &launch_lock(root, address, launch_id),
             &claim_lock(root, address),
         ],
-        binding_path,
         "binding",
         &binding_identity,
         |locked_binding| {
@@ -1376,7 +1293,7 @@ fn pane_retention(
                     ..CommitPlan::reporting((action.to_owned(), diagnostics))
                 })
             };
-            let locked_end = read_record(&end_path, Some("binding_end"), &binding_identity)?;
+            let locked_end = read_record_at(root, "binding_end", &binding_identity)?;
             if locked_binding.as_ref() != Some(binding)
                 || locked_end.as_ref() != Some(end)
                 || binding_selection(root, address, launch_id, binding_id)? != Some(true)
@@ -1502,11 +1419,12 @@ fn pane_entries_prunable(
                 if lock_file(pane, directory, &name) || write_leftover(&name) {
                     continue;
                 }
-                let recognised = state_kind(&path).is_some_and(|kind| {
-                    RecordIdentity::from_state_path(root, &path, kind)
-                        .and_then(|identity| read_record(&path, Some(kind), &identity))
-                        .is_ok_and(|record| record.is_some())
-                });
+                let recognised =
+                    RecordIdentity::locate(root, &path).is_some_and(|(kind, identity)| {
+                        identity
+                            .and_then(|identity| read_record(&path, Some(kind), &identity))
+                            .is_ok_and(|record| record.is_some())
+                    });
                 if !recognised {
                     return preserved(diagnostics, "unknown pane state is preserved", &path);
                 }
@@ -1633,7 +1551,6 @@ pub fn sweep(
         let launch_id = binding["launch_id"].as_str().unwrap_or("");
         let binding_id = binding["binding_id"].as_str().unwrap_or("");
         let binding_dir = binding_path.parent().expect("binding parent");
-        let pane = pane_path(root, &address);
         let current = match binding_selection(root, &address, launch_id, binding_id) {
             Ok(Some(current)) => current,
             Ok(None) => {
@@ -1647,8 +1564,8 @@ pub fn sweep(
                 continue;
             }
         };
-        let end_path = binding_dir.join("end.json");
         let binding_identity = RecordIdentity::binding(&address, launch_id, binding_id);
+        let end_path = binding_identity.path(root, "binding_end")?;
         let end = match read_record(&end_path, Some("binding_end"), &binding_identity) {
             Ok(end) => end,
             Err(error) => {
@@ -1687,7 +1604,6 @@ pub fn sweep(
                         &launch_lock(root, &address, launch_id),
                         &claim_lock(root, &address),
                     ],
-                    binding_path,
                     "binding",
                     &binding_identity,
                     |locked_binding| {
@@ -1708,7 +1624,6 @@ pub fn sweep(
                         }
                         let plan = compaction_plan(
                             root,
-                            binding_dir,
                             &address,
                             launch_id,
                             binding_id,
@@ -1720,7 +1635,7 @@ pub fn sweep(
                         if let Some(floor) = &plan.floor {
                             if plan.action == "advance_floor" {
                                 replacements.push(Replacement::always(
-                                    binding_dir.join("agents-floor.json"),
+                                    binding_identity.path(root, "subagent_retention_floor")?,
                                     json!({
                                         "kind":"subagent_retention_floor","schema":manifest()?.record_schema,
                                         "address":address,"launch_id":launch_id,"binding_id":binding_id,
@@ -1767,15 +1682,7 @@ pub fn sweep(
                     }
                 }
             } else {
-                match compaction_plan(
-                    root,
-                    binding_dir,
-                    &address,
-                    launch_id,
-                    binding_id,
-                    &now,
-                    None,
-                ) {
+                match compaction_plan(root, &address, launch_id, binding_id, &now, None) {
                     Ok(plan) => {
                         diagnostics.extend(plan.diagnostics.clone());
                         if plan.action != "none" {
@@ -1810,7 +1717,6 @@ pub fn sweep(
                 };
                 failed += usize::from(pane_retention(
                     &run,
-                    binding_path,
                     &binding,
                     &address,
                     end,
@@ -1838,12 +1744,9 @@ pub fn sweep(
         if presence == SERVER_GONE {
             continue;
         }
-        let probe_path = pane.join("absence-probe.json");
-        let probe = match read_record(
-            &probe_path,
-            Some("absence_probe"),
-            &RecordIdentity::pane(&address),
-        ) {
+        let probe_identity = RecordIdentity::pane(&address);
+        let probe_path = probe_identity.path(root, "absence_probe")?;
+        let probe = match read_record(&probe_path, Some("absence_probe"), &probe_identity) {
             Ok(probe) => probe,
             Err(error) => {
                 diagnostics.push(error.diagnostic);
@@ -1886,7 +1789,6 @@ pub fn sweep(
                 &launch_lock(root, &address, launch_id),
                 &claim_lock(root, &address),
             ],
-            binding_path,
             "binding",
             &binding_identity,
             |locked_binding| {
@@ -1901,11 +1803,8 @@ pub fn sweep(
                         )),
                     }));
                 }
-                let locked_probe = read_record(
-                    &probe_path,
-                    Some("absence_probe"),
-                    &RecordIdentity::pane(&address),
-                )?;
+                let locked_probe =
+                    read_record(&probe_path, Some("absence_probe"), &probe_identity)?;
                 let mut action = absence_action(
                     &fresh_presence,
                     locked_probe.as_ref(),
@@ -1996,7 +1895,7 @@ pub fn sweep(
             // The preview runs the checks apply runs on the tree itself, so it
             // says keep where apply would keep.
             let mut kept = Vec::new();
-            let binding_path = binding_dir.join("binding.json");
+            let binding_path = binding_dir.join(BINDING_FILE);
             let binding = RecordIdentity::from_state_path(root, &binding_path, "binding")
                 .and_then(|identity| read_record(&binding_path, Some("binding"), &identity));
             let prunable = match binding {
@@ -2015,7 +1914,7 @@ pub fn sweep(
             details.push(json!({"kind":"binding_retention","binding_id":binding_id_for_detail,"action":action}));
             continue;
         }
-        let binding_path = binding_dir.join("binding.json");
+        let binding_path = binding_dir.join(BINDING_FILE);
         let identity = match RecordIdentity::from_state_path(root, &binding_path, "binding") {
             Ok(identity) => identity,
             Err(error) => {
@@ -2038,7 +1937,6 @@ pub fn sweep(
                 &launch_lock(root, &address, launch_id),
                 &claim_lock(root, &address),
             ],
-            &binding_path,
             "binding",
             &identity,
             |locked_binding| {
@@ -2082,11 +1980,7 @@ pub fn sweep(
                         }
                         Some(false) => {}
                     }
-                    let end = read_record(
-                        &binding_dir.join("end.json"),
-                        Some("binding_end"),
-                        &RecordIdentity::binding(&address, launch_id, binding_id),
-                    )?;
+                    let end = read_record_at(root, "binding_end", &identity)?;
                     let end_is_current = end
                         .as_ref()
                         .is_some_and(|end| ends_binding(end, &locked_binding));

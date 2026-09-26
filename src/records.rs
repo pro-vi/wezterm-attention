@@ -70,9 +70,7 @@ impl RecordIdentity {
     }
 
     pub fn review(address: &PaneAddress, owner_key: &str) -> Self {
-        let mut identity = Self::pane(address);
-        identity.key = Some(("owner_key".to_owned(), owner_key.to_owned()));
-        identity
+        Self::pane(address).keyed(REVIEW_KEY, owner_key)
     }
 
     pub fn agent(
@@ -81,9 +79,7 @@ impl RecordIdentity {
         binding_id: &str,
         agent_key: &str,
     ) -> Self {
-        let mut identity = Self::binding(address, launch_id, binding_id);
-        identity.key = Some(("agent_key".to_owned(), agent_key.to_owned()));
-        identity
+        Self::binding(address, launch_id, binding_id).keyed(AGENT_KEY, agent_key)
     }
 
     pub fn from_record(value: &Value) -> Self {
@@ -113,7 +109,7 @@ impl RecordIdentity {
                     .and_then(Value::as_str)
             })
             .map(str::to_owned);
-        let key = ["owner_key", "agent_key"].into_iter().find_map(|field| {
+        let key = [REVIEW_KEY, AGENT_KEY].into_iter().find_map(|field| {
             value
                 .get(field)
                 .and_then(Value::as_str)
@@ -131,6 +127,10 @@ impl RecordIdentity {
         }
     }
 
+    /// The identity the path of a record of `kind` fixes, when the path is
+    /// where [`FIXED_RECORDS`] or [`KEYED_RECORDS`] keep that kind, and an
+    /// error otherwise. This is the check that a record's place and its
+    /// contents agree, so any path it cannot place is refused.
     pub fn from_state_path(root: &Path, path: &Path, kind: &str) -> Result<Self> {
         let parts: Vec<_> = path
             .strip_prefix(root)
@@ -154,112 +154,115 @@ impl RecordIdentity {
                 Err(invalid())
             };
         }
-        if parts.len() < 4 || parts[0] != Some("v2") || parts[1] != Some("realms") {
-            return Err(invalid());
-        }
-        let realm = parts[2].ok_or_else(invalid)?;
-        if kind == "realm" {
-            return if parts.len() == 4 && parts[3] == Some("realm.json") {
-                Ok(Self::realm(realm))
-            } else {
-                Err(invalid())
-            };
-        }
-        if kind == "incarnation" {
-            return if parts.len() == 6
-                && parts[3] == Some("incarnations")
-                && parts[5] == Some("incarnation.json")
-            {
-                Ok(Self::incarnation(realm, parts[4].ok_or_else(invalid)?))
-            } else {
-                Err(invalid())
-            };
-        }
-        if parts.len() < 8 || parts[3] != Some("incarnations") || parts[5] != Some("panes") {
-            return Err(invalid());
-        }
-        let address = PaneAddress {
-            realm_id: realm.to_owned(),
-            incarnation_id: parts[4].ok_or_else(invalid)?.to_owned(),
-            pane_id: parts[6].ok_or_else(invalid)?.to_owned(),
-        };
-        match kind {
-            "claim" if parts.len() == 8 && parts[7] == Some("claim.json") => {
-                return Ok(Self::pane(&address));
-            }
-            "absence_probe" if parts.len() == 8 && parts[7] == Some("absence-probe.json") => {
-                return Ok(Self::pane(&address));
-            }
-            "review"
-                if parts.len() == 9
-                    && parts[7] == Some("reviews")
-                    && path.extension().and_then(|value| value.to_str()) == Some("json") =>
-            {
-                return Ok(Self::review(
-                    &address,
-                    path.file_stem()
-                        .and_then(|value| value.to_str())
-                        .ok_or_else(invalid)?,
-                ));
-            }
-            _ => {}
-        }
-        if parts.len() < 10 || parts[7] != Some("launches") {
-            return Err(invalid());
-        }
-        let launch_id = parts[8].ok_or_else(invalid)?;
-        if kind == "current_binding"
-            && parts.len() == 10
-            && parts[9] == Some("current-binding.json")
-        {
-            return Ok(Self::launch(&address, launch_id));
-        }
-        if matches!(kind, "activity" | "acknowledgement")
-            && parts.len() == 10
-            && parts[9]
-                == Some(if kind == "activity" {
-                    "activity.json"
-                } else {
-                    "ack.json"
-                })
-        {
-            return Ok(Self::launch(&address, launch_id));
-        }
-        if parts.len() < 12 || parts[9] != Some("bindings") {
-            return Err(invalid());
-        }
-        let binding_id = parts[10].ok_or_else(invalid)?;
-        if kind == "subagent_presence" {
-            if parts.len() != 13
-                || parts[11] != Some("agents")
+        let (file, directories) = parts.split_last().ok_or_else(invalid)?;
+        let (depth, identity, collection) = place(directories).ok_or_else(invalid)?;
+        if let Some((_, name, parent, field)) = keyed_record(kind) {
+            if collection != Some(name)
+                || depth != parent
                 || path.extension().and_then(|value| value.to_str()) != Some("json")
             {
                 return Err(invalid());
             }
-            return Ok(Self::agent(
-                &address,
-                launch_id,
-                binding_id,
-                path.file_stem()
-                    .and_then(|value| value.to_str())
-                    .ok_or_else(invalid)?,
-            ));
+            let key = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .ok_or_else(invalid)?;
+            return Ok(identity.keyed(field, key));
         }
-        let expected_name = match kind {
-            "binding" => "binding.json",
-            "lifecycle_snapshot" => "lifecycle.json",
-            "activity" => "activity.json",
-            "activity_clear" => "activity-clear.json",
-            "binding_end" => "end.json",
-            "acknowledgement" => "ack.json",
-            "subagent_clear" => "agents-clear.json",
-            "subagent_retention_floor" => "agents-floor.json",
-            _ => return Err(invalid()),
-        };
-        if parts.len() != 12 || parts[11] != Some(expected_name) {
+        let (_, name, depths) = fixed_record(kind).ok_or_else(invalid)?;
+        if collection.is_some() || !depths.contains(&depth) || *file != Some(name) {
             return Err(invalid());
         }
-        Ok(Self::binding(&address, launch_id, binding_id))
+        Ok(identity)
+    }
+
+    /// What the state file at `path` holds, by its name and the directory it
+    /// sits in: its kind, and the identity its place fixes, or why its place
+    /// is wrong for that kind. `None` when the layout names no kind for it.
+    pub fn locate(root: &Path, path: &Path) -> Option<(&'static str, Result<Self>)> {
+        let kind = kind_of(path)?;
+        Some((kind, Self::from_state_path(root, path, kind)))
+    }
+
+    /// Where the record of `kind` with this identity is kept below `root`.
+    /// An identity that does not name every field the kind's place needs,
+    /// or names more, places nothing.
+    pub fn path(&self, root: &Path, kind: &str) -> Result<PathBuf> {
+        let unplaced = || {
+            AttentionError::new(
+                "record_invalid",
+                format!("a {kind} record has no place for this identity"),
+            )
+        };
+        if let Some((_, name, depth, field)) = keyed_record(kind) {
+            let key = self
+                .key
+                .as_ref()
+                .filter(|(named, _)| named == field)
+                .map(|(_, key)| key)
+                .ok_or_else(unplaced)?;
+            if self.depth() != Some(depth) {
+                return Err(unplaced());
+            }
+            return Ok(self
+                .directory(root)
+                .ok_or_else(unplaced)?
+                .join(name)
+                .join(format!("{key}.json")));
+        }
+        let (_, name, depths) = fixed_record(kind).ok_or_else(unplaced)?;
+        if self.key.is_some() || !self.depth().is_some_and(|depth| depths.contains(&depth)) {
+            return Err(unplaced());
+        }
+        Ok(self.directory(root).ok_or_else(unplaced)?.join(name))
+    }
+
+    /// How deep the directory this identity names is.
+    fn depth(&self) -> Option<Depth> {
+        match (
+            &self.address,
+            &self.launch_id,
+            &self.binding_id,
+            &self.realm_id,
+            &self.incarnation_id,
+        ) {
+            (Some(_), Some(_), Some(_), None, None) => Some(Depth::Binding),
+            (Some(_), Some(_), None, None, None) => Some(Depth::Launch),
+            (Some(_), None, None, None, None) => Some(Depth::Pane),
+            (None, None, None, Some(_), Some(_)) => Some(Depth::Incarnation),
+            (None, None, None, Some(_), None) => Some(Depth::Realm),
+            _ => None,
+        }
+    }
+
+    /// The directory this identity names below `root`.
+    fn directory(&self, root: &Path) -> Option<PathBuf> {
+        Some(match self.depth()? {
+            Depth::Realm => realm_path(root, self.realm_id.as_deref()?),
+            Depth::Incarnation => incarnation_path(
+                root,
+                self.realm_id.as_deref()?,
+                self.incarnation_id.as_deref()?,
+            ),
+            Depth::Pane => pane_path(root, self.address.as_ref()?),
+            Depth::Launch => launch_path(root, self.address.as_ref()?, self.launch_id.as_deref()?),
+            Depth::Binding => binding_dir(
+                root,
+                self.address.as_ref()?,
+                self.launch_id.as_deref()?,
+                self.binding_id.as_deref()?,
+            ),
+        })
+    }
+
+    fn keyed(mut self, field: &str, key: &str) -> Self {
+        self.key = Some((field.to_owned(), key.to_owned()));
+        self
+    }
+
+    /// The pane this identity names, if it names one.
+    pub fn address(&self) -> Option<&PaneAddress> {
+        self.address.as_ref()
     }
 
     pub fn validate(&self, record: &Value) -> Result<()> {
@@ -328,6 +331,161 @@ impl RecordIdentity {
             return false;
         }
         true
+    }
+}
+
+/// How far down a pane tree a directory is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Depth {
+    Realm,
+    Incarnation,
+    Pane,
+    Launch,
+    Binding,
+}
+
+pub(crate) const BINDING_FILE: &str = "binding.json";
+const REVIEWS: &str = "reviews";
+const AGENTS: &str = "agents";
+const REVIEW_KEY: &str = "owner_key";
+const AGENT_KEY: &str = "agent_key";
+
+/// The records kept one to a directory: each kind, the file that holds it,
+/// and the depths whose directory may hold one. Activity and its
+/// acknowledgement belong to a binding, or to the launch while it has none.
+const FIXED_RECORDS: [(&str, &str, &[Depth]); 13] = [
+    ("realm", "realm.json", &[Depth::Realm]),
+    ("incarnation", "incarnation.json", &[Depth::Incarnation]),
+    ("claim", "claim.json", &[Depth::Pane]),
+    ("absence_probe", "absence-probe.json", &[Depth::Pane]),
+    ("current_binding", "current-binding.json", &[Depth::Launch]),
+    (
+        "activity",
+        "activity.json",
+        &[Depth::Launch, Depth::Binding],
+    ),
+    (
+        "acknowledgement",
+        "ack.json",
+        &[Depth::Launch, Depth::Binding],
+    ),
+    ("binding", BINDING_FILE, &[Depth::Binding]),
+    ("lifecycle_snapshot", "lifecycle.json", &[Depth::Binding]),
+    ("activity_clear", "activity-clear.json", &[Depth::Binding]),
+    ("binding_end", "end.json", &[Depth::Binding]),
+    ("subagent_clear", "agents-clear.json", &[Depth::Binding]),
+    (
+        "subagent_retention_floor",
+        "agents-floor.json",
+        &[Depth::Binding],
+    ),
+];
+
+/// The records kept one per owner: each kind, the directory that holds them,
+/// the depth of that directory's parent, and the field whose value names
+/// each file `<value>.json`.
+const KEYED_RECORDS: [(&str, &str, Depth, &str); 2] = [
+    ("review", REVIEWS, Depth::Pane, REVIEW_KEY),
+    ("subagent_presence", AGENTS, Depth::Binding, AGENT_KEY),
+];
+
+fn fixed_record(kind: &str) -> Option<(&'static str, &'static str, &'static [Depth])> {
+    FIXED_RECORDS
+        .into_iter()
+        .find(|(fixed, _, _)| *fixed == kind)
+}
+
+/// The kind of record a binding's directory keeps in the file `name`.
+pub(crate) fn binding_record_kind(name: &str) -> Option<&'static str> {
+    FIXED_RECORDS
+        .into_iter()
+        .find(|(_, file, depths)| *file == name && depths.contains(&Depth::Binding))
+        .map(|(kind, _, _)| kind)
+}
+
+fn keyed_record(kind: &str) -> Option<(&'static str, &'static str, Depth, &'static str)> {
+    KEYED_RECORDS
+        .into_iter()
+        .find(|(keyed, _, _, _)| *keyed == kind)
+}
+
+/// The kind of record a state file holds, as its name and the directory it
+/// sits in say, or `None` when the layout names no kind for it. A file in a
+/// keyed collection's directory is that collection's, whatever its name.
+fn kind_of(path: &Path) -> Option<&'static str> {
+    let name = |up: usize| {
+        path.ancestors()
+            .nth(up)
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+    };
+    if name(2) == Some("sessions") {
+        return Some("session_binding");
+    }
+    if name(1) == Some("sessions") && name(0) == Some("complete.json") {
+        return Some("session_index");
+    }
+    if let Some((kind, _, _, _)) = KEYED_RECORDS
+        .into_iter()
+        .find(|(_, directory, _, _)| name(1) == Some(directory))
+    {
+        return Some(kind);
+    }
+    let file = name(0)?;
+    FIXED_RECORDS
+        .into_iter()
+        .find(|(_, fixed, _)| *fixed == file)
+        .map(|(kind, _, _)| kind)
+}
+
+/// What the directories of a state path below the root name: the depth of
+/// the innermost, the identity that depth fixes, and the keyed collection
+/// it is, if it is one. `None` for any other shape.
+fn place<'a>(directories: &[Option<&'a str>]) -> Option<(Depth, RecordIdentity, Option<&'a str>)> {
+    let [Some("v2"), Some("realms"), Some(realm), rest @ ..] = directories else {
+        return None;
+    };
+    let [Some("incarnations"), Some(incarnation), rest @ ..] = rest else {
+        return rest
+            .is_empty()
+            .then(|| (Depth::Realm, RecordIdentity::realm(realm), None));
+    };
+    let [Some("panes"), Some(pane), rest @ ..] = rest else {
+        return rest.is_empty().then(|| {
+            (
+                Depth::Incarnation,
+                RecordIdentity::incarnation(realm, incarnation),
+                None,
+            )
+        });
+    };
+    let address = PaneAddress {
+        realm_id: (*realm).to_owned(),
+        incarnation_id: (*incarnation).to_owned(),
+        pane_id: (*pane).to_owned(),
+    };
+    let pane = RecordIdentity::pane(&address);
+    let [Some("launches"), Some(launch), rest @ ..] = rest else {
+        return match rest {
+            [] => Some((Depth::Pane, pane, None)),
+            [Some(REVIEWS)] => Some((Depth::Pane, pane, Some(REVIEWS))),
+            _ => None,
+        };
+    };
+    let [Some("bindings"), Some(binding), rest @ ..] = rest else {
+        return rest.is_empty().then(|| {
+            (
+                Depth::Launch,
+                RecordIdentity::launch(&address, launch),
+                None,
+            )
+        });
+    };
+    let binding = RecordIdentity::binding(&address, launch, binding);
+    match rest {
+        [] => Some((Depth::Binding, binding, None)),
+        [Some(AGENTS)] => Some((Depth::Binding, binding, Some(AGENTS))),
+        _ => None,
     }
 }
 
@@ -467,9 +625,7 @@ pub fn launch_lock(root: &Path, address: &PaneAddress, launch_id: &str) -> PathB
 /// The lock a writer of one owner's review holds, beside the reviews. The
 /// owner key is the SHA-256 of the review's source in lowercase hex.
 pub fn review_lock(root: &Path, address: &PaneAddress, owner_key: &str) -> PathBuf {
-    pane_path(root, address)
-        .join("reviews")
-        .join(format!(".{owner_key}.lock"))
+    reviews_dir(root, address).join(format!(".{owner_key}.lock"))
 }
 
 const CLAIM_LOCK: &str = ".claim.lock";
@@ -479,11 +635,23 @@ const LAUNCH_LOCK: &str = ".lock";
 /// `pane`, is named as one of the locks above, which a writer leaves in place.
 pub(crate) fn lock_file(pane: &Path, directory: &Path, name: &str) -> bool {
     matches!(name, CLAIM_LOCK | LAUNCH_LOCK)
-        || (directory == pane.join("reviews")
+        || (directory == pane.join(REVIEWS)
             && name
                 .strip_prefix('.')
                 .and_then(|name| name.strip_suffix(".lock"))
                 .is_some_and(crate::protocol::hex64_text))
+}
+
+/// The directory that holds one binding's records.
+pub fn binding_dir(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+) -> PathBuf {
+    launch_path(root, address, launch_id)
+        .join("bindings")
+        .join(binding_id)
 }
 
 /// Where a binding record is kept. Below an empty root it is the path the
@@ -494,10 +662,22 @@ pub fn binding_path(
     launch_id: &str,
     binding_id: &str,
 ) -> PathBuf {
-    launch_path(root, address, launch_id)
-        .join("bindings")
-        .join(binding_id)
-        .join("binding.json")
+    binding_dir(root, address, launch_id, binding_id).join(BINDING_FILE)
+}
+
+/// The directory that holds a pane's reviews, one per owner.
+pub fn reviews_dir(root: &Path, address: &PaneAddress) -> PathBuf {
+    pane_path(root, address).join(REVIEWS)
+}
+
+/// The directory that holds a binding's sub-agent presences, one per agent.
+pub fn agents_dir(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+) -> PathBuf {
+    binding_dir(root, address, launch_id, binding_id).join(AGENTS)
 }
 
 /// The session index: `v2/sessions/<session key>/<entry key>.json` names
@@ -695,6 +875,21 @@ pub fn read_record(
         RecordRead::Unavailable(error)
         | RecordRead::Invalid(error)
         | RecordRead::Unsupported(error) => Err(error),
+    }
+}
+
+/// [`read_record`] of the record of `kind` that `identity` names, where the
+/// layout keeps it below `root`.
+pub fn read_record_at(root: &Path, kind: &str, identity: &RecordIdentity) -> Result<Option<Value>> {
+    read_record(&identity.path(root, kind)?, Some(kind), identity)
+}
+
+/// [`read_record_typed`] of the record of `kind` that `identity` names, where
+/// the layout keeps it below `root`.
+pub fn read_record_typed_at(root: &Path, kind: &str, identity: &RecordIdentity) -> RecordRead {
+    match identity.path(root, kind) {
+        Ok(path) => read_record_typed(&path, Some(kind), identity),
+        Err(error) => RecordRead::Invalid(error),
     }
 }
 
@@ -1070,13 +1265,12 @@ fn acquire(path: &Path, timeout: Duration) -> Result<HeldLock> {
 ///
 /// The locks are taken in the order `locks` lists them, each waiting at most
 /// [`LOCK_TIMEOUT`], and released in the reverse order. Under all of them the
-/// record at `read_path` is read, `decide` plans from it, the plan is
-/// applied, and `after_apply` runs on the plan's result before any lock is
-/// released.
+/// record of `kind` that `identity` names is read, `decide` plans from it,
+/// the plan is applied, and `after_apply` runs on the plan's result before
+/// any lock is released.
 pub fn commit<T, P>(
     root: &Path,
     locks: &[&Path],
-    read_path: &Path,
     kind: &str,
     identity: &RecordIdentity,
     decide: impl FnOnce(Option<Value>) -> Result<CommitPlan<T>>,
@@ -1086,7 +1280,7 @@ pub fn commit<T, P>(
     for lock in locks {
         held.0.push(acquire(lock, LOCK_TIMEOUT)?);
     }
-    let current = read_record(read_path, Some(kind), identity)?;
+    let current = read_record_at(root, kind, identity)?;
     let plan = decide(current)?;
     apply_plan(root, &plan)?;
     let post_result = after_apply(&plan.result)?;
@@ -1124,7 +1318,102 @@ mod tests {
 
     use std::collections::BTreeMap;
 
-    use super::{PreparedRecordWrite, ends_binding, state_root, sync_parent_directory_with};
+    use super::{
+        PreparedRecordWrite, RecordIdentity, ends_binding, state_root, sync_parent_directory_with,
+    };
+
+    /// A record kind and a path below the state root.
+    type Placement = (&'static str, String);
+
+    /// Paths below a state root: one of every record kind where the layout
+    /// keeps it, and the same names one level up or down, or out of their
+    /// collection, where it does not.
+    fn placements() -> (Vec<Placement>, Vec<Placement>) {
+        let realm = format!("v2/realms/{}", "a".repeat(64));
+        let incarnation = format!("{realm}/incarnations/{}", "b".repeat(64));
+        let pane = format!("{incarnation}/panes/7");
+        let launch = format!("{pane}/launches/00000000-0000-4000-8000-000000000001");
+        let binding = format!("{launch}/bindings/{}", "c".repeat(64));
+        let key = "d".repeat(64);
+        let placed = vec![
+            ("realm", format!("{realm}/realm.json")),
+            ("incarnation", format!("{incarnation}/incarnation.json")),
+            ("claim", format!("{pane}/claim.json")),
+            ("absence_probe", format!("{pane}/absence-probe.json")),
+            ("review", format!("{pane}/reviews/{key}.json")),
+            ("current_binding", format!("{launch}/current-binding.json")),
+            ("activity", format!("{launch}/activity.json")),
+            ("activity", format!("{binding}/activity.json")),
+            ("acknowledgement", format!("{launch}/ack.json")),
+            ("acknowledgement", format!("{binding}/ack.json")),
+            ("binding", format!("{binding}/binding.json")),
+            ("lifecycle_snapshot", format!("{binding}/lifecycle.json")),
+            ("activity_clear", format!("{binding}/activity-clear.json")),
+            ("binding_end", format!("{binding}/end.json")),
+            ("subagent_clear", format!("{binding}/agents-clear.json")),
+            (
+                "subagent_retention_floor",
+                format!("{binding}/agents-floor.json"),
+            ),
+            ("subagent_presence", format!("{binding}/agents/{key}.json")),
+        ];
+        let misplaced = vec![
+            ("realm", format!("{incarnation}/realm.json")),
+            ("incarnation", format!("{pane}/incarnation.json")),
+            ("claim", format!("{incarnation}/claim.json")),
+            ("claim", format!("{launch}/claim.json")),
+            ("absence_probe", format!("{binding}/absence-probe.json")),
+            ("review", format!("{pane}/{key}.json")),
+            ("review", format!("{launch}/reviews/{key}.json")),
+            ("review", format!("{pane}/reviews/{key}.txt")),
+            ("current_binding", format!("{pane}/current-binding.json")),
+            ("current_binding", format!("{binding}/current-binding.json")),
+            ("activity", format!("{pane}/activity.json")),
+            ("activity", format!("{binding}/agents/activity.json")),
+            ("acknowledgement", format!("{pane}/ack.json")),
+            ("binding", format!("{launch}/binding.json")),
+            ("binding", format!("{binding}/end.json")),
+            ("binding", format!("{binding}/agents/binding.json")),
+            ("binding_end", format!("{launch}/end.json")),
+            ("subagent_clear", format!("{launch}/agents-clear.json")),
+            ("subagent_presence", format!("{binding}/{key}.json")),
+            ("subagent_presence", format!("{launch}/agents/{key}.json")),
+            ("claim", "v2/sessions/claim.json".to_owned()),
+            ("session_index", format!("{pane}/complete.json")),
+            ("no_such_kind", format!("{pane}/claim.json")),
+        ];
+        (placed, misplaced)
+    }
+
+    #[test]
+    fn a_record_path_is_accepted_only_where_its_kind_is_kept() {
+        let root = Path::new("/state");
+        let (placed, misplaced) = placements();
+        for (kind, path) in placed {
+            assert!(
+                RecordIdentity::from_state_path(root, &root.join(&path), kind).is_ok(),
+                "{kind} at {path}"
+            );
+        }
+        for (kind, path) in misplaced {
+            assert!(
+                RecordIdentity::from_state_path(root, &root.join(&path), kind).is_err(),
+                "{kind} at {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_record_identity_places_its_record_where_its_path_is_read() {
+        let root = Path::new("/state");
+        for (kind, path) in placements().0 {
+            let path = root.join(path);
+            let (located, identity) = RecordIdentity::locate(root, &path).expect("a known kind");
+            assert_eq!(located, kind, "{}", path.display());
+            let identity = identity.expect("placed where its kind is kept");
+            assert_eq!(identity.path(root, kind).expect("a place"), path);
+        }
+    }
 
     #[test]
     fn an_end_ends_the_binding_it_names_or_one_it_was_observed_after() {

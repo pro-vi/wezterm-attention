@@ -14,9 +14,8 @@ use uuid::Uuid;
 use crate::identity::{PaneAddress, pane_address};
 use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, manifest};
 use crate::records::{
-    CommitPlan, LOCK_TIMEOUT, RecordIdentity, Replacement, claim_lock, commit, incarnation_path,
-    mkdir_private, pane_path, read_record, realm_path, session_index_marker, session_index_path,
-    state_root,
+    CommitPlan, LOCK_TIMEOUT, RecordIdentity, Replacement, claim_lock, commit, mkdir_private,
+    pane_path, read_record_at, reviews_dir, session_index_marker, session_index_path, state_root,
 };
 use crate::wezterm::{
     ControllingTerminal, ProcessFacts, ProcessInspector, ProcessRead, ProcessStart, RuntimePorts,
@@ -92,7 +91,6 @@ fn manifests(
 struct ClaimWrite {
     root: std::path::PathBuf,
     address: PaneAddress,
-    pane: std::path::PathBuf,
     realm_record: Value,
     incarnation_record: Value,
     /// A store this claim starts holds no binding, so its session index is
@@ -110,19 +108,18 @@ impl ClaimWrite {
         Ok(Self {
             root: root.to_path_buf(),
             address: address.clone(),
-            pane: pane_path(root, address),
             realm_record,
             incarnation_record,
             new_store: !root.join("v2").exists(),
         })
     }
 
-    fn claim_path(&self) -> std::path::PathBuf {
-        self.pane.join("claim.json")
-    }
-
     fn lock_path(&self) -> std::path::PathBuf {
         claim_lock(&self.root, &self.address)
+    }
+
+    fn identity(&self) -> RecordIdentity {
+        RecordIdentity::pane(&self.address)
     }
 
     /// Refuse a stored claim whose interior address is not this pane's.
@@ -141,22 +138,19 @@ impl ClaimWrite {
     /// The plan that writes `claim`, or with `None` keeps the stored one, and
     /// reports `result`.
     fn plan<T>(&self, result: T, claim: Option<&Value>) -> Result<CommitPlan<T>> {
+        let (realm_id, incarnation_id) = (&self.address.realm_id, &self.address.incarnation_id);
         let mut replacements = match claim {
             Some(claim) => vec![
                 Replacement::if_different(
-                    realm_path(&self.root, &self.address.realm_id).join("realm.json"),
+                    RecordIdentity::realm(realm_id).path(&self.root, "realm")?,
                     self.realm_record.clone(),
                 ),
                 Replacement::if_different(
-                    incarnation_path(
-                        &self.root,
-                        &self.address.realm_id,
-                        &self.address.incarnation_id,
-                    )
-                    .join("incarnation.json"),
+                    RecordIdentity::incarnation(realm_id, incarnation_id)
+                        .path(&self.root, "incarnation")?,
                     self.incarnation_record.clone(),
                 ),
-                Replacement::always(self.claim_path(), claim.clone()),
+                Replacement::always(self.identity().path(&self.root, "claim")?, claim.clone()),
             ],
             None => Vec::new(),
         };
@@ -169,8 +163,8 @@ impl ClaimWrite {
         Ok(CommitPlan {
             result,
             replacements,
-            removals: vec![self.pane.join("absence-probe.json")],
-            private_dirs: vec![self.pane.join("reviews")],
+            removals: vec![self.identity().path(&self.root, "absence_probe")?],
+            private_dirs: vec![reviews_dir(&self.root, &self.address)],
         })
     }
 }
@@ -264,9 +258,8 @@ pub fn claim_launch_at_tty(
     let (mut selected, published) = commit(
         &root,
         &[&write.lock_path()],
-        &write.claim_path(),
         "claim",
-        &RecordIdentity::pane(&address),
+        &write.identity(),
         |existing| {
             let (locked_address, _) = pane_address(env)?;
             if locked_address != address {
@@ -389,15 +382,8 @@ fn with_pane_claim<T>(
     address: &PaneAddress,
     publish: impl FnOnce(Option<Value>) -> Result<T>,
 ) -> Result<T> {
-    let pane = pane_path(root, address);
-    let read = || {
-        read_record(
-            &pane.join("claim.json"),
-            Some("claim"),
-            &RecordIdentity::pane(address),
-        )
-    };
-    if !pane.is_dir() {
+    let read = || read_record_at(root, "claim", &RecordIdentity::pane(address));
+    if !pane_path(root, address).is_dir() {
         return publish(None);
     }
     crate::records::with_lock(
@@ -953,9 +939,8 @@ fn claim_for_host(
     let (selected, published) = commit(
         &root,
         &[&write.lock_path()],
-        &write.claim_path(),
         "claim",
-        &RecordIdentity::pane(address),
+        &write.identity(),
         |existing| {
             let foreground = proof.confirm(env, ports.processes, ports.tty, address)?;
             if let Some(current) = &existing {

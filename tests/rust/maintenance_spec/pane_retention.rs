@@ -707,6 +707,36 @@ fn a_pane_where_reviews_were_marked_and_cleared_is_removed_once_old() {
     assert!(!pane_dir(&setup).exists());
 }
 
+/// A review is a record sweep recognises, kept in the pane's own reviews
+/// directory, so one still standing goes with the old pane it flags rather
+/// than keeping its tree.
+#[test]
+fn a_pane_still_flagged_for_review_is_removed_once_old() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    wezterm_attention::lifecycle::apply_mark_review(&setup.env, "build").expect("mark review");
+    let review = pane_dir(&setup).join("reviews").join(format!(
+        "{}.json",
+        wezterm_attention::protocol::sha256_hex(b"build")
+    ));
+    assert!(review.exists(), "the review stands");
+    end_long_ago(&setup);
+    setup.panes.set(Vec::new());
+    setup.processes.set(Presence::Absent);
+    setup.clock.set_monotonic(1_000);
+    setup.run_sweep(true, Some(OP_1));
+    setup
+        .clock
+        .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
+    let (result, diagnostics) = setup.run_sweep(true, Some(OP_2));
+    assert_eq!(
+        actions(&result.details, "pane_retention"),
+        [&json!("prune")],
+        "{diagnostics:?}"
+    );
+    assert!(!pane_dir(&setup).exists());
+}
+
 /// Only the name the review writer uses is its lock. A lock-like file of any
 /// other name, or in another directory, is unknown state and keeps the tree.
 #[test]
