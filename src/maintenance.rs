@@ -19,10 +19,11 @@ use crate::query::{
     recorded_socket,
 };
 use crate::records::{
-    BINDING_FILE, CommitPlan, RecordIdentity, Replacement, agents_dir, atomic_replace_if_different,
-    binding_record_kind, binding_session_entry, claim_lock, commit, directory_confined,
-    ends_binding, incarnation_path, launch_lock, lock_file, pane_path, read_record, read_record_at,
-    removal_confined, remove_file_durable, session_index_marker, session_index_path,
+    BINDING_FILE, BindingState, CommitPlan, FileRecords, RecordIdentity, RecordRead, Replacement,
+    agents_dir, atomic_replace_if_different, binding_record_kind, binding_session_entry,
+    claim_lock, commit, directory_confined, ends_binding, incarnation_path, launch_lock, lock_file,
+    pane_path, read_record, read_record_at, removal_confined, remove_file_durable,
+    session_index_marker, session_index_path,
 };
 use crate::wezterm::{Clock, PaneLister, Presence, ProcessInspector, ProcessProbe};
 
@@ -95,31 +96,42 @@ fn binding_files(root: &Path, diagnostics: &mut Vec<Diagnostic>) -> Vec<PathBuf>
     files
 }
 
+/// A binding's state as sweep reads it, from the files themselves.
+fn binding_state(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+) -> BindingState {
+    BindingState::read(&FileRecords, root, address, launch_id, binding_id)
+}
+
+/// Whether a binding is its pane's current one, as sweep takes it from the
+/// binding's `state`: `None` when the pane has no claim, and an error, named
+/// by its file, when the claim or the pointer could not be read, since
+/// sweep decides nothing on a binding it cannot place.
 fn binding_selection(
     root: &Path,
     address: &PaneAddress,
     launch_id: &str,
     binding_id: &str,
+    state: &BindingState,
 ) -> Result<Option<bool>> {
-    let read = |kind: &str, identity: &RecordIdentity| {
+    let named = |read: &RecordRead, kind: &str, identity: RecordIdentity| {
         let path = identity.path(root, kind)?;
-        read_record(&path, Some(kind), identity).map_err(|error| naming_record(root, &path, error))
+        read.clone()
+            .into_result()
+            .map_err(|error| naming_record(root, &path, error))
     };
-    let Some(claim) = read("claim", &RecordIdentity::pane(address))? else {
+    if named(&state.claim, "claim", RecordIdentity::pane(address))?.is_none() {
         return Ok(None);
-    };
-    let pointer = read(
+    }
+    named(
+        &state.pointer,
         "current_binding",
-        &RecordIdentity::launch(address, launch_id),
+        RecordIdentity::launch(address, launch_id),
     )?;
-    Ok(Some(
-        claim.get("launch_id").and_then(Value::as_str) == Some(launch_id)
-            && pointer
-                .as_ref()
-                .and_then(|pointer| pointer.get("binding_id"))
-                .and_then(Value::as_str)
-                == Some(binding_id),
-    ))
+    Ok(Some(state.current(launch_id, binding_id)))
 }
 
 fn audit_state(root: &Path) -> (Vec<Value>, Vec<Diagnostic>) {
@@ -1293,10 +1305,11 @@ fn pane_retention(
                     ..CommitPlan::reporting((action.to_owned(), diagnostics))
                 })
             };
-            let locked_end = read_record_at(root, "binding_end", &binding_identity)?;
+            let state = binding_state(root, address, launch_id, binding_id);
+            let locked_end = state.end.clone().into_result()?;
             if locked_binding.as_ref() != Some(binding)
                 || locked_end.as_ref() != Some(end)
-                || binding_selection(root, address, launch_id, binding_id)? != Some(true)
+                || binding_selection(root, address, launch_id, binding_id, &state)? != Some(true)
             {
                 return plan(
                     "changed",
@@ -1551,7 +1564,8 @@ pub fn sweep(
         let launch_id = binding["launch_id"].as_str().unwrap_or("");
         let binding_id = binding["binding_id"].as_str().unwrap_or("");
         let binding_dir = binding_path.parent().expect("binding parent");
-        let current = match binding_selection(root, &address, launch_id, binding_id) {
+        let state = binding_state(root, &address, launch_id, binding_id);
+        let current = match binding_selection(root, &address, launch_id, binding_id, &state) {
             Ok(Some(current)) => current,
             Ok(None) => {
                 details.push(json!({"kind":"binding_selection","binding_id":binding_id,"action":"unavailable"}));
@@ -1566,7 +1580,7 @@ pub fn sweep(
         };
         let binding_identity = RecordIdentity::binding(&address, launch_id, binding_id);
         let end_path = binding_identity.path(root, "binding_end")?;
-        let end = match read_record(&end_path, Some("binding_end"), &binding_identity) {
+        let end = match state.end.clone().into_result() {
             Ok(end) => end,
             Err(error) => {
                 diagnostics.push(error.diagnostic);
@@ -1574,7 +1588,7 @@ pub fn sweep(
                 continue;
             }
         };
-        let ended_now = end.as_ref().is_some_and(|end| ends_binding(end, &binding));
+        let ended_now = state.ended(&binding);
         if let Some(end) = &end
             && ended_now
             && !current
@@ -1608,8 +1622,13 @@ pub fn sweep(
                     &binding_identity,
                     |locked_binding| {
                         if locked_binding.as_ref() != Some(&binding)
-                            || binding_selection(root, &address, launch_id, binding_id)?
-                                != Some(true)
+                            || binding_selection(
+                                root,
+                                &address,
+                                launch_id,
+                                binding_id,
+                                &binding_state(root, &address, launch_id, binding_id),
+                            )? != Some(true)
                         {
                             return Ok(CommitPlan::reporting(CompactionOutcome {
                                 action: "changed".to_owned(),
@@ -1793,7 +1812,13 @@ pub fn sweep(
             &binding_identity,
             |locked_binding| {
                 if locked_binding.as_ref() != Some(&binding)
-                    || binding_selection(root, &address, launch_id, binding_id)? != Some(true)
+                    || binding_selection(
+                        root,
+                        &address,
+                        launch_id,
+                        binding_id,
+                        &binding_state(root, &address, launch_id, binding_id),
+                    )? != Some(true)
                 {
                     return Ok(CommitPlan::reporting(AbsenceOutcome {
                         action: "changed".to_owned(),
@@ -1957,7 +1982,8 @@ pub fn sweep(
                         "binding changed before retention apply",
                     ));
                 } else {
-                    match binding_selection(root, &address, launch_id, binding_id)? {
+                    let state = binding_state(root, &address, launch_id, binding_id);
+                    match binding_selection(root, &address, launch_id, binding_id, &state)? {
                         None => {
                             local_diagnostics.push(diagnostic(
                                 "record_invalid",
@@ -1980,10 +2006,8 @@ pub fn sweep(
                         }
                         Some(false) => {}
                     }
-                    let end = read_record_at(root, "binding_end", &identity)?;
-                    let end_is_current = end
-                        .as_ref()
-                        .is_some_and(|end| ends_binding(end, &locked_binding));
+                    let end = state.end.clone().into_result()?;
+                    let end_is_current = state.ended(&locked_binding);
                     let still_old = end
                         .as_ref()
                         .map(|end| {

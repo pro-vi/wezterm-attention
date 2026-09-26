@@ -869,13 +869,7 @@ pub fn read_record(
     expected_kind: Option<&str>,
     expected_identity: &RecordIdentity,
 ) -> Result<Option<Value>> {
-    match read_record_typed(path, expected_kind, expected_identity) {
-        RecordRead::Present(value) => Ok(Some(value)),
-        RecordRead::Missing => Ok(None),
-        RecordRead::Unavailable(error)
-        | RecordRead::Invalid(error)
-        | RecordRead::Unsupported(error) => Err(error),
-    }
+    read_record_typed(path, expected_kind, expected_identity).into_result()
 }
 
 /// [`read_record`] of the record of `kind` that `identity` names, where the
@@ -893,10 +887,7 @@ pub fn read_claim(root: &Path, address: &PaneAddress) -> Result<Option<Value>> {
 /// [`read_record_typed`] of the record of `kind` that `identity` names, where
 /// the layout keeps it below `root`.
 pub fn read_record_typed_at(root: &Path, kind: &str, identity: &RecordIdentity) -> RecordRead {
-    match identity.path(root, kind) {
-        Ok(path) => read_record_typed(&path, Some(kind), identity),
-        Err(error) => RecordRead::Invalid(error),
-    }
+    read_with(&FileRecords, root, kind, identity)
 }
 
 /// Read evidence without turning an I/O failure into invalid bytes or absence.
@@ -907,6 +898,128 @@ pub enum RecordRead {
     Unavailable(AttentionError),
     Invalid(AttentionError),
     Unsupported(AttentionError),
+}
+
+impl RecordRead {
+    /// The record, when the read found one.
+    pub fn record(&self) -> Option<&Value> {
+        match self {
+            Self::Present(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The read as [`read_record`] gives it: the record, `None` when there
+    /// is none, and an error for a read that failed in any way.
+    pub fn into_result(self) -> Result<Option<Value>> {
+        match self {
+            Self::Present(value) => Ok(Some(value)),
+            Self::Missing => Ok(None),
+            Self::Unavailable(error) | Self::Invalid(error) | Self::Unsupported(error) => {
+                Err(error)
+            }
+        }
+    }
+}
+
+/// What says whether one binding is its pane's current binding and whether
+/// it has ended: the pane's claim, the launch's current-binding pointer and
+/// the binding's end record, each as its read turned out. What a failed read
+/// means is the caller's to decide: a sweep does not act on that binding, a
+/// bindings answer reports it in the row's health, and a record that could
+/// not be read selects and ends nothing.
+#[derive(Clone, Debug)]
+pub struct BindingState {
+    pub claim: RecordRead,
+    pub pointer: RecordRead,
+    pub end: RecordRead,
+}
+
+impl BindingState {
+    /// Read the three records, in that order.
+    pub fn read(
+        reader: &dyn RecordReader,
+        root: &Path,
+        address: &PaneAddress,
+        launch_id: &str,
+        binding_id: &str,
+    ) -> Self {
+        let claim = read_with(reader, root, "claim", &RecordIdentity::pane(address));
+        Self::beside_claim(claim, reader, root, address, launch_id, binding_id)
+    }
+
+    /// The state of a binding whose pane's claim the caller has read.
+    pub fn beside_claim(
+        claim: RecordRead,
+        reader: &dyn RecordReader,
+        root: &Path,
+        address: &PaneAddress,
+        launch_id: &str,
+        binding_id: &str,
+    ) -> Self {
+        Self {
+            claim,
+            pointer: read_with(
+                reader,
+                root,
+                "current_binding",
+                &RecordIdentity::launch(address, launch_id),
+            ),
+            end: read_with(
+                reader,
+                root,
+                "binding_end",
+                &RecordIdentity::binding(address, launch_id, binding_id),
+            ),
+        }
+    }
+
+    /// Whether the claim names the launch `launch_id` and the pointer names
+    /// the binding `binding_id`. A record that is absent or could not be
+    /// read selects nothing.
+    pub fn current(&self, launch_id: &str, binding_id: &str) -> bool {
+        selects_binding(
+            self.claim.record(),
+            self.pointer.record(),
+            launch_id,
+            binding_id,
+        )
+    }
+
+    /// Whether the end record ends `binding`, by [`ends_binding`]. One that
+    /// is absent or could not be read ends nothing.
+    pub fn ended(&self, binding: &Value) -> bool {
+        self.end
+            .record()
+            .is_some_and(|end| ends_binding(end, binding))
+    }
+}
+
+/// The record of `kind` that `identity` names below `root`, as `reader`
+/// reads it.
+fn read_with(
+    reader: &dyn RecordReader,
+    root: &Path,
+    kind: &str,
+    identity: &RecordIdentity,
+) -> RecordRead {
+    match identity.path(root, kind) {
+        Ok(path) => reader.read(&path, Some(kind), identity),
+        Err(error) => RecordRead::Invalid(error),
+    }
+}
+
+/// Whether a pane's `claim` and its launch's current-binding `pointer`
+/// select the binding `binding_id` of `launch_id`: the claim names the
+/// launch and the pointer names the binding.
+pub fn selects_binding(
+    claim: Option<&Value>,
+    pointer: Option<&Value>,
+    launch_id: &str,
+    binding_id: &str,
+) -> bool {
+    claim.and_then(|claim| claim["launch_id"].as_str()) == Some(launch_id)
+        && pointer.and_then(|pointer| pointer["binding_id"].as_str()) == Some(binding_id)
 }
 
 /// Injectable filesystem boundary for scoped, read-only fact assembly.

@@ -12,9 +12,9 @@ use crate::identity::socket_identity;
 use crate::observations::{LifecycleAvailability, LifecycleSnapshot, LifecycleView};
 use crate::protocol::{AttentionError, Diagnostic, Result, hex64_text};
 use crate::records::{
-    FileRecords, RecordIdentity, RecordRead, RecordReader, agents_dir, binding_path, ends_binding,
-    incarnation_path, read_record, read_record_at, read_record_typed, reviews_dir, session_dir,
-    session_entry_path, session_index_path,
+    BindingState, FileRecords, RecordIdentity, RecordRead, RecordReader, agents_dir, binding_path,
+    ends_binding, incarnation_path, read_record, read_record_at, read_record_typed, reviews_dir,
+    session_dir, session_entry_path, session_index_path,
 };
 use crate::wezterm::Clock;
 use crate::wezterm::{GuiWindowLister, PaneLister, Presence, ProcessListing, ProcessProbe};
@@ -769,26 +769,24 @@ fn read_pane_facts_once(
             )
     });
     let health = binding_health([None, end.failure_code(), None, None], conflicted);
-    let row = binding.record.as_ref().map(|record| BindingRow {
-        address: address.clone(),
-        launch_id: scope.launch_id.clone(),
-        binding_id: selected.unwrap().into(),
-        provider: string(record, "provider").unwrap(),
-        provider_session_id: string(record, "provider_session_id").unwrap(),
-        binding_phase: if ended { "ended" } else { "active" }.into(),
-        pane_presence: presence.clone(),
-        reader_confidence: confidence.as_str().into(),
-        binding_health: health.as_str().into(),
-        current: true,
-        expected_session_match: string(record, "expected_session_id")
-            .map(|v| Some(v) == string(record, "provider_session_id")),
-        expected_session_id: string(record, "expected_session_id"),
-        transcript_path: string(record, "transcript_path"),
-        cwd: string(record, "cwd"),
-        config_dir: string(record, "config_dir"),
-        model: string(record, "model"),
-        start_source: string(record, "start_source"),
-    });
+    let row = binding
+        .record
+        .as_ref()
+        .zip(selected)
+        .map(|(record, selected)| {
+            BindingRow::of(
+                record,
+                address.clone(),
+                scope.launch_id.clone(),
+                selected.to_owned(),
+                RowFacts {
+                    ended,
+                    current: true,
+                    presence: &presence,
+                    health,
+                },
+            )
+        });
     let after_claim = RecordFacet::at(
         reader,
         root,
@@ -1053,6 +1051,52 @@ pub struct BindingRow {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_source: Option<String>,
+}
+
+/// What a reader found about a binding, beside the binding record itself.
+struct RowFacts<'a> {
+    ended: bool,
+    /// Whether the binding is its pane's current one.
+    current: bool,
+    presence: &'a str,
+    health: BindingHealth,
+}
+
+impl BindingRow {
+    /// The row a reader answers for the binding record `binding`, whose
+    /// address, launch and binding are the ones given.
+    fn of(
+        binding: &Value,
+        address: PaneAddress,
+        launch_id: String,
+        binding_id: String,
+        facts: RowFacts<'_>,
+    ) -> Self {
+        let field = |name: &str| string(binding, name);
+        let provider_session_id = field("provider_session_id");
+        Self {
+            address,
+            launch_id,
+            binding_id,
+            provider: field("provider").unwrap_or_default(),
+            expected_session_match: field("expected_session_id")
+                .map(|expected| provider_session_id.as_ref() == Some(&expected)),
+            provider_session_id: provider_session_id.unwrap_or_default(),
+            binding_phase: if facts.ended { "ended" } else { "active" }.to_owned(),
+            pane_presence: facts.presence.to_owned(),
+            reader_confidence: reader_confidence(facts.current, facts.presence)
+                .as_str()
+                .to_owned(),
+            binding_health: facts.health.as_str().to_owned(),
+            current: facts.current,
+            expected_session_id: field("expected_session_id"),
+            transcript_path: field("transcript_path"),
+            cwd: field("cwd"),
+            config_dir: field("config_dir"),
+            model: field("model"),
+            start_source: field("start_source"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -2033,21 +2077,26 @@ fn assemble_bindings(
     let panes = listed_once.as_ref().map(|lister| lister as &dyn PaneLister);
     let probed_once = processes.map(ProbeOncePerAssembly::new);
     let processes = probed_once.as_ref().map(|probe| probe as &dyn ProcessProbe);
-    let read_record = |path: &Path, kind: Option<&str>, identity: &RecordIdentity| {
-        let read = if !typed {
-            read_record(path, kind, identity)
-        } else {
-            match read_record_typed(path, kind, identity) {
-                RecordRead::Present(value) => Ok(Some(value)),
-                RecordRead::Missing => Ok(None),
-                RecordRead::Unavailable(mut error) => {
-                    error.diagnostic.message = "selected state record I/O is unavailable".into();
-                    Err(error)
-                }
-                RecordRead::Invalid(error) | RecordRead::Unsupported(error) => Err(error),
+    // A read as this answer reports it: named by the file it is about, and
+    // in the socket-scoped answer an I/O failure is said to be one.
+    let settle = |read: RecordRead, path: &Path| {
+        let read = match read {
+            RecordRead::Unavailable(mut error) if typed => {
+                error.diagnostic.message = "selected state record I/O is unavailable".into();
+                Err(error)
             }
+            read => read.into_result(),
         };
         read.map_err(|error| naming_record(root, path, error))
+    };
+    // The code of a read beside a binding that failed, whose diagnostic
+    // goes with the row.
+    let failure = |read: &RecordRead, path: &Path, diagnostics: &mut Vec<Diagnostic>| {
+        settle(read.clone(), path).err().map(|error| {
+            let code = error.diagnostic.code.clone();
+            diagnostics.push(error.diagnostic);
+            code
+        })
     };
     let mut rows = Vec::new();
     let mut diagnostics = Vec::new();
@@ -2068,7 +2117,7 @@ fn assemble_bindings(
             let ruled_out = identity.address().is_none_or(|address| {
                 !filter.admits_path(&address.realm_id, &address.incarnation_id)
             });
-            match read_record(&path, Some("binding"), &identity) {
+            match settle(read_record_typed(&path, Some("binding"), &identity), &path) {
                 Ok(Some(binding)) => read.push((path, binding)),
                 Ok(None) => {}
                 // A realm or server the filter rules out is not part of the
@@ -2118,7 +2167,7 @@ fn assemble_bindings(
     let mut servers_gone = Vec::new();
     let mut ignored = Vec::new();
     let mut presence_cache: BTreeMap<PaneAddress, (String, bool)> = BTreeMap::new();
-    let mut claim_cache: BTreeMap<PathBuf, (Option<Value>, Option<String>)> = BTreeMap::new();
+    let mut claim_cache: BTreeMap<PaneAddress, RecordRead> = BTreeMap::new();
     for (_, binding, admitted) in assessed {
         let diagnostics = if admitted {
             &mut diagnostics
@@ -2137,76 +2186,45 @@ fn assemble_bindings(
         let Some(binding_id) = string(&binding, "binding_id") else {
             continue;
         };
-        let identity = RecordIdentity::binding(&address, &launch_id, &binding_id);
-        let mut end_health = None;
-        let end = match read_record(
-            &identity.path(root, "binding_end")?,
-            Some("binding_end"),
-            &identity,
-        ) {
-            Ok(value) => value,
-            Err(error) => {
-                end_health = Some(if error.diagnostic.code == "future_schema" {
-                    "future_schema"
-                } else {
-                    "invalid"
-                });
-                diagnostics.push(error.diagnostic);
-                None
-            }
-        };
-        let mut pointer_health = None;
-        let launch = RecordIdentity::launch(&address, &launch_id);
-        let pointer = match read_record(
-            &launch.path(root, "current_binding")?,
-            Some("current_binding"),
-            &launch,
-        ) {
-            Ok(value) => value,
-            Err(error) => {
-                pointer_health = Some(if error.diagnostic.code == "future_schema" {
-                    "future_schema"
-                } else {
-                    "invalid"
-                });
-                diagnostics.push(error.diagnostic);
-                None
-            }
-        };
-        let pane = RecordIdentity::pane(&address);
-        let claim_path = pane.path(root, "claim")?;
-        let (claim, claim_health) = if let Some(cached) = claim_cache.get(&claim_path) {
-            cached.clone()
-        } else {
-            let loaded = match read_record(&claim_path, Some("claim"), &pane) {
-                Ok(value) => (value, None),
-                Err(error) => {
-                    let health = Some(if error.diagnostic.code == "future_schema" {
-                        "future_schema".to_owned()
-                    } else {
-                        "invalid".to_owned()
-                    });
-                    diagnostics.push(error.diagnostic);
-                    (None, health)
-                }
-            };
-            claim_cache.insert(claim_path.clone(), loaded.clone());
-            loaded
-        };
-        let current = claim
-            .as_ref()
-            .and_then(|value| string(value, "launch_id"))
-            .as_deref()
-            == Some(&launch_id)
-            && pointer
-                .as_ref()
-                .and_then(|value| string(value, "binding_id"))
-                .as_deref()
-                == Some(&binding_id);
-        let ended = end.as_ref().is_some_and(|end| ends_binding(end, &binding));
-        let expected_session_match = string(&binding, "expected_session_id").map(|expected| {
-            string(&binding, "provider_session_id").is_some_and(|actual| actual == expected)
+        // Every binding of a pane shares its claim, which is read, and
+        // reported, once.
+        let claim_path = RecordIdentity::pane(&address).path(root, "claim")?;
+        let cached = claim_cache.get(&address).cloned();
+        let claim = cached.clone().unwrap_or_else(|| {
+            read_record_typed(&claim_path, Some("claim"), &RecordIdentity::pane(&address))
         });
+        claim_cache.insert(address.clone(), claim.clone());
+        let state = BindingState::beside_claim(
+            claim,
+            &FileRecords,
+            root,
+            &address,
+            &launch_id,
+            &binding_id,
+        );
+        let end_failed = failure(
+            &state.end,
+            &RecordIdentity::binding(&address, &launch_id, &binding_id)
+                .path(root, "binding_end")?,
+            diagnostics,
+        );
+        let pointer_failed = failure(
+            &state.pointer,
+            &RecordIdentity::launch(&address, &launch_id).path(root, "current_binding")?,
+            diagnostics,
+        );
+        let mut reported_before = Vec::new();
+        let claim_failed = failure(
+            &state.claim,
+            &claim_path,
+            if cached.is_none() {
+                diagnostics
+            } else {
+                &mut reported_before
+            },
+        );
+        let current = state.current(&launch_id, &binding_id);
+        let ended = state.ended(&binding);
         let (presence, server_gone) = if let Some(cached) = presence_cache.get(&address) {
             cached.clone()
         } else {
@@ -2224,31 +2242,27 @@ fn assemble_bindings(
             presence_cache.insert(address.clone(), observed.clone());
             observed
         };
-        let binding_health = binding_health(
-            [None, end_health, claim_health.as_deref(), pointer_health],
+        let health = binding_health(
+            [
+                None,
+                end_failed.as_deref(),
+                claim_failed.as_deref(),
+                pointer_failed.as_deref(),
+            ],
             false,
-        )
-        .as_str()
-        .to_owned();
-        rows.push(BindingRow {
+        );
+        rows.push(BindingRow::of(
+            &binding,
             address,
             launch_id,
             binding_id,
-            provider: string(&binding, "provider").unwrap_or_default(),
-            provider_session_id: string(&binding, "provider_session_id").unwrap_or_default(),
-            binding_phase: if ended { "ended" } else { "active" }.to_owned(),
-            pane_presence: presence.clone(),
-            reader_confidence: reader_confidence(current, &presence).as_str().to_owned(),
-            binding_health,
-            current,
-            expected_session_match,
-            expected_session_id: string(&binding, "expected_session_id"),
-            transcript_path: string(&binding, "transcript_path"),
-            cwd: string(&binding, "cwd"),
-            config_dir: string(&binding, "config_dir"),
-            model: string(&binding, "model"),
-            start_source: string(&binding, "start_source"),
-        });
+            RowFacts {
+                ended,
+                current,
+                presence: &presence,
+                health,
+            },
+        ));
         admitted_rows.push(admitted);
         servers_gone.push(server_gone);
     }
