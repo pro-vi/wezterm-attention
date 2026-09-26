@@ -553,7 +553,8 @@ fn invocation(command: &Option<Command>) -> (&'static str, bool) {
     }
 }
 
-fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
+/// Runs the command `cli` names, whose answer carries the name `name`.
+fn run(cli: Cli, name: &'static str) -> Result<ExitCode, AttentionError> {
     let environment = wezterm_attention::environment();
     let clock = SystemClock;
     let tty = SystemTtyWriter;
@@ -585,7 +586,7 @@ fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
         }) => {
             let result = wezterm_attention::providers::describe_hooks(&args.provider)?;
             emit(
-                &Response::new("hooks describe", "ok", true, vec![], result),
+                &Response::new(name, "ok", true, vec![], result),
                 args.json,
                 false,
             );
@@ -603,7 +604,7 @@ fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
                 .collect::<Vec<_>>();
             if args.json {
                 emit(
-                    &Response::new("hooks claim", "ok", complete, diagnostics, result),
+                    &Response::new(name, "ok", complete, diagnostics, result),
                     true,
                     false,
                 );
@@ -670,7 +671,7 @@ fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
                 "total_detail_count": report.diagnostics.len(),
             });
             emit(
-                &Response::new("hooks publish", status, complete, diagnostics, result),
+                &Response::new(name, status, complete, diagnostics, result),
                 args.json,
                 args.quiet,
             );
@@ -683,46 +684,45 @@ fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
         Some(Command::Hooks {
             command: Some(HookCommand::Event(args)),
         }) => {
-            let command = "hooks event".to_owned();
             let consumer_timeout = match wezterm_attention::consumer::validate_consumers(
                 &args.consumer,
                 args.consumer_timeout_ms,
             ) {
                 Ok(timeout) => timeout,
                 Err(error) => {
-                    return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
+                    return Ok(emit_hook_error(&error, args.debug, args.strict, name));
                 }
             };
             let observation = match clock.monotonic_ns20() {
                 Ok(observation) => observation,
                 Err(error) => {
-                    return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
+                    return Ok(emit_hook_error(&error, args.debug, args.strict, name));
                 }
             };
             let mut stdin = std::io::stdin();
             if stdin.is_terminal() {
                 let error = AttentionError::usage("hooks event requires JSON on stdin");
-                return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
+                return Ok(emit_hook_error(&error, args.debug, args.strict, name));
             }
             let maximum = match wezterm_attention::protocol::manifest() {
                 Ok(manifest) => manifest.limits.max_json_bytes,
                 Err(error) => {
-                    return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
+                    return Ok(emit_hook_error(&error, args.debug, args.strict, name));
                 }
             };
             let Ok(bytes) = read_bounded(&mut stdin, maximum) else {
                 let error = AttentionError::usage("hooks event could not read stdin");
-                return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
+                return Ok(emit_hook_error(&error, args.debug, args.strict, name));
             };
             let payload: serde_json::Value = if bytes.is_empty() || bytes.len() > maximum {
                 let error = AttentionError::usage("hooks event received empty or oversized stdin");
-                return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
+                return Ok(emit_hook_error(&error, args.debug, args.strict, name));
             } else {
                 match serde_json::from_slice(&bytes) {
                     Ok(payload) => payload,
                     Err(_) => {
                         let error = AttentionError::usage("hooks event received invalid JSON");
-                        return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
+                        return Ok(emit_hook_error(&error, args.debug, args.strict, name));
                     }
                 }
             };
@@ -780,7 +780,7 @@ fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
                 let result = serde_json::json!({"native": outcome.result.as_ref().ok(), "admission": outcome.admission, "persistence": outcome.persistence, "consumers": consumers});
                 // Prompt/reply bodies and child output never enter this diagnostic projection.
                 print_err(&printable_json(&Response::new(
-                    &command,
+                    name,
                     if failed { "findings" } else { "ok" },
                     true,
                     diagnostics,
@@ -800,7 +800,7 @@ fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
             ) {
                 Ok(result) => result,
                 Err(error) => {
-                    return Ok(emit_hook_error(&error, args.debug, args.strict, &command));
+                    return Ok(emit_hook_error(&error, args.debug, args.strict, name));
                 }
             };
             let failed = matches!(
@@ -809,7 +809,7 @@ fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
             );
             if args.debug {
                 let response = Response::new(
-                    &command,
+                    name,
                     if failed { "findings" } else { "ok" },
                     true,
                     result.diagnostic.iter().cloned().collect(),
@@ -851,7 +851,7 @@ fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
                     ) {
                         Ok(result) => result,
                         Err(error) => {
-                            return Ok(emit_error(&error, args.json, "bindings"));
+                            return Ok(emit_error(&error, args.json, name));
                         }
                     };
                 // After the answer, not in its filter: a row filtered out
@@ -919,7 +919,7 @@ fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
                 !truncated && walked_every_directory && (!socket_mode || diagnostics.is_empty());
             emit(
                 &Response::new(
-                    "bindings",
+                    name,
                     if diagnostics.is_empty() {
                         "ok"
                     } else {
@@ -937,7 +937,7 @@ fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
         Some(Command::TabSource(args)) => {
             let source = wezterm_attention::query::read_tab_source(&args.socket)?;
             emit(
-                &Response::new("tab-source", "ok", true, Vec::new(), source),
+                &Response::new(name, "ok", true, Vec::new(), source),
                 true,
                 false,
             );
@@ -974,7 +974,7 @@ fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
                 }
             }?;
             emit(
-                &Response::new(command.name(), "ok", true, Vec::new(), result),
+                &Response::new(name, "ok", true, Vec::new(), result),
                 true,
                 false,
             );
@@ -989,7 +989,7 @@ fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
             )?;
             emit(
                 &Response::new(
-                    "tabs",
+                    name,
                     if diagnostics.is_empty() {
                         "ok"
                     } else {
@@ -1040,7 +1040,7 @@ fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
             let complete = facts.complete();
             emit(
                 &Response::new(
-                    "inspect",
+                    name,
                     if complete { "ok" } else { "findings" },
                     complete,
                     facts.diagnostics.clone(),
@@ -1082,7 +1082,7 @@ fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
                 }
             }?;
             emit(
-                &Response::new("mark", "ok", true, Vec::new(), result),
+                &Response::new(name, "ok", true, Vec::new(), result),
                 args.json,
                 false,
             );
@@ -1130,7 +1130,7 @@ fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
             let complete = !unavailable && diagnostics.len() <= 50;
             emit(
                 &Response::new(
-                    "doctor",
+                    name,
                     status,
                     complete,
                     diagnostics.iter().take(50).cloned().collect(),
@@ -1181,7 +1181,7 @@ fn run(cli: Cli) -> Result<ExitCode, AttentionError> {
                 && result.details.len() == total_details
                 && shown_diagnostics.len() == diagnostics.len();
             emit(
-                &Response::new("sweep", status, complete, shown_diagnostics, result),
+                &Response::new(name, status, complete, shown_diagnostics, result),
                 args.json,
                 false,
             );
@@ -1239,7 +1239,7 @@ fn main() -> ExitCode {
         }
     };
     let (command, as_json) = invocation(&cli.command);
-    match run(cli) {
+    match run(cli, command) {
         Ok(code) => code,
         Err(error) => emit_error(&error, as_json, command),
     }
