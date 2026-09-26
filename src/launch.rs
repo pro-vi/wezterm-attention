@@ -959,12 +959,6 @@ fn claim_for_host(
         std::time::Duration::from_secs(2),
         |existing| {
             let foreground = proof.confirm(env, ports.processes, ports.tty, address)?;
-            let kept = |claim: Value| CommitPlan {
-                result: claim,
-                replacements: Vec::new(),
-                removals: Vec::new(),
-                private_dirs: Vec::new(),
-            };
             if let Some(current) = &existing {
                 write.check_address(current)?;
                 match ClaimMode::of(current)? {
@@ -976,7 +970,7 @@ fn claim_for_host(
                                 "the agent's claim names a terminal the agent no longer runs on",
                             ));
                         }
-                        return Ok(kept(current.clone()));
+                        return write.plan(current.clone(), None);
                     }
                     ClaimMode::SelfOwned(owner) => match owner_state(&owner, ports.processes) {
                         OwnerState::Gone => {}

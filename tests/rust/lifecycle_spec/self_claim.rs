@@ -1433,6 +1433,38 @@ fn a_claim_removes_a_stale_absence_probe_only_inside_the_state_root() {
 }
 
 #[test]
+fn a_claim_kept_as_it_stands_still_removes_a_stale_absence_probe() {
+    // A sweep takes the probe as a first sighting of the pane gone. Keeping
+    // a claim has just seen the pane, so the probe must not stay to pair
+    // with a later sighting.
+    let setup = Setup::new();
+    setup.claim();
+    let claim = stored_claim(&setup).expect("the claim is made");
+    let probe = claim_path(&setup).with_file_name("absence-probe.json");
+    fs::write(&probe, "{}").unwrap();
+    let mut env = setup.env.clone();
+    env.insert("WEZTERM_ATTENTION_LAUNCH_ID".into(), launch_of(&claim));
+    wezterm_attention::claim_launch(&env, &setup.ports()).expect("claim succeeds");
+    assert_eq!(stored_claim(&setup), Some(claim), "a shell claim is kept");
+    assert!(!probe.exists(), "a shell claim");
+
+    let setup = Setup::new();
+    let env = setup.agent_env();
+    apply_as(&setup, &env, &start("claude", "s"), "00000000000000000200");
+    let claim = stored_claim(&setup).expect("the claim is made");
+    let probe = claim_path(&setup).with_file_name("absence-probe.json");
+    fs::write(&probe, "{}").unwrap();
+    let result = apply_as(&setup, &env, &start("claude", "s"), "00000000000000000300");
+    assert_ne!(result.disposition, "ignored", "{result:?}");
+    assert_eq!(
+        stored_claim(&setup),
+        Some(claim),
+        "an agent's claim is kept"
+    );
+    assert!(!probe.exists(), "an agent's own claim");
+}
+
+#[test]
 fn a_pi_clear_removes_its_review_only_inside_the_state_root() {
     let review_name = format!(
         "{}.json",
