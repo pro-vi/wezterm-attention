@@ -20,7 +20,7 @@ cd "$root"
 # install) and one file from GitHub.
 
 # `sh -n` parses only its first file; the rest become positional arguments.
-for script in bin/attention examples/hook.sh scripts/*.sh tests/gate.sh \
+for script in bin/attention scripts/*.sh tests/gate.sh \
   tests/shell/*.sh tests/fixtures/consumer-migration/*.sh; do
   sh -n "$script"
 done

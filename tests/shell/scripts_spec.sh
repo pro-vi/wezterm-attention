@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 # Checks the shell entry points that ship with the checkout: the bin/attention
-# launcher, examples/hook.sh and scripts/install-cli.sh.
+# launcher and scripts/install-cli.sh.
 set -u
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -66,26 +66,6 @@ if [ "$status" -eq 1 ] && grep -qxF "$missing" "$scratch/out"; then
   pass "any other command without the binary still fails"
 else
   fail "any other command without the binary still fails (status $status)"
-fi
-
-# examples/hook.sh must never exit 2: Claude Code and Codex read 2 as "block".
-hook_script="$root/examples/hook.sh"
-hook_sh_ok=1
-for arguments in "" "claude" "claude Stop" "claude Stop --consumer /x"; do
-  # shellcheck disable=SC2086
-  run sh "$hook_script" $arguments
-  [ "$status" -eq 0 ] && [ -s "$scratch/out" ] || { hook_sh_ok=0; printf '#   no checkout, "%s": %s\n' "$arguments" "$status"; }
-done
-run sh "$hook_script" claude Stop --strict
-[ "$status" -eq 1 ] || { hook_sh_ok=0; printf '#   no checkout, --strict: %s\n' "$status"; }
-run WEZTERM_ATTENTION_ROOT="$scratch/checkout" sh "$hook_script" claude
-[ "$status" -eq 0 ] && grep -q '^usage: hook.sh' "$scratch/out" || { hook_sh_ok=0; printf '#   one argument: %s\n' "$status"; }
-run WEZTERM_ATTENTION_ROOT="$scratch/checkout" sh "$hook_script" claude Stop
-grep -q '^rust-binary hooks event claude Stop$' "$scratch/out" || { hook_sh_ok=0; printf '#   forwarding: %s\n' "$status"; }
-if [ "$hook_sh_ok" -eq 1 ]; then
-  pass "examples/hook.sh exits 0, or 1 under --strict, on its own failures and forwards the rest"
-else
-  fail "examples/hook.sh exits 0, or 1 under --strict, on its own failures and forwards the rest"
 fi
 
 # The installer copies what cargo just built, wherever the target directory
