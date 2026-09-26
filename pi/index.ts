@@ -350,7 +350,7 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 	};
 
 	// Forwards one Pi event to the writer, for the session `ctx` belongs to.
-	// `remember` makes that session the one bus requests are written into and
+	// `makeCurrent` makes that session the one bus requests are written into and
 	// its UI the one a warning goes to.
 	//
 	// The write is NOT awaited. Pi awaits lifecycle handlers on the agent's own
@@ -362,10 +362,14 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 	// chains synchronously at call time, so emit order == apply order regardless of the
 	// await. The session_shutdown drain guarantees these land before a reload; don't
 	// weaken it.
-	const forward = (ctx: ExtensionContext, request: (facts: SessionFacts) => WriterRequest, remember = false) => {
+	const forward = (
+		ctx: ExtensionContext,
+		request: (facts: SessionFacts) => WriterRequest,
+		{ makeCurrent = false }: { makeCurrent?: boolean } = {},
+	) => {
 		const facts = sessionFacts(ctx);
 		if (!facts) return;
-		if (remember) {
+		if (makeCurrent) {
 			currentContext = ctx;
 			currentSession = facts;
 		}
@@ -376,11 +380,11 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 	// replaced wholesale on reload, so they don't accumulate (unlike the shared bus
 	// listener below — no dedup needed here).
 	pi.on("session_start", (event, ctx) =>
-		forward(ctx, (facts) => ({ kind: "binding", startSource: event.reason, ...facts }), true));
+		forward(ctx, (facts) => ({ kind: "binding", startSource: event.reason, ...facts }), { makeCurrent: true }));
 	pi.on("agent_start", (_event, ctx) =>
-		forward(ctx, (facts) => ({ kind: "activity", state: "thinking", event: "agent_start", ...facts }), true));
+		forward(ctx, (facts) => ({ kind: "activity", state: "thinking", event: "agent_start", ...facts }), { makeCurrent: true }));
 	pi.on("tool_execution_start", (event, ctx) =>
-		forward(ctx, (facts) => ({ kind: "tool_start", toolName: event.toolName, toolCallId: event.toolCallId, ...facts }), true));
+		forward(ctx, (facts) => ({ kind: "tool_start", toolName: event.toolName, toolCallId: event.toolCallId, ...facts }), { makeCurrent: true }));
 	pi.on("tool_execution_end", (event, ctx) =>
 		forward(ctx, (facts) => ({ kind: "tool_end", toolName: event.toolName, toolCallId: event.toolCallId, isError: event.isError, ...facts })));
 	pi.on("input", (event, ctx) => forward(ctx, (facts) => ({ kind: "input", source: event.source, ...facts })));
@@ -400,7 +404,7 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 	// false ✓ mid-task. agent_settled fires only once Pi will not continue
 	// running automatically. Requires Pi >= 0.80.5.
 	pi.on("agent_settled", (_event, ctx) =>
-		forward(ctx, (facts) => ({ kind: "activity", state: "stop", event: "agent_settled", ...facts }), true));
+		forward(ctx, (facts) => ({ kind: "activity", state: "stop", event: "agent_settled", ...facts }), { makeCurrent: true }));
 
 	// Cooperative: any other Pi extension (e.g. an ask-user extension) can emit
 	// this event to request a state — notably `notify` (the "waiting for you" `!`),
