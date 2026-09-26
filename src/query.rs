@@ -2047,7 +2047,8 @@ pub fn read_checked_tab_publications(
 /// plugin already uses for those panes. A v1 pane is a canonical decimal marker
 /// id; a v2 pane is `v2:<realm_id>:<incarnation_id>:<pane_id>`. Both are already
 /// translated out of the window's local numbering.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PublishedTab {
     pub number: u64,
     pub text: String,
@@ -2185,6 +2186,17 @@ fn published_marker_id(text: &str, pane_id_max_digits: usize) -> bool {
     canonical_decimal_text(text, pane_id_max_digits) || parse_marker_id(text).is_some()
 }
 
+/// A tab publication as the bar writes it, before its values are checked.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublicationFile {
+    schema: u64,
+    window_id: u64,
+    published_at_ms: u64,
+    tabs: Vec<PublishedTab>,
+    source: Option<TabSource>,
+}
+
 fn tab_publication(
     value: &Value,
     window_id: u64,
@@ -2192,8 +2204,8 @@ fn tab_publication(
     limits: &crate::protocol::Limits,
 ) -> Result<TabPublication> {
     let invalid = || AttentionError::new("record_invalid", "tab publication is invalid");
-    let object = value.as_object().ok_or_else(invalid)?;
-    let schema = object
+    // Any later schema is refused as one, whatever else it holds.
+    let schema = value
         .get("schema")
         .and_then(Value::as_u64)
         .ok_or_else(invalid)?;
@@ -2203,93 +2215,47 @@ fn tab_publication(
             "tab publication schema is unsupported",
         ));
     }
-    if !matches!(schema, 1 | 2)
-        || !object.keys().all(|field| {
-            matches!(
-                field.as_str(),
-                "schema" | "window_id" | "published_at_ms" | "tabs"
-            ) || (schema == 2 && field == "source")
-        })
-        // A file that names a window other than the one it is filed under
-        // describes neither of them.
-        || object.get("window_id").and_then(Value::as_u64) != Some(window_id)
-    {
+    let file: PublicationFile = serde_json::from_value(value.clone()).map_err(|_| invalid())?;
+    // A file that names a window other than the one it is filed under
+    // describes neither of them.
+    if !matches!(file.schema, 1 | 2) || file.window_id != window_id {
         return Err(invalid());
     }
-    let source = if schema == 2 {
-        let source: TabSource =
-            serde_json::from_value(object.get("source").ok_or_else(invalid)?.clone())
-                .map_err(|_| invalid())?;
-        if !Path::new(&source.socket_path).is_absolute()
-            || source.socket_path.contains('\0')
-            || !hex64_text(&source.realm_id)
-            || !hex64_text(&source.incarnation_id)
-            || crate::protocol::sha256_hex(source.socket_path.as_bytes()) != source.realm_id
-            || incarnation != Some(source.incarnation_id.as_str())
+    let source = match (file.schema, file.source) {
+        (2, Some(source))
+            if Path::new(&source.socket_path).is_absolute()
+                && !source.socket_path.contains('\0')
+                && hex64_text(&source.realm_id)
+                && hex64_text(&source.incarnation_id)
+                && crate::protocol::sha256_hex(source.socket_path.as_bytes())
+                    == source.realm_id
+                && incarnation == Some(source.incarnation_id.as_str()) =>
         {
-            return Err(invalid());
+            Some(source)
         }
-        Some(source)
-    } else {
-        if incarnation.is_some() {
-            return Err(invalid());
-        }
-        None
+        // A schema 1 file names no source, not even a null one.
+        (1, None) if incarnation.is_none() && value.get("source").is_none() => None,
+        _ => return Err(invalid()),
     };
-    let published_at_ms = object
-        .get("published_at_ms")
-        .and_then(Value::as_u64)
-        .ok_or_else(invalid)?;
-    let mut tabs = Vec::new();
-    for item in object
-        .get("tabs")
-        .and_then(Value::as_array)
-        .ok_or_else(invalid)?
-    {
-        let entry = item.as_object().ok_or_else(invalid)?;
-        if !entry
-            .keys()
-            .all(|field| matches!(field.as_str(), "number" | "text" | "marker_ids"))
-        {
-            return Err(invalid());
-        }
-        let number = entry
-            .get("number")
-            .and_then(Value::as_u64)
-            .filter(|number| *number > 0)
-            .ok_or_else(invalid)?;
-        let text = entry
-            .get("text")
-            .and_then(Value::as_str)
-            // C1 controls count too: U+009B alone starts an escape sequence
-            // in a terminal that draws this text back.
-            .filter(|text| {
-                text.len() <= limits.safe_label_max_bytes && !text.chars().any(char::is_control)
-            })
-            .ok_or_else(invalid)?
-            .to_owned();
-        let mut marker_ids = Vec::new();
-        for id in entry
-            .get("marker_ids")
-            .and_then(Value::as_array)
-            .ok_or_else(invalid)?
-        {
-            let id = id
-                .as_str()
-                .filter(|id| published_marker_id(id, limits.pane_id_max_digits))
-                .ok_or_else(invalid)?;
-            marker_ids.push(id.to_owned());
-        }
-        tabs.push(PublishedTab {
-            number,
-            text,
-            marker_ids,
-        });
+    // C1 controls count too: U+009B alone starts an escape sequence in a
+    // terminal that draws this text back.
+    let drawable = |text: &str| {
+        text.len() <= limits.safe_label_max_bytes && !text.chars().any(char::is_control)
+    };
+    if !file.tabs.iter().all(|tab| {
+        tab.number > 0
+            && drawable(&tab.text)
+            && tab
+                .marker_ids
+                .iter()
+                .all(|id| published_marker_id(id, limits.pane_id_max_digits))
+    }) {
+        return Err(invalid());
     }
     Ok(TabPublication {
         window_id,
-        published_at_ms,
-        tabs,
+        published_at_ms: file.published_at_ms,
+        tabs: file.tabs,
         source,
         relative_path: PathBuf::new(),
         stamp: None,
