@@ -9,7 +9,7 @@ use std::sync::{Arc, Barrier, Mutex};
 
 use serde_json::{Value, json};
 use uuid::Uuid;
-use wezterm_attention::identity::{PaneAddress, pane_address};
+use wezterm_attention::identity::pane_address;
 use wezterm_attention::lifecycle::{apply_provider_event, binding_id};
 use wezterm_attention::maintenance::{
     ABSENCE_INTERVAL_NS, RETENTION_AGE_NS, binding_cap_paths_by_realm, limit_sweep_preview, sweep,
@@ -1011,181 +1011,28 @@ fn a_session_resumed_in_a_new_pane_conflicts_only_while_both_panes_live() {
     );
 }
 
-fn collection_details(details: &[Value]) -> Vec<&Value> {
-    details
-        .iter()
-        .filter(|detail| detail["kind"] == "projection_collection")
-        .collect()
-}
-
-fn plant_flat_files(root: &std::path::Path, pane_id: &str) {
-    fs::write(root.join(pane_id), "stop\n").expect("write marker");
-    fs::write(root.join(format!("{pane_id}.agents")), "{}\n").expect("write agents");
-    fs::write(root.join(format!("{pane_id}.ack")), "{}\n").expect("write ack");
-    fs::write(root.join(format!("{pane_id}.review")), "{}\n").expect("write review");
-}
-
+/// Nothing a sweep removes lies outside the record tree and the tab orders:
+/// files at the top of the state root are not its to judge.
 #[test]
-fn flat_orphan_preview_lists_without_removing() {
+fn sweep_leaves_files_at_the_top_of_the_root_alone() {
     let setup = Setup::new();
     setup.claim_and_bind();
     let root = setup.root();
-    plant_flat_files(&root, "42");
-    let preview = setup.run_sweep(false, None).0;
-    let collections = collection_details(&preview.details);
-    assert_eq!(collections.len(), 1);
-    assert_eq!(collections[0]["pane_id"], "42");
-    assert!(root.join("42").exists());
-    assert!(root.join("42.agents").exists());
-    assert!(root.join("42.ack").exists());
-}
-
-#[test]
-fn flat_orphan_apply_removes_marker_agents_and_ack() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let root = setup.root();
-    plant_flat_files(&root, "42");
-    let operation = "00000000-0000-4000-8000-000000000801";
-    let applied = setup.run_sweep(true, Some(operation)).0;
-    let collections = collection_details(&applied.details);
-    assert_eq!(collections.len(), 1);
-    assert!(!root.join("42").exists());
-    assert!(!root.join("42.agents").exists());
-    assert!(!root.join("42.ack").exists());
-    assert!(root.join("42.review").exists());
-    let again = setup.run_sweep(true, Some(operation)).0;
-    assert!(collection_details(&again.details).is_empty());
-}
-
-#[test]
-fn a_review_flag_survives_collection() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let root = setup.root();
-    plant_flat_files(&root, "42");
-    setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000802"));
-    assert!(root.join("42.review").exists());
-}
-
-#[test]
-fn third_party_marker_without_a_claim_is_never_collected() {
-    let setup = Setup::new();
-    let root = setup.root();
-    fs::create_dir_all(&root).expect("create state root");
-    fs::write(root.join("99"), "stop\n").expect("write third-party marker");
-    let (preview, diagnostics) = setup.run_sweep(false, None);
-    assert!(collection_details(&preview.details).is_empty());
-    assert!(diagnostics.is_empty());
-    assert!(root.join("99").exists());
-}
-
-#[test]
-fn an_ambiguous_scalar_id_is_refused_not_collected() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let root = setup.root();
-    let (address, _) = pane_address(&setup.env).expect("address");
-    let claim_path = pane_path(&root, &address).join("claim.json");
-    let mut claim: Value =
-        serde_json::from_slice(&fs::read(&claim_path).expect("claim")).expect("claim JSON");
-    let other = PaneAddress {
-        realm_id: "e".repeat(64),
-        incarnation_id: address.incarnation_id.clone(),
-        pane_id: address.pane_id.clone(),
-    };
-    claim["address"] = json!(other);
-    atomic_replace(&pane_path(&root, &other).join("claim.json"), &claim).expect("second claim");
-    plant_flat_files(&root, "42");
-    let (_, diagnostics) = setup.run_sweep(false, None);
-    assert!(
-        diagnostics
-            .iter()
-            .any(|item| item.code == "binding_conflict" && item.context["pane_id"] == "42")
-    );
-    assert!(root.join("42").exists());
-}
-
-#[test]
-fn an_undecidable_claim_leaves_the_file_alone() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let root = setup.root();
-    let (address, _) = pane_address(&setup.env).expect("address");
-    let claim_path = pane_path(&root, &address).join("claim.json");
-    let mut claim: Value =
-        serde_json::from_slice(&fs::read(&claim_path).expect("claim")).expect("claim JSON");
-    claim["schema"] = json!(999);
-    fs::write(
-        &claim_path,
-        serde_json::to_vec(&claim).expect("future claim JSON"),
-    )
-    .expect("write future claim");
-    plant_flat_files(&root, "42");
-    let (_, diagnostics) = setup.run_sweep(false, None);
-    assert!(
-        diagnostics
-            .iter()
-            .any(|item| item.code == "record_invalid" && item.context["pane_id"] == "42")
-    );
-    assert!(root.join("42").exists());
-}
-
-#[test]
-fn a_symlinked_marker_is_refused() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let root = setup.root();
-    let target = root.join("elsewhere");
-    fs::write(&target, "stop\n").expect("write symlink target");
-    symlink(&target, root.join("42")).expect("symlink marker");
-    let (_, diagnostics) = setup.run_sweep(false, None);
-    assert!(
-        diagnostics
-            .iter()
-            .any(|item| item.code == "record_invalid" && item.context["pane_id"] == "42")
-    );
-    assert!(
-        root.join("42")
-            .symlink_metadata()
-            .expect("symlink")
-            .file_type()
-            .is_symlink()
-    );
-}
-
-#[test]
-fn an_incomplete_claim_walk_does_not_grant_collection() {
-    for start_is_symlink in [false, true] {
-        let setup = Setup::new();
-        setup.claim_and_bind();
-        let root = setup.root();
-        plant_flat_files(&root, "42");
-        if start_is_symlink {
-            let realms = root.join("v2/realms");
-            let outside = root.join("realms-target");
-            fs::rename(&realms, &outside).expect("move realms");
-            symlink(&outside, &realms).expect("symlink realms");
-        } else {
-            let hidden = root.join("hidden-realm");
-            fs::create_dir_all(&hidden).expect("hidden realm");
-            symlink(&hidden, root.join("v2/realms").join("link")).expect("symlink realm");
-        }
-        let (preview, diagnostics) = setup.run_sweep(false, None);
+    for name in ["42", "42.agents", "42.ack", "42.review"] {
+        fs::write(root.join(name), "{}\n").expect("write top-level file");
+    }
+    let (preview, _) = setup.run_sweep(false, None);
+    let (applied, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000801"));
+    for details in [&preview.details, &applied.details] {
         assert!(
-            collection_details(&preview.details).is_empty(),
-            "start_is_symlink={start_is_symlink}"
-        );
-        assert!(
-            diagnostics
+            details
                 .iter()
-                .any(|item| { item.code == "record_invalid" || item.code == "probe_unavailable" }),
-            "start_is_symlink={start_is_symlink} {diagnostics:?}"
+                .all(|detail| detail["kind"] != "projection_collection"),
+            "{details:?}"
         );
-        assert!(root.join("42").exists());
-        let applied = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000804"));
-        assert!(collection_details(&applied.0.details).is_empty());
-        assert!(root.join("42").exists());
+    }
+    for name in ["42", "42.agents", "42.ack", "42.review"] {
+        assert!(root.join(name).exists(), "{name}");
     }
 }
 
@@ -1584,9 +1431,8 @@ fn leftover_preview_keeps_every_collection_row() {
     let mut details = Vec::new();
     for pane in 0..51 {
         details.push(json!({
-            "kind": "projection_collection",
-            "pane_id": pane.to_string(),
-            "paths": [pane.to_string()],
+            "kind": "tab_order_collection",
+            "path": format!("tabs/{pane}.json"),
         }));
     }
     for index in 0..51 {
@@ -1601,7 +1447,7 @@ fn leftover_preview_keeps_every_collection_row() {
     assert_eq!(
         shown
             .iter()
-            .filter(|detail| detail["kind"] == "projection_collection")
+            .filter(|detail| detail["kind"] == "tab_order_collection")
             .count(),
         51
     );

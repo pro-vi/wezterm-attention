@@ -53,7 +53,6 @@ fn accepted(result: &LifecycleResult) -> bool {
             | Disposition::Confirmed
             | Disposition::Replaced
             | Disposition::Skipped
-            | Disposition::RepairedProjection
     )
 }
 
@@ -150,7 +149,6 @@ pub struct LifecycleResult {
     pub disposition: Disposition,
     pub diagnostic: Option<Diagnostic>,
     pub event_id: Option<String>,
-    pub repaired_projection: bool,
 }
 
 impl LifecycleResult {
@@ -159,7 +157,6 @@ impl LifecycleResult {
             disposition,
             diagnostic: None,
             event_id: None,
-            repaired_projection: false,
         }
     }
 
@@ -2420,12 +2417,7 @@ pub fn apply_provider_event_with_outcome(
         .is_ok_and(|r| matches!(r.disposition.as_str(), "ignored" | "conflict"))
     {
         let p = &mut evidence.persistence;
-        for value in [
-            &mut p.native_state,
-            &mut p.activity,
-            &mut p.compatibility,
-            &mut p.lifecycle,
-        ] {
+        for value in [&mut p.native_state, &mut p.activity, &mut p.lifecycle] {
             if *value == Persistence::Unconfirmed {
                 *value = Persistence::Rejected;
             }

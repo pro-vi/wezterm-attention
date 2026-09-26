@@ -60,34 +60,6 @@ mod claim_fence;
 
 struct Scratch(PathBuf);
 
-#[test]
-fn a_plain_text_file_where_a_v1_marker_goes_is_left_alone() {
-    let setup = Setup::new();
-    setup.claim();
-    setup.apply(
-        &event(
-            "claude",
-            "SessionStart",
-            "repair",
-            json!({"source":"startup"}),
-        ),
-        "00000000000000000200",
-    );
-    let marker = state_root(&setup.env).unwrap().join("42");
-    fs::write(&marker, "thinking\n").unwrap();
-    let result = apply_provider_event(
-        &event("claude", "Stop", "repair", json!({})),
-        &setup.env,
-        "00000000000000000300",
-        &setup.ports(),
-    );
-    assert!(
-        result.is_ok(),
-        "third-party marker blocked the v2 write: {result:?}"
-    );
-    assert_eq!(fs::read(&marker).unwrap(), b"thinking\n");
-}
-
 impl Scratch {
     fn new() -> Self {
         let path = PathBuf::from("/tmp").join(format!("wl-{}", Uuid::new_v4().simple()));
@@ -1823,10 +1795,6 @@ fn prompt_return_clears_lead_only_and_newer_hook_reactivates() {
         json!({"tool_name":"Bash","agent_id":"child-a","agent_type":"Explore"}),
     );
     setup.apply(&child, "00000000000000000350");
-    let root = state_root(&setup.env).expect("state root");
-    let marker = root.join("42");
-    assert!(!marker.exists());
-    assert!(!root.join("42.agents").exists());
     let binding_dir = setup.binding_dir("claude", "session-a");
     let activity: Value =
         serde_json::from_slice(&fs::read(binding_dir.join("activity.json")).expect("activity"))
@@ -1855,14 +1823,11 @@ fn prompt_return_clears_lead_only_and_newer_hook_reactivates() {
     );
     assert!(!binding_dir.join("end.json").exists());
     assert!(!binding_dir.join("agents-clear.json").exists());
-    assert!(!marker.exists());
-    assert!(!root.join("42.agents").exists());
 
     assert_eq!(
         setup.apply(&thinking, "00000000000000000500").disposition,
         "applied"
     );
-    assert!(!marker.exists());
     let activity: Value =
         serde_json::from_slice(&fs::read(binding_dir.join("activity.json")).expect("activity"))
             .expect("activity JSON");
@@ -2097,7 +2062,6 @@ fn stale_pi_clear_preserves_newer_activity_and_review() {
     let result = setup.apply(&clear, "00000000000000000250");
     assert_eq!(result.disposition, "ignored");
     let root = state_root(&setup.env).expect("state root");
-    assert!(!root.join("42").exists());
     let (address, _) = pane_address(&setup.env).expect("address");
     let review = pane_path(&root, &address).join("reviews").join(format!(
         "{}.json",
@@ -2107,7 +2071,7 @@ fn stale_pi_clear_preserves_newer_activity_and_review() {
 }
 
 #[test]
-fn covered_activity_never_creates_the_flat_projection() {
+fn a_settle_covered_by_a_later_clear_is_ignored() {
     let setup = Setup::new();
     setup.claim();
     setup.apply(
@@ -2132,12 +2096,6 @@ fn covered_activity_never_creates_the_flat_projection() {
         "00000000000000000400",
     );
     assert_eq!(result.disposition, "ignored");
-    assert!(
-        !state_root(&setup.env)
-            .expect("state root")
-            .join("42")
-            .exists()
-    );
 }
 
 #[test]
@@ -2322,12 +2280,6 @@ fn fresh_manual_activity_is_fenced_by_an_existing_clear() {
         !setup
             .binding_dir("pi", "pi-a")
             .join("activity.json")
-            .exists()
-    );
-    assert!(
-        !state_root(&setup.env)
-            .expect("state root")
-            .join("42")
             .exists()
     );
 }
@@ -2559,9 +2511,6 @@ fn manual_mark_targets_the_launch_and_a_duplicate_is_skipped() {
     )
     .expect("manual mark");
     assert_eq!(first.disposition, "applied");
-    let root = state_root(&setup.env).expect("state root");
-    let marker = root.join("42");
-    assert!(!marker.exists());
     let unchanged = apply_mark_activity(
         &setup.env,
         "notify",
@@ -2586,7 +2535,6 @@ fn manual_mark_targets_the_launch_and_a_duplicate_is_skipped() {
     )
     .expect("duplicate manual mark");
     assert_eq!(duplicate.disposition, "skipped");
-    assert!(!marker.exists());
     assert_eq!(
         apply_mark_activity(
             &setup.env,
@@ -2609,6 +2557,7 @@ fn manual_mark_targets_the_launch_and_a_duplicate_is_skipped() {
             .disposition,
         "applied"
     );
+    let root = state_root(&setup.env).expect("state root");
     let (address, _) = pane_address(&setup.env).expect("address");
     let review = pane_path(&root, &address).join("reviews").join(format!(
         "{}.json",

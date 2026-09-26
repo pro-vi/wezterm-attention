@@ -167,7 +167,6 @@ pub enum Disposition {
     Ignored,
     Conflict,
     Partial,
-    RepairedProjection,
 }
 
 impl Disposition {
@@ -182,7 +181,6 @@ impl Disposition {
             Self::Ignored => "ignored",
             Self::Conflict => "conflict",
             Self::Partial => "partial",
-            Self::RepairedProjection => "repaired_projection",
         }
     }
 }

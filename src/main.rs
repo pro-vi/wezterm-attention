@@ -25,8 +25,6 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    #[command(hide = true)]
-    Claim,
     /// Callback entrypoints.
     Hooks {
         #[command(subcommand)]
@@ -272,7 +270,7 @@ struct MarkArgs {
 
 #[derive(Clone, Debug, Args)]
 #[command(
-    after_help = "Preview is the default and removes nothing. Example: attention sweep --json\nLeftover <pane_id>, <pane_id>.agents, and <pane_id>.ack stems are always listed in projection_collection; --all-details includes the rest when complete is false.\nApply: attention sweep --apply --json\nEach apply without --operation-id gets a fresh one, reported in result.operation_id.\nPass --operation-id only to replay that operation; it must be a canonical lowercase UUID."
+    after_help = "Preview is the default and removes nothing. Example: attention sweep --json\nTab orders to collect are always listed in full; --all-details includes the rest when complete is false.\nApply: attention sweep --apply --json\nEach apply without --operation-id gets a fresh one, reported in result.operation_id.\nPass --operation-id only to replay that operation; it must be a canonical lowercase UUID."
 )]
 struct SweepArgs {
     #[arg(long)]
@@ -462,13 +460,6 @@ fn run(cli: Cli) -> std::result::Result<ExitCode, (Box<AttentionError>, bool, St
             print_out(&hooks.render_help().to_string());
             Ok(ExitCode::SUCCESS)
         }
-        Some(Command::Claim) => Err((
-            Box::new(AttentionError::usage(
-                "obsolete command; use `attention hooks claim`",
-            )),
-            false,
-            "claim".to_owned(),
-        )),
         Some(Command::Hooks {
             command: Some(HookCommand::Describe(args)),
         }) => {

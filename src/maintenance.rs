@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::identity::{PaneAddress, canonical_pane_id, socket_identity};
+use crate::identity::{PaneAddress, socket_identity};
 use crate::protocol::{
     AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, hex64_text, manifest, sha256_hex,
 };
@@ -23,7 +23,7 @@ use crate::records::{
     CommitPlan, RecordIdentity, Replacement, atomic_replace_if_different, binding_session_entry,
     commit_nested_with, directory_confined, ends_binding, incarnation_path, launch_path, pane_path,
     read_record, realm_path, removal_confined, remove_file_durable, session_index_marker,
-    session_index_path, with_lock,
+    session_index_path,
 };
 use crate::wezterm::{Clock, PaneLister, Presence, ProcessInspector, ProcessProbe};
 
@@ -56,7 +56,7 @@ pub fn limit_sweep_preview(details: Vec<Value>, all_details: bool) -> (Vec<Value
     for detail in details {
         if matches!(
             detail.get("kind").and_then(Value::as_str),
-            Some("projection_collection" | "tab_order_collection")
+            Some("tab_order_collection")
         ) {
             leftover.push(detail);
         } else {
@@ -87,83 +87,6 @@ fn collect_json(
         output,
         diagnostics,
     );
-}
-
-fn collect_json_complete(path: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
-    collect_json_complete_at(path, output, true)
-}
-
-fn collect_json_complete_at(
-    path: &Path,
-    output: &mut Vec<PathBuf>,
-    absent_is_empty: bool,
-) -> Result<()> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if absent_is_empty {
-                return Ok(());
-            }
-            return Err(AttentionError::new(
-                "probe_unavailable",
-                "claim tree changed during walk",
-            ));
-        }
-        Err(_) => {
-            return Err(AttentionError::new(
-                "probe_unavailable",
-                "claim tree could not be enumerated",
-            ));
-        }
-    };
-    if metadata.file_type().is_symlink() {
-        return Err(AttentionError::new(
-            "record_invalid",
-            "claim tree contains a symlink",
-        ));
-    }
-    if !metadata.is_dir() {
-        return Err(AttentionError::new(
-            "probe_unavailable",
-            "claim tree could not be enumerated",
-        ));
-    }
-    let entries = match fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(AttentionError::new(
-                "probe_unavailable",
-                "claim tree changed during walk",
-            ));
-        }
-        Err(_) => {
-            return Err(AttentionError::new(
-                "probe_unavailable",
-                "claim tree could not be enumerated",
-            ));
-        }
-    };
-    for entry in entries {
-        let entry = entry.map_err(|_| {
-            AttentionError::new("probe_unavailable", "claim tree entry is unavailable")
-        })?;
-        let file_type = entry.file_type().map_err(|_| {
-            AttentionError::new("probe_unavailable", "claim tree entry type is unavailable")
-        })?;
-        if file_type.is_symlink() {
-            return Err(AttentionError::new(
-                "record_invalid",
-                "claim tree contains a symlink",
-            ));
-        }
-        let child = entry.path();
-        if file_type.is_dir() {
-            collect_json_complete_at(&child, output, false)?;
-        } else if child.extension().and_then(|extension| extension.to_str()) == Some("json") {
-            output.push(child);
-        }
-    }
-    Ok(())
 }
 
 fn binding_files(root: &Path, diagnostics: &mut Vec<Diagnostic>) -> Vec<PathBuf> {
@@ -1078,214 +1001,12 @@ fn fold_kept_history(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
     folded
 }
 
-fn claim_files(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    collect_json_complete(&root.join("v2/realms"), &mut files)?;
-    files.retain(|path| path.file_name().and_then(|name| name.to_str()) == Some("claim.json"));
-    files.sort();
-    Ok(files)
-}
-
-fn pane_address_from_claim_path(root: &Path, path: &Path) -> Result<PaneAddress> {
-    RecordIdentity::from_state_path(root, path, "claim")?;
-    let parts: Vec<_> = path
-        .strip_prefix(root)
-        .map_err(|_| AttentionError::new("record_invalid", "state path is outside its root"))?
-        .iter()
-        .filter_map(|part| part.to_str())
-        .collect();
-    if parts.len() != 8 {
-        return Err(AttentionError::new(
-            "record_invalid",
-            "state record path has the wrong shape",
-        ));
-    }
-    Ok(PaneAddress {
-        realm_id: parts[2].to_owned(),
-        incarnation_id: parts[4].to_owned(),
-        pane_id: parts[6].to_owned(),
-    })
-}
-
-fn flat_projection_stem(name: &str) -> Option<String> {
-    if name.ends_with(".review") {
-        return None;
-    }
-    let stem = name
-        .strip_suffix(".agents")
-        .or_else(|| name.strip_suffix(".ack"))
-        .unwrap_or(name);
-    canonical_pane_id(stem).ok()
-}
-
-struct FlatFile {
-    path: PathBuf,
-    identity: FileStamp,
-}
-
-fn regular_file_identity(path: &Path) -> Result<Option<FileStamp>> {
-    FileStamp::regular_file(path)
-        .map_err(|_| AttentionError::new("state_permissions", "flat marker could not be inspected"))
-}
-
-struct ClaimInventory {
-    owners: BTreeMap<String, Vec<PaneAddress>>,
-    undecidable: BTreeSet<String>,
-}
-
-fn inventory_claims(root: &Path) -> Result<ClaimInventory> {
-    let mut owners: BTreeMap<String, Vec<PaneAddress>> = BTreeMap::new();
-    let mut undecidable = BTreeSet::new();
-    for path in claim_files(root)? {
-        let address = pane_address_from_claim_path(root, &path)?;
-        match read_record(&path, Some("claim"), &RecordIdentity::pane(&address)) {
-            Ok(Some(claim)) => match record_address(&claim) {
-                Some(claimed) if claimed.pane_id == address.pane_id => {
-                    let entry = owners.entry(claimed.pane_id.clone()).or_default();
-                    if !entry.contains(&claimed) {
-                        entry.push(claimed);
-                    }
-                }
-                _ => {
-                    undecidable.insert(address.pane_id);
-                }
-            },
-            Ok(None) => {}
-            Err(_) => {
-                undecidable.insert(address.pane_id);
-            }
-        }
-    }
-    Ok(ClaimInventory {
-        owners,
-        undecidable,
-    })
-}
-
-type FlatCandidates = (BTreeMap<String, Vec<FlatFile>>, BTreeSet<String>);
-
-fn enumerate_flat_candidates(root: &Path) -> Result<FlatCandidates> {
-    let mut files: BTreeMap<String, Vec<FlatFile>> = BTreeMap::new();
-    let mut malformed = BTreeSet::new();
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((files, malformed));
-        }
-        Err(_) => {
-            return Err(AttentionError::new(
-                "probe_unavailable",
-                "state root could not be enumerated",
-            ));
-        }
-    };
-    for entry in entries {
-        let entry = entry.map_err(|_| {
-            AttentionError::new("probe_unavailable", "state root entry is unavailable")
-        })?;
-        let Ok(name) = entry.file_name().into_string() else {
-            continue;
-        };
-        let Some(stem) = flat_projection_stem(&name) else {
-            continue;
-        };
-        let path = entry.path();
-        match regular_file_identity(&path)? {
-            Some(identity) => files
-                .entry(stem)
-                .or_default()
-                .push(FlatFile { path, identity }),
-            None => {
-                malformed.insert(stem);
-            }
-        }
-    }
-    for paths in files.values_mut() {
-        paths.sort_by(|left, right| left.path.cmp(&right.path));
-    }
-    Ok((files, malformed))
-}
-
-fn projection_collection_diagnostic(code: &str, message: &str, pane_id: &str) -> Diagnostic {
-    let mut item = diagnostic(code, message);
-    item.context.insert("pane_id".into(), json!(pane_id));
-    item
-}
-
-fn apply_projection_collection(
-    root: &Path,
-    address: &PaneAddress,
-    stem: &str,
-    files: &[FlatFile],
-) -> Result<bool> {
-    let pane = pane_path(root, address);
-    with_lock(&pane.join(".claim.lock"), Duration::from_secs(2), || {
-        let claim = read_record(
-            &pane.join("claim.json"),
-            Some("claim"),
-            &RecordIdentity::pane(address),
-        )?;
-        let Some(claim) = claim else {
-            return Err(AttentionError::new(
-                "claim_stale",
-                "claim disappeared before collection",
-            ));
-        };
-        let Some(locked) = record_address(&claim) else {
-            return Err(AttentionError::new(
-                "record_invalid",
-                "claim address is invalid",
-            ));
-        };
-        if locked.pane_id != stem {
-            return Err(AttentionError::new(
-                "claim_stale",
-                "claim no longer names this pane id",
-            ));
-        }
-        let inventory = inventory_claims(root)?;
-        if inventory.undecidable.contains(stem) {
-            return Err(AttentionError::new(
-                "record_invalid",
-                "flat marker cannot be attributed",
-            ));
-        }
-        let Some(owners) = inventory.owners.get(stem) else {
-            return Ok(false);
-        };
-        if owners.len() != 1 || !owners.iter().any(|owner| owner == address) {
-            return Err(AttentionError::new(
-                "binding_conflict",
-                "flat marker is claimed at more than one pane address",
-            ));
-        }
-        for file in files {
-            match regular_file_identity(&file.path)? {
-                Some(identity) if identity == file.identity => {}
-                _ => {
-                    return Err(AttentionError::new(
-                        "record_invalid",
-                        "flat marker changed before collection",
-                    ));
-                }
-            }
-        }
-        let mut removed = false;
-        for file in files {
-            if remove_file_durable(&file.path)? {
-                removed = true;
-            }
-        }
-        Ok(removed)
-    })
-}
-
 /// A tab order whose writer has exited stays on disk for good: the writer
 /// withdraws its own files when a window closes, but nothing runs after the
 /// last window of a WezTerm process. It is collected here once every pane it
 /// names is verified absent, or once it names no tab at all: WezTerm closes a
 /// window whose last tab closes, so an empty order is the bar's final draw. A
-/// file naming a v1 marker id is kept, because a bare pane id has no realm to
+/// file naming a bare decimal pane id is kept, because it has no realm to
 /// ask; so is one naming a pane whose realm or incarnation is not recorded,
 /// and one whose panes could not be probed. A GUI source is not the pane realm
 /// a sweep selects, so a realm-filtered sweep leaves these files alone.
@@ -1429,7 +1150,7 @@ fn collect_tab_orders(
 }
 
 /// The address a published `v2:<realm>:<incarnation>:<pane>` marker id names.
-/// The reader has already checked the shape; a v1 decimal id has no address.
+/// The reader has already checked the shape; a bare decimal id has no address.
 fn v2_marker_address(marker_id: &str) -> Option<PaneAddress> {
     let mut parts = marker_id.strip_prefix("v2:")?.splitn(3, ':');
     let realm_id = parts.next()?.to_owned();
@@ -1440,96 +1161,6 @@ fn v2_marker_address(marker_id: &str) -> Option<PaneAddress> {
         incarnation_id,
         pane_id,
     })
-}
-
-/// Collects flat files a single claim owns. Returns how many steps failed.
-fn collect_projection_orphans(
-    root: &Path,
-    realm_filter: Option<&str>,
-    apply: bool,
-    details: &mut Vec<Value>,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> usize {
-    let mut failed = 0;
-    let inventory = match inventory_claims(root) {
-        Ok(inventory) => inventory,
-        Err(error) => {
-            diagnostics.push(error.diagnostic);
-            return 1;
-        }
-    };
-    let (files, malformed) = match enumerate_flat_candidates(root) {
-        Ok(value) => value,
-        Err(error) => {
-            diagnostics.push(error.diagnostic);
-            return 1;
-        }
-    };
-    let mut stems: BTreeSet<String> = files.keys().cloned().collect();
-    stems.extend(malformed.iter().cloned());
-    for stem in stems {
-        if malformed.contains(&stem) {
-            diagnostics.push(projection_collection_diagnostic(
-                "record_invalid",
-                "flat marker is not a regular file",
-                &stem,
-            ));
-            continue;
-        }
-        if inventory.undecidable.contains(&stem) {
-            diagnostics.push(projection_collection_diagnostic(
-                "record_invalid",
-                "flat marker cannot be attributed",
-                &stem,
-            ));
-            continue;
-        }
-        let Some(owners) = inventory.owners.get(&stem) else {
-            continue;
-        };
-        if owners.len() > 1 {
-            diagnostics.push(projection_collection_diagnostic(
-                "binding_conflict",
-                "flat marker is claimed at more than one pane address",
-                &stem,
-            ));
-            continue;
-        }
-        let Some(address) = owners.iter().next() else {
-            continue;
-        };
-        if realm_filter.is_some_and(|realm| realm != address.realm_id) {
-            continue;
-        }
-        let Some(candidates) = files.get(&stem) else {
-            continue;
-        };
-        let relative: Vec<String> = candidates
-            .iter()
-            .filter_map(|file| file.path.file_name()?.to_str().map(str::to_owned))
-            .collect();
-        if apply {
-            match apply_projection_collection(root, address, &stem, candidates) {
-                Ok(true) => details.push(json!({
-                    "kind": "projection_collection",
-                    "pane_id": stem,
-                    "paths": relative,
-                })),
-                Ok(false) => {}
-                Err(error) => {
-                    diagnostics.push(error.diagnostic);
-                    failed += 1;
-                }
-            }
-        } else {
-            details.push(json!({
-                "kind": "projection_collection",
-                "pane_id": stem,
-                "paths": relative,
-            }));
-        }
-    }
-    failed
 }
 
 /// Gives every binding in `files` its session index entry, and marks the index
@@ -1975,7 +1606,6 @@ pub fn sweep(
             &mut diagnostics,
         ));
     }
-    failed += collect_projection_orphans(root, realm_filter, apply, &mut details, &mut diagnostics);
     let mut ended: BTreeMap<String, Vec<(String, PathBuf, bool)>> = BTreeMap::new();
     // The absence rule's view of each pane. The tab-order step keeps its
     // own, which reads a pane of kept history as unavailable where this one
@@ -2580,122 +2210,4 @@ pub fn sweep(
         },
         fold_kept_history(diagnostics),
     ))
-}
-
-#[cfg(test)]
-mod projection_collection_tests {
-    use super::*;
-
-    struct Root(PathBuf);
-
-    impl Drop for Root {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn address(realm: char) -> PaneAddress {
-        PaneAddress {
-            realm_id: realm.to_string().repeat(64),
-            incarnation_id: "b".repeat(64),
-            pane_id: "42".to_owned(),
-        }
-    }
-
-    /// Writes a claim for `address`, with `schema` in place of the current
-    /// record schema when they differ.
-    fn claim(root: &Path, address: &PaneAddress, schema: u64) {
-        let path = pane_path(root, address).join("claim.json");
-        crate::records::atomic_replace(
-            &path,
-            &json!({
-                "kind":"claim","schema":manifest().expect("manifest").record_schema,
-                "address":address,"launch_id":"00000000-0000-4000-8000-000000000701",
-                "tty_path":"/dev/ttys888","tty_fingerprint":"f".repeat(64),
-                "observed_mono_ns":"00000000000000000100"
-            }),
-        )
-        .expect("claim");
-        let mut value: Value =
-            serde_json::from_slice(&fs::read(&path).expect("claim")).expect("claim JSON");
-        value["schema"] = json!(schema);
-        fs::write(&path, serde_json::to_vec(&value).expect("JSON")).expect("rewrite claim");
-    }
-
-    fn current_schema() -> u64 {
-        manifest().expect("manifest").record_schema
-    }
-
-    /// A state root holding pane 42's claim at realm `a` and its three flat
-    /// files, enumerated as collection first sees them.
-    fn enumerated() -> (Root, PaneAddress, BTreeMap<String, Vec<FlatFile>>) {
-        let root = Root(
-            std::env::temp_dir().join(format!("attention-collect-{}", Uuid::new_v4().simple())),
-        );
-        let address = address('a');
-        claim(&root.0, &address, current_schema());
-        for name in ["42", "42.agents", "42.ack"] {
-            fs::write(root.0.join(name), "stop\n").expect("flat file");
-        }
-        let (files, malformed) = enumerate_flat_candidates(&root.0).expect("enumerate");
-        assert!(malformed.is_empty());
-        (root, address, files)
-    }
-
-    fn assert_nothing_collected(root: &Path) {
-        for name in ["42", "42.agents", "42.ack"] {
-            assert!(root.join(name).exists(), "{name} was collected");
-        }
-    }
-
-    /// Collection enumerates the flat files, then takes the pane's claim lock
-    /// and checks each file is still the one it enumerated. Calling the two
-    /// steps in turn puts a replacement exactly between them, which a test
-    /// racing a sweep thread against a sleep could only hope to do.
-    #[test]
-    fn a_marker_replaced_after_enumeration_is_refused_not_collected() {
-        let (root, address, files) = enumerated();
-        let next = root.0.join("42.agents.next");
-        fs::write(&next, "thinking\n").expect("replacement");
-        fs::rename(&next, root.0.join("42.agents")).expect("replace agents");
-
-        let error = apply_projection_collection(&root.0, &address, "42", &files["42"])
-            .expect_err("a replaced file is refused");
-        assert_eq!(error.diagnostic.code, "record_invalid");
-        assert!(error.diagnostic.message.contains("changed"));
-        assert_eq!(
-            fs::read_to_string(root.0.join("42")).expect("marker"),
-            "stop\n"
-        );
-        assert_eq!(
-            fs::read_to_string(root.0.join("42.agents")).expect("agents"),
-            "thinking\n"
-        );
-        assert!(root.0.join("42.ack").exists());
-    }
-
-    /// Collection decided the markers belong to one claimed pane. A claim for
-    /// the same pane id that appears before the lock and cannot be read makes
-    /// them unattributable, and the check under the lock sees it.
-    #[test]
-    fn a_claim_that_turns_unreadable_before_the_lock_stops_collection() {
-        let (root, owner, files) = enumerated();
-        claim(&root.0, &address('c'), 999);
-        let error = apply_projection_collection(&root.0, &owner, "42", &files["42"])
-            .expect_err("unattributable markers are refused");
-        assert_eq!(error.diagnostic.code, "record_invalid");
-        assert_nothing_collected(&root.0);
-    }
-
-    /// A second claim for the same pane id at another address, appearing
-    /// before the lock, makes the markers ambiguous.
-    #[test]
-    fn a_second_owner_that_appears_before_the_lock_stops_collection() {
-        let (root, owner, files) = enumerated();
-        claim(&root.0, &address('c'), current_schema());
-        let error = apply_projection_collection(&root.0, &owner, "42", &files["42"])
-            .expect_err("ambiguous markers are refused");
-        assert_eq!(error.diagnostic.code, "binding_conflict");
-        assert_nothing_collected(&root.0);
-    }
 }

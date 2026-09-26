@@ -6,30 +6,6 @@ use super::*;
 const OP_1: &str = "00000000-0000-4000-8000-000000000931";
 const OP_2: &str = "00000000-0000-4000-8000-000000000932";
 
-/// A realm-filtered sweep collects only flat markers whose claim is in that
-/// realm.
-#[test]
-fn a_realm_filtered_sweep_leaves_another_realms_flat_markers() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let root = setup.root();
-    plant_flat_files(&root, "42");
-    let (result, _) = sweep(
-        &root,
-        Some(&"e".repeat(64)),
-        true,
-        Some(OP_1),
-        &setup.clock,
-        &setup.panes,
-        Some(&setup.processes),
-    )
-    .expect("sweep");
-    assert!(collection_details(&result.details).is_empty());
-    for name in ["42", "42.agents", "42.ack"] {
-        assert!(root.join(name).exists(), "{name} was collected");
-    }
-}
-
 /// A symlinked `agents/` would aim child compaction at files elsewhere.
 #[test]
 fn compaction_never_deletes_through_a_symlinked_agents_directory() {
