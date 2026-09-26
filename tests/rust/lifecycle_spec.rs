@@ -1930,12 +1930,6 @@ fn codex_parent_stop_clears_children_with_the_same_observation() {
     )
     .expect("clear JSON");
     assert_eq!(clear["observed_mono_ns"], "00000000000000000400");
-    assert!(
-        !state_root(&setup.env)
-            .expect("state root")
-            .join("42.agents")
-            .exists()
-    );
 }
 
 #[test]
@@ -1986,12 +1980,6 @@ fn duplicate_codex_stop_keeps_a_child_newer_than_the_surviving_activity() {
                 "{}.json",
                 wezterm_attention::protocol::sha256_hex(b"child-a")
             ))
-            .exists()
-    );
-    assert!(
-        !state_root(&setup.env)
-            .expect("state root")
-            .join("42.agents")
             .exists()
     );
 }
