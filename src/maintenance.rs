@@ -1473,10 +1473,11 @@ pub fn sweep(
                 .ok_or_else(|| AttentionError::usage("operation id is not canonical"))
         })
         .transpose()?;
-    // An operation id lets a retried apply recognise its own earlier work, and
-    // a repeat under the same id changes nothing. An apply with nothing to
-    // retry gets a fresh id, so running it again is a new observation; the
-    // result reports the id it used.
+    // An operation id lets a retried apply recognise its own earlier work: a
+    // repeat under the same id ends nothing new, and advances no retention
+    // floor that still carries that id. An apply with nothing to retry gets a
+    // fresh id, so running it again is a new observation; the result reports
+    // the id it used.
     let operation_id = operation_id.or_else(|| apply.then(|| Uuid::new_v4().to_string()));
     if let Some(realm) = realm_filter
         && !hex64_text(realm)

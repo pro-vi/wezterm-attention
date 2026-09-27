@@ -386,8 +386,10 @@ or persisted.
 
 Each `sweep --apply` makes up a fresh operation id and reports it in `result.operation_id`.
 `--operation-id` (a canonical lowercase UUID) exists to retry an interrupted run: a run under an id
-already used is treated as a replay of that run, so it ends no binding and advances no retention
-floor, because the absence rule needs two observations under different ids.
+already used is treated as a replay of that run. It ends no binding, because the absence rule needs
+two observations under different ids, and it advances no retention floor that still carries that
+id. A floor a hook's compaction has written since carries another id, and the retry advances it as
+any pass would.
 
 Once a pane's current binding ended more than 30 days ago, `sweep --apply` removes the pane's
 whole tree, but only after two new sightings of absence under different operation ids at least 60
