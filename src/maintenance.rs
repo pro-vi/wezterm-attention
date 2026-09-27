@@ -538,6 +538,8 @@ fn compaction_plan(
     let mut complete = true;
     // Something was not listed, read or judged.
     let mut incomplete = false;
+    // A file this pass does not recognise keeps the whole directory.
+    let mut blocked = false;
     let mut covered = Vec::new();
     let mut spent = Vec::new();
     let mut first_kept: Option<String> = None;
@@ -560,10 +562,14 @@ fn compaction_plan(
         if !file_type.is_file()
             || path.extension().and_then(|extension| extension.to_str()) != Some("json")
         {
-            return Ok(Compaction::blocked(
-                "record_invalid",
-                "unknown subagent state file is preserved",
-            ));
+            if !blocked {
+                diagnostics.push(Diagnostic::new(
+                    "record_invalid",
+                    "unknown subagent state file is preserved",
+                ));
+            }
+            blocked = true;
+            continue;
         }
         let agent_key = path
             .file_stem()
@@ -608,6 +614,12 @@ fn compaction_plan(
         } else if first_kept.as_deref().is_none_or(|first| order < first) {
             first_kept = Some(order.to_owned());
         }
+    }
+    if blocked {
+        return Ok(Compaction {
+            incomplete,
+            ..Compaction::doing("blocked", diagnostics)
+        });
     }
     let replay = operation_id.is_some()
         && floor

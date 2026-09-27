@@ -536,6 +536,32 @@ fn negative_wall_age_reports_clock_skew_and_preserves_child() {
     assert_eq!(result.failed_steps, 1, "a child sweep could not judge");
 }
 
+/// A file sweep does not recognise keeps the whole directory, and a child
+/// record it could not read still makes the apply incomplete, whichever of the
+/// two the directory lists first.
+#[test]
+fn an_unknown_file_does_not_hide_an_unreadable_child() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let spent = setup.seed_presence("spent", 300, 1, "stopped");
+    let agents = setup.binding_dir().join("agents");
+    for index in 0..8 {
+        let key = wezterm_attention::protocol::sha256_hex(format!("broken-{index}").as_bytes());
+        fs::write(agents.join(format!("{key}.json")), b"{").expect("write broken child");
+    }
+    fs::write(agents.join("note.txt"), b"preserve").expect("write unknown file");
+    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
+    let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000727"));
+    assert_eq!(result.failed_steps, 1);
+    assert!(spent.exists() && agents.join("note.txt").exists());
+    assert!(!setup.binding_dir().join("agents-floor.json").exists());
+    assert!(
+        diagnostics
+            .iter()
+            .any(|item| item.message == "unknown subagent state file is preserved")
+    );
+}
+
 /// A child record sweep cannot read may be one the floor must not pass, so
 /// the floor stays where it is and the apply reports a failed step.
 #[test]
