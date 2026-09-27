@@ -876,9 +876,13 @@ return function(context)
       return records, diagnostics
     end
 
+    -- A child record gone since the glob was removed by a writer's
+    -- compaction, which removes only records at or below the binding's
+    -- retention floor. Any other record gone mid-read is an error.
+    local required = kind ~= "subagent_presence"
     for _, path in ipairs(paths) do
       local record, record_diagnostic = read_expected_record_cached(
-        path, kind, expected, true, cached_by_path and cached_by_path[path])
+        path, kind, expected, required, cached_by_path and cached_by_path[path])
       if record and key_field and path_stem(path) ~= record[key_field] then
         record, record_diagnostic = nil, identity_diagnostic(kind, path)
       end

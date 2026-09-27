@@ -951,6 +951,13 @@ fn read_fact_collection(
             result.diagnostics.extend(record.diagnostics);
             continue;
         }
+        // A child record gone since the listing was removed by a writer's
+        // compaction, which removes only records at or below the binding's
+        // retention floor. Any other record gone mid-read leaves the answer
+        // incomplete.
+        if record.record.is_none() && child.is_some() {
+            continue;
+        }
         let Some(record) = record.record else {
             result.availability = A::Unavailable;
             result.diagnostics.push(

@@ -3722,6 +3722,31 @@ test("record recovery rejects cached TTL state when UTC precedes its write", fun
   drain_errors()
 end)
 
+test("a child record gone between the glob and its read counts as removed", function()
+  local window, key, pane_root, _, records_root = seed_record_recovery(9014)
+  local function poll_listing(directory)
+    attention.poll(window, {
+      now_unix_ns = protocol_fixture.state_case.now_unix_ns,
+      glob = function(pattern)
+        local paths = canonical_fixture_glob(pattern)
+        if pattern == directory .. "/*.json" then
+          paths[#paths + 1] = directory .. "/" .. string.rep("e", 64) .. ".json"
+        end
+        return paths
+      end,
+      call_after = function() end,
+    })
+    return internal.attention_cache[key]
+  end
+  local view = poll_listing(records_root .. "/agents")
+  assert(view.subagents == 1, "the child that is still there still counts")
+  assert(view.binding_health == "valid",
+    "a writer's compaction removed a child its retention floor covers")
+  view = poll_listing(pane_root .. "/reviews")
+  assert(view.binding_health ~= "valid", "a review gone mid-read is still a failed read")
+  drain_errors()
+end)
+
 test("focused v2 acknowledgement targets only the active pane's exact event", function()
   local wire = materialize_v2_fixture(51)
   local samples = protocol_fixture.record_samples
