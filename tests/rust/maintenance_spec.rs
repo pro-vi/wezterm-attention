@@ -481,8 +481,13 @@ fn compaction_advances_floor_before_delete_and_replays_operation() {
     let floor_bytes = fs::read(&floor).expect("floor record");
     assert!(!old.exists());
     let delayed = setup.seed_presence("delayed-child", 250, 1, "stopped");
+    let later = setup.seed_presence("later-child", 400, 1, "stopped");
     let replay = setup.run_sweep(true, Some(operation)).0;
     assert!(!delayed.exists());
+    assert!(
+        later.exists(),
+        "a replay advances no floor that carries its id"
+    );
     assert_eq!(fs::read(&floor).expect("floor record"), floor_bytes);
     assert!(
         replay
