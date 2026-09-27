@@ -111,7 +111,7 @@ fn the_users_review_is_refused_where_the_claim_names_another_launch() {
 }
 
 #[test]
-fn the_users_review_leaves_no_trace_on_a_pane_with_no_records() {
+fn the_plugin_leaves_no_trace_on_a_pane_with_no_records() {
     let setup = Setup::new();
     let (address, _) = pane_address(&setup.env).unwrap();
     let pane = pane_dir(&state_root(&setup.env).unwrap(), &address);
@@ -127,9 +127,22 @@ fn the_users_review_leaves_no_trace_on_a_pane_with_no_records() {
         (code, response["result"]["disposition"].as_str()),
         (0, Some("skipped"))
     );
+    let (code, response) = plugin(
+        &setup,
+        "acknowledge",
+        LAUNCH,
+        &[
+            "--activity-event-id",
+            "00000000-0000-4000-8000-000000000402",
+        ],
+    );
+    assert_eq!(
+        (code, response["diagnostics"][0]["code"].as_str()),
+        (1, Some("claim_stale"))
+    );
     assert!(
         !pane.exists(),
-        "neither command creates the pane's directory or its locks"
+        "no command creates the pane's directory or its locks"
     );
 }
 

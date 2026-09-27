@@ -1631,6 +1631,11 @@ pub fn acknowledge_activity(
     launch_id: &str,
     activity_event_id: &str,
 ) -> Result<LifecycleResult> {
+    // As for the user's review: taking the locks would create the directory
+    // of a pane that has no claim to acknowledge under.
+    if !pane_dir(root, address).is_dir() {
+        require_plugin_claim(None, address, launch_id)?;
+    }
     let (mutation, ()) = commit_waiting(
         root,
         &[
