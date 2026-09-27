@@ -1938,8 +1938,8 @@ pub fn read_checked_tab_publications(
 }
 
 /// One drawn tab: the number the bar printed, the text it drew, and the ids the
-/// plugin already uses for those panes. A v1 pane is a canonical decimal marker
-/// id; a v2 pane is `v2:<realm_id>:<incarnation_id>:<pane_id>`. Both are already
+/// plugin already uses for those panes. An unclaimed pane is its canonical
+/// decimal pane id; a claimed pane is `v2:<realm_id>:<incarnation_id>:<pane_id>`. Both are already
 /// translated out of the window's local numbering.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -2074,7 +2074,7 @@ fn read_tab_publication(
     }
 }
 
-/// What `gui_tab_pane_ids` publishes: a v1 marker id, or the v2 cache key
+/// What `gui_tab_pane_ids` publishes: an unclaimed pane's decimal id, or the v2 cache key
 /// `address_cache_key` builds after a poll has identified the pane.
 fn published_marker_id(text: &str, pane_id_max_digits: usize) -> bool {
     canonical_decimal_text(text, pane_id_max_digits) || marker_address(text).is_some()

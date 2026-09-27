@@ -1299,7 +1299,7 @@ fn sweep_collects_a_tab_order_only_when_every_pane_it_names_is_verified_absent()
     // says they are gone.
     let live = write_tab_order(&root, 7, &[&v2("42"), &v2("43")]);
     let dead = write_tab_order(&root, 8, &[&v2("43"), &v2("44")]);
-    let v1 = write_tab_order(&root, 9, &["17"]);
+    let unclaimed = write_tab_order(&root, 9, &["17"]);
     let empty = write_tab_order(&root, 10, &[]);
 
     let (preview, _) = setup.run_sweep(false, None);
@@ -1314,7 +1314,7 @@ fn sweep_collects_a_tab_order_only_when_every_pane_it_names_is_verified_absent()
     // A window with no tabs has closed; an empty order is the bar's last draw.
     assert_eq!(tab_order_detail(&preview.details, 10)["action"], "collect");
     assert!(
-        live.exists() && dead.exists() && v1.exists() && empty.exists(),
+        live.exists() && dead.exists() && unclaimed.exists() && empty.exists(),
         "a preview writes nothing"
     );
 
@@ -1328,7 +1328,7 @@ fn sweep_collects_a_tab_order_only_when_every_pane_it_names_is_verified_absent()
         !dead.exists() && !empty.exists(),
         "the dead windows' orders are collected"
     );
-    assert!(live.exists() && v1.exists(), "everything else stays");
+    assert!(live.exists() && unclaimed.exists(), "everything else stays");
 }
 
 #[test]
