@@ -248,7 +248,6 @@ fn a_file_that_is_not_a_record_does_not_stop_compaction() {
     fs::write(agents.join("notes.json.bak"), b"{").expect("write backup");
     fs::create_dir(agents.join("cache")).expect("create directory");
     // Dot-prefixed names: macOS's AppleDouble file and an editor's lock link.
-    // Neither can be a record, whose name is its key.
     let key = wezterm_attention::protocol::sha256_hex(b"child-a");
     fs::write(agents.join(format!("._{key}.json")), b"{").expect("write AppleDouble file");
     std::os::unix::fs::symlink("nowhere", agents.join(format!(".#{key}.json")))

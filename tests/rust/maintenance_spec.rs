@@ -613,10 +613,12 @@ fn an_unreadable_child_makes_sweep_apply_incomplete() {
     assert!(path.ends_with(&format!("agents/{name}")), "{path}");
 }
 
-/// A pass held back by entries it cannot read, a directory named like a record
-/// and a record of a later schema, still removes what the existing floor
-/// already covers, as after a crash between writing a floor and its removals,
-/// and leaves the floor where it is.
+/// A pass held back by entries it cannot read, directories named like records
+/// and records of a later schema, still visits every entry: it names each one
+/// it cannot read, removes what the existing floor already covers, as after a
+/// crash between writing a floor and its removals, and leaves the floor where
+/// it is. With two entries of each kind, a pass that stops at the first one
+/// misses the second whatever order the directory lists them in.
 #[test]
 fn an_incomplete_pass_still_removes_what_the_floor_covers() {
     let setup = Setup::new();
@@ -627,24 +629,41 @@ fn an_incomplete_pass_still_removes_what_the_floor_covers() {
     let floor_path = setup.binding_dir().join("agents-floor.json");
     let floor_bytes = fs::read(&floor_path).expect("floor record");
     let left = setup.seed_presence("left-behind", 250, 1, "stopped");
-    let key = wezterm_attention::protocol::sha256_hex(b"not-a-file");
-    fs::create_dir(
-        setup
+    let mut unreadable = Vec::new();
+    for name in ["not-a-file", "not-a-file-either"] {
+        let key = wezterm_attention::protocol::sha256_hex(name.as_bytes());
+        let entry = setup
             .binding_dir()
             .join("agents")
-            .join(format!("{key}.json")),
-    )
-    .expect("create directory entry");
-    let future = setup.seed_presence("future-child", 400, 1, "stopped");
-    let mut record: Value =
-        serde_json::from_slice(&fs::read(&future).expect("future child")).expect("future JSON");
-    record["schema"] = json!(999);
-    fs::write(&future, serde_json::to_vec(&record).expect("future JSON"))
-        .expect("write future child");
-    let (result, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000730"));
+            .join(format!("{key}.json"));
+        fs::create_dir(&entry).expect("create directory entry");
+        unreadable.push(entry);
+    }
+    for (name, order) in [("future-child", 400), ("another-future-child", 401)] {
+        let future = setup.seed_presence(name, order, 1, "stopped");
+        let mut record: Value =
+            serde_json::from_slice(&fs::read(&future).expect("future child")).expect("future JSON");
+        record["schema"] = json!(999);
+        fs::write(&future, serde_json::to_vec(&record).expect("future JSON"))
+            .expect("write future child");
+        unreadable.push(future);
+    }
+    let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000730"));
     assert!(!left.exists());
     assert_eq!(fs::read(&floor_path).expect("floor record"), floor_bytes);
     assert_eq!(result.failed_steps, 1);
+    let named: Vec<&str> = diagnostics
+        .iter()
+        .filter_map(|item| item.context.get("path").and_then(Value::as_str))
+        .collect();
+    for entry in &unreadable {
+        let name = entry.file_name().unwrap().to_string_lossy().into_owned();
+        let suffix = format!("agents/{name}");
+        assert!(
+            named.iter().any(|path| path.ends_with(&suffix)),
+            "{suffix} not named in {named:?}"
+        );
+    }
 }
 
 #[test]
