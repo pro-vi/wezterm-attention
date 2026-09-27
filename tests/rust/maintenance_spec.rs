@@ -574,34 +574,25 @@ fn binding_history_cap_is_calculated_per_realm() {
     assert_eq!(binding_cap_paths_by_realm(&one_realm).len(), 1);
 }
 
+/// A floor that was written and not followed by the removals it covers, as
+/// after a crash between the two, is followed by them on the next pass,
+/// whatever operation wrote it: the floor already fences those children.
 #[test]
-fn equal_order_active_child_blocks_the_whole_cap_group() {
+fn a_child_below_the_floor_is_removed_by_any_later_operation() {
     let setup = Setup::new();
     setup.claim_and_bind();
-    setup.clock.set_unix(10_000_000_000);
-    setup.seed_presence("tie-stopped", 300, 10_000_000_000, "stopped");
-    setup.seed_presence("tie-active", 300, 10_000_000_000, "active");
-    for index in 0..499 {
-        setup.seed_presence(
-            &format!("later-{index}"),
-            301 + index,
-            10_000_000_000,
-            "stopped",
-        );
-    }
-    let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000720"));
+    setup.seed_presence("old-child", 300, 1, "stopped");
+    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
+    setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000720"));
+    let left = setup.seed_presence("left-child", 250, 1, "stopped");
+    let (result, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000724"));
+    assert!(!left.exists());
     assert!(
-        diagnostics
-            .iter()
-            .any(|item| item.code == "binding_conflict")
-    );
-    assert!(
-        !result
+        result
             .details
             .iter()
-            .any(|detail| detail["action"] == "advance_floor")
+            .any(|detail| detail["action"] == "reclaim" && detail["deleted"] == 1)
     );
-    assert!(!setup.binding_dir().join("agents-floor.json").exists());
 }
 
 #[test]

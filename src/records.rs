@@ -1270,6 +1270,33 @@ pub fn remove_file_durable(path: &Path) -> Result<bool> {
     }
 }
 
+/// Removes `files`, which are all entries of `directory`, and then makes the
+/// directory durable once, rather than once per file as
+/// [`remove_file_durable`] does: a thousand removals cost one directory sync,
+/// not a thousand. Until that sync, a crash can keep any of them, so the
+/// caller must be content with any subset surviving. A file already gone
+/// counts as removed by someone else. Returns how many this call removed.
+pub fn remove_files_durable(directory: &Path, files: &[PathBuf]) -> Result<usize> {
+    let mut removed = 0;
+    let mut failure = None;
+    for file in files {
+        match fs::remove_file(file) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                failure = Some(AttentionError::new(
+                    "state_permissions",
+                    "state record could not be removed",
+                ));
+            }
+        }
+    }
+    if removed > 0 {
+        sync_parent_directory(directory)?;
+    }
+    failure.map_or(Ok(removed), Err)
+}
+
 /// Whether `directory` and every directory between it and the state root is
 /// a directory in its own right, not a symlink, so a removal there cannot
 /// reach through a link to somewhere outside the root. The root itself may be

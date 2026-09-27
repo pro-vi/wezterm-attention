@@ -1032,13 +1032,26 @@ fn child_still_waits(resolved: &ResolvedLaunch, binding_id: &str, since: &str) -
         ) else {
             return false;
         };
-        let order = presence["observed_mono_ns"].as_str().unwrap_or("");
-        presence["source"] == WAITING_FOR_PERMISSION
-            && presence["status"] == "active"
-            && order >= since
-            && clear.as_deref().is_none_or(|clear| order > clear)
-            && floor.as_deref().is_none_or(|floor| order > floor)
+        waits_for_permission(&presence, since, clear.as_deref(), floor.as_deref())
     })
+}
+
+/// Whether `presence` is a child that asked for permission at or after
+/// `since` and has emitted nothing since, above the parent clear at `clear`
+/// and the retention floor at `floor`: a child that can hold a notify
+/// ordered at `since`.
+pub(crate) fn waits_for_permission(
+    presence: &Value,
+    since: &str,
+    clear: Option<&str>,
+    floor: Option<&str>,
+) -> bool {
+    let order = presence["observed_mono_ns"].as_str().unwrap_or("");
+    presence["source"] == WAITING_FOR_PERMISSION
+        && presence["status"] == "active"
+        && order >= since
+        && clear.is_none_or(|clear| order > clear)
+        && floor.is_none_or(|floor| order > floor)
 }
 
 fn apply_activity(
@@ -2335,6 +2348,30 @@ fn apply_provider_event_inner(
         ProviderAction::Clear => apply_clear_event(&resolved, event, observation, &written_at),
         ProviderAction::Ignored => unreachable!(),
     };
+    // Once a child's stop or the lead's is saved, the binding's spent child
+    // records are folded into its retention floor, so the plugin does not
+    // read every child the session ever ran on each poll. It is maintenance:
+    // whatever becomes of it, the stop stands as saved, and a later stop or
+    // `attention sweep --apply` tries again.
+    let stop = event.action == ProviderAction::ChildStopped
+        || (event.agent_id.is_none() && event.activity_type.as_deref() == Some("stop"));
+    if stop
+        && result.as_ref().is_ok_and(|result| {
+            matches!(
+                result.disposition,
+                Disposition::Applied | Disposition::Replaced | Disposition::Partial
+            )
+        })
+        && let Ok(binding_id) = event_binding_id(event, &resolved.launch_id)
+    {
+        let _ = crate::maintenance::compact_subagents(
+            &resolved.root,
+            &resolved.address,
+            &resolved.launch_id,
+            &binding_id,
+            ports.clock,
+        );
+    }
     // Metadata the parser dropped is reported unless the lifecycle has a
     // finding of its own, which says more about what happened to the event.
     // A claim this event made and could not publish says less than either.

@@ -13,18 +13,18 @@ use crate::presence::{
     kept_history_code, pane_evidence, reader_presence, recorded_socket,
 };
 use crate::protocol::{
-    AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, elapsed_beyond,
-    eligible_subagent_presence, hex64_text, manifest, ns20_text, sha256_hex,
+    AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, elapsed_beyond, hex64_text, manifest,
+    ns20_text, sha256_hex,
 };
 use crate::query::{FileStamp, read_bindings_with_ports, read_tab_publications};
 use crate::records::{
-    AGENTS, BINDING_FILE, BindingState, CommitPlan, FileRecords, RecordIdentity, RecordRead,
-    Replacement, agents_dir, atomic_replace_if_different, binding_record_kind,
-    binding_session_entry, claim_lock, collect_binding_files, collect_state_files, commit,
-    directory_confined, ends_binding, incarnation_dir, is_state_lock, launch_lock, name_address,
-    naming_record, pane_dir, read_bounded, read_record, read_record_at, record_address,
-    removal_confined, remove_file_durable, session_index_marker, session_index_path,
-    state_relative,
+    AGENTS, BINDING_FILE, BindingState, CommitPlan, FileRecords, LOCK_TIMEOUT, RecordIdentity,
+    RecordRead, Replacement, agents_dir, atomic_replace, atomic_replace_if_different,
+    binding_record_kind, binding_session_entry, claim_lock, collect_binding_files,
+    collect_state_files, commit, directory_confined, ends_binding, incarnation_dir, is_state_lock,
+    launch_lock, name_address, naming_record, pane_dir, read_bounded, read_record, read_record_at,
+    record_address, removal_confined, remove_file_durable, remove_files_durable,
+    session_index_marker, session_index_path, state_relative, with_lock,
 };
 use crate::wezterm::{Clock, PaneLister, Presence, ProcessInspector, ProcessProbe};
 
@@ -425,54 +425,29 @@ fn wall_age_exceeds(now: &str, written: &str, interval: u128) -> Result<bool> {
     })
 }
 
-/// Whether a child's presence still counts, by the rule every reader
-/// applies, [`eligible_subagent_presence`]. Compaction keeps a presence it
-/// cannot judge, so a clock that went back is an error here.
-fn presence_eligible(
-    presence: &Value,
-    clear: Option<&Value>,
-    floor: Option<&Value>,
-    now: &str,
-) -> Result<bool> {
-    let (eligible, problem) = eligible_subagent_presence(
-        presence,
-        clear.and_then(|clear| clear["observed_mono_ns"].as_str()),
-        floor.and_then(|floor| floor["floor_mono_ns"].as_str()),
-        Some(now),
-        manifest()?,
-    );
-    match problem {
-        None => Ok(eligible),
-        Some("clock_skew") => Err(AttentionError::new(
-            "clock_skew",
-            "retention timestamp is newer than current UTC",
-        )),
-        Some(code) => Err(AttentionError::new(
-            code,
-            "subagent presence cannot be judged",
-        )),
-    }
-}
-
-#[derive(Clone)]
-struct ChildRecord {
-    path: PathBuf,
-    value: Value,
-}
-
+/// What one compaction pass does to a binding's subagent records: the floor
+/// it writes, when it advances one, and the records it removes, every one at
+/// or below the floor once that is written.
 struct Compaction {
     action: &'static str,
     floor: Option<String>,
-    candidates: Vec<ChildRecord>,
+    covered: Vec<PathBuf>,
     diagnostics: Vec<Diagnostic>,
 }
 
-struct CompactionOutcome {
-    action: String,
-    floor: Option<String>,
-    covered: usize,
-    deleted: usize,
-    diagnostics: Vec<Diagnostic>,
+impl Compaction {
+    fn doing(action: &'static str, diagnostics: Vec<Diagnostic>) -> Self {
+        Self {
+            action,
+            floor: None,
+            covered: Vec::new(),
+            diagnostics,
+        }
+    }
+
+    fn blocked(code: &str, message: &'static str) -> Self {
+        Self::doing("blocked", vec![Diagnostic::new(code, message)])
+    }
 }
 
 struct AbsenceOutcome {
@@ -485,6 +460,25 @@ struct RetentionOutcome {
     diagnostics: Vec<Diagnostic>,
 }
 
+/// Plans one compaction of the subagent records of a binding as they stand
+/// at `now`. The caller holds the launch lock, which every writer of those
+/// records takes.
+///
+/// A record is spent once its lifetime has provably run out since it was
+/// written. No reader counts it then, and no event it could fence is still
+/// on its way, since a hook waits seconds for its locks, not minutes. The
+/// exception is a child waiting on a permission prompt while it can still
+/// hold the pane's notify, because that wait has no time limit. The floor
+/// advances to the latest spent record ordered strictly before every record
+/// kept, so a kept record keeps its whole equal-order group, and every record
+/// at or below the floor, the one already written or the one advanced now,
+/// is removed.
+///
+/// The floor advances only when every record was listed, read and judged:
+/// one that was not may be a record the floor must not pass. The records an
+/// earlier floor covers are removed even then, since that floor already
+/// fences them. A sweep under the `operation_id` that wrote the current floor
+/// is a replay, and advances nothing.
 fn compaction_plan(
     root: &Path,
     address: &PaneAddress,
@@ -496,163 +490,214 @@ fn compaction_plan(
     let identity = RecordIdentity::binding(address, launch_id, binding_id);
     let floor = read_record_at(root, "subagent_retention_floor", &identity)?;
     let clear = read_record_at(root, "subagent_clear", &identity)?;
-    let mut records = Vec::new();
+    let activity = read_record_at(root, "activity", &identity)?;
+    let floor_order = floor
+        .as_ref()
+        .and_then(|floor| floor["floor_mono_ns"].as_str());
+    let clear_order = clear
+        .as_ref()
+        .and_then(|clear| clear["observed_mono_ns"].as_str());
+    let activity_order = activity
+        .as_ref()
+        .and_then(|activity| activity["observed_mono_ns"].as_str());
+    let lifetime = u128::from(manifest()?.limits.subagent_ttl_ms) * 1_000_000;
     let agents = agents_dir(root, address, launch_id, binding_id);
     if fs::symlink_metadata(&agents).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        return Ok(Compaction {
-            action: "blocked",
-            floor: None,
-            candidates: Vec::new(),
-            diagnostics: vec![Diagnostic::new(
-                "record_invalid",
-                "symlinked subagent directory is preserved",
-            )],
-        });
+        return Ok(Compaction::blocked(
+            "record_invalid",
+            "symlinked subagent directory is preserved",
+        ));
     }
     if agents.exists() && !directory_confined(root, &agents) {
-        return Ok(Compaction {
-            action: "blocked",
-            floor: None,
-            candidates: Vec::new(),
-            diagnostics: vec![Diagnostic::new(
-                "record_invalid",
-                "subagent directory outside the state root is preserved",
-            )],
-        });
+        return Ok(Compaction::blocked(
+            "record_invalid",
+            "subagent directory outside the state root is preserved",
+        ));
     }
-    if let Ok(entries) = fs::read_dir(&agents) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file()
-                || path.extension().and_then(|extension| extension.to_str()) != Some("json")
-            {
-                return Ok(Compaction {
-                    action: "blocked",
-                    floor: None,
-                    candidates: Vec::new(),
-                    diagnostics: vec![Diagnostic::new(
-                        "record_invalid",
-                        "unknown subagent state file is preserved",
-                    )],
-                });
-            }
-            let agent_key = path
-                .file_stem()
-                .and_then(|name| name.to_str())
-                .unwrap_or("");
-            let Some(value) = read_record(
-                &path,
-                Some("subagent_presence"),
-                &RecordIdentity::agent(address, launch_id, binding_id, agent_key),
-            )?
-            else {
-                continue;
-            };
-            if path.file_stem().and_then(|name| name.to_str()) != value["agent_key"].as_str() {
-                return Ok(Compaction {
-                    action: "blocked",
-                    floor: None,
-                    candidates: Vec::new(),
-                    diagnostics: vec![Diagnostic::new(
-                        "record_invalid",
-                        "subagent path identity mismatch",
-                    )],
-                });
-            }
-            records.push(ChildRecord { path, value });
+    let entries = match fs::read_dir(&agents) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Compaction::doing("none", Vec::new()));
         }
-    }
-    records.sort_by(|left, right| {
-        (
-            left.value["observed_mono_ns"].as_str().unwrap_or(""),
-            left.value["agent_key"].as_str().unwrap_or(""),
-        )
-            .cmp(&(
-                right.value["observed_mono_ns"].as_str().unwrap_or(""),
-                right.value["agent_key"].as_str().unwrap_or(""),
-            ))
-    });
-    if let Some(floor) = &floor
-        && operation_id.is_some()
-        && floor.get("operation_id").and_then(Value::as_str) == operation_id
-    {
-        let floor_order = floor["floor_mono_ns"].as_str().unwrap_or("").to_owned();
-        let candidates = records
-            .into_iter()
-            .filter(|child| {
-                child.value["observed_mono_ns"].as_str().unwrap_or("") <= floor_order.as_str()
-            })
-            .collect();
-        return Ok(Compaction {
-            action: "replay_floor",
-            floor: Some(floor_order),
-            candidates,
-            diagnostics: Vec::new(),
-        });
-    }
-    let excess = records.len().saturating_sub(RETENTION_CAP);
-    let mut candidates = Vec::new();
+        Err(_) => {
+            return Ok(Compaction::blocked(
+                "probe_unavailable",
+                "subagent directory could not be enumerated",
+            ));
+        }
+    };
     let mut diagnostics = Vec::new();
-    let mut index = 0;
-    while index < records.len() {
-        let order = records[index].value["observed_mono_ns"]
-            .as_str()
-            .unwrap_or("")
-            .to_owned();
-        let start = index;
-        while index < records.len() && records[index].value["observed_mono_ns"] == order {
-            index += 1;
-        }
-        if floor
-            .as_ref()
-            .is_some_and(|floor| order.as_str() <= floor["floor_mono_ns"].as_str().unwrap_or(""))
-        {
+    let mut complete = true;
+    let mut covered = Vec::new();
+    let mut spent = Vec::new();
+    let mut first_kept: Option<String> = None;
+    for entry in entries {
+        let Ok((entry, file_type)) =
+            entry.and_then(|entry| entry.file_type().map(|file_type| (entry, file_type)))
+        else {
+            complete = false;
+            diagnostics.push(Diagnostic::new(
+                "probe_unavailable",
+                "subagent directory entry is unavailable",
+            ));
+            continue;
+        };
+        let path = entry.path();
+        if file_type.is_file() && write_leftover(&entry.file_name().to_string_lossy()) {
             continue;
         }
-        let group = &records[start..index];
-        let mut eligible = false;
-        let mut old = true;
-        for child in group {
-            eligible |= presence_eligible(&child.value, clear.as_ref(), floor.as_ref(), now)?;
-            old &= wall_age_exceeds(
-                now,
-                child.value["written_at_unix_ns"].as_str().unwrap_or(""),
-                RETENTION_AGE_NS,
-            )?;
+        if !file_type.is_file()
+            || path.extension().and_then(|extension| extension.to_str()) != Some("json")
+        {
+            return Ok(Compaction::blocked(
+                "record_invalid",
+                "unknown subagent state file is preserved",
+            ));
         }
-        let cap_candidate = candidates.len() < excess;
-        if eligible {
-            if cap_candidate {
-                diagnostics.push(Diagnostic::new(
-                    "binding_conflict",
-                    "eligible active child blocks unsafe cap pruning",
-                ));
+        let agent_key = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        let presence = match read_record(
+            &path,
+            Some("subagent_presence"),
+            &RecordIdentity::agent(address, launch_id, binding_id, agent_key),
+        ) {
+            Ok(Some(presence)) => presence,
+            Ok(None) => continue,
+            Err(error) => {
+                complete = false;
+                diagnostics.push(naming_record(root, &path, error).diagnostic);
+                continue;
             }
-            break;
+        };
+        let order = presence["observed_mono_ns"].as_str().unwrap_or("");
+        if floor_order.is_some_and(|floor| order <= floor) {
+            covered.push(path);
+            continue;
         }
-        if old || cap_candidate {
-            candidates.extend_from_slice(group);
-        } else {
-            break;
-        }
-    }
-    if candidates.is_empty() {
-        return Ok(Compaction {
-            action: "none",
-            floor: None,
-            candidates,
-            diagnostics,
+        let expired = match wall_age_exceeds(
+            now,
+            presence["written_at_unix_ns"].as_str().unwrap_or(""),
+            lifetime,
+        ) {
+            Ok(expired) => expired,
+            Err(error) => {
+                diagnostics.push(naming_record(root, &path, error).diagnostic);
+                false
+            }
+        };
+        let waiting = activity_order.is_some_and(|since| {
+            crate::lifecycle::waits_for_permission(&presence, since, clear_order, floor_order)
         });
+        if expired && !waiting {
+            spent.push((order.to_owned(), path));
+        } else if first_kept.as_deref().is_none_or(|first| order < first) {
+            first_kept = Some(order.to_owned());
+        }
     }
-    let floor_order = candidates
-        .last()
-        .and_then(|child| child.value["observed_mono_ns"].as_str())
-        .map(str::to_owned);
+    let replay = operation_id.is_some()
+        && floor
+            .as_ref()
+            .and_then(|floor| floor["operation_id"].as_str())
+            == operation_id;
+    let advance = if complete && !replay {
+        spent
+            .iter()
+            .map(|(order, _)| order)
+            .filter(|order| first_kept.as_ref().is_none_or(|first| *order < first))
+            .max()
+            .cloned()
+    } else {
+        None
+    };
+    if let Some(advance) = &advance {
+        covered.extend(
+            spent
+                .into_iter()
+                .filter(|(order, _)| order <= advance)
+                .map(|(_, path)| path),
+        );
+    }
+    let action = if advance.is_some() {
+        "advance_floor"
+    } else if replay {
+        "replay_floor"
+    } else if covered.is_empty() {
+        "none"
+    } else {
+        "reclaim"
+    };
     Ok(Compaction {
-        action: "advance_floor",
-        floor: floor_order,
-        candidates,
+        action,
+        floor: advance,
+        covered,
         diagnostics,
+    })
+}
+
+/// Carries out `plan` for one binding, under the launch lock the caller
+/// holds. The floor is made durable before any record it covers is removed,
+/// so a crash between the two leaves records the next pass removes, never a
+/// record the floor does not fence. The floor names `operation_id`, which
+/// only a sweep replay reads.
+fn apply_compaction(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+    plan: &Compaction,
+    operation_id: &str,
+) -> Result<usize> {
+    if let Some(floor) = &plan.floor {
+        let identity = RecordIdentity::binding(address, launch_id, binding_id);
+        atomic_replace(
+            &identity.path(root, "subagent_retention_floor")?,
+            &json!({
+                "kind":"subagent_retention_floor","schema":manifest()?.record_schema,
+                "address":address,"launch_id":launch_id,"binding_id":binding_id,
+                "floor_mono_ns":floor,"operation_id":operation_id,
+            }),
+        )?;
+    }
+    if plan.covered.is_empty() {
+        return Ok(0);
+    }
+    let agents = agents_dir(root, address, launch_id, binding_id);
+    if !directory_confined(root, &agents) {
+        return Err(AttentionError::new(
+            "record_invalid",
+            "subagent directory outside the state root is preserved",
+        ));
+    }
+    remove_files_durable(&agents, &plan.covered)
+}
+
+/// Compacts one binding's subagent records after a hook saved a stop, so the
+/// records a reader lists stay about as many as the children that ran
+/// within one presence lifetime, however long the session. It takes the
+/// launch lock alone, the one every writer of those records takes, and leaves
+/// the claim lock free. The wall clock is read once the lock is held, so every
+/// record on disk was written by a hook that read its own clock earlier.
+/// Returns how many records were removed.
+pub(crate) fn compact_subagents(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+    clock: &dyn Clock,
+) -> Result<usize> {
+    with_lock(&launch_lock(root, address, launch_id), LOCK_TIMEOUT, || {
+        let now = clock.unix_ns20()?;
+        let plan = compaction_plan(root, address, launch_id, binding_id, &now, None)?;
+        apply_compaction(
+            root,
+            address,
+            launch_id,
+            binding_id,
+            &plan,
+            &Uuid::new_v4().to_string(),
+        )
     })
 }
 
@@ -1580,70 +1625,35 @@ pub fn sweep(
                                 &binding_state(root, &address, launch_id, binding_id),
                             )? != Some(true)
                         {
-                            return Ok(CommitPlan::reporting(CompactionOutcome {
-                                action: "changed".to_owned(),
-                                floor: None,
-                                covered: 0,
-                                deleted: 0,
-                                diagnostics: vec![Diagnostic::new(
+                            return Ok(CommitPlan::reporting(Compaction::doing(
+                                "changed",
+                                vec![Diagnostic::new(
                                     "record_invalid",
                                     "binding changed before sweep apply",
                                 )],
-                            }));
+                            )));
                         }
-                        let plan = compaction_plan(
+                        // The wall clock is read under the lock, as a hook's
+                        // compaction reads it: every record on disk was then
+                        // written by a hook that read its own clock earlier.
+                        let now = clock.unix_ns20()?;
+                        Ok(CommitPlan::reporting(compaction_plan(
                             root,
                             &address,
                             launch_id,
                             binding_id,
                             &now,
                             Some(operation),
-                        )?;
-                        let mut replacements = Vec::new();
-                        let mut removals = Vec::new();
-                        if let Some(floor) = &plan.floor {
-                            if plan.action == "advance_floor" {
-                                replacements.push(Replacement::always(
-                                    binding_identity.path(root, "subagent_retention_floor")?,
-                                    json!({
-                                        "kind":"subagent_retention_floor","schema":manifest()?.record_schema,
-                                        "address":address,"launch_id":launch_id,"binding_id":binding_id,
-                                        "floor_mono_ns":floor,"operation_id":operation,
-                                    }),
-                                ));
-                            }
-                            for child in &plan.candidates {
-                                if child.value["observed_mono_ns"].as_str().unwrap_or("") <= floor {
-                                    removals.push(child.path.clone());
-                                }
-                            }
-                        }
-                        let covered = if plan.action == "replay_floor" {
-                            0
-                        } else {
-                            plan.candidates.len()
-                        };
-                        let deleted = removals.len();
-                        Ok(CommitPlan {
-                            replacements,
-                            removals,
-                            ..CommitPlan::reporting(CompactionOutcome {
-                                action: plan.action.to_owned(),
-                                floor: plan.floor,
-                                covered,
-                                deleted,
-                                diagnostics: plan.diagnostics,
-                            })
-                        })
+                        )?))
                     },
-                    |_| Ok(()),
+                    |plan| apply_compaction(root, &address, launch_id, binding_id, plan, operation),
                 );
                 match applied {
-                    Ok((outcome, ())) => {
-                        diagnostics.extend(outcome.diagnostics);
-                        if outcome.action != "none" && outcome.action != "changed" {
-                            details.push(json!({"kind":"subagent_compaction","binding_id":binding_id,"action":outcome.action,"floor_mono_ns":outcome.floor,"covered":outcome.covered,"deleted":outcome.deleted}));
+                    Ok((plan, deleted)) => {
+                        if plan.action != "none" && plan.action != "changed" {
+                            details.push(json!({"kind":"subagent_compaction","binding_id":binding_id,"action":plan.action,"floor_mono_ns":plan.floor,"covered":plan.covered.len(),"deleted":deleted}));
                         }
+                        diagnostics.extend(plan.diagnostics);
                     }
                     Err(error) => {
                         diagnostics.push(error.diagnostic);
@@ -1653,10 +1663,10 @@ pub fn sweep(
             } else {
                 match compaction_plan(root, &address, launch_id, binding_id, &now, None) {
                     Ok(plan) => {
-                        diagnostics.extend(plan.diagnostics.clone());
                         if plan.action != "none" {
-                            details.push(json!({"kind":"subagent_compaction","binding_id":binding_id,"action":plan.action,"floor_mono_ns":plan.floor,"covered":plan.candidates.len()}));
+                            details.push(json!({"kind":"subagent_compaction","binding_id":binding_id,"action":plan.action,"floor_mono_ns":plan.floor,"covered":plan.covered.len()}));
                         }
+                        diagnostics.extend(plan.diagnostics);
                     }
                     Err(error) => diagnostics.push(error.diagnostic),
                 }
