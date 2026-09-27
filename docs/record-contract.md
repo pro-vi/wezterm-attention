@@ -212,8 +212,8 @@ not know keeps the observation: an unknown `error_category` becomes `unknown`, a
 
 An activity-clear watermark hides activity at or below its monotonic observation. A strictly newer
 activity reappears. Child presence behaves the same way across active, stopped, parent-clear, and
-retention-floor records. A stopped snapshot is retained because deleting it would discard the
-ordering fence.
+retention-floor records. A stopped snapshot is retained until a binding's retention floor covers
+it, because deleting it earlier would discard the ordering fence.
 
 Prompt return is `hooks publish` from a bound pane. It republishes the pane identity and writes an activity-clear watermark for the current lead activity only. It never clears child presence and never writes `end.json`. A shell that inherited a launch id clears that launch. A shell without one, in a pane an agent claimed for itself, clears the claim's launch only once the claim's owner is proven gone by the test a replacing claim uses: another boot session, no process at the pid, or a process there with another start time. An owner that still runs, or whose state cannot be read, keeps its activity, and so does a shell claim. The watermark is written under the launch lock and then the claim lock, only while the claim is the one that was read.
 
@@ -405,6 +405,20 @@ other removal a writer makes follows the same rule without a diagnostic: a new c
 the pane's absence probe, and a clear's removal of a review or activity record, keep the target
 below a symlinked directory, and the claim or the clear is still written.
 
-A retention floor advances only across complete monotonic-timestamp groups that were already
-ineligible under the prior floor. An eligible member blocks the whole equal-timestamp group.
+A binding's child records are compacted after each saved child `SubagentStop` and each saved lead
+stop, and by `sweep --apply` for current bindings. A compaction advances the retention floor
+`agents-floor.json` when it can, and then removes every child record at or below the floor. A record
+counts as spent once one presence TTL has provably passed since its `written_at_unix_ns`: no reader
+counts it any more, and since a hook waits seconds for its locks, no event it would fence is still
+on its way. One exception is kept however old it is: a child waiting for permission whose request is
+at or after the binding's activity, because it can still hold that `notify`. The floor advances to
+the latest spent record ordered strictly before every record kept, so a kept record keeps its whole
+equal-timestamp group. It advances only when every file in `agents/` was listed and read; a
+temporary file an interrupted write left is not a record, and any other file keeps the whole
+directory. Records an existing floor already covers are removed by any later pass, whatever
+operation wrote that floor. A hook's compaction gives the floor a fresh `operation_id` of its own.
+It is maintenance: it takes the launch lock alone, reads the wall clock only once it holds that
+lock, and a failure leaves the stop that ran it saved. A reader treats a child record listed and
+gone before its read as removed, not as a failed read. Every other listed record gone mid-read is
+still a failed read.
 Binding-history caps are calculated separately for each realm.

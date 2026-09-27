@@ -157,9 +157,9 @@ and exponent spellings, since a decoded fixture cannot express the difference.
 `attention sweep --apply` removes only ended bindings and closed panes' whole
 trees under the retention rules in the
 [record contract](record-contract.md#trust-boundary), with their session index
-entries; the subagent records a floor advance covers; and exited GUIs'
+entries; the subagent records a binding's retention floor covers; and exited GUIs'
 tab-order files the record contract lists as collected. Those rules keep sweep from removing state it cannot prove
-abandoned, and they mean four kinds of leftover stay on disk:
+abandoned, and they mean three kinds of leftover stay on disk:
 
 - **An exited GUI's tab-order files that name mux panes.** A file is removed
   only when it names no tab, or when every pane it names is verified absent.
@@ -178,9 +178,6 @@ abandoned, and they mean four kinds of leftover stay on disk:
   `<review>.json.<session>.<ms>.clear` while clearing it, and never finished with. They do not stop a binding or pane tree from being
   pruned, and they go with that tree when it is, but sweep collects none on its
   own.
-- **Subagent records below the retention floor.** A child record older than its
-  binding's floor is already ignored by every reader. It stays until its binding
-  or pane tree is removed.
 - **A half-removed binding directory in a live pane.** A crash while a binding
   directory was being removed can leave part of it behind. While the pane is
   live, retention does not touch its tree, so the remainder stays.
