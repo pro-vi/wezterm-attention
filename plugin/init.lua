@@ -272,7 +272,7 @@ local option_kinds = {
 -- as, or why it went.
 local option_notes = {
   acknowledge_types = "the option is auto_clear",
-  format_tab_title = 'the option is renderer = "manual"',
+  format_tab_title = 'format_tab_title = false is now renderer = "manual", and true was the default',
   stale_after_ms = "it applied only to flat marker files, which are not read",
 }
 

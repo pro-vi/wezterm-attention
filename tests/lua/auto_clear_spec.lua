@@ -5006,17 +5006,21 @@ test("an unknown option or a value of the wrong kind is named, and the default u
 end)
 
 test("options that went with flat markers are named as ignored, and change nothing", function()
-  local before = #(handlers["format-tab-title"] or {})
-  local instance = dofile(repo_root .. "/plugin/init.lua")
-  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
-    integration_root = writer_root, stale_after_ms = { thinking = 1 }, format_tab_title = false })
-  local warnings = table.concat(drain_warnings(), "\n")
-  assert(warnings:find("unknown option stale_after_ms is ignored; it applied only to flat marker files", 1, true),
-    "stale_after_ms is named with the reason it went: " .. warnings)
-  assert(warnings:find('unknown option format_tab_title is ignored; the option is renderer = "manual"', 1, true),
-    "format_tab_title is named with the option that replaced it: " .. warnings)
-  assert(#handlers["format-tab-title"] == before + 1, "format_tab_title does not choose the renderer")
-  assert(instance.remove_marker == nil, "remove_marker went with the flat files it removed")
+  -- true was the default, so the note must not send its users to the manual renderer.
+  for _, value in ipairs({ false, true }) do
+    local before = #(handlers["format-tab-title"] or {})
+    local instance = dofile(repo_root .. "/plugin/init.lua")
+    instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+      integration_root = writer_root, stale_after_ms = { thinking = 1 }, format_tab_title = value })
+    local warnings = table.concat(drain_warnings(), "\n")
+    assert(warnings:find("unknown option stale_after_ms is ignored; it applied only to flat marker files", 1, true),
+      "stale_after_ms is named with the reason it went: " .. warnings)
+    assert(warnings:find('unknown option format_tab_title is ignored; format_tab_title = false is now '
+      .. 'renderer = "manual", and true was the default', 1, true),
+      "format_tab_title = " .. tostring(value) .. " is named with what each value became: " .. warnings)
+    assert(#handlers["format-tab-title"] == before + 1, "format_tab_title does not choose the renderer")
+    assert(instance.remove_marker == nil, "remove_marker went with the flat files it removed")
+  end
 end)
 
 test("a dir option the writer would refuse is named, and the default used", function()
