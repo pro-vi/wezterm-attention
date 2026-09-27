@@ -427,12 +427,15 @@ fn wall_age_exceeds(now: &str, written: &str, interval: u128) -> Result<bool> {
 
 /// What one compaction pass does to a binding's subagent records: the floor
 /// it writes, when it advances one, and the records it removes, every one at
-/// or below the floor once that is written.
+/// or below the floor once that is written. `incomplete` says the pass could
+/// not list, read or judge something it needed to decide on, which sweep
+/// counts as a failed step.
 struct Compaction {
     action: &'static str,
     floor: Option<String>,
     covered: Vec<PathBuf>,
     diagnostics: Vec<Diagnostic>,
+    incomplete: bool,
 }
 
 impl Compaction {
@@ -442,6 +445,7 @@ impl Compaction {
             floor: None,
             covered: Vec::new(),
             diagnostics,
+            incomplete: false,
         }
     }
 
@@ -520,14 +524,20 @@ fn compaction_plan(
             return Ok(Compaction::doing("none", Vec::new()));
         }
         Err(_) => {
-            return Ok(Compaction::blocked(
-                "probe_unavailable",
-                "subagent directory could not be enumerated",
-            ));
+            return Ok(Compaction {
+                incomplete: true,
+                ..Compaction::blocked(
+                    "probe_unavailable",
+                    "subagent directory could not be enumerated",
+                )
+            });
         }
     };
     let mut diagnostics = Vec::new();
+    // Every record was listed and read, so the floor may advance.
     let mut complete = true;
+    // Something was not listed, read or judged.
+    let mut incomplete = false;
     let mut covered = Vec::new();
     let mut spent = Vec::new();
     let mut first_kept: Option<String> = None;
@@ -536,6 +546,7 @@ fn compaction_plan(
             entry.and_then(|entry| entry.file_type().map(|file_type| (entry, file_type)))
         else {
             complete = false;
+            incomplete = true;
             diagnostics.push(Diagnostic::new(
                 "probe_unavailable",
                 "subagent directory entry is unavailable",
@@ -567,6 +578,7 @@ fn compaction_plan(
             Ok(None) => continue,
             Err(error) => {
                 complete = false;
+                incomplete = true;
                 diagnostics.push(naming_record(root, &path, error).diagnostic);
                 continue;
             }
@@ -583,6 +595,7 @@ fn compaction_plan(
         ) {
             Ok(expired) => expired,
             Err(error) => {
+                incomplete = true;
                 diagnostics.push(naming_record(root, &path, error).diagnostic);
                 false
             }
@@ -633,6 +646,7 @@ fn compaction_plan(
         floor: advance,
         covered,
         diagnostics,
+        incomplete,
     })
 }
 
@@ -1651,6 +1665,7 @@ pub fn sweep(
                 );
                 match applied {
                     Ok((plan, deleted)) => {
+                        failed += usize::from(plan.incomplete);
                         if plan.action != "none" && plan.action != "changed" {
                             details.push(json!({"kind":"subagent_compaction","binding_id":binding_id,"action":plan.action,"floor_mono_ns":plan.floor,"covered":plan.covered.len(),"deleted":deleted}));
                         }

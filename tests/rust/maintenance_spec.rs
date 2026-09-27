@@ -524,10 +524,32 @@ fn negative_wall_age_reports_clock_skew_and_preserves_child() {
     setup.claim_and_bind();
     let child = setup.seed_presence("future-child", 300, 9_000_000_000, "stopped");
     setup.clock.set_unix(2_000_000_000);
-    let (_, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000719"));
+    let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000719"));
     assert!(child.exists());
     assert!(diagnostics.iter().any(|item| item.code == "clock_skew"));
     assert!(!setup.binding_dir().join("agents-floor.json").exists());
+    assert_eq!(result.failed_steps, 1, "a child sweep could not judge");
+}
+
+/// A child record sweep cannot read may be one the floor must not pass, so
+/// the floor stays where it is and the apply reports a failed step.
+#[test]
+fn an_unreadable_child_makes_sweep_apply_incomplete() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let spent = setup.seed_presence("spent", 300, 1, "stopped");
+    let child = setup.seed_presence("future-child", 301, 1, "stopped");
+    let mut future: Value =
+        serde_json::from_slice(&fs::read(&child).expect("child")).expect("child JSON");
+    future["schema"] = json!(999);
+    fs::write(&child, serde_json::to_vec(&future).expect("future JSON"))
+        .expect("write future child");
+    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
+    let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000726"));
+    assert_eq!(result.failed_steps, 1);
+    assert!(spent.exists() && child.exists());
+    assert!(!setup.binding_dir().join("agents-floor.json").exists());
+    assert!(diagnostics.iter().any(|item| item.code == "future_schema"));
 }
 
 #[test]
