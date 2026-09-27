@@ -91,7 +91,8 @@ function loadExt() {
 const tempDirs: string[] = [];
 const originalHome = process.env.HOME;
 function clearAttentionEnvironment(): void {
-	delete process.env.WEZTERM_PANE;
+	// Every test runs in a WezTerm pane unless it removes this itself.
+	process.env.WEZTERM_PANE = "42";
 	delete process.env.WEZTERM_ATTENTION_DIR;
 	delete process.env.XDG_STATE_HOME;
 	if (originalHome === undefined) delete process.env.HOME;
@@ -337,6 +338,7 @@ test("writer: an unset checkout root records nothing and says so once", async ()
 
 // Pi runs in other terminals too, where there is no tab to show anything on.
 test("writer: outside a WezTerm pane an unset checkout root records nothing and says nothing", async () => {
+	delete process.env.WEZTERM_PANE;
 	const dir = freshDir("wez-outside-pane-");
 	const { lifecycle, emit } = loadExt();
 	await lifecycle["session_start"]!();
@@ -344,6 +346,25 @@ test("writer: outside a WezTerm pane an unset checkout root records nothing and 
 	await emit("notify");
 	await lifecycle["session_shutdown"]!();
 	expect(readdirSync(dir)).toEqual([]);
+	expect(notifications).toEqual([]);
+});
+
+// The writer cannot name a pane without WEZTERM_PANE, so a root exported
+// outside WezTerm changes nothing.
+test("writer: outside a WezTerm pane a set checkout root is not run and says nothing", async () => {
+	const root = tempDir("wez-root-outside-pane-");
+	const ran = join(root, "ran");
+	mkdirSync(join(root, "bin"));
+	writeFileSync(join(root, "bin", "attention"), `#!/bin/sh\nIFS= read -r payload || :\n: > '${ran}'\nexit 0\n`);
+	chmodSync(join(root, "bin", "attention"), 0o755);
+	process.env.WEZTERM_ATTENTION_ROOT = root;
+	delete process.env.WEZTERM_PANE;
+	const { lifecycle, emit } = loadExt();
+	await lifecycle["session_start"]!();
+	await lifecycle["agent_start"]!();
+	await emit("notify");
+	await lifecycle["session_shutdown"]!();
+	expect(existsSync(ran)).toBe(false);
 	expect(notifications).toEqual([]);
 });
 
