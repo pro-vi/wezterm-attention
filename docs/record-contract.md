@@ -416,11 +416,11 @@ on its way. One exception is kept however old it is: a child waiting for permiss
 at or after the binding's activity, because it can still hold that `notify`. The floor advances to
 the latest spent record ordered strictly before every record kept, so a kept record keeps its whole
 equal-timestamp group. It advances only when every file in `agents/` was listed and read; a
-temporary file an interrupted write left is not a record, and any other file keeps the whole
-directory. Records an existing floor already covers are removed by any later pass, whatever
-operation wrote that floor. A hook's compaction gives the floor a fresh `operation_id` of its own.
-It is maintenance: it takes the launch lock alone, reads the wall clock only once it holds that
-lock, and a failure leaves the stop that ran it saved. A reader treats a child record listed and
-gone before its read as removed, not as a failed read. Every other listed record gone mid-read is
-still a failed read.
+temporary file an interrupted write left is not a record, and any other file blocks the pass, which
+then removes nothing and advances nothing. Records an existing floor already covers are removed by
+any later pass that is not blocked, whatever operation wrote that floor. A hook's compaction gives
+the floor a fresh `operation_id` of its own. It is maintenance: it takes the launch lock alone,
+reads the wall clock only once it holds that lock, and a failure leaves the stop that ran it saved.
+A reader treats a child record listed and gone before its read as removed, not as a failed read.
+Every other listed record gone mid-read is still a failed read.
 Binding-history caps are calculated separately for each realm.

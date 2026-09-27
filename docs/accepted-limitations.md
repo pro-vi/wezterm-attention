@@ -185,13 +185,14 @@ abandoned, and they mean three kinds of leftover stay on disk:
 Collecting any of these would be a new deletion, and would need the same
 evidence rule the others have.
 
-## The first compaction of a long session's backlog
+## What compacting sub-agent records costs
 
 A binding whose session ran for hours under an earlier version holds its
-whole backlog of sub-agent records. The first stop that compacts it clears the
-backlog in one pass under the launch lock. On an M5 Max that pass took 96 ms
-for 1,000 records, 176 ms for 1,922, about 1 s for 10,000, 2.2 s for 15,000
-and 2.5 to 2.8 s for 20,000. Every other writer of that launch waits for it:
+whole backlog of sub-agent records. The first stop that compacts it removes
+the spent ones in one pass under the launch lock. On an M5 Max that pass took
+96 ms for 1,000 records, 176 ms for 1,922, about 1 s for 10,000, 2.2 s for
+15,000 and 2.5 to 2.8 s for 20,000. Every other writer of that launch waits
+for it:
 
 - The plugin's acknowledgement waits 50 ms, so from somewhere between 500 and
   1,000 records it fails once and the plugin retries it about 2 s later.
@@ -207,7 +208,19 @@ pane's current binding by the same rule, including a session that already
 ended in a pane that is still open, which no later stop would compact. While
 it works on a binding it holds that pane's launch and claim locks for the same
 time. A binding that is no longer its pane's current one is not read by the
-plugin; it is removed whole by the usual 30-day retention.
+plugin. Sweep removes it whole once its end is more than 30 days old; one that
+never recorded an end, because another launch took the pane before its session
+ended, stays with its records until sweep removes its pane's whole tree.
+
+After the backlog is gone, each compacting stop still reads every record the
+binding holds, about as many as sub-agents ran in the 10 minutes before it.
+With 200 such records a `SubagentStop` took 2.3 to 2.5 times as long as before
+this change (about 10 ms against 4 ms on an M5 Max), a lead stop about 2.1
+times, and a burst of 20 concurrent sub-agent stops about twice as long (240 ms
+against 120 ms). That is the price of a poll that no longer reads every record
+a session ever wrote. The latency comparison `tests/gate.sh` runs through
+`tests/python/measure.py` times only `PreToolUse`, so it does not see this
+cost.
 
 ## A mux server whose socket was removed, replaced or refuses keeps its records
 
