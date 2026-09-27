@@ -196,10 +196,11 @@ for it:
 
 - The plugin's acknowledgement waits 50 ms, so from somewhere between 500 and
   1,000 records it fails once and the plugin retries it about 2 s later.
-- Another hook of the same launch waits 2 s, so from about 15,000 records it is
-  refused with `probe_unavailable` ("state lock timed out") and its event is
-  not recorded. A sub-agent's permission request lost this way leaves the tab
-  without its `notify`.
+- Another hook of the same launch waits 2 s. The pass takes longer than that
+  from about 15,000 records. At 20,000 a hook that arrived during the pass was
+  refused with `probe_unavailable` ("state lock timed out") and its event was
+  not recorded; at 10,000 it waited about 0.9 s and went through. A sub-agent's
+  permission request lost this way leaves the tab without its `notify`.
 
 Hooks do not bound the pass, because a bound would leave a binding above it
 uncompacted with nothing to report it. To clear backlogs at a moment you
@@ -213,14 +214,31 @@ never recorded an end, because another launch took the pane before its session
 ended, stays with its records until sweep removes its pane's whole tree.
 
 After the backlog is gone, each compacting stop still reads every record the
-binding holds, about as many as sub-agents ran in the 10 minutes before it.
-With 200 such records a `SubagentStop` took 2.3 to 2.5 times as long as before
-this change (about 10 ms against 4 ms on an M5 Max), a lead stop about 2.1
-times, and a burst of 20 concurrent sub-agent stops about twice as long (240 ms
-against 120 ms). That is the price of a poll that no longer reads every record
-a session ever wrote. The latency comparison `tests/gate.sh` runs through
+binding holds: the ones the previous pass kept and every one written since.
+With 200 such records a `SubagentStop` took 2.3 to 2.5 times as long as a stop
+that does not compact (about 10 ms against 4 ms on an M5 Max) and a lead stop
+about twice as long. A burst of 20 concurrent sub-agent stops took about twice
+as long while the binding held 20 to 100 records, and about 3.4 times as long
+at 200. That is the price of a poll that does not read every record a session
+ever wrote. The latency comparison `tests/gate.sh` runs through
 `tests/python/measure.py` times only `PreToolUse`, so it does not see this
 cost.
+
+A `*.json` entry in `agents/` that cannot be read as a record, such as one a
+later version wrote or one this user cannot open, holds the floor where it is
+for as long as it stays. Records then build up behind it as they did before
+compaction existed, and every stop still reads them all: about 24 µs per
+record, 48 ms at 2,000 records on an M5 Max, which outlasts the plugin's 50 ms
+wait from about 2,100. `attention sweep` names the record in a diagnostic;
+once it is fixed or removed, the next stop catches up.
+
+A record counts as spent once its presence TTL has passed by the wall clock. A
+hook suspended for longer than that between reading its clocks and taking the
+launch lock, as when the machine sleeps in the middle of it or the wall clock
+is stepped forward, can meet a floor that has passed its event, and a child's
+event is then refused as covered by the floor. For a child's permission
+request the tab still shows `notify`, but the lead's next tool call replaces it
+instead of waiting for the child.
 
 ## A mux server whose socket was removed, replaced or refuses keeps its records
 
