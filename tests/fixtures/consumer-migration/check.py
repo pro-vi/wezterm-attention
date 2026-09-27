@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import subprocess
@@ -13,26 +12,6 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
-
-
-def load_bridge_reader():
-    spec = importlib.util.spec_from_file_location("consumer_bridge_reader", HERE / "bridge_reader.py")
-    if spec is None or spec.loader is None:
-        raise RuntimeError("cannot load bridge reader fixture")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def check_bridge_reader(scratch: Path) -> None:
-    marker_path = scratch / "42"
-    marker_path.write_text(
-        json.dumps({"type": "thinking", "source": "pi", "updated_at": 10, "updated_at_ms": 10_000}),
-        encoding="utf-8",
-    )
-    marker = load_bridge_reader().marker_for(marker_path, now_s=15)
-    assert marker is not None
-    assert marker["age_s"] == 5
 
 
 def check_hook_copies(scratch: Path) -> None:
@@ -70,14 +49,13 @@ def check_hook_copies(scratch: Path) -> None:
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="attention-consumer-migration-") as directory:
         scratch = Path(directory)
-        check_bridge_reader(scratch)
         check_hook_copies(scratch)
     subprocess.run(
         ["luajit", str(HERE / "check.lua"), str(HERE / "detect_agent.lua")],
         cwd=REPO,
         check=True,
     )
-    print("ok - migrated bridge and provider hooks consume the v2 contracts")
+    print("ok - migrated provider hooks consume the v2 contracts")
 
 
 if __name__ == "__main__":

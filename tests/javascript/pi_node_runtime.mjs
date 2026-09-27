@@ -19,7 +19,7 @@ try {
 	process.env.WEZTERM_ATTENTION_TEST_LOG = log;
 	process.env.WEZTERM_ATTENTION_TEST_IDENTITY_LOG = identityLog;
 	delete process.env.WEZTERM_ATTENTION_LAUNCH_ID;
-	delete process.env.WEZTERM_PANE;
+	process.env.WEZTERM_PANE = "42";
 
 	const lifecycle = new Map();
 	const pi = {

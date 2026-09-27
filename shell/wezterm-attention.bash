@@ -56,8 +56,6 @@ _wezterm_attention_supported_command() {
   local first
   _wezterm_attention_find_command_word "$1"
   first=${_wezterm_attention_command_word##*/}
-  first=${first#\"}; first=${first%\"}
-  first=${first#\'}; first=${first%\'}
   [ -n "$first" ] || return 1
   local supported
   for supported in $WEZTERM_ATTENTION_COMMANDS; do

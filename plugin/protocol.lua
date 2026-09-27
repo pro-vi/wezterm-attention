@@ -1,8 +1,6 @@
 return function(context)
   local wezterm = context.wezterm
   local protocol_path = context.protocol_path
-  local M = context.M
-  local defaults = context.defaults
 
   local container_kinds = setmetatable({}, { __mode = "k" })
   local function read_all(path, maximum)
@@ -93,25 +91,6 @@ return function(context)
     end
     return true
   end
-  local function valid_native_hooks(parsed)
-    if type(parsed.native_hooks) ~= "table" then return false end
-    local providers = {}
-    for _, provider in ipairs(parsed.enums.providers) do
-      providers[provider] = true
-      if type(parsed.native_hooks[provider]) ~= "table" or next(parsed.native_hooks[provider]) == nil then return false end
-    end
-    for provider, hooks in pairs(parsed.native_hooks) do
-      if not providers[provider] then return false end
-      for event, declaration in pairs(hooks) do
-        if type(event) ~= "string" or #event == 0 or #event > parsed.limits.safe_label_max_bytes
-            or has_control_character(event) or type(declaration) ~= "table"
-            or type(declaration.native_event) ~= "string" or #declaration.native_event == 0
-            or (declaration.registration ~= "register" and declaration.registration ~= "ignored") then return false end
-        for key in pairs(declaration) do if key ~= "native_event" and key ~= "registration" then return false end end
-      end
-    end
-    return true
-  end
   if protocol_path then
     local raw, read_err = read_all(protocol_path)
     if raw then
@@ -129,7 +108,7 @@ return function(context)
           and type(parsed.limits.canonical_decimal_max_digits) == "number"
           and type(parsed.limits.safe_label_max_bytes) == "number"
           and type(parsed.enums.providers) == "table"
-          and valid_tool_classification(parsed) and valid_native_hooks(parsed) then
+          and valid_tool_classification(parsed) then
         protocol = parsed
       else
         protocol_load_error = parse_err or "manifest is not a protocol object"
@@ -197,23 +176,9 @@ return function(context)
     return value % U32
   end
 
-  local function portable_bit_pair(left, right, want_xor)
-    left, right = u32(left), u32(right)
-    local result, place = 0, 1
-    for _ = 1, 32 do
-      local left_bit, right_bit = left % 2, right % 2
-      if want_xor and left_bit ~= right_bit
-          or not want_xor and left_bit == 1 and right_bit == 1 then
-        result = result + place
-      end
-      left = (left - left_bit) / 2
-      right = (right - right_bit) / 2
-      place = place * 2
-    end
-    return result
-  end
-
-
+  --- 32-bit operators for sha256: LuaJIT's `bit` library, which the specs
+  --- run under, or Lua 5.4's integer operators, which WezTerm embeds. The
+  --- operators are compiled from text because LuaJIT cannot parse them.
   local function load_bit_operators()
     local ok, bit = pcall(require, "bit")
     if ok and type(bit) == "table" then
@@ -225,36 +190,17 @@ return function(context)
         ror = function(a, n) return u32(bit.ror(a, n)) end,
       }
     end
-
-    local loader = rawget(_G, "load") or rawget(_G, "loadstring")
-    if loader then
-      local chunk = loader([[
-        return {
-          band = function(a, b) return (a & b) & 0xffffffff end,
-          bxor = function(a, b) return (a ~ b) & 0xffffffff end,
-          bnot = function(a) return (~a) & 0xffffffff end,
-          rshift = function(a, n) return (a >> n) & 0xffffffff end,
-          ror = function(a, n)
-            return ((a >> n) | ((a << (32 - n)) & 0xffffffff)) & 0xffffffff
-          end,
-        }
-      ]])
-      if chunk then
-        local loaded, native = pcall(chunk)
-        if loaded and type(native) == "table" then return native end
-      end
-    end
-
-    return {
-      band = function(a, b) return portable_bit_pair(a, b, false) end,
-      bxor = function(a, b) return portable_bit_pair(a, b, true) end,
-      bnot = function(a) return 4294967295 - u32(a) end,
-      rshift = function(a, n) return math.floor(u32(a) / 2 ^ n) end,
-      ror = function(a, n)
-        local value = u32(a)
-        return u32(math.floor(value / 2 ^ n) + (value % 2 ^ n) * 2 ^ (32 - n))
-      end,
-    }
+    return assert(load([[
+      return {
+        band = function(a, b) return (a & b) & 0xffffffff end,
+        bxor = function(a, b) return (a ~ b) & 0xffffffff end,
+        bnot = function(a) return (~a) & 0xffffffff end,
+        rshift = function(a, n) return (a >> n) & 0xffffffff end,
+        ror = function(a, n)
+          return ((a >> n) | ((a << (32 - n)) & 0xffffffff)) & 0xffffffff
+        end,
+      }
+    ]]))()
   end
 
   local bit_operators = load_bit_operators()
@@ -1002,54 +948,11 @@ return function(context)
     return math.floor(poll_now_ms / 1000) % frame_count
   end
 
-  local function normalize_epoch_ms(value)
-    local n = tonumber(value)
-    if not n then return nil end
-    -- Accept either seconds or milliseconds. Current Unix seconds are 10 digits;
-    -- current Unix milliseconds are 13 digits.
-    if n < 100000000000 then return n * 1000 end
-    return n
-  end
-
-  local function stale_ttl_ms(atype, marker_ttl_ms)
-    local explicit = tonumber(marker_ttl_ms)
-    if explicit and explicit > 0 then return explicit end
-
-    local cfg = M._active_stale_after_ms
-    if cfg == false then return nil end
-    cfg = cfg or defaults.stale_after_ms
-    if type(cfg) ~= "table" then return nil end
-
-    local ttl = cfg[atype]
-    if ttl == false then return nil end
-    ttl = tonumber(ttl)
-    if ttl and ttl > 0 then return ttl end
-    return nil
-  end
-
-
   return {
     classify_lifecycle_tool = classify_lifecycle_tool,
-    is_integer = is_integer,
     is_hex64 = is_hex64,
-    is_uuid = is_uuid,
-    is_ns20 = is_ns20,
-    is_canonical_decimal = is_canonical_decimal,
     is_safe_text = is_safe_text,
-    u32 = u32,
-    portable_bit_pair = portable_bit_pair,
-    load_bit_operators = load_bit_operators,
-    bit_and = bit_and,
-    bit_xor = bit_xor,
-    json_contains_null_literal = json_contains_null_literal,
-    list_contains = list_contains,
-    exact_fields = exact_fields,
-    validate_pane_address = validate_pane_address,
     same_address = same_address,
-    validate_activity_target = validate_activity_target,
-    validate_field = validate_field,
-    validate_shape = validate_shape,
-    read_all = read_all,
     decode_json = decode_json,
     protocol = protocol,
     protocol_load_error = protocol_load_error,
@@ -1064,19 +967,15 @@ return function(context)
     unix_ns_parts = unix_ns_parts,
     format_unix_ns20 = format_unix_ns20,
     wezterm_now_unix_ns20 = wezterm_now_unix_ns20,
-    add_ms_to_unix_ns = add_ms_to_unix_ns,
     seconds_until_after = seconds_until_after,
     age_exceeds_ms = age_exceeds_ms,
     address_cache_key = address_cache_key,
     v2_pane_root = v2_pane_root,
     binding_root = binding_root,
     read_record_file = read_record_file,
-    record_matches = record_matches,
     identity_diagnostic = identity_diagnostic,
     read_expected_record = read_expected_record,
     read_expected_record_cached = read_expected_record_cached,
-    path_stem = path_stem,
-    glob_paths = glob_paths,
     read_record_collection = read_record_collection,
     collect_diagnostic = collect_diagnostic,
     health_from_diagnostics = health_from_diagnostics,
@@ -1085,7 +984,5 @@ return function(context)
     deep_copy = deep_copy,
     now_ms = now_ms,
     frame_for_now = frame_for_now,
-    normalize_epoch_ms = normalize_epoch_ms,
-    stale_ttl_ms = stale_ttl_ms,
   }
 end

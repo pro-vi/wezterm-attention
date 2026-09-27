@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -172,14 +172,12 @@ impl PaneProcessSet {
     }
 
     /// Note that a process was listed whose environment could not be read.
-    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     fn missed_one(&mut self) {
         self.missed = true;
     }
 
     /// Add the pairs one process's environment holds, given as `NAME=value`
     /// entries.
-    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     fn add_environment<'a>(&mut self, entries: impl Iterator<Item = &'a [u8]>) {
         let mut sockets = Vec::new();
         let mut panes = Vec::new();
@@ -936,9 +934,7 @@ pub(crate) fn gui_process_exited(socket_path: &str) -> bool {
         .file_name()
         .and_then(OsStr::to_str)
         .and_then(|name| name.strip_prefix("gui-sock-"))
-        .filter(|pid| {
-            !pid.is_empty() && !pid.starts_with('0') && pid.bytes().all(|b| b.is_ascii_digit())
-        })
+        .filter(|pid| crate::protocol::pid_text(pid))
         .and_then(|pid| pid.parse::<libc::pid_t>().ok())
     else {
         return false;
@@ -1068,12 +1064,7 @@ fn run_bounded(
     };
     let (sender, receiver) = channel();
     thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let read = stdout
-            .take(maximum as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes);
-        let _ = sender.send(read);
+        let _ = sender.send(crate::records::read_bounded(stdout, maximum));
     });
     let mut output = None;
     let mut status = None;
@@ -1280,28 +1271,13 @@ fn own_pane_processes() -> Option<PaneProcessSet> {
     read_own.then_some(processes)
 }
 
-/// Elsewhere only `ps` offers environments, and it prints them after the
-/// arguments on one line, so lines are kept only for this user's processes.
+// A pane's absence is proven from the environments of this user's
+// processes, which only the macOS and Linux kernels are read for here.
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn own_pane_processes() -> Option<PaneProcessSet> {
-    let ps = ["/bin/ps", "/usr/bin/ps"]
-        .into_iter()
-        .map(Path::new)
-        .find(|path| is_executable(path))?;
-    let mut command = Command::new(ps);
-    command.args(["axeww", "-o", "uid=,command="]);
-    let output = run_bounded(&mut command, 8 * 1024 * 1024, CHILD_DEADLINE).ok()?;
-    let uid = unsafe { libc::geteuid() }.to_string();
-    let listing = String::from_utf8_lossy(&output)
-        .lines()
-        .filter_map(|line| {
-            let (owner, rest) = line.trim_start().split_once(' ')?;
-            (owner == uid).then_some(rest)
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    Some(PaneProcessSet::from_process_listing(&listing))
-}
+compile_error!(
+    "wezterm-attention builds for macOS and Linux only: it proves a pane gone by reading \
+     process environments from the kernel, and knows how on those two alone"
+);
 
 /// The environment strings in a `KERN_PROCARGS2` buffer.
 ///
@@ -1361,20 +1337,6 @@ fn next_variable_boundary(text: &str) -> usize {
     text.len()
 }
 
-pub fn default_ports<'a>(
-    clock: &'a SystemClock,
-    tty: &'a SystemTtyWriter,
-    panes: &'a WeztermPaneLister,
-    processes: &'a SystemProcessInspector,
-) -> RuntimePorts<'a> {
-    RuntimePorts {
-        clock,
-        tty,
-        panes,
-        processes,
-    }
-}
-
 fn base64(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -1432,15 +1394,8 @@ pub fn publication_bytes(address: &PaneAddress, launch_id: Option<&str>) -> Resu
     Ok(bytes)
 }
 
-pub fn file_from_fd(fd: libc::c_int) -> File {
-    unsafe { File::from_raw_fd(fd) }
-}
-
 pub fn tty_path_from_fd(fd: libc::c_int) -> Result<String> {
-    let file = file_from_fd(fd);
-    let name = ttyname(file.as_raw_fd());
-    std::mem::forget(file);
-    name.ok_or_else(|| AttentionError::new("unsafe_tty", "descriptor is not a tty"))?
+    ttyname(fd).ok_or_else(|| AttentionError::new("unsafe_tty", "descriptor is not a tty"))?
 }
 
 #[cfg(test)]

@@ -15,11 +15,11 @@ impl LockCheckingPanes {
     pub(super) fn for_setup(setup: &Setup) -> Self {
         let root = setup.root();
         let (address, _) = pane_address(&setup.env).expect("address");
-        let launch = launch_path(&root, &address, &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]);
+        let launch = launch_dir(&root, &address, &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]);
         Self {
             locks: vec![
                 launch.join(".lock"),
-                pane_path(&root, &address).join(".claim.lock"),
+                pane_dir(&root, &address).join(".claim.lock"),
             ],
             asked_under_lock: AtomicU64::new(0),
             asked: AtomicU64::new(0),

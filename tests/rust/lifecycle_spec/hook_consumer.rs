@@ -2,7 +2,8 @@ use super::*;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Instant;
-use wezterm_attention::consumer::{self, DeliveryEffect, DeliveryStage, HookContent};
+use wezterm_attention::consumer::{self, DeliveryEffect, DeliveryStage};
+use wezterm_attention::hook_content::HookContent;
 use wezterm_attention::lifecycle::apply_provider_event_with_outcome;
 use wezterm_attention::lifecycle::outcome::Persistence;
 
@@ -452,13 +453,12 @@ fn prompt_availability_and_independent_requests_are_exact() {
     assert_eq!(delivery["prompt"], json!({"availability":"too_large"}));
     let mut oversized = outcome;
     let persistence = oversized.persistence.clone();
-    for field in ["native_state", "activity", "compatibility", "lifecycle"] {
+    for field in ["native_state", "activity", "lifecycle"] {
         for value in [Persistence::Rejected, Persistence::Unconfirmed] {
             oversized.persistence = persistence.clone();
             match field {
                 "native_state" => oversized.persistence.native_state = value,
                 "activity" => oversized.persistence.activity = value,
-                "compatibility" => oversized.persistence.compatibility = value,
                 "lifecycle" => oversized.persistence.lifecycle = value,
                 _ => unreachable!(),
             }

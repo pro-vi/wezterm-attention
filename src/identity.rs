@@ -26,18 +26,29 @@ pub struct SocketMetadata {
 }
 
 pub fn canonical_pane_id(value: &str) -> Result<String> {
-    let maximum = manifest()?.limits.pane_id_max_digits;
-    if value.is_empty()
-        || value.len() > maximum
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-        || (value.len() > 1 && value.starts_with('0'))
-    {
+    if !crate::protocol::canonical_decimal_text(value, manifest()?.limits.pane_id_max_digits) {
         return Err(AttentionError::new(
             "record_invalid",
             "WEZTERM_PANE is not canonical",
         ));
     }
     Ok(value.to_owned())
+}
+
+/// The pane a published `v2:<realm_id>:<incarnation_id>:<pane_id>` marker id
+/// names, when it is one: two digests and a canonical pane id. A bare
+/// decimal marker id names no address.
+pub fn marker_address(text: &str) -> Option<PaneAddress> {
+    let mut parts = text.strip_prefix("v2:")?.splitn(3, ':');
+    let (realm_id, incarnation_id, pane_id) = (parts.next()?, parts.next()?, parts.next()?);
+    if !crate::protocol::hex64_text(realm_id) || !crate::protocol::hex64_text(incarnation_id) {
+        return None;
+    }
+    Some(PaneAddress {
+        realm_id: realm_id.to_owned(),
+        incarnation_id: incarnation_id.to_owned(),
+        pane_id: canonical_pane_id(pane_id).ok()?,
+    })
 }
 
 pub fn canonical_uuid(value: Option<&str>, name: &str) -> Result<String> {
@@ -121,11 +132,17 @@ pub fn socket_identity(socket_value: &str) -> Result<(String, String, SocketMeta
     ))
 }
 
+/// The mux socket a pane's environment names.
+pub fn pane_socket(env: &BTreeMap<String, String>) -> Result<&str> {
+    env.get("WEZTERM_UNIX_SOCKET")
+        .map(String::as_str)
+        .ok_or_else(|| {
+            AttentionError::new("identity_unpublished", "WEZTERM_UNIX_SOCKET is missing")
+        })
+}
+
 pub fn pane_address(env: &BTreeMap<String, String>) -> Result<(PaneAddress, SocketMetadata)> {
-    let socket = env.get("WEZTERM_UNIX_SOCKET").ok_or_else(|| {
-        AttentionError::new("identity_unpublished", "WEZTERM_UNIX_SOCKET is missing")
-    })?;
-    let (realm_id, incarnation_id, metadata) = socket_identity(socket)?;
+    let (realm_id, incarnation_id, metadata) = socket_identity(pane_socket(env)?)?;
     let pane_id = canonical_pane_id(env.get("WEZTERM_PANE").map(String::as_str).unwrap_or(""))?;
     Ok((
         PaneAddress {

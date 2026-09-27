@@ -1,9 +1,5 @@
 -- Drive the production tab-order encoder so a reader test can consume the
 -- exact bytes the plugin writes, not a fixture built from the reader's rule.
---
--- Context fields other than `wezterm` and `now_ms` are unused by
--- `publish_tab_order`; they exist because the factory closes over the same
--- table the rest of overlays.lua uses.
 
 local dir = assert(os.getenv("WEZTERM_ATTENTION_DIR"), "WEZTERM_ATTENTION_DIR")
 local repo = assert(os.getenv("ATTENTION_REPO"), "ATTENTION_REPO")
@@ -16,17 +12,9 @@ if source_response then
 end
 
 local overlays = dofile(repo .. "/plugin/overlays.lua")({
-  wezterm = { log_error = function() end },
+  -- A source is encoded with WezTerm's encoder, which only a WezTerm run has.
+  wezterm = { log_error = function() end, json_encode = source_response and require("wezterm").json_encode },
   now_ms = function() return 1789884000123 end,
-  sha256 = function() return string.rep("0", 64) end,
-  parse_v2_record = function() return nil end,
-  record_matches = function() return true end,
-  identity_diagnostic = function()
-    return { code = "record_invalid", message = "unused" }
-  end,
-  read_expected_record = function() return nil, nil, "missing" end,
-  read_marker = function() return nil end,
-  subagents_path = function() return "" end,
 })
 
 local made_directory = os.execute("mkdir -p " .. dir .. "/tabs")

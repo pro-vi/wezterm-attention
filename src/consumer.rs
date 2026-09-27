@@ -16,7 +16,7 @@ use uuid::Uuid;
 // one public home.
 use crate::lifecycle::outcome::{AdmittedHook, HookPersistence, Persistence};
 
-pub use crate::hook_content::HookContent;
+use crate::hook_content::HookContent;
 
 #[derive(Serialize)]
 pub struct HookDelivery {
@@ -57,8 +57,6 @@ pub enum NotDispatchedReason {
     NativeStateUnconfirmed,
     LifecycleRejected,
     LifecycleUnconfirmed,
-    CompatibilityRejected,
-    CompatibilityUnconfirmed,
     EnvelopeTooLarge,
 }
 
@@ -128,12 +126,6 @@ pub fn delivery_bytes(
     }
     if !confirmed(outcome.persistence.lifecycle) {
         return Err(NotDispatchedReason::LifecycleUnconfirmed);
-    }
-    if outcome.persistence.compatibility == Persistence::Rejected {
-        return Err(NotDispatchedReason::CompatibilityRejected);
-    }
-    if !confirmed(outcome.persistence.compatibility) {
-        return Err(NotDispatchedReason::CompatibilityUnconfirmed);
     }
     let mut delivery = HookDelivery {
         schema: 1,

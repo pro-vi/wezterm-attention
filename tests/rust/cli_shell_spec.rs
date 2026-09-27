@@ -342,13 +342,6 @@ fn rust_cli_help_errors_and_empty_hook_input_keep_the_documented_shape() {
     let home = Command::new(binary).output().expect("run help");
     assert!(home.status.success());
     assert!(String::from_utf8_lossy(&home.stdout).contains("Example:"));
-    let obsolete = Command::new(binary)
-        .arg("claim")
-        .output()
-        .expect("run obsolete command");
-    assert_eq!(obsolete.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&obsolete.stderr).contains("attention hooks claim"));
-
     let operational = Command::new(binary)
         .args(["mark", "notify", "--json"])
         .env_clear()
@@ -710,7 +703,7 @@ fn published_tab_orders_are_read_and_one_refused_file_does_not_withhold_the_othe
     fs::create_dir_all(&tabs).expect("create tab publication directory");
     // Drawn order, not sorted order: the bar drew 11 before 4, and that is the
     // fact the file exists to carry. The first tab is a v2 cache key, the
-    // second a pair of v1 marker ids — the mix `gui_tab_pane_ids` writes.
+    // second a pair of bare decimal ids, which a schema-1 file may hold.
     let v2_id = concat!(
         "v2:",
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

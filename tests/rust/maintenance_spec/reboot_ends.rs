@@ -2,7 +2,7 @@
 //! carries a larger stamp than anything written after it. An end that sweep
 //! writes for such a binding after the reboot still ends it, for every reader.
 
-use super::pane_retention::{OP_1, OP_2, OP_3, OP_4, actions, pane_dir};
+use super::pane_retention::{OP_1, OP_2, OP_3, OP_4, actions, setup_pane_dir};
 use super::*;
 
 const OP_5: &str = "00000000-0000-4000-8000-000000000915";
@@ -100,7 +100,7 @@ fn an_end_written_after_a_reboot_ends_the_binding_for_sweep_bindings_and_inspect
 fn a_pane_ended_after_a_reboot_is_retained_by_the_usual_rule() {
     let setup = Setup::new();
     end_after_a_reboot(&setup);
-    let pane = pane_dir(&setup);
+    let pane = setup_pane_dir(&setup);
     setup
         .clock
         .set_unix(RETENTION_AGE_NS as u64 + 1_000_000_001);

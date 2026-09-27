@@ -16,7 +16,7 @@ type ClaimedEnv = Box<dyn Fn(&Setup) -> BTreeMap<String, String>>;
 pub(super) fn claim_path(setup: &Setup) -> PathBuf {
     let root = state_root(&setup.env).expect("state root");
     let (address, _) = pane_address(&setup.env).expect("address");
-    pane_path(&root, &address).join("claim.json")
+    pane_dir(&root, &address).join("claim.json")
 }
 
 pub(super) fn stored_claim(setup: &Setup) -> Option<Value> {
@@ -48,10 +48,10 @@ pub(super) fn install(setup: &Setup, claim: &Value) {
     atomic_replace(&claim_path(setup), claim).expect("write claim");
 }
 
-pub(super) fn launch_dir(setup: &Setup, launch_id: &str) -> PathBuf {
+pub(super) fn setup_launch_dir(setup: &Setup, launch_id: &str) -> PathBuf {
     let root = state_root(&setup.env).expect("state root");
     let (address, _) = pane_address(&setup.env).expect("address");
-    launch_path(&root, &address, launch_id)
+    launch_dir(&root, &address, launch_id)
 }
 
 /// Every record file under the state root and its bytes, lock files aside,
@@ -238,7 +238,7 @@ fn an_agent_s_own_claim_keeps_its_indicator_and_leaves_lifecycle_facts_unwritten
     assert!(outcome.admission.is_none());
     assert_eq!(outcome.persistence.lifecycle, Persistence::Rejected);
     assert_eq!(outcome.persistence.activity, Persistence::Confirmed);
-    let binding = launch_dir(&setup, AGENT_LAUNCH)
+    let binding = setup_launch_dir(&setup, AGENT_LAUNCH)
         .join("bindings")
         .join(binding_id("codex", "s", AGENT_LAUNCH));
     assert!(binding.join("activity.json").exists());
@@ -769,7 +769,7 @@ fn an_agent_s_first_session_start_claims_the_pane_for_its_own_process() {
         Uuid::parse_str(&launch).expect("a fresh launch id");
         assert!(!env.contains_key("WEZTERM_ATTENTION_LAUNCH_ID"));
         assert!(
-            launch_dir(&setup, &launch)
+            setup_launch_dir(&setup, &launch)
                 .join("bindings")
                 .join(binding_id(provider, "s", &launch))
                 .join("binding.json")
@@ -1123,7 +1123,7 @@ fn sequential_agents_in_one_pane_get_distinct_launch_ids() {
     assert_ne!(first, second);
     assert_eq!(claim["owner_pid"], json!("4100"));
     assert!(
-        launch_dir(&setup, &first)
+        setup_launch_dir(&setup, &first)
             .join("bindings")
             .join(binding_id("claude", "a", &first))
             .join("end.json")
@@ -1277,7 +1277,7 @@ fn two_racing_first_hooks_of_one_agent_end_with_one_claim_both_resolve_to() {
         "{results:?}"
     );
     let launch = launch_of(&stored_claim(&setup).expect("one claim"));
-    let launches: Vec<_> = fs::read_dir(launch_dir(&setup, &launch).parent().unwrap())
+    let launches: Vec<_> = fs::read_dir(setup_launch_dir(&setup, &launch).parent().unwrap())
         .unwrap()
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
@@ -1527,7 +1527,7 @@ fn thinking_agent(setup: &Setup) -> PathBuf {
     let prompt = event("claude", "UserPromptSubmit", "s", json!({"prompt":"go"}));
     apply_as(setup, &env, &prompt, "00000000000000000300");
     let launch = launch_of(&stored_claim(setup).expect("the agent's claim"));
-    let binding = launch_dir(setup, &launch)
+    let binding = setup_launch_dir(setup, &launch)
         .join("bindings")
         .join(binding_id("claude", "s", &launch));
     let activity: Value =

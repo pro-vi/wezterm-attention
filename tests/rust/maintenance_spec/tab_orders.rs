@@ -42,6 +42,38 @@ fn tab_text_with_any_control_character_is_refused() {
     assert!(diagnostics.iter().all(|d| d.code == "record_invalid"));
 }
 
+/// A tab order names its GUI source only from schema 2 on, and names it in
+/// full. A `"source": null` is a source that is not one: refused in a schema
+/// 1 file as in a schema 2 one, rather than read as no source.
+#[test]
+fn a_null_tab_source_is_refused_in_either_schema() {
+    let scratch = Scratch::new();
+    let root = scratch.0.join("state");
+    let tabs = root.join("tabs");
+    fs::create_dir_all(&tabs).expect("create tabs directory");
+    let incarnation = "b".repeat(64);
+    for (name, schema) in [("7".to_owned(), 1), (format!("{incarnation}-8"), 2)] {
+        let window_id: u64 = name.rsplit('-').next().unwrap().parse().unwrap();
+        fs::write(
+            tabs.join(format!("{name}.json")),
+            serde_json::to_vec(&json!({
+                "schema": schema, "window_id": window_id, "published_at_ms": 1,
+                "tabs": [], "source": null
+            }))
+            .expect("tab order JSON"),
+        )
+        .expect("write tab order");
+    }
+    write_tab_text(&root, 9, "plain");
+    let (windows, diagnostics) = read_tab_publications(&root).expect("tab publications");
+    assert_eq!(
+        windows.iter().map(|w| w.window_id).collect::<Vec<_>>(),
+        vec![9]
+    );
+    assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+    assert!(diagnostics.iter().all(|d| d.code == "record_invalid"));
+}
+
 /// A `tabs/` that is a symlink points the tab-order collection at a directory
 /// outside the state root. Nothing there is read, and nothing is deleted.
 #[test]

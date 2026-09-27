@@ -89,7 +89,7 @@ fn an_unreadable_record_beside_the_binding_is_a_diagnostic_not_binding_health() 
     setup.claim_and_bind();
     let scope = current_scope(&setup, "session-a");
     let (address, _) = pane_address(&setup.env).expect("address");
-    let reviews = pane_path(&setup.root(), &address).join("reviews");
+    let reviews = pane_dir(&setup.root(), &address).join("reviews");
     fs::create_dir_all(&reviews).expect("reviews");
     fs::write(reviews.join(format!("{}.json", "a".repeat(64))), "not json").expect("review");
     let facts = assert_agree(&setup, &scope);
@@ -136,7 +136,7 @@ fn a_conflicted_row_reads_conflicted_through_inspect() {
         "written_at_unix_ns":"00000000001000000000","writer_version":"1.0.0"
     });
     atomic_replace(
-        &launch_path(&root, &other, launch_id)
+        &launch_dir(&root, &other, launch_id)
             .join("bindings")
             .join(&other_binding)
             .join("binding.json"),
