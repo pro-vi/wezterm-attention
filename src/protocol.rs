@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub const EMBEDDED_MANIFEST: &str = include_str!("../protocol/v2.json");
-pub const EMITTED_DIAGNOSTIC_CODES: [&str; 16] = [
+pub const EMITTED_DIAGNOSTIC_CODES: [&str; 17] = [
     "identity_unpublished",
     "claim_stale",
     "unsafe_tty",
@@ -26,6 +26,7 @@ pub const EMITTED_DIAGNOSTIC_CODES: [&str; 16] = [
     "state_permissions",
     "bad_usage",
     "self_claim_parent_unverified",
+    "session_detached",
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

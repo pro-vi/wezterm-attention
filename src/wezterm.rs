@@ -279,7 +279,9 @@ pub enum ProcessRead {
 /// The kernel's process table and terminal devices, as the claim an agent
 /// makes from its own hook needs them.
 pub trait ProcessInspector: Send + Sync {
-    /// Whether this platform lets an agent claim a pane from its own hook.
+    /// Whether this platform lets an agent claim a pane from its own hook:
+    /// where its process reads answer. The agent of an event that inherited a
+    /// launch id is checked only here too.
     fn self_claim_supported(&self) -> bool;
     fn own_pid(&self) -> i32;
     fn process(&self, pid: i32) -> ProcessRead;

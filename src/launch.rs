@@ -640,6 +640,20 @@ fn found(read: ProcessRead, whose: &str) -> Result<ProcessFacts> {
 /// none -- a hook its agent started in a session of its own -- does the
 /// parent's decide, and nothing further up is consulted.
 fn read_host(processes: &dyn ProcessInspector, expected_parent: i32) -> Result<HostReading> {
+    read_host_terminal(processes, expected_parent)?.ok_or_else(|| {
+        AttentionError::new(
+            "unsafe_tty",
+            "neither this hook nor its agent has a controlling terminal",
+        )
+    })
+}
+
+/// [`read_host`], giving `None` when the kernel says neither the hook nor its
+/// parent has a controlling terminal.
+fn read_host_terminal(
+    processes: &dyn ProcessInspector,
+    expected_parent: i32,
+) -> Result<Option<HostReading>> {
     let hook = found(processes.process(processes.own_pid()), "this hook")?;
     if hook.traced {
         return Err(parent_unverified("a debugger is attached to this hook"));
@@ -678,20 +692,15 @@ fn read_host(processes: &dyn ProcessInspector, expected_parent: i32) -> Result<H
         ControllingTerminal::Absent => match parent.terminal {
             ControllingTerminal::Device(device) => (device, parent.terminal_foreground_group),
             ControllingTerminal::Unknown => return Err(unknown()),
-            ControllingTerminal::Absent => {
-                return Err(AttentionError::new(
-                    "unsafe_tty",
-                    "neither this hook nor its agent has a controlling terminal",
-                ));
-            }
+            ControllingTerminal::Absent => return Ok(None),
         },
     };
-    Ok(HostReading {
+    Ok(Some(HostReading {
         parent_pid: hook.parent_pid,
         parent_start: parent.start,
         terminal,
         foreground: parent.process_group == foreground_group,
-    })
+    }))
 }
 
 /// The agent process `WEZTERM_ATTENTION_HOST_PID` asserts, read as the
@@ -798,17 +807,55 @@ impl HostProof {
                 "the pane's claim belongs to another agent process",
             ));
         }
-        let recorded = |field: &str| {
-            claim
-                .get(field)
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .ok_or_else(|| AttentionError::new("record_invalid", "claim has no terminal"))
-        };
+        let (tty_path, tty_fingerprint) = recorded_terminal(claim)?;
         let proof = Self {
             owner,
-            tty_path: recorded("tty_path")?,
-            tty_fingerprint: recorded("tty_fingerprint")?,
+            tty_path,
+            tty_fingerprint,
+            terminal: reading.terminal,
+            foreground: reading.foreground,
+        };
+        proof.confirm(env, ports.processes, ports.tty, address)?;
+        Ok(proof)
+    }
+
+    /// Prove that the agent this hook names runs on the terminal the shell
+    /// `claim` was made at, for an event that inherited that claim's launch
+    /// id, without asking the mux.
+    ///
+    /// The launch id matching says only where the hook's environment came
+    /// from. The agent is proven as for its own claim, and must run on the
+    /// device at the claim's `tty_path`, with the claim's `tty_fingerprint`
+    /// (`unsafe_tty` otherwise). An agent that, with its hook, has no
+    /// terminal at all is refused as `session_detached`. The parent is read
+    /// again at the end, as [`Self::confirm`] does.
+    fn of_shell_claim(
+        env: &BTreeMap<String, String>,
+        ports: &RuntimePorts<'_>,
+        address: &PaneAddress,
+        claim: &Value,
+    ) -> Result<Self> {
+        let reading = read_host_terminal(ports.processes, asserted_host(env)?)?
+            .ok_or_else(detached_session)?;
+        let boot_session_id = ports.processes.boot_session().ok_or_else(|| {
+            AttentionError::new("probe_unavailable", "the boot session id could not be read")
+        })?;
+        let (tty_path, tty_fingerprint) = recorded_terminal(claim)?;
+        if ports.processes.terminal_device(&tty_path) != Some(reading.terminal) {
+            return Err(AttentionError::new(
+                "unsafe_tty",
+                "the agent runs on a terminal that is not the one the pane's shell claimed from; \
+                 its launch id was inherited",
+            ));
+        }
+        let proof = Self {
+            owner: ClaimOwner {
+                pid: reading.parent_pid,
+                start: reading.parent_start,
+                boot_session_id,
+            },
+            tty_path,
+            tty_fingerprint,
             terminal: reading.terminal,
             foreground: reading.foreground,
         };
@@ -864,6 +911,56 @@ impl HostProof {
                     == Some(self.tty_fingerprint.as_str()),
         )
     }
+}
+
+/// The terminal path and fingerprint a claim records.
+fn recorded_terminal(claim: &Value) -> Result<(String, String)> {
+    let recorded = |field: &str| {
+        claim
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| AttentionError::new("record_invalid", "claim has no terminal"))
+    };
+    Ok((recorded("tty_path")?, recorded("tty_fingerprint")?))
+}
+
+fn detached_session() -> AttentionError {
+    AttentionError::new(
+        "session_detached",
+        "the agent runs this session in a background process that has no terminal and \
+         carries the environment of whichever pane started it, so the session's own pane \
+         is unknown; for Codex, start it with `codex --no-daemon`",
+    )
+}
+
+/// Refuse an event that inherited the launch of the shell `claim` when the
+/// agent its hook names does not run on that claim's terminal; see
+/// [`HostProof::of_shell_claim`].
+///
+/// A launch id is inherited by whatever the claiming shell starts, and by
+/// what those start in turn, wherever they go on to run. An agent that runs
+/// its sessions in one shared background process, started from one pane,
+/// hands that pane's environment to the hook of every session it runs,
+/// whichever pane the session is shown in.
+///
+/// Only a hook that names its agent in `WEZTERM_ATTENTION_HOST_PID` is
+/// checked. Without it no process can be taken for the agent: the hook's
+/// parent may be a shell that stayed behind, which has no terminal even when
+/// the agent above it runs in the pane, and the first ancestor with a
+/// terminal may be the agent that started the background process, on another
+/// pane's terminal.
+/// Nor is anything checked where the process table cannot be read.
+pub(crate) fn confirm_inherited_host(
+    env: &BTreeMap<String, String>,
+    ports: &RuntimePorts<'_>,
+    address: &PaneAddress,
+    claim: &Value,
+) -> Result<()> {
+    if !env.contains_key("WEZTERM_ATTENTION_HOST_PID") || !ports.processes.self_claim_supported() {
+        return Ok(());
+    }
+    HostProof::of_shell_claim(env, ports, address, claim).map(|_| ())
 }
 
 /// A launch resolved for an agent event that carries no launch id: the claim
