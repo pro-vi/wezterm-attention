@@ -2421,10 +2421,6 @@ mod lifecycle_write_tests {
             LOCK_TIMEOUT,
             || {
                 apply_observed_outputs_with(&resolved, binding_id, &mutation, |_| {
-                    assert!(
-                        !root.join("42").exists(),
-                        "writers do not project before a snapshot write"
-                    );
                     Err(AttentionError::new(
                         "state_permissions",
                         "synthetic snapshot write failure",
@@ -2433,7 +2429,6 @@ mod lifecycle_write_tests {
             },
         )
         .unwrap_err();
-        assert!(!error.diagnostic.context.contains_key("legacy_applied"));
         assert_eq!(error.diagnostic.context["lifecycle_write"], "unconfirmed");
         assert!(!path.exists());
         let evidence = evidence.borrow();

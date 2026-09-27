@@ -322,9 +322,9 @@ return function()
     --- the pane's address and the launch it published go on the command line.
     --- The command takes the locks every writer of these records takes; this
     --- process writes none of them itself. Nil when it did not answer "ok",
-    --- which is logged once per pane and action, and then whether the failure
-    --- can pass: a lock wait that ran out, or a command that could not start
-    --- or gave no answer. Any other diagnostic is a refusal, which stands
+    --- which is logged once per pane, action and kind of failure, and then
+    --- whether the failure can pass: a lock wait that ran out, or a command
+    --- that could not start or gave no answer. Any other diagnostic is a refusal, which stands
     --- until what the command reads changes.
     local function run_plugin_write(action, read, dir, extra)
       local root = M._active_integration_root
@@ -970,9 +970,9 @@ return function()
       -- a race with the user, not a fault.
       local tabs_ok, mux_tabs = pcall(mux_win.tabs, mux_win)
       if not tabs_ok or type(mux_tabs) ~= "table" then return end
-      -- The absence sweep below deletes records for panes it cannot see, so a
-      -- pane it merely failed to read must not look absent. These carry the
-      -- unreadable tabs' panes from the last tick that could read them.
+      -- The absence sweep below drops the cached state of panes it cannot see,
+      -- so a pane it merely failed to read must not look absent. These carry
+      -- the unreadable tabs' panes from the last tick that could read them.
       -- What this tick established, and how. The decisions below need different
       -- strengths of the same fact -- a pane this tick read is enough to dismiss
       -- its notification, where one it merely used to know of is not -- so

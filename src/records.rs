@@ -1323,8 +1323,9 @@ fn remove_path_durable(path: &Path) -> Result<bool> {
     }
 }
 
-/// How long every writer waits for one state lock before it gives up. A
-/// hook's agent waits on the hook meanwhile.
+/// How long a writer waits for one state lock before it gives up, except for
+/// the plugin's commands, which wait [`PLUGIN_LOCK_TIMEOUT`]. A hook's agent
+/// waits on the hook meanwhile.
 pub const LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long a write the plugin asks for waits for one state lock. The plugin

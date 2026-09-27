@@ -451,7 +451,7 @@ fn read_pane_facts_once(
         match server_state(socket, address, processes) {
             ServerState::Current => Ok(false),
             ServerState::Exited => Ok(true),
-            ServerState::Kept(diagnostic) => Err(diagnostic),
+            ServerState::KeptHistory(diagnostic) => Err(diagnostic),
             ServerState::Unreadable(error) => Err(error.diagnostic),
         }
     };

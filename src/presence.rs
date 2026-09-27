@@ -82,7 +82,7 @@ pub(crate) enum ServerState {
     Exited,
     /// It no longer does and nothing shows the server gone, so its records
     /// are kept history; the diagnostic says what became of the socket.
-    Kept(Diagnostic),
+    KeptHistory(Diagnostic),
     /// The socket's identity could not be read.
     Unreadable(AttentionError),
 }
@@ -99,7 +99,7 @@ pub(crate) fn server_state(
         {
             ServerState::Exited
         }
-        RecordedServer::Replaced(change) => ServerState::Kept(change.diagnostic()),
+        RecordedServer::Replaced(change) => ServerState::KeptHistory(change.diagnostic()),
         RecordedServer::Unreadable(error) => ServerState::Unreadable(error),
     }
 }
@@ -185,7 +185,7 @@ pub(crate) fn pane_evidence(
     match server_state(socket_path, address, processes) {
         ServerState::Current => {}
         ServerState::Exited => return PaneEvidence::Observed("verified_absent".to_owned()),
-        ServerState::Kept(diagnostic) => return PaneEvidence::KeptHistory { diagnostic },
+        ServerState::KeptHistory(diagnostic) => return PaneEvidence::KeptHistory { diagnostic },
         ServerState::Unreadable(error) => {
             diagnostics.push(error.diagnostic);
             return unavailable();
