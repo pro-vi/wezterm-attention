@@ -234,7 +234,8 @@
       "integration_version_mismatch",
       "state_permissions",
       "bad_usage",
-      "self_claim_parent_unverified"
+      "self_claim_parent_unverified",
+      "session_detached"
     ],
     "end_reasons": ["session_end", "sweep_absent"],
     "pane_presence": ["present", "verified_absent", "unavailable"],

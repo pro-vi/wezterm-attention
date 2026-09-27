@@ -358,9 +358,12 @@ fn inherited_launch<'a>(env: &BTreeMap<String, String>) -> Result<Option<Resolve
 
 /// Resolve the launch an agent event belongs to.
 ///
-/// An inherited `WEZTERM_ATTENTION_LAUNCH_ID` decides alone: it matches the
-/// pane's claim, or the event is refused, whatever else is true. Without one
-/// the event resolves only against a claim its own agent process holds; see
+/// An inherited `WEZTERM_ATTENTION_LAUNCH_ID` decides which launch: it
+/// matches the pane's claim, or the event is refused, whatever else is true.
+/// A matching one is still refused when the agent its hook names does not
+/// run on that claim's terminal; see
+/// [`crate::launch::confirm_inherited_host`]. Without one the event resolves
+/// only against a claim its own agent process holds; see
 /// [`crate::launch::self_owned_launch`]. Nothing here ever finds a launch by
 /// the terminal alone.
 fn resolve_launch<'a>(
@@ -375,6 +378,7 @@ fn resolve_launch<'a>(
         let inherited = canonical_uuid(Some(inherited), "WEZTERM_ATTENTION_LAUNCH_ID")?;
         return match claim {
             Some(claim) if inherited_claim_matches(&claim, &address, &inherited) => {
+                crate::launch::confirm_inherited_host(env, ports, &address, &claim)?;
                 Ok(ResolvedLaunch {
                     evidence: None,
                     root,

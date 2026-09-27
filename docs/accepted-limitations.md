@@ -337,7 +337,10 @@ and 1.0 has that reader for macOS only, so elsewhere the writer refuses
 before reading anything. On Linux an agent's events need a
 launch id inherited from a claiming shell, as before; an agent started without
 one records nothing. The hook command's `WEZTERM_ATTENTION_HOST_PID=$PPID exec`
-prefix is harmless there.
+prefix is harmless there, and for the same reason an event with an inherited
+launch id is not checked against its agent's terminal: an agent in tmux inside
+the pane, or a session run by a background server, writes to the pane its
+environment names.
 
 ## An agent's claim belongs to its process, not to one run of it
 
@@ -384,6 +387,19 @@ it would record the relay or the shell as the agent. This holds against
 programs that cooperate with the hook entry; a same-user program that sets the
 value to its own pid can still claim a pane for itself, as it can already
 forge any record (see the [record contract](record-contract.md#trust-boundary)).
+
+## An inherited launch id is checked only where the hook names its agent
+
+An event that inherited a shell claim's launch id is written only when the
+process `WEZTERM_ATTENTION_HOST_PID` names runs on the terminal that shell
+claimed from. A hook registered without the variable is not checked, because
+nothing else names the process that runs the session. The hook's parent can be
+a shell that stayed behind, which has no terminal even under an agent that does
+run in the pane; the first ancestor that has a terminal can be the agent that
+started a background server from another pane, on that pane's terminal. So
+such a hook's events go to whichever pane its inherited environment names, as
+the events of a session Codex runs in its shared server do. On Linux nothing is
+checked, for the reason in "On Linux, only a shell claims a pane".
 
 ## A mark stamped before an unbound clear
 

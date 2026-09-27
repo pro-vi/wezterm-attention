@@ -61,6 +61,9 @@ mod claim_fence;
 #[path = "lifecycle_spec/plugin_writes.rs"]
 mod plugin_writes;
 
+#[path = "lifecycle_spec/inherited_host.rs"]
+mod inherited_host;
+
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -970,7 +973,40 @@ fn attempt_failure_retry_and_settling_do_not_end_a_binding() {
 
 #[test]
 fn actual_pi_runner_dispatches_through_the_real_writer() {
-    let setup = Setup::new();
+    let mut setup = Setup::new();
+    // Pi runs on the terminal the pane's shell claimed from, as Pi started
+    // from a claiming shell does: the writer it starts is checked against
+    // that terminal in the kernel's process table.
+    let (mut master, mut slave) = (0, 0);
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    let mut name = [0_u8; 1024];
+    assert_eq!(
+        unsafe { libc::ttyname_r(slave, name.as_mut_ptr().cast(), name.len()) },
+        0
+    );
+    let tty_path = std::ffi::CStr::from_bytes_until_nul(&name)
+        .expect("terminal name")
+        .to_str()
+        .expect("terminal name is UTF-8")
+        .to_owned();
+    setup.tty.fingerprint =
+        wezterm_attention::identity::tty_fingerprint(&tty_path).expect("terminal fingerprint");
+    setup.tty.path = tty_path.clone();
+    setup.panes.set(Some(vec![PaneRow {
+        pane_id: "42".to_owned(),
+        tty_name: Some(tty_path),
+    }]));
     setup.claim();
     let bridge_root = setup._scratch.0.join("bridge");
     fs::create_dir_all(bridge_root.join("bin")).unwrap();
@@ -991,7 +1027,19 @@ fn actual_pi_runner_dispatches_through_the_real_writer() {
     if let Ok(runtime) = std::env::var("ATTENTION_PI_RUNTIME_ROOT") {
         command.env("ATTENTION_PI_RUNTIME_ROOT", runtime);
     }
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut command, move || {
+            if libc::setsid() == -1 || libc::ioctl(slave, libc::TIOCSCTTY as _, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     let output = command.output().unwrap();
+    unsafe {
+        libc::close(master);
+        libc::close(slave);
+    }
     assert!(
         output.status.success(),
         "{}",

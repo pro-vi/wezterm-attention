@@ -103,11 +103,16 @@ queries through the Rust record layer, the plugin reader, and `tests/fixtures/v2
 
 A provider event finds its launch in this order, and stops at the first rule that applies:
 
-1. An inherited `WEZTERM_ATTENTION_LAUNCH_ID` decides alone. It must match the pane's shell
-   claim; a malformed one refuses the event (`record_invalid`), and so does a different one or
-   one that names a self-owned claim (`claim_stale`), whatever else is true. Nothing below is
-   asked of an event that carries one. `attention mark` and prompt return hold an inherited
-   launch id to the same rule.
+1. An inherited `WEZTERM_ATTENTION_LAUNCH_ID` decides which launch. It must match the pane's
+   shell claim; a malformed one refuses the event (`record_invalid`), and so does a different
+   one or one that names a self-owned claim (`claim_stale`), whatever else is true. On macOS,
+   when `WEZTERM_ATTENTION_HOST_PID` is set, the writer then proves its host as in rule 3, with
+   the same refusals, `session_detached` among them. The host's terminal must be the device at
+   the claim's `tty_path`, with the claim's
+   `tty_fingerprint` (`unsafe_tty`), and the socket must still carry the claim's incarnation
+   (`incarnation_changed`). The mux is not asked. Without `WEZTERM_ATTENTION_HOST_PID`, or on
+   Linux, the launch id alone decides. Nothing below is asked of an event that carries one.
+   `attention mark` and prompt return hold an inherited launch id to the matching rule alone.
 2. Without one, the event is refused when self-claim is switched off
    (`WEZTERM_ATTENTION_ENABLE_SELF_CLAIM` set to anything but `1`) or the platform is not macOS
    (`claim_stale`); when `WEZTERM_ATTENTION_HOST_PID` is missing or is not a positive decimal pid
@@ -118,7 +123,10 @@ A provider event finds its launch in this order, and stops at the first rule tha
    process `WEZTERM_ATTENTION_HOST_PID` names, alive, this user's and not replaced while it is
    read, and the writer must not be traced (`self_claim_parent_unverified`). The host's terminal
    is the writer's own controlling terminal, or, only when the kernel says it has none, the
-   parent's; a terminal the kernel cannot report refuses (`probe_unavailable`). A session start
+   parent's; a terminal the kernel cannot report refuses (`probe_unavailable`), and a writer and
+   parent that both have none refuse as `session_detached`: an agent that runs its sessions in
+   a background process with no terminal hands that process's environment, taken from whichever
+   pane started it, to every session's hooks. A session start
    asks the mux: the host's terminal must be the device of the terminal the mux lists for
    `WEZTERM_PANE` on the current socket, and the listing must succeed and name the pane exactly
    once (`unsafe_tty` otherwise). Any other event asks the mux nothing and proves itself against
