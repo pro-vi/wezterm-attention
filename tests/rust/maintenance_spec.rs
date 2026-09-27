@@ -613,9 +613,10 @@ fn an_unreadable_child_makes_sweep_apply_incomplete() {
     assert!(path.ends_with(&format!("agents/{name}")), "{path}");
 }
 
-/// A pass held back by an entry it cannot read still removes what the existing
-/// floor already covers, as after a crash between writing a floor and its
-/// removals, and leaves the floor where it is.
+/// A pass held back by entries it cannot read, a directory named like a record
+/// and a record of a later schema, still removes what the existing floor
+/// already covers, as after a crash between writing a floor and its removals,
+/// and leaves the floor where it is.
 #[test]
 fn an_incomplete_pass_still_removes_what_the_floor_covers() {
     let setup = Setup::new();
@@ -634,6 +635,12 @@ fn an_incomplete_pass_still_removes_what_the_floor_covers() {
             .join(format!("{key}.json")),
     )
     .expect("create directory entry");
+    let future = setup.seed_presence("future-child", 400, 1, "stopped");
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&future).expect("future child")).expect("future JSON");
+    record["schema"] = json!(999);
+    fs::write(&future, serde_json::to_vec(&record).expect("future JSON"))
+        .expect("write future child");
     let (result, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000730"));
     assert!(!left.exists());
     assert_eq!(fs::read(&floor_path).expect("floor record"), floor_bytes);

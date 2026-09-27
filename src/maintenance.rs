@@ -558,9 +558,8 @@ fn compaction_plan(
         };
         let path = entry.path();
         // Only a `*.json` name that does not start with a dot can be a
-        // record, which is named by its 64-hex key; it is also what the plugin
-        // lists. Any other entry, a writer's temporary file included, is not
-        // read.
+        // record, which is named by its 64-hex key. Any other entry, a
+        // writer's temporary file included, is not read.
         if entry.file_name().to_string_lossy().starts_with('.')
             || path.extension().and_then(|extension| extension.to_str()) != Some("json")
         {

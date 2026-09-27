@@ -224,13 +224,13 @@ ever wrote. The latency comparison `tests/gate.sh` runs through
 `tests/python/measure.py` times only `PreToolUse`, so it does not see this
 cost.
 
-A `*.json` entry in `agents/` that cannot be read as a record, such as one a
-later version wrote or one this user cannot open, holds the floor where it is
-for as long as it stays. Records then build up behind it, and every stop still
-reads them all: about 24 µs per record, 48 ms at 2,000 records on an M5 Max,
-which outlasts the plugin's 50 ms wait from about 2,100. `attention sweep`
-names the record in a diagnostic; once it is fixed or removed, the next stop
-catches up.
+A `*.json` entry in `agents/` whose name does not start with a dot and that
+cannot be read as a record, such as one a later version wrote or one this user
+cannot open, holds the floor where it is for as long as it stays. Records then
+build up behind it, and every stop still reads them all: about 24 µs per
+record, 48 ms at 2,000 records on an M5 Max, which outlasts the plugin's 50 ms
+wait from about 2,100. `attention sweep` names the record in a diagnostic;
+once it is fixed or removed, the next stop catches up.
 
 A record counts as spent once its presence TTL has passed by the wall clock. A
 hook suspended for longer than that between reading its clocks and taking the
