@@ -409,7 +409,7 @@ Merge these into any hooks you already have. Do not register `SubagentStart`: a 
 
 Codex reads lifecycle hooks from `~/.codex/hooks.json`, and asks you to approve each new or edited hook once (`/hooks` in Codex). `attention hooks describe --provider codex --json` lists the rows; the same rule and command form apply as for Claude Code, for the same reasons, and so does the advice to register the link on your PATH.
 
-**Start Codex with `--no-daemon`.** Codex 0.157 and later runs its sessions in one shared background server by default, and that server keeps the environment of the terminal that started it, so the hooks of every session would name that first pane. Attention refuses those events (`session_detached`; `unsafe_tty` in a pane no shell claimed) and the tab shows nothing. Start Codex as `codex --no-daemon`, and resume or fork the same way (`codex --no-daemon resume`), so the session runs in the Codex process in your pane. The refusal needs the command form below; on Linux the events are not checked.
+**Start Codex with `--no-daemon`.** Codex 0.157 and later runs its sessions in one shared background server by default, and that server keeps the environment of the terminal that started it, so the hooks of every session would name that first pane. Attention refuses those events (`session_detached`), whether or not a shell claimed the pane, and the tab shows nothing. Start Codex as `codex --no-daemon`, and resume or fork the same way (`codex --no-daemon resume`), so the session runs in the Codex process in your pane. The refusal needs the command form below; on Linux the events are not checked.
 
 ```json
 {

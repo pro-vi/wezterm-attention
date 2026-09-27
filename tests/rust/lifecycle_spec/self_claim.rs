@@ -575,7 +575,7 @@ fn only_a_known_absent_terminal_lets_the_parent_s_terminal_decide() {
         ),
         (
             "an agent with no terminal either",
-            "unsafe_tty",
+            "session_detached",
             Box::new(|setup| {
                 setup.processes.change(AGENT_PID, |agent| {
                     agent.terminal = ControllingTerminal::Absent
@@ -1355,7 +1355,7 @@ fn the_registered_hook_command_hands_the_agent_s_own_pid_to_the_writer() {
     // Past the parent check, the writer goes on to the terminal and the mux,
     // which this test has neither of; any refusal from there on shows the
     // parent was accepted.
-    let past_the_parent = ["unsafe_tty", "realm_unavailable"];
+    let past_the_parent = ["unsafe_tty", "session_detached", "realm_unavailable"];
     let mut shells = vec![vec!["/bin/sh", "-c"], vec!["/bin/bash", "-c"]];
     if std::path::Path::new("/bin/zsh").exists() {
         shells.push(vec!["/bin/zsh", "-lc"]);

@@ -640,12 +640,7 @@ fn found(read: ProcessRead, whose: &str) -> Result<ProcessFacts> {
 /// none -- a hook its agent started in a session of its own -- does the
 /// parent's decide, and nothing further up is consulted.
 fn read_host(processes: &dyn ProcessInspector, expected_parent: i32) -> Result<HostReading> {
-    read_host_terminal(processes, expected_parent)?.ok_or_else(|| {
-        AttentionError::new(
-            "unsafe_tty",
-            "neither this hook nor its agent has a controlling terminal",
-        )
-    })
+    read_host_terminal(processes, expected_parent)?.ok_or_else(detached_session)
 }
 
 /// [`read_host`], giving `None` when the kernel says neither the hook nor its
