@@ -469,20 +469,23 @@ struct RetentionOutcome {
 /// records takes.
 ///
 /// A record is spent once its lifetime has provably run out since it was
-/// written. No reader counts it then, and no event it could fence is still
-/// on its way, since a hook waits seconds for its locks, not minutes. The
-/// exception is a child waiting on a permission prompt while it can still
-/// hold the pane's notify, because that wait has no time limit. The floor
-/// advances to the latest spent record ordered strictly before every record
-/// kept, so a kept record keeps its whole equal-order group, and every record
-/// at or below the floor, the one already written or the one advanced now,
-/// is removed.
+/// written. No reader counts it then, and while no hook is suspended for
+/// that long, as across a system sleep, no event it could fence is still on
+/// its way: a hook waits seconds for its locks, not minutes. The exception
+/// is a child waiting on a permission prompt while it can still hold the
+/// pane's notify, because that wait has no time limit. The floor advances to
+/// the latest spent record ordered strictly before every record kept, so a
+/// kept record keeps its whole equal-order group, and every record at or
+/// below the floor, the one already written or the one advanced now, is
+/// removed.
 ///
-/// The floor advances only when every record was listed, read and judged:
-/// one that was not may be a record the floor must not pass. The records an
-/// earlier floor covers are removed even then, since that floor already
-/// fences them. A sweep under the `operation_id` that wrote the current floor
-/// is a replay, and advances nothing.
+/// Only entries named `*.json` are records, as for every reader. The floor
+/// advances only when every record was listed and read, since one that was
+/// not may be a record the floor must not pass; a record whose age cannot be
+/// judged is kept, so the floor stops below it. The records an earlier floor
+/// covers are removed even then, since that floor already fences them. A
+/// sweep under the `operation_id` that wrote the current floor is a replay,
+/// and advances nothing.
 fn compaction_plan(
     root: &Path,
     address: &PaneAddress,
@@ -538,8 +541,6 @@ fn compaction_plan(
     let mut complete = true;
     // Something was not listed, read or judged.
     let mut incomplete = false;
-    // A file this pass does not recognise keeps the whole directory.
-    let mut blocked = false;
     let mut covered = Vec::new();
     let mut spent = Vec::new();
     let mut first_kept: Option<String> = None;
@@ -556,19 +557,18 @@ fn compaction_plan(
             continue;
         };
         let path = entry.path();
-        if file_type.is_file() && write_leftover(&entry.file_name().to_string_lossy()) {
+        // Only `*.json` entries are records, as every reader lists them; any
+        // other entry, a writer's temporary file included, is not read.
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
             continue;
         }
-        if !file_type.is_file()
-            || path.extension().and_then(|extension| extension.to_str()) != Some("json")
-        {
-            if !blocked {
-                diagnostics.push(Diagnostic::new(
-                    "record_invalid",
-                    "unknown subagent state file is preserved",
-                ));
-            }
-            blocked = true;
+        if !file_type.is_file() {
+            complete = false;
+            incomplete = true;
+            diagnostics.push(Diagnostic::new(
+                "record_invalid",
+                "subagent record is not a regular file",
+            ));
             continue;
         }
         let agent_key = path
@@ -614,12 +614,6 @@ fn compaction_plan(
         } else if first_kept.as_deref().is_none_or(|first| order < first) {
             first_kept = Some(order.to_owned());
         }
-    }
-    if blocked {
-        return Ok(Compaction {
-            incomplete,
-            ..Compaction::doing("blocked", diagnostics)
-        });
     }
     let replay = operation_id.is_some()
         && floor
@@ -699,13 +693,14 @@ fn apply_compaction(
     remove_files_durable(&agents, &plan.covered)
 }
 
-/// Compacts one binding's subagent records after a hook saved a stop, so the
-/// records a reader lists stay about as many as the children that ran
-/// within one presence lifetime, however long the session. It takes the
-/// launch lock alone, the one every writer of those records takes, and leaves
-/// the claim lock free. The wall clock is read once the lock is held, so every
-/// record on disk was written by a hook that read its own clock earlier.
-/// Returns how many records were removed.
+/// Compacts one binding's subagent records after a hook saved a stop, so
+/// that, unless a record holds the floor back, the records a reader lists
+/// stay about as many as the children that ran within one presence lifetime
+/// of the latest stop, however long the session. It takes the launch lock
+/// alone, the one every writer of those records takes, and leaves the claim
+/// lock free. The wall clock is read once the lock is held, so every record
+/// on disk was written by a hook that read its own clock earlier. Returns how
+/// many records were removed.
 pub(crate) fn compact_subagents(
     root: &Path,
     address: &PaneAddress,

@@ -1,7 +1,7 @@
 //! A saved stop folds the binding's spent child records into its retention
-//! floor and removes them, so the plugin's poll reads about as many child
-//! records as ran within one presence lifetime, not every child the session
-//! ever started.
+//! floor and removes them, so, unless a record holds the floor back, the
+//! plugin's poll reads about as many child records as ran within one presence
+//! lifetime of the latest stop, not every child the session ever started.
 
 use super::*;
 use std::os::unix::fs::PermissionsExt;
@@ -233,6 +233,28 @@ fn a_failed_compaction_leaves_the_stop_saved() {
     assert_eq!(stopped["status"], "stopped");
     assert!(presence_path(&setup, "claude", "child-a").exists());
     assert!(floor(&setup, "claude").is_none());
+}
+
+// Only `*.json` entries are records, as for every reader. A file an editor or
+// the Finder left in agents/, or a directory, is not read and does not stop
+// the binding's compaction, which would otherwise freeze with nothing to say so.
+#[test]
+fn a_file_that_is_not_a_record_does_not_stop_compaction() {
+    let mut setup = bound("claude");
+    run_child(&setup, "claude", "Explore", "child-a", 400);
+    let agents = setup.binding_dir("claude", "parent").join("agents");
+    fs::write(agents.join(".DS_Store"), b"finder").expect("write .DS_Store");
+    fs::write(agents.join("notes.json.bak"), b"{").expect("write backup");
+    fs::create_dir(agents.join("cache")).expect("create directory");
+    setup.clock = at(PAST_LIFETIME);
+    run_child(&setup, "claude", "Explore", "child-b", 500);
+    assert!(!presence_path(&setup, "claude", "child-a").exists());
+    assert!(agents.join(".DS_Store").exists() && agents.join("notes.json.bak").exists());
+    assert!(agents.join("cache").is_dir());
+    assert_eq!(
+        floor(&setup, "claude").expect("floor written")["floor_mono_ns"],
+        order(405)
+    );
 }
 
 // A child record that cannot be read may be one the floor must not pass, so

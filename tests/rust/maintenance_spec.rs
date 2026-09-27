@@ -536,30 +536,28 @@ fn negative_wall_age_reports_clock_skew_and_preserves_child() {
     assert_eq!(result.failed_steps, 1, "a child sweep could not judge");
 }
 
-/// A file sweep does not recognise keeps the whole directory, and a child
-/// record it could not read still makes the apply incomplete, whichever of the
-/// two the directory lists first.
+/// A child whose written time is ahead of the clock cannot be judged, so it is
+/// kept: the floor stops below it, the spent child after it stays too, and the
+/// apply reports a failed step.
 #[test]
-fn an_unknown_file_does_not_hide_an_unreadable_child() {
+fn a_floor_stops_below_a_child_it_cannot_judge() {
     let setup = Setup::new();
     setup.claim_and_bind();
-    let spent = setup.seed_presence("spent", 300, 1, "stopped");
-    let agents = setup.binding_dir().join("agents");
-    for index in 0..8 {
-        let key = wezterm_attention::protocol::sha256_hex(format!("broken-{index}").as_bytes());
-        fs::write(agents.join(format!("{key}.json")), b"{").expect("write broken child");
-    }
-    fs::write(agents.join("note.txt"), b"preserve").expect("write unknown file");
-    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
+    let now = RETENTION_AGE_NS as u64;
+    setup.clock.set_unix(now);
+    let before = setup.seed_presence("before", 300, 1, "stopped");
+    let skewed = setup.seed_presence("skewed", 310, now + 1_000, "stopped");
+    let after = setup.seed_presence("after", 320, 1, "stopped");
     let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000727"));
+    assert!(!before.exists());
+    assert!(skewed.exists() && after.exists());
+    let floor: Value = serde_json::from_slice(
+        &fs::read(setup.binding_dir().join("agents-floor.json")).expect("floor"),
+    )
+    .expect("floor JSON");
+    assert_eq!(floor["floor_mono_ns"], "00000000000000000300");
     assert_eq!(result.failed_steps, 1);
-    assert!(spent.exists() && agents.join("note.txt").exists());
-    assert!(!setup.binding_dir().join("agents-floor.json").exists());
-    assert!(
-        diagnostics
-            .iter()
-            .any(|item| item.message == "unknown subagent state file is preserved")
-    );
+    assert!(diagnostics.iter().any(|item| item.code == "clock_skew"));
 }
 
 /// A child record sweep cannot read may be one the floor must not pass, so
@@ -627,9 +625,9 @@ fn binding_history_cap_is_calculated_per_realm() {
     assert_eq!(binding_cap_paths_by_realm(&one_realm).len(), 1);
 }
 
-/// A backlog the old retention kept, stopped children younger than 30 days and
-/// more than 500 of them, goes in one `sweep --apply`, so a session's backlog
-/// can be cleared outside any hook. A child inside its lifetime stays.
+/// Six hundred spent children, none older than 30 days, go in one
+/// `sweep --apply`, so a session's backlog can be cleared outside any hook. A
+/// child inside its lifetime stays.
 #[test]
 fn sweep_apply_clears_a_spent_backlog_in_one_run() {
     let setup = Setup::new();
