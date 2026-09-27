@@ -479,7 +479,7 @@ struct RetentionOutcome {
 /// below the floor, the one already written or the one advanced now, is
 /// removed.
 ///
-/// Only entries named `*.json` are records, as for every reader. The floor
+/// Only `*.json` names that do not start with a dot are records. The floor
 /// advances only when every record was listed and read, since one that was
 /// not may be a record the floor must not pass; a record whose age cannot be
 /// judged is kept, so the floor stops below it. The records an earlier floor
@@ -557,9 +557,13 @@ fn compaction_plan(
             continue;
         };
         let path = entry.path();
-        // Only `*.json` entries are records, as every reader lists them; any
-        // other entry, a writer's temporary file included, is not read.
-        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+        // Only a `*.json` name that does not start with a dot can be a
+        // record, which is named by its 64-hex key; it is also what the plugin
+        // lists. Any other entry, a writer's temporary file included, is not
+        // read.
+        if entry.file_name().to_string_lossy().starts_with('.')
+            || path.extension().and_then(|extension| extension.to_str()) != Some("json")
+        {
             continue;
         }
         if !file_type.is_file() {

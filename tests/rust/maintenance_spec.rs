@@ -604,7 +604,40 @@ fn an_unreadable_child_makes_sweep_apply_incomplete() {
     assert_eq!(result.failed_steps, 1);
     assert!(spent.exists() && child.exists());
     assert!(!setup.binding_dir().join("agents-floor.json").exists());
-    assert!(diagnostics.iter().any(|item| item.code == "future_schema"));
+    let named = diagnostics
+        .iter()
+        .find(|item| item.code == "future_schema")
+        .expect("diagnostic for the unreadable child");
+    let name = child.file_name().unwrap().to_string_lossy().into_owned();
+    let path = named.context["path"].as_str().expect("path context");
+    assert!(path.ends_with(&format!("agents/{name}")), "{path}");
+}
+
+/// A pass held back by an entry it cannot read still removes what the existing
+/// floor already covers, as after a crash between writing a floor and its
+/// removals, and leaves the floor where it is.
+#[test]
+fn an_incomplete_pass_still_removes_what_the_floor_covers() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    setup.seed_presence("first", 300, 1, "stopped");
+    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
+    setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000729"));
+    let floor_path = setup.binding_dir().join("agents-floor.json");
+    let floor_bytes = fs::read(&floor_path).expect("floor record");
+    let left = setup.seed_presence("left-behind", 250, 1, "stopped");
+    let key = wezterm_attention::protocol::sha256_hex(b"not-a-file");
+    fs::create_dir(
+        setup
+            .binding_dir()
+            .join("agents")
+            .join(format!("{key}.json")),
+    )
+    .expect("create directory entry");
+    let (result, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000730"));
+    assert!(!left.exists());
+    assert_eq!(fs::read(&floor_path).expect("floor record"), floor_bytes);
+    assert_eq!(result.failed_steps, 1);
 }
 
 #[test]

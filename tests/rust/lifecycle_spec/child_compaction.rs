@@ -246,6 +246,12 @@ fn a_file_that_is_not_a_record_does_not_stop_compaction() {
     fs::write(agents.join(".DS_Store"), b"finder").expect("write .DS_Store");
     fs::write(agents.join("notes.json.bak"), b"{").expect("write backup");
     fs::create_dir(agents.join("cache")).expect("create directory");
+    // Dot-prefixed names the plugin never lists: macOS's AppleDouble file and
+    // an editor's lock link. Neither can be a record, whose name is its key.
+    let key = wezterm_attention::protocol::sha256_hex(b"child-a");
+    fs::write(agents.join(format!("._{key}.json")), b"{").expect("write AppleDouble file");
+    std::os::unix::fs::symlink("nowhere", agents.join(format!(".#{key}.json")))
+        .expect("create lock link");
     setup.clock = at(PAST_LIFETIME);
     run_child(&setup, "claude", "Explore", "child-b", 500);
     assert!(!presence_path(&setup, "claude", "child-a").exists());

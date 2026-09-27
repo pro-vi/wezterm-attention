@@ -417,13 +417,14 @@ limitations](accepted-limitations.md#what-compacting-sub-agent-records-costs)). 
 kept however old it is: a child waiting for permission whose request is at or after the binding's
 activity, because it can still hold that `notify`. The floor advances to the latest spent record
 ordered strictly before every record kept, so a kept record keeps its whole equal-timestamp group.
-Only entries named `*.json` are records, as for every reader; any other entry, such as a temporary
-file an interrupted write left, is not read. The floor advances only when every record was listed
-and read, and a record whose age cannot be judged is kept, so the floor stops below it. Records an
-existing floor already covers are removed by any later pass that can list `agents/`, whatever
-operation wrote that floor. A hook's compaction gives the floor a fresh `operation_id` of its own.
-It is maintenance: it takes the launch lock alone, reads the wall clock only once it holds that
-lock, and a failure leaves the stop that ran it saved. A reader treats a child record listed and
-gone before its read as removed, not as a failed read. Every other listed record gone mid-read is
-still a failed read.
+Only a `*.json` name that does not start with a dot can be a record, since a record is named by its
+64-hex key, and that is also what the plugin lists; any other entry, such as a temporary file an
+interrupted write left, is not read. The floor advances only when every record was listed and read,
+and a record whose age cannot be judged is kept, so the floor stops below it. Records an existing
+floor already covers are removed by any later pass that can list `agents/`, whatever operation wrote
+that floor. A hook's compaction gives the floor a fresh `operation_id` of its own. It is
+maintenance: it takes the launch lock alone, reads the wall clock only once it holds that lock, and
+a failure leaves the stop that ran it saved. A reader treats a child record listed and gone before
+its read as removed, not as a failed read. Every other listed record gone mid-read is still a failed
+read.
 Binding-history caps are calculated separately for each realm.
