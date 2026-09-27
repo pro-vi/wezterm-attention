@@ -1234,7 +1234,6 @@ return function()
               before[gone_key] = attention_cache[gone_key]
               if not observed_in_other_window(gone_key, window_key) then
                 attention_cache[gone_key] = nil
-                acknowledging[gone_key] = nil
               end
             end
           end
