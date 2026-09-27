@@ -338,6 +338,49 @@ fn inspect_refuses_changed_scope_and_a_mid_read_revision() {
     assert!(facts.lifecycle.observations.is_empty());
 }
 
+// A writer's compaction removes only child records its retention floor
+// covers, so one listed and gone before its read was removed, and the answer
+// stays complete.
+// A review gone the same way is still a read that failed.
+#[test]
+fn inspect_counts_a_child_record_gone_mid_read_as_removed() {
+    let setup = setup();
+    setup.apply(
+        &event(
+            "claude",
+            "PreToolUse",
+            "facts",
+            json!({"tool_name":"Read","agent_id":"child-a","agent_type":"Explore"}),
+        ),
+        "00000000000000000300",
+    );
+    apply_mark_review(&setup.env, "fixture-owner").unwrap();
+    struct ListsOneMore;
+    impl RecordReader for ListsOneMore {
+        fn read(&self, path: &Path, kind: Option<&str>, identity: &RecordIdentity) -> RecordRead {
+            FileRecords.read(path, kind, identity)
+        }
+        fn entries(&self, path: &Path) -> wezterm_attention::protocol::Result<Vec<PathBuf>> {
+            let mut entries = FileRecords.entries(path)?;
+            entries.push(path.join(format!("{}.json", "e".repeat(64))));
+            Ok(entries)
+        }
+    }
+    let facts = read_pane_facts_with_ports(
+        &state_root(&setup.env).unwrap(),
+        &scope(&setup),
+        &ListsOneMore,
+        &setup.clock,
+        Some(&setup.panes),
+        None,
+    )
+    .unwrap();
+    assert_eq!(facts.children.availability, A::Present);
+    assert_eq!(facts.children.count, 1);
+    assert!(facts.children.diagnostics.is_empty());
+    assert_eq!(facts.review.availability, A::Unavailable);
+}
+
 #[test]
 fn inspect_unavailable_probe_and_collection_do_not_report_absence() {
     let setup = setup();

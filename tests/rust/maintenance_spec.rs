@@ -481,8 +481,13 @@ fn compaction_advances_floor_before_delete_and_replays_operation() {
     let floor_bytes = fs::read(&floor).expect("floor record");
     assert!(!old.exists());
     let delayed = setup.seed_presence("delayed-child", 250, 1, "stopped");
+    let later = setup.seed_presence("later-child", 400, 1, "stopped");
     let replay = setup.run_sweep(true, Some(operation)).0;
     assert!(!delayed.exists());
+    assert!(
+        later.exists(),
+        "a replay advances no floor that carries its id"
+    );
     assert_eq!(fs::read(&floor).expect("floor record"), floor_bytes);
     assert!(
         replay
@@ -524,10 +529,141 @@ fn negative_wall_age_reports_clock_skew_and_preserves_child() {
     setup.claim_and_bind();
     let child = setup.seed_presence("future-child", 300, 9_000_000_000, "stopped");
     setup.clock.set_unix(2_000_000_000);
-    let (_, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000719"));
+    let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000719"));
     assert!(child.exists());
     assert!(diagnostics.iter().any(|item| item.code == "clock_skew"));
     assert!(!setup.binding_dir().join("agents-floor.json").exists());
+    assert_eq!(result.failed_steps, 1, "a child sweep could not judge");
+}
+
+/// A child whose written time is ahead of the clock cannot be judged, so it is
+/// kept: the floor stops below it, the spent child after it stays too, and the
+/// apply reports a failed step.
+#[test]
+fn a_floor_stops_below_a_child_it_cannot_judge() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let now = RETENTION_AGE_NS as u64;
+    setup.clock.set_unix(now);
+    let before = setup.seed_presence("before", 300, 1, "stopped");
+    let skewed = setup.seed_presence("skewed", 310, now + 1_000, "stopped");
+    let after = setup.seed_presence("after", 320, 1, "stopped");
+    let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000727"));
+    assert!(!before.exists());
+    assert!(skewed.exists() && after.exists());
+    let floor: Value = serde_json::from_slice(
+        &fs::read(setup.binding_dir().join("agents-floor.json")).expect("floor"),
+    )
+    .expect("floor JSON");
+    assert_eq!(floor["floor_mono_ns"], "00000000000000000300");
+    assert_eq!(result.failed_steps, 1);
+    assert!(diagnostics.iter().any(|item| item.code == "clock_skew"));
+}
+
+/// A `*.json` entry that is not a regular file is one a reader would try to
+/// read, so it holds the floor like an unreadable record, and sweep names it.
+#[test]
+fn a_json_entry_that_is_not_a_file_holds_the_floor_and_is_named() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let spent = setup.seed_presence("spent", 300, 1, "stopped");
+    let key = wezterm_attention::protocol::sha256_hex(b"not-a-file");
+    let entry = setup
+        .binding_dir()
+        .join("agents")
+        .join(format!("{key}.json"));
+    fs::create_dir(&entry).expect("create directory entry");
+    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
+    let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000728"));
+    assert_eq!(result.failed_steps, 1);
+    assert!(spent.exists());
+    assert!(!setup.binding_dir().join("agents-floor.json").exists());
+    let named = diagnostics
+        .iter()
+        .find(|item| item.message == "subagent record is not a regular file")
+        .expect("diagnostic for the entry");
+    let path = named.context["path"].as_str().expect("path context");
+    assert!(path.ends_with(&format!("agents/{key}.json")), "{path}");
+}
+
+/// A child record sweep cannot read may be one the floor must not pass, so
+/// the floor stays where it is and the apply reports a failed step.
+#[test]
+fn an_unreadable_child_makes_sweep_apply_incomplete() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let spent = setup.seed_presence("spent", 300, 1, "stopped");
+    let child = setup.seed_presence("future-child", 301, 1, "stopped");
+    let mut future: Value =
+        serde_json::from_slice(&fs::read(&child).expect("child")).expect("child JSON");
+    future["schema"] = json!(999);
+    fs::write(&child, serde_json::to_vec(&future).expect("future JSON"))
+        .expect("write future child");
+    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
+    let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000726"));
+    assert_eq!(result.failed_steps, 1);
+    assert!(spent.exists() && child.exists());
+    assert!(!setup.binding_dir().join("agents-floor.json").exists());
+    let named = diagnostics
+        .iter()
+        .find(|item| item.code == "future_schema")
+        .expect("diagnostic for the unreadable child");
+    let name = child.file_name().unwrap().to_string_lossy().into_owned();
+    let path = named.context["path"].as_str().expect("path context");
+    assert!(path.ends_with(&format!("agents/{name}")), "{path}");
+}
+
+/// A pass held back by entries it cannot read, directories named like records
+/// and records of a later schema, still visits every entry: it names each one
+/// it cannot read, removes what the existing floor already covers, as after a
+/// crash between writing a floor and its removals, and leaves the floor where
+/// it is. With two entries of each kind, a pass that stops at the first one
+/// misses the second whatever order the directory lists them in.
+#[test]
+fn an_incomplete_pass_still_removes_what_the_floor_covers() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    setup.seed_presence("first", 300, 1, "stopped");
+    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
+    setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000729"));
+    let floor_path = setup.binding_dir().join("agents-floor.json");
+    let floor_bytes = fs::read(&floor_path).expect("floor record");
+    let left = setup.seed_presence("left-behind", 250, 1, "stopped");
+    let mut unreadable = Vec::new();
+    for name in ["not-a-file", "not-a-file-either"] {
+        let key = wezterm_attention::protocol::sha256_hex(name.as_bytes());
+        let entry = setup
+            .binding_dir()
+            .join("agents")
+            .join(format!("{key}.json"));
+        fs::create_dir(&entry).expect("create directory entry");
+        unreadable.push(entry);
+    }
+    for (name, order) in [("future-child", 400), ("another-future-child", 401)] {
+        let future = setup.seed_presence(name, order, 1, "stopped");
+        let mut record: Value =
+            serde_json::from_slice(&fs::read(&future).expect("future child")).expect("future JSON");
+        record["schema"] = json!(999);
+        fs::write(&future, serde_json::to_vec(&record).expect("future JSON"))
+            .expect("write future child");
+        unreadable.push(future);
+    }
+    let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000730"));
+    assert!(!left.exists());
+    assert_eq!(fs::read(&floor_path).expect("floor record"), floor_bytes);
+    assert_eq!(result.failed_steps, 1);
+    let named: Vec<&str> = diagnostics
+        .iter()
+        .filter_map(|item| item.context.get("path").and_then(Value::as_str))
+        .collect();
+    for entry in &unreadable {
+        let name = entry.file_name().unwrap().to_string_lossy().into_owned();
+        let suffix = format!("agents/{name}");
+        assert!(
+            named.iter().any(|path| path.ends_with(&suffix)),
+            "{suffix} not named in {named:?}"
+        );
+    }
 }
 
 #[test]
@@ -574,34 +710,56 @@ fn binding_history_cap_is_calculated_per_realm() {
     assert_eq!(binding_cap_paths_by_realm(&one_realm).len(), 1);
 }
 
+/// Six hundred spent children, none older than 30 days, go in one
+/// `sweep --apply`, so a session's backlog can be cleared outside any hook. A
+/// child inside its lifetime stays.
 #[test]
-fn equal_order_active_child_blocks_the_whole_cap_group() {
+fn sweep_apply_clears_a_spent_backlog_in_one_run() {
     let setup = Setup::new();
     setup.claim_and_bind();
-    setup.clock.set_unix(10_000_000_000);
-    setup.seed_presence("tie-stopped", 300, 10_000_000_000, "stopped");
-    setup.seed_presence("tie-active", 300, 10_000_000_000, "active");
-    for index in 0..499 {
-        setup.seed_presence(
-            &format!("later-{index}"),
-            301 + index,
-            10_000_000_000,
-            "stopped",
-        );
-    }
-    let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000720"));
+    let lifetime = 600_000_000_000;
+    let now = 100 * lifetime;
+    setup.clock.set_unix(now);
+    let spent: Vec<PathBuf> = (0..600)
+        .map(|index| {
+            setup.seed_presence(
+                &format!("spent-{index}"),
+                300 + index,
+                now - lifetime - 1,
+                "stopped",
+            )
+        })
+        .collect();
+    let working = setup.seed_presence("working", 1_000, now, "active");
+    let (result, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000725"));
+    assert!(spent.iter().all(|path| !path.exists()));
+    assert!(working.exists());
+    assert!(result.details.iter().any(|detail| {
+        detail["kind"] == "subagent_compaction"
+            && detail["deleted"] == 600
+            && detail["floor_mono_ns"] == "00000000000000000899"
+    }));
+}
+
+/// A floor that was written and not followed by the removals it covers, as
+/// after a crash between the two, is followed by them on the next pass,
+/// whatever operation wrote it: the floor already fences those children.
+#[test]
+fn a_child_below_the_floor_is_removed_by_any_later_operation() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    setup.seed_presence("old-child", 300, 1, "stopped");
+    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
+    setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000720"));
+    let left = setup.seed_presence("left-child", 250, 1, "stopped");
+    let (result, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000724"));
+    assert!(!left.exists());
     assert!(
-        diagnostics
-            .iter()
-            .any(|item| item.code == "binding_conflict")
-    );
-    assert!(
-        !result
+        result
             .details
             .iter()
-            .any(|detail| detail["action"] == "advance_floor")
+            .any(|detail| detail["action"] == "reclaim" && detail["deleted"] == 1)
     );
-    assert!(!setup.binding_dir().join("agents-floor.json").exists());
 }
 
 #[test]

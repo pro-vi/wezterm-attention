@@ -22,19 +22,27 @@ fn compaction_never_deletes_through_a_symlinked_agents_directory() {
     assert!(diagnostics.iter().any(|d| d.code == "record_invalid"));
 }
 
-/// A child left below the floor by an earlier operation is removed only when
-/// that same operation is replayed; another operation leaves it, since
-/// readers already ignore it and removing it would be a new deletion.
+/// The floor stops strictly before the earliest record compaction keeps, so a
+/// spent child ordered with or after a kept one keeps its file, and only the
+/// spent child before it goes.
 #[test]
-fn a_child_below_the_floor_is_removed_only_by_a_replay_of_its_operation() {
+fn compaction_never_passes_a_kept_child() {
     let setup = Setup::new();
     setup.claim_and_bind();
-    setup.seed_presence("old-child", 300, 1, "stopped");
-    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
+    let now = RETENTION_AGE_NS as u64;
+    setup.clock.set_unix(now);
+    let before = setup.seed_presence("before", 299, 1, "stopped");
+    let tied = setup.seed_presence("tied", 300, 1, "stopped");
+    let kept = setup.seed_presence("kept", 300, now, "stopped");
+    let after = setup.seed_presence("after", 301, 1, "stopped");
     setup.run_sweep(true, Some(OP_1));
-    let delayed = setup.seed_presence("delayed-child", 250, 1, "stopped");
-    setup.run_sweep(true, Some(OP_2));
-    assert!(delayed.exists(), "another operation left the covered child");
+    assert!(!before.exists());
+    assert!(tied.exists() && kept.exists() && after.exists());
+    let floor: Value = serde_json::from_slice(
+        &fs::read(setup.binding_dir().join("agents-floor.json")).expect("floor"),
+    )
+    .expect("floor JSON");
+    assert_eq!(floor["floor_mono_ns"], "00000000000000000299");
 }
 
 /// Lists no panes, and on its second call records a hook's end for the
