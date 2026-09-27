@@ -1358,8 +1358,11 @@ pub const LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a write the plugin asks for waits for one state lock. The plugin
 /// waits for the answer on the GUI's thread, which draws nothing meanwhile,
 /// and a write takes two locks. A hook holds a lock for under a millisecond
-/// per write, so this covers a queue of dozens of them; a wait that still
-/// runs out is retried by the plugin, or reported for a key press.
+/// per write, so this covers a queue of dozens of them. A compaction of a
+/// binding's sub-agent records holds the launch lock for about 0.1 ms per
+/// record it reads and removes, which passed 50 ms between 500 and 1,000
+/// records on an M5 Max. A wait that still runs out is retried by the plugin,
+/// or reported for a key press.
 pub const PLUGIN_LOCK_TIMEOUT: Duration = Duration::from_millis(50);
 
 pub fn with_lock<T>(

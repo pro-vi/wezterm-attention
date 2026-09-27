@@ -185,6 +185,30 @@ abandoned, and they mean three kinds of leftover stay on disk:
 Collecting any of these would be a new deletion, and would need the same
 evidence rule the others have.
 
+## The first compaction of a long session's backlog
+
+A binding whose session ran for hours under an earlier version holds its
+whole backlog of sub-agent records. The first stop that compacts it clears the
+backlog in one pass under the launch lock. On an M5 Max that pass took 96 ms
+for 1,000 records, 176 ms for 1,922, about 1 s for 10,000, 2.2 s for 15,000
+and 2.5 to 2.8 s for 20,000. Every other writer of that launch waits for it:
+
+- The plugin's acknowledgement waits 50 ms, so from somewhere between 500 and
+  1,000 records it fails once and the plugin retries it about 2 s later.
+- Another hook of the same launch waits 2 s, so from about 15,000 records it is
+  refused with `probe_unavailable` ("state lock timed out") and its event is
+  not recorded. A sub-agent's permission request lost this way leaves the tab
+  without its `notify`.
+
+Hooks do not bound the pass, because a bound would leave a binding above it
+uncompacted with nothing to report it. To clear backlogs at a moment you
+choose, run `attention sweep --apply` once after upgrading. It compacts every
+pane's current binding by the same rule, including a session that already
+ended in a pane that is still open, which no later stop would compact. While
+it works on a binding it holds that pane's launch and claim locks for the same
+time. A binding that is no longer its pane's current one is not read by the
+plugin; it is removed whole by the usual 30-day retention.
+
 ## A mux server whose socket was removed, replaced or refuses keeps its records
 
 Sweep reclaims the panes of a server it can show has exited. A GUI that quit is
