@@ -1370,13 +1370,16 @@ fn acquire(path: &Path, timeout: Duration) -> Result<HeldLock> {
         match file.try_lock() {
             Ok(()) => return Ok(HeldLock(file)),
             Err(std::fs::TryLockError::WouldBlock) => {
-                if Instant::now() >= deadline {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
                     return Err(AttentionError::new(
                         "probe_unavailable",
                         "state lock timed out",
                     ));
                 }
-                thread::sleep(Duration::from_millis(10));
+                // The last sleep ends at the deadline, not past it: the GUI
+                // waits on the plugin's commands.
+                thread::sleep(remaining.min(Duration::from_millis(10)));
             }
             Err(std::fs::TryLockError::Error(_)) => {
                 return Err(AttentionError::new(
