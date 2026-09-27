@@ -529,8 +529,7 @@ fn canonical_decimal(value: &Value, maximum: usize) -> bool {
 }
 
 /// Whether `text` is a decimal number of at most `maximum` digits with no
-/// sign and no leading zero, the way this project writes a pane id and every
-/// other decimal field.
+/// sign and no leading zero.
 pub fn canonical_decimal_text(text: &str, maximum: usize) -> bool {
     !text.is_empty()
         && text.len() <= maximum
