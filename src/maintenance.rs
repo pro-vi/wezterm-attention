@@ -565,10 +565,9 @@ fn compaction_plan(
         if !file_type.is_file() {
             complete = false;
             incomplete = true;
-            diagnostics.push(Diagnostic::new(
-                "record_invalid",
-                "subagent record is not a regular file",
-            ));
+            let error =
+                AttentionError::new("record_invalid", "subagent record is not a regular file");
+            diagnostics.push(naming_record(root, &path, error).diagnostic);
             continue;
         }
         let agent_key = path

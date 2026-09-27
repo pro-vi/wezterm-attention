@@ -560,6 +560,32 @@ fn a_floor_stops_below_a_child_it_cannot_judge() {
     assert!(diagnostics.iter().any(|item| item.code == "clock_skew"));
 }
 
+/// A `*.json` entry that is not a regular file is one a reader would try to
+/// read, so it holds the floor like an unreadable record, and sweep names it.
+#[test]
+fn a_json_entry_that_is_not_a_file_holds_the_floor_and_is_named() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let spent = setup.seed_presence("spent", 300, 1, "stopped");
+    let key = wezterm_attention::protocol::sha256_hex(b"not-a-file");
+    let entry = setup
+        .binding_dir()
+        .join("agents")
+        .join(format!("{key}.json"));
+    fs::create_dir(&entry).expect("create directory entry");
+    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
+    let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000728"));
+    assert_eq!(result.failed_steps, 1);
+    assert!(spent.exists());
+    assert!(!setup.binding_dir().join("agents-floor.json").exists());
+    let named = diagnostics
+        .iter()
+        .find(|item| item.message == "subagent record is not a regular file")
+        .expect("diagnostic for the entry");
+    let path = named.context["path"].as_str().expect("path context");
+    assert!(path.ends_with(&format!("agents/{key}.json")), "{path}");
+}
+
 /// A child record sweep cannot read may be one the floor must not pass, so
 /// the floor stays where it is and the apply reports a failed step.
 #[test]
