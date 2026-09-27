@@ -574,6 +574,37 @@ fn binding_history_cap_is_calculated_per_realm() {
     assert_eq!(binding_cap_paths_by_realm(&one_realm).len(), 1);
 }
 
+/// A backlog the old retention kept, stopped children younger than 30 days and
+/// more than 500 of them, goes in one `sweep --apply`, so a session's backlog
+/// can be cleared outside any hook. A child inside its lifetime stays.
+#[test]
+fn sweep_apply_clears_a_spent_backlog_in_one_run() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let lifetime = 600_000_000_000;
+    let now = 100 * lifetime;
+    setup.clock.set_unix(now);
+    let spent: Vec<PathBuf> = (0..600)
+        .map(|index| {
+            setup.seed_presence(
+                &format!("spent-{index}"),
+                300 + index,
+                now - lifetime - 1,
+                "stopped",
+            )
+        })
+        .collect();
+    let working = setup.seed_presence("working", 1_000, now, "active");
+    let (result, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000725"));
+    assert!(spent.iter().all(|path| !path.exists()));
+    assert!(working.exists());
+    assert!(result.details.iter().any(|detail| {
+        detail["kind"] == "subagent_compaction"
+            && detail["deleted"] == 600
+            && detail["floor_mono_ns"] == "00000000000000000899"
+    }));
+}
+
 /// A floor that was written and not followed by the removals it covers, as
 /// after a crash between the two, is followed by them on the next pass,
 /// whatever operation wrote it: the floor already fences those children.
