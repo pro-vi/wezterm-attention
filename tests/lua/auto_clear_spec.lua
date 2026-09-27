@@ -2875,6 +2875,32 @@ test("Alt+B flags a pane with an activity, and one press clears the user's flags
       .. tostring(review.get_attention(7621)))
 end)
 
+test("Alt+B on an unclaimed pane clears the user's flag from its tab, and flags nothing", function()
+  local review = dofile(repo_root .. "/plugin/init.lua")
+  local config = {}
+  review.apply_to_config(config, { auto_poll = false, dir = test_dir, integration_root = writer_root })
+  local toggle = assert(config.keys and config.keys[1] and config.keys[1].action,
+    "review key action was not registered")
+
+  -- 7640 is an agent pane carrying the user's flag; 7641 is a plain shell
+  -- split no launch has claimed.
+  write_activity(7640, "review")
+  local tabs = { { 7640, 7641 } }
+  local w = window_double({ tabs = tabs, focused = true, active_pane_id = 7641 })
+  local spawned = with_plugin_command(reviewing_answer, function() toggle(w, pane_from_entry(7641)) end)
+
+  assert(#spawned == 1 and plugin_arguments(spawned[1]):match("^plugin clear%-review"),
+    "the press clears the sibling's flag")
+  assert(not path_exists(user_review_path(7640)), "the user's flag is gone from the tab")
+  assert(w.action_calls == 1, "a clear redraws once, got " .. w.action_calls)
+
+  spawned = with_plugin_command(reviewing_answer, function() toggle(w, pane_from_entry(7641)) end)
+  assert(#spawned == 0, "an unclaimed pane cannot be flagged")
+  local errors = drain_errors()
+  assert(#errors == 1 and errors[1]:find("has published no agent launch", 1, true),
+    "the refusal says why once, got " .. #errors)
+end)
+
 test("flagging a pane whose stop is already shown requests a redraw", function()
   write_activity(7671, "stop")
 

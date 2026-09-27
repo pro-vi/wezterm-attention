@@ -110,7 +110,7 @@ return function()
         if not panes_ok or type(panes) ~= "table" then panes = {} end
         for _, pane in ipairs(panes) do
           local read = resolve_pane_read(pane)
-          if read.kind == "claimed" and read.cache_key == target.cache_key then
+          if read.kind == target.kind and read.cache_key == target.cache_key then
             return panes
           end
         end

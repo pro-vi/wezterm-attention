@@ -557,11 +557,10 @@ function M.apply_to_config(config, opts)
         -- owner's to withdraw, and a press leaves it.
         local mux_win = win:mux_window()
         local target_read = reader.resolve_pane_read(pane)
-        if target_read.kind ~= "claimed" then
-          -- Nothing has claimed the pane, or it has not published who it is,
-          -- so no reader would show a flag written for it.
-          report_error_once("review-unclaimed-pane",
-            "cannot toggle review: this pane has published no agent launch")
+        if target_read.kind ~= "claimed" and target_read.kind ~= "unclaimed" then
+          -- The pane has not published who it is, so its tab cannot be found.
+          report_error_once("review-unpublished-pane",
+            "cannot toggle review: this pane has not published who it is")
           return
         end
         local panes
@@ -601,6 +600,11 @@ function M.apply_to_config(config, opts)
               written[#written + 1] = read
             end
           end
+        elseif target_read.kind ~= "claimed" then
+          -- Nothing has claimed the pane, so no reader would show a flag
+          -- written for it. A flagged tab is still cleared from here, above.
+          report_error_once("review-unclaimed-pane",
+            "cannot toggle review: this pane has published no agent launch")
         elseif runtime.run_plugin_write("set-review", target_read, dir) then
           written[1] = target_read
         end
