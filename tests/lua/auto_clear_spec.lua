@@ -3724,13 +3724,13 @@ end)
 
 test("a child record gone between the glob and its read counts as removed", function()
   local window, key, pane_root, _, records_root = seed_record_recovery(9014)
-  local function poll_listing(directory)
+  local function poll_listing(directory, name)
     attention.poll(window, {
       now_unix_ns = protocol_fixture.state_case.now_unix_ns,
       glob = function(pattern)
         local paths = canonical_fixture_glob(pattern)
         if pattern == directory .. "/*.json" then
-          paths[#paths + 1] = directory .. "/" .. string.rep("e", 64) .. ".json"
+          paths[#paths + 1] = directory .. "/" .. name
         end
         return paths
       end,
@@ -3738,11 +3738,19 @@ test("a child record gone between the glob and its read counts as removed", func
     })
     return internal.attention_cache[key]
   end
-  local view = poll_listing(records_root .. "/agents")
+  local never = string.rep("e", 64) .. ".json"
+  local view = poll_listing(records_root .. "/agents", never)
   assert(view.subagents == 1, "the child that is still there still counts")
   assert(view.binding_health == "valid",
     "a writer's compaction removed a child its retention floor covers")
-  view = poll_listing(pane_root .. "/reviews")
+  -- The seeded child is in the last poll's cache. Once its file is gone, a
+  -- listing that still names it must not bring it back from there.
+  local seeded = protocol_fixture.record_samples.subagent_presence.agent_key .. ".json"
+  assert(os.remove(records_root .. "/agents/" .. seeded))
+  view = poll_listing(records_root .. "/agents", seeded)
+  assert(view.subagents == 0, "a removed child came back from the cache")
+  assert(view.binding_health == "valid", "a removed child is not a failed read")
+  view = poll_listing(pane_root .. "/reviews", never)
   assert(view.binding_health ~= "valid", "a review gone mid-read is still a failed read")
   drain_errors()
 end)
