@@ -411,6 +411,31 @@ fn an_event_that_changes_nothing_still_replaces_an_invalid_child_set() {
     );
 }
 
+// Whatever an event says about itself, a hook that started the set again
+// reports that first.
+#[test]
+fn a_restarted_child_set_is_reported_before_the_events_own_diagnostic() {
+    let setup = bound("claude");
+    setup.apply(
+        &event("claude", "SessionEnd", SESSION, json!({"reason":"other"})),
+        "00000000000000000300",
+    );
+    let path = set_path(&setup, "claude");
+    fs::write(&path, b"{not json").unwrap();
+    let late = setup.apply(
+        &child("claude", "PreToolUse", "child-a", Some("Explore")),
+        "00000000000000000400",
+    );
+    assert_eq!(late.disposition, "ignored");
+    assert_eq!(
+        late.diagnostic
+            .as_ref()
+            .map(|diagnostic| diagnostic.code.as_str()),
+        Some("record_invalid")
+    );
+    assert_eq!(kept_aside(&path).len(), 1);
+}
+
 // Moving an invalid set aside moves the file as it stands: a link is moved as
 // a link, and what it points to is neither read nor copied.
 #[test]
@@ -562,6 +587,14 @@ fn a_set_written_before_the_end_counts_nothing_after_a_resume() {
         ),
         "00000000000000000500",
     );
+    assert_eq!(facts(&setup, "claude").children.count, 0);
+    // A write that changes nothing else applies the end, and the count the
+    // readers showed stays what it was.
+    setup.apply(
+        &child("claude", "SubagentStop", "child-z", Some("Explore")),
+        "00000000000000000550",
+    );
+    assert!(live(&setup, "claude").is_empty());
     assert_eq!(facts(&setup, "claude").children.count, 0);
     setup.apply(
         &child("claude", "SubagentStart", "child-c", Some("Explore")),

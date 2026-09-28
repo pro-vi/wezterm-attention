@@ -288,8 +288,9 @@ say how that was checked and what an asynchronous hook costs.
 
 A writer that finds `children.json` invalid renames it to `.children.json.invalid.<uuid>`, a
 write-leftover name that sweep and doctor pass over, applies the event to a new, empty set, and
-writes the new set even when the event changed nothing else; the hook reports `record_invalid`. The
-rename moves the file as it stands, a link as a link, without reading it. The children the invalid
+writes the new set even when the event changed nothing else; the hook reports `record_invalid`
+before anything else the event says. The rename moves the file as it stands, a link as a link,
+without reading it; sweep keeps a binding that holds a link, as it keeps any. The children the invalid
 set held are counted again at their next event. A set that a newer writer wrote (`future_schema`),
 one that cannot be read, one that cannot be moved aside (`probe_unavailable`), or a change past the
 size bound, leaves the set as it was: a child's event is refused with that diagnostic, while a
@@ -301,8 +302,9 @@ entries. They apply none of the rules above but one, the binding's end: no child
 `end.json` ends the binding, or while `end.json` exists and is not the end the set's `lifetime_end`
 names. Every write applies the end first, so a set that has not applied it was written before it,
 as in a resumed session before its first child event, and what it holds belongs to the lifetime the
-end closed. An `end.json` that cannot be read leaves the count unknown. A set whose `provider` is
-not its binding's is invalid. The [consumer guide](consumer-guide.md#scoped-headless-inspection) says
+end closed. An `end.json` that cannot be read leaves the count unknown, except that the plugin
+counts against an `end.json` it read before, as it does for the set. A set whose `provider` is not
+its binding's is invalid. The [consumer guide](consumer-guide.md#scoped-headless-inspection) says
 what `inspect` reports when the set is absent or cannot be read. A poll reads one `children.json`
 per pane and reuses it while its bytes are unchanged, and a child's hook replaces it at most once;
 neither lists a directory.

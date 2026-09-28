@@ -389,9 +389,9 @@ return function(context)
   --- nothing is counted while the end ends the binding, or while the set has
   --- not applied it. Every write applies the end first, so a set that has not
   --- was written before the end, and what it holds belongs to the lifetime
-  --- the end closed. An end that cannot be read leaves the count unknown. A
-  --- set read before, handed back when the file cannot be read now, is
-  --- counted the same way.
+  --- the end closed. An end that cannot be read, with no earlier read of it
+  --- to fall back on, leaves the count unknown. A set or an end read before,
+  --- handed back when the file cannot be read now, is counted the same way.
   local function children_facet(set, status, problem, binding, binding_end, end_status, end_problem)
     local facet = { coverage = "known", count = 0, waiting = 0, uncertain = false, diagnostics = {} }
     local supported = list_contains(protocol.enums.subagent_providers, binding.provider)

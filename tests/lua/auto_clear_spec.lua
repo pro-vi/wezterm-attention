@@ -3634,6 +3634,27 @@ test("an unreadable child set keeps the count read before, and is unknown with n
   drain_errors()
 end)
 
+test("an end record that cannot be read leaves the child count unknown", function()
+  write_subagents(4257, 2)
+  local end_path = seeded_records_root(4257) .. "/end.json"
+  local fresh = dofile(repo_root .. "/plugin/init.lua")
+  fresh.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false })
+  local real_open = io.open
+  io.open = function(target, mode)
+    if target == end_path then return nil, "permission denied" end
+    return real_open(target, mode)
+  end
+  local ok, failure = pcall(fresh.poll, window_double({ tabs = { { 4257 } }, focused = false }),
+    { now_unix_ns = fixture_now, call_after = function() end })
+  io.open = real_open
+  assert(ok, failure)
+  local view = fresh._internal.attention_cache[seeded_key(4257)]
+  assert(view.subagents == 0 and view.subagents_uncertain == true,
+    "which children count depends on the end, so the count is unknown")
+  assert(fresh._internal.resolve_visible_attention({ seeded_key(4257) }).indicator == "+? ")
+  drain_errors()
+end)
+
 test("an ended session counts no children, and a resumed one none until its set applies the end", function()
   write_activity(4254, "stop")
   local root = seeded_records_root(4254)

@@ -283,7 +283,9 @@ command to remove such a sub-agent by hand.
 A writer that finds `children.json` invalid renames it to
 `.children.json.invalid.<uuid>`, applies its event to a new, empty set, and
 writes that set even when the event changes nothing else; its hook reports
-`record_invalid`. Until that next child event, the tab shows `+?`. The
+`record_invalid`. A `children.json` that something else replaced with a link is
+moved aside as a link, and sweep then keeps that binding, as it keeps any that
+holds a link. Until that next child event, the tab shows `+?`. The
 sub-agents the invalid set held are counted again only at their next event, so
 one in the middle of a long command stays uncounted until it calls another tool
 or stops. The renamed files are write leftovers: they go with their binding,

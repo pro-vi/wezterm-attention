@@ -1053,13 +1053,16 @@ fn plan_children(
     set.schema = manifest()?.record_schema;
     let reduction = set.apply(EndMark::of(end.as_ref(), &binding), transition);
     let mut result = LifecycleResult::new(reduction.disposition);
-    result.diagnostic = reduction.diagnostic;
-    if started_again && result.diagnostic.is_none() {
-        result.diagnostic = Some(Diagnostic::new(
+    // Starting again loses what the invalid set held, so the hook reports
+    // that before anything the transition itself says.
+    result.diagnostic = if started_again {
+        Some(Diagnostic::new(
             "record_invalid",
             "an invalid child presence set was moved aside and started again",
-        ));
-    }
+        ))
+    } else {
+        reduction.diagnostic
+    };
     if reduction.changed || started_again {
         set.revision = Uuid::new_v4().to_string();
         set.written_at_unix_ns = written_at.to_owned();
