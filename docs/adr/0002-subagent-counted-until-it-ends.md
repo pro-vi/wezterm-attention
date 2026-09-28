@@ -27,7 +27,7 @@ at its `SubagentStop`, at a Codex parent `Stop` ordered after its last event, or
 at the binding's end. Nothing removes a sub-agent for being quiet. The set keeps
 no stopped sub-agents, has no entry cap, and no size limit beyond the general
 `max_json_bytes`, which the writer checks before it writes. Readers count its
-live entries and apply one rule of their own, the binding's end: nothing counts
+live entries and apply one counting rule of their own, the binding's end: nothing counts
 while the end ends the binding or the set has not applied it. A count that
 cannot be read, because the set or the end record cannot, is drawn as unknown
 (`+?`, or `+N?` beside other panes' counts), never as zero.

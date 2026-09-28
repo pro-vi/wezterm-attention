@@ -1063,7 +1063,7 @@ fn plan_children(
     let reduction = set.apply(EndMark::of(end.as_ref(), &binding), transition);
     let mut result = LifecycleResult::new(reduction.disposition);
     // Starting again loses what the invalid set held, so the hook reports
-    // that before anything the transition itself says.
+    // that instead of anything the transition itself says.
     result.diagnostic = if started_again {
         Some(Diagnostic::new(
             "record_invalid",
@@ -1206,6 +1206,21 @@ fn apply_activity(
                     &mut replacements,
                 );
             }
+            let (refused, diagnostic) = match children_report {
+                Ok(diagnostic) => (false, diagnostic),
+                Err(diagnostic) => (true, Some(diagnostic)),
+            };
+            // What the child set reports, a restart included, replaces the
+            // activity's own diagnostic. A lifecycle failure that
+            // append_observation records replaces both, as in apply_child,
+            // since that failure is what the hook's partial then means.
+            let mut result = result;
+            if diagnostic.is_some() {
+                result.diagnostic = diagnostic;
+            }
+            if refused && let Some(evidence) = &resolved.evidence {
+                evidence.borrow_mut().native_refused = true;
+            }
             let mut plan = append_observation(
                 resolved,
                 event,
@@ -1216,21 +1231,11 @@ fn apply_activity(
                     ..CommitPlan::reporting(Mutation::plain(result))
                 },
             );
-            let (refused, diagnostic) = match children_report {
-                Ok(diagnostic) => (false, diagnostic),
-                Err(diagnostic) => (true, Some(diagnostic)),
-            };
+            // Partial only after the observation is planned, so the activity
+            // itself still counts as written.
             let result = &mut plan.result.result;
             if refused && accepted(result) {
                 result.disposition = Disposition::Partial;
-            }
-            if refused && let Some(evidence) = &resolved.evidence {
-                evidence.borrow_mut().native_refused = true;
-            }
-            // What the child set reports, a restart included, wins over the
-            // activity's own diagnostic.
-            if diagnostic.is_some() {
-                result.diagnostic = diagnostic;
             }
             Ok(plan)
         },
@@ -1242,8 +1247,9 @@ fn apply_activity(
 /// Plans a child-set change that an activity carries, adding its
 /// replacement only when it applies. The activity stands whatever happens to
 /// the set. What the change reports comes back beside it: `Ok` with the
-/// transition's own diagnostic, or `Err` when the set could not be planned or
-/// the transition conflicts with it, which makes the hook partial.
+/// diagnostic plan_children reports (a restart's, or else the transition's
+/// own), or `Err` when the set could not be planned or the transition
+/// conflicts with it, which makes an accepted activity's hook partial.
 fn plan_children_beside_activity(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,

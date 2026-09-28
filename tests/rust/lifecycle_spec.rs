@@ -1816,8 +1816,9 @@ fn readme_json_block(heading: &str) -> Value {
 // The README's hook blocks are what users paste into their agent's settings,
 // so each registers exactly the rows `hooks describe` marks `register`, each
 // as one command hook in the documented form. The block holds nothing else;
-// `async` in particular would let a hook run after the agent has gone on,
-// and one child's events could then reach the writer out of order.
+// `async` in particular would let a hook run after the agent has gone on
+// (Claude Code 2.1.283, Codex at source `985cf47a4`), and one child's events
+// could then reach the writer out of order.
 #[test]
 fn readme_hook_blocks_register_exactly_the_described_rows() {
     use wezterm_attention::providers::{HookRegistration, describe_hooks};

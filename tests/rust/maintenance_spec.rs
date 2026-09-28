@@ -922,7 +922,7 @@ fn aged_binding_with_a_child_set(setup: &Setup) -> PathBuf {
 // A binding's child set, and an invalid one a writer moved aside, go with
 // their binding once it has aged out.
 #[test]
-fn an_old_binding_holding_a_child_set_and_a_moved_aside_one_is_removed_whole() {
+fn an_old_binding_holding_a_child_set_and_a_moved_aside_one_is_pruned_whole() {
     let setup = Setup::new();
     let old_dir = aged_binding_with_a_child_set(&setup);
     fs::write(

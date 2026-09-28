@@ -289,8 +289,9 @@ say how that was checked and what an asynchronous hook costs.
 
 A writer that finds `children.json` invalid renames it to `.children.json.invalid.<uuid>`, a
 write-leftover name that sweep and doctor pass over, applies the event to a new, empty set, and
-writes the new set even when the event changed nothing else; the hook reports `record_invalid`
-before anything else the event says. The rename moves the file as it stands, a link as a link,
+writes the new set even when the event changed nothing else; the hook reports that restart
+(`record_invalid`) instead of the event's own diagnostic, and a failure to record the event's
+lifecycle observation instead of both. The rename moves the file as it stands, a link as a link,
 without reading it; sweep keeps a binding that holds a link, as it keeps any. The children the invalid
 set held are counted again at their next event. A set that a newer writer wrote (`future_schema`),
 one that cannot be read, one that cannot be moved aside (`probe_unavailable`), or a change past the

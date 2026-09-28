@@ -385,7 +385,7 @@ return function(context)
   --- { coverage, count, waiting, uncertain, diagnostics }.
   ---
   --- The writer alone decides which children are in the set, and a reader
-  --- only counts them. The one rule a reader applies is the binding's end:
+  --- only counts them. The one counting rule a reader applies is the binding's end:
   --- nothing is counted while the end ends the binding, or while the set has
   --- not applied it. Every write applies the end first, so a set that has not
   --- was written before the end, and what it holds belongs to the lifetime

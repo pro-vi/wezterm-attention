@@ -208,7 +208,7 @@ impl ChildPresenceSet {
     /// the binding's end before anything else, so a set that has not applied
     /// its end was written before that end, and what it holds belongs to the
     /// lifetime the end closed.
-    pub fn counted<'a>(&'a self, end: Option<EndMark<'_>>) -> impl Iterator<Item = &'a LiveChild> {
+    pub fn counted(&self, end: Option<EndMark<'_>>) -> &[LiveChild] {
         let closed = end.is_some_and(|end| {
             end.ends_binding
                 || self
@@ -216,7 +216,7 @@ impl ChildPresenceSet {
                     .as_ref()
                     .is_none_or(|last| last.event_id != end.event_id)
         });
-        self.live.iter().filter(move |_| !closed)
+        if closed { &[] } else { &self.live }
     }
 
     /// Applies one transition. The binding's end is applied first whatever
@@ -247,27 +247,27 @@ impl ChildPresenceSet {
                 self.clear_for_parent(order, event_id)
             }
             ChildTransition::Stop { agent_id, order } => self
-                .refused_by_end(end, order)
+                .ignored_by_end(end, order)
                 .unwrap_or_else(|| self.stop(agent_id, order)),
             ChildTransition::Start {
                 agent_id,
                 agent_type,
                 order,
             } => self
-                .refused_by_end(end, order)
+                .ignored_by_end(end, order)
                 .unwrap_or_else(|| self.advance(agent_id, agent_type, order, ChildEvent::Start)),
             ChildTransition::Tool {
                 agent_id,
                 agent_type,
                 order,
             } => self
-                .refused_by_end(end, order)
+                .ignored_by_end(end, order)
                 .unwrap_or_else(|| self.advance(agent_id, agent_type, order, ChildEvent::Tool)),
             ChildTransition::Permission {
                 agent_id,
                 agent_type,
                 order,
-            } => self.refused_by_end(end, order).unwrap_or_else(|| {
+            } => self.ignored_by_end(end, order).unwrap_or_else(|| {
                 self.advance(agent_id, agent_type, order, ChildEvent::Permission)
             }),
         };
@@ -279,7 +279,7 @@ impl ChildPresenceSet {
 
     /// Why a child's event at `order` cannot change the set, if it cannot:
     /// the binding has ended, or the event comes from before its last end.
-    fn refused_by_end(&self, end: Option<EndMark<'_>>, order: &str) -> Option<Reduction> {
+    fn ignored_by_end(&self, end: Option<EndMark<'_>>, order: &str) -> Option<Reduction> {
         if end.is_some_and(|end| end.ends_binding) {
             return Some(Reduction::diagnosed(
                 false,
@@ -467,7 +467,7 @@ impl ChildPresenceSet {
     /// and has done nothing since: a child that can hold a notify ordered at
     /// `since`.
     pub fn waits_since(&self, end: Option<EndMark<'_>>, since: &str) -> bool {
-        self.counted(end).any(|child| {
+        self.counted(end).iter().any(|child| {
             child.status == ChildStatus::Waiting && child.last_mono_ns.as_str() >= since
         })
     }

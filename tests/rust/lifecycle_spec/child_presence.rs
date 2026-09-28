@@ -257,8 +257,9 @@ fn a_finished_tool_does_not_end_a_childs_wait() {
 }
 
 // Codex's parent stop ends the children it covers. That rests on a Codex
-// parent stopping only once its children have, which Codex does not enforce
-// (see docs/accepted-limitations.md); a covered child that works again
+// parent stopping only once its children have, which Codex at source
+// `985cf47a4` does not enforce (see docs/accepted-limitations.md); a covered
+// child that works again
 // afterwards is counted and reported.
 #[test]
 fn a_codex_parent_stop_ends_the_children_it_covers() {
@@ -374,9 +375,9 @@ fn an_invalid_child_set_is_moved_aside_and_started_again() {
         "applied"
     );
     assert_eq!(live(&setup, "claude"), vec![running("child-a")]);
-    let kept = kept_aside(&path);
-    assert_eq!(kept.len(), 1);
-    assert_eq!(fs::read(&kept[0]).unwrap(), b"{not json");
+    let aside = moved_aside(&path);
+    assert_eq!(aside.len(), 1);
+    assert_eq!(fs::read(&aside[0]).unwrap(), b"{not json");
 }
 
 // A stop for a child the set does not hold changes nothing, yet it still
@@ -404,7 +405,7 @@ fn an_event_that_changes_nothing_still_replaces_an_invalid_child_set() {
         );
     }
     assert!(live(&setup, "claude").is_empty());
-    assert_eq!(kept_aside(&path).len(), 1);
+    assert_eq!(moved_aside(&path).len(), 1);
     assert_eq!(
         facts(&setup, "claude").children.coverage,
         ChildCoverage::Known
@@ -412,9 +413,9 @@ fn an_event_that_changes_nothing_still_replaces_an_invalid_child_set() {
 }
 
 // Whatever an event says about itself, a hook that started the set again
-// reports that first.
+// reports that instead.
 #[test]
-fn a_restarted_child_set_is_reported_before_the_events_own_diagnostic() {
+fn a_restarted_child_set_is_reported_instead_of_the_events_own_diagnostic() {
     let setup = bound("claude");
     setup.apply(
         &event("claude", "SessionEnd", SESSION, json!({"reason":"other"})),
@@ -433,11 +434,11 @@ fn a_restarted_child_set_is_reported_before_the_events_own_diagnostic() {
             .map(|diagnostic| diagnostic.code.as_str()),
         Some("record_invalid")
     );
-    assert_eq!(kept_aside(&path).len(), 1);
+    assert_eq!(moved_aside(&path).len(), 1);
 }
 
 // Moving an invalid set aside moves the file as it stands: a link is moved as
-// a link, and what it points to is neither read nor copied.
+// a link, and what it points to is neither copied nor changed.
 #[test]
 fn an_invalid_child_set_that_is_a_link_is_moved_aside_as_a_link() {
     let setup = bound("claude");
@@ -461,10 +462,10 @@ fn an_invalid_child_set_that_is_a_link_is_moved_aside_as_a_link() {
             .file_type()
             .is_symlink()
     );
-    let kept = kept_aside(&path);
-    assert_eq!(kept.len(), 1);
+    let aside = moved_aside(&path);
+    assert_eq!(aside.len(), 1);
     assert!(
-        fs::symlink_metadata(&kept[0])
+        fs::symlink_metadata(&aside[0])
             .unwrap()
             .file_type()
             .is_symlink()
@@ -630,7 +631,7 @@ fn a_child_set_naming_another_provider_is_moved_aside_and_started_again() {
         Some("record_invalid")
     );
     assert_eq!(live(&setup, "claude"), vec![running("child-b")]);
-    assert_eq!(kept_aside(&path).len(), 1);
+    assert_eq!(moved_aside(&path).len(), 1);
 }
 
 // A waiting child in a set naming another provider holds no notify, since no
@@ -690,7 +691,7 @@ fn a_removed_child_that_stops_after_its_parent_is_reported() {
 // A permission request whose notify an activity clear covers still reports
 // that it moved an invalid set aside and started again.
 #[test]
-fn a_restart_is_reported_when_the_requests_notify_is_refused() {
+fn a_restart_is_reported_when_the_requests_notify_is_ignored() {
     let setup = bound("claude");
     setup.apply(&lead("claude", "PreToolUse"), "00000000000000000300");
     prompt_return(&setup.env, "00000000000000000400").expect("prompt return");
@@ -708,11 +709,93 @@ fn a_restart_is_reported_when_the_requests_notify_is_refused() {
             .map(|diagnostic| diagnostic.code.as_str()),
         Some("record_invalid")
     );
-    assert_eq!(kept_aside(&path).len(), 1);
+    assert_eq!(moved_aside(&path).len(), 1);
+}
+
+// A set that cannot be moved aside is left as it was: a child's own event is
+// refused, and a permission request still shows its notify, with native state
+// rejected so no consumer is given it.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_invalid_child_set_that_cannot_be_moved_aside_is_left_as_it_was() {
+    let setup = bound("claude");
+    let path = set_path(&setup, "claude");
+    fs::write(&path, b"{not json").unwrap();
+    let immutable = |flag: &str| {
+        assert!(
+            Command::new("chflags")
+                .arg(flag)
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    immutable("uchg");
+    let started = apply_provider_event(
+        &child("claude", "SubagentStart", "child-a", Some("Explore")),
+        &setup.env,
+        "00000000000000000300",
+        &setup.ports(),
+    );
+    let asking = wezterm_attention::lifecycle::apply_provider_event_with_outcome(
+        &child("claude", "PermissionRequest", "child-a", Some("Explore")),
+        &setup.env,
+        "00000000000000000400",
+        &setup.ports(),
+    );
+    immutable("nouchg");
+    assert_eq!(
+        started
+            .expect_err("a set that cannot be moved aside refuses the event")
+            .diagnostic
+            .code,
+        "probe_unavailable"
+    );
+    assert_eq!(
+        asking.persistence.native_state,
+        wezterm_attention::lifecycle::outcome::Persistence::Rejected
+    );
+    assert_eq!(
+        asking.result.expect("the request applies").disposition,
+        "partial"
+    );
+    assert_eq!(shown(&setup, "claude"), "notify");
+    assert_eq!(fs::read(&path).unwrap(), b"{not json");
+    assert!(moved_aside(&path).is_empty());
+}
+
+// A hook reports one diagnostic. When the event's lifecycle observation also
+// fails, that failure is what makes the hook partial, so it is what the hook
+// reports, over what the child set says, on this path as on a child's own.
+#[test]
+fn a_failed_lifecycle_observation_is_reported_over_the_child_sets_diagnostic() {
+    let setup = bound("codex");
+    setup.apply(
+        &child("codex", "PreToolUse", "child-a", Some("worker")),
+        "00000000000000000300",
+    );
+    setup.apply(&lead("codex", "Stop"), "00000000000000000400");
+    let asking = setup.apply(
+        &event(
+            "codex",
+            "PermissionRequest",
+            SESSION,
+            json!({"agent_id":"child-a","agent_type":"worker","tool_name":5}),
+        ),
+        "00000000000000000500",
+    );
+    assert_eq!(asking.disposition, "partial");
+    let diagnostic = asking.diagnostic.expect("a diagnostic");
+    assert_eq!(
+        (diagnostic.code.as_str(), diagnostic.message.as_str()),
+        ("record_invalid", "tool_name is missing or too long")
+    );
+    assert_eq!(live(&setup, "codex"), vec![waiting("child-a")]);
 }
 
 /// The invalid sets moved aside beside `path`.
-fn kept_aside(path: &std::path::Path) -> Vec<PathBuf> {
+fn moved_aside(path: &std::path::Path) -> Vec<PathBuf> {
     fs::read_dir(path.parent().unwrap())
         .unwrap()
         .flatten()
