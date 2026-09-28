@@ -158,29 +158,21 @@ return function(context)
         end
       end
     end
-    -- One id naming two different observations: a child's copy never
-    -- displaces the lead's, and the children's file wins over an old copy.
-    local lead_ids, shown, shown_ids = {}, {}, {}
-    for _, lead in ipairs(leads) do lead_ids[lead.item.observation_id] = true end
+    -- One id naming two different observations: the copy in the children's
+    -- file is left out, so nothing lifecycle.json shows is displaced.
+    local taken, shown = {}, {}
+    for _, lead in ipairs(leads) do taken[lead.item.observation_id] = true end
+    for _, old in ipairs(kept) do taken[old.item.observation_id] = true end
     for _, new in ipairs(sibling) do
       if not dropped[new] then
-        if lead_ids[new.item.observation_id] then
+        if taken[new.item.observation_id] then
           report_conflict(diagnostics)
         else
           shown[#shown + 1] = new
-          shown_ids[new.item.observation_id] = true
         end
       end
     end
-    local left = {}
-    for _, old in ipairs(kept) do
-      if shown_ids[old.item.observation_id] then
-        report_conflict(diagnostics)
-      else
-        left[#left + 1] = old
-      end
-    end
-    return left, shown
+    return kept, shown
   end
 
   --- The lifecycle facet from the lead's snapshot and the children's beside

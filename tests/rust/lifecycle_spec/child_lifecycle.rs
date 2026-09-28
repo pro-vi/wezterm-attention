@@ -256,11 +256,41 @@ pub(super) fn two_file_cases() -> Vec<(
             )),
         ),
         (
+            "an old child copy later than the children's",
+            Some(lead_snapshot(
+                vec![lead(), tool_call(2, 300, Some("child-a"), "k")],
+                None,
+            )),
+            Some(children_snapshot(
+                vec![tool_call(3, 200, Some("child-a"), "k")],
+                None,
+            )),
+        ),
+        (
+            "one child observation in both files, identical",
+            Some(lead_snapshot(
+                vec![lead(), tool_call(6, 100, Some("child-a"), "k")],
+                None,
+            )),
+            Some(children_snapshot(
+                vec![tool_call(6, 100, Some("child-a"), "k")],
+                None,
+            )),
+        ),
+        (
             "an old child copy at or below the children's floor",
             Some(lead_snapshot(vec![lead(), old_copy()], None)),
             Some(children_snapshot(
                 vec![tool_call(4, 300, Some("child-b"), "d")],
                 Some(150),
+            )),
+        ),
+        (
+            "an old child copy exactly at the children's floor",
+            Some(lead_snapshot(vec![lead(), old_copy()], None)),
+            Some(children_snapshot(
+                vec![tool_call(4, 300, Some("child-b"), "d")],
+                Some(100),
             )),
         ),
         (
@@ -273,6 +303,14 @@ pub(super) fn two_file_cases() -> Vec<(
             Some(lead_snapshot(vec![lead()], None)),
             Some(children_snapshot(
                 vec![tool_call(1, 400, Some("child-a"), "e")],
+                None,
+            )),
+        ),
+        (
+            "one id naming an old child observation and a later, different one",
+            Some(lead_snapshot(vec![lead(), old_copy()], None)),
+            Some(children_snapshot(
+                vec![tool_call(2, 200, Some("child-a"), "other")],
                 None,
             )),
         ),
@@ -385,6 +423,33 @@ fn a_later_copy_in_the_childrens_file_replaces_an_old_one() {
 }
 
 #[test]
+fn an_old_child_copy_later_than_the_childrens_stands() {
+    let Assembled {
+        shown, diagnostics, ..
+    } = assembled("an old child copy later than the children's");
+    assert_eq!(shown, shown_as(&[(1, "general"), (2, "general")]));
+    assert!(diagnostics.is_empty());
+}
+
+#[test]
+fn one_observation_in_both_files_is_shown_once_from_the_childrens() {
+    let Assembled {
+        shown, diagnostics, ..
+    } = assembled("one child observation in both files, identical");
+    assert_eq!(shown, shown_as(&[(1, "general"), (6, "child_general")]));
+    assert!(diagnostics.is_empty());
+}
+
+#[test]
+fn an_old_child_copy_exactly_at_the_childrens_floor_is_dropped() {
+    let Assembled {
+        shown, diagnostics, ..
+    } = assembled("an old child copy exactly at the children's floor");
+    assert_eq!(shown, shown_as(&[(1, "general"), (4, "child_general")]));
+    assert!(diagnostics.is_empty());
+}
+
+#[test]
 fn an_old_child_copy_the_childrens_floor_fences_is_dropped() {
     let Assembled {
         shown,
@@ -417,6 +482,15 @@ fn a_childs_observation_never_displaces_the_leads_with_the_same_id() {
         shown, diagnostics, ..
     } = assembled("one id naming a lead observation and a child's");
     assert_eq!(shown, shown_as(&[(1, "general")]));
+    assert_eq!(diagnostics, ["record_invalid"]);
+}
+
+#[test]
+fn an_old_child_observation_keeps_its_id_over_the_childrens_file() {
+    let Assembled {
+        shown, diagnostics, ..
+    } = assembled("one id naming an old child observation and a later, different one");
+    assert_eq!(shown, shown_as(&[(1, "general"), (2, "general")]));
     assert_eq!(diagnostics, ["record_invalid"]);
 }
 

@@ -409,34 +409,24 @@ fn reconcile_children(
             }
         }
     }
-    // One id naming two different observations: a child's copy never
-    // displaces the lead's, and the children's file wins over an old copy.
-    let lead_ids: std::collections::BTreeSet<&str> = leads
+    // One id naming two different observations: the copy in the children's
+    // file is left out, so nothing lifecycle.json shows is displaced.
+    let taken: std::collections::BTreeSet<&str> = leads
         .iter()
-        .map(|lead| lead.observation.observation_id.as_str())
+        .chain(&kept)
+        .map(|member| member.observation.observation_id.as_str())
         .collect();
     let mut shown = Vec::new();
     for (new, dropped) in sibling.into_iter().zip(dropped) {
         if dropped {
             continue;
         }
-        if lead_ids.contains(new.observation.observation_id.as_str()) {
+        if taken.contains(new.observation.observation_id.as_str()) {
             conflict(diagnostics);
         } else {
             shown.push(new);
         }
     }
-    let shown_ids: std::collections::BTreeSet<String> = shown
-        .iter()
-        .map(|new| new.observation.observation_id.clone())
-        .collect();
-    kept.retain(|old| {
-        let taken = shown_ids.contains(&old.observation.observation_id);
-        if taken {
-            conflict(diagnostics);
-        }
-        !taken
-    });
     (kept, shown)
 }
 
