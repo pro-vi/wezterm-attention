@@ -296,7 +296,7 @@ set held are counted again at their next event. A set that a newer writer wrote 
 one that cannot be read, one that cannot be moved aside (`probe_unavailable`), or a change past the
 size bound, leaves the set as it was: a child's event is refused with that diagnostic, while a
 child's permission request and a Codex parent `Stop` still write their activity and report
-`partial`.
+`partial`, with `native_state` rejected, so no consumer is given the event.
 
 Readers, the plugin and `attention inspect`, check the set's structure and count its `live`
 entries. They apply none of the rules above but one, the binding's end: no child is counted while

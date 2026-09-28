@@ -238,9 +238,9 @@ stops holding.
 - **Claude Code starts a resumed sub-agent again under the same id.** Claude
   Code 2.1.283 sent `SubagentStart` with the same `agent_id` when a stopped
   sub-agent was woken by its own finished background shell, then its tool
-  calls and a second `SubagentStop`. Claude Code's hooks and sub-agents
-  documentation, read on 2026-09-27, says "Resuming starts a new run of the
-  agent under the same ID", since 2.1.205. If a resume stops sending
+  calls and a second `SubagentStop`. Claude Code's sub-agents documentation,
+  read on 2026-09-27, says "Resuming starts a new run of the agent under the
+  same ID". If a resume stops sending
   `SubagentStart`, a resumed sub-agent is counted from its first tool call
   instead.
 - **Claude Code's own agents carry no type.** The agents Claude Code runs for

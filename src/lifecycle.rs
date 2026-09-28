@@ -43,6 +43,9 @@ struct HookEvidence {
     persistence: HookPersistence,
     admission: Option<AdmittedHook>,
     planned_native: Option<bool>,
+    /// A child-set change the activity carried was refused, so not every
+    /// native effect the action selected was written.
+    native_refused: bool,
     pending_observation_id: Option<String>,
     observation_id: Option<String>,
 }
@@ -68,7 +71,7 @@ fn confirm_native(resolved: &ResolvedLaunch, binding_id: &str, mutation: &Mutati
         .planned_native
         .unwrap_or_else(|| accepted(&mutation.result));
     if evidence.persistence.native_state != Persistence::NotRequested {
-        evidence.persistence.native_state = if admitted {
+        evidence.persistence.native_state = if admitted && !evidence.native_refused {
             Persistence::Confirmed
         } else {
             Persistence::Rejected
@@ -1221,6 +1224,9 @@ fn apply_activity(
             if refused && accepted(result) {
                 result.disposition = Disposition::Partial;
             }
+            if refused && let Some(evidence) = &resolved.evidence {
+                evidence.borrow_mut().native_refused = true;
+            }
             // What the child set reports, a restart included, wins over the
             // activity's own diagnostic.
             if diagnostic.is_some() {
@@ -2217,6 +2223,7 @@ pub fn apply_provider_event_with_outcome(
         inherited: env.contains_key("WEZTERM_ATTENTION_LAUNCH_ID"),
         admission: None,
         planned_native: None,
+        native_refused: false,
         pending_observation_id: None,
         observation_id: None,
         persistence: HookPersistence {
@@ -2354,6 +2361,7 @@ mod lifecycle_write_tests {
             inherited: true,
             admission: None,
             planned_native: Some(true),
+            native_refused: false,
             pending_observation_id: None,
             observation_id: None,
             persistence: HookPersistence {

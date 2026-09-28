@@ -754,7 +754,8 @@ fn a_child_set_from_a_newer_writer_is_never_overwritten() {
 }
 
 // The parent's stop is the lead's own activity. A child set it cannot change
-// is reported beside it, and the stop still shows.
+// is reported beside it, and the stop still shows. Not every native effect the
+// stop selected was written, so its consumer is not told they were.
 #[test]
 fn a_codex_parent_stop_applies_beside_a_child_set_it_cannot_change() {
     let setup = bound("codex");
@@ -767,7 +768,29 @@ fn a_codex_parent_stop_applies_beside_a_child_set_it_cannot_change() {
     set["schema"] = json!(999);
     fs::write(&path, serde_json::to_vec(&set).unwrap()).unwrap();
     let before = fs::read(&path).unwrap();
-    let stop = setup.apply(&lead("codex", "Stop"), "00000000000000000400");
+    let outcome = wezterm_attention::lifecycle::apply_provider_event_with_outcome(
+        &lead("codex", "Stop"),
+        &setup.env,
+        "00000000000000000400",
+        &setup.ports(),
+    );
+    assert_eq!(
+        outcome.persistence.native_state,
+        wezterm_attention::lifecycle::outcome::Persistence::Rejected
+    );
+    assert_eq!(
+        outcome.persistence.activity,
+        wezterm_attention::lifecycle::outcome::Persistence::Confirmed
+    );
+    assert!(matches!(
+        wezterm_attention::consumer::delivery_bytes(
+            &outcome,
+            wezterm_attention::hook_content::HookContent::NotRequested,
+            wezterm_attention::hook_content::HookContent::NotRequested,
+        ),
+        Err(wezterm_attention::consumer::NotDispatchedReason::NativeStateRejected)
+    ));
+    let stop = outcome.result.expect("the stop applies");
     assert_eq!(stop.disposition, "partial");
     assert_eq!(
         stop.diagnostic

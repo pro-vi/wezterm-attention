@@ -166,9 +166,10 @@ ATTENTION_XTERM_MODULE="$xterm_module" cargo test --test lifecycle_spec \
 
 baseline_binary=${ATTENTION_BASELINE_RUST:-}
 # Fixed measurement reference, not a supported reader/writer version. It is the
-# first commit that writes lifecycle snapshots, so it produces the same record
-# set as the candidate; an earlier one writes a third of the bytes and the
-# ratio below would score that difference instead of a regression. No branch
+# first commit that writes lifecycle snapshots, so it writes the same lifecycle
+# records as the candidate; an earlier one writes a third of the bytes and the
+# ratio below would score that difference instead of a regression. It still
+# keeps one record per sub-agent where the candidate keeps one children.json. No branch
 # that every clone has contains it.
 baseline_commit=01c4a43445ac4f583a5a8932cef22965aaa8f0cf
 if [ -z "$baseline_binary" ] && git cat-file -e "$baseline_commit^{commit}" 2>/dev/null; then
