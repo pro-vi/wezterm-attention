@@ -1012,11 +1012,12 @@ fn end_mark<'a>(end: Option<&'a Value>, binding: &Value) -> Option<EndMark<'a>> 
 }
 
 /// Plans one change to the binding's child set, inside the launch and claim
-/// locks: reads the set, the binding and its end, applies `transition`, and
+/// locks: reads the binding, its end and the set, applies `transition`, and
 /// adds the replacement when the set changed. A set this user cannot read is
 /// refused rather than overwritten; a set written by a newer writer is never
 /// overwritten; an invalid set is kept aside under a write-leftover name and
-/// a new one started, so children it held reappear at their next event.
+/// replaced by a new one even when the event changes nothing, so it is kept
+/// aside once, and children it held reappear at their next event.
 fn plan_children(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
@@ -1027,46 +1028,48 @@ fn plan_children(
 ) -> Result<LifecycleResult> {
     let identity = resolved.binding(binding_id);
     let path = identity.path(&resolved.root, "child_presence_set")?;
-    let mut set = match read_record_typed(&path, Some("child_presence_set"), &identity) {
-        RecordRead::Present(value) => ChildPresenceSet::deserialize(&value).map_err(|_| {
-            AttentionError::new("record_invalid", "child presence set could not be decoded")
-        })?,
-        RecordRead::Missing => ChildPresenceSet::empty(
+    let binding = read_record_at(&resolved.root, "binding", &identity)?
+        .ok_or_else(|| AttentionError::new("claim_stale", "child event has no matching binding"))?;
+    let end = read_record_at(&resolved.root, "binding_end", &identity)?;
+    let empty = || {
+        ChildPresenceSet::empty(
             resolved.address.clone(),
             &resolved.launch_id,
             binding_id,
             "",
             0,
-        ),
-        RecordRead::Invalid(_) => {
-            let aside = path.with_file_name(format!(".children.json.invalid.{}", Uuid::new_v4()));
-            std::fs::copy(&path, &aside).map_err(|_| {
-                AttentionError::new(
-                    "probe_unavailable",
-                    "invalid child presence set could not be kept aside",
-                )
-            })?;
-            ChildPresenceSet::empty(
-                resolved.address.clone(),
-                &resolved.launch_id,
-                binding_id,
-                "",
-                0,
-            )
-        }
-        RecordRead::Unavailable(error) | RecordRead::Unsupported(error) => return Err(error),
+        )
     };
+    let (mut set, started_again) =
+        match read_record_typed(&path, Some("child_presence_set"), &identity) {
+            RecordRead::Present(value) => (
+                ChildPresenceSet::deserialize(&value).map_err(|_| {
+                    AttentionError::new("record_invalid", "child presence set could not be decoded")
+                })?,
+                false,
+            ),
+            RecordRead::Missing => (empty(), false),
+            RecordRead::Invalid(_) => {
+                let aside =
+                    path.with_file_name(format!(".children.json.invalid.{}", Uuid::new_v4()));
+                std::fs::copy(&path, &aside).map_err(|_| {
+                    AttentionError::new(
+                        "probe_unavailable",
+                        "invalid child presence set could not be kept aside",
+                    )
+                })?;
+                (empty(), true)
+            }
+            RecordRead::Unavailable(error) | RecordRead::Unsupported(error) => return Err(error),
+        };
     set.provider = provider_name(event)?.to_owned();
     set.schema = manifest()?.record_schema;
-    let binding = read_record_at(&resolved.root, "binding", &identity)?
-        .ok_or_else(|| AttentionError::new("claim_stale", "child event has no matching binding"))?;
-    let end = read_record_at(&resolved.root, "binding_end", &identity)?;
     let reduction = set.apply(end_mark(end.as_ref(), &binding), transition);
     let mut result = LifecycleResult::new(reduction.disposition);
     if let Some((code, message)) = reduction.diagnostic {
         result.diagnostic = Some(Diagnostic::new(code, message));
     }
-    if reduction.changed {
+    if reduction.changed || started_again {
         set.revision = Uuid::new_v4().to_string();
         set.written_at_unix_ns = written_at.to_owned();
         let value = serde_json::to_value(&set).map_err(|_| {
@@ -1165,8 +1168,7 @@ fn apply_activity(
             // reported and the notify still applies.
             let mut presence_error = None;
             if let Some(agent_id) = event.agent_id.as_deref() {
-                let mut presence = Vec::new();
-                match plan_children(
+                presence_error = plan_children_beside_activity(
                     resolved,
                     event,
                     &binding_id,
@@ -1176,39 +1178,29 @@ fn apply_activity(
                         agent_type: event.agent_type.as_deref(),
                         order: observation,
                     },
-                    &mut presence,
-                ) {
-                    Ok(child) if child.disposition == Disposition::Conflict => {
-                        presence_error = child.diagnostic.map(|diagnostic| AttentionError {
-                            diagnostic,
-                            exit_code: 1,
-                        });
-                    }
-                    Ok(_) => replacements.extend(presence),
-                    Err(error) => presence_error = Some(error),
-                }
+                    &mut replacements,
+                );
             }
+            // A Codex parent's stop ends the children it covers. The stop is
+            // the lead's own activity, so a set it cannot change is reported
+            // and the stop still applies.
             if parent_stop && !matches!(result.disposition.as_str(), "ignored" | "conflict") {
                 let surviving_activity = activity.as_ref().ok_or_else(|| {
                     AttentionError::new("record_invalid", "parent stop has no surviving activity")
                 })?;
-                let surviving_order = surviving_activity["observed_mono_ns"]
-                    .as_str()
-                    .unwrap_or("");
-                let child = plan_children(
+                presence_error = plan_children_beside_activity(
                     resolved,
                     event,
                     &binding_id,
                     written_at,
                     ChildTransition::ParentClear {
-                        order: surviving_order,
+                        order: surviving_activity["observed_mono_ns"]
+                            .as_str()
+                            .unwrap_or(""),
                         event_id: surviving_activity["event_id"].as_str().unwrap_or(""),
                     },
                     &mut replacements,
-                )?;
-                if child.disposition == Disposition::Conflict {
-                    return Ok(CommitPlan::reporting(Mutation::plain(child)));
-                }
+                );
             }
             let mut plan = append_observation(
                 resolved,
@@ -1234,6 +1226,41 @@ fn apply_activity(
         |mutation| apply_observed_outputs(resolved, &binding_id, mutation),
     )?;
     Ok(mutation.result)
+}
+
+/// Plans a child-set change that an activity carries, adding its
+/// replacement only when it applies. The activity stands whatever happens to
+/// the set, so a set that cannot be planned, or a transition that conflicts
+/// with it, comes back as the error the hook reports beside the activity.
+fn plan_children_beside_activity(
+    resolved: &ResolvedLaunch,
+    event: &ProviderEvent,
+    binding_id: &str,
+    written_at: &str,
+    transition: ChildTransition<'_>,
+    replacements: &mut Vec<Replacement>,
+) -> Option<AttentionError> {
+    let mut presence = Vec::new();
+    match plan_children(
+        resolved,
+        event,
+        binding_id,
+        written_at,
+        transition,
+        &mut presence,
+    ) {
+        Ok(child) if child.disposition == Disposition::Conflict => {
+            child.diagnostic.map(|diagnostic| AttentionError {
+                diagnostic,
+                exit_code: 1,
+            })
+        }
+        Ok(_) => {
+            replacements.extend(presence);
+            None
+        }
+        Err(error) => Some(error),
+    }
 }
 
 fn apply_observed_outputs(
