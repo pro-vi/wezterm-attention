@@ -9,6 +9,17 @@ local test_dir = os.tmpname()
 os.remove(test_dir)
 assert(os.execute("mkdir -p " .. shell_quote(test_dir)) == 0)
 
+-- The plugin reads WEZTERM_UNIX_SOCKET as its own GUI's socket. A run from
+-- inside a WezTerm pane inherits that pane's socket, which no test describes,
+-- so every test starts from a GUI with none; a test that needs one supplies it.
+do
+  local inherited_getenv = os.getenv
+  os.getenv = function(name)
+    if name == "WEZTERM_UNIX_SOCKET" then return nil end
+    return inherited_getenv(name)
+  end
+end
+
 local logged_errors = {}
 -- Warnings are captured apart from errors: an unexpected error fails a test,
 -- a warning is only what a test chooses to assert.
