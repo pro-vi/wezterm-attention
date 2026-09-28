@@ -339,6 +339,19 @@ impl ChildPresenceSet {
         else {
             // A child this set does not hold: one that already stopped, one
             // the provider runs for itself, or one that was never admitted.
+            // One the latest parent stop removed, stopping after that stop,
+            // shows the parent stopped before its child did.
+            if self.parent_clear.as_ref().is_some_and(|clear| {
+                order > clear.observed_mono_ns.as_str()
+                    && clear.removed.iter().any(|removed| removed == agent_id)
+            }) {
+                return Reduction::diagnosed(
+                    false,
+                    Disposition::Skipped,
+                    "child_active_after_parent_clear",
+                    "a child stopped after the parent stop that ended it",
+                );
+            }
             return Reduction::of(false, Disposition::Skipped);
         };
         let last = self.live[index].last_mono_ns.as_str();

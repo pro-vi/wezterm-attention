@@ -218,8 +218,11 @@ stops holding.
   events showed sub-agent work after the parent's `Stop`. If a parent does stop
   first, its sub-agent is not counted from that `Stop` until its next event,
   which counts it again, and that event's hook prints
-  `attention: child_active_after_parent_clear: …` on stderr. A sub-agent that
-  sends nothing more before it ends is not counted again at all.
+  `attention: child_active_after_parent_clear: …` on stderr; its `SubagentStop`
+  after the parent's `Stop` prints the same. A sub-agent that sends nothing more
+  before it ends is not counted again at all, and one that stays quiet past its
+  parent's next `Stop` is counted again without the report, since the set keeps
+  only the latest parent stop's removals.
 - **Codex reports no interrupted sub-agent.** In Codex source at `985cf47a4`,
   an interrupt runs no hook for a sub-agent's session, and a parent's `Stop`
   carries no list of running sub-agents. An interrupted Codex sub-agent
@@ -283,9 +286,10 @@ command to remove such a sub-agent by hand.
 A writer that finds `children.json` invalid renames it to
 `.children.json.invalid.<uuid>`, applies its event to a new, empty set, and
 writes that set even when the event changes nothing else; its hook reports
-`record_invalid`. A `children.json` that something else replaced with a link is
-moved aside as a link, and sweep then keeps that binding, as it keeps any that
-holds a link. Until that next child event, the tab shows `+?`. The
+`record_invalid`. A `children.json` that something else replaced with a link to a
+file that is not a valid set is moved aside as a link, and sweep then keeps that
+binding, as it keeps any that holds a link; a link to a valid set, or to
+nothing, is replaced by a regular file at the next write. Until that next child event, the tab shows `+?`. The
 sub-agents the invalid set held are counted again only at their next event, so
 one in the middle of a long command stays uncounted until it calls another tool
 or stops. The renamed files are write leftovers: they go with their binding,

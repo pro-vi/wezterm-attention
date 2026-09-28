@@ -44,8 +44,10 @@ A sub-agent whose end is never reported (a failed or unregistered
 ends; no command removes it by hand. The count rests on hooks staying
 synchronous and on Codex parents stopping only after their sub-agents: none of
 11 Codex CLI 0.157.1 sessions with sub-agents showed sub-agent work after the
-parent's `Stop`, and each case that does occur is reported as
-`child_active_after_parent_clear`. Old per-sub-agent files are no longer read;
+parent's `Stop`. A sub-agent that works or stops after the latest parent `Stop`
+removed it is reported as `child_active_after_parent_clear`; one that stays quiet
+past its parent's next `Stop` is not, since the set keeps only the latest
+parent stop's removals. Old per-sub-agent files are no longer read;
 their kinds stay declared so that sweep still recognises and removes them. The
 `children` facet of `attention inspect` changed shape.
 

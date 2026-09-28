@@ -265,8 +265,9 @@ ignored (`binding_conflict`). After that the event itself applies:
   removes every child whose `last_mono_ns` is at or before the cutoff, and records the cutoff and
   those children in `parent_clear`. From then on, a start, tool call or permission request of any
   child ordered at or before the cutoff is ignored. When a newer event adds a removed child again,
-  the hook reports `child_active_after_parent_clear`, because that parent stopped before its child
-  did; see
+  or a removed child's `SubagentStop` comes after the cutoff, the hook reports
+  `child_active_after_parent_clear`, because that parent stopped before its child did. Only the
+  latest parent stop's removals are kept, so a child quiet past the next one is not reported; see
   [accepted limitations](accepted-limitations.md#the-sub-agent-count-depends-on-how-claude-code-and-codex-send-hooks).
   A parent stop ordered before the recorded one is ignored, and one at the same order with another
   `event_id` leaves the set as it is. The stop's activity is written either way; when the set cannot

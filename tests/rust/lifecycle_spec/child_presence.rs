@@ -604,6 +604,113 @@ fn a_set_written_before_the_end_counts_nothing_after_a_resume() {
     assert_eq!(facts(&setup, "claude").children.count, 1);
 }
 
+// Both readers hold a set naming another provider than its binding invalid,
+// so the writer does too: it moves the set aside and starts again rather than
+// relabelling the set and keeping what it held.
+#[test]
+fn a_child_set_naming_another_provider_is_moved_aside_and_started_again() {
+    let setup = bound("claude");
+    setup.apply(
+        &child("claude", "SubagentStart", "foreign-a", Some("Explore")),
+        "00000000000000000300",
+    );
+    let path = set_path(&setup, "claude");
+    let mut set: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    set["provider"] = json!("codex");
+    fs::write(&path, serde_json::to_vec(&set).unwrap()).unwrap();
+    let start = setup.apply(
+        &child("claude", "SubagentStart", "child-b", Some("Explore")),
+        "00000000000000000400",
+    );
+    assert_eq!(
+        start
+            .diagnostic
+            .as_ref()
+            .map(|diagnostic| diagnostic.code.as_str()),
+        Some("record_invalid")
+    );
+    assert_eq!(live(&setup, "claude"), vec![running("child-b")]);
+    assert_eq!(kept_aside(&path).len(), 1);
+}
+
+// A waiting child in a set naming another provider holds no notify, since no
+// reader counts that set.
+#[test]
+fn a_set_naming_another_provider_holds_no_notify() {
+    let setup = bound("claude");
+    setup.apply(
+        &child("claude", "PermissionRequest", "child-a", Some("Explore")),
+        "00000000000000000400",
+    );
+    assert_eq!(shown(&setup, "claude"), "notify");
+    let path = set_path(&setup, "claude");
+    let mut set: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    set["provider"] = json!("codex");
+    fs::write(&path, serde_json::to_vec(&set).unwrap()).unwrap();
+    setup.apply(&lead("claude", "PreToolUse"), "00000000000000000500");
+    assert_eq!(shown(&setup, "claude"), "thinking");
+}
+
+// A child the latest Codex parent stop removed, stopping after that stop,
+// shows the parent stopped first. A stop stamped before the parent's stop
+// only arrived late, and says nothing.
+#[test]
+fn a_removed_child_that_stops_after_its_parent_is_reported() {
+    let setup = bound("codex");
+    for (agent, order) in [
+        ("child-a", "00000000000000000300"),
+        ("child-b", "00000000000000000320"),
+    ] {
+        setup.apply(&child("codex", "PreToolUse", agent, Some("worker")), order);
+    }
+    setup.apply(&lead("codex", "Stop"), "00000000000000000400");
+    for (agent, order, reported) in [
+        ("child-b", "00000000000000000350", None),
+        (
+            "child-a",
+            "00000000000000000500",
+            Some("child_active_after_parent_clear"),
+        ),
+    ] {
+        let stop = setup.apply(
+            &child("codex", "SubagentStop", agent, Some("worker")),
+            order,
+        );
+        assert_eq!(stop.disposition, "skipped", "{agent}");
+        assert_eq!(
+            stop.diagnostic
+                .as_ref()
+                .map(|diagnostic| diagnostic.code.as_str()),
+            reported,
+            "{agent}"
+        );
+    }
+}
+
+// A permission request whose notify an activity clear covers still reports
+// that it moved an invalid set aside and started again.
+#[test]
+fn a_restart_is_reported_when_the_requests_notify_is_refused() {
+    let setup = bound("claude");
+    setup.apply(&lead("claude", "PreToolUse"), "00000000000000000300");
+    prompt_return(&setup.env, "00000000000000000400").expect("prompt return");
+    let path = set_path(&setup, "claude");
+    fs::write(&path, b"{not json").unwrap();
+    let asking = setup.apply(
+        &child("claude", "PermissionRequest", "child-a", Some("Explore")),
+        "00000000000000000350",
+    );
+    assert_eq!(asking.disposition, "ignored");
+    assert_eq!(
+        asking
+            .diagnostic
+            .as_ref()
+            .map(|diagnostic| diagnostic.code.as_str()),
+        Some("record_invalid")
+    );
+    assert_eq!(kept_aside(&path).len(), 1);
+}
+
 /// The invalid sets moved aside beside `path`.
 fn kept_aside(path: &std::path::Path) -> Vec<PathBuf> {
     fs::read_dir(path.parent().unwrap())

@@ -296,7 +296,7 @@ Activity and binding-end facets contain `availability`, optional `record`, and `
 
 The review collection contains availability, `count`, `evidence`, `coverage="eligible_records"` and diagnostics. A successful empty collection can have availability present and count zero. Degraded reads may retain independently validated evidence.
 
-The children facet contains `availability`, `count`, `waiting`, `coverage` and diagnostics. It is read from the binding's one `children.json`, which holds the sub-agents running now ([record contract](record-contract.md#child-presence)). `availability` says how that read went: present, absent, invalid, unsupported or unavailable. `count` is the number of running sub-agents, and `waiting` how many of them asked for permission and have done nothing since. `coverage` says what the count means; the first row that applies decides it, and the end record's read is checked before the set's, since which children count depends on the end:
+The children facet contains `availability`, `count`, `waiting`, `coverage` and diagnostics. It is read from the binding's one `children.json`, which holds the sub-agents running now ([record contract](record-contract.md#child-presence)). `availability` says how that read went: present, absent, invalid, unsupported or unavailable. `count` is the number of running sub-agents, and `waiting` how many of them asked for permission and have done nothing since. `coverage` says what the count means. It is decided in this order, since which children count depends on the end: `ended`; `none`; a failed read of the end record (`invalid`, `unsupported` or `unavailable`, by how it failed); a failed read of the set (the same three); and otherwise `known`:
 
 | `coverage` | When | `count` |
 |---|---|---|

@@ -999,6 +999,9 @@ fn child_still_waits(resolved: &ResolvedLaunch, binding_id: &str, since: &str) -
     ) else {
         return false;
     };
+    if binding["provider"].as_str() != Some(set.provider.as_str()) {
+        return false;
+    }
     set.waits_since(EndMark::of(end.as_ref(), &binding), since)
 }
 
@@ -1025,16 +1028,19 @@ fn plan_children(
     let end = read_record_at(&resolved.root, "binding_end", &identity)?;
     let empty =
         || ChildPresenceSet::empty(resolved.address.clone(), &resolved.launch_id, binding_id);
+    let provider = provider_name(event)?;
     let (mut set, started_again) =
         match read_record_typed(&path, Some("child_presence_set"), &identity) {
-            RecordRead::Present(value) => (
+            // A set naming another provider than its binding is invalid, as
+            // both readers hold.
+            RecordRead::Present(value) if value["provider"].as_str() == Some(provider) => (
                 ChildPresenceSet::deserialize(&value).map_err(|_| {
                     AttentionError::new("record_invalid", "child presence set could not be decoded")
                 })?,
                 false,
             ),
             RecordRead::Missing => (empty(), false),
-            RecordRead::Invalid(_) => {
+            RecordRead::Present(_) | RecordRead::Invalid(_) => {
                 // A rename moves the file as it stands, a symlink included,
                 // without reading it.
                 let aside =
@@ -1049,7 +1055,7 @@ fn plan_children(
             }
             RecordRead::Unavailable(error) | RecordRead::Unsupported(error) => return Err(error),
         };
-    set.provider = provider_name(event)?.to_owned();
+    set.provider = provider.to_owned();
     set.schema = manifest()?.record_schema;
     let reduction = set.apply(EndMark::of(end.as_ref(), &binding), transition);
     let mut result = LifecycleResult::new(reduction.disposition);
@@ -1215,7 +1221,9 @@ fn apply_activity(
             if refused && accepted(result) {
                 result.disposition = Disposition::Partial;
             }
-            if result.diagnostic.is_none() {
+            // What the child set reports, a restart included, wins over the
+            // activity's own diagnostic.
+            if diagnostic.is_some() {
                 result.diagnostic = diagnostic;
             }
             Ok(plan)

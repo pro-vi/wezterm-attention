@@ -135,7 +135,9 @@ attention hooks describe --provider codex --json
 For each `registration=register` row, run the `attention` link on your PATH with that row's `arguments` and pass the original callback JSON on stdin, as one command that first sets `WEZTERM_ATTENTION_HOST_PID=$PPID` and then `exec`s it; the README says why. Ignored rows are not registrations. `requires_launch_identity` qualifies rich facts and executable delivery; it does not remove legacy support. Evidence references describe parser, fixture and native-contact coverage, not live activation.
 
 `SubagentStart` is a `register` row for Claude Code and Codex: a child is counted from its start,
-and a resumed child from its new start. `SubagentStop` removes that exact child. Keep every hook
+and in Claude Code 2.1.283 a resumed child from its new start. Codex at source commit `985cf47a4`
+sends `SubagentStart` only for a spawned or forked child, so a resumed Codex child is counted from
+its first tool call. `SubagentStop` removes that exact child. Keep every hook
 synchronous, which is how Claude Code 2.1.283 and Codex (source at commit `985cf47a4`) run a
 command hook unless it sets `async: true`; an asynchronous hook can deliver one child's events out
 of order, and a child can then stay counted after it stopped (see
