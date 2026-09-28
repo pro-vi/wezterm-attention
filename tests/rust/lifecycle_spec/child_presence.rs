@@ -824,6 +824,37 @@ fn a_childs_own_event_reports_a_failed_lifecycle_observation_over_a_restart() {
     assert_eq!(moved_aside(&path).len(), 1);
 }
 
+// Three reasons in one hook: the activity's own, the child transition's, and
+// the restart of an invalid set. The restart is reported, and the other two
+// stay in order in the chain under it.
+#[test]
+fn every_reason_a_permission_request_met_is_kept_in_order() {
+    let setup = bound("claude");
+    setup.apply(&lead("claude", "PreToolUse"), "00000000000000000300");
+    fs::write(set_path(&setup, "claude"), b"{not json").unwrap();
+    let asking = setup.apply(
+        &child("claude", "PermissionRequest", "child-a", None),
+        "00000000000000000300",
+    );
+    let diagnostic = serde_json::to_value(asking.diagnostic.expect("a diagnostic")).unwrap();
+    let messages: Vec<_> = [
+        "/message",
+        "/context/replaced/message",
+        "/context/replaced/context/replaced/message",
+    ]
+    .iter()
+    .map(|pointer| diagnostic.pointer(pointer).and_then(Value::as_str))
+    .collect();
+    assert_eq!(
+        messages,
+        [
+            Some("an invalid child presence set was moved aside and started again"),
+            Some("child event has no agent type and follows no start"),
+            Some("equal activity order has different content"),
+        ]
+    );
+}
+
 /// The invalid sets moved aside beside `path`.
 fn moved_aside(path: &std::path::Path) -> Vec<PathBuf> {
     fs::read_dir(path.parent().unwrap())

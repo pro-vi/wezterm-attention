@@ -333,7 +333,10 @@ crash. If that last sync fails, the write is reported failed
 (`state_permissions`, "state directory could not be made durable") although the
 new record is already in place and every reader sees it. The hook then reports
 its event as failed, and the records its plan would have written after that one
-are not written. A directory that cannot be opened for the sync is not synced,
+are not written. A failed write of one of those records is reported alone: what
+the plan itself would have reported, such as the restart of an invalid child set,
+is not in the report. Only the lifecycle observation, which is written last,
+keeps the plan's diagnostic under `replaced` in its write error. A directory that cannot be opened for the sync is not synced,
 and the write is reported as made, though a crash can still undo it.
 
 This holds for every record kind, `children.json` included: a `SubagentStop`

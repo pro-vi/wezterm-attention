@@ -845,14 +845,26 @@ fn plan_activity(
     }
 }
 
-/// Makes `diagnostic` the one a hook reports, keeping the one it replaces,
-/// with whatever that one replaced, under `replaced` in its context: a hook
-/// reports one diagnostic, and no reason it met is dropped.
+/// Makes `diagnostic` the one a hook reports and keeps the one it replaces,
+/// with whatever that one replaced, at the end of the `replaced` chain in its
+/// context: a hook reports one diagnostic, and none it replaces is dropped.
 fn report_instead(slot: &mut Option<Diagnostic>, mut diagnostic: Diagnostic) {
     if let Some(replaced) = slot.take()
         && let Ok(value) = serde_json::to_value(&replaced)
     {
-        diagnostic.set("replaced", value);
+        match diagnostic.context.get_mut("replaced") {
+            None => diagnostic.set("replaced", value),
+            Some(mut last) => {
+                while last.pointer("/context/replaced").is_some() {
+                    last = last
+                        .pointer_mut("/context/replaced")
+                        .expect("the pointer was just found");
+                }
+                if let Some(context) = last.get_mut("context").and_then(Value::as_object_mut) {
+                    context.insert("replaced".to_owned(), value);
+                }
+            }
+        }
     }
     *slot = Some(diagnostic);
 }
@@ -1314,6 +1326,10 @@ fn apply_observed_outputs_with(
     if let Some(replacement) = &mutation.lifecycle_replacement {
         replace(replacement).map_err(|mut error| {
             error.diagnostic.set("lifecycle_write", "unconfirmed");
+            // What the hook planned to report is kept under the write error.
+            let mut reported = mutation.result.diagnostic.clone();
+            report_instead(&mut reported, error.diagnostic);
+            error.diagnostic = reported.expect("report_instead always leaves a diagnostic");
             error
         })?;
         if let Some(cell) = &resolved.evidence {
@@ -2424,8 +2440,11 @@ mod lifecycle_write_tests {
             &samples["binding"],
         )
         .unwrap();
+        let restart = "an invalid child presence set was moved aside and started again";
+        let mut planned = LifecycleResult::new(Disposition::Applied);
+        planned.diagnostic = Some(Diagnostic::new("record_invalid", restart));
         let mutation = Mutation {
-            result: LifecycleResult::new(Disposition::Applied),
+            result: planned,
             lifecycle_replacement: Some(PreparedRecordWrite::new(path.clone(), &snapshot).unwrap()),
         };
         let error = crate::records::with_lock(
@@ -2442,6 +2461,7 @@ mod lifecycle_write_tests {
         )
         .unwrap_err();
         assert_eq!(error.diagnostic.context["lifecycle_write"], "unconfirmed");
+        assert_eq!(error.diagnostic.context["replaced"]["message"], restart);
         assert!(!path.exists());
         let evidence = evidence.borrow();
         assert_eq!(evidence.persistence.native_state, Persistence::Confirmed);
