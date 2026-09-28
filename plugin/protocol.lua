@@ -519,6 +519,28 @@ return function(context)
     return "generic", nil
   end
 
+  -- The digest of each sub-agent id checked so far. One id recurs in every
+  -- observation its sub-agent makes, and hashing it in Lua is about two fifths
+  -- of what validating a snapshot of children's observations costs. Starting
+  -- over past 4096 ids bounds it.
+  local agent_keys, agent_key_count = {}, 0
+  local function agent_key_of(agent_id)
+    local key = agent_keys[agent_id]
+    if key then return key end
+    if agent_key_count >= 4096 then agent_keys, agent_key_count = {}, 0 end
+    key = sha256(agent_id)
+    agent_keys[agent_id], agent_key_count = key, agent_key_count + 1
+    return key
+  end
+
+  -- Records holding lifecycle observations: the lead's snapshot or the one its
+  -- children write beside it. Both are read under the lifecycle bounds and
+  -- checked by the same rules, and the children's also holds no lead
+  -- observation.
+  local function is_lifecycle_snapshot_kind(kind)
+    return kind == "lifecycle_snapshot" or kind == "child_lifecycle_snapshot"
+  end
+
   local function validate_lifecycle(value)
     local limits, keys, ids = protocol.limits, {}, {}
     for name, pool in pairs(value.pools) do
@@ -534,7 +556,11 @@ return function(context)
           or (pool.retention_floor_mono_ns and item.observed_mono_ns <= pool.retention_floor_mono_ns) then return false end
         keys[key], ids[item.observation_id], prior = true, true, order
         if item.correlation and item.correlation.elicitation_id and not item.correlation.mcp_server_name then return false end
-        if item.actor.kind == "child" and (value.provider == "pi" or sha256(item.actor.agent_id) ~= item.actor.agent_key) then return false end
+        -- The children's snapshot holds only children's observations.
+        -- lifecycle.json may hold both, from before children had their own
+        -- file, so it is not checked the other way.
+        if value.kind == "child_lifecycle_snapshot" and item.actor.kind ~= "child" then return false end
+        if item.actor.kind == "child" and (value.provider == "pi" or agent_key_of(item.actor.agent_id) ~= item.actor.agent_key) then return false end
         if item.kind == "tool_preflight" or item.kind == "tool_result" then
           local class, mode = classify_lifecycle_tool(value.provider, item.tool_name)
           if item.tool_class ~= class or item.question_mode ~= mode then return false end
@@ -654,7 +680,7 @@ return function(context)
     if kind == "claim" and not claim_owner_is_whole(parsed) then
       return nil, invalid("claim names only part of its owner")
     end
-    if kind == "lifecycle_snapshot" and not validate_lifecycle(parsed) then return nil, invalid("lifecycle snapshot violates its contract") end
+    if is_lifecycle_snapshot_kind(kind) and not validate_lifecycle(parsed) then return nil, invalid("lifecycle snapshot violates its contract") end
     if kind == "child_presence_set" then
       local function unique(ids)
         local seen = {}
@@ -708,14 +734,14 @@ return function(context)
     if json_contains_null_literal(content) then
       return nil, invalid("record contains unsupported null")
     end
-    if expected_kind == "lifecycle_snapshot" and not lifecycle_raw_valid(content) then
+    if is_lifecycle_snapshot_kind(expected_kind) and not lifecycle_raw_valid(content) then
       return nil, invalid("lifecycle JSON exceeds its bounds or contains a noncanonical integer")
     end
     local value, parse_err = decode_json(content)
     if value == nil then
       return nil, invalid("record is not valid JSON", { detail = tostring(parse_err) })
     end
-    if type(value) == "table" and value.kind == "lifecycle_snapshot" and expected_kind ~= "lifecycle_snapshot" and not lifecycle_raw_valid(content) then
+    if type(value) == "table" and is_lifecycle_snapshot_kind(value.kind) and not is_lifecycle_snapshot_kind(expected_kind) and not lifecycle_raw_valid(content) then
       return nil, invalid("lifecycle JSON exceeds its bounds or contains a noncanonical integer")
     end
     return parse_v2_record(value, expected_kind)
@@ -821,7 +847,7 @@ return function(context)
   local function read_record_file(path, expected_kind, previous)
     local limits = protocol and protocol.limits
     if not limits then return nil, diagnostic("probe_unavailable", "protocol limits unavailable"), "unavailable" end
-    local maximum = expected_kind == "lifecycle_snapshot" and limits.lifecycle_max_json_bytes or limits.max_json_bytes
+    local maximum = is_lifecycle_snapshot_kind(expected_kind) and limits.lifecycle_max_json_bytes or limits.max_json_bytes
     local content, read_err, read_status = read_all(path, maximum)
     if not content then
       if read_status == "invalid" then return nil, invalid("record exceeds its bound"), "invalid" end
@@ -966,6 +992,14 @@ return function(context)
     return copied
   end
 
+  -- Equal tables, key for key, recursively; other values by ==.
+  local function deep_equal(a, b)
+    if type(a) ~= "table" or type(b) ~= "table" then return a == b end
+    for key, value in pairs(a) do if not deep_equal(value, b[key]) then return false end end
+    for key in pairs(b) do if a[key] == nil then return false end end
+    return true
+  end
+
   local function now_ms()
     return os.time() * 1000
   end
@@ -986,6 +1020,7 @@ return function(context)
     diagnostic = diagnostic,
     invalid = invalid,
     sha256 = sha256,
+    observation_key = observation_key,
     parse_wire_value = parse_wire_value,
     parse_wire_json = parse_wire_json,
     parse_v2_record = parse_v2_record,
@@ -1009,6 +1044,7 @@ return function(context)
     diagnostics_have_unavailable_io = diagnostics_have_unavailable_io,
     list_contains = list_contains,
     deep_copy = deep_copy,
+    deep_equal = deep_equal,
     now_ms = now_ms,
     frame_for_now = frame_for_now,
   }

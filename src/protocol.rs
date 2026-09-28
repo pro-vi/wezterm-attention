@@ -804,8 +804,10 @@ pub fn parse_record_value(value: &Value, protocol: &Manifest) -> Verdict {
         return Verdict::RecordInvalid;
     }
     let digest_matches = match kind {
-        "lifecycle_snapshot" => crate::observations::LifecycleSnapshot::deserialize(value)
-            .is_ok_and(|snapshot| snapshot.validate_semantics().is_ok()),
+        kind if is_lifecycle_snapshot_kind(kind) => {
+            crate::observations::LifecycleSnapshot::deserialize(value)
+                .is_ok_and(|snapshot| snapshot.validate_semantics().is_ok())
+        }
         "child_presence_set" => crate::children::ChildPresenceSet::deserialize(value)
             .is_ok_and(|set| set.validate_semantics().is_ok()),
         "subagent_presence" => value
@@ -882,6 +884,14 @@ pub fn validate_record(value: &Value, expected_kind: Option<&str>) -> Result<()>
             "state record is invalid",
         )),
     }
+}
+
+/// Whether records of `kind` hold lifecycle observations: the lead's snapshot
+/// or the one its children write beside it. Both are read under the lifecycle
+/// bounds and checked by the same rules, and the children's also holds no lead
+/// observation.
+pub fn is_lifecycle_snapshot_kind(kind: &str) -> bool {
+    matches!(kind, "lifecycle_snapshot" | "child_lifecycle_snapshot")
 }
 
 /// Scan containers before recursive JSON decoding. Syntax remains serde's job.

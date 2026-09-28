@@ -2,9 +2,9 @@ use super::*;
 use wezterm_attention::query::{ChildCoverage, PaneFacts, PaneScope, read_pane_facts_with_ports};
 use wezterm_attention::records::FileRecords;
 
-const SESSION: &str = "parent";
+pub(super) const SESSION: &str = "parent";
 
-fn bound(provider: &str) -> Setup {
+pub(super) fn bound(provider: &str) -> Setup {
     let setup = Setup::new();
     setup.claim();
     setup.apply(
@@ -19,7 +19,12 @@ fn bound(provider: &str) -> Setup {
     setup
 }
 
-fn child(provider: &str, name: &str, agent: &str, agent_type: Option<&str>) -> ProviderEvent {
+pub(super) fn child(
+    provider: &str,
+    name: &str,
+    agent: &str,
+    agent_type: Option<&str>,
+) -> ProviderEvent {
     let mut patch = json!({"agent_id":agent});
     if let Some(agent_type) = agent_type {
         patch["agent_type"] = json!(agent_type);
@@ -32,7 +37,7 @@ fn child(provider: &str, name: &str, agent: &str, agent_type: Option<&str>) -> P
     event(provider, name, SESSION, patch)
 }
 
-fn lead(provider: &str, name: &str) -> ProviderEvent {
+pub(super) fn lead(provider: &str, name: &str) -> ProviderEvent {
     let patch = match name {
         "PreToolUse" => json!({"tool_name":"Bash"}),
         "Stop" => json!({"stop_hook_active":false}),
@@ -46,7 +51,7 @@ fn set_path(setup: &Setup, provider: &str) -> PathBuf {
 }
 
 /// The binding's live children as `(agent_id, status)`, in the set's order.
-fn live(setup: &Setup, provider: &str) -> Vec<(String, String)> {
+pub(super) fn live(setup: &Setup, provider: &str) -> Vec<(String, String)> {
     let Ok(bytes) = fs::read(set_path(setup, provider)) else {
         return vec![];
     };
@@ -72,7 +77,7 @@ fn waiting(agent: &str) -> (String, String) {
     (agent.to_owned(), "waiting".to_owned())
 }
 
-fn facts(setup: &Setup, provider: &str) -> PaneFacts {
+pub(super) fn facts(setup: &Setup, provider: &str) -> PaneFacts {
     let launch_id = &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"];
     let scope = PaneScope::new(
         pane_address(&setup.env).unwrap().0,

@@ -245,11 +245,14 @@ def parse_wire(value: Any, manifest: dict[str, Any]) -> str:
     return "valid"
 
 
+LIFECYCLE_SNAPSHOT_KINDS = ("lifecycle_snapshot", "child_lifecycle_snapshot")
+
+
 def parse_record(value: Any, manifest: dict[str, Any]) -> str:
     if not isinstance(value, dict):
         return "record_invalid"
     schema = value.get("schema")
-    if value.get("kind") == "lifecycle_snapshot" and (type(schema) is not int or not 0 <= schema < 2**64):
+    if value.get("kind") in LIFECYCLE_SNAPSHOT_KINDS and (type(schema) is not int or not 0 <= schema < 2**64):
         return "record_invalid"
     if isinstance(schema, int) and schema > manifest["record_schema"]:
         return "future_schema"
@@ -259,7 +262,7 @@ def parse_record(value: Any, manifest: dict[str, Any]) -> str:
         return "record_invalid"
     try:
         validate_shape(value, spec, manifest, kind)
-        if kind == "lifecycle_snapshot":
+        if kind in LIFECYCLE_SNAPSHOT_KINDS:
             validate_lifecycle(value, manifest)
         if kind == "child_presence_set":
             validate_child_presence_set(value)
@@ -392,6 +395,8 @@ def validate_lifecycle(value: dict[str, Any], manifest: dict[str, Any]) -> None:
                 raise InvalidRecord("observation membership or bound")
             if item["observed_mono_ns"] <= pool.get("retention_floor_mono_ns", ""):
                 raise InvalidRecord("observation below pool floor")
+            if value["kind"] == "child_lifecycle_snapshot" and actor["kind"] != "child":
+                raise InvalidRecord("the children's snapshot holds only children's observations")
             if actor["kind"] == "child" and (value["provider"] == "pi" or hashlib.sha256(actor["agent_id"].encode("utf-8")).hexdigest() != actor["agent_key"]):
                 raise InvalidRecord("child identity mismatch")
     size = compact_size(value) + 1

@@ -355,7 +355,7 @@ const AGENT_KEY: &str = "agent_key";
 /// The records kept one to a directory: each kind, the file that holds it,
 /// and the depths whose directory may hold one. Activity and its
 /// acknowledgement belong to a binding, or to the launch while it has none.
-const FIXED_RECORDS: [(&str, &str, &[Depth]); 14] = [
+const FIXED_RECORDS: [(&str, &str, &[Depth]); 15] = [
     ("realm", "realm.json", &[Depth::Realm]),
     ("incarnation", "incarnation.json", &[Depth::Incarnation]),
     ("claim", "claim.json", &[Depth::Pane]),
@@ -373,6 +373,11 @@ const FIXED_RECORDS: [(&str, &str, &[Depth]); 14] = [
     ),
     ("binding", BINDING_FILE, &[Depth::Binding]),
     ("lifecycle_snapshot", "lifecycle.json", &[Depth::Binding]),
+    (
+        "child_lifecycle_snapshot",
+        "children-lifecycle.json",
+        &[Depth::Binding],
+    ),
     ("activity_clear", "activity-clear.json", &[Depth::Binding]),
     ("binding_end", "end.json", &[Depth::Binding]),
     ("child_presence_set", "children.json", &[Depth::Binding]),
@@ -1124,7 +1129,7 @@ fn decode_record(
             "state record exceeds its bound",
         ));
     }
-    if expected_kind == Some("lifecycle_snapshot")
+    if expected_kind.is_some_and(crate::protocol::is_lifecycle_snapshot_kind)
         && !crate::protocol::bounded_lifecycle_json(bytes)
     {
         return Err(AttentionError::new(
@@ -1148,7 +1153,7 @@ fn decode_record(
 
 /// The most bytes a reader accepts for a record of `kind`.
 fn read_bound(protocol: &Manifest, kind: Option<&str>) -> usize {
-    if kind == Some("lifecycle_snapshot") {
+    if kind.is_some_and(crate::protocol::is_lifecycle_snapshot_kind) {
         protocol.limits.lifecycle_max_json_bytes
     } else {
         protocol.limits.max_json_bytes

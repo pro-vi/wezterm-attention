@@ -749,10 +749,27 @@ fn read_pane_facts_once(
         end = RecordFacet::empty(A::Absent);
     }
     let mut lifecycle = if selected.is_some() {
-        let read = RecordFacet::at(reader, root, "lifecycle_snapshot", &identity, "lifecycle");
-        lifecycle_from_read(
-            read,
-            binding.record.as_ref().and_then(|r| r["provider"].as_str()),
+        let provider = binding.record.as_ref().and_then(|r| r["provider"].as_str());
+        // Only a provider that runs sub-agents has a children's file, as the
+        // plugin also reads it.
+        let children = if provider.is_some_and(|provider| {
+            crate::protocol::manifest()
+                .is_ok_and(|protocol| protocol.enums.subagent_providers.contains(provider))
+        }) {
+            RecordFacet::at(
+                reader,
+                root,
+                "child_lifecycle_snapshot",
+                &identity,
+                "lifecycle",
+            )
+        } else {
+            RecordFacet::empty(A::Absent)
+        };
+        lifecycle_from_reads(
+            RecordFacet::at(reader, root, "lifecycle_snapshot", &identity, "lifecycle"),
+            children,
+            provider,
             now.as_deref(),
         )?
     } else {
@@ -914,11 +931,16 @@ fn read_pane_facts_once(
     })
 }
 
-fn lifecycle_from_read(
+/// One lifecycle file as read for the selected binding: how available it is,
+/// its snapshot when there is one, and what reading it reported.
+fn lifecycle_source(
     read: RecordFacet,
     provider: Option<&str>,
-    now: Option<&str>,
-) -> Result<LifecycleView> {
+) -> Result<(
+    LifecycleAvailability,
+    Option<LifecycleSnapshot>,
+    Vec<Diagnostic>,
+)> {
     let availability = match read.availability {
         RecordAvailability::Present => LifecycleAvailability::Available,
         RecordAvailability::Absent => LifecycleAvailability::Absent,
@@ -926,26 +948,58 @@ fn lifecycle_from_read(
         RecordAvailability::Unsupported => LifecycleAvailability::Unsupported,
         _ => LifecycleAvailability::Invalid,
     };
-    let mut view = LifecycleView::empty(availability);
-    view.diagnostics = read.diagnostics;
-    if let Some(record) = read.record {
-        if record["provider"].as_str() != provider {
-            view.availability = LifecycleAvailability::Invalid;
-            view.diagnostics.push(
-                Diagnostic::new(
-                    "record_invalid",
-                    "lifecycle provider differs from selected binding",
-                )
-                .with("facet", "lifecycle"),
-            );
-        } else {
-            let snapshot: LifecycleSnapshot =
-                serde_json::from_value(record).map_err(AttentionError::record_json)?;
-            view = LifecycleView::from_snapshot(&snapshot, now)?;
-            for diagnostic in &mut view.diagnostics {
-                diagnostic.set("facet", "lifecycle");
-            }
+    let mut diagnostics = read.diagnostics;
+    let Some(record) = read.record else {
+        return Ok((availability, None, diagnostics));
+    };
+    if record["provider"].as_str() != provider {
+        diagnostics.push(Diagnostic::new(
+            "record_invalid",
+            "lifecycle provider differs from selected binding",
+        ));
+        return Ok((LifecycleAvailability::Invalid, None, diagnostics));
+    }
+    let snapshot = serde_json::from_value(record).map_err(AttentionError::record_json)?;
+    Ok((availability, Some(snapshot), diagnostics))
+}
+
+/// The lifecycle facet from the lead's snapshot and the children's beside
+/// it. The lead's file is read first and decides: while it cannot be read,
+/// the facet says so and shows no children's evidence. While it can, a
+/// children's file that cannot is reported and left out. Without a lead's
+/// file, the children's decides.
+fn lifecycle_from_reads(
+    lead: RecordFacet,
+    children: RecordFacet,
+    provider: Option<&str>,
+    now: Option<&str>,
+) -> Result<LifecycleView> {
+    use LifecycleAvailability as L;
+    let (lead, lead_snapshot, mut problems) = lifecycle_source(lead, provider)?;
+    let (children, children_snapshot, children_problems) = lifecycle_source(children, provider)?;
+    let mut view = match (lead, children) {
+        (L::Available, _) | (L::Absent, L::Available) => {
+            problems.extend(children_problems);
+            LifecycleView::assemble(
+                lead_snapshot.as_ref(),
+                children_snapshot.as_ref(),
+                now,
+                problems,
+            )
         }
+        (L::Absent, children) => {
+            let mut view = LifecycleView::empty(children);
+            view.diagnostics = children_problems;
+            view
+        }
+        (lead, _) => {
+            let mut view = LifecycleView::empty(lead);
+            view.diagnostics = problems;
+            view
+        }
+    };
+    for diagnostic in &mut view.diagnostics {
+        diagnostic.set("facet", "lifecycle");
     }
     Ok(view)
 }

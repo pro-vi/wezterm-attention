@@ -122,7 +122,7 @@ fn a_child_waiting_for_permission_asks_for_the_user() {
             "notify",
             "{provider}"
         );
-        let raw = fs::read_to_string(directory.join("lifecycle.json")).unwrap();
+        let raw = fs::read_to_string(directory.join("children-lifecycle.json")).unwrap();
         assert!(raw.contains("approval_requested"), "{provider}: {raw}");
         assert!(
             raw.contains("child-a"),
@@ -282,7 +282,7 @@ fn a_child_permission_request_shows_past_an_unreadable_child_set() {
             "{provider}"
         );
         assert_eq!(shown(&setup, provider), "notify", "{provider}");
-        let raw = fs::read_to_string(directory.join("lifecycle.json")).unwrap();
+        let raw = fs::read_to_string(directory.join("children-lifecycle.json")).unwrap();
         assert!(raw.contains("approval_requested"), "{provider}: {raw}");
 
         let setup = bound(provider, "parent");

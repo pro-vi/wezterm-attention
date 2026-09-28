@@ -35,16 +35,20 @@ Controller ownership and permissions belong to consumers. Key application-owned 
 
 | `lifecycle.availability` | Interpretation |
 |---|---|
-| `available` | Current selected file was read and validated |
+| `available` | A current lifecycle file of the selected scope was read and validated |
 | `cached` | An unavailable read reused the same scoped, previously validated file |
-| `absent` | No lifecycle file exists at the selected scope |
+| `absent` | Neither lifecycle file exists at the selected scope |
 | `unavailable` | The read failed and there is no matching usable cache |
 | `invalid` | A successful read returned malformed or contradictory data |
 | `unsupported` | The record declares a future schema |
 
 Missing, invalid, unsupported, and unavailable data are not an empty pending-request list. A successfully read invalid/future file never falls back to older cached facts. Optional lifecycle failure does not invalidate an otherwise valid activity badge.
 
-The facet contains `snapshot_id`, a flat `observations` array, `requests`, `retention_floors`, `coverage="bounded_window"`, at most eight diagnostics, and an exact `badge_acknowledgement` when one matches the stored activity. Each observation identifies its request/general pool.
+The facet contains `snapshot_id`, a flat `observations` array, `requests`, `retention_floors`, `coverage="bounded_window"`, at most eight diagnostics, and an exact `badge_acknowledgement` when one matches the stored activity. Each observation names its pool: `requests` or `general` for one from `lifecycle.json`, `child_requests` or `child_general` for one from `children-lifecycle.json`.
+
+`retention_floors` names each file's floors: `lead_requests` and `lead_general` for `lifecycle.json`, `child_requests` and `child_general` for the children's file. `requests` and `general` are the later floor of that pool in either file, so they still mean that some evidence of that pool was evicted; read `lead_requests` or `lead_general` to ask only about the lead. A lead floor that a `lifecycle.json` written before children had their own file carried over may have been caused by children's traffic. `snapshot_id` identifies `lifecycle.json` only: a change to the children's file keeps it, so it is not a revision of the whole facet.
+
+The facet is built from both files, and `lifecycle.json` decides first. While it is `unavailable`, `invalid` or `unsupported`, `availability` says so and no children's evidence is shown. Otherwise `availability` is its status, and a children's file that cannot be used is left out and reported in the diagnostics. Without a `lifecycle.json`, the children's file's status is the facet's, so a binding whose only lifecycle evidence is its children's is `available`. The plugin shows a file it could not read again as the copy it read last, with a diagnostic, which makes `availability` `cached` when that file is `lifecycle.json`; `attention inspect` reads once and has no such copy.
 
 ## Requests are evidence, not a pending-state service
 
@@ -97,11 +101,15 @@ A consumer that needs to know which panes are running an agent must inspect proc
 
 ## Storage and retention
 
-One binding-scoped `lifecycle.json` contains separate request/general pools. Each has at most 64 observations, 122,880 compact UTF-8 bytes, and its own monotonic retention floor. One observation is at most 2,048 bytes; the raw file is capped at 262,144 bytes and eight container levels.
+A binding keeps the lead's observations in `lifecycle.json` and its children's in `children-lifecycle.json`, each with separate request/general pools. Each pool has at most 64 observations, 122,880 compact UTF-8 bytes, and its own monotonic retention floor. One observation is at most 2,048 bytes; each raw file is capped at 262,144 bytes and eight container levels.
+
+Children's traffic cannot evict the lead's evidence, however much there is: the lead's observations leave only when later lead observations displace them. That is isolation, not freshness. The newest lead observation shown can still be older than the lead's last hook, because the writer refuses, for example, an observation that repeats one it holds, one at or below its pool's floor, one older than everything its full pool keeps, or one it cannot write before the lock times out. Children share their file's pools, so a busy child can evict another child's evidence.
+
+Children's observations that a writer put in `lifecycle.json` before children had their own file stay there until lead observations displace them. Readers settle them against the children's file: one at or below the children's floor for its pool is left out, of two copies of one observation the later stands, and at one instant the children's file's copy does. Two copies at one instant that differ add a `record_invalid` diagnostic. When one id names two different observations that would both be shown, the one in the children's file is left out and a `record_invalid` diagnostic is added, so nothing `lifecycle.json` shows is replaced.
 
 An observation that its own insertion would evict is reported `rejected`, not `confirmed`, and a pool already holding 64 observations at one timestamp refuses another at that timestamp. Generic tool traffic cannot evict request evidence. Request traffic can still evict older requests or their outcomes. Whole equal-timestamp groups are removed with that pool's floor in one atomic snapshot replacement. There is no replay cursor, complete history promise, lifecycle TTL, or universal `pending_count`.
 
-Activity and lifecycle are separate files, not a multi-file transaction. A crash may leave newer activity with older facts. Failures report incomplete work; retries re-read actual records. Do not join files by timestamp or assume a shared snapshot ID.
+Activity and the two lifecycle files are separate files, not a multi-file transaction. A crash may leave newer activity with older facts, and a poll can read the two lifecycle files at different moments. Failures report incomplete work; retries re-read actual records. Do not join files by timestamp or assume a shared snapshot ID.
 
 The v2 records are the only format the plugin reads. 0.6 read one small JSON file per pane id at the top of the state directory, `<id>`, with an `<id>.ack` beside it, and untagged builds also wrote `<id>.agents` and `<id>.review`; nothing reads or collects those files now. Use matching current Attention writers and readers; intermediate development builds are not supported compatibility targets.
 

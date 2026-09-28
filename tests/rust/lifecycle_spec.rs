@@ -49,6 +49,9 @@ mod turn_endings;
 #[path = "lifecycle_spec/child_presence.rs"]
 mod child_presence;
 
+#[path = "lifecycle_spec/child_lifecycle.rs"]
+mod child_lifecycle;
+
 #[path = "lifecycle_spec/metadata_fields.rs"]
 mod metadata_fields;
 
@@ -1419,7 +1422,15 @@ fn every_active_lifecycle_row_reaches_the_production_writer() {
             );
             assert!(output.stdout.is_empty());
             let directory = setup.binding_dir(provider, "coverage");
-            let raw = fs::read_to_string(directory.join("lifecycle.json")).unwrap();
+            // A case with an agent id is a subagent's event, and a subagent's
+            // observations have their own snapshot.
+            let from_child = case["patch"].get("agent_id").is_some();
+            let file = if from_child {
+                "children-lifecycle.json"
+            } else {
+                "lifecycle.json"
+            };
+            let raw = fs::read_to_string(directory.join(file)).unwrap();
             assert!(!raw.contains("SYNTHETIC-PRIVATE-SENTINEL"));
             let snapshot: LifecycleSnapshot = serde_json::from_str(&raw).unwrap();
             let observation = snapshot
@@ -1431,8 +1442,6 @@ fn every_active_lifecycle_row_reaches_the_production_writer() {
                 .find(|item| item.body.kind() == case["kind"].as_str().unwrap())
                 .unwrap();
             assert_eq!(observation.source_event, name);
-            // A case with an agent id is a subagent's event.
-            let from_child = case["patch"].get("agent_id").is_some();
             if from_child && name == "PreToolUse" {
                 assert!(
                     !directory.join("activity.json").exists(),

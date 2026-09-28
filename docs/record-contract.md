@@ -48,6 +48,7 @@ v2/realms/<realm>/
           end.json
           ack.json
           lifecycle.json
+          children-lifecycle.json
           children.json
 v2/sessions/
   complete.json
@@ -248,7 +249,7 @@ and `provider`, it carries a `revision` UUID replaced on every write, `written_a
 
 Every reader refuses a set that names one `agent_id` twice in `live`, or twice in
 `parent_clear.removed`. The file is read under the general `max_json_bytes` bound, as every record
-but `lifecycle.json` is; nothing else limits its size, which grows with the children running now. A
+but the two lifecycle snapshots is; nothing else limits its size, which grows with the children running now. A
 change that would make the set larger than that bound is refused (`record_invalid`) and the set
 stays as it was, so a writer never leaves a set its readers reject.
 
@@ -381,6 +382,8 @@ acknowledgement counts as none, so it can only leave the earlier behaviour in pl
 Lifecycle evidence stays outside `activity.json` because adding request IDs to activity would change `semantic_activity` equality and could redisplay an acknowledged badge. `append_observation` and the request/focus/result tests enforce that separation. Revisit it only if badge identity is deliberately redesigned, not to simplify one consumer.
 
 `lifecycle.json` has schema 3 and kind `lifecycle_snapshot`. Its full address, launch, binding and provider scope a closed fourteen-kind observation union. Each of its required request/general pools has a separate 64-entry/122,880-byte budget and optional monotonic retention floor. One observation is at most 2,048 compact UTF-8 bytes; the file read is bounded at 262,144 bytes plus one overflow-detection byte before decoding, with at most eight container levels. Both pools and floors are validated and replaced together. The lifecycle file has no TTL.
+
+`children-lifecycle.json` beside it has kind `child_lifecycle_snapshot` and the same fields, pools, limits and read bounds, and holds the binding's children's observations: a lead observation in it makes the file invalid. The writer reduces a lead observation into `lifecycle.json` and a child's into `children-lifecycle.json`, so children's traffic never evicts the lead's evidence, and children share their file's budgets among themselves. A hook writes at most one of the two; a lead observation never reads the children's file, so one that cannot be read rejects only children's observations. Children's observations written into `lifecycle.json` before children had their own file stay there until lead observations displace them; nothing moves them, and readers settle them against the children's file (see the [consumer guide](consumer-guide.md#storage-and-retention)).
 
 Unknown fields, nulls, object-shaped arrays, invalid nested child digests, wrong pool membership, duplicate identities, below-floor members, and incompatible provider/tool/question-mode tuples are rejected. Native elicitation correlation includes the MCP server namespace. A local receipt UUID cannot stand in for a native request identifier.
 

@@ -1159,6 +1159,86 @@
           }
         }
       }
+    },
+    {
+      "id": "children-snapshot",
+      "expected": "valid",
+      "value": {
+        "kind": "child_lifecycle_snapshot",
+        "schema": 3,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "tool_preflight",
+                "tool_name": "shell",
+                "tool_class": "generic",
+                "observation_id": "00000000-0000-4000-8000-000000000011",
+                "source_event": "PreToolUse",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "child",
+                  "agent_id": "child-one",
+                  "agent_key": "2ab66a0087435ba803b815ef783156df3c821b3fd696bc35fd679f834574c5cb"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "lead-in-children-snapshot",
+      "expected": "record_invalid",
+      "value": {
+        "kind": "child_lifecycle_snapshot",
+        "schema": 3,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "tool_preflight",
+                "tool_name": "shell",
+                "tool_class": "generic",
+                "observation_id": "00000000-0000-4000-8000-000000000011",
+                "source_event": "PreToolUse",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                }
+              }
+            ]
+          }
+        }
+      }
     }
   ],
   "raw_cases": [
