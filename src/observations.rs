@@ -239,20 +239,6 @@ impl LifecycleView {
         }
     }
 
-    /// The view of one snapshot, validated first: the lead's, or the one its
-    /// children write beside it.
-    pub fn from_snapshot(snapshot: &LifecycleSnapshot, now: Option<&str>) -> Result<Self> {
-        crate::protocol::validate_record(
-            &serde_json::to_value(snapshot).map_err(AttentionError::record_json)?,
-            Some(snapshot.kind.as_str()),
-        )?;
-        Ok(if snapshot.kind == "child_lifecycle_snapshot" {
-            Self::assemble(None, Some(snapshot), now, vec![])
-        } else {
-            Self::assemble(Some(snapshot), None, now, vec![])
-        })
-    }
-
     /// The view of a binding's lifecycle evidence: the lead's `lifecycle.json`
     /// and its children's `children-lifecycle.json`, each already validated by
     /// its reader, and `problems` from reading them, reported first. The view

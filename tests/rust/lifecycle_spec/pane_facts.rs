@@ -474,12 +474,16 @@ fn rust_and_installed_lua_share_relation_cases_and_retention_floors() {
     {
         let snapshot: LifecycleSnapshot = serde_json::from_value(case["value"].clone()).unwrap();
         // A children's snapshot is read from its own file, never as the lead's.
-        let file = if snapshot.kind == "child_lifecycle_snapshot" {
-            "children"
+        let (file, lead, children) = if snapshot.kind == "child_lifecycle_snapshot" {
+            ("children", None, Some(&snapshot))
         } else {
-            "snapshot"
+            ("snapshot", Some(&snapshot), None)
         };
-        cases.push(json!({"id":case["id"],file:snapshot,"now":"99999999999999999999","expected":LifecycleView::from_snapshot(&snapshot,Some("99999999999999999999")).unwrap()}));
+        let expected =
+            LifecycleView::assemble(lead, children, Some("99999999999999999999"), vec![]);
+        cases.push(
+            json!({"id":case["id"],file:snapshot,"now":"99999999999999999999","expected":expected}),
+        );
     }
     for (id, lead, children) in super::child_lifecycle::two_file_cases() {
         let expected = LifecycleView::assemble(
@@ -551,7 +555,8 @@ fn rust_and_installed_lua_share_relation_cases_and_retention_floors() {
         snapshot.reduce(post).unwrap();
         snapshot.pools.requests.retention_floor_mono_ns = Some("00000000000000000001".into());
         snapshot.pools.general.retention_floor_mono_ns = Some("00000000000000000002".into());
-        let view = LifecycleView::from_snapshot(&snapshot, Some("99999999999999999999")).unwrap();
+        let view =
+            LifecycleView::assemble(Some(&snapshot), None, Some("99999999999999999999"), vec![]);
         assert_eq!(
             view.retention_floors.keys().collect::<Vec<_>>(),
             ["general", "lead_general", "lead_requests", "requests"]

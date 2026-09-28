@@ -865,13 +865,6 @@ return function()
       return copy_public_view(cached)
     end
 
-    local function same_public_value(a, b)
-      if type(a) ~= type(b) then return false end
-      if type(a) ~= "table" then return a == b end
-      for key, value in pairs(a) do if not same_public_value(value, b[key]) then return false end end
-      for key in pairs(b) do if a[key] == nil then return false end end
-      return true
-    end
 
     --- Once per distinct error, so a consumer's bug is visible with its own
     --- words and a failure on every poll is still one line. The count of
@@ -919,9 +912,9 @@ return function()
           if not scope and old and old.scope.launch_id == read.launch_id then scope = old.scope end
           if scope then
             local view = copy_public_view(cached)
-            local replaced = old and not same_public_value(old.scope, scope)
+            local replaced = old and not protocol_api.deep_equal(old.scope, scope)
             if replaced then lost(old, window:window_id()) end
-            if not old or replaced or not same_public_value(old.view, view) then
+            if not old or replaced or not protocol_api.deep_equal(old.view, view) then
               messages[#messages + 1] = { kind = (not old or replaced) and "initial" or "updated",
                 window_id = window:window_id(), scope = protocol_api.deep_copy(scope), view = protocol_api.deep_copy(view) }
             end

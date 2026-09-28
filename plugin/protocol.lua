@@ -992,6 +992,14 @@ return function(context)
     return copied
   end
 
+  -- Equal tables, key for key, recursively; other values by ==.
+  local function deep_equal(a, b)
+    if type(a) ~= "table" or type(b) ~= "table" then return a == b end
+    for key, value in pairs(a) do if not deep_equal(value, b[key]) then return false end end
+    for key in pairs(b) do if a[key] == nil then return false end end
+    return true
+  end
+
   local function now_ms()
     return os.time() * 1000
   end
@@ -1036,6 +1044,7 @@ return function(context)
     diagnostics_have_unavailable_io = diagnostics_have_unavailable_io,
     list_contains = list_contains,
     deep_copy = deep_copy,
+    deep_equal = deep_equal,
     now_ms = now_ms,
     frame_for_now = frame_for_now,
   }

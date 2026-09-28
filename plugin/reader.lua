@@ -21,6 +21,7 @@ return function(context)
   local age_exceeds_ms = protocol_api.age_exceeds_ms
   local list_contains = protocol_api.list_contains
   local deep_copy = protocol_api.deep_copy
+  local deep_equal = protocol_api.deep_equal
   local observation_key = protocol_api.observation_key
 
   local function request_evidence(observations, provider)
@@ -101,19 +102,12 @@ return function(context)
     return lifecycle_availability[status] or "absent"
   end
 
-  local function same_value(a, b)
-    if type(a) ~= "table" or type(b) ~= "table" then return a == b end
-    for key, value in pairs(a) do if not same_value(value, b[key]) then return false end end
-    for key in pairs(b) do if a[key] == nil then return false end end
-    return true
-  end
-
   -- What an observation says, apart from its id, when it was observed and when
   -- it was written.
   local not_compared = { observation_id = true, observed_mono_ns = true, written_at_unix_ns = true }
   local function same_observation(a, b)
     for key, value in pairs(a) do
-      if not not_compared[key] and not same_value(value, b[key]) then return false end
+      if not not_compared[key] and not deep_equal(value, b[key]) then return false end
     end
     for key in pairs(b) do
       if not not_compared[key] and a[key] == nil then return false end

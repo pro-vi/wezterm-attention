@@ -978,7 +978,7 @@ fn lifecycle_from_reads(
     let (lead, lead_snapshot, mut problems) = lifecycle_source(lead, provider)?;
     let (children, children_snapshot, children_problems) = lifecycle_source(children, provider)?;
     let mut view = match (lead, children) {
-        (L::Available, L::Available) | (L::Absent, L::Available) | (L::Available, _) => {
+        (L::Available, _) | (L::Absent, L::Available) => {
             problems.extend(children_problems);
             LifecycleView::assemble(
                 lead_snapshot.as_ref(),
