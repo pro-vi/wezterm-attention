@@ -1,6 +1,6 @@
 # ADR 0003: The lead and its sub-agents keep lifecycle evidence in separate files
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-28
 
 ## Context
