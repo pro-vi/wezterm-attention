@@ -151,7 +151,6 @@ pub struct ProviderEvent {
     pub label: Option<String>,
     pub agent_id: Option<String>,
     pub agent_type: Option<String>,
-    pub child_source: Option<String>,
     pub transcript_path: Option<String>,
     pub cwd: Option<String>,
     pub config_dir: Option<String>,
@@ -174,7 +173,6 @@ impl ProviderEvent {
             label: None,
             agent_id: None,
             agent_type: None,
-            child_source: None,
             transcript_path: None,
             cwd: None,
             config_dir: None,
@@ -328,7 +326,12 @@ fn parse_provider_common(
         None => None,
     };
     let mut dropped = DroppedFields::default();
-    let agent_type = dropped.keep("agent_type", optional_label(payload, "agent_type"));
+    // Claude Code 2.1.283 sends an empty `agent_type` for the agents it runs
+    // for itself; that says no type, and is not malformed.
+    let agent_type = match payload.get("agent_type") {
+        Some(Value::String(text)) if text.is_empty() => None,
+        _ => dropped.keep("agent_type", optional_label(payload, "agent_type")),
+    };
     let transcript_path = dropped.keep(transcript_field, optional_path(payload, transcript_field));
     let cwd = dropped.keep("cwd", optional_path(payload, "cwd"));
     let config_dir = dropped.keep(config_field, environment_path(env, config_field));
@@ -354,7 +357,6 @@ fn parse_provider_common(
             .get("agent_id")
             .and_then(|value| safe_label(value, "agent_id").ok()),
         agent_type,
-        child_source: None,
         transcript_path,
         cwd,
         config_dir,
@@ -477,11 +479,15 @@ fn parse_claude_or_codex(
         return event;
     }
     if event_name == "SubagentStart" {
-        return ProviderEvent::ignored(
-            Some(provider),
-            "integration_version_mismatch",
-            "SubagentStart does not establish presence",
-        );
+        if event.agent_id.is_none() {
+            return ProviderEvent::ignored(
+                Some(provider),
+                "record_invalid",
+                "SubagentStart requires a valid agent_id",
+            );
+        }
+        event.action = ProviderAction::ChildActive;
+        return event;
     }
     if event_name == "SubagentStop" {
         if event.agent_id.is_none() {
@@ -492,18 +498,16 @@ fn parse_claude_or_codex(
             );
         }
         event.action = ProviderAction::ChildStopped;
-        event.child_source = Some("subagent_stop".to_owned());
         return event;
     }
     if event_name == "PreToolUse" && event.agent_id.is_some() {
         event.action = ProviderAction::ChildActive;
-        event.child_source = Some("tool".to_owned());
         return event;
     }
     // A child blocked on a permission prompt waits for the user as the lead
     // would, and Codex has no Notification hook to say so another way. The
-    // lifecycle also refreshes the child's presence, so the lead's own tool
-    // calls do not repaint the notify while that child still waits.
+    // lifecycle also marks the child waiting in the binding's child set, so
+    // the lead's own tool calls do not repaint the notify while it waits.
     if event_name == "PermissionRequest" && event.agent_id.is_some() {
         event.action = ProviderAction::Activity;
         event.activity_type = Some("notify".to_owned());

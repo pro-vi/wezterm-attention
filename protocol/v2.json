@@ -50,7 +50,7 @@
         "native_event": "SubagentStop"
       },
       "SubagentStart": {
-        "registration": "ignored",
+        "registration": "register",
         "native_event": "SubagentStart"
       },
       "PostToolUse": {
@@ -116,7 +116,7 @@
         "native_event": "SubagentStop"
       },
       "SubagentStart": {
-        "registration": "ignored",
+        "registration": "register",
         "native_event": "SubagentStart"
       },
       "PostToolUse": {
@@ -218,6 +218,8 @@
     "activity_types": ["thinking", "stop", "notify"],
     "binding_health": ["valid", "conflicted", "invalid", "future_schema"],
     "binding_phase": ["active", "ended"],
+    "child_presence_events": ["start", "tool", "permission"],
+    "child_presence_statuses": ["running", "waiting"],
     "diagnostic_codes": [
       "identity_unpublished",
       "claim_stale",
@@ -235,7 +237,8 @@
       "state_permissions",
       "bad_usage",
       "self_claim_parent_unverified",
-      "session_detached"
+      "session_detached",
+      "child_active_after_parent_clear"
     ],
     "end_reasons": ["session_end", "sweep_absent"],
     "pane_presence": ["present", "verified_absent", "unavailable"],
@@ -335,6 +338,34 @@
     }
   },
   "lifecycle_shapes": {
+    "child_presence_entry": {
+      "required": ["agent_id", "last_event", "status", "last_mono_ns"],
+      "optional": ["agent_type"],
+      "types": {
+        "agent_id": "safe_label",
+        "agent_type": "safe_label",
+        "last_event": "child_presence_event",
+        "status": "child_presence_status",
+        "last_mono_ns": "monotonic_ns20"
+      }
+    },
+    "child_parent_clear": {
+      "required": ["observed_mono_ns", "event_id", "removed"],
+      "optional": [],
+      "types": {
+        "observed_mono_ns": "monotonic_ns20",
+        "event_id": "uuid",
+        "removed": "child_agent_ids"
+      }
+    },
+    "child_lifetime_end": {
+      "required": ["event_id", "observed_mono_ns"],
+      "optional": [],
+      "types": {
+        "event_id": "uuid",
+        "observed_mono_ns": "monotonic_ns20"
+      }
+    },
     "pools": {
       "required": [
         "requests",
@@ -1032,6 +1063,23 @@
         "binding_id": "hex64",
         "event_id": "uuid",
         "observed_mono_ns": "monotonic_ns20"
+      }
+    },
+    "child_presence_set": {
+      "required": ["kind", "schema", "address", "launch_id", "binding_id", "provider", "revision", "written_at_unix_ns", "live"],
+      "optional": ["parent_clear", "lifetime_end"],
+      "types": {
+        "kind": "record_kind",
+        "schema": "record_schema",
+        "address": "pane_address",
+        "launch_id": "uuid",
+        "binding_id": "hex64",
+        "provider": "subagent_provider",
+        "revision": "uuid",
+        "written_at_unix_ns": "unix_ns20",
+        "live": "child_presence_entries",
+        "parent_clear": "child_parent_clear",
+        "lifetime_end": "child_lifetime_end"
       }
     },
     "subagent_retention_floor": {

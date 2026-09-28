@@ -623,6 +623,9 @@ M._internal = {
   acquire_tab_source = settle_tab_source,
   parse_tab_source_response = runtime.parse_tab_source_response,
   lifecycle_facet = reader.lifecycle_facet,
+  children_facet = reader.children_facet,
+  ends_binding = reader.ends_binding,
+  subagent_count_text = format.subagent_count_text,
   resolve_visible_attention = format.resolve_visible_attention,
   same_cached_attention = runtime.same_cached_attention,
   sample_settled_title = titles.sample_settled_title,
@@ -635,7 +638,6 @@ M._internal = {
   -- Read by the fixture interpreter in tests/lua/support, which drives these
   -- production functions from outside rather than living beside them.
   deep_copy = protocol_api.deep_copy,
-  eligible_subagent = protocol_api.eligible_subagent,
   compare_ns20 = protocol_api.compare_ns20,
   sha256 = protocol_api.sha256,
   format_unix_ns20 = protocol_api.format_unix_ns20,

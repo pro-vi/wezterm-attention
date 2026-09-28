@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub const EMBEDDED_MANIFEST: &str = include_str!("../protocol/v2.json");
-pub const EMITTED_DIAGNOSTIC_CODES: [&str; 17] = [
+pub const EMITTED_DIAGNOSTIC_CODES: [&str; 18] = [
     "identity_unpublished",
     "claim_stale",
     "unsafe_tty",
@@ -27,6 +27,7 @@ pub const EMITTED_DIAGNOSTIC_CODES: [&str; 17] = [
     "bad_usage",
     "self_claim_parent_unverified",
     "session_detached",
+    "child_active_after_parent_clear",
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -303,6 +304,8 @@ pub struct Enums {
     pub activity_types: BTreeSet<String>,
     pub binding_health: BTreeSet<String>,
     pub binding_phase: BTreeSet<String>,
+    pub child_presence_events: BTreeSet<String>,
+    pub child_presence_statuses: BTreeSet<String>,
     pub diagnostic_codes: BTreeSet<String>,
     pub end_reasons: BTreeSet<String>,
     pub pane_presence: BTreeSet<String>,
@@ -363,6 +366,12 @@ pub enum FieldType {
     SubagentStatus,
     ActivityType,
     EndReason,
+    ChildPresenceEntries,
+    ChildParentClear,
+    ChildLifetimeEnd,
+    ChildAgentIds,
+    ChildPresenceEvent,
+    ChildPresenceStatus,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -434,6 +443,15 @@ pub fn parse_manifest(source: &str) -> Result<Manifest> {
         return Err(AttentionError::new(
             "integration_version_mismatch",
             "manifest tool classification is invalid",
+        ));
+    }
+    let declared = |values: &[&str]| values.iter().map(|value| (*value).to_owned()).collect();
+    if parsed.enums.child_presence_statuses != declared(&crate::children::CHILD_STATUSES)
+        || parsed.enums.child_presence_events != declared(&crate::children::CHILD_EVENTS)
+    {
+        return Err(AttentionError::new(
+            "integration_version_mismatch",
+            "manifest child presence vocabulary differs from this binary's",
         ));
     }
     if parsed.digests.algorithm != "sha256" || parsed.digests.encoding != "lowercase_hex" {
@@ -698,6 +716,38 @@ fn validate_field(
         FieldType::EndReason => value
             .as_str()
             .is_some_and(|item| protocol.enums.end_reasons.contains(item)),
+        FieldType::ChildPresenceEntries => value.as_array().is_some_and(|items| {
+            protocol
+                .lifecycle_shapes
+                .get("child_presence_entry")
+                .is_some_and(|spec| {
+                    items
+                        .iter()
+                        .all(|item| validate_shape(item, spec, protocol, None))
+                })
+        }),
+        FieldType::ChildParentClear | FieldType::ChildLifetimeEnd => {
+            let shape = if field_type == FieldType::ChildParentClear {
+                "child_parent_clear"
+            } else {
+                "child_lifetime_end"
+            };
+            protocol
+                .lifecycle_shapes
+                .get(shape)
+                .is_some_and(|spec| validate_shape(value, spec, protocol, None))
+        }
+        FieldType::ChildAgentIds => value.as_array().is_some_and(|items| {
+            items
+                .iter()
+                .all(|item| safe_text(item, limits.safe_label_max_bytes))
+        }),
+        FieldType::ChildPresenceEvent => value
+            .as_str()
+            .is_some_and(|item| protocol.enums.child_presence_events.contains(item)),
+        FieldType::ChildPresenceStatus => value
+            .as_str()
+            .is_some_and(|item| protocol.enums.child_presence_statuses.contains(item)),
     }
 }
 
@@ -756,6 +806,8 @@ pub fn parse_record_value(value: &Value, protocol: &Manifest) -> Verdict {
     let digest_matches = match kind {
         "lifecycle_snapshot" => crate::observations::LifecycleSnapshot::deserialize(value)
             .is_ok_and(|snapshot| snapshot.validate_semantics().is_ok()),
+        "child_presence_set" => crate::children::ChildPresenceSet::deserialize(value)
+            .is_ok_and(|set| set.validate_semantics().is_ok()),
         "subagent_presence" => value
             .get("agent_id")
             .and_then(Value::as_str)
@@ -870,34 +922,6 @@ pub fn bounded_lifecycle_json(bytes: &[u8]) -> bool {
         }
     }
     depth == 0 && !quoted
-}
-
-pub fn eligible_subagent_presence(
-    presence: &Value,
-    clear_order: Option<&str>,
-    floor_order: Option<&str>,
-    now_unix_ns: Option<&str>,
-    protocol: &Manifest,
-) -> (bool, Option<&'static str>) {
-    if parse_record_value(presence, protocol) != Verdict::Valid {
-        return (false, Some("record_invalid"));
-    }
-    let Some(now) = now_unix_ns.filter(|value| ns20_text(value)) else {
-        return (false, Some("probe_unavailable"));
-    };
-    let order = presence["observed_mono_ns"].as_str().unwrap_or("");
-    if presence["status"] != "active"
-        || clear_order.is_some_and(|clear| order <= clear)
-        || floor_order.is_some_and(|floor| order <= floor)
-    {
-        return (false, None);
-    }
-    let written = presence["written_at_unix_ns"].as_str().unwrap_or("");
-    let ttl = presence["ttl_ms"].as_u64().unwrap_or(0) as u128 * 1_000_000;
-    match elapsed_beyond(now, written, ttl) {
-        Some(expired) => (!expired, None),
-        None => (false, Some("clock_skew")),
-    }
 }
 
 /// Serialize a document for a terminal to show. serde_json escapes C0 and

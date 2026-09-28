@@ -6,45 +6,6 @@ use super::*;
 const OP_1: &str = "00000000-0000-4000-8000-000000000931";
 const OP_2: &str = "00000000-0000-4000-8000-000000000932";
 
-/// A symlinked `agents/` would aim child compaction at files elsewhere.
-#[test]
-fn compaction_never_deletes_through_a_symlinked_agents_directory() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let old = setup.seed_presence("old-child", 300, 1, "stopped");
-    let agents = setup.binding_dir().join("agents");
-    let outside = setup._scratch.0.join("outside-agents");
-    fs::rename(&agents, &outside).expect("move agents outside");
-    symlink(&outside, &agents).expect("link agents");
-    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
-    let (_, diagnostics) = setup.run_sweep(true, Some(OP_1));
-    assert!(outside.join(old.file_name().expect("child name")).exists());
-    assert!(diagnostics.iter().any(|d| d.code == "record_invalid"));
-}
-
-/// The floor stops strictly before the earliest record compaction keeps, so a
-/// spent child ordered with or after a kept one keeps its file, and only the
-/// spent child before it goes.
-#[test]
-fn compaction_never_passes_a_kept_child() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let now = RETENTION_AGE_NS as u64;
-    setup.clock.set_unix(now);
-    let before = setup.seed_presence("before", 299, 1, "stopped");
-    let tied = setup.seed_presence("tied", 300, 1, "stopped");
-    let kept = setup.seed_presence("kept", 300, now, "stopped");
-    let after = setup.seed_presence("after", 301, 1, "stopped");
-    setup.run_sweep(true, Some(OP_1));
-    assert!(!before.exists());
-    assert!(tied.exists() && kept.exists() && after.exists());
-    let floor: Value = serde_json::from_slice(
-        &fs::read(setup.binding_dir().join("agents-floor.json")).expect("floor"),
-    )
-    .expect("floor JSON");
-    assert_eq!(floor["floor_mono_ns"], "00000000000000000299");
-}
-
 /// Lists no panes, and on its second call records a hook's end for the
 /// binding, as a SessionEnd landing while sweep decides would.
 struct EndingPanes {
@@ -236,28 +197,6 @@ fn move_v2_outside(setup: &Setup) -> PathBuf {
     fs::rename(root.join("v2"), &outside).expect("move v2 outside");
     symlink(&outside, root.join("v2")).expect("link v2");
     outside
-}
-
-/// A symlinked `v2/` puts every record below it outside the state root.
-/// Compaction reaches its children through it, and removes none of them.
-#[test]
-fn compaction_never_deletes_through_a_symlinked_state_directory() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let old = setup.seed_presence("old-child", 300, 1, "stopped");
-    let relative = old
-        .strip_prefix(setup.root().join("v2"))
-        .expect("child below v2")
-        .to_path_buf();
-    let outside = move_v2_outside(&setup);
-    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
-    let (result, diagnostics) = setup.run_sweep(true, Some(OP_1));
-    assert!(
-        outside.join(&relative).exists(),
-        "a record outside the state root survives: {:?}",
-        result.details
-    );
-    assert!(diagnostics.iter().any(|d| d.code == "record_invalid"));
 }
 
 /// The absence probe a present pane clears is removed only inside the root.

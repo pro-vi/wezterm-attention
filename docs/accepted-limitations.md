@@ -48,16 +48,18 @@ failure. That is why this is a real gap rather than a stylistic preference.
 ## One timestamp field carries three roles
 
 `observed_mono_ns` decides which of two competing writes publishes, serves as the
-watermark an activity-clear compares against, and is the fence a parent `Stop`
-writes to clear its subagents. `apply_activity` takes `surviving_order` from the
-surviving activity and reuses it in the generated `subagent_clear` record, so the
-coupling is semantic rather than a shared field name.
+watermark an activity-clear compares against, and is the cutoff at which a Codex
+parent `Stop` removes its sub-agents. `apply_activity` passes the surviving
+activity's `observed_mono_ns` as the order of the parent clear it applies to
+`children.json`, so the coupling is semantic rather than a shared field name.
 
 One consequence is known and characterised: when an incoming activity is
 semantically equal to the published one, the write is skipped, the stored order
 keeps its older value, and an event carrying a timestamp between the two can
 still publish over it if it commits later. The interleaving is narrow and the
-wrong tint clears on the next distinct activity.
+wrong tint clears on the next distinct activity. The same skip keeps a Codex
+parent clear at the earlier stop's order, so a sub-agent whose last event falls
+between that stop and a repeat of it stays counted until a distinct `Stop`.
 `a_deduplicated_activity_does_not_advance_the_ordering_fence` in
 `tests/rust/lifecycle_spec.rs` pins the current behaviour so a change to it is
 deliberate.
@@ -65,7 +67,7 @@ deliberate.
 Separating the roles is a record-contract change: a new field the Lua reader must
 tolerate on records written before and after, schema validation, pruning in
 `maintenance.rs`, reporting in `query.rs`, and a decision about which of the two
-meanings the subagent-clear watermark actually wants. That is not a change to
+meanings the parent-clear cutoff actually wants. That is not a change to
 make on the way out of the door.
 
 The sequence, with one current binding, no acknowledgement and no
@@ -157,9 +159,9 @@ and exponent spellings, since a decoded fixture cannot express the difference.
 `attention sweep --apply` removes only ended bindings and closed panes' whole
 trees under the retention rules in the
 [record contract](record-contract.md#trust-boundary), with their session index
-entries; the subagent records a binding's retention floor covers; and exited GUIs'
-tab-order files the record contract lists as collected. Those rules keep sweep from removing state it cannot prove
-abandoned, and they mean three kinds of leftover stay on disk:
+entries; and exited GUIs' tab-order files the record contract lists as collected.
+Those rules keep sweep from removing state it cannot prove abandoned, and they
+mean four kinds of leftover stay on disk:
 
 - **An exited GUI's tab-order files that name mux panes.** A file is removed
   only when it names no tab, or when every pane it names is verified absent.
@@ -181,64 +183,178 @@ abandoned, and they mean three kinds of leftover stay on disk:
 - **A half-removed binding directory in a live pane.** A crash while a binding
   directory was being removed can leave part of it behind. While the pane is
   live, retention does not touch its tree, so the remainder stays.
+- **Per-child sub-agent files an earlier build wrote.** Builds before
+  `children.json` wrote `agents/`, `agents-clear.json` and `agents-floor.json`
+  into each binding. Nothing reads them now. Sweep removes them only with their
+  binding, under the same retention rules, so a binding that is still current
+  keeps them.
 
 Collecting any of these would be a new deletion, and would need the same
 evidence rule the others have.
 
-## What compacting sub-agent records costs
+## The sub-agent count depends on how Claude Code and Codex send hooks
 
-A binding whose session ran for hours under an earlier version holds its
-whole backlog of sub-agent records. The first stop that compacts it removes
-the spent ones in one pass under the launch lock. On an M5 Max that pass took
-96 ms for 1,000 records, 176 ms for 1,922, about 1 s for 10,000, 2.2 s for
-15,000 and 2.5 to 2.8 s for 20,000. Every other writer of that launch waits
-for it:
+Attention counts a sub-agent from the hooks Claude Code and Codex run, and stops
+counting it only on a hook that says it ended (see the
+[record contract](record-contract.md#child-presence)). The count is exact only
+while the behaviours below hold. Each belongs to another
+program, so each names what it was checked against and what the tab shows if it
+stops holding.
 
-- The plugin's acknowledgement waits 50 ms, so from somewhere between 500 and
-  1,000 records it fails once and the plugin retries it about 2 s later.
-- Another hook of the same launch waits 2 s. The pass takes longer than that
-  from about 15,000 records. At 20,000 a hook that arrived during the pass was
-  refused with `probe_unavailable` ("state lock timed out") and its event was
-  not recorded; at 10,000 it waited about 0.9 s and went through. A sub-agent's
-  permission request lost this way leaves the tab without its `notify`.
+- **Each hook finishes before the agent goes on.** One sub-agent's events then
+  reach the writer in the order they happened, which is why `children.json`
+  keeps no record of sub-agents that stopped. Checked in Claude Code's hooks
+  documentation, read on 2026-09-27 with Claude Code 2.1.283 installed ("By
+  default, hooks block Claude's execution until they complete"), and in Codex
+  source at commit `985cf47a4`, which awaits each hook it runs; not run live on
+  Codex. Both let a command hook opt out with `async: true`, and the README's
+  blocks do not set it. Under an asynchronous hook, a sub-agent's older tool
+  call can arrive after its `SubagentStop` and add it again, and it then stays
+  counted until its session ends.
+- **A Codex parent stops only after its sub-agents have.** A Codex parent
+  `Stop` removes every sub-agent whose last event came before it, because Codex
+  sends no stop for an interrupted sub-agent (next item). The Codex runtime
+  does not enforce the order: in its source at `985cf47a4` no step of a turn
+  waits for running sub-agents, and the model waits by calling `wait_agent`. In
+  the sessions recorded with Codex CLI 0.157.1, none of the 11 with sub-agent
+  events showed sub-agent work after the parent's `Stop`. If a parent does stop
+  first, its sub-agent is not counted from that `Stop` until its next event,
+  which counts it again, and that event's hook prints
+  `attention: child_active_after_parent_clear: …` on stderr; its `SubagentStop`
+  after the parent's `Stop` prints the same. A sub-agent that sends nothing more
+  before it ends is not counted again at all, and one that stays quiet past its
+  parent's next `Stop` is counted again without the report, since the set keeps
+  only the latest parent stop's removals.
+- **Codex reports no interrupted sub-agent.** In Codex source at `985cf47a4`,
+  an interrupt runs no hook for a sub-agent's session, and a parent's `Stop`
+  carries no list of running sub-agents. An interrupted Codex sub-agent
+  therefore stays counted until a later parent `Stop` is published after its
+  last event, or its session ends; a `Stop` that repeats the stop the tab
+  already shows is skipped and keeps the earlier cutoff (see
+  [One timestamp field carries three roles](#one-timestamp-field-carries-three-roles)). If Codex starts sending either report, it can
+  replace the parent-stop rule above.
+- **Codex sends `SubagentStart` for the sub-agents it spawns.** Codex source at
+  `985cf47a4` dispatches it, with the sub-agent's `agent_id` and `agent_type`,
+  for a spawned sub-agent whether it starts fresh or forks its parent's
+  history, and skips it for internal and system sub-agents. No live Codex
+  session has shown it yet. Without it, a Codex sub-agent is counted from its
+  first tool call, which carries its `agent_type` in the same source.
+- **Claude Code starts a resumed sub-agent again under the same id.** Claude
+  Code 2.1.283 sent `SubagentStart` with the same `agent_id` when a stopped
+  sub-agent was woken by its own finished background shell, then its tool
+  calls and a second `SubagentStop`. Claude Code's sub-agents documentation,
+  read on 2026-09-27, says "Resuming starts a new run of the agent under the
+  same ID". If a resume stops sending
+  `SubagentStart`, a resumed sub-agent is counted from its first tool call
+  instead.
+- **Claude Code's own agents carry no type.** The agents Claude Code runs for
+  itself are told apart only by an empty or
+  missing `agent_type`, so a tool call is counted only when it names a type. In
+  one session of Claude Code 2.1.283, four such agents sent only a
+  `SubagentStop` with `agent_type: ""`, and one sent a single Bash `PreToolUse`
+  with no `agent_type` and nothing else, which would otherwise have been
+  counted until its session ended. Every tool call of a sub-agent launched
+  through the Agent tool carried its `agent_type` in that session. The session
+  ran with transcript saving turned off, which may change what these agents
+  send.
+  Sessions started with `--agent` were not captured: if their internal agents'
+  events carry the session's agent name as `agent_type`, one that sends a tool
+  call and no stop is counted until its session ends.
 
-Hooks do not bound the pass, because a bound would leave a binding above it
-uncompacted with nothing to report it. To clear backlogs at a moment you
-choose, run `attention sweep --apply` once after upgrading. It compacts every
-pane's current binding by the same rule, including a session that already
-ended in a pane that is still open, which no later stop would compact. While
-it works on a binding it holds that pane's launch and claim locks for the same
-time. A binding that is no longer its pane's current one is not read by the
-plugin. Sweep removes it whole once its end is more than 30 days old; one that
-never recorded an end, because another launch took the pane before its session
-ended, stays with its records until sweep removes its pane's whole tree.
+## A sub-agent whose end is never reported stays counted until its session ends
 
-After the backlog is gone, each compacting stop still reads every record the
-binding holds: the ones the previous pass kept and every one written since.
-With 200 such records a `SubagentStop` took 2.3 to 2.5 times as long as a stop
-that does not compact (about 10 ms against 4 ms on an M5 Max) and a lead stop
-about twice as long. A burst of 20 concurrent sub-agent stops took about twice
-as long while the binding held 20 to 100 records, and about 3.4 times as long
-at 200. That is the price of a poll that does not read every record a session
-ever wrote. The latency comparison `tests/gate.sh` runs through
-`tests/python/measure.py` times only `PreToolUse`, so it does not see this
-cost.
+Nothing removes a sub-agent for being quiet, so one whose end never reaches the
+writer stays counted, as `+1` on its tab, until its session's `SessionEnd`, or
+until the pane moves on to another session. A Codex sub-agent also goes at a
+later parent `Stop` that is published after its last event; a repeated `Stop`
+the writer skips keeps the earlier cutoff.
+The end goes missing when:
 
-A `*.json` entry in `agents/` whose name does not start with a dot and that
-cannot be read as a record, such as one a later version wrote or one this user
-cannot open, holds the floor where it is for as long as it stays. Records then
-build up behind it, and every stop still reads them all: about 24 µs per
-record, 48 ms at 2,000 records on an M5 Max, which outlasts the plugin's 50 ms
-wait from about 2,100. `attention sweep` names the record in a diagnostic;
-once it is fixed or removed, the next stop catches up.
+- the `SubagentStop` hook failed, timed out, or was not registered;
+- the user pressed Esc on a foreground sub-agent, if Claude Code sends no
+  `SubagentStop` then. This is untested: Claude Code 2.1.283 launched every
+  sub-agent in the background (2 of 2, also when asked for the foreground), and
+  its hooks documentation, read on 2026-09-27, says sub-agents run in the
+  background by default since 2.1.198. Esc on the lead while a background
+  sub-agent ran fired no hook, and the sub-agent sent its `SubagentStop` when it
+  finished its command;
+- a Codex sub-agent was interrupted, or a hook ran asynchronously, as the
+  previous section describes.
 
-A record counts as spent once its presence TTL has passed by the wall clock. A
-hook suspended for longer than that between reading its clocks and taking the
-launch lock, as when the machine sleeps in the middle of it or the wall clock
-is stepped forward, can meet a floor that has passed its event, and a child's
-event is then refused as covered by the floor. For a child's permission
-request the tab still shows `notify`, but the lead's next tool call replaces it
-instead of waiting for the child.
+Earlier builds hid a sub-agent ten minutes after its last event, which also hid
+sub-agents still running one long command. A count that can stay too high was
+chosen over one that drops a sub-agent that is still working. There is no
+command to remove such a sub-agent by hand.
+
+## An invalid child set is started again, and its sub-agents return at their next event
+
+A writer that finds `children.json` invalid renames it to
+`.children.json.invalid.<uuid>`, applies its event to a new, empty set, and
+writes that set even when the event changes nothing else; its hook reports
+`record_invalid`. A `children.json` that something else replaced with a link to a
+file that is not a valid set is moved aside as a link, and sweep then keeps that
+binding, as it keeps any that holds a link; a link to a valid set, or to
+nothing, is replaced by a regular file at the next write. Until that next child event, the tab shows `+?`. The
+sub-agents the invalid set held are counted again only at their next event, so
+one in the middle of a long command stays uncounted until it calls another tool
+or stops. The rename happens while the hook plans its writes, so if a write in
+the same hook fails before the new set is in place, no `children.json` is left:
+the tab then shows no count, not `+?`, until the next child event writes a new
+set. A failure after the new set is in place, such as a failed sync of its
+directory or a failed write of the lifecycle observation, leaves the new set, as
+[A record write can be reported failed after readers already see it](#a-record-write-can-be-reported-failed-after-readers-already-see-it)
+describes. The renamed files are write leftovers: they go with their binding,
+and sweep collects none on its own (see
+[What sweep leaves behind](#what-sweep-leaves-behind)).
+
+Counting what an invalid file held would mean trusting a file that failed
+validation. Starting again loses only what each sub-agent's next event restores.
+
+## A plugin and a command from either side of the child set show no sub-agents
+
+The plugin reads `children.json`; builds of the command before it wrote one file
+per sub-agent under `agents/` instead. A plugin that reads `children.json`
+beside a command that does not write it, or an older plugin beside a command
+that writes only `children.json`, shows no sub-agents: each finds none of the
+files it reads, and the tab shows neither a count nor `+?`.
+Updating the plugin does not rebuild the command, so run
+`scripts/install-cli.sh` after `wezterm.plugin.update_all()`, as
+[Install](../README.md#install) says.
+
+## The six-value query cannot say a sub-agent count is unknown
+
+`get_attention` keeps its six values, as the record contract promises, and its
+fifth, `subagents`, is 0 both when no sub-agent runs and when the pane's count
+could not be read. Only `get_attention_view(pane).subagents_uncertain`, and
+`ctx.attention.subagents_uncertain` in a title formatter, tell the two apart. A
+manual renderer that draws from `get_attention` shows nothing where the bundled
+renderer shows `+?`, until it reads that field.
+
+## A record write can be reported failed after readers already see it
+
+Every record is written the same way, by `atomic_replace_bytes` in
+`src/records.rs`: the bytes go to a temporary file, which is synced and renamed
+over the record, and then the directory is synced so that the rename survives a
+crash. If that last sync fails, the write is reported failed
+(`state_permissions`, "state directory could not be made durable") although the
+new record is already in place and every reader sees it. The hook then reports
+its event as failed, and the records its plan would have written after that one
+are not written. A failed write of any record written before the lifecycle
+observation is reported alone: what the plan itself would have reported, such as
+the restart of an invalid child set, is not in the report. Only the lifecycle
+observation, which is written last, keeps the plan's diagnostic under `replaced`
+in its write error. A directory that cannot be opened for the sync is not synced,
+and the write is reported as made, though a crash can still undo it.
+
+This holds for every record kind, `children.json` included: a `SubagentStop`
+can be reported failed after the sub-agent has left the set, and the lifecycle
+observation that event would have written after it is then missing. Later
+writes are not misled, because every writer reads the records as they stand,
+under its locks, before it decides, never what an earlier hook reported; the
+[record contract](record-contract.md#consumer-boundary) says a failure after the
+rename requires reading the actual state before a retry. Telling a visible write
+from a durable one would need a state that every reader understands, and no
+record kind has one.
 
 ## A mux server whose socket was removed, replaced or refuses keeps its records
 
@@ -504,7 +620,7 @@ and it takes whatever the next commit changes. Once modules start moving to
 then hands callers a `serde_json::Value` that remembers none of it. Later reads
 re-derive each field with a fallback, most often
 `record["observed_mono_ns"].as_str().unwrap_or("")`. `src/lifecycle.rs` and
-`src/maintenance.rs` hold about twenty of these each.
+`src/maintenance.rs` hold about fifteen of these each.
 
 The fallback is unreachable today. `protocol/v2.json` declares `observed_mono_ns`
 required on `activity` and `activity_clear`, `validate_shape` rejects a missing
@@ -525,8 +641,9 @@ whose required accessors are total: `observed_at()` returns a fence, not an
 malformed stay distinguishable. The document itself stays whole, because the
 record contract is a published surface and lossy typed parsing would break it.
 Start with the three reads that carry ordering: activity, activity-clear, and the
-subagent-clear watermark a parent stop writes. Do not rewrite every site
-mechanically; some read fields that really are optional.
+binding end whose order fences a binding's sub-agents (`EndMark::of` in
+`src/children.rs`). Do not rewrite every site mechanically; some read fields
+that really are optional.
 
 A fix is done when a record with a missing or mistyped `observed_mono_ns` is
 rejected before any visibility decision runs.

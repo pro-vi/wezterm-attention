@@ -7,11 +7,12 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::children::{ChildPresenceSet, ChildTransition, EndMark};
 use crate::identity::{PaneAddress, canonical_uuid, pane_address};
 use crate::lifecycle::outcome::{
     AdmittedHook, BindingTarget, HookPersistence, HookScope, Persistence,
@@ -21,9 +22,9 @@ use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, free_of_c
 use crate::providers::{ProviderAction, ProviderEvent};
 use crate::records::{
     CommitPlan, PLUGIN_LOCK_TIMEOUT, PreparedRecordWrite, RecordIdentity, RecordRead, Replacement,
-    agents_dir, claim_lock, commit, commit_waiting, ends_binding, launch_lock, pane_dir,
-    read_claim, read_record, read_record_at, read_record_typed, read_record_typed_at, review_lock,
-    session_entry, session_entry_path, state_root,
+    claim_lock, commit, commit_waiting, ends_binding, launch_lock, pane_dir, read_claim,
+    read_record, read_record_at, read_record_typed, read_record_typed_at, review_lock,
+    session_entry, session_entry_path, state_root, within_read_bound,
 };
 use crate::wezterm::RuntimePorts;
 
@@ -42,6 +43,9 @@ struct HookEvidence {
     persistence: HookPersistence,
     admission: Option<AdmittedHook>,
     planned_native: Option<bool>,
+    /// A child-set change the activity carried was refused, so not every
+    /// native effect the action selected was written.
+    native_refused: bool,
     pending_observation_id: Option<String>,
     observation_id: Option<String>,
 }
@@ -67,7 +71,7 @@ fn confirm_native(resolved: &ResolvedLaunch, binding_id: &str, mutation: &Mutati
         .planned_native
         .unwrap_or_else(|| accepted(&mutation.result));
     if evidence.persistence.native_state != Persistence::NotRequested {
-        evidence.persistence.native_state = if admitted {
+        evidence.persistence.native_state = if admitted && !evidence.native_refused {
             Persistence::Confirmed
         } else {
             Persistence::Rejected
@@ -841,6 +845,30 @@ fn plan_activity(
     }
 }
 
+/// Makes `diagnostic` the one a hook reports and keeps the one it replaces,
+/// with whatever that one replaced, at the end of the `replaced` chain in its
+/// context: a hook reports one diagnostic, and none it replaces is dropped.
+fn report_instead(slot: &mut Option<Diagnostic>, mut diagnostic: Diagnostic) {
+    if let Some(replaced) = slot.take()
+        && let Ok(value) = serde_json::to_value(&replaced)
+    {
+        match diagnostic.context.get_mut("replaced") {
+            None => diagnostic.set("replaced", value),
+            Some(mut last) => {
+                while last.pointer("/context/replaced").is_some() {
+                    last = last
+                        .pointer_mut("/context/replaced")
+                        .expect("the pointer was just found");
+                }
+                if let Some(context) = last.get_mut("context").and_then(Value::as_object_mut) {
+                    context.insert("replaced".to_owned(), value);
+                }
+            }
+        }
+    }
+    *slot = Some(diagnostic);
+}
+
 // Called inside the selected launch's lock. Rich rejection does not discard an
 // independently valid legacy mutation, and the sidecar is always written last.
 fn append_observation(
@@ -938,7 +966,7 @@ fn append_observation(
                 evidence.borrow_mut().persistence.lifecycle = Persistence::Rejected;
             }
             plan.result.result.disposition = Disposition::Partial;
-            plan.result.result.diagnostic = Some(error.diagnostic);
+            report_instead(&mut plan.result.result.diagnostic, error.diagnostic);
         }
     }
     plan
@@ -978,80 +1006,111 @@ fn apply_observation(
     Ok(mutation.result)
 }
 
-/// The presence source a child's permission request writes. The child's next
-/// tool call or its stop replaces that presence, so while it stands the child
-/// is waiting.
-const WAITING_FOR_PERMISSION: &str = "permission";
-
-/// Whether a child that asked for permission at or after `since` has not
-/// emitted anything since: the fence of
-/// [`crate::protocol::eligible_subagent_presence`] without its TTL. A parent
-/// clear or the retention floor ends the wait; the presence TTL does not,
-/// because a child blocked on an approval prompt sends nothing to refresh it.
-/// A fence or presence that cannot be read answers no, which leaves the
-/// activity to its usual order.
+/// Whether some child of `binding_id` asked for permission at or after
+/// `since` and has done nothing since, so it can hold a notify ordered at
+/// `since`. A set, binding or end that cannot be read answers no, which
+/// leaves the activity to its usual order.
 fn child_still_waits(resolved: &ResolvedLaunch, binding_id: &str, since: &str) -> bool {
     let identity = resolved.binding(binding_id);
-    let fence =
-        |kind: &str, field: &str| match read_record_typed_at(&resolved.root, kind, &identity) {
-            RecordRead::Present(value) => Ok(value[field].as_str().map(str::to_owned)),
-            RecordRead::Missing => Ok(None),
-            _ => Err(()),
-        };
-    let (Ok(clear), Ok(floor)) = (
-        fence("subagent_clear", "observed_mono_ns"),
-        fence("subagent_retention_floor", "floor_mono_ns"),
+    let RecordRead::Present(value) =
+        read_record_typed_at(&resolved.root, "child_presence_set", &identity)
+    else {
+        return false;
+    };
+    let Ok(set) = ChildPresenceSet::deserialize(&value) else {
+        return false;
+    };
+    let (Ok(Some(binding)), Ok(end)) = (
+        read_record_at(&resolved.root, "binding", &identity),
+        read_record_at(&resolved.root, "binding_end", &identity),
     ) else {
         return false;
     };
-    let Ok(entries) = std::fs::read_dir(agents_dir(
-        &resolved.root,
-        &resolved.address,
-        &resolved.launch_id,
-        binding_id,
-    )) else {
+    if binding["provider"].as_str() != Some(set.provider.as_str()) {
         return false;
-    };
-    entries.flatten().any(|entry| {
-        let path = entry.path();
-        let Some(agent_key) = path.file_stem().and_then(|stem| stem.to_str()).filter(|_| {
-            path.extension()
-                .is_some_and(|extension| extension == "json")
-        }) else {
-            return false;
-        };
-        let RecordRead::Present(presence) = read_record_typed(
-            &path,
-            Some("subagent_presence"),
-            &RecordIdentity::agent(
-                &resolved.address,
-                &resolved.launch_id,
-                binding_id,
-                agent_key,
-            ),
-        ) else {
-            return false;
-        };
-        waits_for_permission(&presence, since, clear.as_deref(), floor.as_deref())
-    })
+    }
+    set.waits_since(EndMark::of(end.as_ref(), &binding), since)
 }
 
-/// Whether `presence` is a child that asked for permission at or after
-/// `since` and has emitted nothing since, above the parent clear at `clear`
-/// and the retention floor at `floor`: a child that can hold a notify
-/// ordered at `since`.
-pub(crate) fn waits_for_permission(
-    presence: &Value,
-    since: &str,
-    clear: Option<&str>,
-    floor: Option<&str>,
-) -> bool {
-    let order = presence["observed_mono_ns"].as_str().unwrap_or("");
-    presence["source"] == WAITING_FOR_PERMISSION
-        && presence["status"] == "active"
-        && order >= since
-        && clear.is_none_or(|clear| order > clear)
-        && floor.is_none_or(|floor| order > floor)
+/// Plans one change to the binding's child set, inside the launch and claim
+/// locks: reads the binding, its end and the set, applies `transition`, and
+/// adds the replacement when the set changed. A set this user cannot read is
+/// refused rather than overwritten; a set written by a newer writer is never
+/// overwritten; an invalid set is moved aside under a write-leftover name and
+/// replaced by a new one even when the event changes nothing, and children it
+/// held reappear at their next event. A set its readers would reject as too
+/// large is refused rather than written.
+fn plan_children(
+    resolved: &ResolvedLaunch,
+    event: &ProviderEvent,
+    binding_id: &str,
+    written_at: &str,
+    transition: ChildTransition<'_>,
+    replacements: &mut Vec<Replacement>,
+) -> Result<LifecycleResult> {
+    let identity = resolved.binding(binding_id);
+    let path = identity.path(&resolved.root, "child_presence_set")?;
+    let binding = read_record_at(&resolved.root, "binding", &identity)?
+        .ok_or_else(|| AttentionError::new("claim_stale", "child event has no matching binding"))?;
+    let end = read_record_at(&resolved.root, "binding_end", &identity)?;
+    let empty =
+        || ChildPresenceSet::empty(resolved.address.clone(), &resolved.launch_id, binding_id);
+    let provider = provider_name(event)?;
+    let (mut set, started_again) =
+        match read_record_typed(&path, Some("child_presence_set"), &identity) {
+            // A set naming another provider than its binding is invalid, as
+            // both readers hold.
+            RecordRead::Present(value) if value["provider"].as_str() == Some(provider) => (
+                ChildPresenceSet::deserialize(&value).map_err(|_| {
+                    AttentionError::new("record_invalid", "child presence set could not be decoded")
+                })?,
+                false,
+            ),
+            RecordRead::Missing => (empty(), false),
+            RecordRead::Present(_) | RecordRead::Invalid(_) => {
+                // A rename moves the file as it stands, a symlink included,
+                // without reading it.
+                let aside =
+                    path.with_file_name(format!(".children.json.invalid.{}", Uuid::new_v4()));
+                std::fs::rename(&path, &aside).map_err(|_| {
+                    AttentionError::new(
+                        "probe_unavailable",
+                        "invalid child presence set could not be moved aside",
+                    )
+                })?;
+                (empty(), true)
+            }
+            RecordRead::Unavailable(error) | RecordRead::Unsupported(error) => return Err(error),
+        };
+    set.provider = provider.to_owned();
+    set.schema = manifest()?.record_schema;
+    let reduction = set.apply(EndMark::of(end.as_ref(), &binding), transition);
+    let mut result = LifecycleResult::new(reduction.disposition);
+    result.diagnostic = reduction.diagnostic;
+    // Starting again loses what the invalid set held, so the hook reports
+    // that instead of anything the transition itself says.
+    if started_again {
+        report_instead(
+            &mut result.diagnostic,
+            Diagnostic::new(
+                "record_invalid",
+                "an invalid child presence set was moved aside and started again",
+            ),
+        );
+    }
+    if reduction.changed || started_again {
+        set.revision = Uuid::new_v4().to_string();
+        set.written_at_unix_ns = written_at.to_owned();
+        let value = serde_json::to_value(&set).map_err(|_| {
+            AttentionError::new("record_invalid", "child presence set could not be encoded")
+        })?;
+        within_read_bound(&value)?;
+        replacements.push(Replacement::always(path, value));
+        if result.event_id.is_none() && accepted(&result) {
+            result.event_id = Some(set.revision.clone());
+        }
+    }
+    Ok(result)
 }
 
 fn apply_activity(
@@ -1133,62 +1192,59 @@ fn apply_activity(
                 .into_iter()
                 .collect();
             // Only a child's permission request reaches here with an agent id.
-            // Its presence marks the child as waiting until its next tool call
-            // or its stop. The presence only holds the notify against the
-            // lead's tool calls, so a presence that cannot be planned is
-            // reported and the notify still applies.
-            let mut presence_error = None;
+            // It marks the child `waiting` in the binding's child set, which
+            // only holds the notify against the lead's tool calls (see the
+            // record contract's Child presence), so a set that cannot be
+            // changed is reported and the notify still applies.
+            let mut children_report = Ok(None);
             if let Some(agent_id) = event.agent_id.as_deref() {
-                let mut presence = Vec::new();
-                match plan_presence(
+                children_report = plan_children_beside_activity(
                     resolved,
                     event,
-                    observation,
-                    written_at,
                     &binding_id,
-                    agent_id,
-                    WAITING_FOR_PERMISSION,
-                    "active",
-                    &mut presence,
-                ) {
-                    Ok(_) => replacements.extend(presence),
-                    Err(error) => presence_error = Some(error),
-                }
+                    written_at,
+                    ChildTransition::Permission {
+                        agent_id,
+                        agent_type: event.agent_type.as_deref(),
+                        order: observation,
+                    },
+                    &mut replacements,
+                );
             }
+            // A Codex parent's stop ends the children it covers. The stop is
+            // the lead's own activity, so a set it cannot change is reported
+            // and the stop still applies.
             if parent_stop && !matches!(result.disposition.as_str(), "ignored" | "conflict") {
                 let surviving_activity = activity.as_ref().ok_or_else(|| {
                     AttentionError::new("record_invalid", "parent stop has no surviving activity")
                 })?;
-                let surviving_order = surviving_activity["observed_mono_ns"]
-                    .as_str()
-                    .unwrap_or("");
-                let desired = json!({
-                    "kind": "subagent_clear",
-                    "schema": manifest()?.record_schema,
-                    "address": resolved.address,
-                    "launch_id": resolved.launch_id,
-                    "binding_id": binding_id,
-                    "event_id": surviving_activity["event_id"],
-                    "observed_mono_ns": surviving_order,
-                });
-                let clear_path = identity.path(&resolved.root, "subagent_clear")?;
-                let existing_clear = read_record(&clear_path, Some("subagent_clear"), &identity)?;
-                if existing_clear.as_ref().is_none_or(|current| {
-                    current["observed_mono_ns"].as_str().unwrap_or("") < surviving_order
-                }) {
-                    replacements.push(Replacement::always(clear_path, desired));
-                } else if existing_clear.as_ref().is_some_and(|current| {
-                    current["observed_mono_ns"].as_str().unwrap_or("") == surviving_order
-                        && current != &desired
-                }) {
-                    return Ok(CommitPlan::reporting(Mutation::plain(
-                        LifecycleResult::diagnosed(
-                            Disposition::Conflict,
-                            "record_invalid",
-                            "equal parent-clear order has different content",
-                        ),
-                    )));
-                }
+                children_report = plan_children_beside_activity(
+                    resolved,
+                    event,
+                    &binding_id,
+                    written_at,
+                    ChildTransition::ParentClear {
+                        order: surviving_activity["observed_mono_ns"]
+                            .as_str()
+                            .unwrap_or(""),
+                        event_id: surviving_activity["event_id"].as_str().unwrap_or(""),
+                    },
+                    &mut replacements,
+                );
+            }
+            let (refused, diagnostic) = match children_report {
+                Ok(diagnostic) => (false, diagnostic),
+                Err(diagnostic) => (true, Some(diagnostic)),
+            };
+            // What the child set reports, a restart included, replaces the
+            // activity's own diagnostic, and a lifecycle failure that
+            // append_observation records replaces both, as in apply_child.
+            let mut result = result;
+            if let Some(diagnostic) = diagnostic {
+                report_instead(&mut result.diagnostic, diagnostic);
+            }
+            if refused && let Some(evidence) = &resolved.evidence {
+                evidence.borrow_mut().native_refused = true;
             }
             let mut plan = append_observation(
                 resolved,
@@ -1200,20 +1256,56 @@ fn apply_activity(
                     ..CommitPlan::reporting(Mutation::plain(result))
                 },
             );
-            if let Some(error) = presence_error {
-                let result = &mut plan.result.result;
-                if accepted(result) {
-                    result.disposition = Disposition::Partial;
-                }
-                if result.diagnostic.is_none() {
-                    result.diagnostic = Some(error.diagnostic);
-                }
+            // Partial only after the observation is planned, so the activity
+            // itself still counts as written.
+            let result = &mut plan.result.result;
+            if refused && accepted(result) {
+                result.disposition = Disposition::Partial;
             }
             Ok(plan)
         },
         |mutation| apply_observed_outputs(resolved, &binding_id, mutation),
     )?;
     Ok(mutation.result)
+}
+
+/// Plans a child-set change that an activity carries, adding its
+/// replacement only when it applies. The activity stands whatever happens to
+/// the set. What the change reports comes back beside it: `Ok` with the
+/// diagnostic plan_children reports (a restart's, or else the transition's
+/// own), or `Err` when the set could not be planned or the transition
+/// conflicts with it, which makes an accepted activity's hook partial.
+fn plan_children_beside_activity(
+    resolved: &ResolvedLaunch,
+    event: &ProviderEvent,
+    binding_id: &str,
+    written_at: &str,
+    transition: ChildTransition<'_>,
+    replacements: &mut Vec<Replacement>,
+) -> std::result::Result<Option<Diagnostic>, Diagnostic> {
+    let mut planned = Vec::new();
+    match plan_children(
+        resolved,
+        event,
+        binding_id,
+        written_at,
+        transition,
+        &mut planned,
+    ) {
+        Ok(child) if child.disposition == Disposition::Conflict => {
+            Err(child.diagnostic.unwrap_or_else(|| {
+                Diagnostic::new(
+                    "record_invalid",
+                    "child presence change conflicts with the set",
+                )
+            }))
+        }
+        Ok(child) => {
+            replacements.extend(planned);
+            Ok(child.diagnostic)
+        }
+        Err(error) => Err(error.diagnostic),
+    }
 }
 
 fn apply_observed_outputs(
@@ -1234,6 +1326,10 @@ fn apply_observed_outputs_with(
     if let Some(replacement) = &mutation.lifecycle_replacement {
         replace(replacement).map_err(|mut error| {
             error.diagnostic.set("lifecycle_write", "unconfirmed");
+            // What the hook planned to report is kept under the write error.
+            let mut reported = mutation.result.diagnostic.clone();
+            report_instead(&mut reported, error.diagnostic);
+            error.diagnostic = reported.expect("report_instead always leaves a diagnostic");
             error
         })?;
         if let Some(cell) = &resolved.evidence {
@@ -1723,15 +1819,21 @@ fn apply_child(
         .agent_id
         .as_deref()
         .ok_or_else(|| AttentionError::new("record_invalid", "child event has no agent id"))?;
-    let source = event
-        .agent_type
-        .as_deref()
-        .or(event.child_source.as_deref())
-        .ok_or_else(|| AttentionError::new("record_invalid", "child event has no source"))?;
-    let status = if event.action == ProviderAction::ChildActive {
-        "active"
-    } else {
-        "stopped"
+    let transition = match (event.action, event.source_event.as_str()) {
+        (ProviderAction::ChildStopped, _) => ChildTransition::Stop {
+            agent_id,
+            order: observation,
+        },
+        (_, "SubagentStart") => ChildTransition::Start {
+            agent_id,
+            agent_type: event.agent_type.as_deref(),
+            order: observation,
+        },
+        _ => ChildTransition::Tool {
+            agent_id,
+            agent_type: event.agent_type.as_deref(),
+            order: observation,
+        },
     };
     let (mutation, ()) = commit(
         &resolved.root,
@@ -1752,15 +1854,12 @@ fn apply_child(
                 )));
             }
             let mut replacements = Vec::new();
-            let result = plan_presence(
+            let result = plan_children(
                 resolved,
                 event,
-                observation,
-                written_at,
                 &binding_id,
-                agent_id,
-                source,
-                status,
+                written_at,
+                transition,
                 &mut replacements,
             )?;
             Ok(append_observation(
@@ -1777,96 +1876,6 @@ fn apply_child(
         |mutation| apply_observed_outputs(resolved, &binding_id, mutation),
     )?;
     Ok(mutation.result)
-}
-
-/// Plans one child's presence write at `observation`, inside the launch lock.
-/// A newer or equal record, the retention floor, and (for an active child) the
-/// parent clear each keep what is stored.
-#[allow(clippy::too_many_arguments)]
-fn plan_presence(
-    resolved: &ResolvedLaunch,
-    event: &ProviderEvent,
-    observation: &str,
-    written_at: &str,
-    binding_id: &str,
-    agent_id: &str,
-    source: &str,
-    status: &str,
-    replacements: &mut Vec<Replacement>,
-) -> Result<LifecycleResult> {
-    let agent_key = crate::protocol::sha256_hex(agent_id.as_bytes());
-    let presence = RecordIdentity::agent(
-        &resolved.address,
-        &resolved.launch_id,
-        binding_id,
-        &agent_key,
-    );
-    let presence_path = presence.path(&resolved.root, "subagent_presence")?;
-    let identity = resolved.binding(binding_id);
-    let existing = read_record(&presence_path, Some("subagent_presence"), &presence)?;
-    let floor = read_record_at(&resolved.root, "subagent_retention_floor", &identity)?;
-    let clear = read_record_at(&resolved.root, "subagent_clear", &identity)?;
-    if let Some(existing) = existing {
-        let existing_order = existing["observed_mono_ns"].as_str().unwrap_or("");
-        if existing["status"] == "stopped" && status == "stopped" {
-            let mut result = LifecycleResult::new(Disposition::Skipped);
-            result.event_id = existing["event_id"].as_str().map(str::to_owned);
-            return Ok(result);
-        }
-        if observation < existing_order {
-            return Ok(LifecycleResult::new(Disposition::Ignored));
-        }
-        if observation == existing_order {
-            if existing["status"] == status && existing["source"] == source {
-                let mut result = LifecycleResult::new(Disposition::Skipped);
-                result.event_id = existing["event_id"].as_str().map(str::to_owned);
-                return Ok(result);
-            }
-            return Ok(LifecycleResult::diagnosed(
-                Disposition::Conflict,
-                "record_invalid",
-                "equal child order has different content",
-            ));
-        }
-    }
-    if floor
-        .as_ref()
-        .is_some_and(|floor| observation <= floor["floor_mono_ns"].as_str().unwrap_or(""))
-    {
-        return Ok(LifecycleResult::diagnosed(
-            Disposition::Ignored,
-            "binding_conflict",
-            "child observation is covered by retention floor",
-        ));
-    }
-    if status == "active" && covered_by_clear(observation, clear.as_ref()) {
-        return Ok(LifecycleResult::diagnosed(
-            Disposition::Ignored,
-            "binding_conflict",
-            "child observation is covered by parent clear",
-        ));
-    }
-    let event_id = Uuid::new_v4().to_string();
-    let record = json!({
-        "kind": "subagent_presence",
-        "schema": manifest()?.record_schema,
-        "address": resolved.address,
-        "launch_id": resolved.launch_id,
-        "binding_id": binding_id,
-        "provider": provider_name(event)?,
-        "agent_id": agent_id,
-        "agent_key": agent_key,
-        "source": source,
-        "status": status,
-        "event_id": event_id,
-        "observed_mono_ns": observation,
-        "written_at_unix_ns": written_at,
-        "ttl_ms": manifest()?.limits.subagent_ttl_ms,
-    });
-    replacements.push(Replacement::always(presence_path, record));
-    let mut result = LifecycleResult::new(Disposition::Applied);
-    result.event_id = Some(event_id);
-    Ok(result)
 }
 
 fn apply_end(
@@ -2249,6 +2258,7 @@ pub fn apply_provider_event_with_outcome(
         inherited: env.contains_key("WEZTERM_ATTENTION_LAUNCH_ID"),
         admission: None,
         planned_native: None,
+        native_refused: false,
         pending_observation_id: None,
         observation_id: None,
         persistence: HookPersistence {
@@ -2348,30 +2358,6 @@ fn apply_provider_event_inner(
         ProviderAction::Clear => apply_clear_event(&resolved, event, observation, &written_at),
         ProviderAction::Ignored => unreachable!(),
     };
-    // Once a child's stop or the lead's is saved, the binding's spent child
-    // records are folded into its retention floor, so the plugin does not
-    // read every child the session ever ran on each poll. It is maintenance:
-    // whatever becomes of it, the stop stands as saved, and a later stop or
-    // `attention sweep --apply` tries again.
-    let stop = event.action == ProviderAction::ChildStopped
-        || (event.agent_id.is_none() && event.activity_type.as_deref() == Some("stop"));
-    if stop
-        && result.as_ref().is_ok_and(|result| {
-            matches!(
-                result.disposition,
-                Disposition::Applied | Disposition::Replaced | Disposition::Partial
-            )
-        })
-        && let Ok(binding_id) = event_binding_id(event, &resolved.launch_id)
-    {
-        let _ = crate::maintenance::compact_subagents(
-            &resolved.root,
-            &resolved.address,
-            &resolved.launch_id,
-            &binding_id,
-            ports.clock,
-        );
-    }
     // Metadata the parser dropped is reported unless the lifecycle has a
     // finding of its own, which says more about what happened to the event.
     // A claim this event made and could not publish says less than either.
@@ -2410,6 +2396,7 @@ mod lifecycle_write_tests {
             inherited: true,
             admission: None,
             planned_native: Some(true),
+            native_refused: false,
             pending_observation_id: None,
             observation_id: None,
             persistence: HookPersistence {
@@ -2453,8 +2440,11 @@ mod lifecycle_write_tests {
             &samples["binding"],
         )
         .unwrap();
+        let restart = "an invalid child presence set was moved aside and started again";
+        let mut planned = LifecycleResult::new(Disposition::Applied);
+        planned.diagnostic = Some(Diagnostic::new("record_invalid", restart));
         let mutation = Mutation {
-            result: LifecycleResult::new(Disposition::Applied),
+            result: planned,
             lifecycle_replacement: Some(PreparedRecordWrite::new(path.clone(), &snapshot).unwrap()),
         };
         let error = crate::records::with_lock(
@@ -2471,6 +2461,7 @@ mod lifecycle_write_tests {
         )
         .unwrap_err();
         assert_eq!(error.diagnostic.context["lifecycle_write"], "unconfirmed");
+        assert_eq!(error.diagnostic.context["replaced"]["message"], restart);
         assert!(!path.exists());
         let evidence = evidence.borrow();
         assert_eq!(evidence.persistence.native_state, Persistence::Confirmed);

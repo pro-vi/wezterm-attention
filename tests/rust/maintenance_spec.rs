@@ -265,28 +265,51 @@ impl Setup {
             .join(binding_id("claude", "session-a", launch_id))
     }
 
-    fn seed_presence(&self, agent: &str, observation: u64, written: u64, status: &str) -> PathBuf {
+    /// Writes into session-a's binding the files a binding held while each
+    /// sub-agent had its own record: one stopped child's record under
+    /// `agents/`, written at unix time 1 so every age sweep measures has run
+    /// out, a parent clear and a retention floor. Returns their paths.
+    fn seed_per_child_records(&self) -> [PathBuf; 3] {
         let (address, _) = pane_address(&self.env).expect("address");
         let launch_id = &self.env["WEZTERM_ATTENTION_LAUNCH_ID"];
         let binding_id = binding_id("claude", "session-a", launch_id);
-        let agent_key = wezterm_attention::protocol::sha256_hex(agent.as_bytes());
-        let path = self
-            .binding_dir()
-            .join("agents")
-            .join(format!("{agent_key}.json"));
-        atomic_replace(
-            &path,
-            &json!({
-                "kind":"subagent_presence","schema":3,"address":address,
-                "launch_id":launch_id,"binding_id":binding_id,"provider":"claude",
-                "agent_id":agent,"agent_key":agent_key,"source":"worker","status":status,
-                "event_id":Uuid::new_v4().to_string(),
-                "observed_mono_ns":format!("{observation:020}"),
-                "written_at_unix_ns":format!("{written:020}"),"ttl_ms":600000
-            }),
-        )
-        .expect("write presence");
-        path
+        let agent_key = wezterm_attention::protocol::sha256_hex(b"child-a");
+        let dir = self.binding_dir();
+        let records = [
+            (
+                dir.join("agents").join(format!("{agent_key}.json")),
+                json!({
+                    "kind":"subagent_presence","schema":3,"address":address,
+                    "launch_id":launch_id,"binding_id":binding_id,"provider":"claude",
+                    "agent_id":"child-a","agent_key":agent_key,"source":"worker",
+                    "status":"stopped","event_id":Uuid::new_v4().to_string(),
+                    "observed_mono_ns":"00000000000000000250",
+                    "written_at_unix_ns":"00000000000000000001","ttl_ms":600000
+                }),
+            ),
+            (
+                dir.join("agents-clear.json"),
+                json!({
+                    "kind":"subagent_clear","schema":3,"address":address,
+                    "launch_id":launch_id,"binding_id":binding_id,
+                    "event_id":Uuid::new_v4().to_string(),
+                    "observed_mono_ns":"00000000000000000240"
+                }),
+            ),
+            (
+                dir.join("agents-floor.json"),
+                json!({
+                    "kind":"subagent_retention_floor","schema":3,"address":address,
+                    "launch_id":launch_id,"binding_id":binding_id,
+                    "floor_mono_ns":"00000000000000000230",
+                    "operation_id":Uuid::new_v4().to_string()
+                }),
+            ),
+        ];
+        records.map(|(path, record)| {
+            atomic_replace(&path, &record).expect("write per-child record");
+            path
+        })
     }
 
     /// Doctor as run inside this fixture's pane, whatever pane runs the tests.
@@ -462,211 +485,6 @@ fn live_pane_clears_the_first_absence_probe() {
 }
 
 #[test]
-fn compaction_advances_floor_before_delete_and_replays_operation() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let old = setup.seed_presence("old-child", 300, 1, "stopped");
-    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
-    let preview = setup.run_sweep(false, None).0;
-    assert!(old.exists());
-    assert!(
-        preview
-            .details
-            .iter()
-            .any(|detail| detail["action"] == "advance_floor")
-    );
-    let operation = "00000000-0000-4000-8000-000000000717";
-    setup.run_sweep(true, Some(operation));
-    let floor = setup.binding_dir().join("agents-floor.json");
-    let floor_bytes = fs::read(&floor).expect("floor record");
-    assert!(!old.exists());
-    let delayed = setup.seed_presence("delayed-child", 250, 1, "stopped");
-    let later = setup.seed_presence("later-child", 400, 1, "stopped");
-    let replay = setup.run_sweep(true, Some(operation)).0;
-    assert!(!delayed.exists());
-    assert!(
-        later.exists(),
-        "a replay advances no floor that carries its id"
-    );
-    assert_eq!(fs::read(&floor).expect("floor record"), floor_bytes);
-    assert!(
-        replay
-            .details
-            .iter()
-            .any(|detail| detail["action"] == "replay_floor")
-    );
-}
-
-#[test]
-fn compaction_apply_revalidates_reactivated_child() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let child = setup.seed_presence("child-a", 300, 1, "stopped");
-    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
-    assert!(
-        setup
-            .run_sweep(false, None)
-            .0
-            .details
-            .iter()
-            .any(|detail| detail["action"] == "advance_floor")
-    );
-    let mut active: Value =
-        serde_json::from_slice(&fs::read(&child).expect("presence")).expect("presence JSON");
-    active["status"] = json!("active");
-    active["event_id"] = json!(Uuid::new_v4().to_string());
-    active["observed_mono_ns"] = json!("00000000000000000400");
-    active["written_at_unix_ns"] = json!(format!("{:020}", RETENTION_AGE_NS as u64 + 2));
-    atomic_replace(&child, &active).expect("reactivate child");
-    setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000718"));
-    assert!(child.exists());
-    assert!(!setup.binding_dir().join("agents-floor.json").exists());
-}
-
-#[test]
-fn negative_wall_age_reports_clock_skew_and_preserves_child() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let child = setup.seed_presence("future-child", 300, 9_000_000_000, "stopped");
-    setup.clock.set_unix(2_000_000_000);
-    let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000719"));
-    assert!(child.exists());
-    assert!(diagnostics.iter().any(|item| item.code == "clock_skew"));
-    assert!(!setup.binding_dir().join("agents-floor.json").exists());
-    assert_eq!(result.failed_steps, 1, "a child sweep could not judge");
-}
-
-/// A child whose written time is ahead of the clock cannot be judged, so it is
-/// kept: the floor stops below it, the spent child after it stays too, and the
-/// apply reports a failed step.
-#[test]
-fn a_floor_stops_below_a_child_it_cannot_judge() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let now = RETENTION_AGE_NS as u64;
-    setup.clock.set_unix(now);
-    let before = setup.seed_presence("before", 300, 1, "stopped");
-    let skewed = setup.seed_presence("skewed", 310, now + 1_000, "stopped");
-    let after = setup.seed_presence("after", 320, 1, "stopped");
-    let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000727"));
-    assert!(!before.exists());
-    assert!(skewed.exists() && after.exists());
-    let floor: Value = serde_json::from_slice(
-        &fs::read(setup.binding_dir().join("agents-floor.json")).expect("floor"),
-    )
-    .expect("floor JSON");
-    assert_eq!(floor["floor_mono_ns"], "00000000000000000300");
-    assert_eq!(result.failed_steps, 1);
-    assert!(diagnostics.iter().any(|item| item.code == "clock_skew"));
-}
-
-/// A `*.json` entry that is not a regular file is one a reader would try to
-/// read, so it holds the floor like an unreadable record, and sweep names it.
-#[test]
-fn a_json_entry_that_is_not_a_file_holds_the_floor_and_is_named() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let spent = setup.seed_presence("spent", 300, 1, "stopped");
-    let key = wezterm_attention::protocol::sha256_hex(b"not-a-file");
-    let entry = setup
-        .binding_dir()
-        .join("agents")
-        .join(format!("{key}.json"));
-    fs::create_dir(&entry).expect("create directory entry");
-    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
-    let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000728"));
-    assert_eq!(result.failed_steps, 1);
-    assert!(spent.exists());
-    assert!(!setup.binding_dir().join("agents-floor.json").exists());
-    let named = diagnostics
-        .iter()
-        .find(|item| item.message == "subagent record is not a regular file")
-        .expect("diagnostic for the entry");
-    let path = named.context["path"].as_str().expect("path context");
-    assert!(path.ends_with(&format!("agents/{key}.json")), "{path}");
-}
-
-/// A child record sweep cannot read may be one the floor must not pass, so
-/// the floor stays where it is and the apply reports a failed step.
-#[test]
-fn an_unreadable_child_makes_sweep_apply_incomplete() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let spent = setup.seed_presence("spent", 300, 1, "stopped");
-    let child = setup.seed_presence("future-child", 301, 1, "stopped");
-    let mut future: Value =
-        serde_json::from_slice(&fs::read(&child).expect("child")).expect("child JSON");
-    future["schema"] = json!(999);
-    fs::write(&child, serde_json::to_vec(&future).expect("future JSON"))
-        .expect("write future child");
-    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
-    let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000726"));
-    assert_eq!(result.failed_steps, 1);
-    assert!(spent.exists() && child.exists());
-    assert!(!setup.binding_dir().join("agents-floor.json").exists());
-    let named = diagnostics
-        .iter()
-        .find(|item| item.code == "future_schema")
-        .expect("diagnostic for the unreadable child");
-    let name = child.file_name().unwrap().to_string_lossy().into_owned();
-    let path = named.context["path"].as_str().expect("path context");
-    assert!(path.ends_with(&format!("agents/{name}")), "{path}");
-}
-
-/// A pass held back by entries it cannot read, directories named like records
-/// and records of a later schema, still visits every entry: it names each one
-/// it cannot read, removes what the existing floor already covers, as after a
-/// crash between writing a floor and its removals, and leaves the floor where
-/// it is. With two entries of each kind, a pass that stops at the first one
-/// misses the second whatever order the directory lists them in.
-#[test]
-fn an_incomplete_pass_still_removes_what_the_floor_covers() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    setup.seed_presence("first", 300, 1, "stopped");
-    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
-    setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000729"));
-    let floor_path = setup.binding_dir().join("agents-floor.json");
-    let floor_bytes = fs::read(&floor_path).expect("floor record");
-    let left = setup.seed_presence("left-behind", 250, 1, "stopped");
-    let mut unreadable = Vec::new();
-    for name in ["not-a-file", "not-a-file-either"] {
-        let key = wezterm_attention::protocol::sha256_hex(name.as_bytes());
-        let entry = setup
-            .binding_dir()
-            .join("agents")
-            .join(format!("{key}.json"));
-        fs::create_dir(&entry).expect("create directory entry");
-        unreadable.push(entry);
-    }
-    for (name, order) in [("future-child", 400), ("another-future-child", 401)] {
-        let future = setup.seed_presence(name, order, 1, "stopped");
-        let mut record: Value =
-            serde_json::from_slice(&fs::read(&future).expect("future child")).expect("future JSON");
-        record["schema"] = json!(999);
-        fs::write(&future, serde_json::to_vec(&record).expect("future JSON"))
-            .expect("write future child");
-        unreadable.push(future);
-    }
-    let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000730"));
-    assert!(!left.exists());
-    assert_eq!(fs::read(&floor_path).expect("floor record"), floor_bytes);
-    assert_eq!(result.failed_steps, 1);
-    let named: Vec<&str> = diagnostics
-        .iter()
-        .filter_map(|item| item.context.get("path").and_then(Value::as_str))
-        .collect();
-    for entry in &unreadable {
-        let name = entry.file_name().unwrap().to_string_lossy().into_owned();
-        let suffix = format!("agents/{name}");
-        assert!(
-            named.iter().any(|path| path.ends_with(&suffix)),
-            "{suffix} not named in {named:?}"
-        );
-    }
-}
-
-#[test]
 fn binding_history_cap_is_calculated_per_realm() {
     let two_realms = BTreeMap::from([
         (
@@ -710,58 +528,6 @@ fn binding_history_cap_is_calculated_per_realm() {
     assert_eq!(binding_cap_paths_by_realm(&one_realm).len(), 1);
 }
 
-/// Six hundred spent children, none older than 30 days, go in one
-/// `sweep --apply`, so a session's backlog can be cleared outside any hook. A
-/// child inside its lifetime stays.
-#[test]
-fn sweep_apply_clears_a_spent_backlog_in_one_run() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let lifetime = 600_000_000_000;
-    let now = 100 * lifetime;
-    setup.clock.set_unix(now);
-    let spent: Vec<PathBuf> = (0..600)
-        .map(|index| {
-            setup.seed_presence(
-                &format!("spent-{index}"),
-                300 + index,
-                now - lifetime - 1,
-                "stopped",
-            )
-        })
-        .collect();
-    let working = setup.seed_presence("working", 1_000, now, "active");
-    let (result, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000725"));
-    assert!(spent.iter().all(|path| !path.exists()));
-    assert!(working.exists());
-    assert!(result.details.iter().any(|detail| {
-        detail["kind"] == "subagent_compaction"
-            && detail["deleted"] == 600
-            && detail["floor_mono_ns"] == "00000000000000000899"
-    }));
-}
-
-/// A floor that was written and not followed by the removals it covers, as
-/// after a crash between the two, is followed by them on the next pass,
-/// whatever operation wrote it: the floor already fences those children.
-#[test]
-fn a_child_below_the_floor_is_removed_by_any_later_operation() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    setup.seed_presence("old-child", 300, 1, "stopped");
-    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
-    setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000720"));
-    let left = setup.seed_presence("left-child", 250, 1, "stopped");
-    let (result, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000724"));
-    assert!(!left.exists());
-    assert!(
-        result
-            .details
-            .iter()
-            .any(|detail| detail["action"] == "reclaim" && detail["deleted"] == 1)
-    );
-}
-
 #[test]
 fn old_noncurrent_binding_is_pruned_but_current_binding_is_preserved() {
     let setup = Setup::new();
@@ -797,30 +563,6 @@ fn old_noncurrent_binding_is_pruned_but_current_binding_is_preserved() {
     setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000721"));
     assert!(!old_dir.exists());
     assert!(current_dir.exists());
-}
-
-#[test]
-fn unknown_binding_file_and_future_child_are_preserved() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let child = setup.seed_presence("future-child", 300, 1, "stopped");
-    let mut future: Value =
-        serde_json::from_slice(&fs::read(&child).expect("child")).expect("child JSON");
-    future["schema"] = json!(999);
-    fs::write(&child, serde_json::to_vec(&future).expect("future JSON"))
-        .expect("write future child");
-    let unknown = setup.binding_dir().join("unknown.state");
-    fs::write(&unknown, b"preserve").expect("write unknown state");
-    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
-    let (_, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000722"));
-    assert!(child.exists());
-    assert!(unknown.exists());
-    assert!(
-        diagnostics
-            .iter()
-            .any(|item| matches!(item.code.as_str(), "future_schema" | "record_invalid"))
-    );
-    assert!(!setup.binding_dir().join("agents-floor.json").exists());
 }
 
 #[test]
@@ -871,31 +613,6 @@ fn every_emitted_diagnostic_literal_is_declared_by_the_manifest() {
             path.display()
         );
     }
-}
-
-#[test]
-fn foreign_retention_floor_never_deletes_children() {
-    let setup = Setup::new();
-    setup.claim_and_bind();
-    let active = setup.seed_presence("active", 300, 10_000_000_000, "active");
-    let stopped = setup.seed_presence("stopped", 301, 1, "stopped");
-    let operation = "00000000-0000-4000-8000-000000000723";
-    let (address, _) = pane_address(&setup.env).expect("address");
-    atomic_replace(
-        &setup.binding_dir().join("agents-floor.json"),
-        &json!({
-            "kind":"subagent_retention_floor","schema":3,"address":address,
-            "launch_id":"00000000-0000-4000-8000-000000000999",
-            "binding_id":"f".repeat(64),"floor_mono_ns":"00000009999999999999",
-            "operation_id":operation
-        }),
-    )
-    .expect("write foreign floor");
-    setup.clock.set_unix(10_000_000_000);
-    let (_, diagnostics) = setup.run_sweep(true, Some(operation));
-    assert!(active.exists());
-    assert!(stopped.exists());
-    assert!(diagnostics.iter().any(|item| item.code == "record_invalid"));
 }
 
 struct SignalingPanes {
@@ -1089,6 +806,178 @@ fn retention_preserves_unknown_files_inside_an_old_binding() {
     assert!(old_dir.exists());
     assert!(unknown.exists());
     assert!(diagnostics.iter().any(|item| item.code == "record_invalid"));
+}
+
+/// Nothing writes per-child records any more, but bindings from before still
+/// hold them. Doctor and sweep recognise every one of them, so such a binding,
+/// once ended for longer than the retention age, is pruned whole rather than
+/// kept for holding files sweep does not know.
+#[test]
+fn an_old_binding_holding_per_child_records_is_pruned_whole() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let old_dir = setup.binding_dir();
+    let per_child = setup.seed_per_child_records();
+    setup.clock.set_unix(1);
+    setup.provider_event(
+        "SessionEnd",
+        "session-a",
+        json!({"reason":"other"}),
+        "00000000000000000300",
+    );
+    setup.provider_event(
+        "SessionStart",
+        "session-b",
+        json!({"source":"resume"}),
+        "00000000000000000400",
+    );
+    let root = setup.root();
+    let (_, doctor) = setup.doctor();
+    for path in &per_child {
+        let relative = json!(path.strip_prefix(&root).unwrap().to_str().unwrap());
+        assert!(
+            !doctor
+                .iter()
+                .any(|item| item.context.get("path") == Some(&relative)),
+            "doctor names {relative}: {doctor:?}"
+        );
+    }
+    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
+    let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000731"));
+    assert!(!old_dir.exists(), "{diagnostics:?}");
+    let old_id = old_dir.file_name().unwrap().to_str().unwrap();
+    assert!(
+        result.details.iter().any(|detail| {
+            detail["kind"] == "binding_retention"
+                && detail["binding_id"] == old_id
+                && detail["action"] == "prune"
+        }),
+        "{:?}",
+        result.details
+    );
+}
+
+// A record sweep cannot read, here one a later writer wrote, may be one a
+// newer version still needs, so the binding holding it is kept however old.
+#[test]
+fn an_old_binding_holding_a_newer_per_child_record_is_kept() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let old_dir = setup.binding_dir();
+    let [presence, ..] = setup.seed_per_child_records();
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&presence).expect("presence")).expect("presence JSON");
+    record["schema"] = json!(999);
+    fs::write(&presence, serde_json::to_vec(&record).expect("future JSON"))
+        .expect("write future presence");
+    setup.clock.set_unix(1);
+    setup.provider_event(
+        "SessionEnd",
+        "session-a",
+        json!({"reason":"other"}),
+        "00000000000000000300",
+    );
+    setup.provider_event(
+        "SessionStart",
+        "session-b",
+        json!({"source":"resume"}),
+        "00000000000000000400",
+    );
+    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
+    let (_, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000732"));
+    assert!(old_dir.exists(), "{diagnostics:?}");
+    assert!(presence.exists());
+}
+
+/// Binds session-a, records one of its sub-agents in its child set, and ends
+/// it at unix time 1 before session-b takes the pane, so the old binding has
+/// aged out once the clock passes the retention age. Returns its directory.
+fn aged_binding_with_a_child_set(setup: &Setup) -> PathBuf {
+    setup.claim_and_bind();
+    let old_dir = setup.binding_dir();
+    setup.provider_event(
+        "SubagentStart",
+        "session-a",
+        json!({"agent_id":"child-a","agent_type":"Explore"}),
+        "00000000000000000250",
+    );
+    assert!(old_dir.join("children.json").exists());
+    setup.clock.set_unix(1);
+    setup.provider_event(
+        "SessionEnd",
+        "session-a",
+        json!({"reason":"other"}),
+        "00000000000000000300",
+    );
+    setup.provider_event(
+        "SessionStart",
+        "session-b",
+        json!({"source":"resume"}),
+        "00000000000000000400",
+    );
+    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
+    old_dir
+}
+
+// A binding's child set, and an invalid one a writer moved aside, go with
+// their binding once it has aged out.
+#[test]
+fn an_old_binding_holding_a_child_set_and_a_moved_aside_one_is_pruned_whole() {
+    let setup = Setup::new();
+    let old_dir = aged_binding_with_a_child_set(&setup);
+    fs::write(
+        old_dir.join(".children.json.invalid.00000000-0000-4000-8000-000000000001"),
+        b"{not json",
+    )
+    .expect("moved-aside set");
+    let (_, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000733"));
+    assert!(!old_dir.exists(), "{diagnostics:?}");
+}
+
+// A child set a later writer wrote may be one a newer version still needs,
+// so the binding holding it is kept however old.
+#[test]
+fn an_old_binding_holding_a_newer_child_set_is_kept() {
+    let setup = Setup::new();
+    let old_dir = aged_binding_with_a_child_set(&setup);
+    let path = old_dir.join("children.json");
+    let mut set: Value = serde_json::from_slice(&fs::read(&path).expect("set")).expect("set JSON");
+    set["schema"] = json!(999);
+    fs::write(&path, serde_json::to_vec(&set).expect("future JSON")).expect("write future set");
+    let (_, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000734"));
+    assert!(path.exists(), "{diagnostics:?}");
+}
+
+/// Sweep deletes nothing inside the binding a pane is on, per-child records
+/// included, however old they are: they go only with their binding.
+#[test]
+fn a_current_binding_keeps_its_per_child_records() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let per_child = setup.seed_per_child_records();
+    let before: Vec<Vec<u8>> = per_child
+        .iter()
+        .map(|path| fs::read(path).expect("per-child record"))
+        .collect();
+    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
+    let (result, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000732"));
+    for (path, bytes) in per_child.iter().zip(&before) {
+        assert_eq!(
+            &fs::read(path).expect("per-child record"),
+            bytes,
+            "{}",
+            path.display()
+        );
+    }
+    let binding_dir = setup.binding_dir();
+    let current_id = binding_dir.file_name().unwrap().to_str().unwrap();
+    let kinds: Vec<&Value> = result
+        .details
+        .iter()
+        .filter(|detail| detail["binding_id"] == current_id)
+        .map(|detail| &detail["kind"])
+        .collect();
+    assert_eq!(kinds, [&json!("absence")], "{:?}", result.details);
 }
 
 #[test]

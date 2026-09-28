@@ -46,8 +46,8 @@ mod session_starts;
 #[path = "lifecycle_spec/turn_endings.rs"]
 mod turn_endings;
 
-#[path = "lifecycle_spec/child_compaction.rs"]
-mod child_compaction;
+#[path = "lifecycle_spec/child_presence.rs"]
+mod child_presence;
 
 #[path = "lifecycle_spec/metadata_fields.rs"]
 mod metadata_fields;
@@ -1119,7 +1119,8 @@ fn compaction_is_not_agent_completion() {
             assert_eq!(result.disposition, "applied");
             assert_eq!(fs::read(directory.join("activity.json")).unwrap(), badge);
             assert!(!directory.join("end.json").exists());
-            assert!(!directory.join("agents-clear.json").exists());
+            // A parent stop would write the child set, even with no child.
+            assert!(!directory.join("children.json").exists());
         }
         let before = fs::read(directory.join("lifecycle.json")).unwrap();
         setup.apply(
@@ -1548,6 +1549,21 @@ fn launch_rotation_after_resolution_cannot_add_old_execution_facts() {
     );
 }
 
+/// The agent ids in a binding's child set, in the set's order; none when the
+/// binding has no set.
+fn live_child_ids(setup: &Setup, provider: &str, session: &str) -> Vec<String> {
+    let Ok(bytes) = fs::read(setup.binding_dir(provider, session).join("children.json")) else {
+        return vec![];
+    };
+    let set: Value = serde_json::from_slice(&bytes).expect("child set JSON");
+    set["live"]
+        .as_array()
+        .expect("live children")
+        .iter()
+        .map(|child| child["agent_id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
 fn run_hook(setup: &Setup, arguments: &[&str], payload: &Value) -> std::process::Output {
     let mut child = rust_command(setup)
         .args(arguments)
@@ -1781,6 +1797,77 @@ fn hook_description_is_exhaustive_read_only_and_pins_public_fields() {
     }
 }
 
+/// The first JSON code block in the README section headed `heading`.
+fn readme_json_block(heading: &str) -> Value {
+    let readme = include_str!("../../README.md");
+    let section = readme
+        .split("\n## ")
+        .find(|section| section.starts_with(&format!("{heading}\n")))
+        .unwrap_or_else(|| panic!("README has no section headed {heading:?}"));
+    let block = section
+        .split_once("```json\n")
+        .and_then(|(_, rest)| rest.split_once("\n```"))
+        .map(|(block, _)| block)
+        .unwrap_or_else(|| panic!("README section {heading:?} has no JSON block"));
+    serde_json::from_str(block)
+        .unwrap_or_else(|error| panic!("README section {heading:?}: {error}"))
+}
+
+// The README's hook blocks are what users paste into their agent's settings,
+// so each registers exactly the rows `hooks describe` marks `register`, each
+// as one command hook in the documented form. The block holds nothing else;
+// `async` in particular would let a hook run after the agent has gone on
+// (Claude Code 2.1.283, Codex at source `985cf47a4`), and one child's events
+// could then reach the writer out of order.
+#[test]
+fn readme_hook_blocks_register_exactly_the_described_rows() {
+    use wezterm_attention::providers::{HookRegistration, describe_hooks};
+    for (provider, heading) in [("claude", "Claude Code hooks"), ("codex", "Codex hooks")] {
+        let described: BTreeMap<String, String> = describe_hooks(provider)
+            .unwrap()
+            .native_hooks
+            .into_iter()
+            .filter(|row| row.registration == HookRegistration::Register)
+            .map(|row| {
+                let command = format!(
+                    "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention {}",
+                    row.arguments.join(" ")
+                );
+                (row.native_event, command)
+            })
+            .collect();
+        let block = readme_json_block(heading);
+        let registered: BTreeMap<String, String> = block["hooks"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{heading}: no hooks object"))
+            .iter()
+            .map(|(event, groups)| {
+                let [group] = groups.as_array().map(Vec::as_slice).unwrap_or_default() else {
+                    panic!("{heading}/{event}: expected one matcher group");
+                };
+                let [hook] = group
+                    .as_object()
+                    .filter(|group| group.len() == 1)
+                    .and_then(|group| group["hooks"].as_array())
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+                else {
+                    panic!("{heading}/{event}: expected one hook and nothing else");
+                };
+                let fields: Vec<&str> = hook
+                    .as_object()
+                    .map(|hook| hook.keys().map(String::as_str).collect())
+                    .unwrap_or_default();
+                assert_eq!(fields, ["command", "type"], "{heading}/{event}");
+                assert_eq!(hook["type"], "command", "{heading}/{event}");
+                let command = hook["command"].as_str().unwrap_or_default().to_owned();
+                (event.clone(), command)
+            })
+            .collect();
+        assert_eq!(registered, described, "{heading}");
+    }
+}
+
 #[test]
 fn nested_startup_conflicts_and_nested_resume_replaces() {
     let setup = Setup::new();
@@ -1854,29 +1941,19 @@ fn prompt_return_clears_lead_only_and_newer_hook_reactivates() {
         serde_json::from_slice(&fs::read(binding_dir.join("activity.json")).expect("activity"))
             .expect("activity JSON");
     assert_eq!(activity["type"], "thinking");
-    assert!(
-        binding_dir
-            .join("agents")
-            .join(format!(
-                "{}.json",
-                wezterm_attention::protocol::sha256_hex(b"child-a")
-            ))
-            .exists()
+    assert_eq!(
+        live_child_ids(&setup, "claude", "session-a"),
+        vec!["child-a"]
     );
 
     let cleared = prompt_return(&setup.env, "00000000000000000400").expect("prompt return");
     assert_eq!(cleared.disposition, "applied");
     assert!(binding_dir.join("activity-clear.json").exists());
-    assert!(
-        binding_dir
-            .join("agents")
-            .read_dir()
-            .expect("agents directory")
-            .next()
-            .is_some()
+    assert_eq!(
+        live_child_ids(&setup, "claude", "session-a"),
+        vec!["child-a"]
     );
     assert!(!binding_dir.join("end.json").exists());
-    assert!(!binding_dir.join("agents-clear.json").exists());
 
     assert_eq!(
         setup.apply(&thinking, "00000000000000000500").disposition,
@@ -1886,52 +1963,6 @@ fn prompt_return_clears_lead_only_and_newer_hook_reactivates() {
         serde_json::from_slice(&fs::read(binding_dir.join("activity.json")).expect("activity"))
             .expect("activity JSON");
     assert!(activity.get("publication_id").is_none());
-}
-
-#[test]
-fn stopped_child_fences_an_older_inflight_tool_event() {
-    let setup = Setup::new();
-    setup.claim();
-    setup.apply(
-        &event(
-            "claude",
-            "SessionStart",
-            "session-a",
-            json!({"source":"startup"}),
-        ),
-        "00000000000000000200",
-    );
-    let stopped = event(
-        "claude",
-        "SubagentStop",
-        "session-a",
-        json!({"agent_id":"child-a","agent_type":"Explore","stop_hook_active":false}),
-    );
-    setup.apply(&stopped, "00000000000000000500");
-    let active = event(
-        "claude",
-        "PreToolUse",
-        "session-a",
-        json!({"tool_name":"Bash","agent_id":"child-a","agent_type":"Explore"}),
-    );
-    assert_eq!(
-        setup.apply(&active, "00000000000000000400").disposition,
-        "ignored"
-    );
-    let presence: Value = serde_json::from_slice(
-        &fs::read(
-            setup
-                .binding_dir("claude", "session-a")
-                .join("agents")
-                .join(format!(
-                    "{}.json",
-                    wezterm_attention::protocol::sha256_hex(b"child-a")
-                )),
-        )
-        .expect("presence"),
-    )
-    .expect("presence JSON");
-    assert_eq!(presence["status"], "stopped");
 }
 
 #[test]
@@ -1975,12 +2006,19 @@ fn codex_parent_stop_clears_children_with_the_same_observation() {
         setup.apply(&stop, "00000000000000000400").disposition,
         "applied"
     );
-    let binding_dir = setup.binding_dir("codex", "thread-a");
-    let clear: Value = serde_json::from_slice(
-        &fs::read(binding_dir.join("agents-clear.json")).expect("clear record"),
+    let set: Value = serde_json::from_slice(
+        &fs::read(setup.binding_dir("codex", "thread-a").join("children.json")).expect("child set"),
     )
-    .expect("clear JSON");
-    assert_eq!(clear["observed_mono_ns"], "00000000000000000400");
+    .expect("child set JSON");
+    assert_eq!(
+        set["parent_clear"]["observed_mono_ns"],
+        "00000000000000000400"
+    );
+    assert_eq!(
+        set["parent_clear"]["removed"],
+        json!(["child-a", "child-b"])
+    );
+    assert!(live_child_ids(&setup, "codex", "thread-a").is_empty());
 }
 
 #[test]
@@ -2013,26 +2051,15 @@ fn duplicate_codex_stop_keeps_a_child_newer_than_the_surviving_activity() {
         "00000000000000000400",
     );
     setup.apply(&stop, "00000000000000000500");
-    let clear: Value = serde_json::from_slice(
-        &fs::read(
-            setup
-                .binding_dir("codex", "thread-a")
-                .join("agents-clear.json"),
-        )
-        .expect("agents clear"),
+    let set: Value = serde_json::from_slice(
+        &fs::read(setup.binding_dir("codex", "thread-a").join("children.json")).expect("child set"),
     )
-    .expect("agents clear JSON");
-    assert_eq!(clear["observed_mono_ns"], "00000000000000000300");
-    assert!(
-        setup
-            .binding_dir("codex", "thread-a")
-            .join("agents")
-            .join(format!(
-                "{}.json",
-                wezterm_attention::protocol::sha256_hex(b"child-a")
-            ))
-            .exists()
+    .expect("child set JSON");
+    assert_eq!(
+        set["parent_clear"]["observed_mono_ns"],
+        "00000000000000000300"
     );
+    assert_eq!(live_child_ids(&setup, "codex", "thread-a"), vec!["child-a"]);
 }
 
 #[test]

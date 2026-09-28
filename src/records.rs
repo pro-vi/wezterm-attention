@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::identity::PaneAddress;
 use crate::protocol::{
-    AttentionError, Diagnostic, Result, free_of_control, manifest, validate_record,
+    AttentionError, Diagnostic, Manifest, Result, free_of_control, manifest, validate_record,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -355,7 +355,7 @@ const AGENT_KEY: &str = "agent_key";
 /// The records kept one to a directory: each kind, the file that holds it,
 /// and the depths whose directory may hold one. Activity and its
 /// acknowledgement belong to a binding, or to the launch while it has none.
-const FIXED_RECORDS: [(&str, &str, &[Depth]); 13] = [
+const FIXED_RECORDS: [(&str, &str, &[Depth]); 14] = [
     ("realm", "realm.json", &[Depth::Realm]),
     ("incarnation", "incarnation.json", &[Depth::Incarnation]),
     ("claim", "claim.json", &[Depth::Pane]),
@@ -375,6 +375,7 @@ const FIXED_RECORDS: [(&str, &str, &[Depth]); 13] = [
     ("lifecycle_snapshot", "lifecycle.json", &[Depth::Binding]),
     ("activity_clear", "activity-clear.json", &[Depth::Binding]),
     ("binding_end", "end.json", &[Depth::Binding]),
+    ("child_presence_set", "children.json", &[Depth::Binding]),
     ("subagent_clear", "agents-clear.json", &[Depth::Binding]),
     (
         "subagent_retention_floor",
@@ -675,16 +676,6 @@ pub fn binding_path(
 /// The directory that holds a pane's reviews, one per owner.
 pub fn reviews_dir(root: &Path, address: &PaneAddress) -> PathBuf {
     pane_dir(root, address).join(REVIEWS)
-}
-
-/// The directory that holds a binding's sub-agent presences, one per agent.
-pub fn agents_dir(
-    root: &Path,
-    address: &PaneAddress,
-    launch_id: &str,
-    binding_id: &str,
-) -> PathBuf {
-    binding_dir(root, address, launch_id, binding_id).join(AGENTS)
 }
 
 /// The session index: `v2/sessions/<session key>/<entry key>.json` names
@@ -1096,11 +1087,7 @@ pub fn read_record_typed(
         Ok(protocol) => protocol,
         Err(error) => return RecordRead::Unsupported(error),
     };
-    let maximum = if expected_kind == Some("lifecycle_snapshot") {
-        protocol.limits.lifecycle_max_json_bytes
-    } else {
-        protocol.limits.max_json_bytes
-    };
+    let maximum = read_bound(protocol, expected_kind);
     let Ok(bytes) = read_bounded(file, maximum) else {
         return RecordRead::Unavailable(AttentionError::new(
             "probe_unavailable",
@@ -1157,6 +1144,29 @@ fn decode_record(
     }
     expected_identity.validate(&value)?;
     Ok(value)
+}
+
+/// The most bytes a reader accepts for a record of `kind`.
+fn read_bound(protocol: &Manifest, kind: Option<&str>) -> usize {
+    if kind == Some("lifecycle_snapshot") {
+        protocol.limits.lifecycle_max_json_bytes
+    } else {
+        protocol.limits.max_json_bytes
+    }
+}
+
+/// Refuses a record that its readers would reject as too large, for a writer
+/// whose record can grow and that must know before it commits whether the
+/// record can be written.
+pub(crate) fn within_read_bound(value: &Value) -> Result<()> {
+    let kind = value.get("kind").and_then(Value::as_str);
+    if canonical_json(value)?.len() > read_bound(manifest()?, kind) {
+        return Err(AttentionError::new(
+            "record_invalid",
+            "state record is larger than its readers accept",
+        ));
+    }
+    Ok(())
 }
 
 pub fn atomic_replace(path: &Path, value: &Value) -> Result<()> {
@@ -1270,33 +1280,6 @@ pub fn remove_file_durable(path: &Path) -> Result<bool> {
     }
 }
 
-/// Removes `files`, which are all entries of `directory`, and then makes the
-/// directory durable once, rather than once per file as
-/// [`remove_file_durable`] does: a thousand removals cost one directory sync,
-/// not a thousand. Until that sync, a crash can keep any of them, so the
-/// caller must be content with any subset surviving. A file already gone
-/// counts as removed by someone else. Returns how many this call removed.
-pub fn remove_files_durable(directory: &Path, files: &[PathBuf]) -> Result<usize> {
-    let mut removed = 0;
-    let mut failure = None;
-    for file in files {
-        match fs::remove_file(file) {
-            Ok(()) => removed += 1,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => {
-                failure = Some(AttentionError::new(
-                    "state_permissions",
-                    "state record could not be removed",
-                ));
-            }
-        }
-    }
-    if removed > 0 {
-        sync_parent_directory(directory)?;
-    }
-    failure.map_or(Ok(removed), Err)
-}
-
 /// Whether `directory` and every directory between it and the state root is
 /// a directory in its own right, not a symlink, so a removal there cannot
 /// reach through a link to somewhere outside the root. The root itself may be
@@ -1358,12 +1341,11 @@ pub const LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a write the plugin asks for waits for one state lock. The plugin
 /// waits for the answer on the GUI's thread, which draws nothing meanwhile,
 /// and a write takes two locks. A hook holds a lock for under a millisecond
-/// per write, so this covers a queue of dozens of them. A compaction of a
-/// binding's sub-agent records holds the launch lock for a time that grows
-/// with the records it reads and removes, so a backlog of several hundred can
-/// outlast this wait (docs/accepted-limitations.md, "What compacting sub-agent
-/// records costs"). A wait that still runs out is retried by the plugin, or
-/// reported for a key press.
+/// per write, so this covers a queue of dozens of them; a wait that still
+/// runs out is retried by the plugin, or reported for a key press. A child's
+/// hook holds it longer the more children are running, since it rewrites the
+/// binding's whole child set: about 0.9 ms more at 500 and 9 ms at 5,000 on
+/// an M5 Max.
 pub const PLUGIN_LOCK_TIMEOUT: Duration = Duration::from_millis(50);
 
 pub fn with_lock<T>(
@@ -1632,6 +1614,7 @@ mod tests {
             ("lifecycle_snapshot", format!("{binding}/lifecycle.json")),
             ("activity_clear", format!("{binding}/activity-clear.json")),
             ("binding_end", format!("{binding}/end.json")),
+            ("child_presence_set", format!("{binding}/children.json")),
             ("subagent_clear", format!("{binding}/agents-clear.json")),
             (
                 "subagent_retention_floor",
@@ -1657,6 +1640,11 @@ mod tests {
             ("binding", format!("{binding}/end.json")),
             ("binding", format!("{binding}/agents/binding.json")),
             ("binding_end", format!("{launch}/end.json")),
+            ("child_presence_set", format!("{launch}/children.json")),
+            (
+                "child_presence_set",
+                format!("{binding}/agents/children.json"),
+            ),
             ("subagent_clear", format!("{launch}/agents-clear.json")),
             ("subagent_presence", format!("{binding}/{key}.json")),
             ("subagent_presence", format!("{launch}/agents/{key}.json")),

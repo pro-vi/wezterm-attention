@@ -194,6 +194,24 @@ def validate_typed_field(
     elif field_type == "end_reason":
         if value not in enum_set(manifest, "end_reasons"):
             raise InvalidRecord("invalid end reason")
+    elif field_type == "child_presence_entries":
+        if not isinstance(value, list):
+            raise InvalidRecord("live children must be an array")
+        for item in value:
+            validate_shape(item, manifest["lifecycle_shapes"]["child_presence_entry"], manifest, None)
+    elif field_type in {"child_parent_clear", "child_lifetime_end"}:
+        validate_shape(value, manifest["lifecycle_shapes"][field_type], manifest, None)
+    elif field_type == "child_agent_ids":
+        if not isinstance(value, list) or not all(
+            is_safe_text(item, limits["safe_label_max_bytes"]) for item in value
+        ):
+            raise InvalidRecord("invalid child agent ids")
+    elif field_type == "child_presence_event":
+        if value not in enum_set(manifest, "child_presence_events"):
+            raise InvalidRecord("invalid child last event")
+    elif field_type == "child_presence_status":
+        if value not in enum_set(manifest, "child_presence_statuses"):
+            raise InvalidRecord("invalid child status")
     else:
         raise InvalidRecord(f"manifest names unsupported field type {field_type!r}")
 
@@ -243,6 +261,8 @@ def parse_record(value: Any, manifest: dict[str, Any]) -> str:
         validate_shape(value, spec, manifest, kind)
         if kind == "lifecycle_snapshot":
             validate_lifecycle(value, manifest)
+        if kind == "child_presence_set":
+            validate_child_presence_set(value)
     except InvalidRecord:
         return "record_invalid"
     if kind == "subagent_presence" and hashlib.sha256(
@@ -256,6 +276,16 @@ def parse_record(value: Any, manifest: dict[str, Any]) -> str:
     if kind == "claim" and not claim_owner_is_whole(value):
         return "record_invalid"
     return "valid"
+
+
+def validate_child_presence_set(value: dict[str, Any]) -> None:
+    """One entry per child in the live set, and one per child a parent stop removed."""
+    live = [child["agent_id"] for child in value["live"]]
+    if len(live) != len(set(live)):
+        raise InvalidRecord("a child appears twice in the live set")
+    removed = value.get("parent_clear", {}).get("removed", [])
+    if len(removed) != len(set(removed)):
+        raise InvalidRecord("a child appears twice among those a parent stop removed")
 
 
 CLAIM_OWNER_FIELDS = ("owner_pid", "owner_started_sec", "owner_started_usec", "owner_boot_session_id")
@@ -416,40 +446,83 @@ def case_value(case: dict[str, Any], fixture: dict[str, Any]) -> Any:
     return value
 
 
-def eligible_presence(
-    case: dict[str, Any], fixture: dict[str, Any], manifest: dict[str, Any]
-) -> tuple[bool, str | None]:
-    presence = copy.deepcopy(fixture["record_samples"]["subagent_presence"])
-    for field in ("written_at_unix_ns", "observed_mono_ns", "status"):
-        if field in case:
-            presence[field] = case[field]
-    now = case.get("now_unix_ns")
-    if not isinstance(now, str):
-        return False, "probe_unavailable"
-    if parse_record(presence, manifest) != "valid":
-        return False, "record_invalid"
-    observed = presence["observed_mono_ns"]
-    clear = case.get(
-        "clear_mono_ns",
-        fixture["record_samples"]["subagent_clear"]["observed_mono_ns"],
-    )
-    floor = case.get(
-        "floor_mono_ns",
-        fixture["record_samples"]["subagent_retention_floor"]["floor_mono_ns"],
-    )
-    if presence["status"] != "active":
-        return False, None
-    if clear is not False and observed <= clear:
-        return False, None
-    if floor is not False and observed <= floor:
-        return False, None
-    written = presence["written_at_unix_ns"]
-    if not DECIMAL_NS20.fullmatch(now):
-        return False, "probe_unavailable"
-    if now < written:
-        return False, "clock_skew"
-    expiry = int(written) + presence["ttl_ms"] * 1_000_000
-    return int(now) <= expiry, None
+def ends_binding(end: dict[str, Any], binding: dict[str, Any]) -> bool:
+    """An end ends the binding event it names, or any binding it was observed at or after."""
+    named = "binding_event_id" in end and end["binding_event_id"] == binding["event_id"]
+    return named or end["observed_mono_ns"] >= binding["observed_mono_ns"]
+
+
+UNCERTAIN_COVERAGE = {"invalid", "unsupported", "unavailable"}
+
+
+def patched(sample: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    value = copy.deepcopy(sample)
+    value.update(copy.deepcopy(patch))
+    return value
+
+
+def children_facet(case: dict[str, Any], fixture: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+    """The children a tab shows for one coverage row, decided independently of both readers."""
+    samples = fixture["record_samples"]
+    binding = patched(samples["binding"], case["binding"])
+    if case["end"] == "absent":
+        end, end_status = None, "missing"
+    elif case["end"] == "unavailable":
+        end, end_status = None, "unavailable"
+    else:
+        end = patched(samples["binding_end"], case["end"])
+        end_status = parse_record(end, manifest)
+        if end_status != "valid":
+            end = None
+    children = case["children"]
+    if children == "absent":
+        read, status = None, "missing"
+    elif children == "unavailable":
+        # The plugin keeps the set it read last and counts it again when the
+        # file cannot be read now; inspect has no earlier read.
+        previous = case.get("previous_children")
+        if previous is None:
+            read, status = None, "unavailable"
+        else:
+            read, status = patched(samples["child_presence_set"], previous), "valid"
+    else:
+        read = patched(samples["child_presence_set"], children)
+        status = parse_record(read, manifest)
+    facet = {"count": 0, "waiting": 0}
+    if end is not None and ends_binding(end, binding):
+        facet["coverage"] = "ended"
+    elif binding["provider"] not in enum_set(manifest, "subagent_providers"):
+        facet["coverage"] = "none"
+    # Which children count depends on the end, so an end that could not be
+    # read leaves the count unknown.
+    elif end_status == "unavailable":
+        facet["coverage"] = "unavailable"
+    elif end_status == "future_schema":
+        facet["coverage"] = "unsupported"
+    elif end_status not in ("valid", "missing"):
+        facet["coverage"] = "invalid"
+    elif status == "missing":
+        facet["coverage"] = "known"
+    elif status == "unavailable":
+        facet["coverage"] = "unavailable"
+    elif status == "future_schema":
+        facet["coverage"] = "unsupported"
+    elif status != "valid" or read["provider"] != binding["provider"]:
+        facet["coverage"] = "invalid"
+    else:
+        facet["coverage"] = "known"
+        # A set that has not applied the binding's end was written before it.
+        applied = end is None or read.get("lifetime_end", {}).get("event_id") == end["event_id"]
+        for child in read["live"] if applied else []:
+            facet["count"] += 1
+            facet["waiting"] += child["status"] == "waiting"
+    if facet["count"] > 0:
+        facet["renders"] = f"+{facet['count']}"
+    elif facet["coverage"] in UNCERTAIN_COVERAGE:
+        facet["renders"] = "+?"
+    else:
+        facet["renders"] = ""
+    return facet
 
 
 def check_path_identity(path: str, record: dict[str, Any]) -> None:
@@ -514,15 +587,21 @@ def run(render: bool) -> int:
         if actual != case["expected"]:
             failures.append(f"{case['id']}: expected {case['expected']}, got {actual}")
 
-    eligibility: dict[str, bool] = {}
-    for case in fixture["eligibility_cases"]:
-        actual, diagnostic = eligible_presence(case, fixture, manifest)
-        eligibility[case["id"]] = actual
-        if actual is not case["expected"] or diagnostic != case.get("diagnostic"):
-            failures.append(
-                f"{case['id']}: expected ({case['expected']}, {case.get('diagnostic')}), "
-                f"got ({actual}, {diagnostic})"
-            )
+    samples = fixture["record_samples"]
+    for case in fixture["ends_binding_cases"]:
+        actual = ends_binding(
+            patched(samples["binding_end"], case["end"]),
+            patched(samples["binding"], case["binding"]),
+        )
+        if actual is not case["expected"]:
+            failures.append(f"{case['id']}: expected {case['expected']}, got {actual}")
+
+    coverage: dict[str, dict[str, Any]] = {}
+    for case in fixture["children_coverage_cases"]:
+        actual = children_facet(case, fixture, manifest)
+        coverage[case["id"]] = actual
+        if actual != case["expected"]:
+            failures.append(f"{case['id']}: expected {case['expected']}, got {actual}")
 
     state = fixture["state_case"]
     for entry in state["files"]:
@@ -536,15 +615,6 @@ def run(render: bool) -> int:
         except InvalidRecord as error:
             failures.append(f"state {entry['path']}: {error}")
 
-    older = copy.deepcopy(fixture["record_samples"]["subagent_presence"])
-    newer = copy.deepcopy(older)
-    older["observed_mono_ns"] = "00000000000000000001"
-    older["written_at_unix_ns"] = "00000000999000000000"
-    newer["observed_mono_ns"] = "00000000000000000002"
-    newer["written_at_unix_ns"] = "00000000001000000000"
-    if not older["observed_mono_ns"] < newer["observed_mono_ns"]:
-        failures.append("event order incorrectly depended on written_at_unix_ns")
-
     if failures:
         for failure in failures:
             print(f"not ok - {failure}", file=sys.stderr)
@@ -552,7 +622,8 @@ def run(render: bool) -> int:
 
     print(
         f"ok - {len(fixture['parse_cases'])} protocol rows; "
-        f"{len(fixture['eligibility_cases'])} eligibility rows"
+        f"{len(fixture['ends_binding_cases'])} binding end rows; "
+        f"{len(fixture['children_coverage_cases'])} child coverage rows"
     )
     if render:
         print("\nprotocol fixture state tree")
@@ -562,8 +633,8 @@ def run(render: bool) -> int:
         print(json.dumps(state["expected_view"], indent=2, sort_keys=True))
         print("\nexpected render")
         print(json.dumps(state["expected_render"], indent=2, sort_keys=True))
-        print("\neligibility")
-        print(json.dumps(eligibility, indent=2, sort_keys=True))
+        print("\nchild coverage")
+        print(json.dumps(coverage, indent=2, sort_keys=True))
     return 0
 
 

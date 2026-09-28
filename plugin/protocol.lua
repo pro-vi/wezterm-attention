@@ -367,18 +367,46 @@ return function(context)
     return nil, "invalid activity target kind"
   end
 
+  --- A JSON array: a table with no object marker from the decoder, keyed
+  --- 1..n with nothing else in it.
+  local function is_array(value)
+    if type(value) ~= "table" or container_kinds[value] == "{" then return false end
+    local count = #value
+    for key in pairs(value) do
+      if type(key) ~= "number" or key % 1 ~= 0 or key < 1 or key > count then return false end
+    end
+    return true
+  end
+
   local validate_shape
   local function validate_field(field_type, value, expected_kind)
     local limits = protocol.limits
-    if field_type == "lifecycle_pools" or field_type == "observation_pool" or field_type == "native_correlation" then
+    if field_type == "child_presence_entries" then
+      if not is_array(value) then return false end
+      for _, item in ipairs(value) do
+        if not validate_shape(item, protocol.lifecycle_shapes.child_presence_entry) then return false end
+      end
+      return true
+    elseif field_type == "child_parent_clear" or field_type == "child_lifetime_end" then
+      return validate_shape(value, protocol.lifecycle_shapes[field_type]) ~= nil
+    elseif field_type == "child_agent_ids" then
+      if not is_array(value) then return false end
+      for _, item in ipairs(value) do
+        if not is_safe_text(item, limits.safe_label_max_bytes) then return false end
+      end
+      return true
+    elseif field_type == "child_presence_event" then
+      return list_contains(protocol.enums.child_presence_events, value)
+    elseif field_type == "child_presence_status" then
+      return list_contains(protocol.enums.child_presence_statuses, value)
+    elseif field_type == "lifecycle_pools" or field_type == "observation_pool" or field_type == "native_correlation" then
       local name = field_type == "lifecycle_pools" and "pools" or (field_type == "observation_pool" and "pool" or "correlation")
       return validate_shape(value, protocol.lifecycle_shapes[name]) ~= nil
     elseif field_type == "lifecycle_actor" then
       return type(value) == "table" and (value.kind == "lead" or value.kind == "child")
         and validate_shape(value, protocol.lifecycle_shapes[value.kind], value.kind) ~= nil
     elseif field_type == "observation_array" then
-      if type(value) ~= "table" or container_kinds[value] == "{" or #value > limits.lifecycle_pool_max_count then return false end
-      for key in pairs(value) do if type(key) ~= "number" or key % 1 ~= 0 or key < 1 or key > #value then return false end end
+      if not is_array(value) or #value > limits.lifecycle_pool_max_count then return false end
       container_kinds[value] = "["
       for _, item in ipairs(value) do
         local spec = type(item) == "table" and protocol.lifecycle_variants[item.kind]
@@ -627,6 +655,22 @@ return function(context)
       return nil, invalid("claim names only part of its owner")
     end
     if kind == "lifecycle_snapshot" and not validate_lifecycle(parsed) then return nil, invalid("lifecycle snapshot violates its contract") end
+    if kind == "child_presence_set" then
+      local function unique(ids)
+        local seen = {}
+        for _, id in ipairs(ids) do
+          if seen[id] then return false end
+          seen[id] = true
+        end
+        return true
+      end
+      local live = {}
+      for index, child in ipairs(parsed.live) do live[index] = child.agent_id end
+      if not unique(live) then return nil, invalid("a child appears twice in the live set") end
+      if parsed.parent_clear and not unique(parsed.parent_clear.removed) then
+        return nil, invalid("a child appears twice among those a parent stop removed")
+      end
+    end
     return parsed
   end
 
@@ -876,13 +920,11 @@ return function(context)
       return records, diagnostics
     end
 
-    -- A child record gone since the glob was removed by a writer's
-    -- compaction, which removes only records at or below the binding's
-    -- retention floor. Any other record gone mid-read is an error.
-    local required = kind ~= "subagent_presence"
+    -- A record listed and then gone before its read leaves the collection
+    -- unknown, so it is a failed read like any other.
     for _, path in ipairs(paths) do
       local record, record_diagnostic = read_expected_record_cached(
-        path, kind, expected, required, cached_by_path and cached_by_path[path])
+        path, kind, expected, true, cached_by_path and cached_by_path[path])
       if record and key_field and path_stem(path) ~= record[key_field] then
         record, record_diagnostic = nil, identity_diagnostic(kind, path)
       end
@@ -911,25 +953,6 @@ return function(context)
       end
     end
     return false
-  end
-
-  local function eligible_subagent(record, clear, floor, now_unix_ns)
-    if record.status ~= "active" then return false end
-    if clear and compare_ns20(record.observed_mono_ns, clear.observed_mono_ns) <= 0 then
-      return false
-    end
-    if floor and compare_ns20(record.observed_mono_ns, floor.floor_mono_ns) <= 0 then
-      return false
-    end
-    local expired, age_error, boundary =
-      age_exceeds_ms(now_unix_ns, record.written_at_unix_ns, record.ttl_ms)
-    if age_error then
-      return false, diagnostic(age_error, "subagent wall age is not trustworthy", {
-        agent_key = record.agent_key,
-      })
-    end
-    if expired then return false end
-    return true, nil, boundary
   end
 
   local function deep_copy(value, seen)
@@ -984,7 +1007,7 @@ return function(context)
     collect_diagnostic = collect_diagnostic,
     health_from_diagnostics = health_from_diagnostics,
     diagnostics_have_unavailable_io = diagnostics_have_unavailable_io,
-    eligible_subagent = eligible_subagent,
+    list_contains = list_contains,
     deep_copy = deep_copy,
     now_ms = now_ms,
     frame_for_now = frame_for_now,

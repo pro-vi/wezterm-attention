@@ -15,6 +15,17 @@ return function(context)
     return ids
   end
 
+  --- The text that says how many sub-agents are running: "+N" for a known
+  --- count above zero, "+N?" when some pane's count could not be read, "+?"
+  --- when nothing is counted and some count could not be read, and "" when
+  --- there is nothing to say.
+  local function subagent_count_text(count, uncertain)
+    local counted = (count or 0) > 0 and tostring(count) or ""
+    if uncertain == true then return "+" .. counted .. "?" end
+    if counted ~= "" then return "+" .. counted end
+    return ""
+  end
+
   --- Project one tab's panes into exactly what a title formatter can see:
   --- { indicator = string, type = string|nil, color = string|nil }.
   --- Pane IDs are the input, not a GUI or mux tab object, so the renderer and
@@ -34,11 +45,13 @@ return function(context)
     local best_health   = nil
 
     local subagents = 0
+    local subagents_uncertain = false
 
     for _, id in ipairs(pane_ids) do
       local cached = attention_cache[id]
       if cached then
         subagents = subagents + (cached.subagents or 0)
+        subagents_uncertain = subagents_uncertain or cached.subagents_uncertain == true
         -- A count-only entry has no type. It contributes its subagents and never
         -- competes for the tab's marker glyph.
         local candidate_type = cached.type
@@ -61,26 +74,31 @@ return function(context)
       end
     end
 
+    -- A pane whose count could not be read marks the tab's count with "?":
+    -- the other panes' children are counted, and there may be more.
+    local count_text = subagent_count_text(subagents, subagents_uncertain)
+
     if not best_type then
       -- No marker anywhere in the tab, but subagents of one of its panes are
-      -- still running: show the count alone, tinted as stop. There is no marker
-      -- type to name here, so `type` stays nil.
-      if subagents > 0 then
+      -- still running, or may be: show the count alone, in the tab's default
+      -- colors. There is no marker type to name here, so `type` stays nil.
+      if count_text ~= "" then
         return {
-          indicator = "+" .. subagents .. " ", type = nil, color = nil,
-          subagents = subagents, source = nil, provider = nil,
+          indicator = count_text .. " ", type = nil, color = nil,
+          subagents = subagents, subagents_uncertain = subagents_uncertain,
+          source = nil, provider = nil,
         }
       end
       return {
         indicator = "", type = nil, color = nil, subagents = 0,
-        source = nil, provider = nil,
+        subagents_uncertain = false, source = nil, provider = nil,
       }
     end
 
     -- The count rides inside the indicator's own trailing space: "✓ " with two
     -- subagents renders "✓+2 ", which adds only the "+2".
     local function with_count(glyph)
-      if subagents > 0 then return glyph:gsub("%s+$", "") .. "+" .. subagents .. " " end
+      if count_text ~= "" then return glyph:gsub("%s+$", "") .. count_text .. " " end
       return glyph
     end
 
@@ -107,6 +125,7 @@ return function(context)
       type = best_type,
       color = cfg_colors[best_type],
       subagents = subagents,
+      subagents_uncertain = subagents_uncertain,
       source = best_source,
       provider = best_provider,
       review = best_review,
@@ -143,6 +162,7 @@ return function(context)
       type = visible.type,
       color = visible.color,
       subagents = visible.subagents or 0,
+      subagents_uncertain = visible.subagents_uncertain == true,
       source = visible.source,
       provider = visible.provider,
       review = visible.review == true,
@@ -227,6 +247,7 @@ return function(context)
 
   return {
     gui_tab_pane_ids = gui_tab_pane_ids,
+    subagent_count_text = subagent_count_text,
     resolve_visible_attention = resolve_visible_attention,
     decorate_tab_title = decorate_tab_title,
     drawn_tab_order = drawn_tab_order,
