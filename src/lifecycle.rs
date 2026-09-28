@@ -919,14 +919,20 @@ fn append_observation(
             ));
         }
         let identity = resolved.binding(&binding_id);
-        let path = identity.path(&resolved.root, "lifecycle_snapshot")?;
-        let existing = read_record(&path, Some("lifecycle_snapshot"), &identity)?;
+        // Each actor keeps its own snapshot, so however much the children
+        // record, none of it can evict the lead's evidence.
+        let kind = match draft.actor {
+            crate::observations::Actor::Lead => "lifecycle_snapshot",
+            crate::observations::Actor::Child { .. } => "child_lifecycle_snapshot",
+        };
+        let path = identity.path(&resolved.root, kind)?;
+        let existing = read_record(&path, Some(kind), &identity)?;
         let mut snapshot = match existing {
             Some(value) => serde_json::from_value::<LifecycleSnapshot>(value).map_err(|_| {
                 AttentionError::new("record_invalid", "lifecycle snapshot is invalid")
             })?,
             None => LifecycleSnapshot {
-                kind: "lifecycle_snapshot".to_owned(),
+                kind: kind.to_owned(),
                 schema: manifest()?.record_schema,
                 address: resolved.address.clone(),
                 launch_id: resolved.launch_id.clone(),

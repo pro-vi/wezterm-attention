@@ -948,6 +948,75 @@ fn an_old_binding_holding_a_newer_child_set_is_kept() {
     assert!(path.exists(), "{diagnostics:?}");
 }
 
+/// Binds session-a and records one tool call of one of its sub-agents, which
+/// the writer keeps in the binding's `children-lifecycle.json`. Returns that
+/// file's path.
+fn bound_with_child_lifecycle_evidence(setup: &Setup) -> PathBuf {
+    setup.claim_and_bind();
+    setup.provider_event(
+        "PreToolUse",
+        "session-a",
+        json!({"tool_name":"Bash","agent_id":"child-a","agent_type":"Explore"}),
+        "00000000000000000250",
+    );
+    let path = setup.binding_dir().join("children-lifecycle.json");
+    assert!(path.exists());
+    path
+}
+
+// Children's lifecycle evidence goes with its binding once the binding has
+// aged out, and doctor does not call it unknown on the way.
+#[test]
+fn an_old_binding_holding_childrens_lifecycle_evidence_is_pruned_whole() {
+    let setup = Setup::new();
+    let path = bound_with_child_lifecycle_evidence(&setup);
+    let old_dir = setup.binding_dir();
+    setup.clock.set_unix(1);
+    setup.provider_event(
+        "SessionEnd",
+        "session-a",
+        json!({"reason":"other"}),
+        "00000000000000000300",
+    );
+    setup.provider_event(
+        "SessionStart",
+        "session-b",
+        json!({"source":"resume"}),
+        "00000000000000000400",
+    );
+    let relative = json!(path.strip_prefix(setup.root()).unwrap().to_str().unwrap());
+    let (_, doctor) = setup.doctor();
+    assert!(
+        !doctor
+            .iter()
+            .any(|item| item.context.get("path") == Some(&relative)),
+        "doctor names {relative}: {doctor:?}"
+    );
+    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
+    let (_, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000735"));
+    assert!(!old_dir.exists(), "{diagnostics:?}");
+}
+
+// The children's evidence is checked as a lifecycle record: a lead
+// observation in it is an invalid record, not an unknown file.
+#[test]
+fn doctor_reports_a_lead_observation_among_the_childrens_evidence() {
+    let setup = Setup::new();
+    let path = bound_with_child_lifecycle_evidence(&setup);
+    let mut snapshot: Value =
+        serde_json::from_slice(&fs::read(&path).expect("children's evidence")).expect("JSON");
+    snapshot["pools"]["general"]["observations"][0]["actor"] = json!({"kind":"lead"});
+    fs::write(&path, serde_json::to_vec(&snapshot).expect("JSON")).expect("rewrite");
+    let relative = json!(path.strip_prefix(setup.root()).unwrap().to_str().unwrap());
+    let (_, diagnostics) = setup.doctor();
+    assert!(
+        diagnostics.iter().any(|item| item.code == "record_invalid"
+            && item.message == "state record is invalid"
+            && item.context.get("path") == Some(&relative)),
+        "{diagnostics:?}"
+    );
+}
+
 /// Sweep deletes nothing inside the binding a pane is on, per-child records
 /// included, however old they are: they go only with their binding.
 #[test]

@@ -4916,7 +4916,7 @@ test("lifecycle snapshot grammar agrees with the shared fixture", function()
   local fixture = assert(api.decode_json(file:read("*a")))
   file:close()
   for _, case in ipairs(fixture.cases) do
-    local parsed, problem = api.parse_v2_record(case.value, "lifecycle_snapshot")
+    local parsed, problem = api.parse_v2_record(case.value, case.value.kind)
     assert((parsed and "valid" or problem.code) == case.expected, case.id)
   end
   for _, case in ipairs(fixture.raw_cases) do
@@ -4931,9 +4931,11 @@ test("lifecycle snapshot grammar agrees with the shared fixture", function()
       return string.rep(" ", count)
     end, close = function() return true end }
   end
-  local ok, result, problem, status = pcall(api.read_record_file, "/synthetic/lifecycle.json", "lifecycle_snapshot")
+  for _, kind in ipairs({ "lifecycle_snapshot", "child_lifecycle_snapshot" }) do
+    local ok, result, problem, status = pcall(api.read_record_file, "/synthetic/lifecycle.json", kind)
+    assert(ok and not result and problem.code == "record_invalid" and status == "invalid", kind)
+  end
   io.open = original_open
-  assert(ok and not result and problem.code == "record_invalid" and status == "invalid")
   local parsed = api.parse_v2_record_json(string.rep("[", 9) .. string.rep("]", 9), "lifecycle_snapshot")
   assert(not parsed, "deep lifecycle containers must reject")
 end)

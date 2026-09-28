@@ -242,7 +242,7 @@ impl LifecycleView {
     pub fn from_snapshot(snapshot: &LifecycleSnapshot, now: Option<&str>) -> Result<Self> {
         crate::protocol::validate_record(
             &serde_json::to_value(snapshot).map_err(AttentionError::record_json)?,
-            Some("lifecycle_snapshot"),
+            Some(snapshot.kind.as_str()),
         )?;
         let mut view = Self::empty(LifecycleAvailability::Available);
         view.snapshot_id = Some(snapshot.snapshot_id.clone());
@@ -650,6 +650,11 @@ impl LifecycleSnapshot {
                 }
                 let key = item.storage_key_parts();
                 if !keys.insert(key) {
+                    return Err(invalid());
+                }
+                // Children's observations have their own snapshot; the lead's
+                // are only ever in `lifecycle.json`.
+                if self.kind == "child_lifecycle_snapshot" && item.actor == Actor::Lead {
                     return Err(invalid());
                 }
                 if let Actor::Child {

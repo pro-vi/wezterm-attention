@@ -519,6 +519,13 @@ return function(context)
     return "generic", nil
   end
 
+  -- Records holding lifecycle observations: the lead's snapshot or the one its
+  -- children write beside it. Both are read under the lifecycle bounds and
+  -- checked by the same rules.
+  local function is_lifecycle_snapshot_kind(kind)
+    return kind == "lifecycle_snapshot" or kind == "child_lifecycle_snapshot"
+  end
+
   local function validate_lifecycle(value)
     local limits, keys, ids = protocol.limits, {}, {}
     for name, pool in pairs(value.pools) do
@@ -534,6 +541,9 @@ return function(context)
           or (pool.retention_floor_mono_ns and item.observed_mono_ns <= pool.retention_floor_mono_ns) then return false end
         keys[key], ids[item.observation_id], prior = true, true, order
         if item.correlation and item.correlation.elicitation_id and not item.correlation.mcp_server_name then return false end
+        -- Children's observations have their own snapshot; the lead's are only
+        -- ever in lifecycle.json.
+        if value.kind == "child_lifecycle_snapshot" and item.actor.kind ~= "child" then return false end
         if item.actor.kind == "child" and (value.provider == "pi" or sha256(item.actor.agent_id) ~= item.actor.agent_key) then return false end
         if item.kind == "tool_preflight" or item.kind == "tool_result" then
           local class, mode = classify_lifecycle_tool(value.provider, item.tool_name)
@@ -654,7 +664,7 @@ return function(context)
     if kind == "claim" and not claim_owner_is_whole(parsed) then
       return nil, invalid("claim names only part of its owner")
     end
-    if kind == "lifecycle_snapshot" and not validate_lifecycle(parsed) then return nil, invalid("lifecycle snapshot violates its contract") end
+    if is_lifecycle_snapshot_kind(kind) and not validate_lifecycle(parsed) then return nil, invalid("lifecycle snapshot violates its contract") end
     if kind == "child_presence_set" then
       local function unique(ids)
         local seen = {}
@@ -708,14 +718,14 @@ return function(context)
     if json_contains_null_literal(content) then
       return nil, invalid("record contains unsupported null")
     end
-    if expected_kind == "lifecycle_snapshot" and not lifecycle_raw_valid(content) then
+    if is_lifecycle_snapshot_kind(expected_kind) and not lifecycle_raw_valid(content) then
       return nil, invalid("lifecycle JSON exceeds its bounds or contains a noncanonical integer")
     end
     local value, parse_err = decode_json(content)
     if value == nil then
       return nil, invalid("record is not valid JSON", { detail = tostring(parse_err) })
     end
-    if type(value) == "table" and value.kind == "lifecycle_snapshot" and expected_kind ~= "lifecycle_snapshot" and not lifecycle_raw_valid(content) then
+    if type(value) == "table" and is_lifecycle_snapshot_kind(value.kind) and not is_lifecycle_snapshot_kind(expected_kind) and not lifecycle_raw_valid(content) then
       return nil, invalid("lifecycle JSON exceeds its bounds or contains a noncanonical integer")
     end
     return parse_v2_record(value, expected_kind)
@@ -821,7 +831,7 @@ return function(context)
   local function read_record_file(path, expected_kind, previous)
     local limits = protocol and protocol.limits
     if not limits then return nil, diagnostic("probe_unavailable", "protocol limits unavailable"), "unavailable" end
-    local maximum = expected_kind == "lifecycle_snapshot" and limits.lifecycle_max_json_bytes or limits.max_json_bytes
+    local maximum = is_lifecycle_snapshot_kind(expected_kind) and limits.lifecycle_max_json_bytes or limits.max_json_bytes
     local content, read_err, read_status = read_all(path, maximum)
     if not content then
       if read_status == "invalid" then return nil, invalid("record exceeds its bound"), "invalid" end

@@ -869,6 +869,7 @@
   },
   "records": {
     "lifecycle_snapshot": {"required":["kind","schema","address","launch_id","binding_id","provider","snapshot_id","written_at_unix_ns","pools"],"optional":[],"types":{"kind":"record_kind","schema":"record_schema","address":"pane_address","launch_id":"uuid","binding_id":"hex64","provider":"provider","snapshot_id":"uuid","written_at_unix_ns":"unix_ns20","pools":"lifecycle_pools"}},
+    "child_lifecycle_snapshot": {"required":["kind","schema","address","launch_id","binding_id","provider","snapshot_id","written_at_unix_ns","pools"],"optional":[],"types":{"kind":"record_kind","schema":"record_schema","address":"pane_address","launch_id":"uuid","binding_id":"hex64","provider":"provider","snapshot_id":"uuid","written_at_unix_ns":"unix_ns20","pools":"lifecycle_pools"}},
     "realm": {
       "required": ["kind", "schema", "realm_id", "socket_path", "writer_version"],
       "optional": [],
