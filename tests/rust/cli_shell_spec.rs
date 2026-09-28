@@ -358,7 +358,7 @@ fn rust_cli_help_errors_and_empty_hook_input_keep_the_documented_shape() {
         .expect("run hook help");
     let help = String::from_utf8_lossy(&hook_help.stdout);
     assert!(help.contains("SubagentStop"));
-    assert!(!help.contains("SubagentStart"));
+    assert!(help.contains("SubagentStart"));
 
     let started = Instant::now();
     let empty = Command::new(binary)

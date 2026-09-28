@@ -18,13 +18,13 @@ use crate::protocol::{
 };
 use crate::query::{FileStamp, read_bindings_with_ports, read_tab_publications};
 use crate::records::{
-    AGENTS, BINDING_FILE, BindingState, CommitPlan, FileRecords, LOCK_TIMEOUT, RecordIdentity,
-    RecordRead, Replacement, agents_dir, atomic_replace, atomic_replace_if_different,
-    binding_record_kind, binding_session_entry, claim_lock, collect_binding_files,
-    collect_state_files, commit, directory_confined, ends_binding, incarnation_dir, is_state_lock,
-    launch_lock, name_address, naming_record, pane_dir, read_bounded, read_record, read_record_at,
-    record_address, removal_confined, remove_file_durable, remove_files_durable,
-    session_index_marker, session_index_path, state_relative, with_lock,
+    AGENTS, BINDING_FILE, BindingState, CommitPlan, FileRecords, RecordIdentity, RecordRead,
+    Replacement, agents_dir, atomic_replace, atomic_replace_if_different, binding_record_kind,
+    binding_session_entry, claim_lock, collect_binding_files, collect_state_files, commit,
+    directory_confined, ends_binding, incarnation_dir, is_state_lock, launch_lock, name_address,
+    naming_record, pane_dir, read_bounded, read_record, read_record_at, record_address,
+    removal_confined, remove_file_durable, remove_files_durable, session_index_marker,
+    session_index_path, state_relative,
 };
 use crate::wezterm::{Clock, PaneLister, Presence, ProcessInspector, ProcessProbe};
 
@@ -693,35 +693,6 @@ fn apply_compaction(
         ));
     }
     remove_files_durable(&agents, &plan.covered)
-}
-
-/// Compacts one binding's subagent records after a hook saved a stop, so
-/// that, unless a record holds the floor back, the records a reader lists
-/// stay about as many as the children that ran within one presence lifetime
-/// of the latest stop, however long the session. It takes the launch lock
-/// alone, the one every writer of those records takes, and leaves the claim
-/// lock free. The wall clock is read once the lock is held, so every record
-/// on disk was written by a hook that read its own clock earlier. Returns how
-/// many records were removed.
-pub(crate) fn compact_subagents(
-    root: &Path,
-    address: &PaneAddress,
-    launch_id: &str,
-    binding_id: &str,
-    clock: &dyn Clock,
-) -> Result<usize> {
-    with_lock(&launch_lock(root, address, launch_id), LOCK_TIMEOUT, || {
-        let now = clock.unix_ns20()?;
-        let plan = compaction_plan(root, address, launch_id, binding_id, &now, None)?;
-        apply_compaction(
-            root,
-            address,
-            launch_id,
-            binding_id,
-            &plan,
-            &Uuid::new_v4().to_string(),
-        )
-    })
 }
 
 fn binding_known_and_prunable(

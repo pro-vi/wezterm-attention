@@ -328,7 +328,12 @@ fn parse_provider_common(
         None => None,
     };
     let mut dropped = DroppedFields::default();
-    let agent_type = dropped.keep("agent_type", optional_label(payload, "agent_type"));
+    // Claude sends an empty `agent_type` for the agents it runs for itself,
+    // such as prompt suggestions; that says no type, and is not malformed.
+    let agent_type = match payload.get("agent_type") {
+        Some(Value::String(text)) if text.is_empty() => None,
+        _ => dropped.keep("agent_type", optional_label(payload, "agent_type")),
+    };
     let transcript_path = dropped.keep(transcript_field, optional_path(payload, transcript_field));
     let cwd = dropped.keep("cwd", optional_path(payload, "cwd"));
     let config_dir = dropped.keep(config_field, environment_path(env, config_field));
@@ -477,11 +482,16 @@ fn parse_claude_or_codex(
         return event;
     }
     if event_name == "SubagentStart" {
-        return ProviderEvent::ignored(
-            Some(provider),
-            "integration_version_mismatch",
-            "SubagentStart does not establish presence",
-        );
+        if event.agent_id.is_none() {
+            return ProviderEvent::ignored(
+                Some(provider),
+                "record_invalid",
+                "SubagentStart requires a valid agent_id",
+            );
+        }
+        event.action = ProviderAction::ChildActive;
+        event.child_source = Some("subagent_start".to_owned());
+        return event;
     }
     if event_name == "SubagentStop" {
         if event.agent_id.is_none() {

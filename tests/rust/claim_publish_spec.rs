@@ -21,8 +21,7 @@ use trusted_scratch::TrustedScratch;
 use uuid::Uuid;
 use wezterm_attention::identity::{length_prefixed_digest, pane_address};
 use wezterm_attention::protocol::{
-    EMBEDDED_MANIFEST, eligible_subagent_presence, manifest, parse_manifest, parse_record_value,
-    parse_wire_value,
+    EMBEDDED_MANIFEST, manifest, parse_manifest, parse_record_value, parse_wire_value,
 };
 use wezterm_attention::query::{read_bindings, read_bindings_with_ports};
 use wezterm_attention::records::{
@@ -392,46 +391,6 @@ fn shared_protocol_rows_match_the_independent_checker_verdicts() {
         };
         let expected = case["expected"].as_str().expect("expected verdict");
         assert_eq!(actual.as_str(), expected, "case {}", case["id"]);
-    }
-    for case in fixture["eligibility_cases"]
-        .as_array()
-        .expect("eligibility cases")
-    {
-        let mut presence = fixture["record_samples"]["subagent_presence"].clone();
-        for field in ["written_at_unix_ns", "observed_mono_ns", "status"] {
-            if let Some(value) = case.get(field) {
-                presence[field] = value.clone();
-            }
-        }
-        let clear = match case.get("clear_mono_ns") {
-            Some(Value::Bool(false)) => None,
-            Some(value) => value.as_str(),
-            None => fixture["record_samples"]["subagent_clear"]["observed_mono_ns"].as_str(),
-        };
-        let floor = match case.get("floor_mono_ns") {
-            Some(Value::Bool(false)) => None,
-            Some(value) => value.as_str(),
-            None => fixture["record_samples"]["subagent_retention_floor"]["floor_mono_ns"].as_str(),
-        };
-        let (eligible, diagnostic) = eligible_subagent_presence(
-            &presence,
-            clear,
-            floor,
-            case.get("now_unix_ns").and_then(Value::as_str),
-            protocol,
-        );
-        assert_eq!(
-            eligible,
-            case["expected"].as_bool().expect("eligibility expected"),
-            "case {}",
-            case["id"]
-        );
-        assert_eq!(
-            diagnostic,
-            case.get("diagnostic").and_then(Value::as_str),
-            "case {} diagnostic",
-            case["id"]
-        );
     }
     let scratch = Scratch::new();
     for entry in fixture["state_case"]["files"]

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::children::{ChildPresenceSet, ChildStatus, EndMark};
 use crate::identity::{PaneAddress, marker_address, socket_identity};
 use crate::observations::{LifecycleAvailability, LifecycleSnapshot, LifecycleView};
 use crate::presence::{
@@ -17,7 +18,7 @@ use crate::protocol::{
     ns20_text,
 };
 use crate::records::{
-    BINDING_FILE, BindingState, FileRecords, RecordIdentity, RecordRead, RecordReader, agents_dir,
+    BINDING_FILE, BindingState, FileRecords, RecordIdentity, RecordRead, RecordReader,
     binding_ended, binding_path, collect_binding_files, ends_binding, incarnation_dir,
     name_address, name_path, naming_record, read_record, read_record_typed, record_address,
     reviews_dir, session_dir, session_entry_path, session_index_path, unreadable_state,
@@ -192,17 +193,102 @@ pub struct EvidenceCollection {
     pub evidence: Vec<Value>,
     pub coverage: EvidenceCoverage,
     pub diagnostics: Vec<Diagnostic>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub eligibility: Option<ChildEligibility>,
 }
 
+/// How a reader could tell which sub-agents are running: from the set it
+/// read, or why it could not.
+#[derive(Clone, Copy, Debug, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildCoverage {
+    /// The count is the binding's running children; none when the set is absent.
+    Known,
+    /// The binding has ended, so no child of it is running.
+    Ended,
+    /// The provider runs no sub-agents that Attention records.
+    None,
+    Invalid,
+    Unsupported,
+    Unavailable,
+}
+
+/// The binding's running sub-agents as `inspect` reports them.
 #[derive(Clone, Debug, Serialize)]
-pub struct ChildEligibility {
-    pub ttl_ms: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub clear_mono_ns: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub floor_mono_ns: Option<String>,
+pub struct ChildrenFacet {
+    pub availability: RecordAvailability,
+    pub count: usize,
+    pub waiting: usize,
+    pub coverage: ChildCoverage,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl ChildrenFacet {
+    fn uncounted(availability: RecordAvailability, coverage: ChildCoverage) -> Self {
+        Self {
+            availability,
+            count: 0,
+            waiting: 0,
+            coverage,
+            diagnostics: vec![],
+        }
+    }
+
+    /// The facet for a binding with record `binding`, its end record `end`
+    /// whether or not it still ends the binding, and the read of its child
+    /// set `set`.
+    fn of(binding: &Value, end: Option<&Value>, set: RecordFacet) -> Self {
+        use RecordAvailability as A;
+        let provider = binding["provider"].as_str().unwrap_or("");
+        let supports_children = crate::protocol::manifest()
+            .is_ok_and(|protocol| protocol.enums.subagent_providers.contains(provider));
+        if !supports_children {
+            return Self::uncounted(A::Absent, ChildCoverage::None);
+        }
+        let end_mark = end.map(|end| EndMark {
+            event_id: end["event_id"].as_str().unwrap_or(""),
+            observed_mono_ns: end["observed_mono_ns"].as_str().unwrap_or(""),
+            ends_binding: ends_binding(end, binding),
+        });
+        let coverage = match set.availability {
+            _ if end_mark.is_some_and(|end| end.ends_binding) => ChildCoverage::Ended,
+            A::Present | A::Absent | A::Cleared | A::Expired => ChildCoverage::Known,
+            A::Invalid => ChildCoverage::Invalid,
+            A::Unsupported => ChildCoverage::Unsupported,
+            A::Unavailable => ChildCoverage::Unavailable,
+        };
+        let mut facet = Self {
+            availability: set.availability,
+            count: 0,
+            waiting: 0,
+            coverage,
+            diagnostics: set.diagnostics,
+        };
+        if coverage == ChildCoverage::Known
+            && let Some(record) = &set.record
+        {
+            match ChildPresenceSet::deserialize(record) {
+                Ok(children) => {
+                    for child in children.counted(end_mark) {
+                        facet.count += 1;
+                        if child.status == ChildStatus::Waiting {
+                            facet.waiting += 1;
+                        }
+                    }
+                }
+                Err(_) => {
+                    facet.availability = A::Invalid;
+                    facet.coverage = ChildCoverage::Invalid;
+                    facet.diagnostics.push(
+                        Diagnostic::new(
+                            "record_invalid",
+                            "child presence set could not be decoded",
+                        )
+                        .with("facet", "children"),
+                    );
+                }
+            }
+        }
+        facet
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -219,7 +305,6 @@ impl EvidenceCollection {
             evidence: vec![],
             coverage: EvidenceCoverage::EligibleRecords,
             diagnostics: vec![],
-            eligibility: None,
         }
     }
 }
@@ -234,7 +319,7 @@ pub struct PaneFacts {
     pub binding_health: BindingHealth,
     pub activity: RecordFacet,
     pub binding_end: RecordFacet,
-    pub children: EvidenceCollection,
+    pub children: ChildrenFacet,
     pub review: EvidenceCollection,
     pub lifecycle: LifecycleView,
     pub diagnostics: Vec<Diagnostic>,
@@ -341,7 +426,10 @@ impl PaneFacts {
             binding_health: binding_health([failed, None, None, None], false),
             activity: RecordFacet::empty(RecordAvailability::Unavailable),
             binding_end: RecordFacet::empty(RecordAvailability::Unavailable),
-            children: EvidenceCollection::empty(RecordAvailability::Unavailable),
+            children: ChildrenFacet::uncounted(
+                RecordAvailability::Unavailable,
+                ChildCoverage::Unavailable,
+            ),
             review: EvidenceCollection::empty(RecordAvailability::Unavailable),
             lifecycle: LifecycleView::empty(LifecycleAvailability::Unavailable),
             diagnostics,
@@ -621,6 +709,10 @@ fn read_pane_facts_once(
     } else {
         RecordFacet::empty(A::Absent)
     };
+    // The child rules read the end record even after a later start revived
+    // the binding: children seen before that end belong to the lifetime it
+    // ended.
+    let end_record = end.record.clone();
     if end
         .record
         .as_ref()
@@ -656,50 +748,14 @@ fn read_pane_facts_once(
             serde_json::json!({"activity_event_id":ack_record["activity_event_id"],"event_id":ack_record["event_id"],"target":ack_record["target"]}),
         );
     }
-    let review = read_fact_collection(
-        reader,
-        &reviews_dir(root, address),
-        scope,
-        None,
-        now.as_deref(),
-    );
-    let children = if let Some(selected_binding) = selected {
-        let child_clear = RecordFacet::at(reader, root, "subagent_clear", &identity, "children");
-        let floor = RecordFacet::at(
-            reader,
-            root,
-            "subagent_retention_floor",
-            &identity,
-            "children",
-        );
-        if child_clear.failed() || floor.failed() {
-            let mut result = EvidenceCollection::empty(if child_clear.failed() {
-                child_clear.availability
-            } else {
-                floor.availability
-            });
-            result.diagnostics = [child_clear.diagnostics, floor.diagnostics].concat();
-            result
-        } else {
-            read_fact_collection(
-                reader,
-                &agents_dir(root, address, &scope.launch_id, selected_binding),
-                scope,
-                Some(ChildSelection {
-                    binding_id: selected_binding,
-                    provider: binding
-                        .record
-                        .as_ref()
-                        .and_then(|r| r["provider"].as_str())
-                        .unwrap(),
-                    clear: &child_clear,
-                    floor: &floor,
-                }),
-                now.as_deref(),
-            )
-        }
-    } else {
-        EvidenceCollection::empty(A::Absent)
+    let review = read_fact_collection(reader, &reviews_dir(root, address), scope);
+    let children = match (selected, binding.record.as_ref()) {
+        (Some(_), Some(binding_record)) => ChildrenFacet::of(
+            binding_record,
+            end_record.as_ref(),
+            RecordFacet::at(reader, root, "child_presence_set", &identity, "children"),
+        ),
+        _ => ChildrenFacet::uncounted(A::Absent, ChildCoverage::Known),
     };
     for items in [
         &activity.diagnostics,
@@ -867,45 +923,16 @@ fn lifecycle_from_read(
     Ok(view)
 }
 
-struct ChildSelection<'a> {
-    binding_id: &'a str,
-    provider: &'a str,
-    clear: &'a RecordFacet,
-    floor: &'a RecordFacet,
-}
-
+/// The reviews in `directory`, each read and validated. A review gone since
+/// the listing leaves the answer incomplete.
 fn read_fact_collection(
     reader: &dyn RecordReader,
     directory: &Path,
     scope: &PaneScope,
-    child: Option<ChildSelection<'_>>,
-    now: Option<&str>,
 ) -> EvidenceCollection {
     use RecordAvailability as A;
-    let facet = if child.is_some() {
-        "children"
-    } else {
-        "review"
-    };
+    let facet = "review";
     let mut result = EvidenceCollection::empty(A::Present);
-    if let Some(child) = &child {
-        result.eligibility = Some(ChildEligibility {
-            ttl_ms: crate::protocol::manifest()
-                .expect("reader validated manifest")
-                .limits
-                .subagent_ttl_ms,
-            clear_mono_ns: child
-                .clear
-                .record
-                .as_ref()
-                .and_then(|r| string(r, "observed_mono_ns")),
-            floor_mono_ns: child
-                .floor
-                .record
-                .as_ref()
-                .and_then(|r| string(r, "floor_mono_ns")),
-        });
-    }
     let paths = match reader.entries(directory) {
         Ok(paths) => paths,
         Err(error) => {
@@ -929,33 +956,11 @@ fn read_fact_collection(
             );
             continue;
         };
-        let identity = match &child {
-            Some(child) => {
-                RecordIdentity::agent(&scope.address, &scope.launch_id, child.binding_id, key)
-            }
-            None => RecordIdentity::review(&scope.address, key),
-        };
-        let record = RecordFacet::read(
-            reader,
-            &path,
-            if child.is_some() {
-                "subagent_presence"
-            } else {
-                "review"
-            },
-            &identity,
-            facet,
-        );
+        let identity = RecordIdentity::review(&scope.address, key);
+        let record = RecordFacet::read(reader, &path, "review", &identity, facet);
         if record.failed() {
             result.availability = record.availability;
             result.diagnostics.extend(record.diagnostics);
-            continue;
-        }
-        // A child record gone since the listing was removed by a writer's
-        // compaction, which removes only records at or below the binding's
-        // retention floor. Any other record gone mid-read leaves the answer
-        // incomplete.
-        if record.record.is_none() && child.is_some() {
             continue;
         }
         let Some(record) = record.record else {
@@ -966,43 +971,6 @@ fn read_fact_collection(
             );
             continue;
         };
-        if let Some(child) = &child {
-            if record["provider"].as_str() != Some(child.provider) {
-                result.availability = A::Invalid;
-                result.diagnostics.push(
-                    Diagnostic::new(
-                        "record_invalid",
-                        "child provider differs from selected binding",
-                    )
-                    .with("facet", facet),
-                );
-                continue;
-            }
-            let (eligible, problem) = crate::protocol::eligible_subagent_presence(
-                &record,
-                child
-                    .clear
-                    .record
-                    .as_ref()
-                    .and_then(|r| r["observed_mono_ns"].as_str()),
-                child
-                    .floor
-                    .record
-                    .as_ref()
-                    .and_then(|r| r["floor_mono_ns"].as_str()),
-                now,
-                crate::protocol::manifest().expect("reader validated manifest"),
-            );
-            if let Some(code) = problem {
-                result.availability = A::Unavailable;
-                result.diagnostics.push(
-                    Diagnostic::new(code, "child eligibility is unavailable").with("facet", facet),
-                );
-            }
-            if !eligible {
-                continue;
-            }
-        }
         result.evidence.push(record);
     }
     result.count = result.evidence.len();

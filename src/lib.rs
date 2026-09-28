@@ -15,6 +15,7 @@
 //! `docs/accepted-limitations.md` records why that is documented rather than
 //! enforced.
 
+pub mod children;
 pub mod consumer;
 pub mod hook_content;
 pub mod identity;

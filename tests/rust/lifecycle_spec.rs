@@ -49,6 +49,9 @@ mod turn_endings;
 #[path = "lifecycle_spec/child_compaction.rs"]
 mod child_compaction;
 
+#[path = "lifecycle_spec/child_presence.rs"]
+mod child_presence;
+
 #[path = "lifecycle_spec/metadata_fields.rs"]
 mod metadata_fields;
 
@@ -1548,6 +1551,21 @@ fn launch_rotation_after_resolution_cannot_add_old_execution_facts() {
     );
 }
 
+/// The agent ids in a binding's child set, in the set's order; none when the
+/// binding has no set.
+fn live_child_ids(setup: &Setup, provider: &str, session: &str) -> Vec<String> {
+    let Ok(bytes) = fs::read(setup.binding_dir(provider, session).join("children.json")) else {
+        return vec![];
+    };
+    let set: Value = serde_json::from_slice(&bytes).expect("child set JSON");
+    set["live"]
+        .as_array()
+        .expect("live children")
+        .iter()
+        .map(|child| child["agent_id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
 fn run_hook(setup: &Setup, arguments: &[&str], payload: &Value) -> std::process::Output {
     let mut child = rust_command(setup)
         .args(arguments)
@@ -1854,29 +1872,19 @@ fn prompt_return_clears_lead_only_and_newer_hook_reactivates() {
         serde_json::from_slice(&fs::read(binding_dir.join("activity.json")).expect("activity"))
             .expect("activity JSON");
     assert_eq!(activity["type"], "thinking");
-    assert!(
-        binding_dir
-            .join("agents")
-            .join(format!(
-                "{}.json",
-                wezterm_attention::protocol::sha256_hex(b"child-a")
-            ))
-            .exists()
+    assert_eq!(
+        live_child_ids(&setup, "claude", "session-a"),
+        vec!["child-a"]
     );
 
     let cleared = prompt_return(&setup.env, "00000000000000000400").expect("prompt return");
     assert_eq!(cleared.disposition, "applied");
     assert!(binding_dir.join("activity-clear.json").exists());
-    assert!(
-        binding_dir
-            .join("agents")
-            .read_dir()
-            .expect("agents directory")
-            .next()
-            .is_some()
+    assert_eq!(
+        live_child_ids(&setup, "claude", "session-a"),
+        vec!["child-a"]
     );
     assert!(!binding_dir.join("end.json").exists());
-    assert!(!binding_dir.join("agents-clear.json").exists());
 
     assert_eq!(
         setup.apply(&thinking, "00000000000000000500").disposition,
@@ -1886,52 +1894,6 @@ fn prompt_return_clears_lead_only_and_newer_hook_reactivates() {
         serde_json::from_slice(&fs::read(binding_dir.join("activity.json")).expect("activity"))
             .expect("activity JSON");
     assert!(activity.get("publication_id").is_none());
-}
-
-#[test]
-fn stopped_child_fences_an_older_inflight_tool_event() {
-    let setup = Setup::new();
-    setup.claim();
-    setup.apply(
-        &event(
-            "claude",
-            "SessionStart",
-            "session-a",
-            json!({"source":"startup"}),
-        ),
-        "00000000000000000200",
-    );
-    let stopped = event(
-        "claude",
-        "SubagentStop",
-        "session-a",
-        json!({"agent_id":"child-a","agent_type":"Explore","stop_hook_active":false}),
-    );
-    setup.apply(&stopped, "00000000000000000500");
-    let active = event(
-        "claude",
-        "PreToolUse",
-        "session-a",
-        json!({"tool_name":"Bash","agent_id":"child-a","agent_type":"Explore"}),
-    );
-    assert_eq!(
-        setup.apply(&active, "00000000000000000400").disposition,
-        "ignored"
-    );
-    let presence: Value = serde_json::from_slice(
-        &fs::read(
-            setup
-                .binding_dir("claude", "session-a")
-                .join("agents")
-                .join(format!(
-                    "{}.json",
-                    wezterm_attention::protocol::sha256_hex(b"child-a")
-                )),
-        )
-        .expect("presence"),
-    )
-    .expect("presence JSON");
-    assert_eq!(presence["status"], "stopped");
 }
 
 #[test]
@@ -1975,12 +1937,19 @@ fn codex_parent_stop_clears_children_with_the_same_observation() {
         setup.apply(&stop, "00000000000000000400").disposition,
         "applied"
     );
-    let binding_dir = setup.binding_dir("codex", "thread-a");
-    let clear: Value = serde_json::from_slice(
-        &fs::read(binding_dir.join("agents-clear.json")).expect("clear record"),
+    let set: Value = serde_json::from_slice(
+        &fs::read(setup.binding_dir("codex", "thread-a").join("children.json")).expect("child set"),
     )
-    .expect("clear JSON");
-    assert_eq!(clear["observed_mono_ns"], "00000000000000000400");
+    .expect("child set JSON");
+    assert_eq!(
+        set["parent_clear"]["observed_mono_ns"],
+        "00000000000000000400"
+    );
+    assert_eq!(
+        set["parent_clear"]["removed"],
+        json!(["child-a", "child-b"])
+    );
+    assert!(live_child_ids(&setup, "codex", "thread-a").is_empty());
 }
 
 #[test]
@@ -2013,26 +1982,15 @@ fn duplicate_codex_stop_keeps_a_child_newer_than_the_surviving_activity() {
         "00000000000000000400",
     );
     setup.apply(&stop, "00000000000000000500");
-    let clear: Value = serde_json::from_slice(
-        &fs::read(
-            setup
-                .binding_dir("codex", "thread-a")
-                .join("agents-clear.json"),
-        )
-        .expect("agents clear"),
+    let set: Value = serde_json::from_slice(
+        &fs::read(setup.binding_dir("codex", "thread-a").join("children.json")).expect("child set"),
     )
-    .expect("agents clear JSON");
-    assert_eq!(clear["observed_mono_ns"], "00000000000000000300");
-    assert!(
-        setup
-            .binding_dir("codex", "thread-a")
-            .join("agents")
-            .join(format!(
-                "{}.json",
-                wezterm_attention::protocol::sha256_hex(b"child-a")
-            ))
-            .exists()
+    .expect("child set JSON");
+    assert_eq!(
+        set["parent_clear"]["observed_mono_ns"],
+        "00000000000000000300"
     );
+    assert_eq!(live_child_ids(&setup, "codex", "thread-a"), vec!["child-a"]);
 }
 
 #[test]

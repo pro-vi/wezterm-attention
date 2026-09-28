@@ -83,15 +83,12 @@ fn inspect_is_scoped_read_only_and_keeps_raw_activity_after_acknowledgement() {
     assert!(facts.complete(), "{:?}", facts.diagnostics);
     assert_eq!(facts.activity.availability, A::Present);
     assert_eq!(facts.activity.record.as_ref().unwrap(), &activity);
-    assert_eq!(facts.children.count, 1);
+    // The session ended, so none of its children is running any more.
+    assert_eq!(facts.children.count, 0);
     assert_eq!(
-        facts.children.eligibility.as_ref().unwrap().ttl_ms,
-        wezterm_attention::protocol::manifest()
-            .unwrap()
-            .limits
-            .subagent_ttl_ms
+        facts.children.coverage,
+        wezterm_attention::query::ChildCoverage::Ended
     );
-    assert!(facts.review.eligibility.is_none());
     assert_eq!(facts.review.count, 1);
     assert_eq!(facts.binding_end.availability, A::Present);
     assert_eq!(facts.pane_presence, PanePresence::Present);
@@ -395,13 +392,13 @@ fn inspect_unavailable_probe_and_collection_do_not_report_absence() {
     .unwrap();
     assert_eq!(facts.pane_presence, PanePresence::Unavailable);
     assert!(!facts.complete());
-    fs::write(
-        setup.binding_dir("claude", "facts").join("agents"),
-        "not a directory",
-    )
-    .unwrap();
+    fs::create_dir_all(setup.binding_dir("claude", "facts").join("children.json")).unwrap();
     let facts = read(&setup);
     assert_eq!(facts.children.availability, A::Unavailable);
+    assert_eq!(
+        facts.children.coverage,
+        wezterm_attention::query::ChildCoverage::Unavailable
+    );
     assert!(!facts.complete());
 }
 

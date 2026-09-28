@@ -355,7 +355,7 @@ const AGENT_KEY: &str = "agent_key";
 /// The records kept one to a directory: each kind, the file that holds it,
 /// and the depths whose directory may hold one. Activity and its
 /// acknowledgement belong to a binding, or to the launch while it has none.
-const FIXED_RECORDS: [(&str, &str, &[Depth]); 13] = [
+const FIXED_RECORDS: [(&str, &str, &[Depth]); 14] = [
     ("realm", "realm.json", &[Depth::Realm]),
     ("incarnation", "incarnation.json", &[Depth::Incarnation]),
     ("claim", "claim.json", &[Depth::Pane]),
@@ -375,6 +375,7 @@ const FIXED_RECORDS: [(&str, &str, &[Depth]); 13] = [
     ("lifecycle_snapshot", "lifecycle.json", &[Depth::Binding]),
     ("activity_clear", "activity-clear.json", &[Depth::Binding]),
     ("binding_end", "end.json", &[Depth::Binding]),
+    ("child_presence_set", "children.json", &[Depth::Binding]),
     ("subagent_clear", "agents-clear.json", &[Depth::Binding]),
     (
         "subagent_retention_floor",
@@ -1632,6 +1633,7 @@ mod tests {
             ("lifecycle_snapshot", format!("{binding}/lifecycle.json")),
             ("activity_clear", format!("{binding}/activity-clear.json")),
             ("binding_end", format!("{binding}/end.json")),
+            ("child_presence_set", format!("{binding}/children.json")),
             ("subagent_clear", format!("{binding}/agents-clear.json")),
             (
                 "subagent_retention_floor",
@@ -1657,6 +1659,11 @@ mod tests {
             ("binding", format!("{binding}/end.json")),
             ("binding", format!("{binding}/agents/binding.json")),
             ("binding_end", format!("{launch}/end.json")),
+            ("child_presence_set", format!("{launch}/children.json")),
+            (
+                "child_presence_set",
+                format!("{binding}/agents/children.json"),
+            ),
             ("subagent_clear", format!("{launch}/agents-clear.json")),
             ("subagent_presence", format!("{binding}/{key}.json")),
             ("subagent_presence", format!("{launch}/agents/{key}.json")),
