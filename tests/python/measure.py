@@ -68,6 +68,16 @@ def state_footprint(state: pathlib.Path) -> dict[str, Any]:
     }
 
 
+def children_recorded(state: pathlib.Path) -> int:
+    """How many sub-agents the state names as running: the entries of every
+    binding's child set, or, for a writer that keeps one file per child,
+    those files."""
+    sets = list(state.rglob("children.json"))
+    if sets:
+        return sum(len(json.loads(path.read_text())["live"]) for path in sets)
+    return sum(1 for path in state.rglob("*.json") if path.parent.name == "agents")
+
+
 def artifact_sha256(path: pathlib.Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -151,9 +161,13 @@ def measure(implementation: str, command: list[str], scratch: pathlib.Path, *, f
         ]
 
         def child(index: int) -> float:
+            # Children carry their type, as Claude's do: a writer counts a
+            # tool event with an agent id and no type as the provider's own
+            # agent and records no child for it.
             payload = {
                 **activity,
                 "agent_id": f"measurement-child-{index:02d}",
+                "agent_type": "general-purpose",
             }
             return run(
                 [*command, "hooks", "event", "claude", "PreToolUse", "--strict"],
@@ -177,6 +191,7 @@ def measure(implementation: str, command: list[str], scratch: pathlib.Path, *, f
                 "wall_ms": round(burst_wall_ms, 3),
                 "p95_process_ms": round(percentile_95(concurrent_durations), 3),
                 "max_process_ms": round(max(concurrent_durations), 3),
+                "children_recorded": children_recorded(state),
             },
             "state": state_footprint(state),
         }
@@ -247,6 +262,11 @@ def main() -> None:
             <= 2 * aggregate["sequential_p95_ms"]["baseline"],
             "child_burst_within_2x": aggregate["child_burst_wall_ms"]["candidate"]
             <= 2 * aggregate["child_burst_wall_ms"]["baseline"],
+            # A burst that records nothing is not measuring the child path.
+            "candidate_recorded_every_child": all(
+                item["candidate"]["concurrent_child_burst"]["children_recorded"] == CHILD_COUNT
+                for item in rounds
+            ),
         }
         passed = all(aggregate["checks"].values())
         print(json.dumps({"mode": "rust-baseline", "implementation_identities": identities, "rounds": rounds, "aggregate": aggregate, "passed": passed}, indent=2))
