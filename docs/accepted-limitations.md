@@ -294,13 +294,13 @@ writes that set even when the event changes nothing else; its hook reports
 `record_invalid`. A `children.json` that something else replaced with a link to a
 file that is not a valid set is moved aside as a link, and sweep then keeps that
 binding, as it keeps any that holds a link; a link to a valid set, or to
-nothing, is replaced by a regular file at the next write. Until that next child event, the tab shows `+?`. The
+nothing, is replaced by a regular file at the next write. Until the next event that writes the set, a child's event or a Codex parent's `Stop`, the tab shows `+?`. The
 sub-agents the invalid set held are counted again only at their next event, so
 one in the middle of a long command stays uncounted until it calls another tool
 or stops. The rename happens while the hook plans its writes, so if a write in
 the same hook fails before the new set is in place, no `children.json` is left:
-the tab then shows no count, not `+?`, until the next child event writes a new
-set. A failure after the new set is in place, such as a failed sync of its
+the tab then shows no count, not `+?`, until the next event that writes the set
+writes a new one. A failure after the new set is in place, such as a failed sync of its
 directory or a failed write of the lifecycle observation, leaves the new set, as
 [A record write can be reported failed after readers already see it](#a-record-write-can-be-reported-failed-after-readers-already-see-it)
 describes. The renamed files are write leftovers: they go with their binding,
