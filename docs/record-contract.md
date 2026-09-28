@@ -192,6 +192,11 @@ binding's end. A user prompt or any lead activity other than `thinking` replaces
 once. A child set that cannot be read or changed does not stop the `notify`; the event reports
 `partial` with that record's diagnostic.
 
+A hook reports one diagnostic. When more than one applies, the later one is reported and the one it
+replaces is kept under `replaced` in its context, with whatever that one replaced: a child set's
+diagnostic replaces the activity's own, a restart of an invalid set replaces the transition's, and
+a failure to record the event's lifecycle observation replaces any of them.
+
 A turn that ends without `Stop` still ends the activity when the provider reports the ending. A
 lead Claude `StopFailure` (an API error ended the turn) publishes `notify`, because the user must
 act. A Codex `Interrupt` writes an activity clear for that session, because the user stopped the
@@ -272,7 +277,7 @@ ignored (`binding_conflict`). After that the event itself applies:
   A parent stop ordered before the recorded one is ignored, and one at the same order with another
   `event_id` leaves the set as it is. The stop's activity is written either way; when the set cannot
   be changed (that conflict, or a set refused as below) the hook reports `partial` with the set's
-  diagnostic. A Claude `Stop` removes no child, because Claude's background sub-agents
+  diagnostic, as reported under the one-diagnostic rule above. A Claude `Stop` removes no child, because Claude's background sub-agents
   can outlive the lead's turn: Claude Code 2.1.283 sent the lead's `Stop` while a sub-agent was
   still running.
 
@@ -290,8 +295,7 @@ say how that was checked and what an asynchronous hook costs.
 A writer that finds `children.json` invalid renames it to `.children.json.invalid.<uuid>`, a
 write-leftover name that sweep and doctor pass over, applies the event to a new, empty set, and
 writes the new set even when the event changed nothing else; the hook reports that restart
-(`record_invalid`) instead of the event's own diagnostic, and a failure to record the event's
-lifecycle observation instead of both. The rename moves the file as it stands, a link as a link,
+(`record_invalid`) instead of the event's own diagnostic, keeping that one under `replaced`. The rename moves the file as it stands, a link as a link,
 without reading it; sweep keeps a binding that holds a link, as it keeps any. The children the invalid
 set held are counted again at their next event. A set that a newer writer wrote (`future_schema`),
 one that cannot be read, one that cannot be moved aside (`probe_unavailable`), or a change past the

@@ -845,6 +845,18 @@ fn plan_activity(
     }
 }
 
+/// Makes `diagnostic` the one a hook reports, keeping the one it replaces,
+/// with whatever that one replaced, under `replaced` in its context: a hook
+/// reports one diagnostic, and no reason it met is dropped.
+fn report_instead(slot: &mut Option<Diagnostic>, mut diagnostic: Diagnostic) {
+    if let Some(replaced) = slot.take()
+        && let Ok(value) = serde_json::to_value(&replaced)
+    {
+        diagnostic.set("replaced", value);
+    }
+    *slot = Some(diagnostic);
+}
+
 // Called inside the selected launch's lock. Rich rejection does not discard an
 // independently valid legacy mutation, and the sidecar is always written last.
 fn append_observation(
@@ -942,7 +954,7 @@ fn append_observation(
                 evidence.borrow_mut().persistence.lifecycle = Persistence::Rejected;
             }
             plan.result.result.disposition = Disposition::Partial;
-            plan.result.result.diagnostic = Some(error.diagnostic);
+            report_instead(&mut plan.result.result.diagnostic, error.diagnostic);
         }
     }
     plan
@@ -1062,16 +1074,18 @@ fn plan_children(
     set.schema = manifest()?.record_schema;
     let reduction = set.apply(EndMark::of(end.as_ref(), &binding), transition);
     let mut result = LifecycleResult::new(reduction.disposition);
+    result.diagnostic = reduction.diagnostic;
     // Starting again loses what the invalid set held, so the hook reports
     // that instead of anything the transition itself says.
-    result.diagnostic = if started_again {
-        Some(Diagnostic::new(
-            "record_invalid",
-            "an invalid child presence set was moved aside and started again",
-        ))
-    } else {
-        reduction.diagnostic
-    };
+    if started_again {
+        report_instead(
+            &mut result.diagnostic,
+            Diagnostic::new(
+                "record_invalid",
+                "an invalid child presence set was moved aside and started again",
+            ),
+        );
+    }
     if reduction.changed || started_again {
         set.revision = Uuid::new_v4().to_string();
         set.written_at_unix_ns = written_at.to_owned();
@@ -1211,12 +1225,11 @@ fn apply_activity(
                 Err(diagnostic) => (true, Some(diagnostic)),
             };
             // What the child set reports, a restart included, replaces the
-            // activity's own diagnostic. A lifecycle failure that
-            // append_observation records replaces both, as in apply_child,
-            // since that failure is what the hook's partial then means.
+            // activity's own diagnostic, and a lifecycle failure that
+            // append_observation records replaces both, as in apply_child.
             let mut result = result;
-            if diagnostic.is_some() {
-                result.diagnostic = diagnostic;
+            if let Some(diagnostic) = diagnostic {
+                report_instead(&mut result.diagnostic, diagnostic);
             }
             if refused && let Some(evidence) = &resolved.evidence {
                 evidence.borrow_mut().native_refused = true;

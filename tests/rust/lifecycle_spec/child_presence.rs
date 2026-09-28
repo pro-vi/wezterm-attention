@@ -412,8 +412,8 @@ fn an_event_that_changes_nothing_still_replaces_an_invalid_child_set() {
     );
 }
 
-// Whatever an event says about itself, a hook that started the set again
-// reports that instead.
+// Whatever the child set's transition says, a hook that started the set again
+// reports the restart instead, and keeps what it replaced.
 #[test]
 fn a_restarted_child_set_is_reported_instead_of_the_events_own_diagnostic() {
     let setup = bound("claude");
@@ -428,12 +428,9 @@ fn a_restarted_child_set_is_reported_instead_of_the_events_own_diagnostic() {
         "00000000000000000400",
     );
     assert_eq!(late.disposition, "ignored");
-    assert_eq!(
-        late.diagnostic
-            .as_ref()
-            .map(|diagnostic| diagnostic.code.as_str()),
-        Some("record_invalid")
-    );
+    let diagnostic = late.diagnostic.expect("a diagnostic");
+    assert_eq!(diagnostic.code, "record_invalid");
+    assert_eq!(diagnostic.context["replaced"]["code"], "binding_conflict");
     assert_eq!(moved_aside(&path).len(), 1);
 }
 
@@ -721,7 +718,7 @@ fn an_invalid_child_set_that_cannot_be_moved_aside_is_left_as_it_was() {
     let setup = bound("claude");
     let path = set_path(&setup, "claude");
     fs::write(&path, b"{not json").unwrap();
-    let immutable = |flag: &str| {
+    let chflags = |flag: &str| {
         assert!(
             Command::new("chflags")
                 .arg(flag)
@@ -731,7 +728,7 @@ fn an_invalid_child_set_that_cannot_be_moved_aside_is_left_as_it_was() {
                 .success()
         );
     };
-    immutable("uchg");
+    chflags("uchg");
     let started = apply_provider_event(
         &child("claude", "SubagentStart", "child-a", Some("Explore")),
         &setup.env,
@@ -744,7 +741,7 @@ fn an_invalid_child_set_that_cannot_be_moved_aside_is_left_as_it_was() {
         "00000000000000000400",
         &setup.ports(),
     );
-    immutable("nouchg");
+    chflags("nouchg");
     assert_eq!(
         started
             .expect_err("a set that cannot be moved aside refuses the event")
@@ -791,7 +788,40 @@ fn a_failed_lifecycle_observation_is_reported_over_the_child_sets_diagnostic() {
         (diagnostic.code.as_str(), diagnostic.message.as_str()),
         ("record_invalid", "tool_name is missing or too long")
     );
+    assert_eq!(
+        diagnostic.context["replaced"]["code"],
+        "child_active_after_parent_clear"
+    );
     assert_eq!(live(&setup, "codex"), vec![waiting("child-a")]);
+}
+
+// The same order holds for a child's own event: a failed lifecycle
+// observation is reported, and the restart it replaced is kept.
+#[test]
+fn a_childs_own_event_reports_a_failed_lifecycle_observation_over_a_restart() {
+    let setup = bound("claude");
+    let path = set_path(&setup, "claude");
+    fs::write(&path, b"{not json").unwrap();
+    let working = setup.apply(
+        &event(
+            "claude",
+            "PreToolUse",
+            SESSION,
+            json!({"agent_id":"child-a","agent_type":"Explore","tool_name":5}),
+        ),
+        "00000000000000000300",
+    );
+    assert_eq!(working.disposition, "partial");
+    let diagnostic = working.diagnostic.expect("a diagnostic");
+    assert_eq!(
+        (diagnostic.code.as_str(), diagnostic.message.as_str()),
+        ("record_invalid", "tool_name is missing or too long")
+    );
+    assert_eq!(
+        diagnostic.context["replaced"]["message"],
+        "an invalid child presence set was moved aside and started again"
+    );
+    assert_eq!(moved_aside(&path).len(), 1);
 }
 
 /// The invalid sets moved aside beside `path`.
