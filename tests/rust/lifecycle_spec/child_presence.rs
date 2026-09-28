@@ -149,7 +149,8 @@ fn a_child_shows_from_its_start_and_leaves_at_its_stop() {
     assert_eq!(facts(&setup, "claude").children.count, 0);
 }
 
-// Resuming a sub-agent starts a new run under the same id.
+// Claude Code 2.1.283 starts a resumed sub-agent as a new run under the same
+// id.
 #[test]
 fn a_resumed_child_is_counted_again() {
     let setup = bound("claude");
@@ -182,9 +183,10 @@ fn an_older_child_event_does_not_overwrite_a_newer_one() {
     assert_eq!(live(&setup, "claude"), vec![waiting("child-a")]);
 }
 
-// The provider runs agents of its own. Claude's stop for one of them carries
-// an empty agent type and no start came before it; its tool event can carry
-// an agent id and no type at all. Neither is a sub-agent anyone asked for.
+// The provider runs agents of its own. In Claude Code 2.1.283 the stop of one
+// carried an empty agent type and no start came before it, and one sent a tool
+// event with an agent id and no type at all. Neither is a sub-agent anyone
+// asked for.
 #[test]
 fn an_agent_the_provider_runs_for_itself_is_not_counted() {
     let setup = bound("claude");
@@ -254,9 +256,10 @@ fn a_finished_tool_does_not_end_a_childs_wait() {
     assert_eq!(facts(&setup, "claude").children.waiting, 1);
 }
 
-// Codex's parent stop ends the children it covers; the dependency is that a
-// Codex parent stops only once its children have. A covered child that works
-// again afterwards is counted and reported.
+// Codex's parent stop ends the children it covers. That rests on a Codex
+// parent stopping only once its children have, which Codex does not enforce
+// (see docs/accepted-limitations.md); a covered child that works again
+// afterwards is counted and reported.
 #[test]
 fn a_codex_parent_stop_ends_the_children_it_covers() {
     let setup = bound("codex");
@@ -355,7 +358,7 @@ fn a_child_event_after_the_binding_ended_is_ignored() {
 }
 
 #[test]
-fn an_invalid_child_set_is_kept_aside_and_started_again() {
+fn an_invalid_child_set_is_moved_aside_and_started_again() {
     let setup = bound("claude");
     let path = set_path(&setup, "claude");
     fs::write(&path, b"{not json").unwrap();
@@ -377,19 +380,28 @@ fn an_invalid_child_set_is_kept_aside_and_started_again() {
 }
 
 // A stop for a child the set does not hold changes nothing, yet it still
-// replaces an invalid set, so the set is kept aside once and the next event
+// replaces an invalid set, so the set is moved aside once and the next event
 // reads the new one.
 #[test]
 fn an_event_that_changes_nothing_still_replaces_an_invalid_child_set() {
     let setup = bound("claude");
     let path = set_path(&setup, "claude");
     fs::write(&path, b"{not json").unwrap();
-    for order in ["00000000000000000300", "00000000000000000400"] {
+    for (order, reported) in [
+        ("00000000000000000300", Some("record_invalid")),
+        ("00000000000000000400", None),
+    ] {
         let stop = setup.apply(
             &child("claude", "SubagentStop", "child-a", Some("Explore")),
             order,
         );
         assert_eq!(stop.disposition, "skipped");
+        assert_eq!(
+            stop.diagnostic
+                .as_ref()
+                .map(|diagnostic| diagnostic.code.as_str()),
+            reported
+        );
     }
     assert!(live(&setup, "claude").is_empty());
     assert_eq!(kept_aside(&path).len(), 1);
@@ -399,7 +411,167 @@ fn an_event_that_changes_nothing_still_replaces_an_invalid_child_set() {
     );
 }
 
-/// The copies of invalid sets kept aside beside `path`.
+// Moving an invalid set aside moves the file as it stands: a link is moved as
+// a link, and what it points to is neither read nor copied.
+#[test]
+fn an_invalid_child_set_that_is_a_link_is_moved_aside_as_a_link() {
+    let setup = bound("claude");
+    let path = set_path(&setup, "claude");
+    let target = path
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("elsewhere.json");
+    fs::write(&target, b"{not json").unwrap();
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    setup.apply(
+        &child("claude", "SubagentStart", "child-a", Some("Explore")),
+        "00000000000000000300",
+    );
+    assert_eq!(live(&setup, "claude"), vec![running("child-a")]);
+    assert!(
+        !fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let kept = kept_aside(&path);
+    assert_eq!(kept.len(), 1);
+    assert!(
+        fs::symlink_metadata(&kept[0])
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"{not json");
+}
+
+// Readers refuse a record larger than `max_json_bytes`, so the writer never
+// writes one: an event that would grow the set past it is refused, and the
+// set stays as it was. A permission request still shows its notify.
+#[test]
+fn a_child_that_would_grow_the_set_past_what_readers_accept_is_refused() {
+    let setup = bound("claude");
+    setup.apply(
+        &child("claude", "SubagentStart", "child-0", Some("Explore")),
+        "00000000000000000300",
+    );
+    let path = set_path(&setup, "claude");
+    let mut set: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let entry = set["live"][0].clone();
+    let limit = wezterm_attention::protocol::manifest()
+        .unwrap()
+        .limits
+        .max_json_bytes;
+    let encoded = |set: &Value| serde_json::to_vec(set).unwrap().len() + 1;
+    // Entries of one width, so the count that fits is a division.
+    let named = |index: usize| {
+        let mut next = entry.clone();
+        next["agent_id"] = json!(format!("c{index:06}"));
+        next
+    };
+    set["live"] = json!([named(0)]);
+    let width = serde_json::to_vec(&named(0)).unwrap().len() + 1;
+    let fitting = (limit - encoded(&set)) / width + 1;
+    set["live"] = Value::Array((0..fitting).map(named).collect());
+    assert!(encoded(&set) <= limit && encoded(&set) + width > limit);
+    let mut bytes = serde_json::to_vec(&set).unwrap();
+    bytes.push(b'\n');
+    fs::write(&path, &bytes).unwrap();
+    assert_eq!(
+        facts(&setup, "claude").children.coverage,
+        ChildCoverage::Known
+    );
+    let error = apply_provider_event(
+        &child("claude", "SubagentStart", &"n".repeat(200), Some("Explore")),
+        &setup.env,
+        "00000000000000000400",
+        &setup.ports(),
+    )
+    .expect_err("a set past the bound is refused");
+    assert_eq!(error.diagnostic.code, "record_invalid");
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    let asking = setup.apply(
+        &child(
+            "claude",
+            "PermissionRequest",
+            &"n".repeat(200),
+            Some("Explore"),
+        ),
+        "00000000000000000500",
+    );
+    assert_eq!(asking.disposition, "partial");
+    assert_eq!(shown(&setup, "claude"), "notify");
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
+// A Codex child that works again after its parent's stop removed it is
+// reported whichever event brings it back.
+#[test]
+fn a_child_back_after_a_codex_parent_stop_is_reported_whichever_event_brings_it() {
+    for name in ["PreToolUse", "PermissionRequest"] {
+        let setup = bound("codex");
+        setup.apply(
+            &child("codex", "PreToolUse", "child-a", Some("worker")),
+            "00000000000000000300",
+        );
+        setup.apply(&lead("codex", "Stop"), "00000000000000000400");
+        let back = setup.apply(
+            &child("codex", name, "child-a", Some("worker")),
+            "00000000000000000500",
+        );
+        assert_eq!(back.disposition, "applied", "{name}");
+        assert_eq!(
+            back.diagnostic
+                .as_ref()
+                .map(|diagnostic| diagnostic.code.as_str()),
+            Some("child_active_after_parent_clear"),
+            "{name}"
+        );
+        let set: Value =
+            serde_json::from_slice(&fs::read(set_path(&setup, "codex")).unwrap()).unwrap();
+        assert_eq!(set["parent_clear"]["removed"], json!([]), "{name}");
+    }
+}
+
+// A child hook stamped after the lead's end can take the lock before it. The
+// set it wrote has not applied that end, and neither readers nor the next
+// write count what it holds.
+#[test]
+fn a_set_written_before_the_end_counts_nothing_after_a_resume() {
+    let setup = bound("claude");
+    setup.apply(
+        &child("claude", "SubagentStart", "child-a", Some("Explore")),
+        "00000000000000000300",
+    );
+    setup.apply(
+        &child("claude", "PreToolUse", "child-b", Some("Explore")),
+        "00000000000000000450",
+    );
+    setup.apply(
+        &event("claude", "SessionEnd", SESSION, json!({"reason":"other"})),
+        "00000000000000000400",
+    );
+    setup.apply(
+        &event(
+            "claude",
+            "SessionStart",
+            SESSION,
+            json!({"source":"resume"}),
+        ),
+        "00000000000000000500",
+    );
+    assert_eq!(facts(&setup, "claude").children.count, 0);
+    setup.apply(
+        &child("claude", "SubagentStart", "child-c", Some("Explore")),
+        "00000000000000000600",
+    );
+    assert_eq!(live(&setup, "claude"), vec![running("child-c")]);
+    assert_eq!(facts(&setup, "claude").children.count, 1);
+}
+
+/// The invalid sets moved aside beside `path`.
 fn kept_aside(path: &std::path::Path) -> Vec<PathBuf> {
     fs::read_dir(path.parent().unwrap())
         .unwrap()

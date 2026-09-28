@@ -1119,7 +1119,8 @@ fn compaction_is_not_agent_completion() {
             assert_eq!(result.disposition, "applied");
             assert_eq!(fs::read(directory.join("activity.json")).unwrap(), badge);
             assert!(!directory.join("end.json").exists());
-            assert!(!directory.join("agents-clear.json").exists());
+            // A parent stop would write the child set, even with no child.
+            assert!(!directory.join("children.json").exists());
         }
         let before = fs::read(directory.join("lifecycle.json")).unwrap();
         setup.apply(
@@ -1814,9 +1815,9 @@ fn readme_json_block(heading: &str) -> Value {
 
 // The README's hook blocks are what users paste into their agent's settings,
 // so each registers exactly the rows `hooks describe` marks `register`, each
-// as one command hook in the documented form. A hook with any other field,
-// such as `async`, may run after the agent has gone on, and then one child's
-// events can reach the writer out of order.
+// as one command hook in the documented form. The block holds nothing else;
+// `async` in particular would let a hook run after the agent has gone on,
+// and one child's events could then reach the writer out of order.
 #[test]
 fn readme_hook_blocks_register_exactly_the_described_rows() {
     use wezterm_attention::providers::{HookRegistration, describe_hooks};

@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::identity::PaneAddress;
 use crate::protocol::{
-    AttentionError, Diagnostic, Result, free_of_control, manifest, validate_record,
+    AttentionError, Diagnostic, Manifest, Result, free_of_control, manifest, validate_record,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -1087,11 +1087,7 @@ pub fn read_record_typed(
         Ok(protocol) => protocol,
         Err(error) => return RecordRead::Unsupported(error),
     };
-    let maximum = if expected_kind == Some("lifecycle_snapshot") {
-        protocol.limits.lifecycle_max_json_bytes
-    } else {
-        protocol.limits.max_json_bytes
-    };
+    let maximum = read_bound(protocol, expected_kind);
     let Ok(bytes) = read_bounded(file, maximum) else {
         return RecordRead::Unavailable(AttentionError::new(
             "probe_unavailable",
@@ -1148,6 +1144,29 @@ fn decode_record(
     }
     expected_identity.validate(&value)?;
     Ok(value)
+}
+
+/// The most bytes a reader accepts for a record of `kind`.
+fn read_bound(protocol: &Manifest, kind: Option<&str>) -> usize {
+    if kind == Some("lifecycle_snapshot") {
+        protocol.limits.lifecycle_max_json_bytes
+    } else {
+        protocol.limits.max_json_bytes
+    }
+}
+
+/// Refuses a record that its readers would reject as too large, for a writer
+/// whose record can grow and that must know before it commits whether the
+/// record can be written.
+pub(crate) fn within_read_bound(value: &Value) -> Result<()> {
+    let kind = value.get("kind").and_then(Value::as_str);
+    if canonical_json(value)?.len() > read_bound(manifest()?, kind) {
+        return Err(AttentionError::new(
+            "record_invalid",
+            "state record is larger than its readers accept",
+        ));
+    }
+    Ok(())
 }
 
 pub fn atomic_replace(path: &Path, value: &Value) -> Result<()> {
@@ -1323,7 +1342,10 @@ pub const LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 /// waits for the answer on the GUI's thread, which draws nothing meanwhile,
 /// and a write takes two locks. A hook holds a lock for under a millisecond
 /// per write, so this covers a queue of dozens of them; a wait that still
-/// runs out is retried by the plugin, or reported for a key press.
+/// runs out is retried by the plugin, or reported for a key press. A child's
+/// hook holds it longer the more children are running, since it rewrites the
+/// binding's whole child set: about 0.9 ms more at 500 and 9 ms at 5,000 on
+/// an M5 Max.
 pub const PLUGIN_LOCK_TIMEOUT: Duration = Duration::from_millis(50);
 
 pub fn with_lock<T>(

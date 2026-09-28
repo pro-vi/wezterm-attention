@@ -232,16 +232,12 @@ impl ChildrenFacet {
         }
     }
 
-    /// The facet for a binding with record `binding`, its end record `end`
-    /// whether or not it still ends the binding, and the read of its child
-    /// set `set`.
-    fn of(binding: &Value, end: Option<&Value>, mut set: RecordFacet) -> Self {
+    /// The facet for a binding with record `binding`, the read of its end
+    /// record `end` whether or not that end still ends the binding, and the
+    /// read of its child set `set`.
+    fn of(binding: &Value, end: &RecordFacet, mut set: RecordFacet) -> Self {
         use RecordAvailability as A;
-        let end_mark = end.map(|end| EndMark {
-            event_id: end["event_id"].as_str().unwrap_or(""),
-            observed_mono_ns: end["observed_mono_ns"].as_str().unwrap_or(""),
-            ends_binding: ends_binding(end, binding),
-        });
+        let end_mark = EndMark::of(end.record.as_ref(), binding);
         let ended = end_mark.is_some_and(|end| end.ends_binding);
         let provider = binding["provider"].as_str().unwrap_or("");
         let supports_children = crate::protocol::manifest()
@@ -271,12 +267,20 @@ impl ChildrenFacet {
                 .with("facet", "children"),
             );
         }
-        let coverage = match set.availability {
-            _ if ended => ChildCoverage::Ended,
-            A::Present | A::Absent | A::Cleared | A::Expired => ChildCoverage::Known,
-            A::Invalid => ChildCoverage::Invalid,
-            A::Unsupported => ChildCoverage::Unsupported,
-            A::Unavailable => ChildCoverage::Unavailable,
+        // Which children count depends on the end, so an end that could not
+        // be read leaves the count unknown, however the set read.
+        let unread = |availability| match availability {
+            A::Present | A::Absent | A::Cleared | A::Expired => None,
+            A::Invalid => Some(ChildCoverage::Invalid),
+            A::Unsupported => Some(ChildCoverage::Unsupported),
+            A::Unavailable => Some(ChildCoverage::Unavailable),
+        };
+        let coverage = if ended {
+            ChildCoverage::Ended
+        } else {
+            unread(end.availability)
+                .or(unread(set.availability))
+                .unwrap_or(ChildCoverage::Known)
         };
         let mut facet = Self {
             availability: set.availability,
@@ -735,7 +739,7 @@ fn read_pane_facts_once(
     // The child rules read the end record even after a later start revived
     // the binding: children seen before that end belong to the lifetime it
     // ended.
-    let end_record = end.record.clone();
+    let end_read = end.clone();
     if end
         .record
         .as_ref()
@@ -771,11 +775,11 @@ fn read_pane_facts_once(
             serde_json::json!({"activity_event_id":ack_record["activity_event_id"],"event_id":ack_record["event_id"],"target":ack_record["target"]}),
         );
     }
-    let review = read_fact_collection(reader, &reviews_dir(root, address), scope);
+    let review = read_reviews(reader, &reviews_dir(root, address), scope);
     let children = match (selected, binding.record.as_ref()) {
         (Some(_), Some(binding_record)) => ChildrenFacet::of(
             binding_record,
-            end_record.as_ref(),
+            &end_read,
             RecordFacet::at(reader, root, "child_presence_set", &identity, "children"),
         ),
         _ => ChildrenFacet::uncounted(A::Absent, ChildCoverage::Known),
@@ -948,7 +952,7 @@ fn lifecycle_from_read(
 
 /// The reviews in `directory`, each read and validated. A review gone since
 /// the listing leaves the answer incomplete.
-fn read_fact_collection(
+fn read_reviews(
     reader: &dyn RecordReader,
     directory: &Path,
     scope: &PaneScope,

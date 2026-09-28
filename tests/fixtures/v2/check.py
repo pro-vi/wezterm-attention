@@ -206,9 +206,9 @@ def validate_typed_field(
             is_safe_text(item, limits["safe_label_max_bytes"]) for item in value
         ):
             raise InvalidRecord("invalid child agent ids")
-    elif field_type == "child_presence_provenance":
-        if value not in enum_set(manifest, "child_presence_provenances"):
-            raise InvalidRecord("invalid child provenance")
+    elif field_type == "child_presence_event":
+        if value not in enum_set(manifest, "child_presence_events"):
+            raise InvalidRecord("invalid child last event")
     elif field_type == "child_presence_status":
         if value not in enum_set(manifest, "child_presence_statuses"):
             raise InvalidRecord("invalid child status")
@@ -465,7 +465,15 @@ def children_facet(case: dict[str, Any], fixture: dict[str, Any], manifest: dict
     """The children a tab shows for one coverage row, decided independently of both readers."""
     samples = fixture["record_samples"]
     binding = patched(samples["binding"], case["binding"])
-    end = None if case["end"] == "absent" else patched(samples["binding_end"], case["end"])
+    if case["end"] == "absent":
+        end, end_status = None, "missing"
+    elif case["end"] == "unavailable":
+        end, end_status = None, "unavailable"
+    else:
+        end = patched(samples["binding_end"], case["end"])
+        end_status = parse_record(end, manifest)
+        if end_status != "valid":
+            end = None
     children = case["children"]
     if children == "absent":
         read, status = None, "missing"
@@ -485,6 +493,14 @@ def children_facet(case: dict[str, Any], fixture: dict[str, Any], manifest: dict
         facet["coverage"] = "ended"
     elif binding["provider"] not in enum_set(manifest, "subagent_providers"):
         facet["coverage"] = "none"
+    # Which children count depends on the end, so an end that could not be
+    # read leaves the count unknown.
+    elif end_status == "unavailable":
+        facet["coverage"] = "unavailable"
+    elif end_status == "future_schema":
+        facet["coverage"] = "unsupported"
+    elif end_status not in ("valid", "missing"):
+        facet["coverage"] = "invalid"
     elif status == "missing":
         facet["coverage"] = "known"
     elif status == "unavailable":
@@ -495,12 +511,11 @@ def children_facet(case: dict[str, Any], fixture: dict[str, Any], manifest: dict
         facet["coverage"] = "invalid"
     else:
         facet["coverage"] = "known"
-        applied = end is not None and read.get("lifetime_end", {}).get("event_id") == end["event_id"]
-        cutoff = end["observed_mono_ns"] if end is not None and not applied else None
-        for child in read["live"]:
-            if cutoff is None or child["last_mono_ns"] > cutoff:
-                facet["count"] += 1
-                facet["waiting"] += child["status"] == "waiting"
+        # A set that has not applied the binding's end was written before it.
+        applied = end is None or read.get("lifetime_end", {}).get("event_id") == end["event_id"]
+        for child in read["live"] if applied else []:
+            facet["count"] += 1
+            facet["waiting"] += child["status"] == "waiting"
     if facet["count"] > 0:
         facet["renders"] = f"+{facet['count']}"
     elif facet["coverage"] in UNCERTAIN_COVERAGE:

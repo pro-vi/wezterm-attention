@@ -304,7 +304,7 @@ pub struct Enums {
     pub activity_types: BTreeSet<String>,
     pub binding_health: BTreeSet<String>,
     pub binding_phase: BTreeSet<String>,
-    pub child_presence_provenances: BTreeSet<String>,
+    pub child_presence_events: BTreeSet<String>,
     pub child_presence_statuses: BTreeSet<String>,
     pub diagnostic_codes: BTreeSet<String>,
     pub end_reasons: BTreeSet<String>,
@@ -370,7 +370,7 @@ pub enum FieldType {
     ChildParentClear,
     ChildLifetimeEnd,
     ChildAgentIds,
-    ChildPresenceProvenance,
+    ChildPresenceEvent,
     ChildPresenceStatus,
 }
 
@@ -447,7 +447,7 @@ pub fn parse_manifest(source: &str) -> Result<Manifest> {
     }
     let declared = |values: &[&str]| values.iter().map(|value| (*value).to_owned()).collect();
     if parsed.enums.child_presence_statuses != declared(&crate::children::CHILD_STATUSES)
-        || parsed.enums.child_presence_provenances != declared(&crate::children::CHILD_PROVENANCES)
+        || parsed.enums.child_presence_events != declared(&crate::children::CHILD_EVENTS)
     {
         return Err(AttentionError::new(
             "integration_version_mismatch",
@@ -742,9 +742,9 @@ fn validate_field(
                 .iter()
                 .all(|item| safe_text(item, limits.safe_label_max_bytes))
         }),
-        FieldType::ChildPresenceProvenance => value
+        FieldType::ChildPresenceEvent => value
             .as_str()
-            .is_some_and(|item| protocol.enums.child_presence_provenances.contains(item)),
+            .is_some_and(|item| protocol.enums.child_presence_events.contains(item)),
         FieldType::ChildPresenceStatus => value
             .as_str()
             .is_some_and(|item| protocol.enums.child_presence_statuses.contains(item)),

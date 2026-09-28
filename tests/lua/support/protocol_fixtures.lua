@@ -117,8 +117,14 @@ return function(protocol_api)
     local results = {}
     for _, case in ipairs(fixture.children_coverage_cases or {}) do
       local binding = patched_sample(fixture, "binding", case.binding)
-      local binding_end = case["end"] ~= "absent"
-        and patched_sample(fixture, "binding_end", case["end"]) or nil
+      local binding_end, end_problem, end_status
+      if case["end"] == "unavailable" then
+        end_problem = { code = "probe_unavailable", message = "record could not be read", context = {} }
+        end_status = "unavailable"
+      elseif case["end"] ~= "absent" then
+        binding_end, end_problem = parse_v2_record(patched_sample(fixture, "binding_end", case["end"]), "binding_end")
+        end_status = binding_end and "valid" or "invalid"
+      end
       local set, problem, status
       if case.children == "absent" then
         status = "missing"
@@ -135,7 +141,7 @@ return function(protocol_api)
           patched_sample(fixture, "child_presence_set", case.children), "child_presence_set")
         status = set and "valid" or "invalid"
       end
-      local facet = protocol_api.children_facet(set, status, problem, binding, binding_end)
+      local facet = protocol_api.children_facet(set, status, problem, binding, binding_end, end_status, end_problem)
       results[#results + 1] = {
         id = case.id,
         actual = {

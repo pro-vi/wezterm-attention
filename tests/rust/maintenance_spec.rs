@@ -267,8 +267,8 @@ impl Setup {
 
     /// Writes into session-a's binding the files a binding held while each
     /// sub-agent had its own record: one stopped child's record under
-    /// `agents/`, a parent clear and a retention floor, all written at unix
-    /// time 1, so every age sweep measures has run out. Returns their paths.
+    /// `agents/`, written at unix time 1 so every age sweep measures has run
+    /// out, a parent clear and a retention floor. Returns their paths.
     fn seed_per_child_records(&self) -> [PathBuf; 3] {
         let (address, _) = pane_address(&self.env).expect("address");
         let launch_id = &self.env["WEZTERM_ATTENTION_LAUNCH_ID"];
@@ -857,8 +857,6 @@ fn an_old_binding_holding_per_child_records_is_pruned_whole() {
     );
 }
 
-/// Sweep deletes nothing inside the binding a pane is on, per-child records
-/// included, however old they are: they go only with their binding.
 // A record sweep cannot read, here one a later writer wrote, may be one a
 // newer version still needs, so the binding holding it is kept however old.
 #[test]
@@ -891,6 +889,67 @@ fn an_old_binding_holding_a_newer_per_child_record_is_kept() {
     assert!(presence.exists());
 }
 
+/// Binds session-a, records one of its sub-agents in its child set, and ends
+/// it at unix time 1 before session-b takes the pane, so the old binding has
+/// aged out once the clock passes the retention age. Returns its directory.
+fn aged_binding_with_a_child_set(setup: &Setup) -> PathBuf {
+    setup.claim_and_bind();
+    let old_dir = setup.binding_dir();
+    setup.provider_event(
+        "SubagentStart",
+        "session-a",
+        json!({"agent_id":"child-a","agent_type":"Explore"}),
+        "00000000000000000250",
+    );
+    assert!(old_dir.join("children.json").exists());
+    setup.clock.set_unix(1);
+    setup.provider_event(
+        "SessionEnd",
+        "session-a",
+        json!({"reason":"other"}),
+        "00000000000000000300",
+    );
+    setup.provider_event(
+        "SessionStart",
+        "session-b",
+        json!({"source":"resume"}),
+        "00000000000000000400",
+    );
+    setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
+    old_dir
+}
+
+// A binding's child set, and an invalid one a writer moved aside, go with
+// their binding once it has aged out.
+#[test]
+fn an_old_binding_holding_a_child_set_and_a_moved_aside_one_is_removed_whole() {
+    let setup = Setup::new();
+    let old_dir = aged_binding_with_a_child_set(&setup);
+    fs::write(
+        old_dir.join(".children.json.invalid.00000000-0000-4000-8000-000000000001"),
+        b"{not json",
+    )
+    .expect("moved-aside set");
+    let (_, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000733"));
+    assert!(!old_dir.exists(), "{diagnostics:?}");
+}
+
+// A child set a later writer wrote may be one a newer version still needs,
+// so the binding holding it is kept however old.
+#[test]
+fn an_old_binding_holding_a_newer_child_set_is_kept() {
+    let setup = Setup::new();
+    let old_dir = aged_binding_with_a_child_set(&setup);
+    let path = old_dir.join("children.json");
+    let mut set: Value = serde_json::from_slice(&fs::read(&path).expect("set")).expect("set JSON");
+    set["schema"] = json!(999);
+    fs::write(&path, serde_json::to_vec(&set).expect("future JSON")).expect("write future set");
+    let (_, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000734"));
+    assert!(path.exists(), "{diagnostics:?}");
+}
+
+/// Sweep deletes nothing inside the binding a pane is on, per-child records
+/// included, however old they are: they go only with their binding.
 #[test]
 fn a_current_binding_keeps_its_per_child_records() {
     let setup = Setup::new();

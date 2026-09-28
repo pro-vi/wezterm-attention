@@ -24,7 +24,7 @@ use crate::records::{
     CommitPlan, PLUGIN_LOCK_TIMEOUT, PreparedRecordWrite, RecordIdentity, RecordRead, Replacement,
     claim_lock, commit, commit_waiting, ends_binding, launch_lock, pane_dir, read_claim,
     read_record, read_record_at, read_record_typed, read_record_typed_at, review_lock,
-    session_entry, session_entry_path, state_root,
+    session_entry, session_entry_path, state_root, within_read_bound,
 };
 use crate::wezterm::RuntimePorts;
 
@@ -999,25 +999,17 @@ fn child_still_waits(resolved: &ResolvedLaunch, binding_id: &str, since: &str) -
     ) else {
         return false;
     };
-    set.waits_since(end_mark(end.as_ref(), &binding), since)
-}
-
-/// The binding's end record as the child rules read it.
-fn end_mark<'a>(end: Option<&'a Value>, binding: &Value) -> Option<EndMark<'a>> {
-    end.map(|end| EndMark {
-        event_id: end["event_id"].as_str().unwrap_or(""),
-        observed_mono_ns: end["observed_mono_ns"].as_str().unwrap_or(""),
-        ends_binding: ends_binding(end, binding),
-    })
+    set.waits_since(EndMark::of(end.as_ref(), &binding), since)
 }
 
 /// Plans one change to the binding's child set, inside the launch and claim
 /// locks: reads the binding, its end and the set, applies `transition`, and
 /// adds the replacement when the set changed. A set this user cannot read is
 /// refused rather than overwritten; a set written by a newer writer is never
-/// overwritten; an invalid set is kept aside under a write-leftover name and
-/// replaced by a new one even when the event changes nothing, so it is kept
-/// aside once, and children it held reappear at their next event.
+/// overwritten; an invalid set is moved aside under a write-leftover name and
+/// replaced by a new one even when the event changes nothing, and children it
+/// held reappear at their next event. A set its readers would reject as too
+/// large is refused rather than written.
 fn plan_children(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
@@ -1031,15 +1023,8 @@ fn plan_children(
     let binding = read_record_at(&resolved.root, "binding", &identity)?
         .ok_or_else(|| AttentionError::new("claim_stale", "child event has no matching binding"))?;
     let end = read_record_at(&resolved.root, "binding_end", &identity)?;
-    let empty = || {
-        ChildPresenceSet::empty(
-            resolved.address.clone(),
-            &resolved.launch_id,
-            binding_id,
-            "",
-            0,
-        )
-    };
+    let empty =
+        || ChildPresenceSet::empty(resolved.address.clone(), &resolved.launch_id, binding_id);
     let (mut set, started_again) =
         match read_record_typed(&path, Some("child_presence_set"), &identity) {
             RecordRead::Present(value) => (
@@ -1050,12 +1035,14 @@ fn plan_children(
             ),
             RecordRead::Missing => (empty(), false),
             RecordRead::Invalid(_) => {
+                // A rename moves the file as it stands, a symlink included,
+                // without reading it.
                 let aside =
                     path.with_file_name(format!(".children.json.invalid.{}", Uuid::new_v4()));
-                std::fs::copy(&path, &aside).map_err(|_| {
+                std::fs::rename(&path, &aside).map_err(|_| {
                     AttentionError::new(
                         "probe_unavailable",
-                        "invalid child presence set could not be kept aside",
+                        "invalid child presence set could not be moved aside",
                     )
                 })?;
                 (empty(), true)
@@ -1064,10 +1051,14 @@ fn plan_children(
         };
     set.provider = provider_name(event)?.to_owned();
     set.schema = manifest()?.record_schema;
-    let reduction = set.apply(end_mark(end.as_ref(), &binding), transition);
+    let reduction = set.apply(EndMark::of(end.as_ref(), &binding), transition);
     let mut result = LifecycleResult::new(reduction.disposition);
-    if let Some((code, message)) = reduction.diagnostic {
-        result.diagnostic = Some(Diagnostic::new(code, message));
+    result.diagnostic = reduction.diagnostic;
+    if started_again && result.diagnostic.is_none() {
+        result.diagnostic = Some(Diagnostic::new(
+            "record_invalid",
+            "an invalid child presence set was moved aside and started again",
+        ));
     }
     if reduction.changed || started_again {
         set.revision = Uuid::new_v4().to_string();
@@ -1075,6 +1066,7 @@ fn plan_children(
         let value = serde_json::to_value(&set).map_err(|_| {
             AttentionError::new("record_invalid", "child presence set could not be encoded")
         })?;
+        within_read_bound(&value)?;
         replacements.push(Replacement::always(path, value));
         if result.event_id.is_none() && accepted(&result) {
             result.event_id = Some(set.revision.clone());
@@ -1162,13 +1154,13 @@ fn apply_activity(
                 .into_iter()
                 .collect();
             // Only a child's permission request reaches here with an agent id.
-            // Its presence marks the child as waiting until its next tool call
-            // or its stop. The presence only holds the notify against the
-            // lead's tool calls, so a presence that cannot be planned is
-            // reported and the notify still applies.
-            let mut presence_error = None;
+            // It marks the child `waiting` in the binding's child set, which
+            // only holds the notify against the lead's tool calls (see the
+            // record contract's Child presence), so a set that cannot be
+            // changed is reported and the notify still applies.
+            let mut children_report = Ok(None);
             if let Some(agent_id) = event.agent_id.as_deref() {
-                presence_error = plan_children_beside_activity(
+                children_report = plan_children_beside_activity(
                     resolved,
                     event,
                     &binding_id,
@@ -1188,7 +1180,7 @@ fn apply_activity(
                 let surviving_activity = activity.as_ref().ok_or_else(|| {
                     AttentionError::new("record_invalid", "parent stop has no surviving activity")
                 })?;
-                presence_error = plan_children_beside_activity(
+                children_report = plan_children_beside_activity(
                     resolved,
                     event,
                     &binding_id,
@@ -1212,14 +1204,16 @@ fn apply_activity(
                     ..CommitPlan::reporting(Mutation::plain(result))
                 },
             );
-            if let Some(error) = presence_error {
-                let result = &mut plan.result.result;
-                if accepted(result) {
-                    result.disposition = Disposition::Partial;
-                }
-                if result.diagnostic.is_none() {
-                    result.diagnostic = Some(error.diagnostic);
-                }
+            let (refused, diagnostic) = match children_report {
+                Ok(diagnostic) => (false, diagnostic),
+                Err(diagnostic) => (true, Some(diagnostic)),
+            };
+            let result = &mut plan.result.result;
+            if refused && accepted(result) {
+                result.disposition = Disposition::Partial;
+            }
+            if result.diagnostic.is_none() {
+                result.diagnostic = diagnostic;
             }
             Ok(plan)
         },
@@ -1230,8 +1224,9 @@ fn apply_activity(
 
 /// Plans a child-set change that an activity carries, adding its
 /// replacement only when it applies. The activity stands whatever happens to
-/// the set, so a set that cannot be planned, or a transition that conflicts
-/// with it, comes back as the error the hook reports beside the activity.
+/// the set. What the change reports comes back beside it: `Ok` with the
+/// transition's own diagnostic, or `Err` when the set could not be planned or
+/// the transition conflicts with it, which makes the hook partial.
 fn plan_children_beside_activity(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
@@ -1239,27 +1234,29 @@ fn plan_children_beside_activity(
     written_at: &str,
     transition: ChildTransition<'_>,
     replacements: &mut Vec<Replacement>,
-) -> Option<AttentionError> {
-    let mut presence = Vec::new();
+) -> std::result::Result<Option<Diagnostic>, Diagnostic> {
+    let mut planned = Vec::new();
     match plan_children(
         resolved,
         event,
         binding_id,
         written_at,
         transition,
-        &mut presence,
+        &mut planned,
     ) {
         Ok(child) if child.disposition == Disposition::Conflict => {
-            child.diagnostic.map(|diagnostic| AttentionError {
-                diagnostic,
-                exit_code: 1,
-            })
+            Err(child.diagnostic.unwrap_or_else(|| {
+                Diagnostic::new(
+                    "record_invalid",
+                    "child presence change conflicts with the set",
+                )
+            }))
         }
-        Ok(_) => {
-            replacements.extend(presence);
-            None
+        Ok(child) => {
+            replacements.extend(planned);
+            Ok(child.diagnostic)
         }
-        Err(error) => Some(error),
+        Err(error) => Err(error.diagnostic),
     }
 }
 
@@ -1770,12 +1767,12 @@ fn apply_child(
         .agent_id
         .as_deref()
         .ok_or_else(|| AttentionError::new("record_invalid", "child event has no agent id"))?;
-    let transition = match (event.action, event.child_source.as_deref()) {
+    let transition = match (event.action, event.source_event.as_str()) {
         (ProviderAction::ChildStopped, _) => ChildTransition::Stop {
             agent_id,
             order: observation,
         },
-        (_, Some("subagent_start")) => ChildTransition::Start {
+        (_, "SubagentStart") => ChildTransition::Start {
             agent_id,
             agent_type: event.agent_type.as_deref(),
             order: observation,

@@ -161,9 +161,9 @@ def measure(implementation: str, command: list[str], scratch: pathlib.Path, *, f
         ]
 
         def child(index: int) -> float:
-            # Children carry their type, as Claude's do: a writer counts a
-            # tool event with an agent id and no type as the provider's own
-            # agent and records no child for it.
+            # Children carry their type, as Claude Code 2.1.283's did: a
+            # writer counts a tool event with an agent id and no type as the
+            # provider's own agent and records no child for it.
             payload = {
                 **activity,
                 "agent_id": f"measurement-child-{index:02d}",

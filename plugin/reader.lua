@@ -381,16 +381,18 @@ return function(context)
   --- The running sub-agents of a binding with record `binding`, from its
   --- child presence set `set` as the record reader returned it (`status` and
   --- `problem`), and its end record `binding_end` whether or not that end
-  --- still ends it. Returns { coverage, count, waiting, uncertain, diagnostics }.
+  --- still ends it, with that read's `end_status` and `end_problem`. Returns
+  --- { coverage, count, waiting, uncertain, diagnostics }.
   ---
   --- The writer alone decides which children are in the set, and a reader
-  --- only counts them. The one order a reader checks is against the binding's
-  --- end: while the end ends the binding nothing is counted, and an end the set
-  --- has not applied yet, as after a crash between writing the end and the set
-  --- or before the first child event of a resumed session, leaves only the
-  --- children seen after it. A set read before, handed back when the file
-  --- cannot be read now, is counted the same way.
-  local function children_facet(set, status, problem, binding, binding_end)
+  --- only counts them. The one rule a reader applies is the binding's end:
+  --- nothing is counted while the end ends the binding, or while the set has
+  --- not applied it. Every write applies the end first, so a set that has not
+  --- was written before the end, and what it holds belongs to the lifetime
+  --- the end closed. An end that cannot be read leaves the count unknown. A
+  --- set read before, handed back when the file cannot be read now, is
+  --- counted the same way.
+  local function children_facet(set, status, problem, binding, binding_end, end_status, end_problem)
     local facet = { coverage = "known", count = 0, waiting = 0, uncertain = false, diagnostics = {} }
     local supported = list_contains(protocol.enums.subagent_providers, binding.provider)
     if problem then facet.diagnostics[1] = problem end
@@ -407,22 +409,23 @@ return function(context)
       facet.coverage = "none"
       return facet
     end
-    if status == "unavailable" then
+    local failed_status, failed_problem = status, problem
+    if not binding_end and (end_status == "unavailable" or end_status == "invalid") then
+      failed_status, failed_problem = end_status, end_problem
+    end
+    if failed_status == "unavailable" then
       facet.coverage = "unavailable"
-    elseif status == "invalid" then
-      facet.coverage = problem and problem.code == "future_schema" and "unsupported" or "invalid"
+    elseif failed_status == "invalid" then
+      facet.coverage = failed_problem and failed_problem.code == "future_schema" and "unsupported" or "invalid"
     end
     facet.uncertain = uncertain_coverage[facet.coverage] == true
     if not set or facet.uncertain then return facet end
-    local cutoff
     if binding_end and not (set.lifetime_end and set.lifetime_end.event_id == binding_end.event_id) then
-      cutoff = binding_end.observed_mono_ns
+      return facet
     end
     for _, child in ipairs(set.live) do
-      if not cutoff or child.last_mono_ns > cutoff then
-        facet.count = facet.count + 1
-        if child.status == "waiting" then facet.waiting = facet.waiting + 1 end
-      end
+      facet.count = facet.count + 1
+      if child.status == "waiting" then facet.waiting = facet.waiting + 1 end
     end
     return facet
   end
@@ -483,7 +486,7 @@ return function(context)
     local binding
     local activity
     local activity_clear
-    local binding_end
+    local binding_end, end_problem, end_status
     local acknowledgement
     local activity_fence_valid = true
     local current_target = { kind = "launch" }
@@ -508,13 +511,12 @@ return function(context)
       collect_diagnostic(diagnostics, binding_diagnostic)
       if not binding then return empty_view(read, diagnostics, records) end
 
-      local end_diagnostic
-      binding_end, end_diagnostic = read_expected_record_cached(
+      binding_end, end_problem, end_status = read_expected_record_cached(
         records_root .. "/end.json", "binding_end", {
         address = address, launch_id = read.launch_id, binding_id = pointer.binding_id,
       }, false, previous_binding_records.binding_end)
       records.binding_end = binding_end
-      collect_diagnostic(diagnostics, end_diagnostic)
+      collect_diagnostic(diagnostics, end_problem)
       local activity_clear_diagnostic
       activity_clear, activity_clear_diagnostic = read_expected_record_cached(
         records_root .. "/activity-clear.json", "activity_clear", {
@@ -601,7 +603,7 @@ return function(context)
           }, false, previous_binding_records.children)
       end
       records.children = set
-      children = children_facet(set, set_status, set_problem, binding, binding_end)
+      children = children_facet(set, set_status, set_problem, binding, binding_end, end_status, end_problem)
       for _, item in ipairs(children.diagnostics) do collect_diagnostic(diagnostics, item) end
     end
 

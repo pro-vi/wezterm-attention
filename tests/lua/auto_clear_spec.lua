@@ -2367,7 +2367,7 @@ local function write_subagents(pane_id, count)
   set.live = {}
   for index = 1, count do
     set.live[index] = {
-      agent_id = "agent-" .. index, provenance = "tool", status = "running",
+      agent_id = "agent-" .. index, last_event = "tool", status = "running",
       last_mono_ns = string.format("%020d", 300000000000 + index),
     }
   end
@@ -3598,7 +3598,7 @@ test("a child set that cannot be counted shows +? until a readable one replaces 
   drain_errors()
 end)
 
-test("an unreadable child set keeps the count read before, and says so with none", function()
+test("an unreadable child set keeps the count read before, and is unknown with no earlier read", function()
   write_subagents(4253, 2)
   local path = seeded_records_root(4253) .. "/children.json"
   poll_at({ 4253 })
@@ -3634,13 +3634,13 @@ test("an unreadable child set keeps the count read before, and says so with none
   drain_errors()
 end)
 
-test("an ended session counts no children, and a resumed one only those after its end", function()
+test("an ended session counts no children, and a resumed one none until its set applies the end", function()
   write_activity(4254, "stop")
   local root = seeded_records_root(4254)
   local set = seeded_record(4254, "child_presence_set")
   set.live = {
-    { agent_id = "before-end", provenance = "tool", status = "running", last_mono_ns = "00000000003000000000" },
-    { agent_id = "after-end", provenance = "permission", status = "waiting", last_mono_ns = "00000000006000000000" },
+    { agent_id = "before-end", last_event = "tool", status = "running", last_mono_ns = "00000000003000000000" },
+    { agent_id = "after-end", last_event = "permission", status = "waiting", last_mono_ns = "00000000006000000000" },
   }
   write_child_set(root .. "/children.json", set)
   local ending = seeded_record(4254, "binding_end")
@@ -3658,8 +3658,8 @@ test("an ended session counts no children, and a resumed one only those after it
   write_json_path(root .. "/binding.json", binding)
   poll_at({ 4254 })
   view = internal.attention_cache[seeded_key(4254)]
-  assert(view.binding_phase == "active" and view.subagents == 1,
-    "only the child seen after the end is counted before the set applies that end")
+  assert(view.binding_phase == "active" and view.subagents == 0 and view.subagents_uncertain == false,
+    "a set written before the end holds only children of the lifetime that end closed")
   drain_errors()
 end)
 

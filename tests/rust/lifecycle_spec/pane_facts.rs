@@ -618,9 +618,20 @@ fn inspect_and_installed_lua_count_every_shared_child_row_alike() {
             }
             record
         };
-        if case["end"] != "absent" {
-            let end = placed(patched("binding_end", &case["end"]));
-            atomic_replace(&directory.join("end.json"), &end).unwrap();
+        match case["end"].as_str() {
+            Some("absent") => {}
+            // A directory where the end should be is a read that fails.
+            Some("unavailable") => fs::create_dir_all(directory.join("end.json")).unwrap(),
+            // Written as plain bytes, as the set is below, since some rows
+            // are ends no valid writer would leave.
+            _ => {
+                let end = placed(patched("binding_end", &case["end"]));
+                fs::write(
+                    directory.join("end.json"),
+                    serde_json::to_vec(&end).unwrap(),
+                )
+                .unwrap();
+            }
         }
         match case["children"].as_str() {
             Some("absent") => {}

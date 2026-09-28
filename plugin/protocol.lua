@@ -395,8 +395,8 @@ return function(context)
         if not is_safe_text(item, limits.safe_label_max_bytes) then return false end
       end
       return true
-    elseif field_type == "child_presence_provenance" then
-      return list_contains(protocol.enums.child_presence_provenances, value)
+    elseif field_type == "child_presence_event" then
+      return list_contains(protocol.enums.child_presence_events, value)
     elseif field_type == "child_presence_status" then
       return list_contains(protocol.enums.child_presence_statuses, value)
     elseif field_type == "lifecycle_pools" or field_type == "observation_pool" or field_type == "native_correlation" then
@@ -406,8 +406,7 @@ return function(context)
       return type(value) == "table" and (value.kind == "lead" or value.kind == "child")
         and validate_shape(value, protocol.lifecycle_shapes[value.kind], value.kind) ~= nil
     elseif field_type == "observation_array" then
-      if type(value) ~= "table" or container_kinds[value] == "{" or #value > limits.lifecycle_pool_max_count then return false end
-      for key in pairs(value) do if type(key) ~= "number" or key % 1 ~= 0 or key < 1 or key > #value then return false end end
+      if not is_array(value) or #value > limits.lifecycle_pool_max_count then return false end
       container_kinds[value] = "["
       for _, item in ipairs(value) do
         local spec = type(item) == "table" and protocol.lifecycle_variants[item.kind]

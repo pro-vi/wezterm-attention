@@ -829,7 +829,7 @@ return function()
     --- activity, and the activity's own type when that outranks the flag — in
     --- which case the flag is still reported by the sixth return.
     ---
-    --- A pane with live subagents and no activity returns (nil, nil, nil, false, n):
+    --- A pane with running subagents and no activity returns (nil, nil, nil, false, n):
     --- the count is real even though there is no type to report.
     --- A scalar observed at more than one full address returns nil. Use
     --- get_attention_view(pane) to disambiguate.

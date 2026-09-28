@@ -4,26 +4,28 @@
 //! A child leaves the set only on evidence that it ended: its own stop, a
 //! parent stop that covers its last event, or the end of the binding. Nothing
 //! removes a child for being quiet, so a child running one long command stays
-//! counted. The set keeps no record of children that have stopped: an agent
-//! runs each hook to completion before it goes on, so one child's events reach
-//! the writer in the order they happened, and a stop is never followed by an
-//! older event of the same child.
+//! counted. The set keeps no record of children that have stopped: Claude
+//! Code 2.1.283 and Codex at source commit `985cf47a4` run a hook registered
+//! without `async: true` to completion before the agent goes on, so one
+//! child's events reach the writer in the order they happened, and a stop is
+//! never followed by an older event of the same child.
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::identity::PaneAddress;
-use crate::protocol::{AttentionError, Disposition, Result, vocabulary};
+use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, vocabulary};
 
 vocabulary!(ChildStatus { Running, Waiting });
-vocabulary!(ChildProvenance {
-    Started,
+vocabulary!(ChildEvent {
+    Start,
     Tool,
     Permission
 });
 
 /// The manifest's `child_presence_statuses`, in the order it lists them.
 pub const CHILD_STATUSES: [&str; 2] = ["running", "waiting"];
-/// The manifest's `child_presence_provenances`, in the order it lists them.
-pub const CHILD_PROVENANCES: [&str; 3] = ["started", "tool", "permission"];
+/// The manifest's `child_presence_events`, in the order it lists them.
+pub const CHILD_EVENTS: [&str; 3] = ["start", "tool", "permission"];
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -44,14 +46,15 @@ pub struct ChildPresenceSet {
 }
 
 /// A child that is running or waiting on the user. `agent_type` is the
-/// provider's name for the kind of sub-agent; nothing decides by it.
+/// provider's name for the kind of sub-agent; nothing decides by its value.
+/// `last_event` is the kind of event that last changed the entry.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct LiveChild {
     pub agent_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
-    pub provenance: ChildProvenance,
+    pub last_event: ChildEvent,
     pub status: ChildStatus,
     pub last_mono_ns: String,
 }
@@ -82,6 +85,18 @@ pub struct EndMark<'a> {
     pub event_id: &'a str,
     pub observed_mono_ns: &'a str,
     pub ends_binding: bool,
+}
+
+impl<'a> EndMark<'a> {
+    /// The binding's end record `end`, if it has one, read against the
+    /// binding record `binding`.
+    pub fn of(end: Option<&'a Value>, binding: &Value) -> Option<Self> {
+        end.map(|end| Self {
+            event_id: end["event_id"].as_str().unwrap_or(""),
+            observed_mono_ns: end["observed_mono_ns"].as_str().unwrap_or(""),
+            ends_binding: crate::records::ends_binding(end, binding),
+        })
+    }
 }
 
 /// One event that can change the set. Orders are validated 20-digit
@@ -119,7 +134,7 @@ pub enum ChildTransition<'a> {
 pub struct Reduction {
     pub changed: bool,
     pub disposition: Disposition,
-    pub diagnostic: Option<(&'static str, &'static str)>,
+    pub diagnostic: Option<Diagnostic>,
 }
 
 impl Reduction {
@@ -140,27 +155,22 @@ impl Reduction {
         Self {
             changed,
             disposition,
-            diagnostic: Some((code, message)),
+            diagnostic: Some(Diagnostic::new(code, message)),
         }
     }
 }
 
 impl ChildPresenceSet {
-    /// An empty set for the binding a writer is about to change.
-    pub fn empty(
-        address: PaneAddress,
-        launch_id: &str,
-        binding_id: &str,
-        provider: &str,
-        record_schema: u64,
-    ) -> Self {
+    /// An empty set for the binding a writer is about to change, with the
+    /// provider and schema the writer sets before it writes.
+    pub fn empty(address: PaneAddress, launch_id: &str, binding_id: &str) -> Self {
         Self {
             kind: "child_presence_set".to_owned(),
-            schema: record_schema,
+            schema: 0,
             address,
             launch_id: launch_id.to_owned(),
             binding_id: binding_id.to_owned(),
-            provider: provider.to_owned(),
+            provider: String::new(),
             revision: String::new(),
             written_at_unix_ns: String::new(),
             live: Vec::new(),
@@ -193,27 +203,20 @@ impl ChildPresenceSet {
         Ok(())
     }
 
-    /// The children a reader counts. None while the end record ends the
-    /// binding. When the binding has an end this set has not applied, as
-    /// after a crash between writing the end and writing this set, or before
-    /// the first child write of a resumed session, only children seen after
-    /// that end are counted.
+    /// The children a reader counts: none while the binding has an end this
+    /// set has not applied, or one that ends the binding. Every write applies
+    /// the binding's end before anything else, so a set that has not applied
+    /// its end was written before that end, and what it holds belongs to the
+    /// lifetime the end closed.
     pub fn counted<'a>(&'a self, end: Option<EndMark<'_>>) -> impl Iterator<Item = &'a LiveChild> {
-        let cutoff = end.and_then(|end| {
-            if end.ends_binding {
-                return Some(None);
-            }
-            let applied = self
-                .lifetime_end
-                .as_ref()
-                .is_some_and(|last| last.event_id == end.event_id);
-            (!applied).then(|| Some(end.observed_mono_ns.to_owned()))
+        let closed = end.is_some_and(|end| {
+            end.ends_binding
+                || self
+                    .lifetime_end
+                    .as_ref()
+                    .is_none_or(|last| last.event_id != end.event_id)
         });
-        self.live.iter().filter(move |child| match &cutoff {
-            None => true,
-            Some(None) => false,
-            Some(Some(order)) => child.last_mono_ns.as_str() > order.as_str(),
-        })
+        self.live.iter().filter(move |_| !closed)
     }
 
     /// Applies one transition. The binding's end is applied first whatever
@@ -239,59 +242,63 @@ impl ChildPresenceSet {
             });
             changed = true;
         }
-        if let ChildTransition::ParentClear { order, event_id } = transition {
-            let reduction = self.clear_for_parent(order, event_id);
-            return Reduction {
-                changed: changed || reduction.changed,
-                ..reduction
-            };
-        }
-        if end.is_some_and(|end| end.ends_binding) {
-            return Reduction::diagnosed(
-                changed,
-                Disposition::Ignored,
-                "binding_conflict",
-                "child observation arrived after the binding ended",
-            );
-        }
-        let order = transition_order(transition);
-        if self
-            .lifetime_end
-            .as_ref()
-            .is_some_and(|last| order <= last.observed_mono_ns.as_str())
-        {
-            return Reduction::diagnosed(
-                changed,
-                Disposition::Ignored,
-                "binding_conflict",
-                "child observation predates the binding's last end",
-            );
-        }
         let reduction = match transition {
-            ChildTransition::Stop { agent_id, order } => self.stop(agent_id, order),
+            ChildTransition::ParentClear { order, event_id } => {
+                self.clear_for_parent(order, event_id)
+            }
+            ChildTransition::Stop { agent_id, order } => self
+                .refused_by_end(end, order)
+                .unwrap_or_else(|| self.stop(agent_id, order)),
             ChildTransition::Start {
                 agent_id,
                 agent_type,
                 order,
-            } => self.advance(agent_id, agent_type, order, ChildProvenance::Started),
+            } => self
+                .refused_by_end(end, order)
+                .unwrap_or_else(|| self.advance(agent_id, agent_type, order, ChildEvent::Start)),
             ChildTransition::Tool {
                 agent_id,
                 agent_type,
                 order,
-            } => self.advance(agent_id, agent_type, order, ChildProvenance::Tool),
+            } => self
+                .refused_by_end(end, order)
+                .unwrap_or_else(|| self.advance(agent_id, agent_type, order, ChildEvent::Tool)),
             ChildTransition::Permission {
                 agent_id,
                 agent_type,
                 order,
-            } => self.advance(agent_id, agent_type, order, ChildProvenance::Permission),
-            ChildTransition::ParentClear { order, event_id } => {
-                self.clear_for_parent(order, event_id)
-            }
+            } => self.refused_by_end(end, order).unwrap_or_else(|| {
+                self.advance(agent_id, agent_type, order, ChildEvent::Permission)
+            }),
         };
         Reduction {
             changed: changed || reduction.changed,
             ..reduction
         }
+    }
+
+    /// Why a child's event at `order` cannot change the set, if it cannot:
+    /// the binding has ended, or the event comes from before its last end.
+    fn refused_by_end(&self, end: Option<EndMark<'_>>, order: &str) -> Option<Reduction> {
+        if end.is_some_and(|end| end.ends_binding) {
+            return Some(Reduction::diagnosed(
+                false,
+                Disposition::Ignored,
+                "binding_conflict",
+                "child observation arrived after the binding ended",
+            ));
+        }
+        self.lifetime_end
+            .as_ref()
+            .is_some_and(|last| order <= last.observed_mono_ns.as_str())
+            .then(|| {
+                Reduction::diagnosed(
+                    false,
+                    Disposition::Ignored,
+                    "binding_conflict",
+                    "child observation predates the binding's last end",
+                )
+            })
     }
 
     fn clear_for_parent(&mut self, order: &str, event_id: &str) -> Reduction {
@@ -351,13 +358,13 @@ impl ChildPresenceSet {
     }
 
     /// Applies an event that shows a child working: a start, a tool call, or
-    /// a permission request, named by the provenance it leaves.
+    /// a permission request, named by `event`.
     fn advance(
         &mut self,
         agent_id: &str,
         agent_type: Option<&str>,
         order: &str,
-        provenance: ChildProvenance,
+        event: ChildEvent,
     ) -> Reduction {
         if self
             .parent_clear
@@ -371,10 +378,10 @@ impl ChildPresenceSet {
                 "child observation is covered by parent clear",
             );
         }
-        let status_after = |current: Option<ChildStatus>| match provenance {
-            ChildProvenance::Started => current.unwrap_or(ChildStatus::Running),
-            ChildProvenance::Tool => ChildStatus::Running,
-            ChildProvenance::Permission => ChildStatus::Waiting,
+        let status_after = |current: Option<ChildStatus>| match event {
+            ChildEvent::Start => current.unwrap_or(ChildStatus::Running),
+            ChildEvent::Tool => ChildStatus::Running,
+            ChildEvent::Permission => ChildStatus::Waiting,
         };
         if let Some(child) = self
             .live
@@ -387,7 +394,7 @@ impl ChildPresenceSet {
             }
             let status = status_after(Some(child.status));
             if order == last {
-                return if child.status == status && child.provenance == provenance {
+                return if child.status == status && child.last_event == event {
                     Reduction::of(false, Disposition::Skipped)
                 } else {
                     Reduction::diagnosed(
@@ -399,19 +406,19 @@ impl ChildPresenceSet {
                 };
             }
             child.status = status;
-            child.provenance = provenance;
+            child.last_event = event;
             child.last_mono_ns = order.to_owned();
             if let Some(agent_type) = agent_type {
                 child.agent_type = Some(agent_type.to_owned());
             }
             return Reduction::of(true, Disposition::Applied);
         }
-        // A provider also runs agents of its own, which can send a tool event
-        // with an agent id and no type; only a start or a typed event shows a
-        // sub-agent someone asked for. Such an event is normal, so the hook
-        // still succeeds; the diagnostic is there for a sub-agent that arrives
-        // untyped.
-        if provenance != ChildProvenance::Started && agent_type.is_none() {
+        // Claude Code 2.1.283 also runs agents of its own, and one sent a tool
+        // event with an agent id and no type; only a start or a typed event
+        // shows a sub-agent someone asked for. Such an event is normal, so the
+        // hook still succeeds; the diagnostic is there for a sub-agent that
+        // arrives untyped.
+        if event != ChildEvent::Start && agent_type.is_none() {
             return Reduction::diagnosed(
                 false,
                 Disposition::Skipped,
@@ -427,7 +434,7 @@ impl ChildPresenceSet {
         self.live.push(LiveChild {
             agent_id: agent_id.to_owned(),
             agent_type: agent_type.map(str::to_owned),
-            provenance,
+            last_event: event,
             status: status_after(None),
             last_mono_ns: order.to_owned(),
         });
@@ -450,15 +457,5 @@ impl ChildPresenceSet {
         self.counted(end).any(|child| {
             child.status == ChildStatus::Waiting && child.last_mono_ns.as_str() >= since
         })
-    }
-}
-
-fn transition_order<'a>(transition: ChildTransition<'a>) -> &'a str {
-    match transition {
-        ChildTransition::Start { order, .. }
-        | ChildTransition::Tool { order, .. }
-        | ChildTransition::Permission { order, .. }
-        | ChildTransition::Stop { order, .. }
-        | ChildTransition::ParentClear { order, .. } => order,
     }
 }

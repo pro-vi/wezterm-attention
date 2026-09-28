@@ -218,7 +218,7 @@
     "activity_types": ["thinking", "stop", "notify"],
     "binding_health": ["valid", "conflicted", "invalid", "future_schema"],
     "binding_phase": ["active", "ended"],
-    "child_presence_provenances": ["started", "tool", "permission"],
+    "child_presence_events": ["start", "tool", "permission"],
     "child_presence_statuses": ["running", "waiting"],
     "diagnostic_codes": [
       "identity_unpublished",
@@ -339,12 +339,12 @@
   },
   "lifecycle_shapes": {
     "child_presence_entry": {
-      "required": ["agent_id", "provenance", "status", "last_mono_ns"],
+      "required": ["agent_id", "last_event", "status", "last_mono_ns"],
       "optional": ["agent_type"],
       "types": {
         "agent_id": "safe_label",
         "agent_type": "safe_label",
-        "provenance": "child_presence_provenance",
+        "last_event": "child_presence_event",
         "status": "child_presence_status",
         "last_mono_ns": "monotonic_ns20"
       }
