@@ -4748,6 +4748,12 @@ test("consumer dismissal is scoped to displayed publications and never implies a
   view.binding_phase, view.binding_id = "active", string.rep("d", 64)
   view.lifecycle.availability, view.lifecycle.retention_floors = "available", {}
   assert(first.appearance(view) == "follow_up", "new binding does not inherit dismissal")
+  local fresh = module.new()
+  view.lifecycle.requests = {}
+  view.lifecycle.retention_floors = { child_requests = "00000000000000000100", requests = "00000000000000000100" }
+  assert(fresh.appearance(view) == "base", "a floor in the children's file hides no publication")
+  view.lifecycle.retention_floors.lead_requests = "00000000000000000100"
+  assert(fresh.appearance(view) == "unknown", "a floor in the lead's file may hide one")
 end)
 
 test("twenty full lifecycle panes keep polling and getter work bounded", function()
@@ -4939,6 +4945,21 @@ test("a change to the children's lifecycle evidence alone reaches the view", fun
     assert(#second.lifecycle.observations == 5, "the children's new observation is missing")
     assert(second.lifecycle.observations[5].observation_id == item.observation_id
       and second.lifecycle.observations[5].pool == "child_general")
+    -- A file the plugin cannot read again is used as the copy it read last,
+    -- and the other file's evidence stays shown.
+    local function unreadable_poll(path)
+      os.execute("chmod 000 " .. shell_quote(path))
+      local ok_poll, poll_failure = pcall(instance.poll, window, options)
+      os.execute("chmod 644 " .. shell_quote(path))
+      assert(ok_poll, poll_failure)
+      return assert(instance.get_attention_view(mux_pane(id, pane))).lifecycle
+    end
+    local lead_cached = unreadable_poll(binding_dir .. "/lifecycle.json")
+    assert(lead_cached.availability == "cached" and #lead_cached.observations == 5,
+      "an unreadable lead's file hid the children's evidence")
+    local children_cached = unreadable_poll(binding_dir .. "/children-lifecycle.json")
+    assert(children_cached.availability == "available" and #children_cached.observations == 5
+      and #children_cached.diagnostics == 1, "an unreadable children's file lost its last copy")
   end)
   wezterm.json_parse = real_parse
   assert(ok, failure)

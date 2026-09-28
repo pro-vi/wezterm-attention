@@ -108,7 +108,8 @@ return function(context)
     return true
   end
 
-  -- What an observation says, apart from its id and when it was taken.
+  -- What an observation says, apart from its id, when it was observed and when
+  -- it was written.
   local not_compared = { observation_id = true, observed_mono_ns = true, written_at_unix_ns = true }
   local function same_observation(a, b)
     for key, value in pairs(a) do
@@ -120,78 +121,86 @@ return function(context)
     return true
   end
 
-  local function lifecycle_conflict()
-    return invalid("the two lifecycle snapshots disagree about one observation")
+  -- Each conflict is reported, within the facet's eight diagnostics.
+  local function report_conflict(diagnostics)
+    if #diagnostics < 8 then
+      diagnostics[#diagnostics + 1] = invalid("the two lifecycle snapshots disagree about one observation")
+    end
   end
 
   -- Settles the children's evidence that can appear in both lifecycle files:
   -- `legacy` are children's observations a writer put in lifecycle.json before
-  -- children had their own file, `sibling` the members of that file. Nothing
-  -- moves the old ones, so the same observation can be in both, and the
-  -- children's file decides as its own reducer would have. The lead's
-  -- observations are never dropped here. Each entry is { pool, item }.
+  -- children had their own file, `sibling` the members of
+  -- children-lifecycle.json. Nothing moves the old ones, so the same
+  -- observation can be in both; the rules below decide which copy is shown.
+  -- The lead's observations are never dropped here. Each entry is
+  -- { pool, item }. Returns what is left of `legacy` and `sibling`.
   local function reconcile_children(legacy, sibling, leads, children, diagnostics)
-    local function keep(list, predicate)
-      local kept = {}
-      for _, entry in ipairs(list) do if predicate(entry) then kept[#kept + 1] = entry end end
-      return kept
-    end
-    -- At or below the children's floor for its pool: their reducer would have
-    -- refused it.
-    legacy = keep(legacy, function(old)
+    -- A key names one observation in each file, so one lookup per old copy
+    -- finds its counterpart.
+    local by_key, dropped, kept = {}, {}, {}
+    for _, new in ipairs(sibling) do by_key[observation_key(new.item)] = new end
+    for _, old in ipairs(legacy) do
+      -- At or below the children's floor for its pool: the children's file
+      -- had already let go of it.
       local floor = children.pools[old.pool].retention_floor_mono_ns
-      return not floor or old.item.observed_mono_ns > floor
-    end)
-    -- The same observation in both: the later one stands, and at the same
-    -- instant the children's copy does.
-    legacy = keep(legacy, function(old)
-      local key = observation_key(old.item)
-      for index, new in ipairs(sibling) do
-        if observation_key(new.item) == key then
-          if old.item.observed_mono_ns > new.item.observed_mono_ns then
-            table.remove(sibling, index)
-            return true
-          end
-          if old.item.observed_mono_ns == new.item.observed_mono_ns and not same_observation(old.item, new.item) then
-            diagnostics[#diagnostics + 1] = lifecycle_conflict()
-          end
-          return false
+      if not floor or old.item.observed_mono_ns > floor then
+        -- The same observation in both: the later copy stands, and at the
+        -- same instant the children's copy does.
+        local new = by_key[observation_key(old.item)]
+        if not new then
+          kept[#kept + 1] = old
+        elseif old.item.observed_mono_ns > new.item.observed_mono_ns then
+          dropped[new] = true
+          kept[#kept + 1] = old
+        elseif old.item.observed_mono_ns == new.item.observed_mono_ns and not same_observation(old.item, new.item) then
+          report_conflict(diagnostics)
         end
       end
-      return true
-    end)
+    end
     -- One id naming two different observations: a child's copy never
     -- displaces the lead's, and the children's file wins over an old copy.
-    local function taken_by(list)
-      local ids = {}
-      for _, entry in ipairs(list) do ids[entry.item.observation_id] = true end
-      return function(entry)
-        if not ids[entry.item.observation_id] then return true end
-        diagnostics[#diagnostics + 1] = lifecycle_conflict()
-        return false
+    local lead_ids, shown, shown_ids = {}, {}, {}
+    for _, lead in ipairs(leads) do lead_ids[lead.item.observation_id] = true end
+    for _, new in ipairs(sibling) do
+      if not dropped[new] then
+        if lead_ids[new.item.observation_id] then
+          report_conflict(diagnostics)
+        else
+          shown[#shown + 1] = new
+          shown_ids[new.item.observation_id] = true
+        end
       end
     end
-    sibling = keep(sibling, taken_by(leads))
-    legacy = keep(legacy, taken_by(sibling))
-    return legacy, sibling
+    local left = {}
+    for _, old in ipairs(kept) do
+      if shown_ids[old.item.observation_id] then
+        report_conflict(diagnostics)
+      else
+        left[#left + 1] = old
+      end
+    end
+    return left, shown
   end
 
   --- The lifecycle facet from the lead's snapshot and the children's beside
-  --- it, as Rust's LifecycleView::assemble builds it. The lead's file is read
-  --- first and decides: while it cannot be read, the facet says so and shows
-  --- no children's evidence. While it can, a children's file that cannot is
-  --- reported and left out. Without a lead's file, the children's decides.
+  --- it, as Rust's lifecycle_from_reads and LifecycleView::assemble build it.
+  --- The lead's file is read first and decides: while it is unavailable,
+  --- invalid or unsupported, the facet says so and shows no children's
+  --- evidence. Otherwise a children's file that cannot be used is reported
+  --- and left out. Without a lead's file, the children's decides. A file this
+  --- plugin could not read again is used as the copy it read last (`cached`),
+  --- which Rust, reading once, never has.
   local function lifecycle_facet(snapshot, status, problem, now_unix_ns, children, children_status, children_problem)
     local lead_availability = source_availability(status, problem)
     local children_availability = source_availability(children_status or "missing", children_problem)
     local facet = { availability = lead_availability, coverage = "bounded_window", observations = {}, requests = {}, retention_floors = {}, diagnostics = {} }
     local lead_snapshot, children_snapshot = snapshot, nil
-    if lead_availability == "available" or lead_availability == "absent" then
+    if problem then facet.diagnostics[1] = problem end
+    if lead_availability == "available" or lead_availability == "cached" or lead_availability == "absent" then
       if children_problem then facet.diagnostics[#facet.diagnostics + 1] = children_problem end
       children_snapshot = children
       if lead_availability == "absent" then facet.availability = children_availability end
-    elseif problem then
-      facet.diagnostics[1] = problem
     end
     if not lead_snapshot and not children_snapshot then return facet end
     facet.snapshot_id = lead_snapshot and lead_snapshot.snapshot_id or nil

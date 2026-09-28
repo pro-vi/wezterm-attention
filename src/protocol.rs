@@ -888,7 +888,8 @@ pub fn validate_record(value: &Value, expected_kind: Option<&str>) -> Result<()>
 
 /// Whether records of `kind` hold lifecycle observations: the lead's snapshot
 /// or the one its children write beside it. Both are read under the lifecycle
-/// bounds and checked by the same rules.
+/// bounds and checked by the same rules, and the children's also holds no lead
+/// observation.
 pub fn is_lifecycle_snapshot_kind(kind: &str) -> bool {
     matches!(kind, "lifecycle_snapshot" | "child_lifecycle_snapshot")
 }

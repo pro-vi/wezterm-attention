@@ -749,16 +749,27 @@ fn read_pane_facts_once(
         end = RecordFacet::empty(A::Absent);
     }
     let mut lifecycle = if selected.is_some() {
-        lifecycle_from_reads(
-            RecordFacet::at(reader, root, "lifecycle_snapshot", &identity, "lifecycle"),
+        let provider = binding.record.as_ref().and_then(|r| r["provider"].as_str());
+        // Only a provider that runs sub-agents has a children's file, as the
+        // plugin also reads it.
+        let children = if provider.is_some_and(|provider| {
+            crate::protocol::manifest()
+                .is_ok_and(|protocol| protocol.enums.subagent_providers.contains(provider))
+        }) {
             RecordFacet::at(
                 reader,
                 root,
                 "child_lifecycle_snapshot",
                 &identity,
                 "lifecycle",
-            ),
-            binding.record.as_ref().and_then(|r| r["provider"].as_str()),
+            )
+        } else {
+            RecordFacet::empty(A::Absent)
+        };
+        lifecycle_from_reads(
+            RecordFacet::at(reader, root, "lifecycle_snapshot", &identity, "lifecycle"),
+            children,
+            provider,
             now.as_deref(),
         )?
     } else {

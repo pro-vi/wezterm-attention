@@ -294,7 +294,7 @@ writes that set even when the event changes nothing else; its hook reports
 `record_invalid`. A `children.json` that something else replaced with a link to a
 file that is not a valid set is moved aside as a link, and sweep then keeps that
 binding, as it keeps any that holds a link; a link to a valid set, or to
-nothing, is replaced by a regular file at the next write. Until the next event that writes the set, a child's event or a Codex parent's `Stop`, the tab shows `+?`. The
+nothing, is replaced by a regular file at the next write. Until the next event that writes the set (a child's start, stop, tool call or permission request, or a Codex parent's `Stop`), the tab shows `+?`. The
 sub-agents the invalid set held are counted again only at their next event, so
 one in the middle of a long command stays uncounted until it calls another tool
 or stops. The rename happens while the hook plans its writes, so if a write in
@@ -309,6 +309,27 @@ and sweep collects none on its own (see
 
 Counting what an invalid file held would mean trusting a file that failed
 validation. Starting again loses only what each sub-agent's next event restores.
+
+## An invalid lifecycle file stops recording until its session ends
+
+A writer that cannot use a binding's `lifecycle.json` or
+`children-lifecycle.json`, because it is invalid, written by a newer version,
+unreadable or names another provider, refuses the observation it was adding to
+that file and leaves the file as it is. The hook reports it with a diagnostic,
+a `--strict` hook exits 1, and the consumer the hook would have run is not run.
+Every later observation of the same actor in that binding is refused the same
+way while the file stays as it is, which for an invalid file or one a newer
+version wrote is until the binding ends or you delete the file.
+The other file is unaffected: a bad children's file never stops the lead's
+observations, and a bad `lifecycle.json` never stops the children's, though
+readers then show neither (see the
+[consumer guide](consumer-guide.md#lifecycle-availability)). `attention doctor`
+names the file, and sweep keeps an ended binding that holds it, as it keeps any
+binding holding a record it cannot validate.
+
+Unlike `children.json`, a bad lifecycle file is not moved aside and started
+again. Starting again would discard the evidence the file holds, and nothing
+the tab shows depends on it: activity comes from `activity.json`.
 
 ## A plugin and a command from either side of the child set show no sub-agents
 

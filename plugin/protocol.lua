@@ -519,9 +519,24 @@ return function(context)
     return "generic", nil
   end
 
+  -- The digest of each sub-agent id checked so far. One id recurs in every
+  -- observation its sub-agent makes, and hashing it in Lua is about two fifths
+  -- of what validating a snapshot of children's observations costs. Starting
+  -- over past 4096 ids bounds it.
+  local agent_keys, agent_key_count = {}, 0
+  local function agent_key_of(agent_id)
+    local key = agent_keys[agent_id]
+    if key then return key end
+    if agent_key_count >= 4096 then agent_keys, agent_key_count = {}, 0 end
+    key = sha256(agent_id)
+    agent_keys[agent_id], agent_key_count = key, agent_key_count + 1
+    return key
+  end
+
   -- Records holding lifecycle observations: the lead's snapshot or the one its
   -- children write beside it. Both are read under the lifecycle bounds and
-  -- checked by the same rules.
+  -- checked by the same rules, and the children's also holds no lead
+  -- observation.
   local function is_lifecycle_snapshot_kind(kind)
     return kind == "lifecycle_snapshot" or kind == "child_lifecycle_snapshot"
   end
@@ -541,10 +556,11 @@ return function(context)
           or (pool.retention_floor_mono_ns and item.observed_mono_ns <= pool.retention_floor_mono_ns) then return false end
         keys[key], ids[item.observation_id], prior = true, true, order
         if item.correlation and item.correlation.elicitation_id and not item.correlation.mcp_server_name then return false end
-        -- Children's observations have their own snapshot; the lead's are only
-        -- ever in lifecycle.json.
+        -- The children's snapshot holds only children's observations.
+        -- lifecycle.json may hold both, from before children had their own
+        -- file, so it is not checked the other way.
         if value.kind == "child_lifecycle_snapshot" and item.actor.kind ~= "child" then return false end
-        if item.actor.kind == "child" and (value.provider == "pi" or sha256(item.actor.agent_id) ~= item.actor.agent_key) then return false end
+        if item.actor.kind == "child" and (value.provider == "pi" or agent_key_of(item.actor.agent_id) ~= item.actor.agent_key) then return false end
         if item.kind == "tool_preflight" or item.kind == "tool_result" then
           local class, mode = classify_lifecycle_tool(value.provider, item.tool_name)
           if item.tool_class ~= class or item.question_mode ~= mode then return false end

@@ -919,8 +919,8 @@ fn append_observation(
             ));
         }
         let identity = resolved.binding(&binding_id);
-        // Each actor keeps its own snapshot, so however much the children
-        // record, none of it can evict the lead's evidence.
+        // The lead and its children keep separate snapshots, so however much
+        // the children record, none of it can evict the lead's evidence.
         let kind = match draft.actor {
             crate::observations::Actor::Lead => "lifecycle_snapshot",
             crate::observations::Actor::Child { .. } => "child_lifecycle_snapshot",

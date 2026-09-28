@@ -50,7 +50,7 @@ fn a_leads_observation_goes_to_lifecycle_json_and_a_childs_to_its_own_file() {
 // However much its children record, the lead's newest observation stays, and
 // its pool never gets a floor from their eviction.
 #[test]
-fn a_flood_of_child_observations_leaves_the_leads_newest_in_place() {
+fn more_child_observations_than_a_pool_holds_leave_the_leads_newest_in_place() {
     let setup = bound("claude");
     let finished = setup.apply(&lead("claude", "Stop"), &mono(300));
     assert_eq!(finished.disposition, Disposition::Applied);
@@ -305,6 +305,21 @@ pub(super) fn two_file_cases() -> Vec<(
             )),
         ),
         (
+            "more conflicts than the facet reports",
+            Some(lead_snapshot(
+                (1..=9)
+                    .map(|id| tool_call(id, 10 * id, None, &format!("lead-{id}")))
+                    .collect(),
+                None,
+            )),
+            Some(children_snapshot(
+                (1..=9)
+                    .map(|id| tool_call(id, 10 * id + 1, Some("child-a"), &format!("child-{id}")))
+                    .collect(),
+                None,
+            )),
+        ),
+        (
             "a request floor in the children's file only",
             Some(lead_snapshot(vec![lead()], None)),
             Some(snapshot_of(
@@ -317,7 +332,6 @@ pub(super) fn two_file_cases() -> Vec<(
     ]
 }
 
-/// The ids, pools and diagnostics of the view assembled from `case`'s files.
 /// What the tests compare of the view assembled from a named case's files.
 struct Assembled {
     shown: Vec<(String, String)>,
@@ -453,9 +467,50 @@ fn an_aggregate_floor_is_the_later_of_the_two_files() {
     assert!(!floors.contains_key("lead_requests"));
 }
 
-// What `attention inspect` shows after a child floods its own file.
 #[test]
-fn inspect_keeps_the_leads_newest_through_a_flood_of_child_observations() {
+fn conflicts_are_reported_within_the_facets_eight_diagnostics() {
+    let Assembled {
+        shown, diagnostics, ..
+    } = assembled("more conflicts than the facet reports");
+    assert_eq!(shown.len(), 9);
+    assert!(shown.iter().all(|(_, pool)| pool == "general"));
+    assert_eq!(diagnostics, ["record_invalid"; 8]);
+}
+
+// A provider that runs no sub-agents has no children's file to read, and a
+// stray one changes nothing, as in the plugin.
+#[test]
+fn inspect_reads_no_childrens_file_for_a_provider_without_sub_agents() {
+    let setup = Setup::new();
+    setup.claim();
+    setup.apply(
+        &event(
+            "pi",
+            "session_start",
+            SESSION,
+            json!({"start_source":"startup"}),
+        ),
+        &mono(200),
+    );
+    let children = children_path(&setup, "pi");
+    fs::create_dir_all(children.parent().unwrap()).unwrap();
+    fs::write(&children, b"{not json").unwrap();
+    let lifecycle = super::child_presence::facts(&setup, "pi").lifecycle;
+    assert!(
+        lifecycle.diagnostics.is_empty(),
+        "{:?}",
+        lifecycle.diagnostics
+    );
+    assert_ne!(
+        lifecycle.availability,
+        wezterm_attention::observations::LifecycleAvailability::Invalid
+    );
+}
+
+// What `attention inspect` shows once a child has recorded more than its
+// pool holds.
+#[test]
+fn inspect_keeps_the_leads_newest_past_more_child_observations_than_a_pool_holds() {
     let setup = bound("claude");
     setup.apply(&lead("claude", "Stop"), &mono(300));
     for index in 0..100 {
