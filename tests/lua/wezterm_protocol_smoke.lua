@@ -47,7 +47,8 @@ end
       return true
     end
     for _,case in ipairs(read_json(parity_path)) do
-      local actual=internal.lifecycle_facet(case.snapshot,"valid",nil,case.now)
+      local actual=internal.lifecycle_facet(case.snapshot,case.snapshot and "valid" or "missing",nil,case.now,
+        case.children,case.children and "valid" or "missing",nil)
       assert(equal(actual,case.expected),"Rust/Lua lifecycle projection differs: "..case.id)
     end
   end

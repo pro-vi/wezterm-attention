@@ -21,6 +21,7 @@ return function(context)
   local age_exceeds_ms = protocol_api.age_exceeds_ms
   local list_contains = protocol_api.list_contains
   local deep_copy = protocol_api.deep_copy
+  local observation_key = protocol_api.observation_key
 
   local function request_evidence(observations, provider)
     local groups, ordered = {}, {}
@@ -93,22 +94,141 @@ return function(context)
     return latest
   end
 
-  local function lifecycle_facet(snapshot, status, problem, now_unix_ns)
-    local availability = { valid = "available", missing = "absent", cached = "cached", unavailable = "unavailable", invalid = "invalid" }
-    local facet = { availability = availability[status] or "absent", coverage = "bounded_window", observations = {}, requests = {}, retention_floors = {}, diagnostics = {} }
-    if problem then
-      facet.diagnostics[1] = problem
-      if problem.code == "future_schema" then facet.availability = "unsupported" end
+  local lifecycle_availability = { valid = "available", missing = "absent", cached = "cached", unavailable = "unavailable", invalid = "invalid" }
+
+  local function source_availability(status, problem)
+    if problem and problem.code == "future_schema" then return "unsupported" end
+    return lifecycle_availability[status] or "absent"
+  end
+
+  local function same_value(a, b)
+    if type(a) ~= "table" or type(b) ~= "table" then return a == b end
+    for key, value in pairs(a) do if not same_value(value, b[key]) then return false end end
+    for key in pairs(b) do if a[key] == nil then return false end end
+    return true
+  end
+
+  -- What an observation says, apart from its id and when it was taken.
+  local not_compared = { observation_id = true, observed_mono_ns = true, written_at_unix_ns = true }
+  local function same_observation(a, b)
+    for key, value in pairs(a) do
+      if not not_compared[key] and not same_value(value, b[key]) then return false end
     end
-    if not snapshot then return facet end
-    facet.snapshot_id = snapshot.snapshot_id
-    for name, pool in pairs(snapshot.pools) do
-      facet.retention_floors[name] = pool.retention_floor_mono_ns
-      for _, observation in ipairs(pool.observations) do
-        local copy = deep_copy(observation)
-        copy.pool = name
+    for key in pairs(b) do
+      if not not_compared[key] and a[key] == nil then return false end
+    end
+    return true
+  end
+
+  local function lifecycle_conflict()
+    return invalid("the two lifecycle snapshots disagree about one observation")
+  end
+
+  -- Settles the children's evidence that can appear in both lifecycle files:
+  -- `legacy` are children's observations a writer put in lifecycle.json before
+  -- children had their own file, `sibling` the members of that file. Nothing
+  -- moves the old ones, so the same observation can be in both, and the
+  -- children's file decides as its own reducer would have. The lead's
+  -- observations are never dropped here. Each entry is { pool, item }.
+  local function reconcile_children(legacy, sibling, leads, children, diagnostics)
+    local function keep(list, predicate)
+      local kept = {}
+      for _, entry in ipairs(list) do if predicate(entry) then kept[#kept + 1] = entry end end
+      return kept
+    end
+    -- At or below the children's floor for its pool: their reducer would have
+    -- refused it.
+    legacy = keep(legacy, function(old)
+      local floor = children.pools[old.pool].retention_floor_mono_ns
+      return not floor or old.item.observed_mono_ns > floor
+    end)
+    -- The same observation in both: the later one stands, and at the same
+    -- instant the children's copy does.
+    legacy = keep(legacy, function(old)
+      local key = observation_key(old.item)
+      for index, new in ipairs(sibling) do
+        if observation_key(new.item) == key then
+          if old.item.observed_mono_ns > new.item.observed_mono_ns then
+            table.remove(sibling, index)
+            return true
+          end
+          if old.item.observed_mono_ns == new.item.observed_mono_ns and not same_observation(old.item, new.item) then
+            diagnostics[#diagnostics + 1] = lifecycle_conflict()
+          end
+          return false
+        end
+      end
+      return true
+    end)
+    -- One id naming two different observations: a child's copy never
+    -- displaces the lead's, and the children's file wins over an old copy.
+    local function taken_by(list)
+      local ids = {}
+      for _, entry in ipairs(list) do ids[entry.item.observation_id] = true end
+      return function(entry)
+        if not ids[entry.item.observation_id] then return true end
+        diagnostics[#diagnostics + 1] = lifecycle_conflict()
+        return false
+      end
+    end
+    sibling = keep(sibling, taken_by(leads))
+    legacy = keep(legacy, taken_by(sibling))
+    return legacy, sibling
+  end
+
+  --- The lifecycle facet from the lead's snapshot and the children's beside
+  --- it, as Rust's LifecycleView::assemble builds it. The lead's file is read
+  --- first and decides: while it cannot be read, the facet says so and shows
+  --- no children's evidence. While it can, a children's file that cannot is
+  --- reported and left out. Without a lead's file, the children's decides.
+  local function lifecycle_facet(snapshot, status, problem, now_unix_ns, children, children_status, children_problem)
+    local lead_availability = source_availability(status, problem)
+    local children_availability = source_availability(children_status or "missing", children_problem)
+    local facet = { availability = lead_availability, coverage = "bounded_window", observations = {}, requests = {}, retention_floors = {}, diagnostics = {} }
+    local lead_snapshot, children_snapshot = snapshot, nil
+    if lead_availability == "available" or lead_availability == "absent" then
+      if children_problem then facet.diagnostics[#facet.diagnostics + 1] = children_problem end
+      children_snapshot = children
+      if lead_availability == "absent" then facet.availability = children_availability end
+    elseif problem then
+      facet.diagnostics[1] = problem
+    end
+    if not lead_snapshot and not children_snapshot then return facet end
+    facet.snapshot_id = lead_snapshot and lead_snapshot.snapshot_id or nil
+    local leads, legacy, sibling = {}, {}, {}
+    for _, source in ipairs({ { "lead", lead_snapshot }, { "child", children_snapshot } }) do
+      local name_prefix, current = source[1], source[2]
+      if current then
+        for _, name in ipairs({ "requests", "general" }) do
+          local pool = current.pools[name]
+          local floor = pool.retention_floor_mono_ns
+          if floor then
+            facet.retention_floors[name_prefix .. "_" .. name] = floor
+            local aggregate = facet.retention_floors[name]
+            if not aggregate or floor > aggregate then facet.retention_floors[name] = floor end
+          end
+          for _, item in ipairs(pool.observations) do
+            local entry = { pool = name, item = item }
+            if name_prefix == "child" then
+              sibling[#sibling + 1] = entry
+            elseif item.actor.kind == "lead" then
+              leads[#leads + 1] = entry
+            else
+              legacy[#legacy + 1] = entry
+            end
+          end
+        end
+      end
+    end
+    if children_snapshot then
+      legacy, sibling = reconcile_children(legacy, sibling, leads, children_snapshot, facet.diagnostics)
+    end
+    for _, group in ipairs({ { "", leads }, { "", legacy }, { "child_", sibling } }) do
+      for _, entry in ipairs(group[2]) do
+        local copy = deep_copy(entry.item)
+        copy.pool = group[1] .. entry.pool
         facet.observations[#facet.observations + 1] = copy
-        if now_unix_ns and now_unix_ns < observation.written_at_unix_ns and #facet.diagnostics < 8 then
+        if now_unix_ns and now_unix_ns < entry.item.written_at_unix_ns and #facet.diagnostics < 8 then
           facet.diagnostics[#facet.diagnostics + 1] = diagnostic("clock_skew", "lifecycle write time is ahead of UTC")
         end
       end
@@ -116,7 +236,7 @@ return function(context)
     table.sort(facet.observations, function(a,b)
       return a.observed_mono_ns .. a.observation_id < b.observed_mono_ns .. b.observation_id
     end)
-    facet.requests = request_evidence(facet.observations, snapshot.provider)
+    facet.requests = request_evidence(facet.observations, (lead_snapshot or children_snapshot).provider)
     return facet
   end
 
@@ -610,33 +730,55 @@ return function(context)
     local activity_type = activity and activity.type or nil
     local effective_type = effective_attention_type(activity_type, review)
     local unavailable = diagnostics_have_unavailable_io(diagnostics)
+    -- The lead's lifecycle snapshot, and the one its children write beside it
+    -- when the provider runs sub-agents.
     local snapshot, snapshot_problem, snapshot_status
+    local children_snapshot, children_problem, children_status
     if binding then
+      local identity = { address = address, launch_id = read.launch_id, binding_id = pointer.binding_id }
       snapshot, snapshot_problem, snapshot_status = read_expected_record_cached(
-        records_root .. "/lifecycle.json", "lifecycle_snapshot", {
-          address = address, launch_id = read.launch_id, binding_id = pointer.binding_id,
-        }, false, previous_binding_records.lifecycle)
+        records_root .. "/lifecycle.json", "lifecycle_snapshot", identity, false, previous_binding_records.lifecycle)
       if snapshot and snapshot.provider ~= binding.provider then
         snapshot, snapshot_problem, snapshot_status = nil, invalid("lifecycle provider differs from its binding"), "invalid"
       end
+      if list_contains(protocol.enums.subagent_providers, binding.provider) then
+        children_snapshot, children_problem, children_status = read_expected_record_cached(
+          records_root .. "/children-lifecycle.json", "child_lifecycle_snapshot", identity, false,
+          previous_binding_records.children_lifecycle)
+        if children_snapshot and children_snapshot.provider ~= binding.provider then
+          children_snapshot, children_problem, children_status = nil, invalid("lifecycle provider differs from its binding"), "invalid"
+        end
+      end
     end
     records.lifecycle = snapshot
-    -- The record reader hands back the previous snapshot table when the file's
-    -- bytes have not changed, and then the facet built from it last poll is
-    -- still the facet: copying and grouping every observation again would give
-    -- the same tables. Only the clock can change it, through the clock-skew
-    -- diagnostics, so it is reused only while neither poll saw any.
+    records.children_lifecycle = children_snapshot
+    -- The record reader hands back the previous snapshot table when a file's
+    -- bytes have not changed, and then the facet built last poll is still the
+    -- facet: copying and grouping every observation again would give the same
+    -- tables. It is reused only while each file is the table it was, or is
+    -- still absent, and at least one is there. Only the clock can change it
+    -- then, through the clock-skew diagnostics, so it is reused only while
+    -- neither poll saw any.
+    local function as_before(current, status, before)
+      if status == "missing" then return before == nil end
+      return status == "valid" and current == before
+    end
+    local function written_after_now(current)
+      return current and now_unix_ns and now_unix_ns < latest_written_unix_ns(current)
+    end
     local lifecycle
     local previous_lifecycle = previous and previous.lifecycle
-    if snapshot and snapshot_status == "valid" and previous_lifecycle
-        and previous_binding_records.lifecycle == snapshot
+    if (snapshot or children_snapshot) and previous_lifecycle
+        and as_before(snapshot, snapshot_status, previous_binding_records.lifecycle)
+        and as_before(children_snapshot, children_status or "missing", previous_binding_records.children_lifecycle)
         and previous_lifecycle.availability == "available"
         and #previous_lifecycle.diagnostics == 0
-        and not (now_unix_ns and now_unix_ns < latest_written_unix_ns(snapshot)) then
+        and not written_after_now(snapshot) and not written_after_now(children_snapshot) then
       lifecycle = previous_lifecycle
       lifecycle.badge_acknowledgement = nil
     else
-      lifecycle = lifecycle_facet(snapshot, snapshot_status, snapshot_problem, now_unix_ns)
+      lifecycle = lifecycle_facet(snapshot, snapshot_status, snapshot_problem, now_unix_ns,
+        children_snapshot, children_status, children_problem)
     end
     local raw_activity = records.activity
     if acknowledgement and raw_activity and same_target(acknowledgement.target, current_target)

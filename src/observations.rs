@@ -239,33 +239,93 @@ impl LifecycleView {
         }
     }
 
+    /// The view of one snapshot, validated first: the lead's, or the one its
+    /// children write beside it.
     pub fn from_snapshot(snapshot: &LifecycleSnapshot, now: Option<&str>) -> Result<Self> {
         crate::protocol::validate_record(
             &serde_json::to_value(snapshot).map_err(AttentionError::record_json)?,
             Some(snapshot.kind.as_str()),
         )?;
+        Ok(if snapshot.kind == "child_lifecycle_snapshot" {
+            Self::assemble(None, Some(snapshot), now, vec![])
+        } else {
+            Self::assemble(Some(snapshot), None, now, vec![])
+        })
+    }
+
+    /// The view of a binding's lifecycle evidence: the lead's `lifecycle.json`
+    /// and its children's `children-lifecycle.json`, each already validated by
+    /// its reader, and `problems` from reading them, reported first. The view
+    /// can hold both files' pools, so it is not a snapshot and is never
+    /// validated as one.
+    ///
+    /// Observations from `lifecycle.json` keep the pool names `general` and
+    /// `requests`, the children's file's take `child_general` and
+    /// `child_requests`. Each file's floors appear as `lead_<pool>` and
+    /// `child_<pool>`, and `general` and `requests` are the later of the two,
+    /// so that they still mean that some evidence of that pool was evicted.
+    pub fn assemble(
+        lead: Option<&LifecycleSnapshot>,
+        children: Option<&LifecycleSnapshot>,
+        now: Option<&str>,
+        problems: Vec<crate::protocol::Diagnostic>,
+    ) -> Self {
         let mut view = Self::empty(LifecycleAvailability::Available);
-        view.snapshot_id = Some(snapshot.snapshot_id.clone());
-        for (name, pool) in [
-            ("requests", &snapshot.pools.requests),
-            ("general", &snapshot.pools.general),
-        ] {
-            if let Some(floor) = &pool.retention_floor_mono_ns {
-                view.retention_floors.insert(name.into(), floor.clone());
-            }
-            for observation in &pool.observations {
-                if now.is_some_and(|now| now < observation.written_at_unix_ns.as_str())
-                    && view.diagnostics.len() < 8
-                {
-                    view.diagnostics.push(
-                        AttentionError::new("clock_skew", "lifecycle write time is ahead of UTC")
-                            .diagnostic,
-                    );
+        view.diagnostics = problems;
+        view.snapshot_id = lead.map(|snapshot| snapshot.snapshot_id.clone());
+        let (mut leads, mut legacy, mut sibling) = (vec![], vec![], vec![]);
+        for (source, snapshot) in [("lead", lead), ("child", children)] {
+            let Some(snapshot) = snapshot else { continue };
+            for (name, pool) in [
+                ("requests", &snapshot.pools.requests),
+                ("general", &snapshot.pools.general),
+            ] {
+                if let Some(floor) = &pool.retention_floor_mono_ns {
+                    view.retention_floors
+                        .insert(format!("{source}_{name}"), floor.clone());
+                    let aggregate = view
+                        .retention_floors
+                        .entry(name.to_owned())
+                        .or_insert_with(|| floor.clone());
+                    if floor > aggregate {
+                        aggregate.clone_from(floor);
+                    }
                 }
-                view.observations.push(PooledObservation {
-                    pool: name.into(),
-                    observation: observation.clone(),
-                });
+                for observation in &pool.observations {
+                    let pooled = PooledObservation {
+                        pool: if source == "lead" {
+                            name.to_owned()
+                        } else {
+                            format!("child_{name}")
+                        },
+                        observation: observation.clone(),
+                    };
+                    match (source, &observation.actor) {
+                        ("lead", Actor::Lead) => leads.push(pooled),
+                        ("lead", Actor::Child { .. }) => legacy.push(pooled),
+                        _ => sibling.push(pooled),
+                    }
+                }
+            }
+        }
+        if let Some(children) = children {
+            reconcile_children(
+                &mut legacy,
+                &mut sibling,
+                &leads,
+                children,
+                &mut view.diagnostics,
+            );
+        }
+        view.observations = leads.into_iter().chain(legacy).chain(sibling).collect();
+        for pooled in &view.observations {
+            if now.is_some_and(|now| now < pooled.observation.written_at_unix_ns.as_str())
+                && view.diagnostics.len() < 8
+            {
+                view.diagnostics.push(
+                    AttentionError::new("clock_skew", "lifecycle write time is ahead of UTC")
+                        .diagnostic,
+                );
             }
         }
         view.observations.sort_by(|a, b| {
@@ -278,9 +338,89 @@ impl LifecycleView {
                     &b.observation.observation_id,
                 ))
         });
-        view.requests = request_evidence(&view.observations, &snapshot.provider);
-        Ok(view)
+        if let Some(snapshot) = lead.or(children) {
+            view.requests = request_evidence(&view.observations, &snapshot.provider);
+        }
+        view
     }
+}
+
+/// Settles the children's evidence that can appear in both lifecycle files:
+/// `legacy` are children's observations a writer put in `lifecycle.json`
+/// before children had their own file, `sibling` the members of that file.
+/// Nothing moves the old ones, so the same observation can be in both, and
+/// the children's file decides as its own reducer would have. The lead's
+/// observations are never dropped here.
+fn reconcile_children(
+    legacy: &mut Vec<PooledObservation>,
+    sibling: &mut Vec<PooledObservation>,
+    leads: &[PooledObservation],
+    children: &LifecycleSnapshot,
+    diagnostics: &mut Vec<crate::protocol::Diagnostic>,
+) {
+    let conflict = || {
+        crate::protocol::Diagnostic::new(
+            "record_invalid",
+            "the two lifecycle snapshots disagree about one observation",
+        )
+    };
+    // At or below the children's floor for its pool: their reducer would
+    // have refused it.
+    legacy.retain(|old| {
+        let pool = if old.pool == "requests" {
+            &children.pools.requests
+        } else {
+            &children.pools.general
+        };
+        pool.retention_floor_mono_ns
+            .as_ref()
+            .is_none_or(|floor| old.observation.observed_mono_ns > *floor)
+    });
+    // The same observation in both: the later one stands, and at the same
+    // instant the children's copy does.
+    legacy.retain(|old| {
+        let key = old.observation.storage_key_parts();
+        let Some(index) = sibling
+            .iter()
+            .position(|new| new.observation.storage_key_parts() == key)
+        else {
+            return true;
+        };
+        let new = &sibling[index].observation;
+        match old.observation.observed_mono_ns.cmp(&new.observed_mono_ns) {
+            std::cmp::Ordering::Greater => {
+                sibling.remove(index);
+                true
+            }
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Equal => {
+                if old.observation.semantic() != new.semantic() {
+                    diagnostics.push(conflict());
+                }
+                false
+            }
+        }
+    });
+    // One id naming two different observations: a child's copy never
+    // displaces the lead's, and the children's file wins over an old copy.
+    sibling.retain(|new| {
+        let taken = leads
+            .iter()
+            .any(|lead| lead.observation.observation_id == new.observation.observation_id);
+        if taken {
+            diagnostics.push(conflict());
+        }
+        !taken
+    });
+    legacy.retain(|old| {
+        let taken = sibling
+            .iter()
+            .any(|new| new.observation.observation_id == old.observation.observation_id);
+        if taken {
+            diagnostics.push(conflict());
+        }
+        !taken
+    });
 }
 
 fn request_evidence(observations: &[PooledObservation], provider: &str) -> Vec<RequestEvidence> {

@@ -77,7 +77,7 @@ fn waiting(agent: &str) -> (String, String) {
     (agent.to_owned(), "waiting".to_owned())
 }
 
-fn facts(setup: &Setup, provider: &str) -> PaneFacts {
+pub(super) fn facts(setup: &Setup, provider: &str) -> PaneFacts {
     let launch_id = &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"];
     let scope = PaneScope::new(
         pane_address(&setup.env).unwrap().0,

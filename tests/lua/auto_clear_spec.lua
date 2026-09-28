@@ -4783,10 +4783,11 @@ test("twenty full lifecycle panes keep polling and getter work bounded", functio
   instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false })
   local window = window_double({ tabs = { entries }, focused = false })
   local old_open, old_popen = io.open, io.popen
-  local reads, child_reads, writes, globs = 0, 0, 0, 0
+  local reads, child_reads, writes, globs, children_lifecycle_reads = 0, 0, 0, 0, 0
   io.open = function(path, mode)
     if mode and mode:find("w", 1, true) then writes = writes + 1 end
     if path:match("/lifecycle%.json$") then reads = reads + 1 end
+    if path:match("/children%-lifecycle%.json$") then children_lifecycle_reads = children_lifecycle_reads + 1 end
     if path:match("/children%.json$") then child_reads = child_reads + 1 end
     return old_open(path, mode)
   end
@@ -4817,6 +4818,8 @@ test("twenty full lifecycle panes keep polling and getter work bounded", functio
   assert(ok, failure)
   assert(reads == 40 and globs == 40 and writes == 0, "exactly one sidecar read per pane/poll and no writes")
   assert(child_reads == 40, "exactly one child set read per pane and poll, got " .. child_reads)
+  assert(children_lifecycle_reads == 40,
+    "exactly one children's lifecycle read per pane and poll, got " .. children_lifecycle_reads)
   io.write(string.format("lifecycle workload: 20 panes, 2 polls, 128 observations each; CPU %.2f ms; 40 snapshot reads; 0 writes\n", cpu_ms))
 end)
 
@@ -4872,6 +4875,70 @@ test("an unchanged record is not parsed again, and a changed one is", function()
     local third = assert(instance.get_attention_view(mux_pane(id, pane)))
     assert(#third.lifecycle.observations < #first.lifecycle.observations,
       "the changed snapshot's facts must replace the old ones")
+  end)
+  wezterm.json_parse = real_parse
+  assert(ok, failure)
+end)
+
+test("a change to the children's lifecycle evidence alone reaches the view", function()
+  local api = dofile(repo_root .. "/plugin/protocol.lua")({ wezterm = wezterm, protocol_path = repo_root .. "/protocol/v2.json" })
+  local file = assert(io.open(repo_root .. "/tests/fixtures/lifecycle/observations.json", "r"))
+  local fixture = decode_json(file:read("*a")); file:close()
+  local id = 11102
+  local wire = materialize_v2_fixture(id)
+  local function snapshot_of(kind, actor, first_id)
+    local snapshot = decode_json(encode_json(fixture.cases[2].value))
+    snapshot.kind = kind
+    snapshot.address, snapshot.launch_id = wire.address, wire.launch_id
+    snapshot.binding_id, snapshot.provider = protocol_fixture.record_samples.binding.binding_id, "claude"
+    -- The harness encoder writes an empty table as {}, which is not an
+    -- observation array, so both pools always hold something.
+    for index, pool in ipairs({ "requests", "general" }) do
+      local item = decode_json(encode_json(fixture.cases[2].value.pools.general.observations[1]))
+      item.observation_id = string.format("00000000-0000-4000-8000-%012d", first_id + index)
+      item.observed_mono_ns = string.format("%020d", first_id + index)
+      item.correlation = { tool_call_id = kind .. pool }
+      item.actor = actor
+      if pool == "requests" then item.tool_name, item.tool_class, item.question_mode = "AskUserQuestion", "question", "blocking" end
+      snapshot.pools[pool].observations = { item }
+    end
+    return snapshot
+  end
+  local lead = snapshot_of("lifecycle_snapshot", { kind = "lead" }, 100)
+  local child = { kind = "child", agent_id = "child-a", agent_key = api.sha256("child-a") }
+  local children = snapshot_of("child_lifecycle_snapshot", child, 200)
+  local binding_dir = test_dir .. "/v2/realms/" .. wire.address.realm_id .. "/incarnations/"
+    .. wire.address.incarnation_id .. "/panes/" .. id .. "/launches/" .. wire.launch_id
+    .. "/bindings/" .. lead.binding_id
+  write_json_path(binding_dir .. "/lifecycle.json", lead)
+  write_json_path(binding_dir .. "/children-lifecycle.json", children)
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root })
+  local pane = { id = id, domain = "unix", attention = wire }
+  local window = window_double({ tabs = { { pane } }, focused = false })
+  local options = { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end }
+  local real_parse, parses = wezterm.json_parse, 0
+  wezterm.json_parse = function(content) parses = parses + 1; return real_parse(content) end
+  local ok, failure = pcall(function()
+    instance.poll(window, options)
+    local first = assert(instance.get_attention_view(mux_pane(id, pane)))
+    assert(first.lifecycle.availability == "available" and #first.lifecycle.observations == 4,
+      "precondition: both snapshots are valid")
+    parses = 0
+    instance.poll(window, options)
+    assert(parses == 0, "two unchanged snapshots were parsed again: " .. parses .. " parses")
+    local item = decode_json(encode_json(children.pools.general.observations[1]))
+    item.observation_id = "00000000-0000-4000-8000-000000000299"
+    item.observed_mono_ns = string.format("%020d", 299)
+    item.correlation = { tool_call_id = "later" }
+    children.pools.general.observations[2] = item
+    write_json_path(binding_dir .. "/children-lifecycle.json", children)
+    instance.poll(window, options)
+    local second = assert(instance.get_attention_view(mux_pane(id, pane)))
+    assert(#second.lifecycle.observations == 5, "the children's new observation is missing")
+    assert(second.lifecycle.observations[5].observation_id == item.observation_id
+      and second.lifecycle.observations[5].pool == "child_general")
   end)
   wezterm.json_parse = real_parse
   assert(ok, failure)

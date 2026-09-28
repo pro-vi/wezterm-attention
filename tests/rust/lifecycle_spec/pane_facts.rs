@@ -473,7 +473,29 @@ fn rust_and_installed_lua_share_relation_cases_and_retention_floors() {
         .filter(|c| c["expected"] == "valid")
     {
         let snapshot: LifecycleSnapshot = serde_json::from_value(case["value"].clone()).unwrap();
-        cases.push(json!({"id":case["id"],"snapshot":snapshot,"now":"99999999999999999999","expected":LifecycleView::from_snapshot(&snapshot,Some("99999999999999999999")).unwrap()}));
+        // A children's snapshot is read from its own file, never as the lead's.
+        let file = if snapshot.kind == "child_lifecycle_snapshot" {
+            "children"
+        } else {
+            "snapshot"
+        };
+        cases.push(json!({"id":case["id"],file:snapshot,"now":"99999999999999999999","expected":LifecycleView::from_snapshot(&snapshot,Some("99999999999999999999")).unwrap()}));
+    }
+    for (id, lead, children) in super::child_lifecycle::two_file_cases() {
+        let expected = LifecycleView::assemble(
+            lead.as_ref(),
+            children.as_ref(),
+            Some("99999999999999999999"),
+            vec![],
+        );
+        let mut case = json!({"id":id,"now":"99999999999999999999","expected":expected});
+        if let Some(lead) = lead {
+            case["snapshot"] = json!(lead);
+        }
+        if let Some(children) = children {
+            case["children"] = json!(children);
+        }
+        cases.push(case);
     }
     for case in relations["cases"].as_array().unwrap() {
         let find = |key: &str| {
@@ -530,7 +552,10 @@ fn rust_and_installed_lua_share_relation_cases_and_retention_floors() {
         snapshot.pools.requests.retention_floor_mono_ns = Some("00000000000000000001".into());
         snapshot.pools.general.retention_floor_mono_ns = Some("00000000000000000002".into());
         let view = LifecycleView::from_snapshot(&snapshot, Some("99999999999999999999")).unwrap();
-        assert_eq!(view.retention_floors.len(), 2);
+        assert_eq!(
+            view.retention_floors.keys().collect::<Vec<_>>(),
+            ["general", "lead_general", "lead_requests", "requests"]
+        );
         assert_eq!(view.requests.len() as u64, case["groups"].as_u64().unwrap());
         assert_eq!(
             view.requests
