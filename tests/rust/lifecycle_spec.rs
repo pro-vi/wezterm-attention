@@ -1796,6 +1796,76 @@ fn hook_description_is_exhaustive_read_only_and_pins_public_fields() {
     }
 }
 
+/// The first JSON code block in the README section headed `heading`.
+fn readme_json_block(heading: &str) -> Value {
+    let readme = include_str!("../../README.md");
+    let section = readme
+        .split("\n## ")
+        .find(|section| section.starts_with(&format!("{heading}\n")))
+        .unwrap_or_else(|| panic!("README has no section headed {heading:?}"));
+    let block = section
+        .split_once("```json\n")
+        .and_then(|(_, rest)| rest.split_once("\n```"))
+        .map(|(block, _)| block)
+        .unwrap_or_else(|| panic!("README section {heading:?} has no JSON block"));
+    serde_json::from_str(block)
+        .unwrap_or_else(|error| panic!("README section {heading:?}: {error}"))
+}
+
+// The README's hook blocks are what users paste into their agent's settings,
+// so each registers exactly the rows `hooks describe` marks `register`, each
+// as one command hook in the documented form. A hook with any other field,
+// such as `async`, may run after the agent has gone on, and then one child's
+// events can reach the writer out of order.
+#[test]
+fn readme_hook_blocks_register_exactly_the_described_rows() {
+    use wezterm_attention::providers::{HookRegistration, describe_hooks};
+    for (provider, heading) in [("claude", "Claude Code hooks"), ("codex", "Codex hooks")] {
+        let described: BTreeMap<String, String> = describe_hooks(provider)
+            .unwrap()
+            .native_hooks
+            .into_iter()
+            .filter(|row| row.registration == HookRegistration::Register)
+            .map(|row| {
+                let command = format!(
+                    "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention {}",
+                    row.arguments.join(" ")
+                );
+                (row.native_event, command)
+            })
+            .collect();
+        let block = readme_json_block(heading);
+        let registered: BTreeMap<String, String> = block["hooks"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{heading}: no hooks object"))
+            .iter()
+            .map(|(event, groups)| {
+                let [group] = groups.as_array().map(Vec::as_slice).unwrap_or_default() else {
+                    panic!("{heading}/{event}: expected one matcher group");
+                };
+                let [hook] = group
+                    .as_object()
+                    .filter(|group| group.len() == 1)
+                    .and_then(|group| group["hooks"].as_array())
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+                else {
+                    panic!("{heading}/{event}: expected one hook and nothing else");
+                };
+                let fields: Vec<&str> = hook
+                    .as_object()
+                    .map(|hook| hook.keys().map(String::as_str).collect())
+                    .unwrap_or_default();
+                assert_eq!(fields, ["command", "type"], "{heading}/{event}");
+                assert_eq!(hook["type"], "command", "{heading}/{event}");
+                let command = hook["command"].as_str().unwrap_or_default().to_owned();
+                (event.clone(), command)
+            })
+            .collect();
+        assert_eq!(registered, described, "{heading}");
+    }
+}
+
 #[test]
 fn nested_startup_conflicts_and_nested_resume_replaces() {
     let setup = Setup::new();

@@ -48,9 +48,7 @@ v2/realms/<realm>/
           end.json
           ack.json
           lifecycle.json
-          agents-clear.json
-          agents-floor.json
-          agents/<agent-key>.json
+          children.json
 v2/sessions/
   complete.json
   <session-key>/<entry-key>.json
@@ -164,9 +162,11 @@ lock: its publication names only the pane, which leaves any launch a claim publi
 
 ## Ordering and wall age
 
-`observed_mono_ns` orders competing writes and supplies activity-clear, child-clear,
-retention-floor, and absence fences. `written_at_unix_ns` is required on activity, child presence,
-binding, and binding-end records. It supplies TTL and 30-day retention age.
+`observed_mono_ns` orders competing writes and supplies activity-clear, parent-clear,
+retention-floor, and absence fences; a running child's order is its `last_mono_ns` in
+`children.json`. `written_at_unix_ns` is required on activity, binding, binding-end and child
+presence set records. It supplies TTL and 30-day retention age; on the child presence set it says
+when the set was last written and decides nothing.
 
 A binding-end record ends the binding event its `binding_event_id` names, and any binding it was
 observed at or after. The name is what orders an end across a reboot: the monotonic clock restarts
@@ -184,13 +184,13 @@ tool call and a turn that calls no tool still shows activity. The first `PreTool
 repeats the same `thinking` and is skipped. A child actor cannot write lead state, so its prompt
 stays observation-only. The one exception is a child's `PermissionRequest`: a child blocked on a
 permission prompt waits for the user as the lead would, so it publishes lead `notify` activity and
-records the child's presence as waiting (`source: "permission"`); its observation still names the
-child as the actor. While that child waits, the lead's next `thinking` does not replace the visible
-`notify`. The wait has no time limit: it ends at the child's next tool call, its `SubagentStop`, a
-parent clear, or the retention floor, and never at the presence TTL, because a child blocked on a
-prompt sends nothing that would refresh its presence. A user prompt or any lead activity other than
-`thinking` replaces the `notify` at once. A child presence that cannot be read does not stop the
-`notify`; the event reports `partial` with that record's diagnostic.
+marks the child `waiting` in the binding's `children.json`; its observation still names the child
+as the actor. While that child waits, the lead's next `thinking` does not replace the visible
+`notify`. The wait has no time limit, because a child blocked on a prompt sends nothing: it ends at
+the child's next tool call, its `SubagentStop`, a Codex parent stop that removes it, or the
+binding's end. A user prompt or any lead activity other than `thinking` replaces the `notify` at
+once. A child set that cannot be read or changed does not stop the `notify`; the event reports
+`partial` with that record's diagnostic.
 
 A turn that ends without `Stop` still ends the activity when the provider reports the ending. A
 lead Claude `StopFailure` (an API error ended the turn) publishes `notify`, because the user must
@@ -207,17 +207,109 @@ A provider event with a malformed optional field keeps its action and loses only
 fields are `agent_type`, `transcript_path` or `session_file`, `cwd`, `CLAUDE_CONFIG_DIR`,
 `CODEX_HOME`, `PI_CODING_AGENT_DIR`, `model`, and the Pi bus `label`. One `record_invalid`
 diagnostic names them, with message `optional fields were dropped: …` and the list in
-`context.dropped_fields`. A malformed `session_id` or `WEZTERM_ATTENTION_EXPECTED_SESSION_ID` still
-ignores the event, because those are identity, not metadata. A native enum value this version does
+`context.dropped_fields`. An empty `agent_type` is not malformed: it says the agent has no type, as
+Claude Code 2.1.283 sends for the agents it runs for itself. A malformed `session_id` or
+`WEZTERM_ATTENTION_EXPECTED_SESSION_ID` still ignores the event, because those are identity, not
+metadata. A native enum value this version does
 not know keeps the observation: an unknown `error_category` becomes `unknown`, and an unknown
 `input_source` or compaction trigger is omitted.
 
 An activity-clear watermark hides activity at or below its monotonic observation. A strictly newer
-activity reappears. Child presence behaves the same way across active, stopped, parent-clear, and
-retention-floor records. A stopped snapshot is retained until a binding's retention floor covers
-it, because deleting it earlier would discard the ordering fence.
+activity reappears.
 
 Prompt return is `hooks publish` from a bound pane. It republishes the pane identity and writes an activity-clear watermark for the current lead activity only. It never clears child presence and never writes `end.json`. A shell that inherited a launch id clears that launch. A shell without one, in a pane an agent claimed for itself, clears the claim's launch only once the claim's owner is proven gone by the test a replacing claim uses: another boot session, no process at the pid, or a process there with another start time. An owner that still runs, or whose state cannot be read, keeps its activity, and so does a shell claim. The watermark is written under the launch lock and then the claim lock, only while the claim is the one that was read.
+
+## Child presence
+
+A binding's `children.json`, kind `child_presence_set`, holds the sub-agents of that binding that
+are running now, and nothing else. Only the providers in `subagent_providers`, Claude and Codex,
+have one; a Pi binding never does. Besides `kind`, `schema`, `address`, `launch_id`, `binding_id`
+and `provider`, it carries a `revision` UUID replaced on every write, `written_at_unix_ns`, and:
+
+- `live`: one entry per running child, `{agent_id, agent_type?, provenance, status,
+  last_mono_ns}`. `status` is `running`, or `waiting` once the child has asked for permission and
+  done nothing since. `provenance` names the kind of event that last changed the entry: `started`
+  (`SubagentStart`), `tool` (a tool call) or `permission` (a permission request). `agent_type` is
+  the provider's name for the kind of sub-agent, and nothing decides by it. `last_mono_ns` is the
+  order of the child's latest event.
+- `parent_clear`, optional: the latest Codex parent stop, `{observed_mono_ns, event_id, removed}`,
+  where `removed` holds the `agent_id` of each child that stop removed.
+- `lifetime_end`, optional: the `event_id` and `observed_mono_ns` of the binding's `end.json` that
+  this set last applied.
+
+Every reader refuses a set that names one `agent_id` twice in `live`, or twice in
+`parent_clear.removed`. The file is read under the general `max_json_bytes` bound, as every record
+but `lifecycle.json` is; nothing else limits its size, which grows with the children running now.
+
+Only the `attention` command changes the set, under the launch lock and then the claim lock, and it
+writes the file only when the set changed or replaces an invalid one (below). An event whose launch claim no longer holds, or whose
+session has no binding in that launch, is refused before the set is read. The binding's end is
+applied first, whatever the event is: when `end.json` exists and is not the end `lifetime_end`
+names, the writer empties `live`, drops `parent_clear` and records that end. A child event ordered
+at or before the recorded end, or one that arrives while the end still ends the binding, is then
+ignored (`binding_conflict`). After that the event itself applies:
+
+- **`SubagentStart`, a child's `PreToolUse` or a child's `PermissionRequest`** refreshes the child's
+  entry. `PreToolUse` sets `running`, `PermissionRequest` sets `waiting`, and `SubagentStart` keeps
+  the status the child had. A child not in the set is added only by `SubagentStart` or by an event
+  whose `agent_type` is not empty: a provider also runs agents of its own, which can send a tool
+  event with an `agent_id` and no type, and those are not counted. The hook still succeeds for such
+  an event, and prints a `record_invalid` diagnostic naming it. A child's `PostToolUse` and
+  `PostToolUseFailure` change nothing.
+- **The child's `SubagentStop`** removes it. A stop for a child the set does not hold changes
+  nothing.
+- **A Codex parent `Stop`** takes the order of the activity it leaves standing as a cutoff,
+  removes every child whose `last_mono_ns` is at or before the cutoff, and records the cutoff and
+  those children in `parent_clear`. From then on, a start, tool call or permission request of any
+  child ordered at or before the cutoff is ignored. When a newer event adds a removed child again,
+  the hook reports `child_active_after_parent_clear`, because that parent stopped before its child
+  did; see
+  [accepted limitations](accepted-limitations.md#the-sub-agent-count-depends-on-how-claude-code-and-codex-send-hooks).
+  A parent stop ordered before the recorded one is ignored, and one at the same order with another
+  `event_id` leaves the set as it is. The stop's activity is written either way; when the set cannot
+  be changed (that conflict, or a set refused as below) the hook reports `partial` with the set's
+  diagnostic. A Claude `Stop` removes no child, because Claude's background sub-agents
+  can outlive the lead's turn: Claude Code 2.1.283 sent the lead's `Stop` while a sub-agent was
+  still running.
+
+An event of a child in the set that is ordered before its entry is ignored; one ordered at the same
+stamp is skipped when it would leave the entry as it is, and is a conflict otherwise.
+
+Nothing removes a child for being quiet, and the set keeps no record of children that stopped. Both
+rest on each hook running to completion before the agent goes on, which Claude Code 2.1.283 and
+Codex at source commit `985cf47a4` do for a command hook unless it is registered with
+`async: true`: one child's events then reach the writer in the order they happened, and no older
+event of a child arrives after its stop. The [accepted
+limitations](accepted-limitations.md#the-sub-agent-count-depends-on-how-claude-code-and-codex-send-hooks)
+say how that was checked and what an asynchronous hook costs.
+
+A writer that finds `children.json` invalid copies it aside to `.children.json.invalid.<uuid>`, a
+write-leftover name that sweep and doctor pass over, applies the event to a new, empty set, and
+writes the new set even when the event changed nothing else, so an invalid file is copied aside
+once. If the copy fails, the event is refused (`probe_unavailable`). The children the invalid set
+held are counted again at their next event. A set that a newer writer wrote (`future_schema`), or
+one that cannot be read, is never overwritten: a child's event is refused with that diagnostic,
+while a child's permission request and a Codex parent `Stop` still write their activity and report
+`partial`.
+
+Readers, the plugin and `attention inspect`, check the set's structure and count its `live`
+entries. They apply none of the rules above but one: while `end.json` ends the binding no child is
+counted, and when `end.json` exists and is not the end the set's `lifetime_end` names, only entries
+with `last_mono_ns` after that end are counted. That covers a crash between writing `end.json` and
+writing the set, and a resumed session before its first child event. A set whose `provider` is not
+its binding's is invalid. The [consumer guide](consumer-guide.md#scoped-headless-inspection) says
+what `inspect` reports when the set is absent or cannot be read. A poll reads one `children.json`
+per pane and reuses it while its bytes are unchanged, and a child's hook replaces it at most once;
+neither lists a directory.
+
+Builds of the command before `children.json` kept one record per child under
+`agents/<agent-key>.json` (`subagent_presence`), a parent clear in `agents-clear.json`
+(`subagent_clear`) and a retention floor in `agents-floor.json` (`subagent_retention_floor`), and
+readers hid a child ten minutes after its last event. Nothing writes those files now, and neither
+reader reads them. Their kinds, `limits.subagent_ttl_ms` and `enums.subagent_statuses` stay in
+`protocol/v2.json` so that `doctor` and `sweep` still recognise the files: sweep removes them with
+their binding under the retention rules in [Trust boundary](#trust-boundary), and removes nothing
+from a binding that is still current.
 
 ## Precedence and the plugin's writes
 
@@ -267,7 +359,7 @@ acknowledgement counts as none, so it can only leave the earlier behaviour in pl
 
 ## Consumer boundary
 
-`get_attention_view(pane)` exposes fifteen copied base fields plus an independent cached `lifecycle` facet. See the [consumer guide](consumer-guide.md) for exact availability, request/publication relations, acknowledgement meaning, and display ownership. No `answered`, `currently_waiting`, or complete pending-count claim is made.
+`get_attention_view(pane)` exposes sixteen copied base fields plus an independent cached `lifecycle` facet. See the [consumer guide](consumer-guide.md) for exact availability, request/publication relations, acknowledgement meaning, and display ownership. No `answered`, `currently_waiting`, or complete pending-count claim is made.
 
 Lifecycle evidence stays outside `activity.json` because adding request IDs to activity would change `semantic_activity` equality and could redisplay an acknowledged badge. `append_observation` and the request/focus/result tests enforce that separation. Revisit it only if badge identity is deliberately redesigned, not to simplify one consumer.
 
@@ -389,9 +481,7 @@ or persisted.
 Each `sweep --apply` makes up a fresh operation id and reports it in `result.operation_id`.
 `--operation-id` (a canonical lowercase UUID) exists to retry an interrupted run: a run under an id
 already used is treated as a replay of that run. It ends no binding, because the absence rule needs
-two observations under different ids, and it advances no retention floor that still carries that
-id. A floor a hook's compaction has written since carries another id, and the retry advances it as
-any pass would.
+two observations under different ids.
 
 Once a pane's current binding ended more than 30 days ago, `sweep --apply` removes the pane's
 whole tree, but only after two new sightings of absence under different operation ids at least 60
@@ -403,29 +493,10 @@ while clearing it and never finished with, and the lock `reviews/.<owner key>.lo
 review writer leaves beside the reviews, do not hold a binding or pane tree back from retention; a
 lock-like file of any other name or place does. Nothing reads a moved-aside review. Every removal sweep makes stays inside the state
 root: a target reached through a symlinked directory below the root is kept, with a
-`record_invalid` diagnostic, and so are subagent records below a symlinked directory. An absence
+`record_invalid` diagnostic. An absence
 probe kept that way shows as action `keep` in its `absence` or `pane_retention` detail. Every
 other removal a writer makes follows the same rule without a diagnostic: a new claim's removal of
 the pane's absence probe, and a clear's removal of a review or activity record, keep the target
 below a symlinked directory, and the claim or the clear is still written.
 
-A binding's child records are compacted after each saved child `SubagentStop` and each saved lead
-stop, and by `sweep --apply` for current bindings. A compaction advances the retention floor
-`agents-floor.json` when it can, and then removes every child record at or below the floor. A record
-counts as spent once one presence TTL has provably passed since its `written_at_unix_ns`: no reader
-counts it any more, and while no hook is suspended that long, as across a system sleep, no event it
-would fence is still on its way, since a hook waits seconds for its locks ([accepted
-limitations](accepted-limitations.md#what-compacting-sub-agent-records-costs)). One exception is
-kept however old it is: a child waiting for permission whose request is at or after the binding's
-activity, because it can still hold that `notify`. The floor advances to the latest spent record
-ordered strictly before every record kept, so a kept record keeps its whole equal-timestamp group.
-Only a `*.json` name that does not start with a dot can be a record, since a record is named by its
-64-hex key; any other entry, such as a temporary file an interrupted write left, is not read. The
-floor advances only when every record was listed and read, and a record whose age cannot be judged
-is kept, so the floor stops below it. Records an existing floor already covers are removed by any
-later pass that can list `agents/`, whatever operation wrote that floor. A hook's compaction gives
-the floor a fresh `operation_id` of its own. It is maintenance: it takes the launch lock alone,
-reads the wall clock only once it holds that lock, and a failure leaves the stop that ran it saved.
-A reader treats a child record listed and gone before its read as removed, not as a failed read.
-Every other listed record gone mid-read is still a failed read. Binding-history caps are calculated
-separately for each realm.
+Binding-history caps are calculated separately for each realm.

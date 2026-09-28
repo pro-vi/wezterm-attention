@@ -128,7 +128,8 @@ attention.apply_to_config(config, {
   title_formatter = function(tab, ctx)
     -- ctx.default_title: the base title from the rule above
     -- ctx.server_title, ctx.directory, ctx.settled_title: its sources, nil when empty
-    -- ctx.attention: { indicator, type, color, subagents, source, provider, review, binding_health }
+    -- ctx.attention: { indicator, type, color, subagents, subagents_uncertain,
+    --   source, provider, review, binding_health }
     local pane = tab.active_pane
     return pane.title  -- just the pane title, no directory
   end,
@@ -251,22 +252,38 @@ that pane's state.
 
 ### Subagent activity
 
-Claude Code and Codex hooks record each subagent that runs a tool call from a
-pane, and when it stops. A subagent counts as live until it stops or ten minutes
-pass without a tool call from it. The count is independent of the pane's own
-activity: a pane can carry live subagents with no activity at all — the parent
-agent stopped and you acknowledged its ✓ — or alongside activity of any type.
+Claude Code and Codex hooks record each subagent of a pane from its
+`SubagentStart`, or from its first tool call or permission request when no
+start was seen, until it ends. A subagent stays counted however long it is
+quiet, as while it runs one long command. It stops counting at its own
+`SubagentStop`, at a Codex parent's `Stop` that comes after its last event, or
+when its session ends. The count is independent of the pane's own activity: a
+pane can carry running subagents with no activity at all — the parent agent
+stopped and you acknowledged its ✓ — or alongside activity of any type.
 
-The tab renders the live count as `+N`, inside the space the indicator already
+The tab renders the count as `+N`, inside the space the indicator already
 occupies:
 
-| Activity | Live subagents | Tab shows |
-|----------|----------------|-----------|
+| Activity | Subagents | Tab shows |
+|----------|-----------|-----------|
 | `stop` | 0 | `✓ ` |
 | `stop` | 2 | `✓+2 ` |
 | `thinking` | 3 | `◑+3 ` |
 | `notify` | 1 | `!+1 ` |
 | none | 2 | `+2 ` with default tab colors |
+| `stop` | unknown | `✓+? ` |
+| none | 2 in one pane, unknown in another | `+2? ` |
+
+`+?` means the pane's record of its subagents is invalid, was written by a newer
+`attention`, or could not be read and was never read before, so the count is
+unknown rather than zero.
+In a tab with several panes, `+2?` means two subagents are counted and another
+pane's count is unknown.
+
+The count is what the hooks reported, not a process list. A subagent whose end
+was never reported, because its `SubagentStop` hook failed or was not
+registered, stays counted until its session ends. See
+[accepted limitations](docs/accepted-limitations.md#a-sub-agent-whose-end-is-never-reported-stays-counted-until-its-session-ends).
 
 The count never decides which state wins the tab — priority is settled by the
 states alone. But a change in the count alone is a visible change, so it
@@ -332,15 +349,17 @@ local marker_id = attention.pane_marker_id(pane)
 -- returns (type, frame, source, reserved, subagents, review) or nil.
 -- source is the activity's "source" (nil when it carried none);
 -- reserved is always false; it preserves the positions of later tuple values;
--- subagents is how many of the pane's subagents are live, 0 when none. A pane
--- with live subagents and no activity returns (nil, nil, nil, false, n).
+-- subagents is how many of the pane's subagents are running, 0 when none and
+-- also when the count could not be read (get_attention_view(pane).subagents_uncertain
+-- tells the two apart). A pane with running subagents and no activity returns
+-- (nil, nil, nil, false, n).
 -- review is true when the pane carries a review flag. state is the effective
 -- type: "review" when the flag outranks the activity, the activity's own type
 -- when that outranks the flag -- and then review is still true. nil when the id
 -- is seen at more than one full pane address; get_attention_view tells them apart.
 local state, frame, source, reserved, subagents, review = attention.get_attention(marker_id)
 
--- Read fifteen cached base fields plus independent lifecycle evidence, without
+-- Read sixteen cached base fields plus independent lifecycle evidence, without
 -- I/O. Nested returned values do not share mutable state with the plugin cache.
 local view = attention.get_attention_view(pane)
 
@@ -397,13 +416,14 @@ In `~/.claude/settings.json`:
     "PostCompact":        [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude PostCompact" }] }],
     "Stop":               [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude Stop" }] }],
     "StopFailure":        [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude StopFailure" }] }],
+    "SubagentStart":      [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude SubagentStart" }] }],
     "SubagentStop":       [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude SubagentStop" }] }],
     "SessionEnd":         [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude SessionEnd" }] }]
   }
 }
 ```
 
-Merge these into any hooks you already have. Do not register `SubagentStart`: a child becomes visible only after its first tool call. `SubagentStop` records that the same child stopped. A root `Stop` does not clear the children, because background children can outlive it. A `StopFailure` (the turn ended on an API error) shows `notify`.
+Merge these into any hooks you already have, and keep them synchronous: do not add `async: true`, which lets one subagent's events arrive out of order, so that a subagent can stay counted after it stopped. `SubagentStart` counts a subagent from its start, and again when it resumes, which Claude Code 2.1.283 reports as a new start under the same id. `SubagentStop` removes that same subagent. A root `Stop` removes none, because background subagents can outlive it. A `StopFailure` (the turn ended on an API error) shows `notify`.
 
 ## Codex hooks
 
@@ -423,13 +443,14 @@ Codex reads lifecycle hooks from `~/.codex/hooks.json`, and asks you to approve 
     "PostCompact":       [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event codex PostCompact" }] }],
     "Stop":              [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event codex Stop" }] }],
     "Interrupt":         [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event codex Interrupt" }] }],
+    "SubagentStart":     [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event codex SubagentStart" }] }],
     "SubagentStop":      [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event codex SubagentStop" }] }],
     "SessionEnd":        [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event codex SessionEnd" }] }]
   }
 }
 ```
 
-Do not register `SubagentStart`. Child attribution needs matching native `agent_id` values; see [contact evidence](docs/reviews/lifecycle-contact-results.md) for the paths that were exercised. A root `Stop` writes the lead stop, then one child-clear record. An `Interrupt` clears the tab's activity for that session, because Codex runs no `Stop` after one. A child's `PermissionRequest` shows `notify` on the tab, since Codex has no `Notification` hook.
+`SubagentStart` counts a subagent from its start. Child attribution needs matching native `agent_id` values; see [contact evidence](docs/reviews/lifecycle-contact-results.md) for the paths that were exercised. A root `Stop` writes the lead stop and stops counting every subagent whose last event came before it. Codex (source at commit `985cf47a4`) does not make a parent wait for its subagents, but in the sessions recorded with Codex 0.157.1 none worked after its parent's `Stop`; one that does is counted again at its next event (see [accepted limitations](docs/accepted-limitations.md#the-sub-agent-count-depends-on-how-claude-code-and-codex-send-hooks)). An `Interrupt` clears the tab's activity for that session, because Codex runs no `Stop` after one. A child's `PermissionRequest` shows `notify` on the tab, since Codex has no `Notification` hook.
 
 ## Other use cases
 
@@ -495,7 +516,7 @@ The Lua implementation is split by responsibility under `plugin/`: protocol vali
 - If the window is attached to a mux server (`wezterm connect`, a unix domain), check the pane publishes its identity: `wezterm cli list --format json` shows the server-side pane id, and the pane must emit it as the `WEZTERM_PANE` user var. See [Publishing the pane id](#publishing-the-pane-id). Without it the plugin deliberately does nothing for that pane.
 - Check the plugin found the command: without it the WezTerm log says `libexec/attention-rs is missing`, and nothing is recorded.
 - Ensure your hooks write to the same state directory as the plugin's `dir` setting (see [Configure](#configure) for the order).
-- A `+N` with no glyph beside it is the [subagent count](#subagent-activity) for a pane whose own activity is gone or already acknowledged.
+- A `+N` with no glyph beside it is the [subagent count](#subagent-activity) for a pane whose own activity is gone or already acknowledged. A `+?` is a pane whose subagent count could not be read.
 - A ◆ that `Alt+B` does not clear is a review another source published; `attention mark clear --source NAME` withdraws it.
 - `status_update_interval` defaults to 1000ms; indicators update on this interval. Lower it if indicators feel slow — the redraw request rides on the same tick.
 - A Codex tab that shows nothing, or shows another pane's session: Codex 0.157 and later runs sessions in a shared background server that is in no pane, and Attention refuses their events on the hook's stderr with `session_detached` (or `claim_stale`, after a refused session start in a pane no shell claimed). Start Codex with `--no-daemon`; see [Codex hooks](#codex-hooks).
