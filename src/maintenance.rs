@@ -19,12 +19,11 @@ use crate::protocol::{
 use crate::query::{FileStamp, read_bindings_with_ports, read_tab_publications};
 use crate::records::{
     AGENTS, BINDING_FILE, BindingState, CommitPlan, FileRecords, RecordIdentity, RecordRead,
-    Replacement, agents_dir, atomic_replace, atomic_replace_if_different, binding_record_kind,
-    binding_session_entry, claim_lock, collect_binding_files, collect_state_files, commit,
-    directory_confined, ends_binding, incarnation_dir, is_state_lock, launch_lock, name_address,
-    naming_record, pane_dir, read_bounded, read_record, read_record_at, record_address,
-    removal_confined, remove_file_durable, remove_files_durable, session_index_marker,
-    session_index_path, state_relative,
+    Replacement, atomic_replace_if_different, binding_record_kind, binding_session_entry,
+    claim_lock, collect_binding_files, collect_state_files, commit, directory_confined,
+    ends_binding, incarnation_dir, is_state_lock, launch_lock, name_address, naming_record,
+    pane_dir, read_bounded, read_record, record_address, removal_confined, remove_file_durable,
+    session_index_marker, session_index_path, state_relative,
 };
 use crate::wezterm::{Clock, PaneLister, Presence, ProcessInspector, ProcessProbe};
 
@@ -425,35 +424,6 @@ fn wall_age_exceeds(now: &str, written: &str, interval: u128) -> Result<bool> {
     })
 }
 
-/// What one compaction pass does to a binding's subagent records: the floor
-/// it writes, when it advances one, and the records it removes, every one at
-/// or below the floor once that is written. `incomplete` says the pass could
-/// not list, read or judge something it needed to decide on, which sweep
-/// counts as a failed step.
-struct Compaction {
-    action: &'static str,
-    floor: Option<String>,
-    covered: Vec<PathBuf>,
-    diagnostics: Vec<Diagnostic>,
-    incomplete: bool,
-}
-
-impl Compaction {
-    fn doing(action: &'static str, diagnostics: Vec<Diagnostic>) -> Self {
-        Self {
-            action,
-            floor: None,
-            covered: Vec::new(),
-            diagnostics,
-            incomplete: false,
-        }
-    }
-
-    fn blocked(code: &str, message: &'static str) -> Self {
-        Self::doing("blocked", vec![Diagnostic::new(code, message)])
-    }
-}
-
 struct AbsenceOutcome {
     action: String,
     diagnostic: Option<Diagnostic>,
@@ -462,237 +432,6 @@ struct AbsenceOutcome {
 struct RetentionOutcome {
     pruned: bool,
     diagnostics: Vec<Diagnostic>,
-}
-
-/// Plans one compaction of the subagent records of a binding as they stand
-/// at `now`. The caller holds the launch lock, which every writer of those
-/// records takes.
-///
-/// A record is spent once its lifetime has provably run out since it was
-/// written. No reader counts it then, and while no hook is suspended for
-/// that long, as across a system sleep, no event it could fence is still on
-/// its way: a hook waits seconds for its locks, not minutes. The exception
-/// is a child waiting on a permission prompt while it can still hold the
-/// pane's notify, because that wait has no time limit. The floor advances to
-/// the latest spent record ordered strictly before every record kept, so a
-/// kept record keeps its whole equal-order group, and every record at or
-/// below the floor, the one already written or the one advanced now, is
-/// removed.
-///
-/// Only `*.json` names that do not start with a dot are records. The floor
-/// advances only when every record was listed and read, since one that was
-/// not may be a record the floor must not pass; a record whose age cannot be
-/// judged is kept, so the floor stops below it. The records an earlier floor
-/// covers are removed even then, since that floor already fences them. A
-/// sweep under the `operation_id` that wrote the current floor is a replay,
-/// and advances nothing.
-fn compaction_plan(
-    root: &Path,
-    address: &PaneAddress,
-    launch_id: &str,
-    binding_id: &str,
-    now: &str,
-    operation_id: Option<&str>,
-) -> Result<Compaction> {
-    let identity = RecordIdentity::binding(address, launch_id, binding_id);
-    let floor = read_record_at(root, "subagent_retention_floor", &identity)?;
-    let clear = read_record_at(root, "subagent_clear", &identity)?;
-    let activity = read_record_at(root, "activity", &identity)?;
-    let floor_order = floor
-        .as_ref()
-        .and_then(|floor| floor["floor_mono_ns"].as_str());
-    let clear_order = clear
-        .as_ref()
-        .and_then(|clear| clear["observed_mono_ns"].as_str());
-    let activity_order = activity
-        .as_ref()
-        .and_then(|activity| activity["observed_mono_ns"].as_str());
-    let lifetime = u128::from(manifest()?.limits.subagent_ttl_ms) * 1_000_000;
-    let agents = agents_dir(root, address, launch_id, binding_id);
-    if fs::symlink_metadata(&agents).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        return Ok(Compaction::blocked(
-            "record_invalid",
-            "symlinked subagent directory is preserved",
-        ));
-    }
-    if agents.exists() && !directory_confined(root, &agents) {
-        return Ok(Compaction::blocked(
-            "record_invalid",
-            "subagent directory outside the state root is preserved",
-        ));
-    }
-    let entries = match fs::read_dir(&agents) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Compaction::doing("none", Vec::new()));
-        }
-        Err(_) => {
-            return Ok(Compaction {
-                incomplete: true,
-                ..Compaction::blocked(
-                    "probe_unavailable",
-                    "subagent directory could not be enumerated",
-                )
-            });
-        }
-    };
-    let mut diagnostics = Vec::new();
-    // Every record was listed and read, so the floor may advance.
-    let mut complete = true;
-    // Something was not listed, read or judged.
-    let mut incomplete = false;
-    let mut covered = Vec::new();
-    let mut spent = Vec::new();
-    let mut first_kept: Option<String> = None;
-    for entry in entries {
-        let Ok((entry, file_type)) =
-            entry.and_then(|entry| entry.file_type().map(|file_type| (entry, file_type)))
-        else {
-            complete = false;
-            incomplete = true;
-            diagnostics.push(Diagnostic::new(
-                "probe_unavailable",
-                "subagent directory entry is unavailable",
-            ));
-            continue;
-        };
-        let path = entry.path();
-        // Only a `*.json` name that does not start with a dot can be a
-        // record, which is named by its 64-hex key. Any other entry, a
-        // writer's temporary file included, is not read.
-        if entry.file_name().to_string_lossy().starts_with('.')
-            || path.extension().and_then(|extension| extension.to_str()) != Some("json")
-        {
-            continue;
-        }
-        if !file_type.is_file() {
-            complete = false;
-            incomplete = true;
-            let error =
-                AttentionError::new("record_invalid", "subagent record is not a regular file");
-            diagnostics.push(naming_record(root, &path, error).diagnostic);
-            continue;
-        }
-        let agent_key = path
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or("");
-        let presence = match read_record(
-            &path,
-            Some("subagent_presence"),
-            &RecordIdentity::agent(address, launch_id, binding_id, agent_key),
-        ) {
-            Ok(Some(presence)) => presence,
-            Ok(None) => continue,
-            Err(error) => {
-                complete = false;
-                incomplete = true;
-                diagnostics.push(naming_record(root, &path, error).diagnostic);
-                continue;
-            }
-        };
-        let order = presence["observed_mono_ns"].as_str().unwrap_or("");
-        if floor_order.is_some_and(|floor| order <= floor) {
-            covered.push(path);
-            continue;
-        }
-        let expired = match wall_age_exceeds(
-            now,
-            presence["written_at_unix_ns"].as_str().unwrap_or(""),
-            lifetime,
-        ) {
-            Ok(expired) => expired,
-            Err(error) => {
-                incomplete = true;
-                diagnostics.push(naming_record(root, &path, error).diagnostic);
-                false
-            }
-        };
-        let waiting = activity_order.is_some_and(|since| {
-            crate::lifecycle::waits_for_permission(&presence, since, clear_order, floor_order)
-        });
-        if expired && !waiting {
-            spent.push((order.to_owned(), path));
-        } else if first_kept.as_deref().is_none_or(|first| order < first) {
-            first_kept = Some(order.to_owned());
-        }
-    }
-    let replay = operation_id.is_some()
-        && floor
-            .as_ref()
-            .and_then(|floor| floor["operation_id"].as_str())
-            == operation_id;
-    let advance = if complete && !replay {
-        spent
-            .iter()
-            .map(|(order, _)| order)
-            .filter(|order| first_kept.as_ref().is_none_or(|first| *order < first))
-            .max()
-            .cloned()
-    } else {
-        None
-    };
-    if let Some(advance) = &advance {
-        covered.extend(
-            spent
-                .into_iter()
-                .filter(|(order, _)| order <= advance)
-                .map(|(_, path)| path),
-        );
-    }
-    let action = if advance.is_some() {
-        "advance_floor"
-    } else if replay {
-        "replay_floor"
-    } else if covered.is_empty() {
-        "none"
-    } else {
-        "reclaim"
-    };
-    Ok(Compaction {
-        action,
-        floor: advance,
-        covered,
-        diagnostics,
-        incomplete,
-    })
-}
-
-/// Carries out `plan` for one binding, under the launch lock the caller
-/// holds. The floor is made durable before any record it covers is removed,
-/// so a crash between the two leaves records the next pass removes, never a
-/// record the floor does not fence. The floor names `operation_id`, which
-/// only a sweep replay reads.
-fn apply_compaction(
-    root: &Path,
-    address: &PaneAddress,
-    launch_id: &str,
-    binding_id: &str,
-    plan: &Compaction,
-    operation_id: &str,
-) -> Result<usize> {
-    if let Some(floor) = &plan.floor {
-        let identity = RecordIdentity::binding(address, launch_id, binding_id);
-        atomic_replace(
-            &identity.path(root, "subagent_retention_floor")?,
-            &json!({
-                "kind":"subagent_retention_floor","schema":manifest()?.record_schema,
-                "address":address,"launch_id":launch_id,"binding_id":binding_id,
-                "floor_mono_ns":floor,"operation_id":operation_id,
-            }),
-        )?;
-    }
-    if plan.covered.is_empty() {
-        return Ok(0);
-    }
-    let agents = agents_dir(root, address, launch_id, binding_id);
-    if !directory_confined(root, &agents) {
-        return Err(AttentionError::new(
-            "record_invalid",
-            "subagent directory outside the state root is preserved",
-        ));
-    }
-    remove_files_durable(&agents, &plan.covered)
 }
 
 fn binding_known_and_prunable(
@@ -1468,10 +1207,9 @@ pub fn sweep(
         })
         .transpose()?;
     // An operation id lets a retried apply recognise its own earlier work: a
-    // repeat under the same id ends nothing new, and advances no retention
-    // floor that still carries that id. An apply with nothing to retry gets a
-    // fresh id, so running it again is a new observation; the result reports
-    // the id it used.
+    // repeat under the same id ends nothing new. An apply with nothing to
+    // retry gets a fresh id, so running it again is a new observation; the
+    // result reports the id it used.
     let operation_id = operation_id.or_else(|| apply.then(|| Uuid::new_v4().to_string()));
     if let Some(realm) = realm_filter
         && !hex64_text(realm)
@@ -1596,75 +1334,6 @@ pub fn sweep(
                 Err(error) => {
                     diagnostics.push(error.diagnostic);
                     failed += 1;
-                }
-            }
-        }
-        if current {
-            if apply {
-                let operation = operation_id.as_deref().expect("apply operation id");
-                let applied = commit(
-                    root,
-                    &[
-                        &launch_lock(root, &address, launch_id),
-                        &claim_lock(root, &address),
-                    ],
-                    "binding",
-                    &binding_identity,
-                    |locked_binding| {
-                        if locked_binding.as_ref() != Some(&binding)
-                            || binding_selection(
-                                root,
-                                &address,
-                                launch_id,
-                                binding_id,
-                                &binding_state(root, &address, launch_id, binding_id),
-                            )? != Some(true)
-                        {
-                            return Ok(CommitPlan::reporting(Compaction::doing(
-                                "changed",
-                                vec![Diagnostic::new(
-                                    "record_invalid",
-                                    "binding changed before sweep apply",
-                                )],
-                            )));
-                        }
-                        // The wall clock is read under the lock, as a hook's
-                        // compaction reads it: every record on disk was then
-                        // written by a hook that read its own clock earlier.
-                        let now = clock.unix_ns20()?;
-                        Ok(CommitPlan::reporting(compaction_plan(
-                            root,
-                            &address,
-                            launch_id,
-                            binding_id,
-                            &now,
-                            Some(operation),
-                        )?))
-                    },
-                    |plan| apply_compaction(root, &address, launch_id, binding_id, plan, operation),
-                );
-                match applied {
-                    Ok((plan, deleted)) => {
-                        failed += usize::from(plan.incomplete);
-                        if plan.action != "none" && plan.action != "changed" {
-                            details.push(json!({"kind":"subagent_compaction","binding_id":binding_id,"action":plan.action,"floor_mono_ns":plan.floor,"covered":plan.covered.len(),"deleted":deleted}));
-                        }
-                        diagnostics.extend(plan.diagnostics);
-                    }
-                    Err(error) => {
-                        diagnostics.push(error.diagnostic);
-                        failed += 1;
-                    }
-                }
-            } else {
-                match compaction_plan(root, &address, launch_id, binding_id, &now, None) {
-                    Ok(plan) => {
-                        if plan.action != "none" {
-                            details.push(json!({"kind":"subagent_compaction","binding_id":binding_id,"action":plan.action,"floor_mono_ns":plan.floor,"covered":plan.covered.len()}));
-                        }
-                        diagnostics.extend(plan.diagnostics);
-                    }
-                    Err(error) => diagnostics.push(error.diagnostic),
                 }
             }
         }

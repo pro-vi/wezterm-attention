@@ -46,9 +46,6 @@ mod session_starts;
 #[path = "lifecycle_spec/turn_endings.rs"]
 mod turn_endings;
 
-#[path = "lifecycle_spec/child_compaction.rs"]
-mod child_compaction;
-
 #[path = "lifecycle_spec/child_presence.rs"]
 mod child_presence;
 

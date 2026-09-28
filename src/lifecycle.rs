@@ -979,11 +979,6 @@ fn apply_observation(
     Ok(mutation.result)
 }
 
-/// The presence source a child's permission request writes. The child's next
-/// tool call or its stop replaces that presence, so while it stands the child
-/// is waiting.
-const WAITING_FOR_PERMISSION: &str = "permission";
-
 /// Whether some child of `binding_id` asked for permission at or after
 /// `since` and has done nothing since, so it can hold a notify ordered at
 /// `since`. A set, binding or end that cannot be read answers no, which
@@ -1083,24 +1078,6 @@ fn plan_children(
         }
     }
     Ok(result)
-}
-
-/// Whether `presence` is a child that asked for permission at or after
-/// `since` and has emitted nothing since, above the parent clear at `clear`
-/// and the retention floor at `floor`: a child that can hold a notify
-/// ordered at `since`.
-pub(crate) fn waits_for_permission(
-    presence: &Value,
-    since: &str,
-    clear: Option<&str>,
-    floor: Option<&str>,
-) -> bool {
-    let order = presence["observed_mono_ns"].as_str().unwrap_or("");
-    presence["source"] == WAITING_FOR_PERMISSION
-        && presence["status"] == "active"
-        && order >= since
-        && clear.is_none_or(|clear| order > clear)
-        && floor.is_none_or(|floor| order > floor)
 }
 
 fn apply_activity(
