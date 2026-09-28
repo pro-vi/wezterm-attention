@@ -57,7 +57,9 @@ One consequence is known and characterised: when an incoming activity is
 semantically equal to the published one, the write is skipped, the stored order
 keeps its older value, and an event carrying a timestamp between the two can
 still publish over it if it commits later. The interleaving is narrow and the
-wrong tint clears on the next distinct activity.
+wrong tint clears on the next distinct activity. The same skip keeps a Codex
+parent clear at the earlier stop's order, so a sub-agent whose last event falls
+between that stop and a repeat of it stays counted until a distinct `Stop`.
 `a_deduplicated_activity_does_not_advance_the_ordering_fence` in
 `tests/rust/lifecycle_spec.rs` pins the current behaviour so a change to it is
 deliberate.
@@ -226,8 +228,10 @@ stops holding.
 - **Codex reports no interrupted sub-agent.** In Codex source at `985cf47a4`,
   an interrupt runs no hook for a sub-agent's session, and a parent's `Stop`
   carries no list of running sub-agents. An interrupted Codex sub-agent
-  therefore stays counted until its parent's next `Stop` comes after its last
-  event, or its session ends. If Codex starts sending either report, it can
+  therefore stays counted until a later parent `Stop` is published after its
+  last event, or its session ends; a `Stop` that repeats the stop the tab
+  already shows is skipped and keeps the earlier cutoff (see
+  [One timestamp field carries three roles](#one-timestamp-field-carries-three-roles)). If Codex starts sending either report, it can
   replace the parent-stop rule above.
 - **Codex sends `SubagentStart` for the sub-agents it spawns.** Codex source at
   `985cf47a4` dispatches it, with the sub-agent's `agent_id` and `agent_type`,
@@ -261,8 +265,9 @@ stops holding.
 
 Nothing removes a sub-agent for being quiet, so one whose end never reaches the
 writer stays counted, as `+1` on its tab, until its session's `SessionEnd`, or
-until the pane moves on to another session. A Codex sub-agent also goes at its
-parent's next `Stop` that comes after its last event.
+until the pane moves on to another session. A Codex sub-agent also goes at a
+later parent `Stop` that is published after its last event; a repeated `Stop`
+the writer skips keeps the earlier cutoff.
 The end goes missing when:
 
 - the `SubagentStop` hook failed, timed out, or was not registered;
