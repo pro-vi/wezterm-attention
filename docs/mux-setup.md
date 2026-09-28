@@ -136,9 +136,9 @@ For each `registration=register` row, run the `attention` link on your PATH with
 
 `SubagentStart` is a `register` row for Claude Code and Codex: a child is counted from its start,
 and a resumed child from its new start. `SubagentStop` removes that exact child. Keep every hook
-synchronous, which is how Claude Code and Codex run a command hook unless it sets `async: true`; an
-asynchronous hook can deliver one child's events out of order, and a child can then stay counted
-after it stopped (see
+synchronous, which is how Claude Code 2.1.283 and Codex (source at commit `985cf47a4`) run a
+command hook unless it sets `async: true`; an asynchronous hook can deliver one child's events out
+of order, and a child can then stay counted after it stopped (see
 [accepted limitations](accepted-limitations.md#the-sub-agent-count-depends-on-how-claude-code-and-codex-send-hooks)).
 
 The bundled Pi extension is installed with `pi install` rather than registered here; see [Pi extension](../README.md#pi-extension). Its handlers enqueue without awaiting filesystem work and drain the queue during shutdown.

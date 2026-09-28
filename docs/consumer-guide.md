@@ -296,18 +296,18 @@ Activity and binding-end facets contain `availability`, optional `record`, and `
 
 The review collection contains availability, `count`, `evidence`, `coverage="eligible_records"` and diagnostics. A successful empty collection can have availability present and count zero. Degraded reads may retain independently validated evidence.
 
-The children facet contains `availability`, `count`, `waiting`, `coverage` and diagnostics. It is read from the binding's one `children.json`, which holds the sub-agents running now ([record contract](record-contract.md#child-presence)). `availability` says how that read went: present, absent, invalid, unsupported or unavailable. `count` is the number of running sub-agents, and `waiting` how many of them asked for permission and have done nothing since. `coverage` says what the count means; the first row that applies decides it:
+The children facet contains `availability`, `count`, `waiting`, `coverage` and diagnostics. It is read from the binding's one `children.json`, which holds the sub-agents running now ([record contract](record-contract.md#child-presence)). `availability` says how that read went: present, absent, invalid, unsupported or unavailable. `count` is the number of running sub-agents, and `waiting` how many of them asked for permission and have done nothing since. `coverage` says what the count means; the first row that applies decides it, and the end record's read is checked before the set's, since which children count depends on the end:
 
 | `coverage` | When | `count` |
 |---|---|---|
 | `ended` | The binding's end record ends the binding | 0 |
 | `none` | The provider records no sub-agents (Pi) | 0 |
-| `known` | The set was read, or there is none | The sub-agents the set holds, less any seen before an end the set has not applied; 0 when there is no set |
-| `invalid` | The set fails validation, or names another provider than its binding | 0 |
-| `unsupported` | The set declares a future schema | 0 |
-| `unavailable` | The set could not be read | 0 |
+| `invalid` | The binding's end record, or the set, fails validation, or the set names another provider than its binding | 0 |
+| `unsupported` | The end record or the set declares a future schema | 0 |
+| `unavailable` | The end record or the set could not be read | 0 |
+| `known` | The set was read and names its binding's provider, or there is none | The sub-agents the set holds; 0 when there is no set, or when the binding has an end the set has not applied |
 
-Only `ended`, `none` and `known` give a count to rely on. Under the other three a zero means unknown, not none; the plugin draws those as `+?`. `inspect` has no earlier read to fall back on, where the plugin keeps counting its last successful read of the same file. A scope with no selected binding reads `known` with availability absent. `known` is what the command recorded, not what runs: a sub-agent whose end was never reported stays counted, and a Codex sub-agent still working after its parent's stop is not ([accepted limitations](accepted-limitations.md#the-sub-agent-count-depends-on-how-claude-code-and-codex-send-hooks)).
+Only `ended`, `none` and `known` give a count to rely on. Under the other three a zero means unknown, not none; the plugin draws those as `+?`. When the binding record itself, or the pane's current-binding pointer, cannot be read, `inspect` reports every facet `unavailable`, while the plugin shows no count and reports `binding_health` `invalid`. `inspect` has no earlier read to fall back on, where the plugin keeps counting its last successful read of the same file. A scope with no selected binding reads `known` with availability absent. `known` is what the command recorded, not what runs: a sub-agent whose end was never reported stays counted, and a Codex sub-agent still working after its parent's stop is not ([accepted limitations](accepted-limitations.md#the-sub-agent-count-depends-on-how-claude-code-and-codex-send-hooks)).
 
 Lifecycle uses the existing GUI observation/request/relation/floor names and `coverage="bounded_window"`. Headless availability is available, absent, unavailable, invalid or unsupported; there is no cached fallback. Missing snapshot IDs, correlations, optional native fields and floors are omitted. Arrays remain arrays when empty. Both pool floors are preserved when present. Optional badge acknowledgement is separate from raw activity and native relations.
 

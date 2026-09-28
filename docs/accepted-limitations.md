@@ -49,10 +49,9 @@ failure. That is why this is a real gap rather than a stylistic preference.
 
 `observed_mono_ns` decides which of two competing writes publishes, serves as the
 watermark an activity-clear compares against, and is the cutoff at which a Codex
-parent `Stop` removes its sub-agents. `apply_activity` takes `surviving_order`
-from the surviving activity and passes it as the order of the parent clear it
-applies to `children.json`, so the coupling is semantic rather than a shared
-field name.
+parent `Stop` removes its sub-agents. `apply_activity` passes the surviving
+activity's `observed_mono_ns` as the order of the parent clear it applies to
+`children.json`, so the coupling is semantic rather than a shared field name.
 
 One consequence is known and characterised: when an incoming activity is
 semantically equal to the published one, the write is skipped, the stored order
@@ -281,14 +280,15 @@ command to remove such a sub-agent by hand.
 
 ## An invalid child set is started again, and its sub-agents return at their next event
 
-A writer that finds `children.json` invalid keeps a copy beside it as
-`.children.json.invalid.<uuid>` and applies its event to a new, empty set. Until
-the next child event writes the new set, the tab shows `+?`; that event writes
-it even when it changes nothing else, so each invalid file is copied once. The
+A writer that finds `children.json` invalid renames it to
+`.children.json.invalid.<uuid>`, applies its event to a new, empty set, and
+writes that set even when the event changes nothing else; its hook reports
+`record_invalid`. Until that next child event, the tab shows `+?`. The
 sub-agents the invalid set held are counted again only at their next event, so
 one in the middle of a long command stays uncounted until it calls another tool
-or stops. The copies are write leftovers: they go with their binding, and sweep collects
-none on its own (see [What sweep leaves behind](#what-sweep-leaves-behind)).
+or stops. The renamed files are write leftovers: they go with their binding,
+and sweep collects none on its own (see
+[What sweep leaves behind](#what-sweep-leaves-behind)).
 
 Counting what an invalid file held would mean trusting a file that failed
 validation. Starting again loses only what each sub-agent's next event restores.
@@ -300,8 +300,8 @@ per sub-agent under `agents/` instead. A plugin that reads `children.json`
 beside a command that does not write it, or an older plugin beside a command
 that writes only `children.json`, shows no sub-agents: each finds none of the
 files it reads, and the tab shows neither a count nor `+?`.
-`wezterm.plugin.update_all()` replaces the plugin without rebuilding the
-command, so run `scripts/install-cli.sh` after it, as
+Updating the plugin does not rebuild the command, so run
+`scripts/install-cli.sh` after `wezterm.plugin.update_all()`, as
 [Install](../README.md#install) says.
 
 ## The six-value query cannot say a sub-agent count is unknown
@@ -620,8 +620,8 @@ whose required accessors are total: `observed_at()` returns a fence, not an
 malformed stay distinguishable. The document itself stays whole, because the
 record contract is a published surface and lossy typed parsing would break it.
 Start with the three reads that carry ordering: activity, activity-clear, and the
-binding end whose order fences a binding's sub-agents (`end_mark` in
-`src/lifecycle.rs`). Do not rewrite every site mechanically; some read fields
+binding end whose order fences a binding's sub-agents (`EndMark::of` in
+`src/children.rs`). Do not rewrite every site mechanically; some read fields
 that really are optional.
 
 A fix is done when a record with a missing or mistyped `observed_mono_ns` is

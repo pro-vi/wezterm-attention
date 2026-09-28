@@ -274,9 +274,9 @@ occupies:
 | `stop` | unknown | `✓+? ` |
 | none | 2 in one pane, unknown in another | `+2? ` |
 
-`+?` means the pane's record of its subagents is invalid, was written by a newer
-`attention`, or could not be read and was never read before, so the count is
-unknown rather than zero.
+`+?` means the pane's record of its subagents, or of its session's end, is
+invalid, was written by a newer `attention`, or could not be read and was never
+read before, so the count is unknown rather than zero.
 In a tab with several panes, `+2?` means two subagents are counted and another
 pane's count is unknown.
 
@@ -423,7 +423,7 @@ In `~/.claude/settings.json`:
 }
 ```
 
-Merge these into any hooks you already have, and keep them synchronous: do not add `async: true`, which lets one subagent's events arrive out of order, so that a subagent can stay counted after it stopped. `SubagentStart` counts a subagent from its start, and again when it resumes, which Claude Code 2.1.283 reports as a new start under the same id. `SubagentStop` removes that same subagent. A root `Stop` removes none, because background subagents can outlive it. A `StopFailure` (the turn ended on an API error) shows `notify`.
+Merge these into any hooks you already have, and keep them synchronous: do not add `async: true`, which lets one subagent's events arrive out of order, so that a subagent can stay counted after it stopped. `SubagentStart` counts a subagent from its start, and again when it resumes, which Claude Code 2.1.283 reports as a new start under the same id. `SubagentStop` removes that same subagent. A root `Stop` removes none, because background subagents can outlive it: Claude Code 2.1.283 sent the lead's `Stop` while a subagent was still running. A `StopFailure` (the turn ended on an API error) shows `notify`.
 
 ## Codex hooks
 

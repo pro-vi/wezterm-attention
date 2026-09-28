@@ -226,12 +226,12 @@ are running now, and nothing else. Only the providers in `subagent_providers`, C
 have one; a Pi binding never does. Besides `kind`, `schema`, `address`, `launch_id`, `binding_id`
 and `provider`, it carries a `revision` UUID replaced on every write, `written_at_unix_ns`, and:
 
-- `live`: one entry per running child, `{agent_id, agent_type?, provenance, status,
+- `live`: one entry per running child, `{agent_id, agent_type?, last_event, status,
   last_mono_ns}`. `status` is `running`, or `waiting` once the child has asked for permission and
-  done nothing since. `provenance` names the kind of event that last changed the entry: `started`
+  done nothing since. `last_event` names the kind of event that last changed the entry: `start`
   (`SubagentStart`), `tool` (a tool call) or `permission` (a permission request). `agent_type` is
-  the provider's name for the kind of sub-agent, and nothing decides by it. `last_mono_ns` is the
-  order of the child's latest event.
+  the provider's name for the kind of sub-agent, and nothing decides by its value. `last_mono_ns`
+  is the order of the child's latest event.
 - `parent_clear`, optional: the latest Codex parent stop, `{observed_mono_ns, event_id, removed}`,
   where `removed` holds the `agent_id` of each child that stop removed.
 - `lifetime_end`, optional: the `event_id` and `observed_mono_ns` of the binding's `end.json` that
@@ -239,11 +239,14 @@ and `provider`, it carries a `revision` UUID replaced on every write, `written_a
 
 Every reader refuses a set that names one `agent_id` twice in `live`, or twice in
 `parent_clear.removed`. The file is read under the general `max_json_bytes` bound, as every record
-but `lifecycle.json` is; nothing else limits its size, which grows with the children running now.
+but `lifecycle.json` is; nothing else limits its size, which grows with the children running now. A
+change that would make the set larger than that bound is refused (`record_invalid`) and the set
+stays as it was, so a writer never leaves a set its readers reject.
 
 Only the `attention` command changes the set, under the launch lock and then the claim lock, and it
-writes the file only when the set changed or replaces an invalid one (below). An event whose launch claim no longer holds, or whose
-session has no binding in that launch, is refused before the set is read. The binding's end is
+writes the file only when the set changed or replaces an invalid one (below). An event whose launch
+claim no longer holds, or whose session has no binding in that launch, is refused before the set is
+read. The binding's end is
 applied first, whatever the event is: when `end.json` exists and is not the end `lifetime_end`
 names, the writer empties `live`, drops `parent_clear` and records that end. A child event ordered
 at or before the recorded end, or one that arrives while the end still ends the binding, is then
@@ -252,8 +255,8 @@ ignored (`binding_conflict`). After that the event itself applies:
 - **`SubagentStart`, a child's `PreToolUse` or a child's `PermissionRequest`** refreshes the child's
   entry. `PreToolUse` sets `running`, `PermissionRequest` sets `waiting`, and `SubagentStart` keeps
   the status the child had. A child not in the set is added only by `SubagentStart` or by an event
-  whose `agent_type` is not empty: a provider also runs agents of its own, which can send a tool
-  event with an `agent_id` and no type, and those are not counted. The hook still succeeds for such
+  whose `agent_type` is not empty: Claude Code 2.1.283 also runs agents of its own, and one sent a
+  tool event with an `agent_id` and no type; those are not counted. The hook still succeeds for such
   an event, and prints a `record_invalid` diagnostic naming it. A child's `PostToolUse` and
   `PostToolUseFailure` change nothing.
 - **The child's `SubagentStop`** removes it. A stop for a child the set does not hold changes
@@ -283,21 +286,23 @@ event of a child arrives after its stop. The [accepted
 limitations](accepted-limitations.md#the-sub-agent-count-depends-on-how-claude-code-and-codex-send-hooks)
 say how that was checked and what an asynchronous hook costs.
 
-A writer that finds `children.json` invalid copies it aside to `.children.json.invalid.<uuid>`, a
+A writer that finds `children.json` invalid renames it to `.children.json.invalid.<uuid>`, a
 write-leftover name that sweep and doctor pass over, applies the event to a new, empty set, and
-writes the new set even when the event changed nothing else, so an invalid file is copied aside
-once. If the copy fails, the event is refused (`probe_unavailable`). The children the invalid set
-held are counted again at their next event. A set that a newer writer wrote (`future_schema`), or
-one that cannot be read, is never overwritten: a child's event is refused with that diagnostic,
-while a child's permission request and a Codex parent `Stop` still write their activity and report
+writes the new set even when the event changed nothing else; the hook reports `record_invalid`. The
+rename moves the file as it stands, a link as a link, without reading it. The children the invalid
+set held are counted again at their next event. A set that a newer writer wrote (`future_schema`),
+one that cannot be read, one that cannot be moved aside (`probe_unavailable`), or a change past the
+size bound, leaves the set as it was: a child's event is refused with that diagnostic, while a
+child's permission request and a Codex parent `Stop` still write their activity and report
 `partial`.
 
 Readers, the plugin and `attention inspect`, check the set's structure and count its `live`
-entries. They apply none of the rules above but one: while `end.json` ends the binding no child is
-counted, and when `end.json` exists and is not the end the set's `lifetime_end` names, only entries
-with `last_mono_ns` after that end are counted. That covers a crash between writing `end.json` and
-writing the set, and a resumed session before its first child event. A set whose `provider` is not
-its binding's is invalid. The [consumer guide](consumer-guide.md#scoped-headless-inspection) says
+entries. They apply none of the rules above but one, the binding's end: no child is counted while
+`end.json` ends the binding, or while `end.json` exists and is not the end the set's `lifetime_end`
+names. Every write applies the end first, so a set that has not applied it was written before it,
+as in a resumed session before its first child event, and what it holds belongs to the lifetime the
+end closed. An `end.json` that cannot be read leaves the count unknown. A set whose `provider` is
+not its binding's is invalid. The [consumer guide](consumer-guide.md#scoped-headless-inspection) says
 what `inspect` reports when the set is absent or cannot be read. A poll reads one `children.json`
 per pane and reuses it while its bytes are unchanged, and a child's hook replaces it at most once;
 neither lists a directory.
