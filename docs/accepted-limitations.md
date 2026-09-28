@@ -278,6 +278,9 @@ The end goes missing when:
   background by default since 2.1.198. Esc on the lead while a background
   sub-agent ran fired no hook, and the sub-agent sent its `SubagentStop` when it
   finished its command;
+- the API ended the sub-agent mid-run. In Claude Code 2.1.283, two
+  sub-agents stopped by an API error sent no `SubagentStop`, while every
+  sub-agent that finished in the same session sent one;
 - a Codex sub-agent was interrupted, or a hook ran asynchronously, as the
   previous section describes.
 
