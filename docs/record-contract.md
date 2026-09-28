@@ -192,11 +192,13 @@ prompt sends nothing that would refresh its presence. A user prompt or any lead 
 `thinking` replaces the `notify` at once. A child presence that cannot be read does not stop the
 `notify`; the event reports `partial` with that record's diagnostic.
 
-A turn that ends without `Stop` still ends the activity. A lead Claude `StopFailure` (an API error
-ended the turn) publishes `notify`, because the user must act. A Codex `Interrupt` writes an
-activity clear for that session, because the user stopped the turn and there is nothing to report;
-it does not touch a Pi review. Both keep their lifecycle observation. A child's `StopFailure` stays
-observation-only.
+A turn that ends without `Stop` still ends the activity when the provider reports the ending. A
+lead Claude `StopFailure` (an API error ended the turn) publishes `notify`, because the user must
+act. A Codex `Interrupt` writes an activity clear for that session, because the user stopped the
+turn and there is nothing to report; it does not touch a Pi review. Both keep their lifecycle
+observation. A child's `StopFailure` stays observation-only. A Claude turn the user stops with Esc
+reports nothing, so its `thinking` stays; see
+[Accepted limitations](accepted-limitations.md#pressing-esc-in-claude-code-leaves-thinking-on-the-tab).
 
 `SessionStart` with source `fork` binds the forked session for Claude and Codex, replacing the
 active binding as `resume` and `clear` do.

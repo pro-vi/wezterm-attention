@@ -414,6 +414,24 @@ without a hook of its own ending that activity, because it was killed, crashed
 or cut its turn short, leaves its last activity on the tab until the next agent
 claims the pane or the pane closes.
 
+## Pressing Esc in Claude Code leaves `thinking` on the tab
+
+Claude Code runs no hook when the user presses Esc to stop a turn: `Stop` does
+not run, it has no interrupt event, and the `idle_prompt` notification that
+follows a finished turn after a minute without input is not sent either. The
+`thinking` the prompt wrote stays on the tab until the next turn ends with
+`Stop`, or until Claude Code quits and the shell integration's prompt return
+clears it. Focusing the pane does not clear it, since acknowledgement covers
+only `stop` and `notify`, and a hook's `thinking` carries no TTL. The writer
+has no signal to act on. The only trace is a `[Request interrupted by user]`
+line in the session transcript, and an Esc before any output leaves not even
+that: Claude Code undoes the turn and puts the prompt back in the input box.
+Codex sends `Interrupt`, and is not affected.
+
+Checked against Claude Code 2.1.283. In one session, an Esc before any output
+and an Esc after a tool call had run each ran no hook within 90 seconds, while
+a normal turn ran `Stop` and then `idle_prompt` 63 seconds later.
+
 ## A pane a shell has claimed refuses agents started without its launch id
 
 Once a shell has claimed a pane, whether the bash integration for a listed
