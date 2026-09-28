@@ -1,6 +1,6 @@
 # ADR 0002: A sub-agent stays counted until a hook shows it ended
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-27
 
 ## Context
