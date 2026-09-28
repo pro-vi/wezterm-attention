@@ -46,9 +46,15 @@ The split isolates the lead's evidence; it does not make it fresh. The newest
 lead observation shown can still be older than the lead's last hook when the
 writer refuses a repeat, a fenced or an evicted observation, or times out on
 the lock. Sub-agents share one file and can still evict each other's evidence.
-A poll reads two files per pane: with 8 full panes measured on an M5 Max, a
-poll after writes to both files costs at most 1.19 times what it cost before
-the split, in a session that spans the upgrade as well as a fresh one.
+A poll reads two files per pane, and a pane now holds up to twice as many
+observations: the lead's and its children's. A poll that must parse both full
+files costs about as much more as the extra observations it holds. Measured
+for one full pane on an M5 Max inside WezTerm 20260905-195314-b99b1ca2, with
+both files rewritten before each poll, it took 20.5 to 23.5 ms against 9.2 ms
+before the split when the old file held mostly the lead's observations (2.24
+times), 14.4 ms when it held an even mix (1.55 times) and 19.6 ms when it held
+only sub-agents' (1.20 times), since the old reader hashed every sub-agent id
+on each read. A poll where only one of the two files changed took 11 to 15 ms.
 `snapshot_id` identifies `lifecycle.json` only. A consumer that asks only about
 the lead reads `lead_requests` or `lead_general`; one that reads `general` or
 `requests` gets no benefit from the split until it switches. A plugin from
