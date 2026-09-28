@@ -4886,7 +4886,7 @@ test("an unchanged record is not parsed again, and a changed one is", function()
   assert(ok, failure)
 end)
 
-test("a change to the children's lifecycle evidence alone reaches the view", function()
+test("the children's lifecycle evidence reaches the view unless lifecycle.json cannot be used", function()
   local api = dofile(repo_root .. "/plugin/protocol.lua")({ wezterm = wezterm, protocol_path = repo_root .. "/protocol/v2.json" })
   local file = assert(io.open(repo_root .. "/tests/fixtures/lifecycle/observations.json", "r"))
   local fixture = decode_json(file:read("*a")); file:close()
@@ -4960,6 +4960,23 @@ test("a change to the children's lifecycle evidence alone reaches the view", fun
     local children_cached = unreadable_poll(binding_dir .. "/children-lifecycle.json")
     assert(children_cached.availability == "available" and #children_cached.observations == 5
       and #children_cached.diagnostics == 1, "an unreadable children's file lost its last copy")
+    -- lifecycle.json decides first: while it cannot be used, the children's
+    -- evidence beside it is not shown.
+    local function lead_poll(write)
+      write(binding_dir .. "/lifecycle.json")
+      instance.poll(window, options)
+      return assert(instance.get_attention_view(mux_pane(id, pane))).lifecycle
+    end
+    local corrupt = lead_poll(function(path)
+      local handle = assert(io.open(path, "w")); handle:write("{not json"); handle:close()
+    end)
+    assert(corrupt.availability == "invalid" and #corrupt.observations == 0
+      and #corrupt.diagnostics == 1, "children's evidence was shown beside a corrupt lifecycle.json")
+    local newer = decode_json(encode_json(lead))
+    newer.schema = newer.schema + 1
+    local future = lead_poll(function(path) write_json_path(path, newer) end)
+    assert(future.availability == "unsupported" and #future.observations == 0
+      and #future.diagnostics == 1, "children's evidence was shown beside a newer lifecycle.json")
   end)
   wezterm.json_parse = real_parse
   assert(ok, failure)
