@@ -297,7 +297,10 @@ binding, as it keeps any that holds a link; a link to a valid set, or to
 nothing, is replaced by a regular file at the next write. Until that next child event, the tab shows `+?`. The
 sub-agents the invalid set held are counted again only at their next event, so
 one in the middle of a long command stays uncounted until it calls another tool
-or stops. The renamed files are write leftovers: they go with their binding,
+or stops. The rename happens while the hook plans its writes, so if a later write
+in the same hook fails, the write of the new set included, no `children.json` is
+left: the tab then shows no count, not `+?`, until the next child event writes a
+new set. The renamed files are write leftovers: they go with their binding,
 and sweep collects none on its own (see
 [What sweep leaves behind](#what-sweep-leaves-behind)).
 
@@ -333,10 +336,11 @@ crash. If that last sync fails, the write is reported failed
 (`state_permissions`, "state directory could not be made durable") although the
 new record is already in place and every reader sees it. The hook then reports
 its event as failed, and the records its plan would have written after that one
-are not written. A failed write of one of those records is reported alone: what
-the plan itself would have reported, such as the restart of an invalid child set,
-is not in the report. Only the lifecycle observation, which is written last,
-keeps the plan's diagnostic under `replaced` in its write error. A directory that cannot be opened for the sync is not synced,
+are not written. A failed write of any record written before the lifecycle
+observation is reported alone: what the plan itself would have reported, such as
+the restart of an invalid child set, is not in the report. Only the lifecycle
+observation, which is written last, keeps the plan's diagnostic under `replaced`
+in its write error. A directory that cannot be opened for the sync is not synced,
 and the write is reported as made, though a crash can still undo it.
 
 This holds for every record kind, `children.json` included: a `SubagentStop`

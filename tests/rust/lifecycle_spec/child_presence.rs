@@ -828,7 +828,7 @@ fn a_childs_own_event_reports_a_failed_lifecycle_observation_over_a_restart() {
 // the restart of an invalid set. The restart is reported, and the other two
 // stay in order in the chain under it.
 #[test]
-fn every_reason_a_permission_request_met_is_kept_in_order() {
+fn a_restart_keeps_the_transitions_and_the_activitys_diagnostics_in_order() {
     let setup = bound("claude");
     setup.apply(&lead("claude", "PreToolUse"), "00000000000000000300");
     fs::write(set_path(&setup, "claude"), b"{not json").unwrap();
