@@ -4982,6 +4982,31 @@ test("the children's lifecycle evidence reaches the view unless lifecycle.json c
   assert(ok, failure)
 end)
 
+-- A provider that runs no sub-agents has no children's file to read, and a
+-- stray one changes nothing, as in attention inspect.
+test("a stray children's lifecycle file beside a provider without sub-agents is not read", function()
+  local id = 11177
+  local wire = materialize_v2_fixture(id)
+  local binding = decode_json(encode_json(protocol_fixture.record_samples.binding))
+  binding.address = decode_json(encode_json(wire.address))
+  binding.provider = "pi"
+  local binding_dir = test_dir .. "/v2/realms/" .. wire.address.realm_id .. "/incarnations/"
+    .. wire.address.incarnation_id .. "/panes/" .. id .. "/launches/" .. wire.launch_id
+    .. "/bindings/" .. binding.binding_id
+  write_json_path(binding_dir .. "/binding.json", binding)
+  local handle = assert(io.open(binding_dir .. "/children-lifecycle.json", "w"))
+  handle:write("{not json"); handle:close()
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root })
+  local pane = { id = id, domain = "unix", attention = wire }
+  local window = window_double({ tabs = { { pane } }, focused = false })
+  instance.poll(window, { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+  local lifecycle = assert(instance.get_attention_view(mux_pane(id, pane))).lifecycle
+  assert(lifecycle.availability == "absent" and #lifecycle.diagnostics == 0,
+    "a stray children's lifecycle file was read for a provider without sub-agents")
+end)
+
 test("consumer manifest classification agrees with Rust and rejects incompatible metadata", function()
   local load = dofile(repo_root .. "/plugin/protocol.lua")
   local api = load({ wezterm = wezterm, protocol_path = repo_root .. "/protocol/v2.json" })
