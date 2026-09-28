@@ -342,6 +342,25 @@ local function materialize_state_case(state_case)
   end
 end
 
+--- The fixture tree's binding directory, where its activity, end and child
+--- set live.
+local function fixture_binding_dir()
+  local samples = protocol_fixture.record_samples
+  return test_dir .. "/v2/realms/" .. samples.claim.address.realm_id
+    .. "/incarnations/" .. samples.claim.address.incarnation_id
+    .. "/panes/42/launches/" .. samples.claim.launch_id
+    .. "/bindings/" .. samples.binding.binding_id
+end
+
+--- Write a child presence set. This harness's encoder writes an empty table
+--- as {}, and an empty list of children must stay a JSON array.
+local function write_child_set(path, set)
+  assert(os.execute("mkdir -p " .. shell_quote(dirname(path))) == 0)
+  local file = assert(io.open(path, "w"))
+  assert(file:write((encode_json(set):gsub('"live":{}', '"live":[]'):gsub('"removed":{}', '"removed":[]'))))
+  assert(file:close())
+end
+
 local function materialize_v2_fixture(pane_id, realm_id)
   local original_realm = protocol_fixture.wire_sample.address.realm_id
   local address = decode_json(encode_json(protocol_fixture.wire_sample.address))
@@ -2338,19 +2357,21 @@ end)
 
 -- ── Subagents ───────────────────────────────────────────────────────────────
 
---- Give the pane `count` live subagents, in place of any it had.
+--- Give the pane `count` running subagents, in place of any it had, as the
+--- writer's set of running children.
 local function write_subagents(pane_id, count)
   if not path_exists(seeded_pane_root(pane_id) .. "/claim.json") then seed_pane(pane_id) end
-  local agents = seeded_records_root(pane_id) .. "/agents"
-  assert(os.execute("rm -rf " .. shell_quote(agents)) == 0)
+  local set = seeded_record(pane_id, "child_presence_set")
+  set.revision = next_event_id()
+  set.parent_clear, set.lifetime_end = nil, nil
+  set.live = {}
   for index = 1, count do
-    local presence = seeded_record(pane_id, "subagent_presence")
-    presence.agent_id = "agent-" .. index
-    presence.agent_key = internal.sha256(presence.agent_id)
-    presence.event_id = next_event_id()
-    presence.written_at_unix_ns = fixture_now
-    write_json_path(agents .. "/" .. presence.agent_key .. ".json", presence)
+    set.live[index] = {
+      agent_id = "agent-" .. index, provenance = "tool", status = "running",
+      last_mono_ns = string.format("%020d", 300000000000 + index),
+    }
   end
+  write_child_set(seeded_records_root(pane_id) .. "/children.json", set)
 end
 
 local function poll_at(pane_ids, spec)
@@ -2419,6 +2440,23 @@ test("the tab indicator carries the subagent count", function()
   assert(count_only.color == nil, "a bare count keeps the tab's default colors")
 end)
 
+-- A tab whose panes include one whose children could not be read shows the
+-- children it could count, marked as possibly more.
+test("a tab with an unreadable child count marks its count as uncertain", function()
+  internal.attention_cache["7593"] = { type = nil, subagents = 2, subagents_uncertain = false }
+  internal.attention_cache["7594"] = { type = nil, subagents = 0, subagents_uncertain = true }
+  local mixed = internal.resolve_visible_attention({ "7593", "7594" })
+  assert(mixed.indicator == "+2? " and mixed.subagents == 2 and mixed.subagents_uncertain == true,
+    "a known count keeps its number and gains the mark, got " .. tostring(mixed.indicator))
+  local unknown = internal.resolve_visible_attention({ "7594" })
+  assert(unknown.indicator == "+? ", "nothing counted shows the mark alone, got " .. tostring(unknown.indicator))
+  internal.attention_cache["7595"] = { type = "stop", subagents = 0, subagents_uncertain = true }
+  local marked = internal.resolve_visible_attention({ "7595", "7593" })
+  assert(marked.indicator:find("+2? ", 1, true),
+    "the count rides beside a marker glyph too, got " .. tostring(marked.indicator))
+  internal.attention_cache["7593"], internal.attention_cache["7594"], internal.attention_cache["7595"] = nil, nil, nil
+end)
+
 test("count-only keeps the default colors", function()
   local sentinel = { colors = { stop = "SENTINEL" } }
   internal.attention_cache["7591"] = { type = nil, subagents = 2 }
@@ -2439,6 +2477,9 @@ test("count-only keeps the default colors", function()
   local clear = decode_json(encode_json(samples.activity_clear))
   clear.observed_mono_ns = "00000000004000000000"
   write_json_path(binding_dir .. "/activity-clear.json", clear)
+  -- The fixture's session has ended, and an ended session has no children
+  -- running; without its end the set's two children are counted.
+  os.remove(binding_dir .. "/end.json")
   attention.poll(window_double({ tabs = { { {
     id = 7592, domain = "unix", attention = protocol_fixture.wire_sample,
   } } }, focused = false }), {
@@ -2447,7 +2488,7 @@ test("count-only keeps the default colors", function()
   })
   local key = internal.address_cache_key(protocol_fixture.wire_sample.address)
   local v2_visible = internal.resolve_visible_attention({ key }, sentinel)
-  assert(v2_visible.indicator == "+1 " and v2_visible.type == nil and v2_visible.color == nil,
+  assert(v2_visible.indicator == "+2 " and v2_visible.type == nil and v2_visible.color == nil,
     "a count read from records must also keep default colors")
   internal.attention_cache["7591"] = nil
 end)
@@ -2508,15 +2549,15 @@ end)
 test("all rendered view fields participate in redraw equality", function()
   local baseline = {
     type = "notify", frame = 0, activity_type = "notify", event_id = "a",
-    source = "claude", provider = "claude", subagents = 1,
+    source = "claude", provider = "claude", subagents = 1, subagents_uncertain = false,
     review = false, binding_phase = "active", pane_presence = "present",
     reader_confidence = "confirmed", binding_health = "valid",
     base_title = "base", settled_title = "settled",
   }
   for _, field in ipairs({
     "type", "frame", "activity_type", "event_id", "source", "provider",
-    "subagents", "review", "binding_phase", "pane_presence", "reader_confidence",
-    "binding_health", "base_title", "settled_title",
+    "subagents", "subagents_uncertain", "review", "binding_phase", "pane_presence",
+    "reader_confidence", "binding_health", "base_title", "settled_title",
   }) do
     local changed = {}
     for key, value in pairs(baseline) do changed[key] = value end
@@ -2804,6 +2845,61 @@ test("a change in the subagent count alone requests a redraw", function()
     "the count changing is itself a visible change, got " .. #w.actions)
 end)
 
+test("a count that becomes unknown alone repaints the tab and reaches consumers as updated", function()
+  write_activity(7541, "stop")
+  write_subagents(7541, 0)
+  -- An acknowledgement that is not a record keeps the pane's health invalid
+  -- throughout, so the child set turning invalid changes nothing else in the
+  -- view.
+  local ack = assert(io.open(seeded_records_root(7541) .. "/ack.json", "w"))
+  assert(ack:write("not a record"))
+  assert(ack:close())
+  local messages = {}
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    on_view_change = function(message) messages[#messages + 1] = message end })
+  local w = window_double({ tabs = { { 7540, 7541 } }, focused = true, active_pane_id = 7540 })
+  local options = { now_unix_ns = fixture_now, call_after = function() end }
+  instance.poll(w, options)
+  instance.poll(w, options)
+  local actions = #w.actions
+  assert(#messages == 1 and messages[1].kind == "initial", "precondition: one initial view")
+  local before = messages[1].view
+  assert(before.binding_health == "invalid" and before.subagents == 0
+      and before.subagents_uncertain == false, "precondition: a known count of none")
+
+  local set = seeded_record(7541, "child_presence_set")
+  set.live[2] = copy_json(set.live[1])
+  write_child_set(seeded_records_root(7541) .. "/children.json", set)
+  instance.poll(w, options)
+
+  assert(#w.actions == actions + 1, "the tab must repaint to show +?, got " .. (#w.actions - actions))
+  assert(#messages == 2 and messages[2].kind == "updated", "consumers must hear of the change")
+  local after = messages[2].view
+  assert(after.subagents == 0 and after.subagents_uncertain == true, "the count is now unknown")
+  for field, value in pairs(before) do
+    if field ~= "subagents_uncertain" and type(value) ~= "table" then
+      assert(after[field] == value, field .. " changed as well, so the test proves nothing")
+    end
+  end
+  assert(select("#", instance.get_attention(7541)) == 6
+      and select(5, instance.get_attention(7541)) == 0,
+    "the six-value tuple keeps a numeric count")
+  drain_errors()
+end)
+
+test("a child that stopped and started again is counted again", function()
+  write_subagents(7551, 1)
+  poll_at({ 7551 })
+  assert(select(5, attention.get_attention(7551)) == 1, "precondition: one running child")
+  write_subagents(7551, 0)
+  poll_at({ 7551 })
+  assert(select(5, attention.get_attention(7551)) == 0, "a stopped child leaves the set")
+  write_subagents(7551, 1)
+  poll_at({ 7551 })
+  assert(select(5, attention.get_attention(7551)) == 1, "the same child starting again is counted")
+end)
+
 -- ── The review flag ─────────────────────────────────────────────────────────
 
 test("the review flag outranks a thinking activity without replacing it", function()
@@ -2970,15 +3066,26 @@ test("text checks refuse C1 controls the way Rust's char::is_control does", func
   assert(not parsed and problem.code == "record_invalid", "an escaped C1 must make the record invalid")
 end)
 
-test("Lua and Python fixture semantics cover exact wall-age boundaries", function()
-  local results = fixtures.fixture_eligibility_cases(protocol_fixture)
-  assert(#results == #protocol_fixture.eligibility_cases, "every eligibility row must run")
+test("Lua decides every shared binding end row as Rust and Python do", function()
+  local results = fixtures.fixture_ends_binding_cases(protocol_fixture)
+  assert(#results == #protocol_fixture.ends_binding_cases and #results > 0,
+    "every binding end row must run")
   for _, result in ipairs(results) do
     assert(result.actual == result.expected,
-      result.id .. " eligibility mismatch: " .. tostring(result.actual))
-    assert(result.diagnostic == result.expected_diagnostic,
-      result.id .. " diagnostic expected " .. tostring(result.expected_diagnostic)
-        .. ", got " .. tostring(result.diagnostic))
+      result.id .. " expected " .. tostring(result.expected) .. ", got " .. tostring(result.actual))
+  end
+end)
+
+test("Lua counts and renders children for every shared coverage row", function()
+  local results = fixtures.fixture_children_coverage_cases(protocol_fixture)
+  assert(#results == #protocol_fixture.children_coverage_cases and #results > 0,
+    "every coverage row must run")
+  for _, result in ipairs(results) do
+    for _, field in ipairs({ "count", "waiting", "coverage", "renders" }) do
+      assert(result.actual[field] == result.expected[field],
+        result.id .. " " .. field .. " expected " .. tostring(result.expected[field])
+          .. ", got " .. tostring(result.actual[field]))
+    end
   end
 end)
 
@@ -3035,7 +3142,9 @@ test("a complete v2 state tree reaches both pure renderers", function()
   assert(view.binding_health == expected.binding_health, "fixture should remain valid")
   assert(view.provider == expected.provider,
     "provider belongs to the binding-backed view")
-  assert(view.subagents == expected.subagents, "one exact active child must count")
+  assert(view.subagents == expected.subagents
+      and view.subagents_uncertain == expected.subagents_uncertain,
+    "an ended session's children are not running, and that is known")
   assert(view.review == expected.review, "review overlay composes with activity and end")
 
   local default_rendered = format_tab_title(tab(4242, 4243, false))
@@ -3055,8 +3164,7 @@ test("a complete v2 state tree reaches both pure renderers", function()
       and manual_attention[2] == expected_render.type
       and manual_attention[3] == expected_render.color,
     "manual renderer context must match the built-in projection")
-  assert(#scheduled == 1 and scheduled[1].delay > 0,
-    "an eligible TTL record must schedule one future reread")
+  assert(#scheduled == 0, "nothing in the tree expires, so no reread is scheduled")
 end)
 
 test("activity TTL uses written Unix time while event order stays monotonic", function()
@@ -3249,6 +3357,11 @@ test("one v2 poll samples UTC once and formatting samples no clock", function()
 end)
 
 test("call_after only wakes a fresh TTL read", function()
+  materialize_state_case(protocol_fixture.state_case)
+  local activity_path = fixture_binding_dir() .. "/activity.json"
+  local activity = copy_json(protocol_fixture.record_samples.activity)
+  activity.ttl_ms = 600000
+  write_json_path(activity_path, activity)
   local callback
   local clock_value = "00000000610000000000"
   local pane_spec = {
@@ -3257,14 +3370,15 @@ test("call_after only wakes a fresh TTL read", function()
     published = 42,
     attention = protocol_fixture.wire_sample,
   }
+  local key = internal.address_cache_key(protocol_fixture.wire_sample.address)
   local window = window_double({ tabs = { { pane_spec } }, focused = false })
   attention.poll(window, {
     now_unix_ns = clock_value,
     call_after = function(_, scheduled_callback) callback = scheduled_callback end,
   })
-  assert(type(callback) == "function", "the exact-boundary child must schedule a reread")
-  assert(select(5, attention.get_attention(42)) == 1,
-    "scheduling alone must not expire the child")
+  assert(type(callback) == "function", "an activity at its exact TTL boundary must schedule a reread")
+  assert(internal.attention_cache[key].activity_type == "notify",
+    "scheduling alone must not expire the activity")
 
   clock_value = "00000000610000000001"
   local previous_time = wezterm.time
@@ -3284,24 +3398,26 @@ test("call_after only wakes a fresh TTL read", function()
   }
   callback()
   wezterm.time = previous_time
-  assert(select(5, attention.get_attention(42)) == 0,
+  write_json_path(activity_path, protocol_fixture.record_samples.activity)
+  assert(internal.attention_cache[key].activity_type == nil,
     "the fresh read one nanosecond later must derive expiry")
 end)
 
-test("unavailable UTC omits TTL children but preserves non-TTL activity", function()
-  local pane_spec = {
-    id = 4246,
-    domain = "unix",
-    published = 42,
-    attention = protocol_fixture.wire_sample,
-  }
-  attention.poll(window_double({ tabs = { { pane_spec } }, focused = false }), {
-    utc_now = function() return nil, "probe_unavailable" end,
-  })
-  local atype, _, _, _, subagents, review = attention.get_attention(42)
-  assert(atype == "notify", "non-TTL activity must survive an unavailable TTL clock")
-  assert(subagents == 0, "TTL-bearing child state must fail closed")
-  assert(review == true, "the exact review overlay must remain independent of the clock")
+test("a child's count does not depend on the clock, and a quiet child keeps counting", function()
+  -- No rule hides a running child for being quiet: its last event can be
+  -- far older than the poll, and an unreadable clock changes nothing either.
+  write_activity(4247, "notify")
+  write_subagents(4247, 2)
+  for _, options in ipairs({
+    { now_unix_ns = "99999999999999999999" },
+    { utc_now = function() return nil, "probe_unavailable" end },
+  }) do
+    options.call_after = function() end
+    attention.poll(window_double({ tabs = { { 4246, 4247 } }, focused = false }), options)
+    local atype, _, _, _, subagents = attention.get_attention(4247)
+    assert(atype == "notify", "non-TTL activity must survive any clock")
+    assert(subagents == 2, "both running children are counted, got " .. tostring(subagents))
+  end
   local errors = drain_errors()
   assert(#errors >= 1 and errors[1]:find("probe_unavailable", 1, true),
     "the unavailable clock must be diagnosed")
@@ -3445,39 +3561,123 @@ test("a poll read failure preserves the last v2 view as unavailable", function()
     "the poll must report the unavailable read")
 end)
 
-test("invalid child wall ages do not poison a valid sibling", function()
-  local samples = protocol_fixture.record_samples
-  local agents_dir = test_dir .. "/v2/realms/" .. samples.claim.address.realm_id
-    .. "/incarnations/" .. samples.claim.address.incarnation_id
-    .. "/panes/42/launches/" .. samples.claim.launch_id
-    .. "/bindings/" .. samples.binding.binding_id .. "/agents"
+test("a child set that cannot be counted shows +? until a readable one replaces it", function()
+  write_subagents(4249, 1)
+  local path = seeded_records_root(4249) .. "/children.json"
+  local function poll_tab()
+    poll_at({ 4249 })
+    return internal.attention_cache[seeded_key(4249)],
+      internal.resolve_visible_attention({ seeded_key(4249) })
+  end
+  local view, visible = poll_tab()
+  assert(view.subagents == 1 and view.subagents_uncertain == false and visible.indicator == "+1 ",
+    "precondition: one running child")
 
-  local future = decode_json(encode_json(samples.subagent_presence))
-  future.agent_id = "child-future"
-  future.agent_key = "731bc325223228990d07e8b7adcbb75f761c5059011cad92b0aee8d3d3125bdc"
-  future.event_id = "00000000-0000-4000-8000-000000000012"
-  future.observed_mono_ns = "00000000310000000000"
-  future.written_at_unix_ns = "00000000620000000000"
-  write_json_path(agents_dir .. "/" .. future.agent_key .. ".json", future)
+  local set = seeded_record(4249, "child_presence_set")
+  set.live[2] = copy_json(set.live[1])
+  write_child_set(path, set)
+  view, visible = poll_tab()
+  assert(view.subagents == 0 and view.subagents_uncertain == true,
+    "a set with a repeated child has no count to give")
+  assert(visible.indicator == "+? ", "the tab says the count is unknown, got " .. visible.indicator)
+  assert(select(5, attention.get_attention(4249)) == 0, "the six-value tuple keeps a number")
+  assert(view.binding_health == "invalid", "the invalid set is diagnosed")
 
-  local malformed = decode_json(encode_json(samples.subagent_presence))
-  malformed.agent_id = "child-malformed"
-  malformed.agent_key = "1c68b06d2f8d5136a4e534149c07ef8f118b51f7e39ecbf5a041acfb38330abc"
-  malformed.event_id = "00000000-0000-4000-8000-000000000013"
-  malformed.observed_mono_ns = "00000000320000000000"
-  malformed.written_at_unix_ns = "bad"
-  write_json_path(agents_dir .. "/" .. malformed.agent_key .. ".json", malformed)
+  set = seeded_record(4249, "child_presence_set")
+  set.schema = 4
+  write_child_set(path, set)
+  view, visible = poll_tab()
+  assert(view.subagents_uncertain == true and visible.indicator == "+? ",
+    "a set from a newer writer cannot be counted either")
+  assert(view.binding_health == "future_schema", "and it is reported as newer, not broken")
 
-  local read = internal.resolve_pane_read(mux_pane(4249, {
-    domain = "unix", attention = protocol_fixture.wire_sample,
-  }))
-  local view = internal.read_attention_view(read,
-    protocol_fixture.state_case.now_unix_ns, { dir = test_dir, glob = wezterm.glob })
-  assert(view.subagents == 1, "the original valid child must remain counted")
-  local codes = {}
-  for _, item in ipairs(view.diagnostics) do codes[item.code] = true end
-  assert(codes.clock_skew == true, "the future child must report clock_skew")
-  assert(codes.record_invalid == true, "the malformed child must report record_invalid")
+  write_subagents(4249, 1)
+  view, visible = poll_tab()
+  assert(view.subagents == 1 and view.subagents_uncertain == false and visible.indicator == "+1 ",
+    "the writer's next set is counted again")
+  drain_errors()
+end)
+
+test("an unreadable child set keeps the count read before, and says so with none", function()
+  write_subagents(4253, 2)
+  local path = seeded_records_root(4253) .. "/children.json"
+  poll_at({ 4253 })
+  assert(internal.attention_cache[seeded_key(4253)].subagents == 2, "precondition: two running children")
+  local real_open = io.open
+  io.open = function(target, mode)
+    if target == path then return nil, "permission denied" end
+    return real_open(target, mode)
+  end
+  local ok, failure = pcall(poll_at, { 4253 })
+  local kept = internal.attention_cache[seeded_key(4253)]
+  io.open = real_open
+  assert(ok, failure)
+  assert(kept.subagents == 2 and kept.subagents_uncertain == false,
+    "a set read before is counted again while the file cannot be read")
+  assert(kept.pane_presence == "unavailable", "and the read is still reported as failed")
+
+  -- A pane read by another plugin instance has no earlier read to fall back on.
+  local fresh = dofile(repo_root .. "/plugin/init.lua")
+  fresh.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false })
+  io.open = function(target, mode)
+    if target == path then return nil, "permission denied" end
+    return real_open(target, mode)
+  end
+  ok, failure = pcall(fresh.poll, window_double({ tabs = { { 4253 } }, focused = false }),
+    { now_unix_ns = fixture_now, call_after = function() end })
+  io.open = real_open
+  assert(ok, failure)
+  local unknown = fresh._internal.attention_cache[seeded_key(4253)]
+  assert(unknown.subagents == 0 and unknown.subagents_uncertain == true,
+    "with nothing read before, the count is unknown")
+  assert(fresh._internal.resolve_visible_attention({ seeded_key(4253) }).indicator == "+? ")
+  drain_errors()
+end)
+
+test("an ended session counts no children, and a resumed one only those after its end", function()
+  write_activity(4254, "stop")
+  local root = seeded_records_root(4254)
+  local set = seeded_record(4254, "child_presence_set")
+  set.live = {
+    { agent_id = "before-end", provenance = "tool", status = "running", last_mono_ns = "00000000003000000000" },
+    { agent_id = "after-end", provenance = "permission", status = "waiting", last_mono_ns = "00000000006000000000" },
+  }
+  write_child_set(root .. "/children.json", set)
+  local ending = seeded_record(4254, "binding_end")
+  ending.binding_event_id = protocol_fixture.record_samples.binding.event_id
+  write_json_path(root .. "/end.json", ending)
+  poll_at({ 4254 })
+  local view = internal.attention_cache[seeded_key(4254)]
+  assert(view.binding_phase == "ended" and view.subagents == 0 and view.subagents_uncertain == false,
+    "no child of an ended session is running")
+
+  -- The session resumes: a new binding event, and no child write yet.
+  local binding = seeded_record(4254, "binding")
+  binding.event_id = "00000000-0000-4000-8000-000000000031"
+  binding.observed_mono_ns = "00000000005000000000"
+  write_json_path(root .. "/binding.json", binding)
+  poll_at({ 4254 })
+  view = internal.attention_cache[seeded_key(4254)]
+  assert(view.binding_phase == "active" and view.subagents == 1,
+    "only the child seen after the end is counted before the set applies that end")
+  drain_errors()
+end)
+
+test("files a former writer kept per child are not read for children", function()
+  write_subagents(4255, 1)
+  local root = seeded_records_root(4255)
+  local presence = seeded_record(4255, "subagent_presence")
+  write_json_path(root .. "/agents/" .. presence.agent_key .. ".json", presence)
+  local clear = seeded_record(4255, "subagent_clear")
+  write_json_path(root .. "/agents-clear.json", clear)
+  local floor_path = root .. "/agents-floor.json"
+  local file = assert(io.open(floor_path, "w"))
+  assert(file:write("not a record"))
+  assert(file:close())
+  poll_at({ 4255 })
+  local view = internal.attention_cache[seeded_key(4255)]
+  assert(view.subagents == 1, "only the set's child is counted, got " .. tostring(view.subagents))
+  assert(view.binding_health == "valid", "an unreadable file of the former layout is not diagnosed")
 end)
 
 -- ── Attention v2: reader, review, lifecycle and cleanup regressions ─────────
@@ -3522,6 +3722,10 @@ end)
 
 test("cache recovery recalculates TTL and never rearms an expired deadline", function()
   materialize_state_case(protocol_fixture.state_case)
+  local activity_path = fixture_binding_dir() .. "/activity.json"
+  local activity = copy_json(protocol_fixture.record_samples.activity)
+  activity.ttl_ms = 600000
+  write_json_path(activity_path, activity)
   local pane_spec = {
     id = 4261, domain = "unix", attention = protocol_fixture.wire_sample,
   }
@@ -3530,7 +3734,7 @@ test("cache recovery recalculates TTL and never rearms an expired deadline", fun
     now_unix_ns = "00000000610000000000",
     call_after = function() end,
   })
-  assert(select(5, attention.get_attention(42)) == 1, "precondition: exact-boundary child counts")
+  assert(attention.get_attention(42) == "notify", "precondition: the exact-boundary activity shows")
 
   local samples = protocol_fixture.record_samples
   local claim_path = test_dir .. "/v2/realms/" .. samples.claim.address.realm_id
@@ -3549,37 +3753,12 @@ test("cache recovery recalculates TTL and never rearms an expired deadline", fun
     end,
   })
   io.open = real_open
+  write_json_path(activity_path, protocol_fixture.record_samples.activity)
   assert(ok, "expired-boundary read failure escaped: " .. tostring(poll_error))
-  assert(select(5, attention.get_attention(42)) == 0,
-    "recovery must derive that the cached child is now expired")
+  assert(attention.get_attention(42) ~= "notify",
+    "recovery must derive that the cached activity is now expired")
   assert(#scheduled == 0, "an expired deadline must not schedule delay=0 callbacks")
   drain_errors()
-end)
-
-test("matching forged child filenames cannot duplicate one raw agent id", function()
-  materialize_state_case(protocol_fixture.state_case)
-  local samples = protocol_fixture.record_samples
-  local forged = decode_json(encode_json(samples.subagent_presence))
-  forged.agent_key = "9999999999999999999999999999999999999999999999999999999999999999"
-  local agents_dir = test_dir .. "/v2/realms/" .. samples.claim.address.realm_id
-    .. "/incarnations/" .. samples.claim.address.incarnation_id
-    .. "/panes/42/launches/" .. samples.claim.launch_id
-    .. "/bindings/" .. samples.binding.binding_id .. "/agents"
-  write_json_path(agents_dir .. "/" .. forged.agent_key .. ".json", forged)
-
-  local read = internal.resolve_pane_read(mux_pane(4262, {
-    domain = "unix", attention = protocol_fixture.wire_sample,
-  }))
-  local view = internal.read_attention_view(read,
-    protocol_fixture.state_case.now_unix_ns, { dir = test_dir, glob = wezterm.glob })
-  assert(view.subagents == 1, "one raw agent id must contribute at most one child")
-  local invalid_hash = false
-  for _, item in ipairs(view.diagnostics) do
-    if item.code == "record_invalid" and item.message:find("agent_key", 1, true) then
-      invalid_hash = true
-    end
-  end
-  assert(invalid_hash, "the forged agent_key relationship must be diagnosed")
 end)
 
 test("an unbound launch reads and applies its exact acknowledgement", function()
@@ -3621,8 +3800,7 @@ local function canonical_fixture_glob(pattern)
   local paths = wezterm.glob(pattern)
   local selected = {}
   for _, path in ipairs(paths) do
-    if path:find(protocol_fixture.record_samples.review.owner_key, 1, true)
-        or path:find(protocol_fixture.record_samples.subagent_presence.agent_key, 1, true) then
+    if path:find(protocol_fixture.record_samples.review.owner_key, 1, true) then
       selected[#selected + 1] = path
     end
   end
@@ -3636,6 +3814,9 @@ local function seed_record_recovery(window_id)
     .. "/incarnations/" .. samples.claim.address.incarnation_id .. "/panes/42"
   local launch_root = pane_root .. "/launches/" .. samples.claim.launch_id
   local records_root = launch_root .. "/bindings/" .. samples.binding.binding_id
+  -- Without its end the fixture's session is still running, and so are the
+  -- two children of its set.
+  os.remove(records_root .. "/end.json")
   local window = window_double({ window_id = window_id, tabs = { { {
     id = window_id, domain = "unix", attention = protocol_fixture.wire_sample,
   } } }, focused = false })
@@ -3645,7 +3826,7 @@ local function seed_record_recovery(window_id)
     call_after = function() end,
   })
   local key = internal.address_cache_key(samples.claim.address)
-  assert(internal.attention_cache[key].subagents == 1, "seed child must be active")
+  assert(internal.attention_cache[key].subagents == 2, "seed children must be running")
   assert(internal.attention_cache[key].activity_type == "notify", "seed activity must be visible")
   return window, key, pane_root, launch_root, records_root
 end
@@ -3678,12 +3859,10 @@ end)
 test("fresh acknowledgement and stopped child survive an unrelated review read failure", function()
   local window, key, pane_root, _, records_root = seed_record_recovery(9012)
   local samples = protocol_fixture.record_samples
-  local stopped = decode_json(encode_json(samples.subagent_presence))
-  stopped.status = "stopped"
-  stopped.event_id = "00000000-0000-4000-8000-000000000030"
-  stopped.observed_mono_ns = "00000000301000000000"
-  stopped.written_at_unix_ns = protocol_fixture.state_case.now_unix_ns
-  write_json_path(records_root .. "/agents/" .. stopped.agent_key .. ".json", stopped)
+  local stopped = decode_json(encode_json(samples.child_presence_set))
+  stopped.revision = "00000000-0000-4000-8000-000000000030"
+  stopped.live = {}
+  write_child_set(records_root .. "/children.json", stopped)
   local acknowledgement = decode_json(encode_json(samples.acknowledgement))
   acknowledgement.activity_event_id = samples.activity.event_id
   write_json_path(records_root .. "/ack.json", acknowledgement)
@@ -3702,13 +3881,16 @@ test("fresh acknowledgement and stopped child survive an unrelated review read f
   io.open = real_open
   assert(ok, "review read failure escaped: " .. tostring(poll_error))
   local view = internal.attention_cache[key]
-  assert(view.activity_type == nil and view.subagents == 0,
-    "unrelated review failure must not revive acknowledged activity or stopped child")
+  assert(view.activity_type == nil and view.subagents == 0 and view.subagents_uncertain == false,
+    "unrelated review failure must not revive acknowledged activity or stopped children")
   drain_errors()
 end)
 
 test("record recovery rejects cached TTL state when UTC precedes its write", function()
-  local window, key, pane_root = seed_record_recovery(9013)
+  local window, key, pane_root, _, records_root = seed_record_recovery(9013)
+  local activity = copy_json(protocol_fixture.record_samples.activity)
+  activity.ttl_ms = 600000
+  write_json_path(records_root .. "/activity.json", activity)
   local failed_path = pane_root .. "/reviews/"
     .. protocol_fixture.record_samples.review.owner_key .. ".json"
   local real_open = io.open
@@ -3722,9 +3904,11 @@ test("record recovery rejects cached TTL state when UTC precedes its write", fun
     call_after = function() end,
   })
   io.open = real_open
+  write_json_path(records_root .. "/activity.json", protocol_fixture.record_samples.activity)
   assert(ok, "clock-skew recovery escaped: " .. tostring(poll_error))
   local view = internal.attention_cache[key]
-  assert(view.subagents == 0, "cached child must fail closed when now is before written time")
+  assert(view.activity_type == nil, "a TTL activity must fail closed when now is before its write")
+  assert(view.subagents == 2, "children carry no TTL, so an early clock hides none of them")
   local saw_clock_skew = false
   for _, item in ipairs(view.diagnostics or {}) do
     if item.code == "clock_skew" then saw_clock_skew = true end
@@ -3733,36 +3917,22 @@ test("record recovery rejects cached TTL state when UTC precedes its write", fun
   drain_errors()
 end)
 
-test("a child record gone between the glob and its read counts as removed", function()
-  local window, key, pane_root, _, records_root = seed_record_recovery(9014)
-  local function poll_listing(directory, name)
-    attention.poll(window, {
-      now_unix_ns = protocol_fixture.state_case.now_unix_ns,
-      glob = function(pattern)
-        local paths = canonical_fixture_glob(pattern)
-        if pattern == directory .. "/*.json" then
-          paths[#paths + 1] = directory .. "/" .. name
-        end
-        return paths
-      end,
-      call_after = function() end,
-    })
-    return internal.attention_cache[key]
-  end
-  local never = string.rep("e", 64) .. ".json"
-  local view = poll_listing(records_root .. "/agents", never)
-  assert(view.subagents == 1, "the child that is still there still counts")
-  assert(view.binding_health == "valid",
-    "a writer's compaction removed a child its retention floor covers")
-  -- The seeded child is in the last poll's cache. Once its file is gone, a
-  -- listing that still names it must not bring it back from there.
-  local seeded = protocol_fixture.record_samples.subagent_presence.agent_key .. ".json"
-  assert(os.remove(records_root .. "/agents/" .. seeded))
-  view = poll_listing(records_root .. "/agents", seeded)
-  assert(view.subagents == 0, "a removed child came back from the cache")
-  assert(view.binding_health == "valid", "a removed child is not a failed read")
-  view = poll_listing(pane_root .. "/reviews", never)
-  assert(view.binding_health ~= "valid", "a review gone mid-read is still a failed read")
+test("a review gone between the glob and its read is a failed read", function()
+  local window, key, pane_root = seed_record_recovery(9014)
+  local reviews = pane_root .. "/reviews"
+  attention.poll(window, {
+    now_unix_ns = protocol_fixture.state_case.now_unix_ns,
+    glob = function(pattern)
+      local paths = canonical_fixture_glob(pattern)
+      if pattern == reviews .. "/*.json" then
+        paths[#paths + 1] = reviews .. "/" .. string.rep("e", 64) .. ".json"
+      end
+      return paths
+    end,
+    call_after = function() end,
+  })
+  assert(internal.attention_cache[key].binding_health ~= "valid",
+    "a review listed and then gone leaves the reviews unknown")
   drain_errors()
 end)
 
@@ -4343,7 +4513,7 @@ test("get_attention_view returns cached provider facts without exposing the cach
   assert(view.provider == "claude" and view.binding_id == protocol_fixture.record_samples.binding.binding_id,
     "the full view must retain provider and binding identity")
   assert(view.binding_phase == "ended" and view.type == "notify"
-      and view.subagents == 1 and view.review == true
+      and view.subagents == 0 and view.subagents_uncertain == false and view.review == true
       and view.reader_confidence == "confirmed",
     "the accessor must return the cached full-pane facts")
   view.provider = "mutated"
@@ -4391,9 +4561,14 @@ test("lifecycle facts reach the cached reader without changing the badge", funct
   local ack = decode_json(encode_json(samples.acknowledgement))
   ack.activity_event_id = samples.activity.event_id
   write_json_path(binding_dir .. "/ack.json", ack)
-  local stopped = decode_json(encode_json(samples.subagent_presence))
-  stopped.status = "stopped"
-  write_json_path(binding_dir .. "/agents/" .. stopped.agent_key .. ".json", stopped)
+  -- Reopened, so its children count, and then its children stop: the writer's
+  -- next set holds none of them.
+  os.remove(binding_dir .. "/end.json")
+  reloaded.poll(window, { now_unix_ns = protocol_fixture.state_case.now_unix_ns, call_after = function() end })
+  assert(reloaded.get_attention_view(pane).subagents == 2, "precondition: the set's children count")
+  local stopped = decode_json(encode_json(samples.child_presence_set))
+  stopped.live = {}
+  write_child_set(binding_dir .. "/children.json", stopped)
   local original_open = io.open
   io.open = function(path, mode)
     if path == binding_dir .. "/lifecycle.json" then return nil, "Permission denied" end
@@ -4446,13 +4621,9 @@ test("question publication, tool return, and badge dismissal stay independent", 
     .. "/panes/9971/launches/" .. wire.launch_id .. "/bindings/" .. binding.binding_id
   write_json_path(directory .. "/binding.json", binding)
   os.remove(directory .. "/end.json")
-  for _, entry in ipairs(protocol_fixture.state_case.files) do
-    if entry.path:find("/agents/", 1, true) then
-      local presence = decode_json(encode_json(samples[entry.sample]))
-      presence.address, presence.provider = wire.address, "codex"
-      write_json_path(test_dir .. "/" .. entry.path:gsub("/panes/42/", "/panes/9971/", 1), presence)
-    end
-  end
+  local children = decode_json(encode_json(samples.child_presence_set))
+  children.address, children.provider = wire.address, "codex"
+  write_child_set(directory .. "/children.json", children)
   local file = assert(io.open(repo_root .. "/tests/fixtures/lifecycle/observations.json", "r"))
   local fixture = decode_json(file:read("*a")); file:close()
   local snapshot = fixture.cases[18].value -- nonblocking tool result, without Pre
@@ -4591,10 +4762,11 @@ test("twenty full lifecycle panes keep polling and getter work bounded", functio
   instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false })
   local window = window_double({ tabs = { entries }, focused = false })
   local old_open, old_popen = io.open, io.popen
-  local reads, writes, globs = 0, 0, 0
+  local reads, child_reads, writes, globs = 0, 0, 0, 0
   io.open = function(path, mode)
     if mode and mode:find("w", 1, true) then writes = writes + 1 end
     if path:match("/lifecycle%.json$") then reads = reads + 1 end
+    if path:match("/children%.json$") then child_reads = child_reads + 1 end
     return old_open(path, mode)
   end
   io.popen = function() error("lifecycle polling/getter cannot launch a subprocess") end
@@ -4605,7 +4777,7 @@ test("twenty full lifecycle panes keep polling and getter work bounded", functio
         glob = function(pattern)
           globs = globs + 1
           local directory = assert(pattern:match("^(.*)/%*%.json$"))
-          assert(directory:match("/reviews$") or directory:match("/agents$"), "no historical directory walk")
+          assert(directory:match("/reviews$"), "children come from one file, never a directory walk")
           local matches = {}
           for _, path in ipairs(paths) do if dirname(path) == directory then matches[#matches + 1] = path end end
           return matches
@@ -4622,7 +4794,8 @@ test("twenty full lifecycle panes keep polling and getter work bounded", functio
   local cpu_ms = (os.clock() - started) * 1000
   io.open, io.popen = old_open, old_popen
   assert(ok, failure)
-  assert(reads == 40 and globs == 80 and writes == 0, "exactly one sidecar read per pane/poll and no writes")
+  assert(reads == 40 and globs == 40 and writes == 0, "exactly one sidecar read per pane/poll and no writes")
+  assert(child_reads == 40, "exactly one child set read per pane and poll, got " .. child_reads)
   io.write(string.format("lifecycle workload: 20 panes, 2 polls, 128 observations each; CPU %.2f ms; 40 snapshot reads; 0 writes\n", cpu_ms))
 end)
 

@@ -19,7 +19,7 @@ return function(context)
   local read_record_collection = protocol_api.read_record_collection
   local identity_diagnostic = protocol_api.identity_diagnostic
   local age_exceeds_ms = protocol_api.age_exceeds_ms
-  local eligible_subagent = protocol_api.eligible_subagent
+  local list_contains = protocol_api.list_contains
   local deep_copy = protocol_api.deep_copy
 
   local function request_evidence(observations, provider)
@@ -351,6 +351,7 @@ return function(context)
       frame = nil,
       source = nil,
       subagents = 0,
+      subagents_uncertain = false,
       review = false,
       binding_phase = nil,
       pane_presence = unavailable and "unavailable" or "present",
@@ -374,6 +375,58 @@ return function(context)
       or binding_end.observed_mono_ns >= binding.observed_mono_ns
   end
 
+  -- The coverages whose count is not known, which the tab shows as "+?".
+  local uncertain_coverage = { invalid = true, unsupported = true, unavailable = true }
+
+  --- The running sub-agents of a binding with record `binding`, from its
+  --- child presence set `set` as the record reader returned it (`status` and
+  --- `problem`), and its end record `binding_end` whether or not that end
+  --- still ends it. Returns { coverage, count, waiting, uncertain, diagnostics }.
+  ---
+  --- The writer alone decides which children are in the set, and a reader
+  --- only counts them. The one order a reader checks is against the binding's
+  --- end: while the end ends the binding nothing is counted, and an end the set
+  --- has not applied yet, as after a crash between writing the end and the set
+  --- or before the first child event of a resumed session, leaves only the
+  --- children seen after it. A set read before, handed back when the file
+  --- cannot be read now, is counted the same way.
+  local function children_facet(set, status, problem, binding, binding_end)
+    local facet = { coverage = "known", count = 0, waiting = 0, uncertain = false, diagnostics = {} }
+    local supported = list_contains(protocol.enums.subagent_providers, binding.provider)
+    if problem then facet.diagnostics[1] = problem end
+    if supported and set and set.provider ~= binding.provider then
+      set, status = nil, "invalid"
+      facet.diagnostics[#facet.diagnostics + 1] = invalid("child presence provider differs from its binding")
+    end
+    -- An ended binding has no running children whoever its provider is.
+    if binding_end and ends_binding(binding_end, binding) then
+      facet.coverage = "ended"
+      return facet
+    end
+    if not supported then
+      facet.coverage = "none"
+      return facet
+    end
+    if status == "unavailable" then
+      facet.coverage = "unavailable"
+    elseif status == "invalid" then
+      facet.coverage = problem and problem.code == "future_schema" and "unsupported" or "invalid"
+    end
+    facet.uncertain = uncertain_coverage[facet.coverage] == true
+    if not set or facet.uncertain then return facet end
+    local cutoff
+    if binding_end and not (set.lifetime_end and set.lifetime_end.event_id == binding_end.event_id) then
+      cutoff = binding_end.observed_mono_ns
+    end
+    for _, child in ipairs(set.live) do
+      if not cutoff or child.last_mono_ns > cutoff then
+        facet.count = facet.count + 1
+        if child.status == "waiting" then facet.waiting = facet.waiting + 1 end
+      end
+    end
+    return facet
+  end
+
   local function read_view_at(read, now_unix_ns, opts)
     local diagnostics = {}
     local previous = opts and opts.previous_view or nil
@@ -382,7 +435,7 @@ return function(context)
         and same_address(previous.address, read.address) then
       previous_records = previous._records or {}
     end
-    local records = { reviews = {}, presences = {} }
+    local records = { reviews = {} }
     if not protocol then
       collect_diagnostic(diagnostics, diagnostic(
         "probe_unavailable", "v2 protocol manifest is unavailable",
@@ -432,9 +485,6 @@ return function(context)
     local activity_clear
     local binding_end
     local acknowledgement
-    local clear
-    local floor
-    local subagent_fences_valid = true
     local activity_fence_valid = true
     local current_target = { kind = "launch" }
     local records_root = launch_root
@@ -473,22 +523,6 @@ return function(context)
       records.activity_clear = activity_clear
       collect_diagnostic(diagnostics, activity_clear_diagnostic)
       if activity_clear_diagnostic and not activity_clear then activity_fence_valid = false end
-      local clear_diagnostic
-      clear, clear_diagnostic = read_expected_record_cached(
-        records_root .. "/agents-clear.json", "subagent_clear", {
-          address = address, launch_id = read.launch_id, binding_id = pointer.binding_id,
-        }, false, previous_binding_records.clear)
-      records.clear = clear
-      collect_diagnostic(diagnostics, clear_diagnostic)
-      if clear_diagnostic and not clear then subagent_fences_valid = false end
-      local floor_diagnostic
-      floor, floor_diagnostic = read_expected_record_cached(
-        records_root .. "/agents-floor.json", "subagent_retention_floor", {
-          address = address, launch_id = read.launch_id, binding_id = pointer.binding_id,
-        }, false, previous_binding_records.floor)
-      records.floor = floor
-      collect_diagnostic(diagnostics, floor_diagnostic)
-      if floor_diagnostic and not floor then subagent_fences_valid = false end
     end
 
     local previous_selected_records = pointer and previous_binding_records or previous_records
@@ -554,36 +588,21 @@ return function(context)
       break
     end
 
-    local subagents = 0
-    local next_wakeup_unix_ns = activity and activity_expiry_unix_ns or nil
-    if pointer and subagent_fences_valid then
-      local presences, presence_diagnostics = read_record_collection(
-        records_root .. "/agents/*.json", "subagent_presence", {
-          address = address, launch_id = read.launch_id, binding_id = pointer.binding_id,
-        }, previous_binding_records.presences, "agent_key", opts)
-      records.presences = presences
-      for _, item in ipairs(presence_diagnostics) do collect_diagnostic(diagnostics, item) end
-      for path, record in pairs(presences) do
-        local record_diagnostic
-        if record and binding and record.provider ~= binding.provider then
-          record, record_diagnostic = nil, invalid(
-            "subagent provider does not match its binding", { path = path })
-          records.presences[path] = nil
-        end
-        collect_diagnostic(diagnostics, record_diagnostic)
-        if record then
-          local eligible, eligibility_diagnostic, wakeup_boundary =
-            eligible_subagent(record, clear, floor, now_unix_ns)
-          collect_diagnostic(diagnostics, eligibility_diagnostic)
-          if eligible then
-            subagents = subagents + 1
-            if wakeup_boundary
-                and (not next_wakeup_unix_ns or wakeup_boundary < next_wakeup_unix_ns) then
-              next_wakeup_unix_ns = wakeup_boundary
-            end
-          end
-        end
+    -- Children are counted from the one set the writer keeps per binding, read
+    -- and reused like every other record. A provider that runs no sub-agents
+    -- has no set to read.
+    local children = { count = 0, uncertain = false }
+    if binding then
+      local set, set_problem, set_status
+      if list_contains(protocol.enums.subagent_providers, binding.provider) then
+        set, set_problem, set_status = read_expected_record_cached(
+          records_root .. "/children.json", "child_presence_set", {
+            address = address, launch_id = read.launch_id, binding_id = pointer.binding_id,
+          }, false, previous_binding_records.children)
       end
+      records.children = set
+      children = children_facet(set, set_status, set_problem, binding, binding_end)
+      for _, item in ipairs(children.diagnostics) do collect_diagnostic(diagnostics, item) end
     end
 
     local activity_type = activity and activity.type or nil
@@ -641,7 +660,8 @@ return function(context)
       activity_type = activity_type,
       frame = effective_type == activity_type and activity and activity.frame or nil,
       source = activity and activity.source or nil,
-      subagents = subagents,
+      subagents = children.count,
+      subagents_uncertain = children.uncertain,
       review = review,
       binding_phase = binding_end and binding and ends_binding(binding_end, binding)
         and "ended" or (binding and "active" or nil),
@@ -649,7 +669,7 @@ return function(context)
       reader_confidence = unavailable and "unconfirmed" or "confirmed",
       binding_health = health_from_diagnostics(diagnostics),
       diagnostics = diagnostics,
-      next_wakeup_unix_ns = next_wakeup_unix_ns,
+      next_wakeup_unix_ns = activity and activity_expiry_unix_ns or nil,
       _records = records,
     }
   end
@@ -691,6 +711,8 @@ return function(context)
 
   return {
     lifecycle_facet = lifecycle_facet,
+    ends_binding = ends_binding,
+    children_facet = children_facet,
     unix_domain_socket = unix_domain_socket,
     refresh_domain_facts = refresh_domain_facts,
     pane_method = pane_method,

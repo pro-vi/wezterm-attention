@@ -99,17 +99,38 @@ for _, result in ipairs(parse_results) do
     result.id .. " expected " .. tostring(result.expected) .. ", got " .. tostring(result.actual))
 end
 
-  local eligibility_results = fixtures.fixture_eligibility_cases(fixture)
-assert(#eligibility_results == #fixture.eligibility_cases,
-  "not every protocol eligibility row ran")
-for _, result in ipairs(eligibility_results) do
-  assert(result.actual == result.expected,
-    result.id .. " eligibility expected " .. tostring(result.expected)
-      .. ", got " .. tostring(result.actual))
-  assert(result.diagnostic == result.expected_diagnostic,
-    result.id .. " diagnostic expected " .. tostring(result.expected_diagnostic)
-      .. ", got " .. tostring(result.diagnostic))
-end
+  local end_results = fixtures.fixture_ends_binding_cases(fixture)
+  assert(#end_results == #fixture.ends_binding_cases and #end_results > 0,
+    "not every binding end row ran")
+  for _, result in ipairs(end_results) do
+    assert(result.actual == result.expected, result.id .. " binding end expected "
+      .. tostring(result.expected) .. ", got " .. tostring(result.actual))
+  end
+
+  -- Rust's inspect answers for the rows it can read, keyed by row id. A row
+  -- with an earlier read is the plugin's alone: inspect reads once.
+  local children_parity_path = os.getenv("WEZTERM_ATTENTION_CHILDREN_PARITY")
+  local rust_children = children_parity_path and read_json(children_parity_path) or nil
+  local coverage_results = fixtures.fixture_children_coverage_cases(fixture)
+  assert(#coverage_results == #fixture.children_coverage_cases and #coverage_results > 0,
+    "not every child coverage row ran")
+  local compared = 0
+  for _, result in ipairs(coverage_results) do
+    for _, field in ipairs({ "count", "waiting", "coverage", "renders" }) do
+      assert(result.actual[field] == result.expected[field], result.id .. " " .. field .. " expected "
+        .. tostring(result.expected[field]) .. ", got " .. tostring(result.actual[field]))
+    end
+    if rust_children then
+      local rust = rust_children[result.id]
+      assert((rust == nil) == result.earlier_read, result.id .. ": Rust read the wrong rows")
+      if rust then
+        compared = compared + 1
+        for _, field in ipairs({ "count", "waiting", "coverage" }) do
+          assert(rust[field] == result.actual[field], "Rust/Lua child " .. field .. " differs: " .. result.id)
+        end
+      end
+    end
+  end
 
   local now = wezterm.time.now()
   local seconds = now:format_utc("%s")
@@ -155,6 +176,9 @@ assert(type(rendered) == "string" and rendered:find("+2 manual", 1, true),
 assert(manual_context.attention.indicator == manual_context.attention[1]
     and manual_context.attention.color == nil,
   "installed formatter context lost named/positional parity")
+  internal.attention_cache["9001"] = { type = nil, subagents = 0, subagents_uncertain = true }
+  assert(internal.resolve_visible_attention({ "9001" }).indicator == "+? ",
+    "installed formatter did not say that a count is unknown")
   internal.attention_cache["9001"] = nil
 
   for index = 1, 20 do
@@ -166,8 +190,9 @@ assert(manual_context.attention.indicator == manual_context.attention[1]
   end
 
   return string.format(
-    "wezterm-attention protocol/formatter smoke: %d parse rows, %d eligibility rows, UTC %d+9 digits",
-    #parse_results, #eligibility_results, #seconds)
+    "wezterm-attention protocol/formatter smoke: %d parse rows, %d binding end rows, "
+      .. "%d child coverage rows (%d compared with Rust), UTC %d+9 digits",
+    #parse_results, #end_results, #coverage_results, compared, #seconds)
 end
 
 local passed, result = xpcall(run, function(error_value) return tostring(error_value) end)

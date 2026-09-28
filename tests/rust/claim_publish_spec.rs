@@ -25,8 +25,8 @@ use wezterm_attention::protocol::{
 };
 use wezterm_attention::query::{read_bindings, read_bindings_with_ports};
 use wezterm_attention::records::{
-    RecordIdentity, RecordRead, atomic_replace, launch_dir, pane_dir, read_record_typed,
-    state_root, with_lock,
+    RecordIdentity, RecordRead, atomic_replace, ends_binding, launch_dir, pane_dir,
+    read_record_typed, state_root, with_lock,
 };
 use wezterm_attention::wezterm::{
     Clock, PaneLister, PaneRow, Presence, ProcessListing, ProcessProbe, RuntimePorts,
@@ -391,6 +391,28 @@ fn shared_protocol_rows_match_the_independent_checker_verdicts() {
         };
         let expected = case["expected"].as_str().expect("expected verdict");
         assert_eq!(actual.as_str(), expected, "case {}", case["id"]);
+    }
+    let patched = |sample: &str, patch: &Value| {
+        let mut value = fixture["record_samples"][sample].clone();
+        for (field, replacement) in patch.as_object().expect("top-level patch") {
+            value[field] = replacement.clone();
+        }
+        value
+    };
+    let ends = fixture["ends_binding_cases"]
+        .as_array()
+        .expect("binding end cases");
+    assert!(!ends.is_empty());
+    for case in ends {
+        assert_eq!(
+            ends_binding(
+                &patched("binding_end", &case["end"]),
+                &patched("binding", &case["binding"])
+            ),
+            case["expected"].as_bool().expect("expected end verdict"),
+            "case {}",
+            case["id"]
+        );
     }
     let scratch = Scratch::new();
     for entry in fixture["state_case"]["files"]

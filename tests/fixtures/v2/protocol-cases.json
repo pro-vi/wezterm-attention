@@ -273,6 +273,11 @@
     {"id": "child_presence_set_rejects_a_provider_without_children", "parser": "record", "sample": "child_presence_set", "patch": {"provider": "pi"}, "expected": "record_invalid"},
     {"id": "child_presence_set_rejects_a_malformed_order", "parser": "record", "sample": "child_presence_set", "patch": {"live": [{"agent_id": "child-a", "provenance": "tool", "status": "running", "last_mono_ns": "300"}]}, "expected": "record_invalid"},
     {"id": "child_presence_set_future_schema", "parser": "record", "sample": "child_presence_set", "patch": {"schema": 4}, "expected": "future_schema"},
+    {"id": "child_presence_set_without_fences_is_valid", "parser": "record", "sample": "child_presence_set", "remove": ["parent_clear", "lifetime_end"], "expected": "valid"},
+    {"id": "child_presence_set_rejects_an_empty_agent_type", "parser": "record", "sample": "child_presence_set", "patch": {"live": [{"agent_id": "child-a", "agent_type": "", "provenance": "tool", "status": "running", "last_mono_ns": "00000000300000000000"}]}, "expected": "record_invalid"},
+    {"id": "child_presence_set_rejects_an_empty_removed_child", "parser": "record", "sample": "child_presence_set", "patch": {"parent_clear.removed": [""]}, "expected": "record_invalid"},
+    {"id": "child_presence_set_rejects_a_parent_clear_without_removed", "parser": "record", "sample": "child_presence_set", "remove": ["parent_clear.removed"], "expected": "record_invalid"},
+    {"id": "child_presence_set_rejects_a_lifetime_end_without_its_order", "parser": "record", "sample": "child_presence_set", "remove": ["lifetime_end.observed_mono_ns"], "expected": "record_invalid"},
     { "id": "subagent_clear_valid", "parser": "record", "sample": "subagent_clear", "expected": "valid" },
     { "id": "subagent_retention_floor_valid", "parser": "record", "sample": "subagent_retention_floor", "expected": "valid" },
     { "id": "session_binding_valid", "parser": "record", "sample": "session_binding", "expected": "valid" },
@@ -295,20 +300,35 @@
     { "id": "record_subagent_key_matches_agent_id", "parser": "record", "sample": "subagent_presence", "patch": { "agent_key": "9999999999999999999999999999999999999999999999999999999999999999" }, "expected": "record_invalid" },
     { "id": "record_subagent_ttl_is_fixed", "parser": "record", "sample": "subagent_presence", "patch": { "ttl_ms": 599999 }, "expected": "record_invalid" }
   ],
-  "eligibility_cases": [
-    { "id": "exact_600_seconds", "now_unix_ns": "00000000610000000000", "expected": true },
-    { "id": "one_nanosecond_after_600_seconds", "now_unix_ns": "00000000610000000001", "expected": false },
-    { "id": "cross_second_borrow_before_boundary", "written_at_unix_ns": "00000000010999999999", "now_unix_ns": "00000000610999999999", "expected": true },
-    { "id": "cross_second_borrow_after_boundary", "written_at_unix_ns": "00000000010999999999", "now_unix_ns": "00000000611000000000", "expected": false },
-    { "id": "clear_covers_equal_observation", "now_unix_ns": "00000000011000000000", "observed_mono_ns": "00000000200000000000", "expected": false },
-    { "id": "floor_covers_equal_observation", "now_unix_ns": "00000000011000000000", "observed_mono_ns": "00000000150000000000", "clear_mono_ns": false, "expected": false },
-    { "id": "stopped_is_not_eligible", "now_unix_ns": "00000000011000000000", "status": "stopped", "expected": false },
-    { "id": "future_write_reports_clock_skew", "written_at_unix_ns": "00000000620000000000", "now_unix_ns": "00000000610000000000", "expected": false, "diagnostic": "clock_skew" },
-    { "id": "malformed_write_is_invalid", "written_at_unix_ns": "bad", "now_unix_ns": "00000000610000000000", "expected": false, "diagnostic": "record_invalid" },
-    { "id": "unavailable_clock_fails_closed", "now_unix_ns": false, "expected": false, "diagnostic": "probe_unavailable" }
+  "children_coverage_cases": [
+    {"id": "a_binding_its_end_ends_counts_no_children", "binding": {}, "end": {}, "children": {}, "expected": {"count": 0, "waiting": 0, "coverage": "ended", "renders": ""}},
+    {"id": "an_ended_binding_is_ended_whatever_its_set_holds", "binding": {}, "end": {}, "children": {"live": [{"agent_id": "child-a", "provenance": "tool", "status": "running", "last_mono_ns": "00000000300000000000"}, {"agent_id": "child-a", "provenance": "permission", "status": "waiting", "last_mono_ns": "00000000300000000000"}]}, "expected": {"count": 0, "waiting": 0, "coverage": "ended", "renders": ""}},
+    {"id": "an_unreadable_set_of_an_ended_binding_is_ended", "binding": {}, "end": {}, "children": "unavailable", "expected": {"count": 0, "waiting": 0, "coverage": "ended", "renders": ""}},
+    {"id": "an_ended_binding_of_a_provider_without_sub_agents_is_ended", "binding": {"provider": "pi"}, "end": {}, "children": "absent", "expected": {"count": 0, "waiting": 0, "coverage": "ended", "renders": ""}},
+    {"id": "a_provider_without_sub_agents_counts_none", "binding": {"provider": "pi"}, "end": "absent", "children": {}, "expected": {"count": 0, "waiting": 0, "coverage": "none", "renders": ""}},
+    {"id": "a_binding_with_no_set_has_no_children", "binding": {}, "end": "absent", "children": "absent", "expected": {"count": 0, "waiting": 0, "coverage": "known", "renders": ""}},
+    {"id": "every_child_in_the_set_is_counted_and_waiting_ones_are_told_apart", "binding": {}, "end": "absent", "children": {}, "expected": {"count": 2, "waiting": 1, "coverage": "known", "renders": "+2"}},
+    {"id": "an_empty_set_shows_nothing", "binding": {}, "end": "absent", "children": {"live": []}, "expected": {"count": 0, "waiting": 0, "coverage": "known", "renders": ""}},
+    {"id": "a_child_at_or_before_the_parent_clear_is_still_counted", "binding": {}, "end": "absent", "children": {"live": [{"agent_id": "child-a", "provenance": "tool", "status": "running", "last_mono_ns": "00000000100000000000"}]}, "expected": {"count": 1, "waiting": 0, "coverage": "known", "renders": "+1"}},
+    {"id": "a_resumed_binding_counts_only_children_seen_after_an_end_its_set_has_not_applied", "binding": {"event_id": "00000000-0000-4000-8000-000000000031", "observed_mono_ns": "00000000005000000000"}, "end": {}, "children": {"live": [{"agent_id": "child-a", "provenance": "tool", "status": "running", "last_mono_ns": "00000000003000000000"}, {"agent_id": "child-b", "provenance": "permission", "status": "waiting", "last_mono_ns": "00000000006000000000"}]}, "expected": {"count": 1, "waiting": 1, "coverage": "known", "renders": "+1"}},
+    {"id": "a_set_that_applied_the_binding_end_counts_every_child", "binding": {"event_id": "00000000-0000-4000-8000-000000000031", "observed_mono_ns": "00000000005000000000"}, "end": {}, "children": {"live": [{"agent_id": "child-a", "provenance": "tool", "status": "running", "last_mono_ns": "00000000003000000000"}, {"agent_id": "child-b", "provenance": "permission", "status": "waiting", "last_mono_ns": "00000000006000000000"}], "lifetime_end": {"event_id": "00000000-0000-4000-8000-000000000006", "observed_mono_ns": "00000000004000000000"}}, "expected": {"count": 2, "waiting": 1, "coverage": "known", "renders": "+2"}},
+    {"id": "a_set_with_a_repeated_child_is_invalid", "binding": {}, "end": "absent", "children": {"live": [{"agent_id": "child-a", "provenance": "tool", "status": "running", "last_mono_ns": "00000000300000000000"}, {"agent_id": "child-a", "provenance": "permission", "status": "waiting", "last_mono_ns": "00000000300000000000"}]}, "expected": {"count": 0, "waiting": 0, "coverage": "invalid", "renders": "+?"}},
+    {"id": "a_set_naming_another_provider_than_its_binding_is_invalid", "binding": {}, "end": "absent", "children": {"provider": "codex"}, "expected": {"count": 0, "waiting": 0, "coverage": "invalid", "renders": "+?"}},
+    {"id": "a_set_from_a_newer_writer_is_unsupported", "binding": {}, "end": "absent", "children": {"schema": 4}, "expected": {"count": 0, "waiting": 0, "coverage": "unsupported", "renders": "+?"}},
+    {"id": "an_unreadable_set_with_no_earlier_read_is_unavailable", "binding": {}, "end": "absent", "children": "unavailable", "expected": {"count": 0, "waiting": 0, "coverage": "unavailable", "renders": "+?"}},
+    {"id": "an_unreadable_set_keeps_the_earlier_read", "binding": {}, "end": "absent", "children": "unavailable", "previous_children": {}, "expected": {"count": 2, "waiting": 1, "coverage": "known", "renders": "+2"}},
+    {"id": "an_earlier_read_is_counted_against_the_current_end", "binding": {"event_id": "00000000-0000-4000-8000-000000000031", "observed_mono_ns": "00000000005000000000"}, "end": {}, "children": "unavailable", "previous_children": {"live": [{"agent_id": "child-a", "provenance": "tool", "status": "running", "last_mono_ns": "00000000003000000000"}, {"agent_id": "child-b", "provenance": "permission", "status": "waiting", "last_mono_ns": "00000000006000000000"}]}, "expected": {"count": 1, "waiting": 1, "coverage": "known", "renders": "+1"}}
+  ],
+  "ends_binding_cases": [
+    {"id": "an_end_observed_after_the_binding_ends_it", "binding": {}, "end": {}, "expected": true},
+    {"id": "an_end_observed_with_the_binding_ends_it", "binding": {}, "end": {"observed_mono_ns": "00000000002000000000"}, "expected": true},
+    {"id": "an_end_older_than_a_refreshed_binding_does_not_end_it", "binding": {"event_id": "00000000-0000-4000-8000-000000000031", "observed_mono_ns": "00000000005000000000"}, "end": {}, "expected": false},
+    {"id": "an_end_naming_the_binding_event_ends_it_though_its_stamp_is_older", "binding": {"observed_mono_ns": "00000000005000000000"}, "end": {"binding_event_id": "00000000-0000-4000-8000-000000000002"}, "expected": true},
+    {"id": "an_end_naming_an_earlier_binding_event_does_not_end_a_resumed_binding", "binding": {"event_id": "00000000-0000-4000-8000-000000000031", "observed_mono_ns": "00000000005000000000"}, "end": {"binding_event_id": "00000000-0000-4000-8000-000000000002"}, "expected": false},
+    {"id": "an_end_observed_after_the_binding_ends_it_whichever_event_it_names", "binding": {}, "end": {"binding_event_id": "00000000-0000-4000-8000-000000000031"}, "expected": true}
   ],
   "state_case": {
-    "id": "complete-notify-with-one-child",
+    "id": "complete-notify-after-the-session-ended",
     "now_unix_ns": "00000000610000000000",
     "files": [
       { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/realm.json", "sample": "realm" },
@@ -321,9 +341,7 @@
       { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/panes/42/launches/00000000-0000-4000-8000-000000000001/bindings/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/activity-clear.json", "sample": "activity_clear" },
       { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/panes/42/launches/00000000-0000-4000-8000-000000000001/bindings/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/end.json", "sample": "binding_end" },
       { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/panes/42/launches/00000000-0000-4000-8000-000000000001/bindings/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/ack.json", "sample": "acknowledgement" },
-      { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/panes/42/launches/00000000-0000-4000-8000-000000000001/bindings/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/agents-clear.json", "sample": "subagent_clear" },
-      { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/panes/42/launches/00000000-0000-4000-8000-000000000001/bindings/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/agents-floor.json", "sample": "subagent_retention_floor" },
-      { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/panes/42/launches/00000000-0000-4000-8000-000000000001/bindings/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/agents/219264af6a9830685abfb94da44705f051594227429253be94bfc39402af3458.json", "sample": "subagent_presence" }
+      { "path": "v2/realms/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/panes/42/launches/00000000-0000-4000-8000-000000000001/bindings/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/children.json", "sample": "child_presence_set" }
     ],
     "expected_view": {
       "activity_type": "notify",
@@ -332,11 +350,12 @@
       "reader_confidence": "confirmed",
       "binding_health": "valid",
       "provider": "claude",
-      "subagents": 1,
+      "subagents": 0,
+      "subagents_uncertain": false,
       "review": true
     },
     "expected_render": {
-      "indicator": "!+1 ",
+      "indicator": "! ",
       "type": "notify",
       "color": "#240f16"
     }

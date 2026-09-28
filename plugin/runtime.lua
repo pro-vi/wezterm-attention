@@ -78,22 +78,51 @@ return function()
       rebuild_scalar_projection()
     end
 
+    -- Every field of a cached pane view that can reach the screen or a
+    -- consumer. A `redraw` field that changes makes the tab bar draw again; a
+    -- `public` field is part of what get_attention_view and on_view_change hand
+    -- out. Both read this one list, so a field added here says in one place
+    -- whether the bar repaints for it and whether consumers receive it.
+    local function as_count(value) return value or 0 end
+    local function as_flag(value) return value == true end
+    local view_fields = {
+      { name = "type", redraw = true, public = true },
+      { name = "frame", redraw = true },
+      { name = "activity_type", redraw = true, public = true },
+      { name = "event_id", redraw = true, public = true },
+      { name = "source", redraw = true, public = true },
+      { name = "provider", redraw = true, public = true },
+      { name = "subagents", redraw = true, public = true, normal = as_count },
+      { name = "subagents_uncertain", redraw = true, public = true, normal = as_flag },
+      { name = "review", redraw = true, public = true, normal = as_flag },
+      { name = "binding_phase", redraw = true, public = true },
+      { name = "pane_presence", redraw = true, public = true },
+      { name = "reader_confidence", redraw = true, public = true },
+      { name = "binding_health", redraw = true, public = true },
+      -- The titles the bar draws around the indicator; not facts about the pane.
+      { name = "base_title", redraw = true },
+      { name = "settled_title", redraw = true },
+      -- Which pane, launch and binding the view describes, and the lifecycle
+      -- facts behind it; the bar draws none of them.
+      { name = "binding_id", public = true },
+      { name = "address", public = true, nested = true },
+      { name = "launch_id", public = true },
+      { name = "marker_id", public = true },
+      { name = "lifecycle", public = true, nested = true },
+    }
+
+    local function field_value(view, field)
+      local value = view[field.name]
+      if field.normal then return field.normal(value) end
+      return value
+    end
+
     local function same_cached_attention(a, b)
       if not a or not b then return a == b end
-      return a.type == b.type
-        and a.frame == b.frame
-        and a.activity_type == b.activity_type
-        and a.event_id == b.event_id
-        and a.source == b.source
-        and a.provider == b.provider
-        and (a.subagents or 0) == (b.subagents or 0)
-        and (a.review == true) == (b.review == true)
-        and a.binding_phase == b.binding_phase
-        and a.pane_presence == b.pane_presence
-        and a.reader_confidence == b.reader_confidence
-        and a.binding_health == b.binding_health
-        and a.base_title == b.base_title
-        and a.settled_title == b.settled_title
+      for _, field in ipairs(view_fields) do
+        if field.redraw and field_value(a, field) ~= field_value(b, field) then return false end
+      end
+      return true
     end
 
     --- Return the panes of the tab holding `target` in a captured tab list. The
@@ -792,8 +821,9 @@ return function()
     --- Returns (type, frame, source, reserved, subagents, review) or nil. `source` is
     --- the activity's `source` when it carried one; `reserved` is always
     --- false to retain tuple positions; `subagents` is how many of the pane's
-    --- subagents are live, 0 when none; `review` is true when the pane carries
-    --- a review flag.
+    --- subagents are running, 0 when none or when the count could not be read
+    --- (get_attention_view(pane).subagents_uncertain tells the two apart);
+    --- `review` is true when the pane carries a review flag.
     ---
     --- `type` is the effective one: it is `review` when the flag outranks the
     --- activity, and the activity's own type when that outranks the flag — in
@@ -816,24 +846,15 @@ return function()
     --- Return a copy of the cached full-pane v2 view for a pane, or nil when the
     --- pane has no cache entry. This performs no filesystem or process work.
     local function copy_public_view(cached)
-      return {
-        provider = cached.provider,
-        binding_id = cached.binding_id,
-        binding_phase = cached.binding_phase,
-        type = cached.type,
-        event_id = cached.event_id,
-        subagents = cached.subagents or 0,
-        review = cached.review == true,
-        reader_confidence = cached.reader_confidence,
-        activity_type = cached.activity_type,
-        source = cached.source,
-        address = cached.address and protocol_api.deep_copy(cached.address) or nil,
-        launch_id = cached.launch_id,
-        marker_id = cached.marker_id,
-        pane_presence = cached.pane_presence,
-        binding_health = cached.binding_health,
-        lifecycle = cached.lifecycle and protocol_api.deep_copy(cached.lifecycle) or nil,
-      }
+      local view = {}
+      for _, field in ipairs(view_fields) do
+        if field.public then
+          local value = field_value(cached, field)
+          if field.nested and value ~= nil then value = protocol_api.deep_copy(value) end
+          view[field.name] = value
+        end
+      end
+      return view
     end
 
     function M.get_attention_view(pane)

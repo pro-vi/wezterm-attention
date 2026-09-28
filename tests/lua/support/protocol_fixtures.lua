@@ -6,7 +6,7 @@
 -- running plugin, and it used to live in `plugin/protocol.lua`, which meant every
 -- WezTerm install shipped and loaded a test harness.
 --
--- Production validation and eligibility stay in the production module; this file
+-- Production validation and counting stay in the production modules; this file
 -- only drives them.
 
 return function(protocol_api)
@@ -15,7 +15,6 @@ return function(protocol_api)
   local parse_wire_json = protocol_api.parse_wire_json
   local parse_v2_record = protocol_api.parse_v2_record
   local parse_v2_record_json = protocol_api.parse_v2_record_json
-  local eligible_subagent = protocol_api.eligible_subagent
 
   local function fixture_set_path(value, dotted, replacement)
     local parts = {}
@@ -89,41 +88,62 @@ return function(protocol_api)
     return results
   end
 
-  local function fixture_eligibility_cases(fixture)
-    local results = {}
-    for _, case in ipairs(fixture.eligibility_cases or {}) do
-      local presence = deep_copy(fixture.record_samples.subagent_presence)
-      for _, field in ipairs({ "written_at_unix_ns", "observed_mono_ns", "status" }) do
-        if case[field] ~= nil then presence[field] = case[field] end
-      end
-      local clear = deep_copy(fixture.record_samples.subagent_clear)
-      local floor = deep_copy(fixture.record_samples.subagent_retention_floor)
-      if case.clear_mono_ns == false then
-        clear = nil
-      elseif case.clear_mono_ns ~= nil then
-        clear.observed_mono_ns = case.clear_mono_ns
-      end
-      if case.floor_mono_ns == false then
-        floor = nil
-      elseif case.floor_mono_ns ~= nil then
-        floor.floor_mono_ns = case.floor_mono_ns
-      end
+  --- A copy of the fixture's sample `name` with the top-level fields of
+  --- `patch` replaced.
+  local function patched_sample(fixture, name, patch)
+    local value = deep_copy(fixture.record_samples[name])
+    for field, replacement in pairs(patch or {}) do value[field] = deep_copy(replacement) end
+    return value
+  end
 
-      local parsed, parse_diagnostic = parse_v2_record(presence, "subagent_presence")
-      local eligible = false
-      local eligibility_diagnostic
-      if parsed then
-        eligible, eligibility_diagnostic = eligible_subagent(
-          parsed, clear, floor, type(case.now_unix_ns) == "string" and case.now_unix_ns or nil)
-      else
-        eligibility_diagnostic = parse_diagnostic
-      end
+  local function fixture_ends_binding_cases(fixture)
+    local results = {}
+    for _, case in ipairs(fixture.ends_binding_cases or {}) do
       results[#results + 1] = {
         id = case.id,
-        actual = eligible == true,
-        diagnostic = eligibility_diagnostic and eligibility_diagnostic.code or nil,
-        expected = case.expected == true,
-        expected_diagnostic = case.diagnostic,
+        actual = protocol_api.ends_binding(
+          patched_sample(fixture, "binding_end", case["end"]),
+          patched_sample(fixture, "binding", case.binding)),
+        expected = case.expected,
+      }
+    end
+    return results
+  end
+
+  --- Each coverage row through the plugin's own parser, counter and count
+  --- text. A row whose set cannot be read now but was read before gets that
+  --- earlier set back, as the record reader hands it back.
+  local function fixture_children_coverage_cases(fixture)
+    local results = {}
+    for _, case in ipairs(fixture.children_coverage_cases or {}) do
+      local binding = patched_sample(fixture, "binding", case.binding)
+      local binding_end = case["end"] ~= "absent"
+        and patched_sample(fixture, "binding_end", case["end"]) or nil
+      local set, problem, status
+      if case.children == "absent" then
+        status = "missing"
+      elseif case.children == "unavailable" then
+        problem = { code = "probe_unavailable", message = "record could not be read", context = {} }
+        status = "unavailable"
+        if case.previous_children then
+          set = assert(parse_v2_record(
+            patched_sample(fixture, "child_presence_set", case.previous_children), "child_presence_set"))
+          status = "cached"
+        end
+      else
+        set, problem = parse_v2_record(
+          patched_sample(fixture, "child_presence_set", case.children), "child_presence_set")
+        status = set and "valid" or "invalid"
+      end
+      local facet = protocol_api.children_facet(set, status, problem, binding, binding_end)
+      results[#results + 1] = {
+        id = case.id,
+        actual = {
+          count = facet.count, waiting = facet.waiting, coverage = facet.coverage,
+          renders = protocol_api.subagent_count_text(facet.count, facet.uncertain),
+        },
+        expected = case.expected,
+        earlier_read = case.previous_children ~= nil,
       }
     end
     return results
@@ -134,6 +154,7 @@ return function(protocol_api)
     fixture_remove_path = fixture_remove_path,
     fixture_case_value = fixture_case_value,
     parse_fixture_cases = parse_fixture_cases,
-    fixture_eligibility_cases = fixture_eligibility_cases,
+    fixture_ends_binding_cases = fixture_ends_binding_cases,
+    fixture_children_coverage_cases = fixture_children_coverage_cases,
   }
 end

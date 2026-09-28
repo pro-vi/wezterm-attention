@@ -335,12 +335,11 @@ fn inspect_refuses_changed_scope_and_a_mid_read_revision() {
     assert!(facts.lifecycle.observations.is_empty());
 }
 
-// A writer's compaction removes only child records its retention floor
-// covers, so one listed and gone before its read was removed, and the answer
-// stays complete.
-// A review gone the same way is still a read that failed.
+// Children are counted from their set, which is read whole, so a record
+// listed and gone before its read cannot touch the count. A review gone that
+// way is a read that failed.
 #[test]
-fn inspect_counts_a_child_record_gone_mid_read_as_removed() {
+fn inspect_reports_a_review_gone_mid_read_and_counts_children_from_their_set() {
     let setup = setup();
     setup.apply(
         &event(
@@ -561,4 +560,144 @@ fn rust_and_installed_lua_share_relation_cases_and_retention_floors() {
     assert!(output.status.success());
     let result = fs::read_to_string(result).unwrap();
     assert!(result.starts_with("ok -"), "{result}");
+}
+
+/// Every child coverage row of the shared fixture, read through `inspect`
+/// from a binding whose records carry the row's fields, then counted again
+/// by the installed WezTerm's Lua, which must agree on each row. A row with
+/// an earlier read belongs to the plugin alone: inspect reads once.
+#[test]
+fn inspect_and_installed_lua_count_every_shared_child_row_alike() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../../fixtures/v2/protocol-cases.json")).unwrap();
+    let samples = &fixture["record_samples"];
+    let patched = |sample: &str, patch: &Value| {
+        let mut value = samples[sample].clone();
+        for (field, replacement) in patch.as_object().unwrap() {
+            value[field] = replacement.clone();
+        }
+        value
+    };
+    let mut answers = serde_json::Map::new();
+    for case in fixture["children_coverage_cases"].as_array().unwrap() {
+        if case.get("previous_children").is_some() {
+            continue;
+        }
+        let id = case["id"].as_str().unwrap();
+        let row_binding = patched("binding", &case["binding"]);
+        let provider = row_binding["provider"].as_str().unwrap();
+        let setup = Setup::new();
+        setup.claim();
+        let start = match provider {
+            "pi" => event(
+                "pi",
+                "session_start",
+                "children",
+                json!({"start_source":"startup"}),
+            ),
+            _ => event(
+                provider,
+                "SessionStart",
+                "children",
+                json!({"source":"startup"}),
+            ),
+        };
+        setup.apply(&start, "00000000000000000200");
+        let directory = setup.binding_dir(provider, "children");
+        let written: Value =
+            serde_json::from_slice(&fs::read(directory.join("binding.json")).unwrap()).unwrap();
+        let mut binding = written.clone();
+        for field in ["event_id", "observed_mono_ns"] {
+            binding[field] = row_binding[field].clone();
+        }
+        atomic_replace(&directory.join("binding.json"), &binding).unwrap();
+        // The row's records, moved to the binding this setup wrote.
+        let placed = |mut record: Value| {
+            for field in ["address", "launch_id", "binding_id"] {
+                record[field] = written[field].clone();
+            }
+            record
+        };
+        if case["end"] != "absent" {
+            let end = placed(patched("binding_end", &case["end"]));
+            atomic_replace(&directory.join("end.json"), &end).unwrap();
+        }
+        match case["children"].as_str() {
+            Some("absent") => {}
+            // A directory where the set should be is a read that fails.
+            Some("unavailable") => fs::create_dir_all(directory.join("children.json")).unwrap(),
+            // Written as plain bytes: the writer refuses to write a set that is
+            // not valid, and some rows are sets no valid writer would leave.
+            _ => {
+                let set = placed(patched("child_presence_set", &case["children"]));
+                fs::write(
+                    directory.join("children.json"),
+                    serde_json::to_vec(&set).unwrap(),
+                )
+                .unwrap();
+            }
+        }
+        let launch_id = setup.env["WEZTERM_ATTENTION_LAUNCH_ID"].clone();
+        let scope = PaneScope::new(
+            pane_address(&setup.env).unwrap().0,
+            launch_id.clone(),
+            Some(binding_id(provider, "children", &launch_id)),
+        )
+        .unwrap();
+        let facts = read_pane_facts_with_ports(
+            &state_root(&setup.env).unwrap(),
+            &scope,
+            &FileRecords,
+            &setup.clock,
+            Some(&setup.panes),
+            None,
+        )
+        .unwrap();
+        let children = serde_json::to_value(&facts.children).unwrap();
+        let count = facts.children.count;
+        let renders = if count > 0 {
+            format!("+{count}")
+        } else if matches!(
+            children["coverage"].as_str(),
+            Some("invalid" | "unsupported" | "unavailable")
+        ) {
+            "+?".to_owned()
+        } else {
+            String::new()
+        };
+        let answer = json!({
+            "count": count,
+            "waiting": facts.children.waiting,
+            "coverage": children["coverage"],
+        });
+        let mut shown = answer.clone();
+        shown["renders"] = json!(renders);
+        assert_eq!(shown, case["expected"], "{id}");
+        answers.insert(id.to_owned(), answer);
+    }
+    assert!(!answers.is_empty());
+    let setup = Setup::new();
+    let input = setup._scratch.0.join("children-parity.json");
+    fs::write(&input, serde_json::to_vec(&answers).unwrap()).unwrap();
+    let result = setup._scratch.0.join("children-parity-result");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let wezterm = crate::executables::resolve("wezterm");
+    let output = Command::new(&wezterm)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("WEZTERM_ATTENTION_SMOKE_RESULT", &result)
+        .env("WEZTERM_ATTENTION_TEST_ROOT", &root)
+        .env("WEZTERM_ATTENTION_CHILDREN_PARITY", &input)
+        .arg("--config-file")
+        .arg(root.join("tests/lua/wezterm_protocol_smoke.lua"))
+        .args(["show-keys", "--lua"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let result = fs::read_to_string(result).unwrap();
+    assert!(result.starts_with("ok -"), "{result}");
+    assert!(
+        result.contains(&format!("({} compared with Rust)", answers.len())),
+        "{result}"
+    );
 }

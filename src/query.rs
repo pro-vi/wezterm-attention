@@ -235,21 +235,44 @@ impl ChildrenFacet {
     /// The facet for a binding with record `binding`, its end record `end`
     /// whether or not it still ends the binding, and the read of its child
     /// set `set`.
-    fn of(binding: &Value, end: Option<&Value>, set: RecordFacet) -> Self {
+    fn of(binding: &Value, end: Option<&Value>, mut set: RecordFacet) -> Self {
         use RecordAvailability as A;
-        let provider = binding["provider"].as_str().unwrap_or("");
-        let supports_children = crate::protocol::manifest()
-            .is_ok_and(|protocol| protocol.enums.subagent_providers.contains(provider));
-        if !supports_children {
-            return Self::uncounted(A::Absent, ChildCoverage::None);
-        }
         let end_mark = end.map(|end| EndMark {
             event_id: end["event_id"].as_str().unwrap_or(""),
             observed_mono_ns: end["observed_mono_ns"].as_str().unwrap_or(""),
             ends_binding: ends_binding(end, binding),
         });
+        let ended = end_mark.is_some_and(|end| end.ends_binding);
+        let provider = binding["provider"].as_str().unwrap_or("");
+        let supports_children = crate::protocol::manifest()
+            .is_ok_and(|protocol| protocol.enums.subagent_providers.contains(provider));
+        if !supports_children {
+            // An ended binding has no running children whoever its provider
+            // is, and the plugin answers the same for it.
+            let coverage = if ended {
+                ChildCoverage::Ended
+            } else {
+                ChildCoverage::None
+            };
+            return Self::uncounted(A::Absent, coverage);
+        }
+        if set
+            .record
+            .as_ref()
+            .is_some_and(|record| record["provider"].as_str() != Some(provider))
+        {
+            set.record = None;
+            set.availability = A::Invalid;
+            set.diagnostics.push(
+                Diagnostic::new(
+                    "record_invalid",
+                    "child presence provider differs from selected binding",
+                )
+                .with("facet", "children"),
+            );
+        }
         let coverage = match set.availability {
-            _ if end_mark.is_some_and(|end| end.ends_binding) => ChildCoverage::Ended,
+            _ if ended => ChildCoverage::Ended,
             A::Present | A::Absent | A::Cleared | A::Expired => ChildCoverage::Known,
             A::Invalid => ChildCoverage::Invalid,
             A::Unsupported => ChildCoverage::Unsupported,
