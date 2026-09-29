@@ -209,6 +209,8 @@ turn and there is nothing to report; it does not touch a Pi review. Both keep th
 observation. A child's `StopFailure` stays observation-only. A Claude turn the user stops with Esc
 reports nothing, so its `thinking` stays; see
 [Accepted limitations](accepted-limitations.md#pressing-esc-in-claude-code-leaves-thinking-on-the-tab).
+A Codex turn that ends on an API error reports nothing either; see
+[Accepted limitations](accepted-limitations.md#a-codex-turn-that-ends-on-an-api-error-leaves-thinking-on-the-tab).
 
 `SessionStart` with source `fork` binds the forked session for Claude and Codex, replacing the
 active binding as `resume` and `clear` do.

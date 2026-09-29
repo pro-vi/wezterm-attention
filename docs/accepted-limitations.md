@@ -597,6 +597,22 @@ Checked against Claude Code 2.1.283. In one session, an Esc before any output
 and an Esc after a tool call had run each ran no hook within 90 seconds, while
 a normal turn ran `Stop` and then `idle_prompt` 63 seconds later.
 
+## A Codex turn that ends on an API error leaves `thinking` on the tab
+
+Codex runs no hook when a turn ends on an error. Its turn loop runs `Stop` only
+when the model finished without needing a follow-up, and `Interrupt` only when
+the user interrupted the turn. An error from the model request reports the
+error to the client and leaves the loop, so neither hook runs. The `thinking`
+the prompt wrote stays on the tab until the next turn ends, or until Codex
+quits and prompt return clears it, as with an Esc in Claude Code. The writer
+has no signal to act on. Claude Code sends `StopFailure` for the same case, and
+is not affected.
+
+Read in the Codex source at commit `985cf47a4` (a development commit, not the
+`rust-v0.157.1` tag): `run_turn_stop_hooks` in `core/src/session/turn.rs` and
+`run_turn_interrupt_hooks` in `core/src/tasks/mod.rs`, and the `Err` arms of the
+turn loop that `break` without calling either. The path was read, not traced.
+
 ## A pane a shell has claimed refuses agents started without its launch id
 
 Once a shell has claimed a pane, whether the bash integration for a listed
