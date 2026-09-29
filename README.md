@@ -433,6 +433,15 @@ Codex reads lifecycle hooks from `~/.codex/hooks.json`, and asks you to approve 
 
 **Start Codex with `--no-daemon`.** Codex 0.157 and later runs its sessions in one shared background server by default, and that server keeps the environment of the terminal that started it, so the hooks of every session would name that first pane. Attention refuses those events and the tab shows nothing: with `session_detached` where a shell claimed the pane, and where none did, with `session_detached` for the session start and `claim_stale` for the events after it. Start Codex as `codex --no-daemon`, and resume or fork the same way (`codex --no-daemon resume`), so the session runs in the Codex process in your pane. The refusal needs the command form below; on Linux the events are not checked.
 
+A plain `codex` typed without the flag still starts that server. Codex 0.157.1 has a setting that stops it, in `$CODEX_HOME/config.toml`:
+
+```toml
+[features]
+daemon_auto_start = false
+```
+
+The setting does not keep a session out of a server that is already running, so use both. If one is running, quit the sessions attached to it, run `codex app-server daemon stop` once for each `CODEX_HOME`, stop the `codex app-server daemon pid-update-loop` process that `stop` leaves running (`pgrep -fl pid-update-loop` shows its pid), and resume the sessions with `--no-daemon`.
+
 ```json
 {
   "hooks": {
@@ -521,7 +530,8 @@ The Lua implementation is split by responsibility under `plugin/`: protocol vali
 - A `+N` with no glyph beside it is the [subagent count](#subagent-activity) for a pane whose own activity is gone or already acknowledged. A `+?` is a pane whose subagent count could not be read.
 - A ◆ that `Alt+B` does not clear is a review another source published; `attention mark clear --source NAME` withdraws it.
 - `status_update_interval` defaults to 1000ms; indicators update on this interval. Lower it if indicators feel slow — the redraw request rides on the same tick.
-- A Codex tab that shows nothing, or shows another pane's session: Codex 0.157 and later runs sessions in a shared background server that is in no pane, and Attention refuses their events on the hook's stderr with `session_detached` (or `claim_stale`, after a refused session start in a pane no shell claimed). Start Codex with `--no-daemon`; see [Codex hooks](#codex-hooks).
+- A Codex tab that shows nothing, or shows another pane's session: Codex 0.157 and later runs sessions in a shared background server that is in no pane, and Attention refuses their events with `session_detached` (or `claim_stale`, after a refused session start in a pane no shell claimed). Start Codex with `--no-daemon`; see [Codex hooks](#codex-hooks). The refusal goes to the hook's stderr, and Codex 0.157.1 does not show the stderr of a hook that exits 0, which a refusal does, so the reason is neither on screen nor in Codex's logs. To read it, append `2>>/tmp/attention-hook.log` to the hook's command for a while; the command stays one `exec`.
+- A resumed Codex session's tab shows nothing until you send its first message. Codex 0.157.1 runs `SessionStart` when the first turn starts, not when the session resumes, so this is not a refusal.
 
 **Indicators appear only when you switch tabs?**
 - In `renderer = "manual"` mode, pass the event pane: `attention.poll(window, { active_pane = pane })`. The plugin resolves `window:active_pane()` at use time; the event pane is used only when the current pane is unavailable.
