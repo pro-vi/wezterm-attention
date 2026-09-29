@@ -39,7 +39,6 @@ pub struct HookOutcome {
 #[derive(Clone, Debug)]
 struct HookEvidence {
     event: ProviderEvent,
-    inherited: bool,
     persistence: HookPersistence,
     admission: Option<AdmittedHook>,
     planned_native: Option<bool>,
@@ -84,14 +83,10 @@ fn confirm_native(resolved: &ResolvedLaunch, binding_id: &str, mutation: &Mutati
             Persistence::Rejected
         };
     }
-    if !evidence.inherited {
-        return;
-    }
     let context = (|| -> Result<Option<AdmittedHook>> {
-        // The claim reread here is never an agent's own with this launch id:
-        // an agent's claim is always made with a fresh launch id, and no
-        // shell exported that id for this event to inherit.
-        if inherited_claim(&resolved.root, &resolved.address, &resolved.launch_id)?.is_none() {
+        // The same fence the native write passed: an agent's own claim is
+        // admitted only while its process still proves itself.
+        if resolved.lapsed_now()?.is_some() {
             return Ok(None);
         }
         let pointer = read_record_at(&resolved.root, "current_binding", &resolved.launch())?;
@@ -869,8 +864,10 @@ fn report_instead(slot: &mut Option<Diagnostic>, mut diagnostic: Diagnostic) {
     *slot = Some(diagnostic);
 }
 
-// Called inside the selected launch's lock. Rich rejection does not discard an
-// independently valid legacy mutation, and the sidecar is always written last.
+// Called inside the selected launch's lock, after `ResolvedLaunch::lapsed`
+// passed there, so the claim is still the one the event was resolved against.
+// Rich rejection does not discard an independently valid legacy mutation, and
+// the sidecar is always written last.
 fn append_observation(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
@@ -892,16 +889,6 @@ fn append_observation(
             return Ok(None);
         };
         let binding_id = event_binding_id(event, &resolved.launch_id)?;
-        // Only an inherited launch reaches here with an observation, and the
-        // claim reread under the lock is never an agent's own with its launch
-        // id: an agent's claim is always made with a fresh launch id, which no
-        // shell exported for this event to inherit.
-        if inherited_claim(&resolved.root, &resolved.address, &resolved.launch_id)?.is_none() {
-            return Err(AttentionError::new(
-                "claim_stale",
-                "lifecycle claim changed",
-            ));
-        }
         let pointer = read_record_at(&resolved.root, "current_binding", &resolved.launch())?;
         let binding = read_current(
             &resolved.root,
@@ -2280,7 +2267,6 @@ pub fn apply_provider_event_with_outcome(
     };
     let cell = Rc::new(RefCell::new(HookEvidence {
         event: event.clone(),
-        inherited: env.contains_key("WEZTERM_ATTENTION_LAUNCH_ID"),
         admission: None,
         planned_native: None,
         native_refused: false,
@@ -2346,22 +2332,6 @@ fn apply_provider_event_inner(
     };
     resolved.evidence = evidence;
     let written_at = ports.clock.unix_ns20()?;
-    let mut admitted = event.clone();
-    // Lifecycle facts are kept only for an event whose process inherited its
-    // launch id. An agent's own claim proves which process holds the pane,
-    // not which execution an observation belongs to, so its events keep the
-    // indicator and leave the lifecycle unwritten -- a property of the mode,
-    // reported as not persisted rather than as a failed event.
-    if resolved.host.is_some()
-        && (admitted.observation.is_some() || admitted.observation_diagnostic.is_some())
-    {
-        admitted.observation = None;
-        admitted.observation_diagnostic = None;
-        if let Some(evidence) = &resolved.evidence {
-            evidence.borrow_mut().persistence.lifecycle = Persistence::Rejected;
-        }
-    }
-    let event = &admitted;
     let result = match event.action {
         ProviderAction::Observation => {
             apply_observation(&resolved, event, observation, &written_at)
@@ -2418,7 +2388,6 @@ mod lifecycle_write_tests {
                 &json!({"hook_event_name":"Stop", "session_id":samples["binding"]["provider_session_id"]}),
                 &BTreeMap::new(),
             ),
-            inherited: true,
             admission: None,
             planned_native: Some(true),
             native_refused: false,

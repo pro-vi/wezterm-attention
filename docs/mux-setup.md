@@ -60,8 +60,8 @@ the activity an agent left behind once the agent's process has exited; without i
 stays until the next agent claims the pane.
 
 The explicit claim below is still the way to claim on Linux, where an agent does not claim its own
-pane in 1.0, and on macOS it gives the agent an inherited launch id, which lifecycle observations and
-`attention mark` need. Once a shell has claimed a pane, that pane refuses events from an agent
+pane in 1.0, and on macOS it gives the agent an inherited launch id, which `attention mark`
+needs. Once a shell has claimed a pane, that pane refuses events from an agent
 started there without the claim's launch id; open a new pane to go back to agents claiming for
 themselves. Zsh exposes compound command lists too late to distinguish every executed agent
 command, so its claim is explicit. In `~/.zshrc`:
@@ -97,7 +97,7 @@ held only the claim keeps the ID for the next one.
 The danger is a wrapper that calls the helper and launches the agent regardless of its status. There
 the agent runs with no launch id, and nothing in the agent's own output says so. On macOS, in a pane
 no shell has claimed, the agent then claims the pane for itself at its first session start, and its
-callbacks are recorded without the lifecycle observations an inherited launch id gives. With
+callbacks are recorded as they would be under the claim. With
 self-claim switched off, on Linux, or in a pane that already holds a shell claim, every callback
 from that run is discarded.
 

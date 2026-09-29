@@ -148,10 +148,6 @@ A provider event finds its launch in this order, and stops at the first rule tha
    The claim is published to the proven terminal before the lock is released.
 5. Any other event resolves against the self-owned claim it proved itself against.
 
-Lifecycle observations are kept only for an event with an inherited launch id; an event resolved
-through its own agent's claim writes the rest of its records and reports the lifecycle as not
-persisted.
-
 Every writer of a launch's records takes the launch lock, then the pane's claim lock, then a
 review owner's lock where it also writes a review; `attention mark review`, which writes only the
 review, takes the claim lock and then the owner's. Under them it reads the claim again and writes

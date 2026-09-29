@@ -65,6 +65,8 @@ Verified inherited launch plus current matching binding passes the admission tes
 
 A controlled Node exec probe preserved PID, parent PID, executable and process start time across an exec transition. Those metadata fields alone do not identify an execution generation. This is not proof that every possible metadata approach is impossible. A production wrapper-free proof remains **unverified**, and that admission path remains disabled for rich facts.
 
+The admission decision above is superseded in 1.0.0: an agent's own pane claim, which its process proves again under the writer's locks at every event, admits lifecycle facts and consumer delivery. The probe result stands.
+
 No process-environment dump was used. Existing environment-scanning production probes were not used to obtain identity evidence.
 
 ## Reproduction

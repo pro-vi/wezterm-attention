@@ -211,8 +211,19 @@ fn a_shell_claim_refuses_every_event_that_lacks_its_launch_id() {
     assert_eq!(records(&setup), before);
 }
 
+/// The delivery a consumer would receive for `outcome`, if it would receive one.
+pub(super) fn delivered(outcome: &wezterm_attention::lifecycle::HookOutcome) -> Option<Value> {
+    wezterm_attention::consumer::delivery_bytes(
+        outcome,
+        wezterm_attention::hook_content::HookContent::NotRequested,
+        wezterm_attention::hook_content::HookContent::NotRequested,
+    )
+    .ok()
+    .map(|bytes| serde_json::from_slice(&bytes).expect("delivery JSON"))
+}
+
 #[test]
-fn an_agent_s_own_claim_keeps_its_indicator_and_leaves_lifecycle_facts_unwritten() {
+fn an_agent_s_own_claim_keeps_lifecycle_facts_and_delivers_its_events() {
     let setup = Setup::new();
     install(&setup, &self_owned_claim(&setup, AGENT_LAUNCH, AGENT_PID));
     let env = setup.agent_env();
@@ -220,29 +231,121 @@ fn an_agent_s_own_claim_keeps_its_indicator_and_leaves_lifecycle_facts_unwritten
     let result = apply_provider_event(&start, &env, "00000000000000000200", &setup.ports())
         .expect("start applies");
     assert_eq!(result.disposition, "applied");
-    let tool = event(
-        "codex",
-        "PreToolUse",
-        "s",
-        json!({"tool_name":"shell","tool_use_id":"call-1"}),
-    );
-    assert!(
-        tool.observation.is_some(),
-        "the event carries lifecycle facts"
-    );
-    let outcome =
-        apply_provider_event_with_outcome(&tool, &env, "00000000000000000300", &setup.ports());
-    let result = outcome.result.expect("tool applies");
-    assert_eq!(result.disposition, "applied");
-    assert!(result.diagnostic.is_none(), "{:?}", result.diagnostic);
-    assert!(outcome.admission.is_none());
-    assert_eq!(outcome.persistence.lifecycle, Persistence::Rejected);
-    assert_eq!(outcome.persistence.activity, Persistence::Confirmed);
+    let bound = binding_id("codex", "s", AGENT_LAUNCH);
     let binding = setup_launch_dir(&setup, AGENT_LAUNCH)
         .join("bindings")
-        .join(binding_id("codex", "s", AGENT_LAUNCH));
-    assert!(binding.join("activity.json").exists());
-    assert!(!binding.join("lifecycle.json").exists());
+        .join(&bound);
+    for (at, name, patch) in [
+        (
+            "00000000000000000300",
+            "PreToolUse",
+            json!({"tool_name":"shell","tool_use_id":"call-1"}),
+        ),
+        (
+            "00000000000000000400",
+            "Stop",
+            json!({"stop_hook_active":false}),
+        ),
+    ] {
+        let hook = event("codex", name, "s", patch);
+        let outcome = apply_provider_event_with_outcome(&hook, &env, at, &setup.ports());
+        let result = outcome.result.as_ref().expect("the event applies");
+        assert_eq!(result.disposition, "applied", "{name}");
+        assert!(
+            result.diagnostic.is_none(),
+            "{name}: {:?}",
+            result.diagnostic
+        );
+        assert_eq!(
+            outcome.persistence.activity,
+            Persistence::Confirmed,
+            "{name}"
+        );
+        let delivery = delivered(&outcome).expect("the event reaches its consumers");
+        assert_eq!(
+            delivery["scope"]["launch_id"],
+            json!(AGENT_LAUNCH),
+            "{name}"
+        );
+        assert_eq!(
+            delivery["scope"]["target"]["binding_id"],
+            json!(bound),
+            "{name}"
+        );
+    }
+    let snapshot: Value = serde_json::from_slice(
+        &fs::read(binding.join("lifecycle.json")).expect("the lifecycle is written"),
+    )
+    .expect("lifecycle JSON");
+    assert_eq!(snapshot["launch_id"], json!(AGENT_LAUNCH));
+    assert_eq!(snapshot["binding_id"], json!(bound));
+}
+
+#[test]
+fn a_session_its_agent_switched_away_from_keeps_no_lifecycle_fact_and_reaches_no_consumer() {
+    let setup = Setup::new();
+    install(&setup, &self_owned_claim(&setup, AGENT_LAUNCH, AGENT_PID));
+    let env = setup.agent_env();
+    let lifecycle = |session: &str| {
+        setup_launch_dir(&setup, AGENT_LAUNCH)
+            .join("bindings")
+            .join(binding_id("claude", session, AGENT_LAUNCH))
+            .join("lifecycle.json")
+    };
+    assert_eq!(
+        apply_as(&setup, &env, &start("claude", "s1"), "00000000000000000200").disposition,
+        "applied"
+    );
+    let switch = event("claude", "SessionStart", "s2", json!({"source":"clear"}));
+    let switched = apply_as(&setup, &env, &switch, "00000000000000000300");
+    assert!(
+        matches!(switched.disposition.as_str(), "applied" | "replaced"),
+        "{switched:?}"
+    );
+    // The current session's tool result is kept, so a stale one that is not
+    // was refused, not unwritable.
+    let current = event(
+        "claude",
+        "PostToolUse",
+        "s2",
+        json!({"tool_name":"Bash","tool_use_id":"call-2"}),
+    );
+    let outcome =
+        apply_provider_event_with_outcome(&current, &env, "00000000000000000400", &setup.ports());
+    assert_eq!(outcome.persistence.lifecycle, Persistence::Confirmed);
+    assert!(delivered(&outcome).is_some());
+    let before = records(&setup);
+    // PreToolUse and Stop are refused as activity before any lifecycle write;
+    // PostToolUse records nothing but the observation, so only the lifecycle
+    // write's own binding check stands between it and the old session.
+    for (at, name, patch) in [
+        (
+            "00000000000000000500",
+            "PreToolUse",
+            json!({"tool_name":"Bash","tool_use_id":"call-1"}),
+        ),
+        (
+            "00000000000000000600",
+            "PostToolUse",
+            json!({"tool_name":"Bash","tool_use_id":"call-1"}),
+        ),
+        (
+            "00000000000000000700",
+            "Stop",
+            json!({"stop_hook_active":false}),
+        ),
+    ] {
+        let stale = event("claude", name, "s1", patch);
+        let outcome = apply_provider_event_with_outcome(&stale, &env, at, &setup.ports());
+        assert_ne!(
+            outcome.persistence.lifecycle,
+            Persistence::Confirmed,
+            "{name}"
+        );
+        assert!(delivered(&outcome).is_none(), "{name}");
+        assert!(!lifecycle("s1").exists(), "{name}");
+        assert_eq!(records(&setup), before, "{name}: nothing is written");
+    }
 }
 
 #[test]

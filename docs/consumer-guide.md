@@ -139,7 +139,7 @@ The v2 records are the only format the plugin reads. 0.6 read one small JSON fil
 
 A realm-wide `bindings` applies `--realm` and `--provider` before it asks any socket, and asks the remaining sockets in parallel. A row outside the filter that shares a provider session with a returned row is still assessed, so a conflict across realms still shows. `result.timing_ms` says where the call's wall time went, in whole milliseconds: `pane_list` inside `wezterm cli list` (for a realm-wide call, the wall time of the parallel batch), `process_list` inside the process probe, `records` in finding and reading the records. It is on every `bindings` and `inspect` answer that carries a `result`; log it next to a slow call and the phase is named. An envelope printed for an error has an empty `result` object, so it has no timing.
 
-Live Claude/Codex registration, shell setup, activation of any application that consumes these facts, and provider-paid contact remain separate operator work. An inherited launch claim is required for rich admission; tty presence alone is not an execution-generation proof.
+Live Claude/Codex registration, shell setup, activation of any application that consumes these facts, and provider-paid contact remain separate operator work. Rich admission (lifecycle observations and consumer delivery) needs a claimed launch: a shell's claim the agent inherited, or on macOS the agent's own claim, which its process proves again under the writer's locks at every event. A terminal match alone admits nothing.
 
 ## Discover bindings for an existing socket
 
@@ -256,7 +256,7 @@ Repeat `--consumer` for multiple executables. Each gets the explicit positive, r
 
 `HookDelivery` contains `schema`, a fresh `delivery_id`, `scope`, `action`, `provider`, `provider_session_id`, `source_event`, `actor`, optional `correlation` and `observation_id`, `persistence`, `reply`, and `prompt`. Scope contains the admitted `address`, `launch_id`, and a binding `target` (`kind="binding"`, `binding_id`). `action` uses the existing provider-action vocabulary and distinguishes binding, activity, parent Stop, child presence, end, review, clear and observation-only operations. It is not a controller command or permission.
 
-Identity is captured inside the same native application path. Delivery requires inherited launch identity and a matching provider binding. An event admitted through the agent's own pane claim does not qualify. The label remains that admitted source even if a newer occupant appears before a consumer acts. No executable runs inside an Attention writer lock.
+Identity is captured inside the same native application path. Delivery requires a claimed launch, as for lifecycle observations above, and a matching current provider binding. A consumer run for an event admitted through the agent's own pane claim inherits no `WEZTERM_ATTENTION_LAUNCH_ID`, so `attention mark` called from it is refused. The label remains that admitted source even if a newer occupant appears before a consumer acts. No executable runs inside an Attention writer lock.
 
 Persistence reports four independent fields:
 

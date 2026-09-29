@@ -3,12 +3,14 @@
 //! compared again there, and held until the last record is written.
 
 use super::self_claim::{
-    AGENT_LAUNCH, apply_as, every_action, install, launch_of, records, self_owned_claim, start,
-    stored_claim,
+    AGENT_LAUNCH, apply_as, delivered, every_action, install, launch_of, records, self_owned_claim,
+    start, stored_claim,
 };
 use super::*;
 
 use std::sync::mpsc;
+use wezterm_attention::lifecycle::apply_provider_event_with_outcome;
+use wezterm_attention::lifecycle::outcome::Persistence;
 
 /// A pane whose shell claim has bound a Codex and a Pi session "s", so every
 /// action has something to act on.
@@ -137,14 +139,14 @@ impl Clock for PausingClock {
     }
 }
 
-/// Resolve `event` in `env`, then let `replace` change the pane's claim
-/// before the event reaches its locks.
-fn resolve_then_replace(
+/// Resolve `event` in `env`, then let `change` alter the pane's claim or its
+/// agent before the event reaches its locks.
+fn resolve_then(
     setup: &Setup,
     env: &BTreeMap<String, String>,
     event: &ProviderEvent,
-    replace: impl FnOnce(),
-) -> wezterm_attention::lifecycle::LifecycleResult {
+    change: impl FnOnce(),
+) -> wezterm_attention::lifecycle::HookOutcome {
     let clock = PausingClock {
         entered: std::sync::Barrier::new(2),
         released: std::sync::Barrier::new(2),
@@ -157,15 +159,12 @@ fn resolve_then_replace(
                 panes: &setup.panes,
                 processes: &setup.processes,
             };
-            apply_provider_event(event, env, "00000000000000000900", &ports)
+            apply_provider_event_with_outcome(event, env, "00000000000000000900", &ports)
         });
         clock.entered.wait();
-        replace();
+        change();
         clock.released.wait();
-        pending
-            .join()
-            .expect("event thread")
-            .expect("a refusal is a result")
+        pending.join().expect("event thread")
     })
 }
 
@@ -190,7 +189,7 @@ fn a_claim_replaced_after_resolution_refuses_every_event_before_it_writes() {
             "WEZTERM_ATTENTION_LAUNCH_ID".into(),
             "00000000-0000-4000-8000-0000000009aa".into(),
         );
-        let result = resolve_then_replace(&setup, &setup.env, &event, || {
+        let result = resolve_then(&setup, &setup.env, &event, || {
             let ports = RuntimePorts {
                 clock: &FixedClock {
                     monotonic: "00000000000000000500",
@@ -201,7 +200,9 @@ fn a_claim_replaced_after_resolution_refuses_every_event_before_it_writes() {
                 processes: &setup.processes,
             };
             wezterm_attention::claim_launch(&newer, &ports).expect("newer claim");
-        });
+        })
+        .result
+        .expect("a refusal is a result");
         let label = format!("{} {:?}", event.source_event, event.action);
         assert_eq!(result.disposition, "ignored", "{label}: {result:?}");
         assert_eq!(
@@ -229,12 +230,59 @@ fn an_agent_s_claim_taken_over_after_resolution_refuses_its_event() {
         "WEZTERM_ATTENTION_LAUNCH_ID".into(),
         "00000000-0000-4000-8000-0000000009ab".into(),
     );
-    let tool = event("codex", "PreToolUse", "s", json!({"tool_name":"shell"}));
-    let result = resolve_then_replace(&setup, &env, &tool, || {
+    let tool = event(
+        "codex",
+        "PreToolUse",
+        "s",
+        json!({"tool_name":"shell","tool_use_id":"call-1"}),
+    );
+    let outcome = resolve_then(&setup, &env, &tool, || {
         wezterm_attention::claim_launch(&shell, &setup.ports()).expect("shell claim");
     });
+    let result = outcome.result.as_ref().expect("a refusal is a result");
     assert_eq!(result.disposition, "ignored", "{result:?}");
     assert_eq!(event_records(records(&setup)), event_records(before));
+    assert_ne!(outcome.persistence.lifecycle, Persistence::Confirmed);
+    assert!(delivered(&outcome).is_none());
+}
+
+#[test]
+fn an_agent_gone_after_its_event_resolved_keeps_no_lifecycle_fact_and_reaches_no_consumer() {
+    for (name, patch) in [
+        (
+            "PreToolUse",
+            json!({"tool_name":"shell","tool_use_id":"call-1"}),
+        ),
+        (
+            "PostToolUse",
+            json!({"tool_name":"shell","tool_use_id":"call-1"}),
+        ),
+        ("Stop", json!({"stop_hook_active":false})),
+    ] {
+        let setup = Setup::new();
+        install(&setup, &self_owned_claim(&setup, AGENT_LAUNCH, AGENT_PID));
+        let env = setup.agent_env();
+        apply_as(&setup, &env, &start("codex", "s"), "00000000000000000200");
+        let before = records(&setup);
+        let hook = event("codex", name, "s", patch);
+        let outcome = resolve_then(&setup, &env, &hook, || {
+            setup.processes.set(AGENT_PID, ProcessRead::Gone);
+        });
+        let result = outcome.result.as_ref().expect("a refusal is a result");
+        assert_eq!(result.disposition, "ignored", "{name}: {result:?}");
+        assert_eq!(
+            event_records(records(&setup)),
+            event_records(before),
+            "{name}: nothing is written"
+        );
+        assert_ne!(
+            outcome.persistence.lifecycle,
+            Persistence::Confirmed,
+            "{name}"
+        );
+        assert!(outcome.admission.is_none(), "{name}");
+        assert!(delivered(&outcome).is_none(), "{name}");
+    }
 }
 
 #[test]
