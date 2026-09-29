@@ -1238,6 +1238,25 @@ fn apply_activity(
                     &mut replacements,
                 );
             }
+            // A Claude lead's stop carries the tasks the provider still runs,
+            // so a counted child it no longer lists ended without a stop of
+            // its own. The stop is the lead's own activity: a set it cannot
+            // change is reported and the stop still applies.
+            if let Some(running) = event.running_children.as_deref()
+                && !matches!(result.disposition.as_str(), "ignored" | "conflict")
+            {
+                children_report = plan_children_beside_activity(
+                    resolved,
+                    event,
+                    &binding_id,
+                    written_at,
+                    ChildTransition::Reconcile {
+                        order: observation,
+                        running,
+                    },
+                    &mut replacements,
+                );
+            }
             let (refused, diagnostic) = match children_report {
                 Ok(diagnostic) => (false, diagnostic),
                 Err(diagnostic) => (true, Some(diagnostic)),

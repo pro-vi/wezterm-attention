@@ -307,6 +307,135 @@ fn a_codex_parent_stop_ends_the_children_it_covers() {
     );
 }
 
+// A lead `Stop` as Claude Code 2.1.284 sends it: `background_tasks` names every
+// task still in flight, sub-agents by the same id their hooks carry (checked in
+// a headless session on 2026-09-29).
+fn lead_stop_listing(tasks: Value) -> ProviderEvent {
+    event(
+        "claude",
+        "Stop",
+        SESSION,
+        json!({"stop_hook_active": false, "background_tasks": tasks}),
+    )
+}
+
+fn task(id: &str, kind: &str) -> Value {
+    json!({"id": id, "type": kind, "status": "running"})
+}
+
+// The API can end a sub-agent without a `SubagentStop`. Claude Code then
+// stops listing it, and the lead's next `Stop` is where that shows, including
+// when that `Stop` repeats the lead's earlier one and publishes nothing new.
+#[test]
+fn a_claude_stop_ends_a_child_the_provider_no_longer_lists() {
+    let setup = bound("claude");
+    setup.apply(
+        &child(
+            "claude",
+            "SubagentStart",
+            "child-a",
+            Some("general-purpose"),
+        ),
+        "00000000000000000300",
+    );
+    setup.apply(
+        &child("claude", "PreToolUse", "child-a", Some("general-purpose")),
+        "00000000000000000350",
+    );
+    setup.apply(
+        &lead_stop_listing(json!([task("child-a", "subagent")])),
+        "00000000000000000400",
+    );
+    assert_eq!(live(&setup, "claude"), vec![running("child-a")]);
+    setup.apply(&lead_stop_listing(json!([])), "00000000000000000500");
+    assert!(live(&setup, "claude").is_empty());
+    let facts = facts(&setup, "claude");
+    assert_eq!(facts.children.count, 0);
+    assert_eq!(facts.children.coverage, ChildCoverage::Known);
+}
+
+// Whatever the list names is running, whether Claude Code calls it a
+// sub-agent or anything else; the tasks that are no child do no harm.
+#[test]
+fn a_claude_stop_keeps_every_child_the_provider_lists() {
+    let setup = bound("claude");
+    for (agent, order) in [
+        ("child-a", "00000000000000000300"),
+        ("child-b", "00000000000000000310"),
+    ] {
+        setup.apply(
+            &child("claude", "SubagentStart", agent, Some("general-purpose")),
+            order,
+        );
+    }
+    setup.apply(
+        &lead_stop_listing(json!([
+            task("child-a", "teammate"),
+            task("bcsf3njem", "shell")
+        ])),
+        "00000000000000000400",
+    );
+    assert_eq!(live(&setup, "claude"), vec![running("child-a")]);
+}
+
+// A list that cannot be read proves nothing about which children ran, so the
+// set keeps them: a count too high is the chosen error.
+#[test]
+fn a_claude_stop_without_a_usable_list_ends_nothing() {
+    let setup = bound("claude");
+    setup.apply(
+        &child(
+            "claude",
+            "SubagentStart",
+            "child-a",
+            Some("general-purpose"),
+        ),
+        "00000000000000000300",
+    );
+    let without = event(
+        "claude",
+        "Stop",
+        SESSION,
+        json!({"stop_hook_active": false}),
+    );
+    setup.apply(&without, "00000000000000000400");
+    for (order, tasks) in [
+        ("00000000000000000500", json!("none")),
+        ("00000000000000000600", json!([{"type": "subagent"}])),
+        (
+            "00000000000000000700",
+            json!([{"id": 7, "type": "subagent"}]),
+        ),
+    ] {
+        setup.apply(&lead_stop_listing(tasks), order);
+        assert_eq!(live(&setup, "claude"), vec![running("child-a")], "{order}");
+    }
+}
+
+// The list is taken when the lead stops, so a child whose event came after
+// that moment is not shown by it to have ended.
+#[test]
+fn a_claude_stop_keeps_a_child_that_worked_after_it() {
+    let setup = bound("claude");
+    setup.apply(
+        &child(
+            "claude",
+            "SubagentStart",
+            "child-a",
+            Some("general-purpose"),
+        ),
+        "00000000000000000300",
+    );
+    setup.apply(
+        &child("claude", "PreToolUse", "child-a", Some("general-purpose")),
+        "00000000000000000500",
+    );
+    setup.apply(&lead_stop_listing(json!([])), "00000000000000000400");
+    assert_eq!(live(&setup, "claude"), vec![running("child-a")]);
+    setup.apply(&lead_stop_listing(json!([])), "00000000000000000600");
+    assert!(live(&setup, "claude").is_empty());
+}
+
 // The binding's end record marks where a lifetime ends. A resumed session
 // refreshes the binding; children of the ended lifetime are not counted, even
 // before any child write has applied that end to the set.

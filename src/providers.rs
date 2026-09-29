@@ -151,6 +151,10 @@ pub struct ProviderEvent {
     pub label: Option<String>,
     pub agent_id: Option<String>,
     pub agent_type: Option<String>,
+    /// The ids of the tasks the provider lists as in flight when the lead
+    /// stops. `None` when the event carries no list, or one that cannot be
+    /// read in full.
+    pub running_children: Option<Vec<String>>,
     pub transcript_path: Option<String>,
     pub cwd: Option<String>,
     pub config_dir: Option<String>,
@@ -173,6 +177,7 @@ impl ProviderEvent {
             label: None,
             agent_id: None,
             agent_type: None,
+            running_children: None,
             transcript_path: None,
             cwd: None,
             config_dir: None,
@@ -357,6 +362,7 @@ fn parse_provider_common(
             .get("agent_id")
             .and_then(|value| safe_label(value, "agent_id").ok()),
         agent_type,
+        running_children: None,
         transcript_path,
         cwd,
         config_dir,
@@ -365,6 +371,20 @@ fn parse_provider_common(
         diagnostic: dropped.diagnostic(),
     };
     Ok(event)
+}
+
+/// The ids of the tasks a Claude Code `Stop` lists in `background_tasks` as in
+/// flight. Claude Code 2.1.284 sends the list, sub-agents under the id their
+/// hooks carry, and its hooks reference has documented it since 2.1.145.
+/// `None` unless the field is an array whose every entry has a string `id`: a
+/// list that cannot be read in full says nothing about which children ended.
+fn in_flight_task_ids(payload: &Value) -> Option<Vec<String>> {
+    payload
+        .get("background_tasks")?
+        .as_array()?
+        .iter()
+        .map(|task| task.get("id")?.as_str().map(str::to_owned))
+        .collect()
 }
 
 fn parse_claude_or_codex(
@@ -615,6 +635,9 @@ fn parse_claude_or_codex(
                 ProviderAction::Activity
             };
             event.activity_type = Some("stop".to_owned());
+            if provider == Provider::Claude && event.agent_id.is_none() {
+                event.running_children = in_flight_task_ids(payload);
+            }
         }
         _ => {
             return ProviderEvent::ignored(

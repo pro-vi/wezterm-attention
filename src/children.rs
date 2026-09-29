@@ -126,6 +126,12 @@ pub enum ChildTransition<'a> {
         order: &'a str,
         event_id: &'a str,
     },
+    /// The provider's list of the tasks it still runs, taken when the lead
+    /// stopped at `order`.
+    Reconcile {
+        order: &'a str,
+        running: &'a [String],
+    },
 }
 
 /// The result of one transition: whether the set changed and must be
@@ -246,6 +252,7 @@ impl ChildPresenceSet {
             ChildTransition::ParentClear { order, event_id } => {
                 self.clear_for_parent(order, event_id)
             }
+            ChildTransition::Reconcile { order, running } => self.reconcile(order, running),
             ChildTransition::Stop { agent_id, order } => self
                 .ignored_by_end(end, order)
                 .unwrap_or_else(|| self.stop(agent_id, order)),
@@ -329,6 +336,23 @@ impl ChildPresenceSet {
             removed: removed.into_iter().map(|child| child.agent_id).collect(),
         });
         Reduction::of(true, Disposition::Applied)
+    }
+
+    /// Ends the children the provider no longer lists, so one whose stop
+    /// never came stops being counted. A child with an event after `order`
+    /// stays: the list was taken before that event, so it says nothing of
+    /// it. Nothing is recorded of the children it ends; one that works again
+    /// is counted at its next typed event, as any child the set does not hold.
+    fn reconcile(&mut self, order: &str, running: &[String]) -> Reduction {
+        let before = self.live.len();
+        self.live.retain(|child| {
+            child.last_mono_ns.as_str() > order || running.contains(&child.agent_id)
+        });
+        if self.live.len() == before {
+            Reduction::of(false, Disposition::Skipped)
+        } else {
+            Reduction::of(true, Disposition::Applied)
+        }
     }
 
     fn stop(&mut self, agent_id: &str, order: &str) -> Reduction {
