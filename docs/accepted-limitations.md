@@ -263,6 +263,8 @@ stops holding.
   the count is too high after an unreported end again. If the field stays but
   its ids stop matching, each lead `Stop` ends every counted sub-agent and its
   next typed event counts it again, so the tab reads low in between.
+  `tests/python/claude_contact_check.py` repeats the observations above against
+  the installed Claude Code; the gate runs it when `ATTENTION_CLAUDE_CONTACT` is set.
 - **Claude Code's own agents carry no type.** The agents Claude Code runs for
   itself are told apart only by an empty or
   missing `agent_type`, so a tool call is counted only when it names a type. In

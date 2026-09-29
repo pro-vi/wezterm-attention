@@ -11,6 +11,10 @@ cd "$root"
 # and ATTENTION_TEST_BASH_PREEXEC a local bash-preexec.sh to use instead of
 # downloading the pinned one.
 #
+# One check runs two headless Claude Code sessions, which spend API calls. Set
+# ATTENTION_CLAUDE_CONTACT to run it against the claude on PATH, or against
+# ATTENTION_TEST_CLAUDE when the one you want is not the first there.
+#
 # Two integration tests drive a real Codex checkout, which this repository
 # cannot supply. Set ATTENTION_CODEX_SOURCE to one to run them; without it they
 # print SKIPPED and the rest of the gate is unaffected. With it, and without
@@ -72,10 +76,17 @@ if [ -n "${ATTENTION_CODEX_SOURCE:-}" ]; then
 else
   printf 'gate: Codex contact tests SKIPPED (set ATTENTION_CODEX_SOURCE to a Codex checkout)\n'
 fi
+if [ -n "${ATTENTION_CLAUDE_CONTACT:-}" ]; then
+  printf 'gate: Claude contact check ENABLED\n'
+  python3 tests/python/claude_contact_check.py
+else
+  printf 'gate: Claude contact check SKIPPED (set ATTENTION_CLAUDE_CONTACT to run two headless Claude Code sessions)\n'
+fi
 printf 'gate: GUI tab-source test SKIPPED (disposable_gui_publishes_its_own_source opens a WezTerm window; run it with cargo test --test cli_shell_spec -- --ignored disposable_gui_publishes_its_own_source)\n'
 WEZTERM_ATTENTION_TTY_INPUT_GUARD="$root/tests/python/tty_input_guard.py" cargo test -- --test-threads=1
 python3 -m py_compile tests/fixtures/v2/check.py \
   tests/fixtures/consumer-migration/check.py tests/python/provider_contact_hook.py \
+  tests/python/claude_contact_check.py \
   tests/python/measure.py tests/python/measure_spec.py tests/python/interactive_shell.py
 python3 -m unittest tests/python/measure_spec.py
 python3 tests/fixtures/v2/check.py

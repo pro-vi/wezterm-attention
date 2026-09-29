@@ -28,6 +28,10 @@ SAFE_FIELDS = (
 )
 
 
+def safe_text(value: object) -> bool:
+    return isinstance(value, str) and len(value.encode("utf-8")) <= 256 and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         return 0
@@ -49,8 +53,17 @@ def main() -> int:
         if isinstance(payload, dict):
             for field in SAFE_FIELDS:
                 value = payload.get(field)
-                if isinstance(value, bool) or (isinstance(value, str) and len(value.encode("utf-8")) <= 256 and not any(ord(char) < 32 or ord(char) == 127 for char in value)):
+                if isinstance(value, bool) or safe_text(value):
                     record[field] = value
+            # Claude Code lists the tasks in flight on a Stop; only what names
+            # them is kept, not their commands or descriptions.
+            tasks = payload.get("background_tasks")
+            if isinstance(tasks, list):
+                record["background_tasks"] = [
+                    {key: task[key] for key in ("id", "type", "status") if safe_text(task.get(key))}
+                    for task in tasks
+                    if isinstance(task, dict)
+                ]
             response = payload.get("tool_response")
             if "tool_response" in payload:
                 record["tool_response_shape"] = type(response).__name__
