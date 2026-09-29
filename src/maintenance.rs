@@ -25,7 +25,7 @@ use crate::records::{
     pane_dir, read_bounded, read_record, record_address, removal_confined, remove_file_durable,
     session_index_marker, session_index_path, state_relative,
 };
-use crate::wezterm::{Clock, PaneLister, Presence, ProcessInspector, ProcessProbe};
+use crate::wezterm::{Clock, PaneLister, Presence, ProcessInspector, ProcessListing, ProcessProbe};
 
 pub const ABSENCE_INTERVAL_NS: u128 = 60_000_000_000;
 pub const RETENTION_AGE_NS: u128 = 30 * 24 * 60 * 60 * 1_000_000_000;
@@ -337,6 +337,8 @@ pub fn doctor_with_environment(
     probes.push(json!({"name":"socket","status":socket_status}));
     let environment_status = environment_probe(root, environment, inspector, &mut diagnostics);
     probes.push(json!({"name":"environment","status":environment_status}));
+    let codex_status = codex_server_probe(processes, &mut diagnostics);
+    probes.push(json!({"name":"codex_server","status":codex_status}));
     diagnostics.extend(state_diagnostics);
     let diagnostics = fold_kept_history(diagnostics);
     let mut unobserved = vec![json!("gui_user_vars")];
@@ -348,7 +350,7 @@ pub fn doctor_with_environment(
     );
     Ok((
         json!({
-            "scope": ["state_files","socket","processes","permissions","versions","environment"],
+            "scope": ["state_files","socket","processes","permissions","versions","environment","codex_server"],
             "unobserved": unobserved,
             "probes": probes,
             "bindings_scanned": rows.len(),
@@ -361,6 +363,49 @@ pub fn doctor_with_environment(
         }),
         diagnostics,
     ))
+}
+
+/// Whether a Codex shared server runs for a `CODEX_HOME` whose hooks call
+/// Attention. A session that joins one runs its hooks in the server, which is
+/// in no pane, so each of its events is refused and its tab shows nothing,
+/// and Codex does not show the refusal. A server whose `CODEX_HOME` cannot be
+/// told is reported too. With no server running there is nothing to check.
+fn codex_server_probe(
+    processes: Option<&dyn ProcessProbe>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> &'static str {
+    let listing = match processes.map(|probe| probe.pane_processes()) {
+        Some(ProcessListing::Listed(listing)) => listing,
+        Some(ProcessListing::NotOffered) => return "unobserved",
+        _ => return "unavailable",
+    };
+    if listing.codex_servers().is_empty() {
+        return "unobserved";
+    }
+    let mut status = "healthy";
+    for server in listing.codex_servers() {
+        let calls_attention = server.codex_home.as_ref().is_none_or(|home| {
+            match fs::read_to_string(home.join("hooks.json")) {
+                Ok(hooks) => hooks.contains("hooks event codex"),
+                // Hooks that cannot be read may still call Attention.
+                Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+            }
+        });
+        if !calls_attention {
+            continue;
+        }
+        let mut item = Diagnostic::new(
+            "session_detached",
+            "a Codex shared server is running, and sessions that join it are refused; \
+             stop it with `codex app-server daemon stop` and start Codex with --no-daemon",
+        );
+        if let Some(home) = &server.codex_home {
+            item.set("codex_home", home.display().to_string());
+        }
+        diagnostics.push(item);
+        status = "finding";
+    }
+    status
 }
 
 /// Whether the pane doctor runs in has a server identity anything can find.

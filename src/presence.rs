@@ -456,6 +456,15 @@ impl ProcessProbe for ProbeOncePerAssembly<'_> {
             }
         }
     }
+
+    fn pane_processes(&self) -> ProcessListing {
+        let Ok(mut listed) = self.listed.lock() else {
+            return record_spent(&self.spent, || self.inner.pane_processes());
+        };
+        listed
+            .get_or_insert_with(|| record_spent(&self.spent, || self.inner.pane_processes()))
+            .clone()
+    }
 }
 
 /// An apply's pane lister: a listing that failed answers every later ask

@@ -115,10 +115,11 @@ pub enum Presence {
     Unavailable,
 }
 
-/// The socket and pane pairs that live processes carry in their environment.
+/// The socket and pane pairs that live processes carry in their environment,
+/// and the Codex shared servers the same listing shows.
 ///
 /// It is built from a process listing that holds every process's whole
-/// environment, which is where API keys live. Only the two values this crate
+/// environment, which is where API keys live. Only the values this crate
 /// looks for are kept, and the listing is dropped when parsing returns.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PaneProcessSet {
@@ -129,6 +130,40 @@ pub struct PaneProcessSet {
     /// Some process of this user was listed and its environment could not be
     /// read, so the pairs may be missing one.
     missed: bool,
+    codex_servers: Vec<CodexServer>,
+}
+
+/// A Codex shared background server, `codex app-server ... --managed-daemon`.
+/// A Codex session that joins one runs its hooks in it, in no pane and with
+/// the environment of the terminal that started it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodexServer {
+    /// The `CODEX_HOME` whose hooks it runs: its own `CODEX_HOME`, else
+    /// `.codex` under its `HOME`, as Codex resolves it. `None` when its
+    /// environment names neither.
+    pub codex_home: Option<PathBuf>,
+}
+
+/// Whether a process's arguments are those of a Codex shared server.
+fn codex_shared_server<'a>(arguments: impl Iterator<Item = &'a [u8]>) -> bool {
+    let (mut app_server, mut managed) = (false, false);
+    for argument in arguments {
+        app_server |= argument == b"app-server";
+        managed |= argument == b"--managed-daemon";
+    }
+    app_server && managed
+}
+
+fn codex_home(codex_home: Option<&[u8]>, home: Option<&[u8]>) -> Option<PathBuf> {
+    let text = |value: &[u8]| {
+        std::str::from_utf8(value)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    };
+    codex_home
+        .and_then(text)
+        .or_else(|| home.and_then(text).map(|home| home.join(".codex")))
 }
 
 /// A socket path as two spellings of it can be compared: its directory with
@@ -150,6 +185,12 @@ impl PaneProcessSet {
     pub fn from_process_listing(listing: &str) -> Self {
         let mut processes = Self::default();
         for line in listing.lines() {
+            if codex_shared_server(line.split(' ').map(str::as_bytes)) {
+                let first = |name| environment_values(line, name).first().map(|v| v.as_bytes());
+                processes.codex_servers.push(CodexServer {
+                    codex_home: codex_home(first("CODEX_HOME="), first("HOME=")),
+                });
+            }
             let panes = environment_values(line, "WEZTERM_PANE=");
             if panes.is_empty() {
                 continue;
@@ -193,6 +234,27 @@ impl PaneProcessSet {
                 self.insert(socket, pane);
             }
         }
+    }
+
+    /// Add a Codex shared server, given its environment's `NAME=value`
+    /// entries.
+    fn add_codex_server<'a>(&mut self, entries: impl Iterator<Item = &'a [u8]>) {
+        let (mut codex, mut home) = (None, None);
+        for entry in entries {
+            if let Some(value) = entry.strip_prefix(b"CODEX_HOME=") {
+                codex = Some(value);
+            } else if let Some(value) = entry.strip_prefix(b"HOME=") {
+                home = Some(value);
+            }
+        }
+        self.codex_servers.push(CodexServer {
+            codex_home: codex_home(codex, home),
+        });
+    }
+
+    /// The Codex shared servers the listing showed.
+    pub fn codex_servers(&self) -> &[CodexServer] {
+        &self.codex_servers
     }
 
     /// Never `Unavailable`: a set that exists came from a listing that was read.
@@ -1212,8 +1274,11 @@ fn own_pane_processes() -> Option<PaneProcessSet> {
             continue;
         }
         read_own |= pid == own;
-        let environment =
-            procargs_environment(&buffer[..size.min(buffer.len())]).collect::<Vec<_>>();
+        let process = &buffer[..size.min(buffer.len())];
+        let environment = procargs_environment(process).collect::<Vec<_>>();
+        if codex_shared_server(procargs_arguments(process)) {
+            processes.add_codex_server(environment.iter().copied());
+        }
         // macOS hands over the arguments of its own system binaries, /bin/zsh
         // and /bin/sleep among them, with no environment at all. A process
         // started with an empty environment looks the same, and is counted
@@ -1268,6 +1333,11 @@ fn own_pane_processes() -> Option<PaneProcessSet> {
             }
         };
         read_own |= pid == own;
+        if let Ok(arguments) = fs::read(entry.path().join("cmdline"))
+            && codex_shared_server(arguments.split(|byte| *byte == 0))
+        {
+            processes.add_codex_server(environment.split(|byte| *byte == 0));
+        }
         processes.add_environment(environment.split(|byte| *byte == 0));
     }
     read_own.then_some(processes)
@@ -1288,11 +1358,7 @@ compile_error!(
 /// or by the end of the buffer.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn procargs_environment(buffer: &[u8]) -> impl Iterator<Item = &[u8]> {
-    let count = buffer
-        .get(..4)
-        .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
-        .map(i32::from_ne_bytes)
-        .and_then(|count| usize::try_from(count).ok());
+    let count = procargs_count(buffer);
     let mut strings = buffer.get(4..).unwrap_or_default().split(|byte| *byte == 0);
     let arguments_known = count.is_some() && strings.next().is_some();
     let mut rest = strings.skip_while(|string| string.is_empty());
@@ -1300,6 +1366,25 @@ fn procargs_environment(buffer: &[u8]) -> impl Iterator<Item = &[u8]> {
         rest.next();
     }
     rest.take_while(move |string| arguments_known && !string.is_empty())
+}
+
+/// The argument strings in a `KERN_PROCARGS2` buffer, laid out as
+/// [`procargs_environment`] describes; none when `argc` cannot be read.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn procargs_arguments(buffer: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let count = procargs_count(buffer).unwrap_or(0);
+    let mut strings = buffer.get(4..).unwrap_or_default().split(|byte| *byte == 0);
+    strings.next();
+    strings.skip_while(|string| string.is_empty()).take(count)
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn procargs_count(buffer: &[u8]) -> Option<usize> {
+    buffer
+        .get(..4)
+        .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+        .map(i32::from_ne_bytes)
+        .and_then(|count| usize::try_from(count).ok())
 }
 
 /// The values `name` takes on one process line, where `name` ends in `=`.
@@ -1403,6 +1488,7 @@ pub fn tty_path_from_fd(fd: libc::c_int) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use std::fs::OpenOptions;
+    use std::path::PathBuf;
 
     use super::{
         Ancestor, PaneProcessSet, Presence, SystemTtyWriter, ancestry_is_trusted, tty_path_from_fd,
@@ -1577,6 +1663,54 @@ mod tests {
         assert_eq!(processes.presence("/env.sock", "7"), Presence::Present);
         assert_eq!(processes.presence("/argv.sock", "9"), Presence::Absent);
         assert_eq!(super::procargs_environment(&[1, 0]).count(), 0);
+    }
+
+    /// A Codex shared server is told by its arguments alone: the same words
+    /// in its environment, past `argc`, do not make one.
+    #[test]
+    fn a_codex_shared_server_is_told_by_its_arguments() {
+        let block = |argc: i32, strings: &[u8]| {
+            let mut buffer = argc.to_ne_bytes().to_vec();
+            buffer.extend_from_slice(b"/opt/codex/bin/codex\0\0\0");
+            buffer.extend_from_slice(strings);
+            buffer
+        };
+        let server = block(
+            5,
+            b"codex\0app-server\0--listen\0unix://\0--managed-daemon\0HOME=/h\0\0",
+        );
+        assert!(super::codex_shared_server(super::procargs_arguments(
+            &server
+        )));
+        let desktop = block(
+            3,
+            b"codex\0app-server\0--analytics-default-enabled\0HOME=/h\0",
+        );
+        assert!(!super::codex_shared_server(super::procargs_arguments(
+            &desktop
+        )));
+        let past_argc = block(2, b"codex\0app-server\0--managed-daemon\0");
+        assert!(!super::codex_shared_server(super::procargs_arguments(
+            &past_argc
+        )));
+
+        let mut processes = PaneProcessSet::default();
+        processes.add_codex_server(super::procargs_environment(&server));
+        processes.add_codex_server([b"HOME=/h".as_slice(), b"CODEX_HOME=/c"].into_iter());
+        processes.add_codex_server(std::iter::empty());
+        let homes = processes
+            .codex_servers()
+            .iter()
+            .map(|server| server.codex_home.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            homes,
+            [
+                Some(PathBuf::from("/h/.codex")),
+                Some(PathBuf::from("/c")),
+                None
+            ]
+        );
     }
 
     #[test]

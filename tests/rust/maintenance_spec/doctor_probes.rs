@@ -210,3 +210,146 @@ fn doctor_in_a_pane_nothing_has_published_reports_it_where_no_agent_can_claim() 
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 }
+
+/// Offers one listing, parsed from process lines.
+struct ListedProcesses(String);
+
+impl ProcessProbe for ListedProcesses {
+    fn available(&self) -> bool {
+        true
+    }
+
+    fn presence(&self, _socket_path: &str, _pane_id: &str) -> Presence {
+        Presence::Absent
+    }
+
+    fn pane_processes(&self) -> ProcessListing {
+        ProcessListing::Listed(PaneProcessSet::from_process_listing(&self.0))
+    }
+}
+
+/// A Codex session that joins a shared server runs its hooks there, in no
+/// pane, so Attention refuses every event and Codex shows none of the
+/// refusals. Doctor names such a server when the `CODEX_HOME` it serves has
+/// hooks that call Attention, and leaves alone one whose hooks do not, and
+/// the desktop app's private server, which no terminal session can join.
+#[test]
+fn doctor_names_a_codex_shared_server_whose_hooks_call_attention() {
+    let setup = Setup::new();
+    let homes = setup._scratch.0.join("codex");
+    let (calling, other) = (homes.join("calling"), homes.join("other"));
+    for (home, hooks) in [
+        (
+            &calling,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event codex Stop"}]}]}}"#,
+        ),
+        (&other, r#"{"hooks":{}}"#),
+    ] {
+        fs::create_dir_all(home).expect("codex home");
+        fs::write(home.join("hooks.json"), hooks).expect("hooks");
+    }
+    let server = |home: &PathBuf| {
+        format!(
+            "codex app-server --listen unix:// --managed-daemon CODEX_HOME={}",
+            home.display()
+        )
+    };
+    let doctor = |listing: String| {
+        wezterm_attention::maintenance::doctor_with_environment(
+            &setup.root(),
+            &setup.env,
+            Some(&setup.panes),
+            Some(&ListedProcesses(listing)),
+            &wezterm_attention::wezterm::SystemProcessInspector,
+        )
+        .expect("doctor")
+    };
+
+    let (result, diagnostics) = doctor(format!("{}\n{}", server(&calling), server(&other)));
+    assert_eq!(probe_status(&result, "codex_server"), "finding", "{result}");
+    let named: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.code == "session_detached")
+        .collect();
+    assert_eq!(named.len(), 1, "{diagnostics:?}");
+    assert_eq!(
+        named[0].context.get("codex_home"),
+        Some(&json!(calling.display().to_string())),
+        "{diagnostics:?}"
+    );
+
+    let desktop = format!(
+        "codex app-server --analytics-default-enabled CODEX_HOME={}",
+        calling.display()
+    );
+    let (result, diagnostics) = doctor(format!("{}\n{desktop}", server(&other)));
+    assert_eq!(probe_status(&result, "codex_server"), "healthy", "{result}");
+    assert!(
+        !diagnostics.iter().any(|d| d.code == "session_detached"),
+        "{diagnostics:?}"
+    );
+
+    let (result, _) = doctor(desktop);
+    assert_eq!(
+        probe_status(&result, "codex_server"),
+        "unobserved",
+        "{result}"
+    );
+}
+
+/// Hooks that exist and cannot be read may call Attention, so their server is
+/// reported; a listing that failed leaves the probe unavailable, not
+/// unobserved, so doctor says its report is incomplete.
+#[test]
+fn doctor_reports_a_codex_server_it_cannot_rule_out() {
+    let setup = Setup::new();
+    let unreadable = setup._scratch.0.join("codex-unreadable");
+    fs::create_dir_all(unreadable.join("hooks.json")).expect("hooks.json as a directory");
+    let listing = format!(
+        "codex app-server --listen unix:// --managed-daemon CODEX_HOME={}",
+        unreadable.display()
+    );
+    let (result, diagnostics) = wezterm_attention::maintenance::doctor_with_environment(
+        &setup.root(),
+        &setup.env,
+        Some(&setup.panes),
+        Some(&ListedProcesses(listing)),
+        &wezterm_attention::wezterm::SystemProcessInspector,
+    )
+    .expect("doctor");
+    assert_eq!(probe_status(&result, "codex_server"), "finding", "{result}");
+    assert!(
+        diagnostics.iter().any(|d| d.code == "session_detached"),
+        "{diagnostics:?}"
+    );
+
+    let (result, _) = wezterm_attention::maintenance::doctor_with_environment(
+        &setup.root(),
+        &setup.env,
+        Some(&setup.panes),
+        Some(&FailedListing),
+        &wezterm_attention::wezterm::SystemProcessInspector,
+    )
+    .expect("doctor");
+    assert_eq!(
+        probe_status(&result, "codex_server"),
+        "unavailable",
+        "{result}"
+    );
+}
+
+struct FailedListing;
+
+impl ProcessProbe for FailedListing {
+    fn available(&self) -> bool {
+        false
+    }
+
+    fn presence(&self, _socket_path: &str, _pane_id: &str) -> Presence {
+        Presence::Unavailable
+    }
+
+    fn pane_processes(&self) -> ProcessListing {
+        ProcessListing::Failed
+    }
+}

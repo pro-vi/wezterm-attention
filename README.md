@@ -523,14 +523,14 @@ The Lua implementation is split by responsibility under `plugin/`: protocol vali
 ## Troubleshooting
 
 **Indicators not showing?**
-- Run `attention doctor`: it checks the state directory's permissions and records, the mux socket, the pane's environment, agent processes and the command's version.
+- Run `attention doctor`: it checks the state directory's permissions and records, the mux socket, the pane's environment, agent processes and the command's version, and whether a Codex shared server is running for hooks that call Attention.
 - If the window is attached to a mux server (`wezterm connect`, a unix domain), check the pane publishes its identity: `wezterm cli list --format json` shows the server-side pane id, and the pane must emit it as the `WEZTERM_PANE` user var. See [Publishing the pane id](#publishing-the-pane-id). Without it the plugin deliberately does nothing for that pane.
 - Check the plugin found the command: without it the WezTerm log says `libexec/attention-rs is missing`, and nothing is recorded.
 - Ensure your hooks write to the same state directory as the plugin's `dir` setting (see [Configure](#configure) for the order).
 - A `+N` with no glyph beside it is the [subagent count](#subagent-activity) for a pane whose own activity is gone or already acknowledged. A `+?` is a pane whose subagent count could not be read.
 - A ◆ that `Alt+B` does not clear is a review another source published; `attention mark clear --source NAME` withdraws it.
 - `status_update_interval` defaults to 1000ms; indicators update on this interval. Lower it if indicators feel slow — the redraw request rides on the same tick.
-- A Codex tab that shows nothing, or shows another pane's session: Codex 0.157 and later runs sessions in a shared background server that is in no pane, and Attention refuses their events with `session_detached` (or `claim_stale`, after a refused session start in a pane no shell claimed). Start Codex with `--no-daemon`; see [Codex hooks](#codex-hooks). The refusal goes to the hook's stderr, and Codex 0.157.1 does not show the stderr of a hook that exits 0, which a refusal does, so the reason is neither on screen nor in Codex's logs. To read it, append `2>>/tmp/attention-hook.log` to the hook's command for a while; the command stays one `exec`.
+- A Codex tab that shows nothing, or shows another pane's session: Codex 0.157 and later runs sessions in a shared background server that is in no pane, and Attention refuses their events with `session_detached` (or `claim_stale`, after a refused session start in a pane no shell claimed). Start Codex with `--no-daemon`; see [Codex hooks](#codex-hooks). `attention doctor` names such a server as `session_detached`, with the `codex_home` it serves. The refusal goes to the hook's stderr, and Codex 0.157.1 does not show the stderr of a hook that exits 0, which a refusal does, so the reason is neither on screen nor in Codex's logs. To read it, append `2>>/tmp/attention-hook.log` to the hook's command for a while; the command stays one `exec`.
 - A resumed Codex session's tab shows nothing until you send its first message. Codex 0.157.1 runs `SessionStart` when the first turn starts, not when the session resumes, so this is not a refusal.
 
 **Indicators appear only when you switch tabs?**
