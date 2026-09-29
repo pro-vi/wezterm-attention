@@ -247,6 +247,22 @@ stops holding.
   same ID". If a resume stops sending
   `SubagentStart`, a resumed sub-agent is counted from its first tool call
   instead.
+- **Claude Code lists the tasks it still runs when the lead stops.** In two
+  headless sessions of Claude Code 2.1.284 on 2026-09-29, all 7 lead `Stop`s
+  and all 4 `SubagentStop`s carried `background_tasks`, and its hooks reference
+  documents the field from v2.1.145. A lead `Stop` named each running
+  sub-agent under the id its `SubagentStart` carried, and named none once they
+  had ended. The list on a `SubagentStop` still names the sub-agent that is
+  stopping, so only the lead's `Stop` is read. A sub-agent given a model id that
+  does not exist sent `StopFailure` with its own `agent_id` and no
+  `SubagentStop`, and neither of the lead's next two `Stop`s listed it. Attention
+  ends a counted sub-agent that a lead `Stop` no longer lists, unless it had an
+  event after the `Stop`. Not observed: a sub-agent the API ended mid-run, as
+  the two behind the `+2` below were. If Claude Code keeps listing such a
+  sub-agent, it stays counted. If the field goes, or `Stop` stops carrying it,
+  the count is too high after an unreported end again. If the field stays but
+  its ids stop matching, each lead `Stop` ends every counted sub-agent and its
+  next typed event counts it again, so the tab reads low in between.
 - **Claude Code's own agents carry no type.** The agents Claude Code runs for
   itself are told apart only by an empty or
   missing `agent_type`, so a tool call is counted only when it names a type. In
@@ -267,7 +283,10 @@ Nothing removes a sub-agent for being quiet, so one whose end never reaches the
 writer stays counted, as `+1` on its tab, until its session's `SessionEnd`, or
 until the pane moves on to another session. A Codex sub-agent also goes at a
 later parent `Stop` that is published after its last event; a repeated `Stop`
-the writer skips keeps the earlier cutoff.
+the writer skips keeps the earlier cutoff. A Claude sub-agent also goes at the
+next lead `Stop` whose `background_tasks` no longer lists it, so what stays
+counted to the session's end is one that Claude Code still lists, or one in a
+Claude Code session that sends no list.
 The end goes missing when:
 
 - the `SubagentStop` hook failed, timed out, or was not registered;
@@ -278,9 +297,11 @@ The end goes missing when:
   background by default since 2.1.198. Esc on the lead while a background
   sub-agent ran fired no hook, and the sub-agent sent its `SubagentStop` when it
   finished its command;
-- the API ended the sub-agent mid-run. In Claude Code 2.1.283, two
-  sub-agents stopped by an API error sent no `SubagentStop`, while every
-  sub-agent that finished in the same session sent one;
+- the API ended the sub-agent. In Claude Code 2.1.283, two sub-agents stopped
+  by an API error mid-run sent no `SubagentStop`, while every sub-agent that
+  finished in the same session sent one. In Claude Code 2.1.284, one whose
+  model id does not exist failed at its start the same way, with a
+  `StopFailure` for its `agent_id`, and no lead `Stop` listed it afterwards;
 - a Codex sub-agent was interrupted, or a hook ran asynchronously, as the
   previous section describes.
 
@@ -297,7 +318,7 @@ writes that set even when the event changes nothing else; its hook reports
 `record_invalid`. A `children.json` that something else replaced with a link to a
 file that is not a valid set is moved aside as a link, and sweep then keeps that
 binding, as it keeps any that holds a link; a link to a valid set, or to
-nothing, is replaced by a regular file at the next write. Until the next event that writes the set (a child's start, stop, tool call or permission request, or a Codex parent's `Stop`), the tab shows `+?`. The
+nothing, is replaced by a regular file at the next write. Until the next event that writes the set (a child's start, stop, tool call or permission request, a Codex parent's `Stop`, or a Claude lead's `Stop` that lists tasks), the tab shows `+?`. The
 sub-agents the invalid set held are counted again only at their next event, so
 one in the middle of a long command stays uncounted until it calls another tool
 or stops. The rename happens while the hook plans its writes, so if a write in

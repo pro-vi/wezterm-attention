@@ -256,8 +256,9 @@ Claude Code and Codex hooks record each subagent of a pane from its
 `SubagentStart`, or from its first tool call or permission request when no
 start was seen, until it ends. A subagent stays counted however long it is
 quiet, as while it runs one long command. It stops counting at its own
-`SubagentStop`, at a Codex parent's `Stop` that comes after its last event, or
-when its session ends. The count is independent of the pane's own activity: a
+`SubagentStop`, at a Codex parent's `Stop` that comes after its last event, at
+a Claude lead's `Stop` whose `background_tasks` no longer lists it, or when its
+session ends. The count is independent of the pane's own activity: a
 pane can carry running subagents with no activity at all — the parent agent
 stopped and you acknowledged its ✓ — or alongside activity of any type.
 
@@ -282,7 +283,8 @@ pane's count is unknown.
 
 The count is what the hooks reported, not a process list. A subagent whose end
 was never reported, because its `SubagentStop` hook failed or was not
-registered, stays counted until its session ends. See
+registered, stays counted until the lead's next `Stop` stops listing it, or
+until its session ends. See
 [accepted limitations](docs/accepted-limitations.md#a-sub-agent-whose-end-is-never-reported-stays-counted-until-its-session-ends).
 
 The count never decides which state wins the tab — priority is settled by the
@@ -423,7 +425,7 @@ In `~/.claude/settings.json`:
 }
 ```
 
-Merge these into any hooks you already have, and keep them synchronous: do not add `async: true`, which lets one subagent's events arrive out of order, so that a subagent can stay counted after it stopped. `SubagentStart` counts a subagent from its start, and again when it resumes, which Claude Code 2.1.283 reports as a new start under the same id. `SubagentStop` removes that same subagent. A root `Stop` removes none, because background subagents can outlive it: Claude Code 2.1.283 sent the lead's `Stop` while a subagent was still running. A `StopFailure` (the turn ended on an API error) shows `notify`.
+Merge these into any hooks you already have, and keep them synchronous: do not add `async: true`, which lets one subagent's events arrive out of order, so that a subagent can stay counted after it stopped. `SubagentStart` counts a subagent from its start, and again when it resumes, which Claude Code 2.1.283 reports as a new start under the same id. `SubagentStop` removes that same subagent. A root `Stop` removes only the subagents its `background_tasks` no longer lists, because background subagents can outlive it: Claude Code 2.1.283 sent the lead's `Stop` while a subagent was still running, and 2.1.284 lists it there. A `StopFailure` (the turn ended on an API error) shows `notify`.
 
 ## Codex hooks
 

@@ -137,7 +137,8 @@ For each `registration=register` row, run the `attention` link on your PATH with
 `SubagentStart` is a `register` row for Claude Code and Codex: a child is counted from its start,
 and in Claude Code 2.1.283 a resumed child from its new start. Codex at source commit `985cf47a4`
 sends `SubagentStart` only for a spawned or forked child, so a resumed Codex child is counted from
-its first tool call. `SubagentStop` removes that exact child. Keep every hook
+its first tool call. `SubagentStop` removes that exact child, and a Claude lead's
+`Stop` removes each child its `background_tasks` no longer lists. Keep every hook
 synchronous, which is how Claude Code 2.1.283 and Codex (source at commit `985cf47a4`) run a
 command hook unless it sets `async: true`; an asynchronous hook can deliver one child's events out
 of order, and a child can then stay counted after it stopped (see

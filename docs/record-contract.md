@@ -188,8 +188,8 @@ permission prompt waits for the user as the lead would, so it publishes lead `no
 marks the child `waiting` in the binding's `children.json`; its observation still names the child
 as the actor. While that child waits, the lead's next `thinking` does not replace the visible
 `notify`. The wait has no time limit, because a child blocked on a prompt sends nothing: it ends at
-the child's next tool call, its `SubagentStop`, a Codex parent stop that removes it, or the
-binding's end. A user prompt or any lead activity other than `thinking` replaces the `notify` at
+the child's next tool call, its `SubagentStop`, a Codex parent stop or a Claude lead `Stop` that
+removes it, or the binding's end. A user prompt or any lead activity other than `thinking` replaces the `notify` at
 once. A child set that cannot be read or changed does not stop the `notify`; the event reports
 `partial` with that record's diagnostic.
 
@@ -282,9 +282,18 @@ ignored (`binding_conflict`). After that the event itself applies:
   A parent stop ordered before the recorded one is ignored, and one at the same order with another
   `event_id` leaves the set as it is. The stop's activity is written either way; when the set cannot
   be changed (that conflict, or a set refused as below) the hook reports `partial` with the set's
-  diagnostic, as reported under the one-diagnostic rule above. A Claude `Stop` removes no child, because Claude's background sub-agents
-  can outlive the lead's turn: Claude Code 2.1.283 sent the lead's `Stop` while a sub-agent was
-  still running.
+  diagnostic, as reported under the one-diagnostic rule above.
+- **A Claude lead `Stop` that carries `background_tasks`** removes each child that no task in the
+  array names by `id` and whose `last_mono_ns` is at or before the order of the `Stop` event
+  itself. It does not use the activity the `Stop` leaves standing, so a `Stop` that repeats the
+  published one still applies. Claude Code 2.1.284 lists every task in flight, sub-agents under
+  the `agent_id` their hooks carry, and the array is empty when none is; a child it names stays,
+  because Claude's background sub-agents can outlive the lead's turn (Claude Code 2.1.283 sent
+  the lead's `Stop` while a sub-agent was still running). Nothing is recorded of the children it
+  removes: one that works again is added again by its next `SubagentStart` or typed event, as any
+  child the set does not hold. A `Stop` without the field, or whose `background_tasks` is not an
+  array of objects that each have a string `id`, removes nothing, and so does one whose activity
+  was ignored or conflicted. The `Stop`'s activity is written whatever happens to the set.
 
 An event of a child in the set that is ordered before its entry is ignored; one ordered at the same
 stamp is skipped when it would leave the entry as it is, and is a conflict otherwise.
@@ -305,7 +314,8 @@ without reading it; sweep keeps a binding that holds a link, as it keeps any. Th
 set held are counted again at their next event. A set that a newer writer wrote (`future_schema`),
 one that cannot be read, one that cannot be moved aside (`probe_unavailable`), or a change past the
 size bound, leaves the set as it was: a child's event is refused with that diagnostic, while a
-child's permission request and a Codex parent `Stop` still write their activity and report
+child's permission request, a Codex parent `Stop` and a Claude lead `Stop` that lists tasks still write
+their activity and report
 `partial`, with `native_state` rejected, so no consumer is given the event.
 
 Readers, the plugin and `attention inspect`, check the set's structure and count its `live`
