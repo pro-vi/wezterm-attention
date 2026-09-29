@@ -612,6 +612,8 @@ Read in the Codex source at commit `985cf47a4` (a development commit, not the
 `rust-v0.157.1` tag): `run_turn_stop_hooks` in `core/src/session/turn.rs` and
 `run_turn_interrupt_hooks` in `core/src/tasks/mod.rs`, and the `Err` arms of the
 turn loop that `break` without calling either. The path was read, not traced.
+[openai/codex#22774](https://github.com/openai/codex/issues/22774) asks for a
+hook on this case; it was open, with no pull request, on 2026-09-29.
 
 ## A pane a shell has claimed refuses agents started without its launch id
 
