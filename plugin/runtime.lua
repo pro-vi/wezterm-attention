@@ -379,6 +379,7 @@ return function()
         if type(response) ~= "table" then response = nil end
         if ok and success and response and response.status == "ok"
             and type(response.result) == "table" then
+          M._writer_outdated = false
           return response.result
         end
         local item = response and type(response.diagnostics) == "table" and response.diagnostics[1]
@@ -393,6 +394,9 @@ return function()
           failure = "it gave no answer; the attention command in " .. root
             .. " may predate this plugin, so run scripts/install-cli.sh there"
           kind, passing = "exited_silent", true
+          -- The log line alone went unread while focus and Alt+B stopped
+          -- working, so the focused tab says so until a command answers.
+          M._writer_outdated = true
         else
           failure, kind, passing = "it gave no answer", "silent", true
         end

@@ -221,7 +221,8 @@ function M.wrap_title_formatter(base_fn)
       tabs = tabs, panes = panes, config = config, hover = hover, max_width = max_width,
     })
     local show_index = not (config and config.show_tab_index_in_tab_bar == false)
-    return format.decorate_tab_title(tab, visible, call_title_formatter(base_fn, tab, ctx), show_index)
+    return format.decorate_tab_title(tab, visible, call_title_formatter(base_fn, tab, ctx), show_index,
+      nil, format.writer_warning(tab))
   end
 end
 
@@ -380,6 +381,7 @@ function M.apply_to_config(config, opts)
   M._active_dir = dir
   local integration_root = opts.integration_root or plugin_root
   M._active_writer_installed = false
+  M._writer_outdated = false
   if type(integration_root) == "string" and integration_root:sub(1, 1) == "/" then
     M._active_integration_root = integration_root
     config.set_environment_variables = config.set_environment_variables or {}
@@ -519,14 +521,16 @@ function M.apply_to_config(config, opts)
         base = ctx.default_title
       end
 
-      local rendered = format.decorate_tab_title(tab, visible, base, show_index)
+      local warning = format.writer_warning(tab)
+      local rendered = format.decorate_tab_title(tab, visible, base, show_index, nil, warning)
 
       -- Nothing outside this process can see the order the bar draws, so the
       -- bar publishes it. Only a window whose every tab has been drawn, and
       -- only when the drawn list or its source identity changes: an ordinary
-      -- redraw with the same source touches no file.
+      -- redraw with the same source touches no file. The published copy
+      -- leaves out the rebuild warning, which names no tab.
       local published = rendered
-      if visible.still_indicator ~= visible.indicator then
+      if visible.still_indicator ~= visible.indicator or warning then
         published = format.decorate_tab_title(tab, visible, base, show_index, visible.still_indicator)
       end
       local order, window_id = format.drawn_tab_order(tab, tabs, marker_ids, published)

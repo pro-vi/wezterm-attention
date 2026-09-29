@@ -139,11 +139,12 @@ return function(context)
   -- attention indicator, then the base. `show_index` false drops the index the
   -- way `show_tab_index_in_tab_bar = false` does for the default renderer.
   --- `indicator` replaces the visible one when given.
-  local function decorate_tab_title(tab, visible, base, show_index, indicator)
+  --- `warning` goes between the indicator and the base.
+  local function decorate_tab_title(tab, visible, base, show_index, indicator, warning)
     local index = ""
     if show_index ~= false then index = (tab.tab_index + 1) .. ": " end
     local suffix = visible.agent_suffix and (" · " .. visible.agent_suffix) or ""
-    local text = " " .. index .. (indicator or visible.indicator) .. base .. suffix .. " "
+    local text = " " .. index .. (indicator or visible.indicator) .. (warning or "") .. base .. suffix .. " "
     if visible.color then
       return {
         { Background = { Color = visible.color } },
@@ -151,6 +152,14 @@ return function(context)
       }
     end
     return text
+  end
+
+  --- What the focused tab draws while the attention command answers the
+  --- plugin's calls with nothing, the way a command built before the plugin
+  --- was updated fails; nil otherwise.
+  local function writer_warning(tab)
+    if M._writer_outdated ~= true or tab.is_active ~= true then return nil end
+    return "⚠ rebuild attention · "
   end
 
   local function build_formatter_context(tab, visible, values)
@@ -250,6 +259,7 @@ return function(context)
     subagent_count_text = subagent_count_text,
     resolve_visible_attention = resolve_visible_attention,
     decorate_tab_title = decorate_tab_title,
+    writer_warning = writer_warning,
     drawn_tab_order = drawn_tab_order,
     build_formatter_context = build_formatter_context,
     last_base_title_by_tab = last_base_title_by_tab,

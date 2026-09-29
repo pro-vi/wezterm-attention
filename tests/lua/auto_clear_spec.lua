@@ -1784,6 +1784,35 @@ test("each different failure of a pane's command is logged once", function()
     "the later failure is logged too, got " .. tostring(errors[2]))
 end)
 
+test("the focused tab says to rebuild while the command answers nothing, until it answers", function()
+  local warning = "⚠ rebuild attention · "
+  write_activity(9437, "notify")
+  with_plugin_command(function() return false, "" end, function()
+    poll_focused({ tabs = { { 9437 } }, active_pane_id = 9437 })
+  end)
+  drain_errors()
+
+  local focused = gui_tab({ window_id = 9830, tab_id = 9831, tab_index = 0, is_active = true, panes = { 9437 } })
+  local other = gui_tab({ window_id = 9830, tab_id = 9832, tab_index = 1, panes = { 9438 } })
+  local bar = { focused, other }
+  local focused_drawn = rendered_text(format_tab_title(focused, bar))
+  local other_drawn = rendered_text(format_tab_title(other, bar))
+  assert(focused_drawn:find(warning, 1, true), "the focused tab carries the warning, got " .. focused_drawn)
+  assert(not other_drawn:find(warning, 1, true), "only the focused tab does, got " .. other_drawn)
+  local published = assert(read_tab_publication(9830), "the drawn window should be published")
+  assert(not published.tabs[1].text:find(warning, 1, true),
+    "the published order names tabs, not the warning, got " .. published.tabs[1].text)
+  local wrapped = rendered_text(attention.wrap_title_formatter(function() return "base" end)(focused, bar))
+  assert(wrapped:find(warning .. "base", 1, true), "a manual renderer draws it too, got " .. wrapped)
+
+  write_activity(9439, "notify")
+  with_plugin_command(acknowledging_answer, function()
+    poll_focused({ tabs = { { 9439 } }, active_pane_id = 9439 })
+  end)
+  local after = rendered_text(format_tab_title(focused, bar))
+  assert(not after:find(warning, 1, true), "a command that answers clears it, got " .. after)
+end)
+
 test("a pane that vanishes between polls leaves the cache and keeps its records", function()
   seed_pane(940)
   write_activity(945, "notify")

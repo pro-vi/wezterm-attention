@@ -55,6 +55,7 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - A `doctor` probe named `environment`, which checks inside a pane that the pane's socket has a server identity hooks can find. Where an agent can claim its own pane, an identity nothing has published yet is `unobserved` rather than a finding, because the agent's first session start publishes it.
 - `result.timing_ms` on `inspect` as on `bindings`, and `result.diagnostic_count` / `total_diagnostic_count` on `tabs`.
 - Options `show_directory`, `settled_title_fallback`, `show_provider`, `on_view_change` and `integration_root`.
+- The focused tab shows `⚠ rebuild attention` while the `attention` command answers the plugin's calls with nothing, which is how a command built before a plugin update fails: focus acknowledgement and `Alt+B` stop working. It goes once a command answers. Before, only the WezTerm log said so. The published tab order leaves it out.
 
 ### Changed
 
