@@ -775,6 +775,9 @@ local function test(name, callback)
   drain_errors()
   drain_warnings()
   for key in pairs(mux_windows_by_id) do mux_windows_by_id[key] = nil end
+  -- A command that answered nothing sets this for the whole plugin, and
+  -- only a later answer clears it, so one test would draw it in the next.
+  attention._writer_outdated = false
   local ok, err = pcall(callback)
   if ok and #logged_errors > 0 then
     ok, err = false, "unexpected wezterm.log_error: " .. tostring(logged_errors[1])

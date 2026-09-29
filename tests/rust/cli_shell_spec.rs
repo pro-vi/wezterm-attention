@@ -1624,6 +1624,9 @@ fn a_hook_command_never_exits_two_and_says_why_on_stderr() {
     }
 }
 
+/// Doctor reads this machine's processes, which no environment here can hide:
+/// a running Codex shared server whose hooks call Attention makes this report
+/// `findings` (`session_detached`), and the test fails for that reason alone.
 #[test]
 fn doctor_that_had_nothing_to_look_at_says_unobserved_not_healthy() {
     let scratch = Scratch::new();
