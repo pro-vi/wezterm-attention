@@ -13,7 +13,9 @@ against the installed `claude` as of 2.1.284:
 
 It runs two headless sessions, so it spends API calls; the gate runs it only
 when ATTENTION_CLAUDE_CONTACT is set. The sessions get the Bash tool in an empty
-scratch directory, and no settings but the contact hook. A session in which the
+scratch directory, no settings but the contact hook, and no saved transcript;
+Claude Code still writes a few small sub-agent stubs, into one project directory
+that every run reuses. A session in which the
 model did not start the sub-agent proves nothing, and is reported as
 inconclusive rather than passed.
 """
@@ -59,7 +61,9 @@ class Inconclusive(Exception):
     pass
 
 
-def run_session(claude: str, scratch: pathlib.Path, name: str, prompt: str, extra: list[str]) -> list[dict]:
+def run_session(
+    claude: str, scratch: pathlib.Path, workdir: pathlib.Path, name: str, prompt: str, extra: list[str]
+) -> list[dict]:
     log = scratch / f"{name}.jsonl"
     hooks = {
         event: [{"hooks": [{"type": "command", "command": f"python3 {shlex.quote(str(HOOK))} claude {event}"}]}]
@@ -72,11 +76,12 @@ def run_session(claude: str, scratch: pathlib.Path, name: str, prompt: str, extr
     env = {key: value for key, value in os.environ.items() if not key.startswith("WEZTERM_")}
     env["WEZTERM_ATTENTION_CONTACT_LOG"] = str(log)
     command = [
-        claude, "-p", "--model", "sonnet", "--setting-sources", "project", "--settings", str(settings),
+        claude, "-p", "--no-session-persistence", "--model", "sonnet", "--setting-sources", "project",
+        "--settings", str(settings),
         "--allowedTools", "Agent", "Bash", *extra, "--output-format", "json", prompt,
     ]
     finished = subprocess.run(
-        command, cwd=scratch, env=env, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, check=False
+        command, cwd=workdir, env=env, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, check=False
     )
     if finished.returncode != 0:
         raise SystemExit(f"claude exited {finished.returncode} in {name}: {finished.stderr[-400:]}")
@@ -149,9 +154,15 @@ def main() -> int:
     failures: list[str] = []
     with tempfile.TemporaryDirectory(prefix="attention-claude-contact.") as scratch_name:
         scratch = pathlib.Path(scratch_name)
+        # The same working directory every run, so the project directory Claude
+        # Code keeps for it is made once rather than once per run.
+        workdir = pathlib.Path(tempfile.gettempdir()) / "attention-claude-contact"
+        workdir.mkdir(exist_ok=True)
         try:
-            check_listing(run_session(claude, scratch, "listing", QUIET_AND_QUICK, []), failures)
-            check_failure(run_session(claude, scratch, "failure", DOOMED, ["--agents", DOOMED_AGENT]), failures)
+            check_listing(run_session(claude, scratch, workdir, "listing", QUIET_AND_QUICK, []), failures)
+            check_failure(
+                run_session(claude, scratch, workdir, "failure", DOOMED, ["--agents", DOOMED_AGENT]), failures
+            )
         except Inconclusive as reason:
             print(f"claude contact: INCONCLUSIVE on {version}: {reason}", file=sys.stderr)
             return 1
