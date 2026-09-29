@@ -50,6 +50,24 @@ The facet contains `snapshot_id`, a flat `observations` array, `requests`, `rete
 
 The facet is built from both files, and `lifecycle.json` decides first. While it is `unavailable`, `invalid` or `unsupported`, `availability` says so and no children's evidence is shown. Otherwise `availability` is its status, and a children's file that cannot be used is left out and reported in the diagnostics. Without a `lifecycle.json`, the children's file's status is the facet's, so a binding whose only lifecycle evidence is its children's is `available`. The plugin shows a file it could not read again as the copy it read last, with a diagnostic, which makes `availability` `cached` when that file is `lifecycle.json`; `attention inspect` reads once and has no such copy.
 
+## Which observations end a turn
+
+No one kind marks the end of a turn. Read it per provider, from observations whose `actor.kind` is `lead`; a sub-agent's observations do not end the lead's turn.
+
+| Provider | Kind | Native event |
+|---|---|---|
+| Claude | `response_finished` | `Stop` |
+| Claude | `attempt_outcome` | `StopFailure`, which Claude Code 2.1.284 sends instead of `Stop` when an API error ended the turn |
+| Codex | `response_finished` | `Stop` |
+| Codex | `user_interrupt` | `Interrupt`; Codex (source at commit `985cf47a4`) runs no `Stop` after one |
+| Pi | `run_settled` | `agent_settled`, which Pi 0.85.1 sends once no automatic retry, compaction or queued message will continue the run |
+
+Pi's `attempt_outcome` is not a turn end. It comes from a `message_end` whose assistant message errored or was aborted. Pi still sends `agent_settled` when the run ends, and after an error it can retry first; the turn ends at that `run_settled`. The two `attempt_outcome` producers differ in `source_event`, `StopFailure` or `message_end`.
+
+A `Stop` hook can block the stop, and the agent then keeps working in the same turn without a new prompt; its next `response_finished` carries `stop_hook_active: true`. Take the latest turn-end observation, not the first.
+
+Some turns end with no observation. A Claude turn the user stops with Esc sends no event (see [accepted limitations](accepted-limitations.md#pressing-esc-in-claude-code-leaves-thinking-on-the-tab)). In Codex source at commit `985cf47a4`, a turn that ends on an API error runs neither `Stop` nor `Interrupt`; this was read in the source, not observed.
+
 ## Requests are evidence, not a pending-state service
 
 `requests` groups only supported exact native identities under the same binding and actor. Tool names, question modes and supplied turn scopes must match. Elicitation IDs also require their native `mcp_server_name` namespace. Two servers or sibling children cannot merge merely because they supplied the same ID. Local observation UUIDs are not native tool IDs.
