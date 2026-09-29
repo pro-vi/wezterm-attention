@@ -259,7 +259,13 @@ stops holding.
   ends a counted sub-agent that a lead `Stop` no longer lists, unless it had an
   event after the `Stop` began. One that starts in the few milliseconds between
   Claude taking the list and the `Stop` hook starting is ended too, and counted
-  again at its next typed event. Not observed: a sub-agent the API ended mid-run, as
+  again at its next typed event. An end-to-end run on 2026-09-29, with a real
+  Claude Code 2.1.284 session and the README's hooks in a pane of a disposable
+  mux server and a temporary state directory, counted a sub-agent that failed
+  at its start when it started and ended it at the lead's next `Stop` after the
+  failure; the build before this rule (`a199dfb`) left it counted. A sub-agent
+  running one quiet `sleep 20` stayed counted through a lead `Stop` that listed
+  it, and left at its own `SubagentStop`. Not observed: a sub-agent the API ended mid-run, as
   the two behind the `+2` below were. If Claude Code keeps listing such a
   sub-agent, it stays counted. If the field goes, or `Stop` stops carrying it,
   the count is too high after an unreported end again. If the field stays but
