@@ -23,8 +23,6 @@ pub use crate::protocol::{HookRegistration, NativeHookDeclaration};
 pub struct NativeHookSpec {
     pub native_event: String,
     pub arguments: Vec<String>,
-    /// Required for rich facts and executable delivery, not for legacy admission.
-    pub requires_launch_identity: bool,
     pub registration: HookRegistration,
     pub evidence: Vec<String>,
 }
@@ -72,7 +70,6 @@ pub fn describe_hooks(provider: &str) -> crate::protocol::Result<HookDescription
                     provider.into(),
                     event.clone(),
                 ],
-                requires_launch_identity: true,
                 registration: declaration.registration,
                 evidence: vec![
                     format!("tests/fixtures/providers/{provider}.json"),

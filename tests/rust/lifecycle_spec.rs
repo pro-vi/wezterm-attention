@@ -1749,7 +1749,6 @@ fn hook_description_is_exhaustive_read_only_and_pins_public_fields() {
                 hook.registration == HookRegistration::Register,
                 "{provider}/{callback}"
             );
-            assert!(hook.requires_launch_identity);
             assert_eq!(&hook.arguments[..3], &["hooks", "event", provider]);
         }
         let output = Command::new(env!("CARGO_BIN_EXE_attention"))
@@ -1777,13 +1776,7 @@ fn hook_description_is_exhaustive_read_only_and_pins_public_fields() {
                     .keys()
                     .map(String::as_str)
                     .collect::<Vec<_>>(),
-                vec![
-                    "arguments",
-                    "evidence",
-                    "native_event",
-                    "registration",
-                    "requires_launch_identity"
-                ]
+                vec!["arguments", "evidence", "native_event", "registration"]
             );
         }
     }
