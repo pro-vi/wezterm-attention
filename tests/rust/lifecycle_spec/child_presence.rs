@@ -308,8 +308,7 @@ fn a_codex_parent_stop_ends_the_children_it_covers() {
 }
 
 // A lead `Stop` as Claude Code 2.1.284 sends it: `background_tasks` names every
-// task still in flight, sub-agents by the same id their hooks carry (checked in
-// a headless session on 2026-09-29).
+// task still in flight, sub-agents by the same id their hooks carry.
 fn lead_stop_listing(tasks: Value) -> ProviderEvent {
     event(
         "claude",
@@ -412,8 +411,8 @@ fn a_claude_stop_without_a_usable_list_ends_nothing() {
     }
 }
 
-// The list is taken when the lead stops, so a child whose event came after
-// that moment is not shown by it to have ended.
+// The list is taken as the lead stops, so a child whose event is stamped after
+// the `Stop` began is not shown by it to have ended.
 #[test]
 fn a_claude_stop_keeps_a_child_that_worked_after_it() {
     let setup = bound("claude");
@@ -1077,6 +1076,52 @@ fn a_codex_parent_stop_applies_beside_a_child_set_it_cannot_change() {
         Some("future_schema")
     );
     assert_eq!(shown(&setup, "codex"), "stop");
+    assert_eq!(fs::read(&path).unwrap(), before);
+}
+
+// A Claude lead's stop is the lead's own activity, as a Codex parent's is. A
+// child set it cannot change is reported beside it and the stop still shows;
+// its consumer is not told the stop's native effects were written.
+#[test]
+fn a_claude_stop_applies_beside_a_child_set_it_cannot_change() {
+    let setup = bound("claude");
+    setup.apply(
+        &child(
+            "claude",
+            "SubagentStart",
+            "child-a",
+            Some("general-purpose"),
+        ),
+        "00000000000000000300",
+    );
+    let path = set_path(&setup, "claude");
+    let mut set: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    set["schema"] = json!(999);
+    fs::write(&path, serde_json::to_vec(&set).unwrap()).unwrap();
+    let before = fs::read(&path).unwrap();
+    let outcome = wezterm_attention::lifecycle::apply_provider_event_with_outcome(
+        &lead_stop_listing(json!([])),
+        &setup.env,
+        "00000000000000000400",
+        &setup.ports(),
+    );
+    assert_eq!(
+        outcome.persistence.native_state,
+        wezterm_attention::lifecycle::outcome::Persistence::Rejected
+    );
+    assert_eq!(
+        outcome.persistence.activity,
+        wezterm_attention::lifecycle::outcome::Persistence::Confirmed
+    );
+    let stop = outcome.result.expect("the stop applies");
+    assert_eq!(stop.disposition, "partial");
+    assert_eq!(
+        stop.diagnostic
+            .as_ref()
+            .map(|diagnostic| diagnostic.code.as_str()),
+        Some("future_schema")
+    );
+    assert_eq!(shown(&setup, "claude"), "stop");
     assert_eq!(fs::read(&path).unwrap(), before);
 }
 

@@ -257,7 +257,9 @@ stops holding.
   does not exist sent `StopFailure` with its own `agent_id` and no
   `SubagentStop`, and neither of the lead's next two `Stop`s listed it. Attention
   ends a counted sub-agent that a lead `Stop` no longer lists, unless it had an
-  event after the `Stop`. Not observed: a sub-agent the API ended mid-run, as
+  event after the `Stop` began. One that starts in the few milliseconds between
+  Claude taking the list and the `Stop` hook starting is ended too, and counted
+  again at its next typed event. Not observed: a sub-agent the API ended mid-run, as
   the two behind the `+2` below were. If Claude Code keeps listing such a
   sub-agent, it stays counted. If the field goes, or `Stop` stops carrying it,
   the count is too high after an unreported end again. If the field stays but

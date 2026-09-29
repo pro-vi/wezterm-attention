@@ -1242,7 +1242,7 @@ fn apply_activity(
             // so a counted child it no longer lists ended without a stop of
             // its own. The stop is the lead's own activity: a set it cannot
             // change is reported and the stop still applies.
-            if let Some(running) = event.running_children.as_deref()
+            if let Some(in_flight) = event.in_flight_task_ids.as_deref()
                 && !matches!(result.disposition.as_str(), "ignored" | "conflict")
             {
                 children_report = plan_children_beside_activity(
@@ -1252,7 +1252,7 @@ fn apply_activity(
                     written_at,
                     ChildTransition::Reconcile {
                         order: observation,
-                        running,
+                        in_flight,
                     },
                     &mut replacements,
                 );

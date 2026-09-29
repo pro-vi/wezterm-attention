@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """Opt-in contact check: what Claude Code sends that the sub-agent count reads.
 
-The count ends a sub-agent whose lead `Stop` no longer lists it in
+The count ends a sub-agent that a lead `Stop` no longer lists in
 `background_tasks`. That rests on three things Claude Code does, checked here
 against the installed `claude` as of 2.1.284:
 
-- a lead `Stop` carries `background_tasks`, and names each sub-agent in flight
-  by the `agent_id` its `SubagentStart` carried;
-- once a sub-agent has ended, the lead's next `Stop` does not name it;
+- a lead `Stop` carries `background_tasks`, and lists every sub-agent still
+  running under the `agent_id` its `SubagentStart` carried;
+- once a sub-agent has ended, the lead's next `Stop` does not list it;
 - a sub-agent the API ends sends `StopFailure` with its own `agent_id`, no
-  `SubagentStop`, and is not named by a later lead `Stop`.
+  `SubagentStop`, and is not listed by a later lead `Stop`.
 
 It runs two headless sessions, so it spends API calls; the gate runs it only
-when ATTENTION_CLAUDE_CONTACT is set. A session in which the model did not start
-the sub-agent proves nothing, and is reported as inconclusive rather than passed.
+when ATTENTION_CLAUDE_CONTACT is set. The sessions get the Bash tool in an empty
+scratch directory, and no settings but the contact hook. A session in which the
+model did not start the sub-agent proves nothing, and is reported as
+inconclusive rather than passed.
 """
 
 from __future__ import annotations
@@ -83,25 +85,39 @@ def run_session(claude: str, scratch: pathlib.Path, name: str, prompt: str, extr
     return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
 
 
-def subagent_ids(tasks: list[dict]) -> set[str]:
-    return {task["id"] for task in tasks if task.get("type") == "subagent" and "id" in task}
+def task_ids(tasks: list[dict]) -> set[str]:
+    return {task["id"] for task in tasks if "id" in task}
 
 
 def check_listing(records: list[dict], failures: list[str]) -> None:
-    started = {r["agent_id"] for r in records if r["event"] == "SubagentStart" and "agent_id" in r}
-    stops = [r for r in records if r["event"] == "Stop"]
+    started: set[str] = set()
+    running: set[str] = set()  # started and not yet stopped, in the order the hooks ran
+    stops = 0
+    stops_while_running = 0
+    last_listed: set[str] = set()
+    for record in records:
+        event = record["event"]
+        if event == "SubagentStart" and "agent_id" in record:
+            started.add(record["agent_id"])
+            running.add(record["agent_id"])
+        elif event == "SubagentStop":
+            running.discard(record.get("agent_id"))
+        elif event == "Stop":
+            if "background_tasks" not in record:
+                failures.append("a lead Stop carried no background_tasks")
+                return
+            stops += 1
+            last_listed = task_ids(record["background_tasks"])
+            if running:
+                stops_while_running += 1
+                if running - last_listed:
+                    failures.append(f"a lead Stop does not list the running sub-agent {sorted(running - last_listed)}")
     if not started or not stops:
         raise Inconclusive("listing: the model started no sub-agent")
-    if not all("background_tasks" in r for r in stops):
-        failures.append("a lead Stop carried no background_tasks")
-        return
-    listed = set().union(*(subagent_ids(r["background_tasks"]) for r in stops))
-    if not listed:
-        raise Inconclusive("listing: every sub-agent ended before the first lead Stop")
-    if not listed <= started:
-        failures.append(f"Stop names {sorted(listed - started)} that no SubagentStart carried as agent_id")
-    if subagent_ids(stops[-1]["background_tasks"]):
-        failures.append("the last lead Stop still names a sub-agent")
+    if not stops_while_running:
+        raise Inconclusive("listing: no lead Stop came while a sub-agent was running")
+    if last_listed & started:
+        failures.append("the last lead Stop still lists a sub-agent that ended")
 
 
 def check_failure(records: list[dict], failures: list[str]) -> None:
@@ -120,7 +136,7 @@ def check_failure(records: list[dict], failures: list[str]) -> None:
     later = [r for r in records[failed_at:] if r["event"] == "Stop"]
     if not later:
         raise Inconclusive("failure: no lead Stop followed the failure")
-    if any(agent in subagent_ids(r.get("background_tasks", [])) for r in later):
+    if any(agent in task_ids(r.get("background_tasks", [])) for r in later):
         failures.append("a lead Stop after the failure still names the sub-agent")
 
 

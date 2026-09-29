@@ -154,7 +154,7 @@ pub struct ProviderEvent {
     /// The ids of the tasks the provider lists as in flight when the lead
     /// stops. `None` when the event carries no list, or one that cannot be
     /// read in full.
-    pub running_children: Option<Vec<String>>,
+    pub in_flight_task_ids: Option<Vec<String>>,
     pub transcript_path: Option<String>,
     pub cwd: Option<String>,
     pub config_dir: Option<String>,
@@ -177,7 +177,7 @@ impl ProviderEvent {
             label: None,
             agent_id: None,
             agent_type: None,
-            running_children: None,
+            in_flight_task_ids: None,
             transcript_path: None,
             cwd: None,
             config_dir: None,
@@ -362,7 +362,7 @@ fn parse_provider_common(
             .get("agent_id")
             .and_then(|value| safe_label(value, "agent_id").ok()),
         agent_type,
-        running_children: None,
+        in_flight_task_ids: None,
         transcript_path,
         cwd,
         config_dir,
@@ -378,7 +378,7 @@ fn parse_provider_common(
 /// hooks carry, and its hooks reference has documented it since 2.1.145.
 /// `None` unless the field is an array whose every entry has a string `id`: a
 /// list that cannot be read in full says nothing about which children ended.
-fn in_flight_task_ids(payload: &Value) -> Option<Vec<String>> {
+fn listed_task_ids(payload: &Value) -> Option<Vec<String>> {
     payload
         .get("background_tasks")?
         .as_array()?
@@ -636,7 +636,7 @@ fn parse_claude_or_codex(
             };
             event.activity_type = Some("stop".to_owned());
             if provider == Provider::Claude && event.agent_id.is_none() {
-                event.running_children = in_flight_task_ids(payload);
+                event.in_flight_task_ids = listed_task_ids(payload);
             }
         }
         _ => {
