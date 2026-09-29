@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-27
+- **Amended:** 2026-09-29 — a Claude lead `Stop` also ends the sub-agents it no longer lists
 
 ## Context
 
@@ -23,8 +24,11 @@ sub-agent needs no fence.
 One `children.json` (kind `child_presence_set`) per binding holds exactly the
 sub-agents running now. The writer adds a sub-agent at its `SubagentStart`, or
 at a tool call or permission request that names its `agent_type`, and removes it
-at its `SubagentStop`, at a Codex parent `Stop` ordered after its last event, or
-at the binding's end. Nothing removes a sub-agent for being quiet. The set keeps
+at its `SubagentStop`, at a Codex parent `Stop` ordered after its last event, at
+a Claude lead `Stop` whose `background_tasks` no longer lists it, or at the
+binding's end. A lead `Stop` spares a sub-agent with an event stamped after the
+`Stop` began, and a `Stop` with no readable list ends nothing. Nothing removes a
+sub-agent for being quiet. The set keeps
 no stopped sub-agents, has no entry cap, and no size limit beyond the general
 `max_json_bytes`, which the writer checks before it writes. Readers count its
 live entries and apply one counting rule of their own, the binding's end: nothing counts
@@ -37,14 +41,23 @@ compaction, the design this replaces. The TTL hides sub-agents that are still
 running, and any bound on the kept history is a number standing in for "this
 sub-agent ended", which the hooks report directly.
 
+Also rejected, for the Claude rule: reusing the Codex parent clear, which is
+skipped when a `Stop` repeats the published one and so drops the reconcile for
+exactly that `Stop`; ending a sub-agent at its own `StopFailure`, which acts at
+the moment of death but covers API errors only; and a command that clears a
+binding's sub-agents by hand, until something shows Claude Code lists a dead one.
+
 ## Consequences and revisit
 
-A sub-agent whose end is never reported (a failed or unregistered
-`SubagentStop`, an interrupted Codex sub-agent) stays counted until its session
-ends; no command removes it by hand. The count rests on hooks staying
-synchronous and on Codex parents stopping only after their sub-agents: none of
-11 Codex CLI 0.157.1 sessions with sub-agents showed sub-agent work after the
-parent's `Stop`. A sub-agent that works or stops after the latest parent `Stop`
+A Claude sub-agent whose end is never reported goes at the next lead `Stop`
+that does not list it. One that Claude Code still lists, or that runs under a
+Claude Code sending no list, and an interrupted Codex sub-agent, stay counted
+until the session ends; no command removes them by hand. Nothing is recorded of
+the sub-agents a lead `Stop` ends, so a list whose ids stop matching would end
+every sub-agent at each `Stop` with only the opt-in contact check to say so.
+The count rests on hooks staying synchronous and on Codex parents stopping only
+after their sub-agents: none of 11 Codex CLI 0.157.1 sessions with sub-agents
+showed sub-agent work after the parent's `Stop`. A sub-agent that works or stops after the latest parent `Stop`
 removed it is reported as `child_active_after_parent_clear`; one that stays quiet
 past its parent's next `Stop` is not, since the set keeps only the latest
 parent stop's removals. Old per-sub-agent files are no longer read;
@@ -52,15 +65,24 @@ their kinds stay declared so that sweep still recognises and removes them. The
 `children` facet of `attention inspect` changed shape.
 
 Revisit if a provider delivers hooks asynchronously by default, if
-`child_active_after_parent_clear` shows up in normal Codex use, or if a
-provider starts reporting its running sub-agents directly, which could replace
-the parent-stop rule.
+`child_active_after_parent_clear` shows up in normal Codex use, or if Codex
+starts reporting its running sub-agents directly as Claude Code now does, which
+could replace its parent-stop rule. For the Claude rule, revisit if a
+sub-agent the API ended mid-run stays listed (only one that failed at its start
+has been seen to leave the list), which calls for the clear command; if the
+contact check fails; or if a wrong removal has to be found by something other
+than that check, which calls for recording what a `Stop` ends.
 
 Enforced by `a_quiet_running_child_stays_counted`,
 `a_codex_parent_stop_ends_the_children_it_covers`,
 `children_of_an_ended_lifetime_are_never_counted`,
 `a_set_written_before_the_end_counts_nothing_after_a_resume`,
-`a_child_back_after_a_codex_parent_stop_is_reported_whichever_event_brings_it` and
+`a_child_back_after_a_codex_parent_stop_is_reported_whichever_event_brings_it`,
+`a_claude_stop_ends_a_child_the_provider_no_longer_lists`,
+`a_claude_stop_keeps_every_child_the_provider_lists`,
+`a_claude_stop_without_a_usable_list_ends_nothing`,
+`a_claude_stop_keeps_a_child_that_worked_after_it`,
+`a_claude_stop_applies_beside_a_child_set_it_cannot_change` and
 `readme_hook_blocks_register_exactly_the_described_rows` in the Rust
 integration suites, and the shared children coverage cases in
 `tests/fixtures/v2/protocol-cases.json`, which the Rust reader, the Lua reader
