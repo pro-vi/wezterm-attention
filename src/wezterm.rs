@@ -133,13 +133,14 @@ pub struct PaneProcessSet {
     codex_servers: Vec<CodexServer>,
 }
 
-/// A Codex shared background server, `codex app-server ... --managed-daemon`.
+/// A Codex shared background server, `codex app-server ... --managed-daemon`
+/// as of Codex 0.157.1.
 /// A Codex session that joins one runs its hooks in it, in no pane and with
 /// the environment of the terminal that started it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodexServer {
     /// The `CODEX_HOME` whose hooks it runs: its own `CODEX_HOME`, else
-    /// `.codex` under its `HOME`, as Codex resolves it. `None` when its
+    /// `.codex` under its `HOME`, as Codex 0.157.1 resolves it. `None` when its
     /// environment names neither.
     pub codex_home: Option<PathBuf>,
 }

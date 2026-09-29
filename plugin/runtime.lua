@@ -394,8 +394,8 @@ return function()
           failure = "it gave no answer; the attention command in " .. root
             .. " may predate this plugin, so run scripts/install-cli.sh there"
           kind, passing = "exited_silent", true
-          -- The log line alone went unread while focus and Alt+B stopped
-          -- working, so the focused tab says so until a command answers.
+          -- A log line alone goes unread while focus and Alt+B stop working,
+          -- so the focused tab says so until a command answers.
           M._writer_outdated = true
         else
           failure, kind, passing = "it gave no answer", "silent", true

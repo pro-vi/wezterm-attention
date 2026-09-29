@@ -368,8 +368,8 @@ pub fn doctor_with_environment(
 /// Whether a Codex shared server runs for a `CODEX_HOME` whose hooks call
 /// Attention. A session that joins one runs its hooks in the server, which is
 /// in no pane, so each of its events is refused and its tab shows nothing,
-/// and Codex does not show the refusal. A server whose `CODEX_HOME` cannot be
-/// told is reported too. With no server running there is nothing to check.
+/// and Codex 0.157.1 does not show the refusal. A server whose `CODEX_HOME`
+/// cannot be told is reported too. With no server running there is nothing to check.
 fn codex_server_probe(
     processes: Option<&dyn ProcessProbe>,
     diagnostics: &mut Vec<Diagnostic>,

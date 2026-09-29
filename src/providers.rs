@@ -1142,10 +1142,11 @@ fn parse_run_observation(
                 })
                 .transpose()?,
         },
-        // One kind, two meanings. Claude sends StopFailure instead of Stop, so
-        // for Claude this ends the turn. Pi still sends agent_settled after a
-        // failed or aborted message_end, and can retry an error first, so for
-        // Pi it does not. The consumer guide lists the turn-end kinds.
+        // One kind, two meanings. Claude Code 2.1.284 sends StopFailure instead
+        // of Stop, so for Claude this ends the turn. Pi 0.85.1 still sends
+        // agent_settled after a failed or aborted message_end, and can retry an
+        // error first, so for Pi it does not. The consumer guide lists the
+        // turn-end kinds.
         "StopFailure" => ObservationBody::AttemptOutcome {
             outcome: AttemptOutcome::Failed,
             error_category: optional_observation_enum(payload, "error", "error_category")?,
