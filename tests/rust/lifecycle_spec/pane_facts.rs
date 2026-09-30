@@ -186,7 +186,10 @@ fn inspector_rechecks_socket_and_preserves_unbound_optionality() {
     )
     .unwrap();
     assert_eq!(facts.scope_relation, ScopeRelation::Unavailable);
-    assert_eq!(facts.diagnostics[0].code, "incarnation_changed");
+    assert_eq!(
+        facts.diagnostics[0].code,
+        DiagnosticCode::IncarnationChanged
+    );
     assert_eq!(
         facts.activity.availability,
         A::Unavailable,

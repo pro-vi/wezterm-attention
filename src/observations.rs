@@ -4,7 +4,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::identity::PaneAddress;
-use crate::protocol::{AttentionError, Result, manifest, vocabulary};
+use crate::protocol::{AttentionError, DiagnosticCode, Result, manifest, vocabulary};
 
 // Defined in `protocol` because the manifest's tool classification is written in
 // them: a closed vocabulary the contract declares belongs with the contract.
@@ -304,8 +304,11 @@ impl LifecycleView {
                 && view.diagnostics.len() < 8
             {
                 view.diagnostics.push(
-                    AttentionError::new("clock_skew", "lifecycle write time is ahead of UTC")
-                        .diagnostic,
+                    AttentionError::new(
+                        DiagnosticCode::ClockSkew,
+                        "lifecycle write time is ahead of UTC",
+                    )
+                    .diagnostic,
                 );
             }
         }
@@ -344,7 +347,7 @@ fn reconcile_children(
     let conflict = |diagnostics: &mut Vec<crate::protocol::Diagnostic>| {
         if diagnostics.len() < 8 {
             diagnostics.push(crate::protocol::Diagnostic::new(
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 "the two lifecycle snapshots disagree about one observation",
             ));
         }
@@ -721,7 +724,10 @@ pub fn classify_tool(provider: &str, name: &str) -> (ToolClass, Option<QuestionM
 }
 
 fn invalid() -> AttentionError {
-    AttentionError::new("record_invalid", "lifecycle evidence violates its contract")
+    AttentionError::new(
+        DiagnosticCode::RecordInvalid,
+        "lifecycle evidence violates its contract",
+    )
 }
 
 impl LifecycleSnapshot {

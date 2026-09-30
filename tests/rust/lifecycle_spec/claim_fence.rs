@@ -103,7 +103,7 @@ fn every_writer_waits_for_the_pane_claim_lock() {
                     })
                     .expect("the test holds the claim lock");
                     match outcome {
-                        Err(error) if error.diagnostic.code == "probe_unavailable" => {
+                        Err(error) if error.diagnostic.code == DiagnosticCode::ProbeUnavailable => {
                             (records(&setup) != before)
                                 .then(|| format!("{label}: wrote while waiting"))
                         }

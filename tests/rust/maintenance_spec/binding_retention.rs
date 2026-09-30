@@ -40,7 +40,11 @@ fn the_retention_preview_says_keep_where_apply_would_keep() {
     fs::write(old_dir.join("notes.txt"), "keep me").expect("unknown file");
     let (preview, diagnostics) = setup.run_sweep(false, None);
     assert_eq!(retention_actions(&preview.details), [json!("keep")]);
-    assert!(diagnostics.iter().any(|d| d.code == "record_invalid"));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::RecordInvalid)
+    );
     let (applied, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000921"));
     assert!(retention_actions(&applied.details).is_empty());
     assert!(old_dir.exists());

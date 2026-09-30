@@ -24,7 +24,7 @@ struct UnansweredPanes;
 impl PaneLister for UnansweredPanes {
     fn list(&self, _socket_path: &str) -> wezterm_attention::protocol::Result<Vec<PaneRow>> {
         Err(AttentionError::new(
-            "realm_unavailable",
+            DiagnosticCode::RealmUnavailable,
             "wezterm cli list via /fake/wezterm exited with status 3",
         ))
     }
@@ -411,7 +411,7 @@ fn a_tab_order_pane_whose_mux_does_not_answer_leaves_sweep_incomplete() {
 }
 
 /// A pane lister whose `wezterm cli list` fails with `code`.
-struct FailingPanes(&'static str);
+struct FailingPanes(DiagnosticCode);
 
 impl PaneLister for FailingPanes {
     fn list(&self, _socket_path: &str) -> wezterm_attention::protocol::Result<Vec<PaneRow>> {
@@ -424,7 +424,10 @@ impl PaneLister for FailingPanes {
 /// incomplete exactly as the pane's binding does.
 #[test]
 fn a_failed_listing_leaves_a_tab_order_undecided_as_it_does_a_binding() {
-    for code in ["realm_unavailable", "record_invalid"] {
+    for code in [
+        DiagnosticCode::RealmUnavailable,
+        DiagnosticCode::RecordInvalid,
+    ] {
         let setup = Setup::new();
         setup.claim_and_bind();
         let (address, _) = pane_address(&setup.env).expect("address");
@@ -443,7 +446,8 @@ fn a_failed_listing_leaves_a_tab_order_undecided_as_it_does_a_binding() {
             .expect("sweep");
             let undecided = |named: &str| {
                 diagnostics.iter().any(|item| {
-                    item.code == "probe_unavailable" && item.context.contains_key(named)
+                    item.code == DiagnosticCode::ProbeUnavailable
+                        && item.context.contains_key(named)
                 })
             };
             assert!(undecided("binding_id"), "{code}: {diagnostics:?}");
@@ -491,7 +495,7 @@ fn an_apply_asks_an_unanswered_socket_once() {
     assert!(
         diagnostics
             .iter()
-            .any(|item| item.code == "probe_unavailable")
+            .any(|item| item.code == DiagnosticCode::ProbeUnavailable)
     );
     assert_eq!(panes.0.load(Ordering::SeqCst), 1);
 }
@@ -641,7 +645,7 @@ fn every_reader_calls_a_removed_socket_gone() {
         Some(&setup.processes),
     )
     .expect_err("bindings --socket");
-    assert_eq!(error.diagnostic.code, "socket_gone");
+    assert_eq!(error.diagnostic.code, DiagnosticCode::SocketGone);
     let lister = WindowLister(|_: &str| Ok(std::collections::BTreeSet::from([0])));
     let (windows, _) = read_checked_tab_publications(&root, &lister, &setup.clock).expect("tabs");
     assert!(
@@ -853,7 +857,7 @@ fn tabs_reads_an_exited_guis_stale_socket_as_gone() {
         setup.stop_listening();
         let lister = WindowLister(|_: &str| {
             Err(AttentionError::new(
-                "realm_unavailable",
+                DiagnosticCode::RealmUnavailable,
                 "wezterm cli list via /fake/wezterm exited with status 3",
             ))
         });

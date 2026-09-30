@@ -12,7 +12,8 @@ use uuid::Uuid;
 
 use crate::identity::PaneAddress;
 use crate::protocol::{
-    AttentionError, Diagnostic, Manifest, Result, free_of_control, manifest, validate_record,
+    AttentionError, Diagnostic, DiagnosticCode, Manifest, Result, free_of_control, manifest,
+    validate_record,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -136,12 +137,21 @@ impl RecordIdentity {
     pub fn from_state_path(root: &Path, path: &Path, kind: &str) -> Result<Self> {
         let parts: Vec<_> = path
             .strip_prefix(root)
-            .map_err(|_| AttentionError::new("record_invalid", "state path is outside its root"))?
+            .map_err(|_| {
+                AttentionError::new(
+                    DiagnosticCode::RecordInvalid,
+                    "state path is outside its root",
+                )
+            })?
             .iter()
             .map(|part| part.to_str())
             .collect();
-        let invalid =
-            || AttentionError::new("record_invalid", "state record path has the wrong shape");
+        let invalid = || {
+            AttentionError::new(
+                DiagnosticCode::RecordInvalid,
+                "state record path has the wrong shape",
+            )
+        };
         if parts.first() == Some(&Some("v2")) && parts.get(1) == Some(&Some("sessions")) {
             // The index names each entry by what it holds, which the reader
             // checks; the path fixes no field of the record.
@@ -192,7 +202,7 @@ impl RecordIdentity {
     pub fn path(&self, root: &Path, kind: &str) -> Result<PathBuf> {
         let unplaced = || {
             AttentionError::new(
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 format!("a {kind} record has no place for this identity"),
             )
         };
@@ -272,7 +282,7 @@ impl RecordIdentity {
             Ok(())
         } else {
             Err(AttentionError::new(
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 "state record identity does not match its path",
             ))
         }
@@ -564,7 +574,7 @@ pub fn state_root(env: &BTreeMap<String, String>) -> Result<PathBuf> {
         && env[name] == NOT_UTF8
     {
         return Err(AttentionError::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             format!("{name} is not UTF-8"),
         ));
     }
@@ -582,7 +592,7 @@ pub fn state_root(env: &BTreeMap<String, String>) -> Result<PathBuf> {
     }
     let home = env
         .get("HOME")
-        .ok_or_else(|| AttentionError::new("record_invalid", "HOME is missing"))?;
+        .ok_or_else(|| AttentionError::new(DiagnosticCode::RecordInvalid, "HOME is missing"))?;
     Ok(absolute_path(home, "HOME")?.join(".local/state/wezterm-attention"))
 }
 
@@ -593,7 +603,7 @@ fn absolute_path(value: &str, name: &str) -> Result<PathBuf> {
         || !Path::new(value).is_absolute()
     {
         return Err(AttentionError::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             format!("{name} must be an absolute safe path"),
         ));
     }
@@ -719,7 +729,8 @@ pub fn session_entry_path(
 
 /// A binding record's session index entry and where it goes.
 pub fn binding_session_entry(root: &Path, binding: &Value) -> Result<(PathBuf, Value)> {
-    let invalid = || AttentionError::new("record_invalid", "binding record is invalid");
+    let invalid =
+        || AttentionError::new(DiagnosticCode::RecordInvalid, "binding record is invalid");
     let text = |field: &str| {
         binding
             .get(field)
@@ -807,7 +818,10 @@ pub fn mkdir_private(path: &Path) -> Result<()> {
     while !cursor.exists() {
         missing.push(cursor.to_path_buf());
         cursor = cursor.parent().ok_or_else(|| {
-            AttentionError::new("state_permissions", "state path has no existing ancestor")
+            AttentionError::new(
+                DiagnosticCode::StatePermissions,
+                "state path has no existing ancestor",
+            )
         })?;
     }
     for directory in missing.iter().rev() {
@@ -820,21 +834,21 @@ pub fn mkdir_private(path: &Path) -> Result<()> {
                 if error.kind() == std::io::ErrorKind::AlreadyExists && directory.is_dir() => {}
             Err(_) => {
                 return Err(AttentionError::new(
-                    "state_permissions",
+                    DiagnosticCode::StatePermissions,
                     "state directory could not be created",
                 ));
             }
         }
         fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).map_err(|_| {
             AttentionError::new(
-                "state_permissions",
+                DiagnosticCode::StatePermissions,
                 "state directory permissions could not be set",
             )
         })?;
     }
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|_| {
         AttentionError::new(
-            "state_permissions",
+            DiagnosticCode::StatePermissions,
             "state directory permissions could not be set",
         )
     })
@@ -867,7 +881,7 @@ fn sync_parent_directory_with(
     };
     sync(&directory).map_err(|_| {
         AttentionError::new(
-            "state_permissions",
+            DiagnosticCode::StatePermissions,
             "state directory could not be made durable",
         )
     })
@@ -1044,7 +1058,7 @@ impl RecordReader for FileRecords {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
             Err(_) => {
                 return Err(AttentionError::new(
-                    "probe_unavailable",
+                    DiagnosticCode::ProbeUnavailable,
                     "record directory could not be enumerated",
                 ));
             }
@@ -1052,17 +1066,23 @@ impl RecordReader for FileRecords {
         let mut paths = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|_| {
-                AttentionError::new("probe_unavailable", "record directory entry is unavailable")
+                AttentionError::new(
+                    DiagnosticCode::ProbeUnavailable,
+                    "record directory entry is unavailable",
+                )
             })?;
             if entry.path().extension().and_then(|v| v.to_str()) != Some("json") {
                 continue;
             }
             let kind = entry.file_type().map_err(|_| {
-                AttentionError::new("probe_unavailable", "record entry type is unavailable")
+                AttentionError::new(
+                    DiagnosticCode::ProbeUnavailable,
+                    "record entry type is unavailable",
+                )
             })?;
             if kind.is_symlink() {
                 return Err(AttentionError::new(
-                    "record_invalid",
+                    DiagnosticCode::RecordInvalid,
                     "record collection contains a symlink",
                 ));
             }
@@ -1083,7 +1103,7 @@ pub fn read_record_typed(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return RecordRead::Missing,
         Err(_) => {
             return RecordRead::Unavailable(AttentionError::new(
-                "probe_unavailable",
+                DiagnosticCode::ProbeUnavailable,
                 "state record could not be read",
             ));
         }
@@ -1095,13 +1115,15 @@ pub fn read_record_typed(
     let maximum = read_bound(protocol, expected_kind);
     let Ok(bytes) = read_bounded(file, maximum) else {
         return RecordRead::Unavailable(AttentionError::new(
-            "probe_unavailable",
+            DiagnosticCode::ProbeUnavailable,
             "state record could not be read",
         ));
     };
     match decode_record(&bytes, maximum, expected_kind, expected_identity) {
         Ok(value) => RecordRead::Present(value),
-        Err(error) if error.diagnostic.code == "future_schema" => RecordRead::Unsupported(error),
+        Err(error) if error.diagnostic.code == DiagnosticCode::FutureSchema => {
+            RecordRead::Unsupported(error)
+        }
         Err(error) => RecordRead::Invalid(error),
     }
 }
@@ -1125,7 +1147,7 @@ fn decode_record(
 ) -> Result<Value> {
     if bytes.len() > maximum {
         return Err(AttentionError::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "state record exceeds its bound",
         ));
     }
@@ -1133,17 +1155,18 @@ fn decode_record(
         && !crate::protocol::bounded_lifecycle_json(bytes)
     {
         return Err(AttentionError::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "lifecycle JSON nesting exceeds its bound",
         ));
     }
-    let value: Value = serde_json::from_slice(bytes)
-        .map_err(|_| AttentionError::new("record_invalid", "state record is invalid"))?;
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| {
+        AttentionError::new(DiagnosticCode::RecordInvalid, "state record is invalid")
+    })?;
     if let Some(kind) = expected_kind {
         validate_record(&value, Some(kind))?;
     } else if !value.is_object() {
         return Err(AttentionError::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "state value is not an object",
         ));
     }
@@ -1167,7 +1190,7 @@ pub(crate) fn within_read_bound(value: &Value) -> Result<()> {
     let kind = value.get("kind").and_then(Value::as_str);
     if canonical_json(value)?.len() > read_bound(manifest()?, kind) {
         return Err(AttentionError::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "state record is larger than its readers accept",
         ));
     }
@@ -1202,9 +1225,9 @@ impl PreparedRecordWrite {
 }
 
 fn atomic_replace_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| AttentionError::new("state_permissions", "state path has no parent"))?;
+    let parent = path.parent().ok_or_else(|| {
+        AttentionError::new(DiagnosticCode::StatePermissions, "state path has no parent")
+    })?;
     mkdir_private(parent)?;
     let temporary = parent.join(format!(
         ".{}.{}",
@@ -1221,7 +1244,7 @@ fn atomic_replace_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
             .open(&temporary)
             .map_err(|_| {
                 AttentionError::new(
-                    "state_permissions",
+                    DiagnosticCode::StatePermissions,
                     "temporary state record could not be created",
                 )
             })?;
@@ -1229,16 +1252,19 @@ fn atomic_replace_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
             .and_then(|()| sync_via_fsync(&file))
             .map_err(|_| {
                 AttentionError::new(
-                    "state_permissions",
+                    DiagnosticCode::StatePermissions,
                     "state record could not be made durable",
                 )
             })?;
         fs::rename(&temporary, path).map_err(|_| {
-            AttentionError::new("state_permissions", "state record could not be replaced")
+            AttentionError::new(
+                DiagnosticCode::StatePermissions,
+                "state record could not be replaced",
+            )
         })?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|_| {
             AttentionError::new(
-                "state_permissions",
+                DiagnosticCode::StatePermissions,
                 "state record permissions could not be set",
             )
         })?;
@@ -1279,7 +1305,7 @@ pub fn remove_file_durable(path: &Path) -> Result<bool> {
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(_) => Err(AttentionError::new(
-            "state_permissions",
+            DiagnosticCode::StatePermissions,
             "state record could not be removed",
         )),
     }
@@ -1322,7 +1348,10 @@ fn remove_path_durable(path: &Path) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
             fs::remove_dir_all(path).map_err(|_| {
-                AttentionError::new("state_permissions", "state directory could not be removed")
+                AttentionError::new(
+                    DiagnosticCode::StatePermissions,
+                    "state directory could not be removed",
+                )
             })?;
             if let Some(parent) = path.parent() {
                 sync_parent_directory(parent)?;
@@ -1332,7 +1361,7 @@ fn remove_path_durable(path: &Path) -> Result<bool> {
         Ok(_) => remove_file_durable(path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(_) => Err(AttentionError::new(
-            "state_permissions",
+            DiagnosticCode::StatePermissions,
             "state path could not be inspected",
         )),
     }
@@ -1372,9 +1401,9 @@ impl Drop for HeldLock {
 }
 
 fn acquire(path: &Path, timeout: Duration) -> Result<HeldLock> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| AttentionError::new("state_permissions", "lock path has no parent"))?;
+    let parent = path.parent().ok_or_else(|| {
+        AttentionError::new(DiagnosticCode::StatePermissions, "lock path has no parent")
+    })?;
     mkdir_private(parent)?;
     let file = OpenOptions::new()
         .read(true)
@@ -1383,7 +1412,12 @@ fn acquire(path: &Path, timeout: Duration) -> Result<HeldLock> {
         .truncate(false)
         .mode(0o600)
         .open(path)
-        .map_err(|_| AttentionError::new("state_permissions", "state lock could not be opened"))?;
+        .map_err(|_| {
+            AttentionError::new(
+                DiagnosticCode::StatePermissions,
+                "state lock could not be opened",
+            )
+        })?;
     let deadline = Instant::now() + timeout;
     loop {
         match file.try_lock() {
@@ -1392,7 +1426,7 @@ fn acquire(path: &Path, timeout: Duration) -> Result<HeldLock> {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
                     return Err(AttentionError::new(
-                        "probe_unavailable",
+                        DiagnosticCode::ProbeUnavailable,
                         "state lock timed out",
                     ));
                 }
@@ -1402,7 +1436,7 @@ fn acquire(path: &Path, timeout: Duration) -> Result<HeldLock> {
             }
             Err(std::fs::TryLockError::Error(_)) => {
                 return Err(AttentionError::new(
-                    "probe_unavailable",
+                    DiagnosticCode::ProbeUnavailable,
                     "state lock is unavailable",
                 ));
             }
@@ -1537,7 +1571,10 @@ pub(crate) fn collect_state_files(
 
 /// The diagnostic for a state path a walk could not read.
 pub(crate) fn unreadable_state(root: &Path, path: &Path) -> Diagnostic {
-    let mut item = Diagnostic::new("state_permissions", "state directory could not be read");
+    let mut item = Diagnostic::new(
+        DiagnosticCode::StatePermissions,
+        "state directory could not be read",
+    );
     name_path(&mut item, root, path);
     item
 }
@@ -1582,6 +1619,7 @@ pub(crate) fn record_address(record: &Value) -> Option<PaneAddress> {
 
 #[cfg(test)]
 mod tests {
+    use crate::protocol::DiagnosticCode;
     use std::io;
     use std::path::Path;
 
@@ -1809,6 +1847,6 @@ mod tests {
             Err(io::Error::from_raw_os_error(libc::EIO))
         })
         .expect_err("directory fsync failure must propagate");
-        assert_eq!(error.diagnostic.code, "state_permissions");
+        assert_eq!(error.diagnostic.code, DiagnosticCode::StatePermissions);
     }
 }

@@ -48,7 +48,9 @@ fn doctor_reports_a_directory_it_could_not_read() {
     let _hidden = hide_bindings(&setup);
     let (result, diagnostics) = setup.doctor();
     assert!(
-        diagnostics.iter().any(|d| d.code == "state_permissions"),
+        diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::StatePermissions),
         "{diagnostics:?}"
     );
     let probe = |name: &str| {
@@ -74,7 +76,9 @@ fn a_realm_wide_listing_says_rows_may_be_missing() {
             .expect("bindings");
     assert!(rows.is_empty());
     assert!(
-        diagnostics.iter().any(|d| d.code == "state_permissions"),
+        diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::StatePermissions),
         "{diagnostics:?}"
     );
 
@@ -97,7 +101,9 @@ fn sweep_reports_a_directory_it_could_not_read() {
     let _hidden = hide_bindings(&setup);
     let (_, diagnostics) = setup.run_sweep(false, None);
     assert!(
-        diagnostics.iter().any(|d| d.code == "state_permissions"),
+        diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::StatePermissions),
         "{diagnostics:?}"
     );
 }
@@ -141,7 +147,8 @@ fn a_socket_scoped_listing_names_the_directory_it_could_not_read() {
         assert!(
             diagnostics
                 .iter()
-                .any(|d| d.code == "state_permissions" && d.context.get("path") == Some(&expected)),
+                .any(|d| d.code == DiagnosticCode::StatePermissions
+                    && d.context.get("path") == Some(&expected)),
             "{mode}: {diagnostics:?}"
         );
     }

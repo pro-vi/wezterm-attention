@@ -233,7 +233,7 @@ fn typed_reads_distinguish_missing_io_invalid_and_future_without_changing_wrappe
             .unwrap_err()
             .diagnostic
             .code,
-        "probe_unavailable"
+        DiagnosticCode::ProbeUnavailable
     );
     fs::remove_dir(&file).unwrap();
     fs::write(&file, "invalid").unwrap();
@@ -315,7 +315,7 @@ fn bindings_socket_rebirth_discards_rows() {
         None,
     )
     .unwrap_err();
-    assert_eq!(error.diagnostic.code, "incarnation_changed");
+    assert_eq!(error.diagnostic.code, DiagnosticCode::IncarnationChanged);
     assert_eq!(error.exit_code, 1);
 }
 
@@ -604,7 +604,11 @@ fn realm_wide_diagnostics_are_counted_and_never_make_the_rows_incomplete() {
     .unwrap();
     let (_, rows, diagnostics) = query(&setup);
     assert_eq!(rows.len(), 1);
-    assert!(diagnostics.iter().any(|d| d.code == "probe_unavailable"));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::ProbeUnavailable)
+    );
 }
 
 #[test]
@@ -693,8 +697,16 @@ fn a_record_failure_cannot_hide_another_rows_unavailable_probe() {
     .unwrap();
     let (_, rows, diagnostics) = query(&setup);
     assert_eq!(rows.len(), 1);
-    assert!(diagnostics.iter().any(|d| d.code == "record_invalid"));
-    assert!(diagnostics.iter().any(|d| d.code == "probe_unavailable"));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::RecordInvalid)
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::ProbeUnavailable)
+    );
 }
 
 /// Offers one listing of every process, and counts how it is asked.

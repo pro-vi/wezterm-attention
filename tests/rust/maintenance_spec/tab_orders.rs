@@ -39,7 +39,11 @@ fn tab_text_with_any_control_character_is_refused() {
         vec![1]
     );
     assert_eq!(diagnostics.len(), 4, "{diagnostics:?}");
-    assert!(diagnostics.iter().all(|d| d.code == "record_invalid"));
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.code == DiagnosticCode::RecordInvalid)
+    );
 }
 
 /// A tab order names its GUI source only from schema 2 on, and names it in
@@ -71,7 +75,11 @@ fn a_null_tab_source_is_refused_in_either_schema() {
         vec![9]
     );
     assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
-    assert!(diagnostics.iter().all(|d| d.code == "record_invalid"));
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.code == DiagnosticCode::RecordInvalid)
+    );
 }
 
 /// A `tabs/` that is a symlink points the tab-order collection at a directory
@@ -96,10 +104,14 @@ fn a_symlinked_tabs_directory_is_refused_and_nothing_behind_it_is_deleted() {
             .iter()
             .all(|detail| detail["kind"] != "tab_order_collection")
     );
-    assert!(diagnostics.iter().any(|d| d.code == "record_invalid"));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::RecordInvalid)
+    );
 
     let error = read_tab_publications(&root).expect_err("a symlinked tabs directory");
-    assert_eq!(error.diagnostic.code, "record_invalid");
+    assert_eq!(error.diagnostic.code, DiagnosticCode::RecordInvalid);
 }
 
 /// Lists the fixture's pane, and rewrites one tab order the first time it is
@@ -187,12 +199,14 @@ fn a_tab_order_naming_a_pane_of_a_gone_socket_is_kept_and_named() {
             .expect("tab order detail");
         assert_eq!(detail["action"], "keep");
         assert!(
-            !diagnostics.iter().any(|d| d.code == "probe_unavailable"),
+            !diagnostics
+                .iter()
+                .any(|d| d.code == DiagnosticCode::ProbeUnavailable),
             "{diagnostics:?}"
         );
         let gone: Vec<_> = diagnostics
             .iter()
-            .filter(|d| d.code == "socket_gone")
+            .filter(|d| d.code == DiagnosticCode::SocketGone)
             .collect();
         assert_eq!(gone.len(), 1, "{diagnostics:?}");
         assert_eq!(

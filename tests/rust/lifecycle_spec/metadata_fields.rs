@@ -25,7 +25,7 @@ fn a_bad_optional_field_is_dropped_and_the_event_kept() {
         .diagnostic
         .clone()
         .expect("the dropped fields are named");
-    assert_eq!(diagnostic.code, "record_invalid");
+    assert_eq!(diagnostic.code, DiagnosticCode::RecordInvalid);
     assert_eq!(
         diagnostic.context["dropped_fields"],
         json!(["cwd", "CLAUDE_CONFIG_DIR", "model"])

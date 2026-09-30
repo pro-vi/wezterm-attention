@@ -125,7 +125,11 @@ fn retention_keeps_a_binding_holding_another_bindings_record() {
     .expect("foreign record");
     let (_, diagnostics) = setup.run_sweep(true, Some(OP_1));
     assert!(old_dir.exists());
-    assert!(diagnostics.iter().any(|d| d.code == "record_invalid"));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::RecordInvalid)
+    );
 }
 
 /// Lists no panes, and on its first call starts a new launch in the pane, as
@@ -186,7 +190,11 @@ fn pane_retention_keeps_a_pane_claimed_again_during_the_decision() {
     )
     .expect("sweep");
     assert!(pane.join("claim.json").exists(), "{:?}", result.details);
-    assert!(diagnostics.iter().any(|d| d.code == "record_invalid"));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::RecordInvalid)
+    );
 }
 
 /// Moves the state root's `v2/` outside it and leaves a symlink in its place.
@@ -222,7 +230,11 @@ fn an_absence_probe_is_never_cleared_through_a_symlinked_state_directory() {
     }]);
     let (result, diagnostics) = setup.run_sweep(true, Some(OP_2));
     assert!(outside.join(&relative).exists(), "{diagnostics:?}");
-    assert!(diagnostics.iter().any(|d| d.code == "record_invalid"));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::RecordInvalid)
+    );
     assert_eq!(
         super::pane_retention::actions(&result.details, "absence"),
         [&json!("keep")]
@@ -257,7 +269,11 @@ fn a_retention_probe_is_never_cleared_through_a_symlinked_state_directory() {
     }]);
     let (result, diagnostics) = setup.run_sweep(true, Some(OP_2));
     assert!(outside.join(&relative).exists(), "{diagnostics:?}");
-    assert!(diagnostics.iter().any(|d| d.code == "record_invalid"));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::RecordInvalid)
+    );
     assert_eq!(
         super::pane_retention::actions(&result.details, "pane_retention"),
         [&json!("keep")]

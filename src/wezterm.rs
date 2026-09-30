@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 use crate::identity::{
     PaneAddress, monotonic_ns20, tty_fingerprint, tty_fingerprint_from_metadata,
 };
-use crate::protocol::{AttentionError, Result, Verdict, manifest, parse_wire_value};
+use crate::protocol::{
+    AttentionError, DiagnosticCode, Result, Verdict, manifest, parse_wire_value,
+};
 
 pub trait Clock: Send + Sync {
     fn monotonic_ns20(&self) -> Result<String>;
@@ -56,7 +58,7 @@ pub fn parse_gui_window_ids(bytes: &[u8]) -> Result<BTreeSet<u64>> {
     }
     let invalid = || {
         AttentionError::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "GUI inventory contains invalid pane or window identities",
         )
     };
@@ -580,7 +582,9 @@ impl Clock for SystemClock {
     fn unix_ns20(&self) -> Result<String> {
         let duration = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| AttentionError::new("clock_skew", "wall clock precedes Unix epoch"))?;
+            .map_err(|_| {
+                AttentionError::new(DiagnosticCode::ClockSkew, "wall clock precedes Unix epoch")
+            })?;
         Ok(format!("{:020}", duration.as_nanos()))
     }
 }
@@ -671,13 +675,16 @@ fn cut_sequence_closing(data: &[u8], written: usize) -> &'static [u8] {
 
 impl SystemTtyWriter {
     pub fn validate_opened(file: &File, expected_fingerprint: &str) -> Result<()> {
-        let metadata = file
-            .metadata()
-            .map_err(|_| AttentionError::new("unsafe_tty", "opened tty could not be inspected"))?;
+        let metadata = file.metadata().map_err(|_| {
+            AttentionError::new(
+                DiagnosticCode::UnsafeTty,
+                "opened tty could not be inspected",
+            )
+        })?;
         let actual = tty_fingerprint_from_metadata(&metadata)?;
         if actual != expected_fingerprint {
             return Err(AttentionError::new(
-                "unsafe_tty",
+                DiagnosticCode::UnsafeTty,
                 "opened tty identity does not match validation",
             ));
         }
@@ -693,16 +700,20 @@ impl SystemTtyWriter {
     ) -> Result<()> {
         if tty_fingerprint(path)? != expected_fingerprint {
             return Err(AttentionError::new(
-                "unsafe_tty",
+                DiagnosticCode::UnsafeTty,
                 "tty identity changed before publication",
             ));
         }
         let mut file = open(path).map_err(|_| {
-            AttentionError::new("unsafe_tty", "tty could not be opened for publication")
+            AttentionError::new(
+                DiagnosticCode::UnsafeTty,
+                "tty could not be opened for publication",
+            )
         })?;
         Self::validate_opened(&file, expected_fingerprint)?;
-        write_tty_with_deadline(&mut file, data)
-            .map_err(|_| AttentionError::new("unsafe_tty", "tty publication was incomplete"))
+        write_tty_with_deadline(&mut file, data).map_err(|_| {
+            AttentionError::new(DiagnosticCode::UnsafeTty, "tty publication was incomplete")
+        })
     }
 }
 
@@ -718,7 +729,10 @@ impl TtyWriter for SystemTtyWriter {
             .custom_flags(libc::O_NOCTTY | libc::O_CLOEXEC)
             .open("/dev/tty")
             .map_err(|_| {
-                AttentionError::new("unsafe_tty", "controlling terminal is unavailable")
+                AttentionError::new(
+                    DiagnosticCode::UnsafeTty,
+                    "controlling terminal is unavailable",
+                )
             })?;
         tty_name_for_fd(terminal.as_raw_fd())
     }
@@ -738,7 +752,8 @@ impl TtyWriter for SystemTtyWriter {
 }
 
 fn tty_name_for_fd(fd: libc::c_int) -> Result<String> {
-    ttyname(fd).ok_or_else(|| AttentionError::new("unsafe_tty", "stdin is not a terminal"))?
+    ttyname(fd)
+        .ok_or_else(|| AttentionError::new(DiagnosticCode::UnsafeTty, "stdin is not a terminal"))?
 }
 
 /// The terminal path behind `fd`, or `None` when it is not a terminal.
@@ -759,7 +774,7 @@ fn ttyname(fd: libc::c_int) -> Option<Result<String>> {
     buffer.truncate(length);
     Some(
         String::from_utf8(buffer)
-            .map_err(|_| AttentionError::new("unsafe_tty", "tty path is not UTF-8")),
+            .map_err(|_| AttentionError::new(DiagnosticCode::UnsafeTty, "tty path is not UTF-8")),
     )
 }
 
@@ -911,7 +926,7 @@ pub fn resolve_wezterm_executable(
         }
     }
     Err(AttentionError::new(
-        "realm_unavailable",
+        DiagnosticCode::RealmUnavailable,
         "wezterm executable was not found",
     ))
 }
@@ -930,12 +945,15 @@ pub fn wezterm_executable() -> Result<PathBuf> {
 pub fn parse_pane_rows(bytes: &[u8]) -> Result<Vec<PaneRow>> {
     if bytes.len() > manifest()?.limits.max_json_bytes {
         return Err(AttentionError::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "wezterm cli list exceeded its JSON bound",
         ));
     }
     serde_json::from_slice::<Vec<PaneRow>>(bytes).map_err(|_| {
-        AttentionError::new("record_invalid", "wezterm cli list returned malformed rows")
+        AttentionError::new(
+            DiagnosticCode::RecordInvalid,
+            "wezterm cli list returned malformed rows",
+        )
     })
 }
 
@@ -1053,8 +1071,8 @@ fn list_wezterm_inventory(socket_path: &str) -> Result<Vec<u8>> {
         .env("WEZTERM_UNIX_SOCKET", socket_path);
     run_bounded(&mut command, maximum, CHILD_DEADLINE).map_err(|failure| {
         let code = match failure {
-            RunFailure::TooLarge => "record_invalid",
-            _ => "realm_unavailable",
+            RunFailure::TooLarge => DiagnosticCode::RecordInvalid,
+            _ => DiagnosticCode::RealmUnavailable,
         };
         AttentionError::new(
             code,
@@ -1466,7 +1484,7 @@ pub fn publication_bytes(address: &PaneAddress, launch_id: Option<&str>) -> Resu
         });
         if parse_wire_value(&wire, manifest()?) != Verdict::Valid {
             return Err(AttentionError::new(
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 "outgoing publication does not match the wire manifest",
             ));
         }
@@ -1475,7 +1493,7 @@ pub fn publication_bytes(address: &PaneAddress, launch_id: Option<&str>) -> Resu
     }
     if bytes.len() > 8192 {
         return Err(AttentionError::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "OSC publication exceeds its 8192-byte bound",
         ));
     }
@@ -1483,11 +1501,13 @@ pub fn publication_bytes(address: &PaneAddress, launch_id: Option<&str>) -> Resu
 }
 
 pub fn tty_path_from_fd(fd: libc::c_int) -> Result<String> {
-    ttyname(fd).ok_or_else(|| AttentionError::new("unsafe_tty", "descriptor is not a tty"))?
+    ttyname(fd)
+        .ok_or_else(|| AttentionError::new(DiagnosticCode::UnsafeTty, "descriptor is not a tty"))?
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::protocol::DiagnosticCode;
     use std::fs::OpenOptions;
     use std::path::PathBuf;
 
@@ -2206,7 +2226,7 @@ mod tests {
                 OpenOptions::new().write(true).open(&second_path)
             })
             .expect_err("write must reject a substituted descriptor");
-        assert_eq!(error.diagnostic.code, "unsafe_tty");
+        assert_eq!(error.diagnostic.code, DiagnosticCode::UnsafeTty);
         unsafe {
             libc::close(first_master);
             libc::close(first_slave);

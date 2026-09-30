@@ -96,7 +96,7 @@ fn the_user_source_is_reserved_for_the_plugin() {
         apply_mark_review(&setup.env, "user").unwrap_err(),
         apply_mark_clear(&setup.env, "user", "00000000000000000300").unwrap_err(),
     ] {
-        assert_eq!(error.diagnostic.code, "bad_usage");
+        assert_eq!(error.diagnostic.code, DiagnosticCode::BadUsage);
     }
     apply_mark_review(&setup.env, "pi-bus").expect("pi-bus stays usable");
 }

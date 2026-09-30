@@ -70,10 +70,10 @@ fn c1_controls_are_refused_by_every_writer_text_check() {
             "00000000012345678900",
         )
         .expect_err("a C1 label is refused");
-        assert_eq!(mark.diagnostic.code, "bad_usage");
+        assert_eq!(mark.diagnostic.code, DiagnosticCode::BadUsage);
         let review = apply_mark_review(&setup.env, &format!("owner{control}"))
             .expect_err("a C1 source is refused");
-        assert_eq!(review.diagnostic.code, "bad_usage");
+        assert_eq!(review.diagnostic.code, DiagnosticCode::BadUsage);
 
         let mut environment = setup.env.clone();
         environment.insert(

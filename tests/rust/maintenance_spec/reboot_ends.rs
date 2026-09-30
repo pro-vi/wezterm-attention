@@ -165,7 +165,7 @@ fn a_binding_ended_after_a_reboot_is_no_rival_for_its_session() {
     assert!(
         !diagnostics
             .iter()
-            .any(|item| item.code == "binding_conflict")
+            .any(|item| item.code == DiagnosticCode::BindingConflict)
     );
 
     let (_, socket_rows, _) = wezterm_attention::query::read_bindings_for_socket_with_ports(

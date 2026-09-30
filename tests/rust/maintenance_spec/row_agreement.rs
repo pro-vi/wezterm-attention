@@ -96,7 +96,12 @@ fn an_unreadable_record_beside_the_binding_is_a_diagnostic_not_binding_health() 
     assert_eq!(facts.binding_health, BindingHealth::Valid);
     assert_eq!(facts.reader_confidence, ReaderConfidence::Confirmed);
     assert!(!facts.complete(), "the unreadable review is still reported");
-    assert!(facts.diagnostics.iter().any(|d| d.code == "record_invalid"));
+    assert!(
+        facts
+            .diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::RecordInvalid)
+    );
 
     fs::write(setup.binding_dir().join("agents"), "not a directory").expect("agents");
     let facts = assert_agree(&setup, &scope);

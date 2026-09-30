@@ -21,7 +21,8 @@ use trusted_scratch::TrustedScratch;
 use uuid::Uuid;
 use wezterm_attention::identity::{length_prefixed_digest, pane_address};
 use wezterm_attention::protocol::{
-    EMBEDDED_MANIFEST, manifest, parse_manifest, parse_record_value, parse_wire_value,
+    DiagnosticCode, EMBEDDED_MANIFEST, manifest, parse_manifest, parse_record_value,
+    parse_wire_value,
 };
 use wezterm_attention::query::{read_bindings, read_bindings_with_ports};
 use wezterm_attention::records::{
@@ -57,7 +58,10 @@ fn c8_socket_rebirth_inside_realm_publication_is_rejected() {
     )
     .unwrap();
     assert_eq!(report.published, 0);
-    assert_eq!(report.diagnostics[0].code, "incarnation_changed");
+    assert_eq!(
+        report.diagnostics[0].code,
+        DiagnosticCode::IncarnationChanged
+    );
 }
 
 impl Scratch {
@@ -192,7 +196,7 @@ impl TtyWriter for FailingWriteTty {
         _expected_fingerprint: &str,
     ) -> wezterm_attention::protocol::Result<()> {
         Err(wezterm_attention::protocol::AttentionError::new(
-            "unsafe_tty",
+            DiagnosticCode::UnsafeTty,
             "test publication failure",
         ))
     }
@@ -313,7 +317,10 @@ fn manifest_rejects_unknown_field_type_at_load() {
     value["records"]["claim"]["types"]["kind"] = json!("unknown_type");
     let error = parse_manifest(&serde_json::to_string(&value).expect("manifest serialization"))
         .expect_err("unknown field type must fail at manifest load");
-    assert_eq!(error.diagnostic.code, "integration_version_mismatch");
+    assert_eq!(
+        error.diagnostic.code,
+        DiagnosticCode::IntegrationVersionMismatch
+    );
 }
 
 fn assign_path(value: &mut Value, dotted: &str, replacement: Value) {
@@ -480,7 +487,7 @@ fn an_unreadable_record_is_diagnosed_as_a_failed_probe_not_as_invalid_bytes() {
     let RecordRead::Unavailable(error) = read else {
         panic!("an unopenable record must read as unavailable");
     };
-    assert_eq!(error.diagnostic.code, "probe_unavailable");
+    assert_eq!(error.diagnostic.code, DiagnosticCode::ProbeUnavailable);
 }
 
 #[test]
@@ -490,7 +497,7 @@ fn pane_enumeration_accepts_numeric_ids_and_rejects_malformed_rows() {
     assert_eq!(rows[0].pane_id, "42");
     let error = parse_pane_rows(br#"[{"pane_id":42,"tty_name":7}]"#)
         .expect_err("malformed tty_name must make the probe unavailable");
-    assert_eq!(error.diagnostic.code, "record_invalid");
+    assert_eq!(error.diagnostic.code, DiagnosticCode::RecordInvalid);
 }
 
 #[test]
@@ -529,7 +536,7 @@ fn realm_publish_skips_only_the_row_without_a_tty() {
     assert_eq!(report.published, 1);
     assert_eq!(report.v2_published, 1);
     assert_eq!(report.skipped, 1);
-    assert_eq!(report.diagnostics[0].code, "unsafe_tty");
+    assert_eq!(report.diagnostics[0].code, DiagnosticCode::UnsafeTty);
 }
 
 #[test]
@@ -555,7 +562,7 @@ fn executable_resolution_rejects_a_fallback_below_a_group_writable_directory() {
     fs::set_permissions(&shared, fs::Permissions::from_mode(0o770)).expect("group-writable");
     let error = resolve_wezterm_executable(None, None, None, &[executable])
         .expect_err("a fallback below a group-writable directory must not be trusted");
-    assert_eq!(error.diagnostic.code, "realm_unavailable");
+    assert_eq!(error.diagnostic.code, DiagnosticCode::RealmUnavailable);
 }
 
 #[test]
@@ -583,7 +590,7 @@ fn the_cli_beside_a_running_mux_server_is_used_and_the_server_itself_never_is() 
         std::slice::from_ref(&server),
     )
     .expect_err("a mux server is never run in place of the CLI");
-    assert_eq!(error.diagnostic.code, "realm_unavailable");
+    assert_eq!(error.diagnostic.code, DiagnosticCode::RealmUnavailable);
 }
 
 #[test]
@@ -603,7 +610,7 @@ fn executable_resolution_skips_a_relative_path_entry() {
     );
     let error = resolve_wezterm_executable(Some(relative.as_os_str()), None, None, &[])
         .expect_err("a relative PATH entry is skipped");
-    assert_eq!(error.diagnostic.code, "realm_unavailable");
+    assert_eq!(error.diagnostic.code, DiagnosticCode::RealmUnavailable);
     let absolute = resolve_wezterm_executable(Some(scratch.0.as_os_str()), None, None, &[])
         .expect("the same directory as an absolute entry resolves");
     assert_eq!(absolute, cli);
@@ -838,7 +845,7 @@ fn socket_rebirth_before_commit_is_rejected_without_a_claim_write() {
     let clock = FixedClock("00000000000000000100");
     let error = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &this_pane()))
         .expect_err("socket rebirth must reject claim");
-    assert_eq!(error.diagnostic.code, "incarnation_changed");
+    assert_eq!(error.diagnostic.code, DiagnosticCode::IncarnationChanged);
     let old_claim =
         pane_dir(&state_root(&environment).expect("state root"), &old_address).join("claim.json");
     assert!(!old_claim.exists());
@@ -864,7 +871,7 @@ fn lock_contention_is_bounded_and_diagnosed() {
     entered.wait();
     let error = with_lock(&path, Duration::from_millis(25), || Ok(()))
         .expect_err("second lock must time out");
-    assert_eq!(error.diagnostic.code, "probe_unavailable");
+    assert_eq!(error.diagnostic.code, DiagnosticCode::ProbeUnavailable);
     release.wait();
     holder.join().expect("holder thread");
 }
@@ -905,7 +912,7 @@ fn opened_tty_descriptor_is_revalidated() {
     let second_file = unsafe { fs::File::from_raw_fd(second_slave) };
     let error = SystemTtyWriter::validate_opened(&second_file, &expected)
         .expect_err("opened second tty must not match first");
-    assert_eq!(error.diagnostic.code, "unsafe_tty");
+    assert_eq!(error.diagnostic.code, DiagnosticCode::UnsafeTty);
     unsafe {
         libc::close(first_master);
         libc::close(first_slave);
@@ -1142,7 +1149,7 @@ fn full_tty_output_queue_does_not_block_later_realm_panes() {
     assert_eq!(report.attempted, 2);
     assert_eq!(report.published, 1);
     assert_eq!(report.skipped, 1);
-    assert_eq!(report.diagnostics[0].code, "unsafe_tty");
+    assert_eq!(report.diagnostics[0].code, DiagnosticCode::UnsafeTty);
     let mut second_output = unsafe { fs::File::from_raw_fd(second_master) };
     let mut bytes = [0_u8; 4096];
     let count = second_output
@@ -1240,7 +1247,7 @@ fn bindings_query_returns_all_identity_axes_and_rejects_path_mismatch() {
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "record_invalid")
+            .any(|diagnostic| diagnostic.code == DiagnosticCode::RecordInvalid)
     );
 }
 
@@ -1296,7 +1303,7 @@ fn bindings_query_rejects_foreign_end_pointer_and_claim_records() {
     assert!(
         diagnostics
             .iter()
-            .filter(|item| item.code == "record_invalid")
+            .filter(|item| item.code == DiagnosticCode::RecordInvalid)
             .count()
             >= 3
     );
@@ -1500,7 +1507,7 @@ struct UnavailablePanes;
 impl PaneLister for UnavailablePanes {
     fn list(&self, _socket_path: &str) -> wezterm_attention::protocol::Result<Vec<PaneRow>> {
         Err(wezterm_attention::protocol::AttentionError::new(
-            "realm_unavailable",
+            DiagnosticCode::RealmUnavailable,
             "test listing failure",
         ))
     }
@@ -1522,14 +1529,14 @@ fn a_claim_from_a_terminal_other_than_the_pane_s_own_is_refused() {
     }]);
     let error = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &elsewhere))
         .expect_err("an inherited pane id must not claim from another terminal");
-    assert_eq!(error.diagnostic.code, "unsafe_tty");
+    assert_eq!(error.diagnostic.code, DiagnosticCode::UnsafeTty);
     let unlisted = FakePanes(vec![PaneRow {
         pane_id: "7".into(),
         tty_name: Some(tty.path.clone()),
     }]);
     let error = wezterm_attention::claim_launch(&environment, &ports(&clock, &tty, &unlisted))
         .expect_err("a pane its mux does not list must not be claimed");
-    assert_eq!(error.diagnostic.code, "unsafe_tty");
+    assert_eq!(error.diagnostic.code, DiagnosticCode::UnsafeTty);
     assert!(!claim_file(&environment).exists());
     assert!(tty.writes.lock().expect("writes lock").is_empty());
 }
@@ -1564,7 +1571,7 @@ fn without_a_listing_a_claim_inside_tmux_or_screen_is_refused_and_others_proceed
         if refused {
             assert_eq!(
                 result.expect_err("refused").diagnostic.code,
-                "unsafe_tty",
+                DiagnosticCode::UnsafeTty,
                 "{name}={value}"
             );
             assert!(!claim_file(&environment).exists());

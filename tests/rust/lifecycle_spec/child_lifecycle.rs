@@ -401,7 +401,11 @@ fn assembled(case: &str) -> Assembled {
             })
             .collect(),
         floors: view.retention_floors.into_iter().collect(),
-        diagnostics: view.diagnostics.into_iter().map(|d| d.code).collect(),
+        diagnostics: view
+            .diagnostics
+            .into_iter()
+            .map(|d| d.code.to_string())
+            .collect(),
         snapshot_id: view.snapshot_id,
     }
 }
@@ -657,7 +661,7 @@ fn inspect_shows_the_leads_evidence_past_a_corrupt_childrens_file_and_says_so() 
         "{:?}",
         lifecycle.diagnostics
     );
-    assert_eq!(lifecycle.diagnostics[0].code, "record_invalid");
+    assert_eq!(lifecycle.diagnostics[0].code, DiagnosticCode::RecordInvalid);
 }
 
 #[test]

@@ -562,7 +562,7 @@ fn a_restarted_child_set_is_reported_instead_of_the_events_own_diagnostic() {
     );
     assert_eq!(late.disposition, "ignored");
     let diagnostic = late.diagnostic.expect("a diagnostic");
-    assert_eq!(diagnostic.code, "record_invalid");
+    assert_eq!(diagnostic.code, DiagnosticCode::RecordInvalid);
     assert_eq!(diagnostic.context["replaced"]["code"], "binding_conflict");
     assert_eq!(moved_aside(&path).len(), 1);
 }
@@ -646,7 +646,7 @@ fn a_child_that_would_grow_the_set_past_what_readers_accept_is_refused() {
         &setup.ports(),
     )
     .expect_err("a set past the bound is refused");
-    assert_eq!(error.diagnostic.code, "record_invalid");
+    assert_eq!(error.diagnostic.code, DiagnosticCode::RecordInvalid);
     assert_eq!(fs::read(&path).unwrap(), bytes);
     let asking = setup.apply(
         &child(
@@ -880,7 +880,7 @@ fn an_invalid_child_set_that_cannot_be_moved_aside_is_left_as_it_was() {
             .expect_err("a set that cannot be moved aside refuses the event")
             .diagnostic
             .code,
-        "probe_unavailable"
+        DiagnosticCode::ProbeUnavailable
     );
     assert_eq!(
         asking.persistence.native_state,
@@ -1022,7 +1022,7 @@ fn a_child_set_from_a_newer_writer_is_never_overwritten() {
         &setup.ports(),
     )
     .expect_err("a newer set is refused");
-    assert_eq!(error.diagnostic.code, "future_schema");
+    assert_eq!(error.diagnostic.code, DiagnosticCode::FutureSchema);
     assert_eq!(fs::read(&path).unwrap(), before);
     assert_eq!(
         facts(&setup, "claude").children.coverage,

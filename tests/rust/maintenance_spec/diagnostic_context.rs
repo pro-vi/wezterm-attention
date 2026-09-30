@@ -27,7 +27,7 @@ fn a_realm_wide_bindings_diagnostic_names_its_record() {
         assert!(
             diagnostics
                 .iter()
-                .any(|d| d.code == "record_invalid"
+                .any(|d| d.code == DiagnosticCode::RecordInvalid
                     && d.context.get("path") == Some(&relative(&path))),
             "no diagnostic names {}: {diagnostics:?}",
             path.display()
@@ -80,7 +80,7 @@ fn doctor_and_sweep_name_a_record_they_could_not_read() {
     ] {
         let invalid: Vec<_> = diagnostics
             .iter()
-            .filter(|d| d.code == "record_invalid")
+            .filter(|d| d.code == DiagnosticCode::RecordInvalid)
             .collect();
         assert!(
             invalid.iter().all(|d| d.context.contains_key("path")),

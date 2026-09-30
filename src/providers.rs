@@ -8,7 +8,7 @@ use crate::observations::{
     Actor, AttemptOutcome, ElicitationMode, LifecycleObservation, NativeCorrelation, NoticeSubtype,
     ObservationBody, QuestionMode, ResultSurface, SelectionAction, classify_tool,
 };
-use crate::protocol::{AttentionError, Diagnostic, free_of_control, manifest};
+use crate::protocol::{AttentionError, Diagnostic, DiagnosticCode, free_of_control, manifest};
 
 // Which agents exist is a contract fact — the manifest declares the same set
 // as `enums.providers`, and `parse_manifest` checks the two agree.
@@ -161,7 +161,7 @@ pub struct ProviderEvent {
 }
 
 impl ProviderEvent {
-    fn ignored(provider: Option<Provider>, code: &str, message: &str) -> Self {
+    fn ignored(provider: Option<Provider>, code: DiagnosticCode, message: &str) -> Self {
         Self {
             source_event: String::new(),
             observation: None,
@@ -192,13 +192,13 @@ fn safe_label(value: &Value, field: &str) -> std::result::Result<String, Diagnos
         .safe_label_max_bytes;
     let Some(text) = value.as_str() else {
         return Err(Diagnostic::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             format!("{field} is missing or too long"),
         ));
     };
     if text.is_empty() || text.len() > maximum || !free_of_control(text) {
         return Err(Diagnostic::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             format!("{field} is missing or too long"),
         ));
     }
@@ -236,7 +236,7 @@ impl DroppedFields {
         }
         Some(
             Diagnostic::new(
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 format!("optional fields were dropped: {}", self.0.join(", ")),
             )
             .with("dropped_fields", serde_json::json!(self.0)),
@@ -253,7 +253,7 @@ fn optional_path(payload: &Value, field: &str) -> std::result::Result<Option<Str
     }
     let Some(path) = value.as_str() else {
         return Err(Diagnostic::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             format!("{field} must be absolute"),
         ));
     };
@@ -267,7 +267,7 @@ fn optional_path(payload: &Value, field: &str) -> std::result::Result<Option<Str
         || !Path::new(path).is_absolute()
     {
         return Err(Diagnostic::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             format!("{field} must be absolute"),
         ));
     }
@@ -293,7 +293,7 @@ fn environment_path(
         || !Path::new(value).is_absolute()
     {
         return Err(Diagnostic::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             format!("{field} must be absolute"),
         ));
     }
@@ -397,7 +397,7 @@ fn parse_claude_or_codex(
     {
         return ProviderEvent::ignored(
             Some(provider),
-            "claim_stale",
+            DiagnosticCode::ClaimStale,
             "Claude background job is not pane authority",
         );
     }
@@ -408,21 +408,21 @@ fn parse_claude_or_codex(
     {
         return ProviderEvent::ignored(
             Some(provider),
-            "claim_stale",
+            DiagnosticCode::ClaimStale,
             "Cursor-owned Claude invocation is not pane authority",
         );
     }
     if !declared_hook(provider, event_name) {
         return ProviderEvent::ignored(
             Some(provider),
-            "integration_version_mismatch",
+            DiagnosticCode::IntegrationVersionMismatch,
             "provider event is not supported",
         );
     }
     if payload.get("hook_event_name").and_then(Value::as_str) != Some(event_name) {
         return ProviderEvent::ignored(
             Some(provider),
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "hook event name does not match the callback",
         );
     }
@@ -430,7 +430,7 @@ fn parse_claude_or_codex(
         Ok(event) => event,
         Err(diagnostic) => {
             let mut event =
-                ProviderEvent::ignored(Some(provider), &diagnostic.code, &diagnostic.message);
+                ProviderEvent::ignored(Some(provider), diagnostic.code, &diagnostic.message);
             event.diagnostic = Some(diagnostic);
             return event;
         }
@@ -441,7 +441,7 @@ fn parse_claude_or_codex(
     {
         return ProviderEvent::ignored(
             Some(provider),
-            "claim_stale",
+            DiagnosticCode::ClaimStale,
             "Codex hook identity differs from the inherited thread",
         );
     }
@@ -488,7 +488,7 @@ fn parse_claude_or_codex(
         if event_name == "Interrupt" && event.agent_id.is_some() {
             return ProviderEvent::ignored(
                 Some(provider),
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 "Interrupt is a root-turn observation",
             );
         }
@@ -499,7 +499,7 @@ fn parse_claude_or_codex(
         if event.agent_id.is_none() {
             return ProviderEvent::ignored(
                 Some(provider),
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 "SubagentStart requires a valid agent_id",
             );
         }
@@ -510,7 +510,7 @@ fn parse_claude_or_codex(
         if event.agent_id.is_none() {
             return ProviderEvent::ignored(
                 Some(provider),
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 "SubagentStop requires a valid agent_id",
             );
         }
@@ -533,7 +533,7 @@ fn parse_claude_or_codex(
     if event.agent_id.is_some() {
         return ProviderEvent::ignored(
             Some(provider),
-            "claim_stale",
+            DiagnosticCode::ClaimStale,
             "child callback cannot write lead state",
         );
     }
@@ -542,14 +542,14 @@ fn parse_claude_or_codex(
             let Some(source) = payload.get("source").and_then(Value::as_str) else {
                 return ProviderEvent::ignored(
                     Some(provider),
-                    "integration_version_mismatch",
+                    DiagnosticCode::IntegrationVersionMismatch,
                     "SessionStart source is not supported",
                 );
             };
             if !["startup", "resume", "clear", "compact", "fork"].contains(&source) {
                 return ProviderEvent::ignored(
                     Some(provider),
-                    "integration_version_mismatch",
+                    DiagnosticCode::IntegrationVersionMismatch,
                     "SessionStart source is not supported",
                 );
             }
@@ -570,7 +570,7 @@ fn parse_claude_or_codex(
             {
                 return ProviderEvent::ignored(
                     Some(provider),
-                    "integration_version_mismatch",
+                    DiagnosticCode::IntegrationVersionMismatch,
                     "SessionEnd reason is not supported",
                 );
             }
@@ -580,7 +580,7 @@ fn parse_claude_or_codex(
             let Some(tool_name) = payload.get("tool_name").and_then(Value::as_str) else {
                 return ProviderEvent::ignored(
                     Some(provider),
-                    "record_invalid",
+                    DiagnosticCode::RecordInvalid,
                     "PreToolUse requires tool_name",
                 );
             };
@@ -609,7 +609,7 @@ fn parse_claude_or_codex(
             if notification == Some("idle_prompt") {
                 return ProviderEvent::ignored(
                     Some(provider),
-                    "integration_version_mismatch",
+                    DiagnosticCode::IntegrationVersionMismatch,
                     "idle prompt does not replace terminal activity",
                 );
             }
@@ -618,7 +618,7 @@ fn parse_claude_or_codex(
             {
                 return ProviderEvent::ignored(
                     Some(provider),
-                    "integration_version_mismatch",
+                    DiagnosticCode::IntegrationVersionMismatch,
                     "notification type is not supported",
                 );
             }
@@ -639,7 +639,7 @@ fn parse_claude_or_codex(
         _ => {
             return ProviderEvent::ignored(
                 Some(provider),
-                "integration_version_mismatch",
+                DiagnosticCode::IntegrationVersionMismatch,
                 "provider event has no transition",
             );
         }
@@ -651,7 +651,7 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
     if !declared_hook(Provider::Pi, event_name) {
         return ProviderEvent::ignored(
             Some(Provider::Pi),
-            "integration_version_mismatch",
+            DiagnosticCode::IntegrationVersionMismatch,
             "Pi event is not supported",
         );
     }
@@ -659,7 +659,7 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
         Ok(event) => event,
         Err(diagnostic) => {
             let mut event =
-                ProviderEvent::ignored(Some(Provider::Pi), &diagnostic.code, &diagnostic.message);
+                ProviderEvent::ignored(Some(Provider::Pi), diagnostic.code, &diagnostic.message);
             event.diagnostic = Some(diagnostic);
             return event;
         }
@@ -678,7 +678,7 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
             {
                 return ProviderEvent::ignored(
                     Some(Provider::Pi),
-                    "integration_version_mismatch",
+                    DiagnosticCode::IntegrationVersionMismatch,
                     "Pi message has no supported attempt outcome",
                 );
             }
@@ -692,7 +692,7 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
             if !["startup", "reload", "new", "resume", "fork"].contains(&source) {
                 return ProviderEvent::ignored(
                     Some(Provider::Pi),
-                    "integration_version_mismatch",
+                    DiagnosticCode::IntegrationVersionMismatch,
                     "Pi session start source is not supported",
                 );
             }
@@ -704,14 +704,14 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
             if reason == "reload" {
                 return ProviderEvent::ignored(
                     Some(Provider::Pi),
-                    "integration_version_mismatch",
+                    DiagnosticCode::IntegrationVersionMismatch,
                     "Pi reload keeps the current binding",
                 );
             }
             if !["quit", "new", "resume", "fork"].contains(&reason) {
                 return ProviderEvent::ignored(
                     Some(Provider::Pi),
-                    "integration_version_mismatch",
+                    DiagnosticCode::IntegrationVersionMismatch,
                     "Pi shutdown reason is not supported",
                 );
             }
@@ -728,7 +728,7 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
         "agent_end" => {
             return ProviderEvent::ignored(
                 Some(Provider::Pi),
-                "integration_version_mismatch",
+                DiagnosticCode::IntegrationVersionMismatch,
                 "Pi agent_end is not terminal",
             );
         }
@@ -742,7 +742,7 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
             _ => {
                 return ProviderEvent::ignored(
                     Some(Provider::Pi),
-                    "record_invalid",
+                    DiagnosticCode::RecordInvalid,
                     "Pi bus state is invalid",
                 );
             }
@@ -761,14 +761,14 @@ pub fn parse_provider_event(
     let Some(provider) = Provider::parse(provider_name) else {
         return ProviderEvent::ignored(
             None,
-            "integration_version_mismatch",
+            DiagnosticCode::IntegrationVersionMismatch,
             "provider is not supported",
         );
     };
     if !payload.is_object() {
         return ProviderEvent::ignored(
             Some(provider),
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "provider payload is not an object",
         );
     }
@@ -778,14 +778,14 @@ pub fn parse_provider_event(
     {
         return ProviderEvent::ignored(
             Some(provider),
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "child identity is invalid",
         );
     }
     if provider == Provider::Pi && payload.get("agent_id").is_some() {
         return ProviderEvent::ignored(
             Some(provider),
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "Pi has no native child identity contract",
         );
     }
@@ -910,7 +910,10 @@ fn parse_tool_observation(
                     .get("is_error")
                     .and_then(Value::as_bool)
                     .ok_or_else(|| {
-                        Diagnostic::new("record_invalid", "Pi tool result requires is_error")
+                        Diagnostic::new(
+                            DiagnosticCode::RecordInvalid,
+                            "Pi tool result requires is_error",
+                        )
                     })?,
             )
         } else if event_name == "PostToolUseFailure" {
@@ -922,7 +925,10 @@ fn parse_tool_observation(
             .get("is_interrupt")
             .map(|value| {
                 value.as_bool().ok_or_else(|| {
-                    Diagnostic::new("record_invalid", "tool interruption flag is invalid")
+                    Diagnostic::new(
+                        DiagnosticCode::RecordInvalid,
+                        "tool interruption flag is invalid",
+                    )
                 })
             })
             .transpose()?;
@@ -935,7 +941,7 @@ fn parse_tool_observation(
                 || !accepted_async_receipt(&payload["tool_response"]))
         {
             return Err(Diagnostic::new(
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 "async question publication receipt is invalid",
             ));
         }
@@ -1004,7 +1010,7 @@ fn observation_for_body(
                 let id = safe_label(value, "transport_id")?;
                 if !uuid::Uuid::parse_str(&id).is_ok_and(|parsed| parsed.to_string() == id) {
                     return Err(Diagnostic::new(
-                        "record_invalid",
+                        DiagnosticCode::RecordInvalid,
                         "Pi transport ID is invalid",
                     ));
                 }
@@ -1043,7 +1049,12 @@ fn parse_request_observation(
     payload: &Value,
     event: &ProviderEvent,
 ) -> std::result::Result<Option<LifecycleObservation>, Diagnostic> {
-    let invalid = || Diagnostic::new("record_invalid", "request observation metadata is invalid");
+    let invalid = || {
+        Diagnostic::new(
+            DiagnosticCode::RecordInvalid,
+            "request observation metadata is invalid",
+        )
+    };
     let body = match event_name {
         "PermissionRequest" => ObservationBody::ApprovalRequested {
             tool_name: strict_optional_label(payload, "tool_name")?,
@@ -1134,7 +1145,10 @@ fn parse_run_observation(
                 .get("stop_hook_active")
                 .map(|value| {
                     value.as_bool().ok_or_else(|| {
-                        Diagnostic::new("record_invalid", "stop continuation flag is invalid")
+                        Diagnostic::new(
+                            DiagnosticCode::RecordInvalid,
+                            "stop continuation flag is invalid",
+                        )
                     })
                 })
                 .transpose()?,
@@ -1186,7 +1200,7 @@ fn parse_compaction_observation(
         }
     }) {
         return Err(Diagnostic::new(
-            "integration_version_mismatch",
+            DiagnosticCode::IntegrationVersionMismatch,
             "provider compaction trigger is unsupported",
         ));
     }

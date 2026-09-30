@@ -183,7 +183,9 @@ fn doctor_in_a_pane_nothing_has_published_reports_it_where_no_agent_can_claim() 
             "{label}: {result}"
         );
         assert!(
-            diagnostics.iter().any(|d| d.code == "identity_unpublished"),
+            diagnostics
+                .iter()
+                .any(|d| d.code == DiagnosticCode::IdentityUnpublished),
             "{label}: {diagnostics:?}"
         );
     }
@@ -195,7 +197,9 @@ fn doctor_in_a_pane_nothing_has_published_reports_it_where_no_agent_can_claim() 
         "{result}"
     );
     assert!(
-        !diagnostics.iter().any(|d| d.code == "identity_unpublished"),
+        !diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::IdentityUnpublished),
         "{diagnostics:?}"
     );
 
@@ -269,7 +273,7 @@ fn doctor_names_a_codex_shared_server_whose_hooks_call_attention() {
     assert_eq!(probe_status(&result, "codex_server"), "finding", "{result}");
     let named: Vec<_> = diagnostics
         .iter()
-        .filter(|d| d.code == "session_detached")
+        .filter(|d| d.code == DiagnosticCode::SessionDetached)
         .collect();
     assert_eq!(named.len(), 1, "{diagnostics:?}");
     assert_eq!(
@@ -285,7 +289,9 @@ fn doctor_names_a_codex_shared_server_whose_hooks_call_attention() {
     let (result, diagnostics) = doctor(format!("{}\n{desktop}", server(&other)));
     assert_eq!(probe_status(&result, "codex_server"), "healthy", "{result}");
     assert!(
-        !diagnostics.iter().any(|d| d.code == "session_detached"),
+        !diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::SessionDetached),
         "{diagnostics:?}"
     );
 
@@ -319,7 +325,9 @@ fn doctor_reports_a_codex_server_it_cannot_rule_out() {
     .expect("doctor");
     assert_eq!(probe_status(&result, "codex_server"), "finding", "{result}");
     assert!(
-        diagnostics.iter().any(|d| d.code == "session_detached"),
+        diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::SessionDetached),
         "{diagnostics:?}"
     );
 

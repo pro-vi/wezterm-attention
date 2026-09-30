@@ -13,8 +13,8 @@ use crate::presence::{
     kept_history_code, pane_evidence, reader_presence, recorded_socket,
 };
 use crate::protocol::{
-    AttentionError, Diagnostic, EMBEDDED_MANIFEST, Result, elapsed_beyond, hex64_text, manifest,
-    ns20_text, sha256_hex,
+    AttentionError, Diagnostic, DiagnosticCode, EMBEDDED_MANIFEST, Result, elapsed_beyond,
+    hex64_text, manifest, ns20_text, sha256_hex,
 };
 use crate::query::{FileStamp, read_bindings_with_ports, read_tab_publications};
 use crate::records::{
@@ -136,8 +136,10 @@ fn audit_state(root: &Path) -> (Vec<Value>, Vec<Diagnostic>) {
     let mut records = Vec::new();
     for path in files {
         let Some((kind, identity)) = RecordIdentity::locate(root, &path) else {
-            let error =
-                AttentionError::new("record_invalid", "unknown v2 state file is uninspected");
+            let error = AttentionError::new(
+                DiagnosticCode::RecordInvalid,
+                "unknown v2 state file is uninspected",
+            );
             diagnostics.push(naming_record(root, &path, error).diagnostic);
             continue;
         };
@@ -154,7 +156,7 @@ fn audit_state(root: &Path) -> (Vec<Value>, Vec<Diagnostic>) {
 fn runtime_manifest_bytes() -> Result<Option<Vec<u8>>> {
     let executable = std::env::current_exe().map_err(|_| {
         AttentionError::new(
-            "probe_unavailable",
+            DiagnosticCode::ProbeUnavailable,
             "current executable path is unavailable",
         )
     })?;
@@ -170,15 +172,21 @@ fn runtime_manifest_bytes() -> Result<Option<Vec<u8>>> {
         return Ok(None);
     };
     let file = fs::File::open(path).map_err(|_| {
-        AttentionError::new("probe_unavailable", "installed manifest is unreadable")
+        AttentionError::new(
+            DiagnosticCode::ProbeUnavailable,
+            "installed manifest is unreadable",
+        )
     })?;
     let maximum = manifest()?.limits.max_json_bytes;
     let bytes = read_bounded(file, maximum).map_err(|_| {
-        AttentionError::new("probe_unavailable", "installed manifest is unreadable")
+        AttentionError::new(
+            DiagnosticCode::ProbeUnavailable,
+            "installed manifest is unreadable",
+        )
     })?;
     if bytes.len() > maximum {
         return Err(AttentionError::new(
-            "probe_unavailable",
+            DiagnosticCode::ProbeUnavailable,
             "installed manifest exceeds its size bound",
         ));
     }
@@ -205,7 +213,7 @@ pub fn doctor_with_environment(
     let (audited_records, audit_diagnostics) = audit_state(root);
     let unreadable = audit_diagnostics
         .iter()
-        .any(|item| item.code == "state_permissions");
+        .any(|item| item.code == DiagnosticCode::StatePermissions);
     let permission_status = if !root.exists() {
         "unobserved"
     } else if unreadable {
@@ -215,14 +223,14 @@ pub fn doctor_with_environment(
             Ok(metadata) if metadata.permissions().mode() & 0o077 == 0 => "healthy",
             Ok(_) => {
                 diagnostics.push(Diagnostic::new(
-                    "state_permissions",
+                    DiagnosticCode::StatePermissions,
                     "state directory is accessible to other users",
                 ));
                 "finding"
             }
             Err(_) => {
                 diagnostics.push(Diagnostic::new(
-                    "probe_unavailable",
+                    DiagnosticCode::ProbeUnavailable,
                     "state directory cannot be inspected",
                 ));
                 "unavailable"
@@ -277,10 +285,10 @@ pub fn doctor_with_environment(
     if process_status == "unavailable"
         && !diagnostics
             .iter()
-            .any(|item| item.code == "probe_unavailable")
+            .any(|item| item.code == DiagnosticCode::ProbeUnavailable)
     {
         diagnostics.push(Diagnostic::new(
-            "probe_unavailable",
+            DiagnosticCode::ProbeUnavailable,
             "identity-scoped process evidence is unavailable",
         ));
     }
@@ -290,7 +298,7 @@ pub fn doctor_with_environment(
         Ok(Some(bytes)) => Some(bytes),
         Ok(None) => {
             diagnostics.push(Diagnostic::new(
-                "probe_unavailable",
+                DiagnosticCode::ProbeUnavailable,
                 "installed manifest was not found",
             ));
             None
@@ -306,27 +314,27 @@ pub fn doctor_with_environment(
         .is_some_and(|bytes| bytes == EMBEDDED_MANIFEST.as_bytes());
     if disk_bytes.is_some() && !manifest_matches {
         diagnostics.push(Diagnostic::new(
-            "integration_version_mismatch",
+            DiagnosticCode::IntegrationVersionMismatch,
             "on-disk manifest differs from the embedded manifest",
         ));
     }
     let version_finding = state_diagnostics
         .iter()
-        .any(|item| item.code == "future_schema")
+        .any(|item| item.code == DiagnosticCode::FutureSchema)
         || diagnostics
             .iter()
-            .any(|item| item.code == "integration_version_mismatch");
+            .any(|item| item.code == DiagnosticCode::IntegrationVersionMismatch);
     probes.push(json!({"name":"versions","status":if version_finding{"finding"}else{"healthy"}}));
     // A mux that did not answer leaves its panes unknown. A socket that is
     // gone, replaced or refusing is a finding about the recorded history.
     let socket_status = if state_diagnostics
         .iter()
-        .any(|item| item.code == "realm_unavailable")
+        .any(|item| item.code == DiagnosticCode::RealmUnavailable)
     {
         "unavailable"
     } else if state_diagnostics
         .iter()
-        .any(|item| kept_history_code(&item.code))
+        .any(|item| kept_history_code(item.code))
     {
         "finding"
     } else if realm_sockets.is_empty() {
@@ -395,7 +403,7 @@ fn codex_server_probe(
             continue;
         }
         let mut item = Diagnostic::new(
-            "session_detached",
+            DiagnosticCode::SessionDetached,
             "a Codex shared server is running, and sessions that join it are refused; \
              stop it with `codex app-server daemon stop` and start Codex with --no-daemon",
         );
@@ -442,14 +450,14 @@ fn environment_probe(
         "unobserved"
     } else {
         diagnostics.push(Diagnostic::new(
-            "identity_unpublished",
+            DiagnosticCode::IdentityUnpublished,
             "this pane's mux server identity is not published",
         ));
         "finding"
     }
 }
 
-fn ns20(value: &str, code: &str) -> Result<u128> {
+fn ns20(value: &str, code: DiagnosticCode) -> Result<u128> {
     if !ns20_text(value) {
         return Err(AttentionError::new(code, "timestamp is invalid"));
     }
@@ -459,11 +467,11 @@ fn ns20(value: &str, code: &str) -> Result<u128> {
 }
 
 fn wall_age_exceeds(now: &str, written: &str, interval: u128) -> Result<bool> {
-    ns20(now, "record_invalid")?;
-    ns20(written, "record_invalid")?;
+    ns20(now, DiagnosticCode::RecordInvalid)?;
+    ns20(written, DiagnosticCode::RecordInvalid)?;
     elapsed_beyond(now, written, interval).ok_or_else(|| {
         AttentionError::new(
-            "clock_skew",
+            DiagnosticCode::ClockSkew,
             "retention timestamp is newer than current UTC",
         )
     })
@@ -486,7 +494,7 @@ fn binding_known_and_prunable(
 ) -> bool {
     let Some(address) = record_address(binding) else {
         diagnostics.push(Diagnostic::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "binding address is invalid",
         ));
         return false;
@@ -508,7 +516,7 @@ fn binding_known_and_prunable(
         };
         if file_type.is_symlink() {
             diagnostics.push(Diagnostic::new(
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 "symlinked binding state is preserved",
             ));
             return false;
@@ -529,7 +537,7 @@ fn binding_known_and_prunable(
                     || child_path.extension().and_then(|value| value.to_str()) != Some("json")
                 {
                     diagnostics.push(Diagnostic::new(
-                        "record_invalid",
+                        DiagnosticCode::RecordInvalid,
                         "unknown binding state is preserved",
                     ));
                     return false;
@@ -548,7 +556,7 @@ fn binding_known_and_prunable(
                 .is_none()
                 {
                     diagnostics.push(Diagnostic::new(
-                        "record_invalid",
+                        DiagnosticCode::RecordInvalid,
                         "subagent path identity mismatch",
                     ));
                     return false;
@@ -565,7 +573,7 @@ fn binding_known_and_prunable(
             .and_then(binding_record_kind);
         let (true, Some(kind)) = (path.is_file(), kind) else {
             diagnostics.push(Diagnostic::new(
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 "unknown binding state is preserved",
             ));
             return false;
@@ -574,7 +582,7 @@ fn binding_known_and_prunable(
             Ok(Some(_)) => {}
             _ => {
                 diagnostics.push(Diagnostic::new(
-                    "record_invalid",
+                    DiagnosticCode::RecordInvalid,
                     "binding child identity mismatch",
                 ));
                 return false;
@@ -590,7 +598,7 @@ fn binding_confined(root: &Path, binding_dir: &Path, diagnostics: &mut Vec<Diagn
     let confined = directory_confined(root, binding_dir);
     if !confined {
         diagnostics.push(Diagnostic::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "binding removal target is outside the state root",
         ));
     }
@@ -631,9 +639,9 @@ fn absence_action(
             };
             let prior = ns20(
                 probe["observed_mono_ns"].as_str().unwrap_or(""),
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
             )?;
-            let current = ns20(observation, "record_invalid")?;
+            let current = ns20(observation, DiagnosticCode::RecordInvalid)?;
             // The monotonic clock restarts at boot, so a probe ahead of it was
             // taken before a restart and cannot be measured against: it is
             // replaced, and the count starts again.
@@ -694,7 +702,7 @@ fn name_pane(items: &mut [Diagnostic], address: &PaneAddress, binding_id: &str) 
 /// The diagnostic for a pane whose absence could not be established, named
 /// by the pane and binding it is about.
 fn absence_unavailable(message: &str, address: &PaneAddress, binding_id: &str) -> Diagnostic {
-    let mut item = Diagnostic::new("probe_unavailable", message);
+    let mut item = Diagnostic::new(DiagnosticCode::ProbeUnavailable, message);
     name_pane(std::slice::from_mut(&mut item), address, binding_id);
     item
 }
@@ -711,7 +719,7 @@ fn fold_kept_history(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
     type Held = BTreeMap<(String, String), BTreeSet<String>>;
     let mut folded: Vec<Diagnostic> = Vec::new();
     // Per code, where its one diagnostic stands and what it holds.
-    let mut held: BTreeMap<String, (usize, Held)> = BTreeMap::new();
+    let mut held: BTreeMap<DiagnosticCode, (usize, Held)> = BTreeMap::new();
     for item in diagnostics {
         let field = |name: &str| {
             item.context
@@ -719,12 +727,12 @@ fn fold_kept_history(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         };
-        if kept_history_code(&item.code)
+        if kept_history_code(item.code)
             && let (Some(realm_id), Some(incarnation_id), Some(pane_id)) =
                 (field("realm_id"), field("incarnation_id"), field("pane_id"))
         {
             let position = folded.len();
-            let (_, incarnations) = held.entry(item.code.clone()).or_insert_with(|| {
+            let (_, incarnations) = held.entry(item.code).or_insert_with(|| {
                 folded.push(item.clone());
                 (position, BTreeMap::new())
             });
@@ -820,7 +828,7 @@ fn collect_tab_orders(
                                 reader_presence(root, address, Some(panes), processes, diagnostics);
                             if observed == "unavailable" && !kept_history {
                                 diagnostics.push(Diagnostic::new(
-                                    "probe_unavailable",
+                                    DiagnosticCode::ProbeUnavailable,
                                     "tab order pane presence cannot be established",
                                 ));
                             }
@@ -881,7 +889,7 @@ fn collect_tab_orders(
             None if !removal_confined(root, &root.join(&relative)) => {
                 diagnostics.push(
                     Diagnostic::new(
-                        "record_invalid",
+                        DiagnosticCode::RecordInvalid,
                         "tab order outside the state root is preserved",
                     )
                     .with("path", relative.as_str()),
@@ -1096,7 +1104,7 @@ fn pane_retention(
                     "changed",
                     Vec::new(),
                     vec![Diagnostic::new(
-                        "record_invalid",
+                        DiagnosticCode::RecordInvalid,
                         "binding changed before pane retention",
                     )],
                 );
@@ -1117,7 +1125,7 @@ fn pane_retention(
                     "keep",
                     Vec::new(),
                     vec![Diagnostic::new(
-                        "record_invalid",
+                        DiagnosticCode::RecordInvalid,
                         "absence probe outside the state root is preserved",
                     )],
                 ),
@@ -1133,7 +1141,7 @@ fn pane_retention(
                     let mut kept = Vec::new();
                     if !directory_confined(root, &pane) {
                         kept.push(Diagnostic::new(
-                            "record_invalid",
+                            DiagnosticCode::RecordInvalid,
                             "pane removal target is outside the state root",
                         ));
                         return plan("keep", Vec::new(), kept);
@@ -1180,7 +1188,8 @@ fn pane_entries_prunable(
 ) -> bool {
     let preserved = |diagnostics: &mut Vec<Diagnostic>, message: &str, path: &Path| {
         diagnostics.push(
-            Diagnostic::new("record_invalid", message).with("path", state_relative(root, path)),
+            Diagnostic::new(DiagnosticCode::RecordInvalid, message)
+                .with("path", state_relative(root, path)),
         );
         false
     };
@@ -1266,8 +1275,8 @@ pub fn sweep(
     }
     let observation = clock.monotonic_ns20()?;
     let now = clock.unix_ns20()?;
-    ns20(&observation, "record_invalid")?;
-    ns20(&now, "record_invalid")?;
+    ns20(&observation, DiagnosticCode::RecordInvalid)?;
+    ns20(&now, DiagnosticCode::RecordInvalid)?;
     // A preview decides nothing, so one pane listing per socket and one
     // process listing answer all its steps. An apply acts on each answer and
     // takes a fresh look for each decision, except where a socket's listing
@@ -1494,7 +1503,7 @@ pub fn sweep(
                     return Ok(CommitPlan::reporting(AbsenceOutcome {
                         action: "changed".to_owned(),
                         diagnostic: Some(Diagnostic::new(
-                            "record_invalid",
+                            DiagnosticCode::RecordInvalid,
                             "binding changed before sweep apply",
                         )),
                     }));
@@ -1514,7 +1523,7 @@ pub fn sweep(
                         return Ok(CommitPlan::reporting(AbsenceOutcome {
                             action: "keep".to_owned(),
                             diagnostic: Some(Diagnostic::new(
-                                "record_invalid",
+                                DiagnosticCode::RecordInvalid,
                                 "absence probe outside the state root is preserved",
                             )),
                         }));
@@ -1639,7 +1648,7 @@ pub fn sweep(
                 let mut local_diagnostics = Vec::new();
                 let Some(locked_binding) = locked_binding else {
                     local_diagnostics.push(Diagnostic::new(
-                        "record_invalid",
+                        DiagnosticCode::RecordInvalid,
                         "binding changed before retention apply",
                     ));
                     return Ok(CommitPlan::reporting(RetentionOutcome {
@@ -1649,7 +1658,7 @@ pub fn sweep(
                 };
                 if locked_binding != binding {
                     local_diagnostics.push(Diagnostic::new(
-                        "record_invalid",
+                        DiagnosticCode::RecordInvalid,
                         "binding changed before retention apply",
                     ));
                 } else {
@@ -1657,7 +1666,7 @@ pub fn sweep(
                     match binding_selection(root, &address, launch_id, binding_id, &state)? {
                         None => {
                             local_diagnostics.push(Diagnostic::new(
-                                "record_invalid",
+                                DiagnosticCode::RecordInvalid,
                                 "pane claim changed before retention apply",
                             ));
                             return Ok(CommitPlan::reporting(RetentionOutcome {
@@ -1667,7 +1676,7 @@ pub fn sweep(
                         }
                         Some(true) => {
                             local_diagnostics.push(Diagnostic::new(
-                                "binding_conflict",
+                                DiagnosticCode::BindingConflict,
                                 "current binding was preserved during retention",
                             ));
                             return Ok(CommitPlan::reporting(RetentionOutcome {
@@ -1692,7 +1701,7 @@ pub fn sweep(
                         .unwrap_or(false);
                     if !end_is_current || (!still_old && !cap_paths.contains(&binding_dir)) {
                         local_diagnostics.push(Diagnostic::new(
-                            "record_invalid",
+                            DiagnosticCode::RecordInvalid,
                             "binding changed before retention apply",
                         ));
                     } else if binding_confined(root, &binding_dir, &mut local_diagnostics)

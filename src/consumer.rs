@@ -276,6 +276,7 @@ fn terminate_child(child: &mut std::process::Child) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::validate_consumers;
+    use crate::protocol::DiagnosticCode;
 
     #[test]
     fn a_consumer_path_with_any_control_character_is_refused() {
@@ -287,7 +288,7 @@ mod tests {
         ] {
             let error = validate_consumers(&[path.to_owned()], Some(100))
                 .expect_err("control characters are refused");
-            assert_eq!(error.diagnostic.code, "bad_usage", "{path:?}");
+            assert_eq!(error.diagnostic.code, DiagnosticCode::BadUsage, "{path:?}");
         }
         assert!(validate_consumers(&["/bin/caf\u{e9}".to_owned()], Some(100)).is_ok());
     }

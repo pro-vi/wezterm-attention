@@ -14,8 +14,8 @@ use crate::presence::{
     presence_at_socket, reader_presence, realm_socket, recorded_server, server_state,
 };
 use crate::protocol::{
-    AttentionError, Diagnostic, Result, canonical_decimal_text, elapsed_beyond, hex64_text,
-    ns20_text,
+    AttentionError, Diagnostic, DiagnosticCode, Result, canonical_decimal_text, elapsed_beyond,
+    hex64_text, ns20_text,
 };
 use crate::records::{
     BINDING_FILE, BindingState, FileRecords, RecordIdentity, RecordRead, RecordReader,
@@ -174,14 +174,14 @@ impl RecordFacet {
         )
     }
     /// The diagnostic code of a failed read, or None when the read did not fail.
-    fn failure_code(&self) -> Option<&str> {
+    fn failure_code(&self) -> Option<DiagnosticCode> {
         if !self.failed() {
             return None;
         }
         Some(
             self.diagnostics
                 .first()
-                .map_or("record_invalid", |diagnostic| diagnostic.code.as_str()),
+                .map_or(DiagnosticCode::RecordInvalid, |diagnostic| diagnostic.code),
         )
     }
 }
@@ -261,7 +261,7 @@ impl ChildrenFacet {
             set.availability = A::Invalid;
             set.diagnostics.push(
                 Diagnostic::new(
-                    "record_invalid",
+                    DiagnosticCode::RecordInvalid,
                     "child presence provider differs from selected binding",
                 )
                 .with("facet", "children"),
@@ -306,7 +306,7 @@ impl ChildrenFacet {
                     facet.coverage = ChildCoverage::Invalid;
                     facet.diagnostics.push(
                         Diagnostic::new(
-                            "record_invalid",
+                            DiagnosticCode::RecordInvalid,
                             "child presence set could not be decoded",
                         )
                         .with("facet", "children"),
@@ -403,13 +403,13 @@ impl ReaderConfidence {
 /// provider session is live at another pane address, which outranks them. An
 /// unreadable review, activity or child record is a diagnostic about that
 /// record, not about the binding.
-fn binding_health(failed_reads: [Option<&str>; 4], conflicted: bool) -> BindingHealth {
+fn binding_health(failed_reads: [Option<DiagnosticCode>; 4], conflicted: bool) -> BindingHealth {
     if conflicted {
         return BindingHealth::Conflicted;
     }
     match failed_reads.into_iter().flatten().next() {
         None => BindingHealth::Valid,
-        Some("future_schema") => BindingHealth::FutureSchema,
+        Some(DiagnosticCode::FutureSchema) => BindingHealth::FutureSchema,
         Some(_) => BindingHealth::Invalid,
     }
 }
@@ -442,7 +442,7 @@ impl PaneFacts {
         scope: &PaneScope,
         relation: ScopeRelation,
         diagnostics: Vec<Diagnostic>,
-        failed: Option<&str>,
+        failed: Option<DiagnosticCode>,
     ) -> Self {
         Self {
             scope: scope.clone(),
@@ -547,7 +547,7 @@ fn read_pane_facts_once(
     let Some(socket) = socket.filter(|_| incarnation.record.is_some()) else {
         diagnostics.push(
             Diagnostic::new(
-                "identity_unpublished",
+                DiagnosticCode::IdentityUnpublished,
                 "requested server identity is not available",
             )
             .with("facet", "scope"),
@@ -587,7 +587,7 @@ fn read_pane_facts_once(
             ScopeRelation::Unavailable,
             if claim.diagnostics.is_empty() {
                 vec![
-                    Diagnostic::new("identity_unpublished", "claim is absent")
+                    Diagnostic::new(DiagnosticCode::IdentityUnpublished, "claim is absent")
                         .with("facet", "claim"),
                 ]
             } else {
@@ -601,8 +601,11 @@ fn read_pane_facts_once(
             scope,
             ScopeRelation::LaunchChanged,
             vec![
-                Diagnostic::new("claim_stale", "requested launch is no longer current")
-                    .with("facet", "claim"),
+                Diagnostic::new(
+                    DiagnosticCode::ClaimStale,
+                    "requested launch is no longer current",
+                )
+                .with("facet", "claim"),
             ],
             None,
         ));
@@ -635,8 +638,11 @@ fn read_pane_facts_once(
             scope,
             ScopeRelation::BindingChanged,
             vec![
-                Diagnostic::new("claim_stale", "requested binding is no longer current")
-                    .with("facet", "binding_selection"),
+                Diagnostic::new(
+                    DiagnosticCode::ClaimStale,
+                    "requested binding is no longer current",
+                )
+                .with("facet", "binding_selection"),
             ],
             None,
         ));
@@ -653,11 +659,16 @@ fn read_pane_facts_once(
     if selected.is_some() && binding.record.is_none() {
         if !binding.failed() {
             diagnostics.push(
-                Diagnostic::new("record_invalid", "selected binding record is absent")
-                    .with("facet", "binding"),
+                Diagnostic::new(
+                    DiagnosticCode::RecordInvalid,
+                    "selected binding record is absent",
+                )
+                .with("facet", "binding"),
             );
         }
-        let failed = binding.failure_code().unwrap_or("record_invalid");
+        let failed = binding
+            .failure_code()
+            .unwrap_or(DiagnosticCode::RecordInvalid);
         return Ok(PaneFacts::unavailable(
             scope,
             ScopeRelation::Matched,
@@ -669,8 +680,11 @@ fn read_pane_facts_once(
         Ok(value) if ns20_text(&value) => Some(value),
         _ => {
             diagnostics.push(
-                Diagnostic::new("probe_unavailable", "inspection UTC is unavailable")
-                    .with("facet", "clock"),
+                Diagnostic::new(
+                    DiagnosticCode::ProbeUnavailable,
+                    "inspection UTC is unavailable",
+                )
+                .with("facet", "clock"),
             );
             None
         }
@@ -688,7 +702,7 @@ fn read_pane_facts_once(
         activity = RecordFacet::empty(A::Invalid);
         activity.diagnostics.push(
             Diagnostic::new(
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 "activity target differs from selected scope",
             )
             .with("facet", "activity"),
@@ -724,8 +738,11 @@ fn read_pane_facts_once(
                 None => {
                     activity = RecordFacet::empty(A::Unavailable);
                     activity.diagnostics.push(
-                        Diagnostic::new("clock_skew", "activity age is unavailable or negative")
-                            .with("facet", "activity"),
+                        Diagnostic::new(
+                            DiagnosticCode::ClockSkew,
+                            "activity age is unavailable or negative",
+                        )
+                        .with("facet", "activity"),
                     );
                 }
             }
@@ -902,7 +919,7 @@ fn read_pane_facts_once(
             ScopeRelation::Unavailable,
             vec![
                 Diagnostic::new(
-                    "claim_stale",
+                    DiagnosticCode::ClaimStale,
                     "scope changed or became unavailable during inspection",
                 )
                 .with("facet", "scope"),
@@ -954,7 +971,7 @@ fn lifecycle_source(
     };
     if record["provider"].as_str() != provider {
         diagnostics.push(Diagnostic::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "lifecycle provider differs from selected binding",
         ));
         return Ok((LifecycleAvailability::Invalid, None, diagnostics));
@@ -1017,7 +1034,7 @@ fn read_reviews(
     let paths = match reader.entries(directory) {
         Ok(paths) => paths,
         Err(error) => {
-            result.availability = if error.diagnostic.code == "record_invalid" {
+            result.availability = if error.diagnostic.code == DiagnosticCode::RecordInvalid {
                 A::Invalid
             } else {
                 A::Unavailable
@@ -1032,7 +1049,7 @@ fn read_reviews(
         let Some(key) = path.file_stem().and_then(|s| s.to_str()) else {
             result.availability = A::Invalid;
             result.diagnostics.push(
-                Diagnostic::new("record_invalid", "record filename is invalid")
+                Diagnostic::new(DiagnosticCode::RecordInvalid, "record filename is invalid")
                     .with("facet", facet),
             );
             continue;
@@ -1047,8 +1064,11 @@ fn read_reviews(
         let Some(record) = record.record else {
             result.availability = A::Unavailable;
             result.diagnostics.push(
-                Diagnostic::new("probe_unavailable", "record disappeared during enumeration")
-                    .with("facet", facet),
+                Diagnostic::new(
+                    DiagnosticCode::ProbeUnavailable,
+                    "record disappeared during enumeration",
+                )
+                .with("facet", facet),
             );
             continue;
         };
@@ -1206,7 +1226,7 @@ pub fn read_bindings_for_socket_timed(
     let after = selected_socket_identity(socket)?;
     if after.0 != scope.realm_id || after.1 != scope.incarnation_id {
         let mut error = AttentionError::new(
-            "incarnation_changed",
+            DiagnosticCode::IncarnationChanged,
             "selected socket identity changed during discovery",
         );
         error.exit_code = 1;
@@ -1229,7 +1249,8 @@ fn selected_socket_identity(
         if fs::symlink_metadata(socket)
             .is_err_and(|missing| missing.kind() == std::io::ErrorKind::NotFound)
         {
-            let mut gone = AttentionError::new("socket_gone", "mux socket no longer exists");
+            let mut gone =
+                AttentionError::new(DiagnosticCode::SocketGone, "mux socket no longer exists");
             gone.exit_code = error.exit_code;
             gone
         } else {
@@ -1256,7 +1277,7 @@ fn collect_selected_binding_files(
         }
     };
     let symlink = |message: &str, path: &Path| {
-        let mut item = Diagnostic::new("record_invalid", message);
+        let mut item = Diagnostic::new(DiagnosticCode::RecordInvalid, message);
         name_path(&mut item, root, path);
         item
     };
@@ -1575,7 +1596,7 @@ fn assemble_bindings(
     // goes with the row.
     let failure = |read: &RecordRead, path: &Path, diagnostics: &mut Vec<Diagnostic>| {
         settle(read.clone(), path).err().map(|error| {
-            let code = error.diagnostic.code.clone();
+            let code = error.diagnostic.code;
             diagnostics.push(error.diagnostic);
             code
         })
@@ -1591,8 +1612,10 @@ fn assemble_bindings(
         for path in files {
             let Some(identity) = RecordIdentity::from_state_path(root, &path, "binding").ok()
             else {
-                let mut item =
-                    Diagnostic::new("record_invalid", "binding path has the wrong shape");
+                let mut item = Diagnostic::new(
+                    DiagnosticCode::RecordInvalid,
+                    "binding path has the wrong shape",
+                );
                 name_path(&mut item, root, &path);
                 diagnostics.push(item);
                 continue;
@@ -1661,7 +1684,10 @@ fn assemble_bindings(
             continue;
         };
         let address: PaneAddress = serde_json::from_value(address_value.clone()).map_err(|_| {
-            crate::protocol::AttentionError::new("record_invalid", "binding address is invalid")
+            crate::protocol::AttentionError::new(
+                DiagnosticCode::RecordInvalid,
+                "binding address is invalid",
+            )
         })?;
         let Some(launch_id) = string(&binding, "launch_id") else {
             continue;
@@ -1715,7 +1741,7 @@ fn assemble_bindings(
             let observed = reader_presence(root, &address, panes, processes, diagnostics);
             if typed && observed.0 == "unavailable" && diagnostics.len() == before_presence {
                 diagnostics.push(Diagnostic::new(
-                    "probe_unavailable",
+                    DiagnosticCode::ProbeUnavailable,
                     "selected binding presence is unavailable",
                 ));
             }
@@ -1725,15 +1751,7 @@ fn assemble_bindings(
             presence_cache.insert(address.clone(), observed.clone());
             observed
         };
-        let health = binding_health(
-            [
-                None,
-                end_failed.as_deref(),
-                claim_failed.as_deref(),
-                pointer_failed.as_deref(),
-            ],
-            false,
-        );
+        let health = binding_health([None, end_failed, claim_failed, pointer_failed], false);
         rows.push(BindingRow::of(
             &binding,
             address,
@@ -1780,7 +1798,7 @@ fn assemble_bindings(
             let first = &rows[indices[0]];
             diagnostics.push(
                 Diagnostic::new(
-                    "binding_conflict",
+                    DiagnosticCode::BindingConflict,
                     "provider session is bound to multiple pane addresses",
                 )
                 .with("provider", first.provider.as_str())
@@ -1939,7 +1957,7 @@ fn observe_tab_source(
         return Err(WindowCheckReason::SocketGone);
     }
     inventory.map_err(|error| {
-        if error.diagnostic.code == "record_invalid" {
+        if error.diagnostic.code == DiagnosticCode::RecordInvalid {
             WindowCheckReason::InventoryInvalid
         } else {
             WindowCheckReason::ProbeUnavailable
@@ -1970,7 +1988,9 @@ pub fn read_checked_tab_publications(
                 .parse::<u128>()
                 .ok()
                 .and_then(|ns| u64::try_from(ns / 1_000_000).ok())
-                .ok_or_else(|| AttentionError::new("clock_skew", "window check time is invalid"))?;
+                .ok_or_else(|| {
+                    AttentionError::new(DiagnosticCode::ClockSkew, "window check time is invalid")
+                })?;
             inventories.insert(key.clone(), (inventory, checked_at_ms));
         }
         let (inventory, checked_at_ms) = &inventories[&key];
@@ -2021,7 +2041,7 @@ pub fn read_tab_publications(root: &Path) -> Result<(Vec<TabPublication>, Vec<Di
     // so a linked directory would aim the collection outside the state root.
     if fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return Err(AttentionError::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "tab publication directory is a symlink",
         ));
     }
@@ -2032,7 +2052,7 @@ pub fn read_tab_publications(root: &Path) -> Result<(Vec<TabPublication>, Vec<Di
         }
         Err(_) => {
             return Err(AttentionError::new(
-                "probe_unavailable",
+                DiagnosticCode::ProbeUnavailable,
                 "tab publication directory could not be enumerated",
             ));
         }
@@ -2040,7 +2060,7 @@ pub fn read_tab_publications(root: &Path) -> Result<(Vec<TabPublication>, Vec<Di
     for entry in entries {
         let Ok(entry) = entry else {
             diagnostics.push(Diagnostic::new(
-                "probe_unavailable",
+                DiagnosticCode::ProbeUnavailable,
                 "tab publication entry is unavailable",
             ));
             continue;
@@ -2075,7 +2095,7 @@ fn read_tab_publication(
     match entry.file_type() {
         Ok(kind) if kind.is_symlink() => {
             diagnostics.push(Diagnostic::new(
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 "tab publication is a symlink",
             ));
             return;
@@ -2084,7 +2104,7 @@ fn read_tab_publication(
         Ok(_) => {}
         Err(_) => {
             diagnostics.push(Diagnostic::new(
-                "probe_unavailable",
+                DiagnosticCode::ProbeUnavailable,
                 "tab publication entry type is unavailable",
             ));
             return;
@@ -2104,7 +2124,7 @@ fn read_tab_publication(
         .flatten();
     let Some(window_id) = window_id else {
         diagnostics.push(Diagnostic::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "tab publication is not named by a window ID",
         ));
         return;
@@ -2153,7 +2173,8 @@ fn tab_publication(
     incarnation: Option<&str>,
     limits: &crate::protocol::Limits,
 ) -> Result<TabPublication> {
-    let invalid = || AttentionError::new("record_invalid", "tab publication is invalid");
+    let invalid =
+        || AttentionError::new(DiagnosticCode::RecordInvalid, "tab publication is invalid");
     // Any later schema is refused as one, whatever else it holds.
     let schema = value
         .get("schema")
@@ -2161,7 +2182,7 @@ fn tab_publication(
         .ok_or_else(invalid)?;
     if schema > TAB_PUBLICATION_SCHEMA {
         return Err(AttentionError::new(
-            "future_schema",
+            DiagnosticCode::FutureSchema,
             "tab publication schema is unsupported",
         ));
     }

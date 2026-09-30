@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::identity::{PaneAddress, pane_address, pane_socket};
-use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, manifest};
+use crate::protocol::{AttentionError, Diagnostic, DiagnosticCode, Disposition, Result, manifest};
 use crate::records::{
     CommitPlan, LOCK_TIMEOUT, RecordIdentity, Replacement, claim_lock, commit, mkdir_private,
     pane_dir, read_claim, reviews_dir, session_index_marker, session_index_path, state_root,
@@ -128,7 +128,7 @@ impl ClaimWrite {
             != Some(&serde_json::to_value(&self.address).map_err(AttentionError::record_json)?)
         {
             return Err(AttentionError::new(
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 "claim interior address mismatches its path",
             ));
         }
@@ -210,7 +210,7 @@ fn confirm_pane_tty(
             Some(row) => row.tty_name,
             None => {
                 return Err(AttentionError::new(
-                    "unsafe_tty",
+                    DiagnosticCode::UnsafeTty,
                     "the mux does not list this pane; WEZTERM_PANE was inherited from elsewhere",
                 ));
             }
@@ -220,7 +220,7 @@ fn confirm_pane_tty(
     match pane_tty {
         Some(pane_tty) if pane_tty == tty_path => Ok(()),
         Some(_) => Err(AttentionError::new(
-            "unsafe_tty",
+            DiagnosticCode::UnsafeTty,
             "this terminal is not the pane's terminal; WEZTERM_PANE was inherited",
         )),
         None if ["TMUX", "STY"]
@@ -228,7 +228,7 @@ fn confirm_pane_tty(
             .any(|name| env.get(*name).is_some_and(|value| !value.is_empty())) =>
         {
             Err(AttentionError::new(
-                "unsafe_tty",
+                DiagnosticCode::UnsafeTty,
                 "inside tmux or screen, and the pane's terminal could not be confirmed",
             ))
         }
@@ -287,13 +287,16 @@ pub fn claim_launch_at_tty(
                             .get("observed_mono_ns")
                             .and_then(Value::as_str)
                             .ok_or_else(|| {
-                                AttentionError::new("record_invalid", "claim order is invalid")
+                                AttentionError::new(
+                                    DiagnosticCode::RecordInvalid,
+                                    "claim order is invalid",
+                                )
                             })?;
                         if observation.as_str() < current_order {
                             (Disposition::Ignored, current, false)
                         } else if observation == current_order {
                             return Err(AttentionError::new(
-                                "record_invalid",
+                                DiagnosticCode::RecordInvalid,
                                 "equal claim order has different content",
                             ));
                         } else {
@@ -308,7 +311,7 @@ pub fn claim_launch_at_tty(
             // alone, so a kept claim has to be a shell's.
             if ClaimMode::of(&selected)? != ClaimMode::Shell {
                 return Err(AttentionError::new(
-                    "claim_stale",
+                    DiagnosticCode::ClaimStale,
                     "the pane holds an agent's own claim, which a shell cannot share",
                 ));
             }
@@ -359,7 +362,7 @@ fn same_incarnation(
     let (current_realm, current_incarnation, _) = crate::identity::socket_identity(socket_path)?;
     if current_realm != realm_id || current_incarnation != incarnation_id {
         return Err(AttentionError::new(
-            "incarnation_changed",
+            DiagnosticCode::IncarnationChanged,
             format!("mux socket changed {moment}"),
         ));
     }
@@ -507,10 +510,9 @@ pub fn publish_realm(
     for row in rows {
         let result = (|| {
             let pane_id = crate::identity::canonical_pane_id(&row.pane_id)?;
-            let tty_name = row
-                .tty_name
-                .as_deref()
-                .ok_or_else(|| AttentionError::new("unsafe_tty", "pane has no publishable tty"))?;
+            let tty_name = row.tty_name.as_deref().ok_or_else(|| {
+                AttentionError::new(DiagnosticCode::UnsafeTty, "pane has no publishable tty")
+            })?;
             let fingerprint = ports.tty.fingerprint(tty_name)?;
             let address = PaneAddress {
                 realm_id: realm_id.clone(),
@@ -572,7 +574,7 @@ impl ClaimMode {
                 boot_session_id: boot.to_owned(),
             })),
             Err(()) => Err(AttentionError::new(
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 "claim owner is invalid",
             )),
         }
@@ -585,11 +587,11 @@ pub(crate) fn claim_launch_id(claim: &Value) -> Result<String> {
         .get("launch_id")
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| AttentionError::new("record_invalid", "claim has no launch id"))
+        .ok_or_else(|| AttentionError::new(DiagnosticCode::RecordInvalid, "claim has no launch id"))
 }
 
 fn parent_unverified(message: &str) -> AttentionError {
-    AttentionError::new("self_claim_parent_unverified", message)
+    AttentionError::new(DiagnosticCode::SelfClaimParentUnverified, message)
 }
 
 /// The pid `WEZTERM_ATTENTION_HOST_PID` names: decimal digits with no sign or
@@ -677,7 +679,7 @@ fn read_host_terminal(
     }
     let unknown = || {
         AttentionError::new(
-            "probe_unavailable",
+            DiagnosticCode::ProbeUnavailable,
             "the agent's controlling terminal could not be read",
         )
     };
@@ -706,7 +708,10 @@ fn read_owner(
 ) -> Result<(ClaimOwner, HostReading)> {
     let reading = read_host(processes, asserted_host(env)?)?;
     let boot_session_id = processes.boot_session().ok_or_else(|| {
-        AttentionError::new("probe_unavailable", "the boot session id could not be read")
+        AttentionError::new(
+            DiagnosticCode::ProbeUnavailable,
+            "the boot session id could not be read",
+        )
     })?;
     let owner = ClaimOwner {
         pid: reading.parent_pid,
@@ -748,16 +753,19 @@ impl HostProof {
         let mut listed = rows.iter().filter(|row| row.pane_id == address.pane_id);
         let (Some(row), None) = (listed.next(), listed.next()) else {
             return Err(AttentionError::new(
-                "unsafe_tty",
+                DiagnosticCode::UnsafeTty,
                 "the mux does not list this pane exactly once",
             ));
         };
         let tty_path = row.tty_name.clone().ok_or_else(|| {
-            AttentionError::new("unsafe_tty", "the mux lists no terminal for this pane")
+            AttentionError::new(
+                DiagnosticCode::UnsafeTty,
+                "the mux lists no terminal for this pane",
+            )
         })?;
         if ports.processes.terminal_device(&tty_path) != Some(reading.terminal) {
             return Err(AttentionError::new(
-                "unsafe_tty",
+                DiagnosticCode::UnsafeTty,
                 "the agent runs on a terminal that is not the pane's",
             ));
         }
@@ -798,7 +806,7 @@ impl HostProof {
         let (owner, reading) = read_owner(env, ports.processes)?;
         if ClaimMode::of(claim)? != ClaimMode::SelfOwned(owner.clone()) {
             return Err(AttentionError::new(
-                "claim_stale",
+                DiagnosticCode::ClaimStale,
                 "the pane's claim belongs to another agent process",
             ));
         }
@@ -833,12 +841,15 @@ impl HostProof {
         let reading = read_host_terminal(ports.processes, asserted_host(env)?)?
             .ok_or_else(detached_session)?;
         let boot_session_id = ports.processes.boot_session().ok_or_else(|| {
-            AttentionError::new("probe_unavailable", "the boot session id could not be read")
+            AttentionError::new(
+                DiagnosticCode::ProbeUnavailable,
+                "the boot session id could not be read",
+            )
         })?;
         let (tty_path, tty_fingerprint) = recorded_terminal(claim)?;
         if ports.processes.terminal_device(&tty_path) != Some(reading.terminal) {
             return Err(AttentionError::new(
-                "unsafe_tty",
+                DiagnosticCode::UnsafeTty,
                 "the agent runs on a terminal that is not the one the pane's shell claimed from; \
                  its launch id was inherited",
             ));
@@ -883,7 +894,7 @@ impl HostProof {
             || tty.fingerprint(&self.tty_path)? != self.tty_fingerprint
         {
             return Err(AttentionError::new(
-                "unsafe_tty",
+                DiagnosticCode::UnsafeTty,
                 "the agent no longer runs on the terminal the pane was proven to use",
             ));
         }
@@ -915,14 +926,16 @@ fn recorded_terminal(claim: &Value) -> Result<(String, String)> {
             .get(field)
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .ok_or_else(|| AttentionError::new("record_invalid", "claim has no terminal"))
+            .ok_or_else(|| {
+                AttentionError::new(DiagnosticCode::RecordInvalid, "claim has no terminal")
+            })
     };
     Ok((recorded("tty_path")?, recorded("tty_fingerprint")?))
 }
 
 fn detached_session() -> AttentionError {
     AttentionError::new(
-        "session_detached",
+        DiagnosticCode::SessionDetached,
         "the agent runs this session in a background process that has no terminal and \
          carries the environment of whichever pane started it, so the session's own pane \
          is unknown; for Codex, start it with `codex --no-daemon`",
@@ -1068,7 +1081,7 @@ fn claim_for_host(
                     ClaimMode::SelfOwned(owner) if owner == proof.owner => {
                         if !proof.owns(current)? {
                             return Err(AttentionError::new(
-                                "unsafe_tty",
+                                DiagnosticCode::UnsafeTty,
                                 "the agent's claim names a terminal the agent no longer runs on",
                             ));
                         }
@@ -1078,13 +1091,13 @@ fn claim_for_host(
                         OwnerState::Gone => {}
                         OwnerState::Alive => {
                             return Err(AttentionError::new(
-                                "claim_stale",
+                                DiagnosticCode::ClaimStale,
                                 "another agent process that still runs holds the pane's claim",
                             ));
                         }
                         OwnerState::Unknown => {
                             return Err(AttentionError::new(
-                                "probe_unavailable",
+                                DiagnosticCode::ProbeUnavailable,
                                 "whether the agent holding the pane's claim still runs could not be read",
                             ));
                         }
@@ -1093,7 +1106,7 @@ fn claim_for_host(
             }
             if !foreground {
                 return Err(AttentionError::new(
-                    "claim_stale",
+                    DiagnosticCode::ClaimStale,
                     "the agent is not in the pane's foreground job, so it cannot claim the pane",
                 ));
             }
@@ -1119,7 +1132,7 @@ fn claim_for_host(
 
 fn shell_claim_refusal() -> AttentionError {
     AttentionError::new(
-        "claim_stale",
+        DiagnosticCode::ClaimStale,
         "the pane holds a shell claim, which an agent without its launch id cannot use",
     )
 }
@@ -1133,7 +1146,7 @@ pub(crate) fn self_claim_refusal(
 ) -> Option<AttentionError> {
     if !processes.self_claim_supported() {
         return Some(AttentionError::new(
-            "claim_stale",
+            DiagnosticCode::ClaimStale,
             "an agent cannot claim its own pane on this platform; start it from a claiming shell",
         ));
     }
@@ -1143,7 +1156,7 @@ pub(crate) fn self_claim_refusal(
     {
         None | Some("1") => None,
         Some(_) => Some(AttentionError::new(
-            "claim_stale",
+            DiagnosticCode::ClaimStale,
             "an agent claiming its own pane is switched off by WEZTERM_ATTENTION_ENABLE_SELF_CLAIM",
         )),
     }
@@ -1184,7 +1197,7 @@ pub(crate) fn self_owned_launch(
     // prove this against.
     let Some(claim) = claim else {
         return Err(AttentionError::new(
-            "claim_stale",
+            DiagnosticCode::ClaimStale,
             "provider event has no matching pane claim",
         ));
     };

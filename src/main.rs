@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
-use wezterm_attention::protocol::{AttentionError, Diagnostic, Disposition};
+use wezterm_attention::protocol::{AttentionError, Diagnostic, DiagnosticCode, Disposition};
 use wezterm_attention::query::read_bindings_timed;
 use wezterm_attention::records::read_bounded;
 use wezterm_attention::wezterm::{
@@ -1101,7 +1101,7 @@ fn run(cli: Cli, name: &'static str) -> Result<ExitCode, AttentionError> {
             // panes, which its socket probe reports.
             let unavailable = diagnostics
                 .iter()
-                .any(|item| item.code == "probe_unavailable")
+                .any(|item| item.code == DiagnosticCode::ProbeUnavailable)
                 || result["probes"].as_array().is_some_and(|probes| {
                     probes.iter().any(|probe| probe["status"] == "unavailable")
                 });
@@ -1161,7 +1161,7 @@ fn run(cli: Cli, name: &'static str) -> Result<ExitCode, AttentionError> {
             result.total_detail_count = total_details;
             let unavailable = diagnostics
                 .iter()
-                .any(|item| item.code == "probe_unavailable");
+                .any(|item| item.code == DiagnosticCode::ProbeUnavailable);
             let status = if unavailable {
                 "unavailable"
             } else if diagnostics.is_empty() {

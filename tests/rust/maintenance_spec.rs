@@ -14,6 +14,7 @@ use wezterm_attention::lifecycle::{apply_provider_event, binding_id};
 use wezterm_attention::maintenance::{
     ABSENCE_INTERVAL_NS, RETENTION_AGE_NS, binding_cap_paths_by_realm, limit_sweep_preview, sweep,
 };
+use wezterm_attention::protocol::DiagnosticCode;
 use wezterm_attention::providers::parse_provider_event;
 use wezterm_attention::query::read_bindings_with_ports;
 use wezterm_attention::query::{PaneScope, read_pane_facts_with_ports};
@@ -379,7 +380,11 @@ fn doctor_reports_a_future_claim_without_any_binding() {
     )
     .expect("write future claim");
     let (result, diagnostics) = setup.doctor();
-    assert!(diagnostics.iter().any(|item| item.code == "future_schema"));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|item| item.code == DiagnosticCode::FutureSchema)
+    );
     assert!(
         result["probes"]
             .as_array()
@@ -440,7 +445,7 @@ fn unavailable_process_probe_never_counts_as_absence() {
     assert!(
         diagnostics
             .iter()
-            .any(|item| item.code == "probe_unavailable")
+            .any(|item| item.code == DiagnosticCode::ProbeUnavailable)
     );
     let pane = pane_dir(&setup.root(), &pane_address(&setup.env).expect("address").0);
     assert!(!pane.join("absence-probe.json").exists());
@@ -566,53 +571,21 @@ fn old_noncurrent_binding_is_pruned_but_current_binding_is_preserved() {
 }
 
 #[test]
-fn every_emitted_diagnostic_literal_is_declared_by_the_manifest() {
-    let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+fn the_manifest_declares_exactly_the_diagnostic_codes_the_binary_can_emit() {
     let declared = &wezterm_attention::protocol::manifest()
         .expect("manifest")
         .enums
         .diagnostic_codes;
-    let mut emitted = BTreeMap::new();
+    let emitted = DiagnosticCode::ALL
+        .iter()
+        .map(|code| code.as_str().to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
-        declared,
-        &wezterm_attention::protocol::EMITTED_DIAGNOSTIC_CODES
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
+        emitted.len(),
+        DiagnosticCode::ALL.len(),
+        "a spelling repeats"
     );
-    for entry in fs::read_dir(source_root).expect("source directory") {
-        let path = entry.expect("source entry").path();
-        if path.extension().and_then(|value| value.to_str()) != Some("rs") {
-            continue;
-        }
-        let source = fs::read_to_string(&path).expect("source text");
-        for marker in ["AttentionError::new(", "diagnostic("] {
-            for tail in source.split(marker).skip(1) {
-                let tail = tail.trim_start();
-                let Some(tail) = tail.strip_prefix('"') else {
-                    continue;
-                };
-                let Some(end) = tail.find('"') else { continue };
-                emitted.insert(tail[..end].to_owned(), path.clone());
-            }
-        }
-    }
-    emitted.insert(
-        "bad_usage".to_owned(),
-        PathBuf::from("AttentionError::usage"),
-    );
-    emitted.insert(
-        "record_invalid".to_owned(),
-        PathBuf::from("AttentionError::record_json"),
-    );
-    assert!(!emitted.is_empty());
-    for (code, path) in emitted {
-        assert!(
-            declared.contains(&code),
-            "{code} from {} is not in the manifest",
-            path.display()
-        );
-    }
+    assert_eq!(declared, &emitted);
 }
 
 struct SignalingPanes {
@@ -674,7 +647,8 @@ fn sweep_apply_uses_the_binding_reread_after_selection() {
             .exists()
     );
     assert!(diagnostics.iter().any(|item| {
-        item.code == "record_invalid" && item.message.contains("changed before sweep apply")
+        item.code == DiagnosticCode::RecordInvalid
+            && item.message.contains("changed before sweep apply")
     }));
     assert!(
         !result
@@ -723,7 +697,11 @@ fn malformed_claim_is_contained_to_its_binding_selection() {
     )
     .expect("corrupt claim");
     let (result, diagnostics) = setup.run_sweep(false, None);
-    assert!(diagnostics.iter().any(|item| item.code == "record_invalid"));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|item| item.code == DiagnosticCode::RecordInvalid)
+    );
     assert!(result.details.iter().any(|detail| {
         detail["kind"] == "binding_selection" && detail["action"] == "unavailable"
     }));
@@ -752,7 +730,11 @@ fn doctor_rejects_a_valid_record_at_the_wrong_depth() {
     )
     .expect("write misplaced record");
     let (_, diagnostics) = setup.doctor();
-    assert!(diagnostics.iter().any(|item| item.code == "record_invalid"));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|item| item.code == DiagnosticCode::RecordInvalid)
+    );
 }
 
 #[test]
@@ -805,7 +787,11 @@ fn retention_preserves_unknown_files_inside_an_old_binding() {
     let (_, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000728"));
     assert!(old_dir.exists());
     assert!(unknown.exists());
-    assert!(diagnostics.iter().any(|item| item.code == "record_invalid"));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|item| item.code == DiagnosticCode::RecordInvalid)
+    );
 }
 
 /// Nothing writes per-child records any more, but bindings from before still
@@ -1010,9 +996,11 @@ fn doctor_reports_a_lead_observation_among_the_childrens_evidence() {
     let relative = json!(path.strip_prefix(setup.root()).unwrap().to_str().unwrap());
     let (_, diagnostics) = setup.doctor();
     assert!(
-        diagnostics.iter().any(|item| item.code == "record_invalid"
-            && item.message == "state record is invalid"
-            && item.context.get("path") == Some(&relative)),
+        diagnostics
+            .iter()
+            .any(|item| item.code == DiagnosticCode::RecordInvalid
+                && item.message == "state record is invalid"
+                && item.context.get("path") == Some(&relative)),
         "{diagnostics:?}"
     );
 }
@@ -1091,7 +1079,7 @@ fn a_session_resumed_in_a_new_pane_conflicts_only_while_both_panes_live() {
     assert!(rows.iter().all(|row| row.binding_health == "conflicted"));
     let conflict = diagnostics
         .iter()
-        .find(|item| item.code == "binding_conflict")
+        .find(|item| item.code == DiagnosticCode::BindingConflict)
         .expect("conflict diagnostic");
     // The diagnostic names the session and every address that holds it, so
     // a reader that dropped `binding_health` can still find the rows.
@@ -1123,7 +1111,7 @@ fn a_session_resumed_in_a_new_pane_conflicts_only_while_both_panes_live() {
     assert!(
         !diagnostics
             .iter()
-            .any(|item| item.code == "binding_conflict")
+            .any(|item| item.code == DiagnosticCode::BindingConflict)
     );
 }
 
@@ -1261,8 +1249,14 @@ fn failed_window_inventory_never_means_absence_or_hides_another_source() {
     write_sourced_tab_order(&root, socket, 1);
     write_sourced_tab_order(&root, other.to_str().unwrap(), 0);
     for (code, reason) in [
-        ("realm_unavailable", WindowCheckReason::ProbeUnavailable),
-        ("record_invalid", WindowCheckReason::InventoryInvalid),
+        (
+            DiagnosticCode::RealmUnavailable,
+            WindowCheckReason::ProbeUnavailable,
+        ),
+        (
+            DiagnosticCode::RecordInvalid,
+            WindowCheckReason::InventoryInvalid,
+        ),
     ] {
         let calls = AtomicU64::new(0);
         let failing_socket = fs::canonicalize(socket).unwrap();
@@ -1500,7 +1494,9 @@ fn sweep_keeps_a_tab_order_naming_an_unrecorded_pane_without_calling_it_unprobed
         );
         assert_eq!(tab_order_detail(&applied.details, 10)["reason"], "present");
         assert!(
-            diagnostics.iter().all(|d| d.code != "probe_unavailable"),
+            diagnostics
+                .iter()
+                .all(|d| d.code != DiagnosticCode::ProbeUnavailable),
             "{diagnostics:?}"
         );
         assert_eq!(applied.failed_steps, 0);

@@ -9,30 +9,72 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub const EMBEDDED_MANIFEST: &str = include_str!("../protocol/v2.json");
-pub const EMITTED_DIAGNOSTIC_CODES: [&str; 18] = [
-    "identity_unpublished",
-    "claim_stale",
-    "unsafe_tty",
-    "realm_unavailable",
-    "incarnation_changed",
-    "socket_gone",
-    "socket_refused",
-    "record_invalid",
-    "future_schema",
-    "binding_conflict",
-    "probe_unavailable",
-    "clock_skew",
-    "integration_version_mismatch",
-    "state_permissions",
-    "bad_usage",
-    "self_claim_parent_unverified",
-    "session_detached",
-    "child_active_after_parent_clear",
-];
+
+/// Declares [`DiagnosticCode`] from one list, so its variants, their published
+/// spellings and [`DiagnosticCode::ALL`] cannot disagree. Rust cannot list an
+/// enum's variants on its own, and the manifest test needs that list.
+macro_rules! diagnostic_codes {
+    ($($variant:ident => $spelling:literal),+ $(,)?) => {
+        /// Every code a diagnostic can carry. Closed vocabulary: consumers
+        /// switch on these, and the manifest's `enums.diagnostic_codes` must
+        /// declare each one.
+        #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+        pub enum DiagnosticCode {
+            $($variant),+
+        }
+
+        impl DiagnosticCode {
+            pub const ALL: &[Self] = &[$(Self::$variant),+];
+
+            /// The published spelling. Serialization goes through this too.
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $spelling),+
+                }
+            }
+        }
+    };
+}
+
+diagnostic_codes! {
+    IdentityUnpublished => "identity_unpublished",
+    ClaimStale => "claim_stale",
+    UnsafeTty => "unsafe_tty",
+    RealmUnavailable => "realm_unavailable",
+    IncarnationChanged => "incarnation_changed",
+    SocketGone => "socket_gone",
+    SocketRefused => "socket_refused",
+    RecordInvalid => "record_invalid",
+    FutureSchema => "future_schema",
+    BindingConflict => "binding_conflict",
+    ProbeUnavailable => "probe_unavailable",
+    ClockSkew => "clock_skew",
+    IntegrationVersionMismatch => "integration_version_mismatch",
+    StatePermissions => "state_permissions",
+    BadUsage => "bad_usage",
+    SelfClaimParentUnverified => "self_claim_parent_unverified",
+    SessionDetached => "session_detached",
+    ChildActiveAfterParentClear => "child_active_after_parent_clear",
+}
+
+impl fmt::Display for DiagnosticCode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for DiagnosticCode {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Diagnostic {
-    pub code: String,
+    pub code: DiagnosticCode,
     pub message: String,
     pub context: BTreeMap<String, Value>,
     pub help: String,
@@ -45,15 +87,11 @@ pub struct AttentionError {
 }
 
 impl Diagnostic {
-    /// A diagnostic with one of the declared codes and nothing in its
-    /// context, pointing at `attention doctor` for help.
-    pub fn new(code: &str, message: impl Into<String>) -> Self {
-        assert!(
-            EMITTED_DIAGNOSTIC_CODES.contains(&code),
-            "undeclared diagnostic code: {code}"
-        );
+    /// A diagnostic with nothing in its context, pointing at `attention
+    /// doctor` for help.
+    pub fn new(code: DiagnosticCode, message: impl Into<String>) -> Self {
         Self {
-            code: code.to_owned(),
+            code,
             message: message.into(),
             context: BTreeMap::new(),
             help: "attention doctor".to_owned(),
@@ -73,7 +111,7 @@ impl Diagnostic {
 }
 
 impl AttentionError {
-    pub fn new(code: &str, message: impl Into<String>) -> Self {
+    pub fn new(code: DiagnosticCode, message: impl Into<String>) -> Self {
         Self {
             diagnostic: Diagnostic::new(code, message),
             exit_code: 3,
@@ -81,13 +119,16 @@ impl AttentionError {
     }
 
     pub fn usage(message: impl Into<String>) -> Self {
-        let mut error = Self::new("bad_usage", message);
+        let mut error = Self::new(DiagnosticCode::BadUsage, message);
         error.exit_code = 2;
         error
     }
 
     pub fn record_json(error: serde_json::Error) -> Self {
-        Self::new("record_invalid", format!("JSON is invalid: {error}"))
+        Self::new(
+            DiagnosticCode::RecordInvalid,
+            format!("JSON is invalid: {error}"),
+        )
     }
 }
 
@@ -396,13 +437,13 @@ static MANIFEST: OnceLock<std::result::Result<Manifest, String>> = OnceLock::new
 pub fn parse_manifest(source: &str) -> Result<Manifest> {
     let parsed: Manifest = serde_json::from_str(source).map_err(|error| {
         AttentionError::new(
-            "integration_version_mismatch",
+            DiagnosticCode::IntegrationVersionMismatch,
             format!("manifest is invalid: {error}"),
         )
     })?;
     if parsed.manifest_schema != 2 {
         return Err(AttentionError::new(
-            "integration_version_mismatch",
+            DiagnosticCode::IntegrationVersionMismatch,
             "manifest schema is unsupported",
         ));
     }
@@ -421,7 +462,7 @@ pub fn parse_manifest(source: &str) -> Result<Manifest> {
         })
     {
         return Err(AttentionError::new(
-            "integration_version_mismatch",
+            DiagnosticCode::IntegrationVersionMismatch,
             "manifest native hooks are invalid",
         ));
     }
@@ -441,7 +482,7 @@ pub fn parse_manifest(source: &str) -> Result<Manifest> {
         })
     {
         return Err(AttentionError::new(
-            "integration_version_mismatch",
+            DiagnosticCode::IntegrationVersionMismatch,
             "manifest tool classification is invalid",
         ));
     }
@@ -450,13 +491,13 @@ pub fn parse_manifest(source: &str) -> Result<Manifest> {
         || parsed.enums.child_presence_events != declared(&crate::children::CHILD_EVENTS)
     {
         return Err(AttentionError::new(
-            "integration_version_mismatch",
+            DiagnosticCode::IntegrationVersionMismatch,
             "manifest child presence vocabulary differs from this binary's",
         ));
     }
     if parsed.digests.algorithm != "sha256" || parsed.digests.encoding != "lowercase_hex" {
         return Err(AttentionError::new(
-            "integration_version_mismatch",
+            DiagnosticCode::IntegrationVersionMismatch,
             "manifest digest algorithm is unsupported",
         ));
     }
@@ -470,7 +511,7 @@ pub fn parse_manifest(source: &str) -> Result<Manifest> {
         let typed: BTreeSet<_> = spec.types.keys().cloned().collect();
         if declared != typed {
             return Err(AttentionError::new(
-                "integration_version_mismatch",
+                DiagnosticCode::IntegrationVersionMismatch,
                 format!("manifest shape {name} has inconsistent fields"),
             ));
         }
@@ -484,7 +525,7 @@ pub fn manifest() -> Result<&'static Manifest> {
     {
         Ok(value) => Ok(value),
         Err(message) => Err(AttentionError::new(
-            "integration_version_mismatch",
+            DiagnosticCode::IntegrationVersionMismatch,
             message.clone(),
         )),
     }
@@ -876,11 +917,11 @@ pub fn validate_record(value: &Value, expected_kind: Option<&str>) -> Result<()>
             Ok(())
         }
         Verdict::FutureSchema => Err(AttentionError::new(
-            "future_schema",
+            DiagnosticCode::FutureSchema,
             "record schema is unsupported",
         )),
         _ => Err(AttentionError::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "state record is invalid",
         )),
     }

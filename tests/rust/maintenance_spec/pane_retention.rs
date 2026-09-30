@@ -107,8 +107,16 @@ fn a_vanished_socket_without_a_process_answer_never_ends_a_binding() {
         )
         .expect("sweep");
         assert!(actions(&result.details, "absence").is_empty());
-        assert!(!diagnostics.iter().any(|d| d.code == "probe_unavailable"));
-        assert!(diagnostics.iter().any(|d| d.code == "socket_gone"));
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| d.code == DiagnosticCode::ProbeUnavailable)
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == DiagnosticCode::SocketGone)
+        );
     }
     assert_eq!(end_reason(&binding_dir), None);
     assert!(!pane.join("absence-probe.json").exists());
@@ -160,8 +168,16 @@ fn readers_report_a_vanished_socket_as_unavailable_and_change_nothing() {
         read_bindings_with_ports(&setup.root(), Some(&setup.panes), Some(&setup.processes))
             .expect("bindings");
     assert_eq!(rows[0].pane_presence, "unavailable");
-    assert!(diagnostics.iter().any(|d| d.code == "socket_gone"));
-    assert!(!diagnostics.iter().any(|d| d.code == "probe_unavailable"));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::SocketGone)
+    );
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::ProbeUnavailable)
+    );
     setup.doctor();
     setup.run_sweep(false, None);
     assert_eq!(tree_bytes(&setup.root()), before);
@@ -388,7 +404,9 @@ fn an_unknown_file_keeps_the_pane_tree() {
     assert!(unknown.exists());
     assert!(setup_pane_dir(&setup).join("claim.json").exists());
     assert!(
-        diagnostics.iter().any(|d| d.code == "record_invalid"),
+        diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::RecordInvalid),
         "{diagnostics:?}"
     );
     assert!(!actions(&result.details, "pane_retention").contains(&&json!("prune")));
@@ -575,11 +593,15 @@ fn a_pane_whose_process_hides_its_environment_is_not_absent_when_its_socket_vani
     assert_eq!(end_reason(&binding_dir), None);
     assert!(!pane.join("absence-probe.json").exists());
     assert!(
-        !diagnostics.iter().any(|d| d.code == "probe_unavailable"),
+        !diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::ProbeUnavailable),
         "{diagnostics:?}"
     );
     assert!(
-        diagnostics.iter().any(|d| d.code == "socket_gone"),
+        diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::SocketGone),
         "{diagnostics:?}"
     );
 }

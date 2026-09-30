@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::identity::PaneAddress;
-use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, vocabulary};
+use crate::protocol::{
+    AttentionError, Diagnostic, DiagnosticCode, Disposition, Result, vocabulary,
+};
 
 vocabulary!(ChildStatus { Running, Waiting });
 vocabulary!(ChildEvent {
@@ -155,7 +157,7 @@ impl Reduction {
     fn diagnosed(
         changed: bool,
         disposition: Disposition,
-        code: &'static str,
+        code: DiagnosticCode,
         message: &'static str,
     ) -> Self {
         Self {
@@ -194,7 +196,7 @@ impl ChildPresenceSet {
         }
         if !unique(self.live.iter().map(|child| child.agent_id.as_str())) {
             return Err(AttentionError::new(
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 "a child appears twice in the live set",
             ));
         }
@@ -202,7 +204,7 @@ impl ChildPresenceSet {
             && !unique(clear.removed.iter().map(String::as_str))
         {
             return Err(AttentionError::new(
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 "a child appears twice among those a parent stop removed",
             ));
         }
@@ -291,7 +293,7 @@ impl ChildPresenceSet {
             return Some(Reduction::diagnosed(
                 false,
                 Disposition::Ignored,
-                "binding_conflict",
+                DiagnosticCode::BindingConflict,
                 "child observation arrived after the binding ended",
             ));
         }
@@ -302,7 +304,7 @@ impl ChildPresenceSet {
                 Reduction::diagnosed(
                     false,
                     Disposition::Ignored,
-                    "binding_conflict",
+                    DiagnosticCode::BindingConflict,
                     "child observation predates the binding's last end",
                 )
             })
@@ -320,7 +322,7 @@ impl ChildPresenceSet {
                     Reduction::diagnosed(
                         false,
                         Disposition::Conflict,
-                        "record_invalid",
+                        DiagnosticCode::RecordInvalid,
                         "equal parent-clear order has different content",
                     )
                 };
@@ -373,7 +375,7 @@ impl ChildPresenceSet {
                 return Reduction::diagnosed(
                     false,
                     Disposition::Skipped,
-                    "child_active_after_parent_clear",
+                    DiagnosticCode::ChildActiveAfterParentClear,
                     "a child stopped after the parent stop that ended it",
                 );
             }
@@ -387,7 +389,7 @@ impl ChildPresenceSet {
             return Reduction::diagnosed(
                 false,
                 Disposition::Conflict,
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 "equal child order has different content",
             );
         }
@@ -412,7 +414,7 @@ impl ChildPresenceSet {
             return Reduction::diagnosed(
                 false,
                 Disposition::Ignored,
-                "binding_conflict",
+                DiagnosticCode::BindingConflict,
                 "child observation is covered by parent clear",
             );
         }
@@ -438,7 +440,7 @@ impl ChildPresenceSet {
                     Reduction::diagnosed(
                         false,
                         Disposition::Conflict,
-                        "record_invalid",
+                        DiagnosticCode::RecordInvalid,
                         "equal child order has different content",
                     )
                 };
@@ -460,7 +462,7 @@ impl ChildPresenceSet {
             return Reduction::diagnosed(
                 false,
                 Disposition::Skipped,
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 "child event has no agent type and follows no start",
             );
         }
@@ -480,7 +482,7 @@ impl ChildPresenceSet {
             Reduction::diagnosed(
                 true,
                 Disposition::Applied,
-                "child_active_after_parent_clear",
+                DiagnosticCode::ChildActiveAfterParentClear,
                 "a child worked after the parent stop that ended it",
             )
         } else {

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::protocol::{AttentionError, Result, manifest};
+use crate::protocol::{AttentionError, DiagnosticCode, Result, manifest};
 
 /// Ordered by realm, then incarnation, then pane id, as its fields are.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -28,7 +28,7 @@ pub struct SocketMetadata {
 pub fn canonical_pane_id(value: &str) -> Result<String> {
     if !crate::protocol::canonical_decimal_text(value, manifest()?.limits.pane_id_max_digits) {
         return Err(AttentionError::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "WEZTERM_PANE is not canonical",
         ));
     }
@@ -54,15 +54,19 @@ pub fn marker_address(text: &str) -> Option<PaneAddress> {
 pub fn canonical_uuid(value: Option<&str>, name: &str) -> Result<String> {
     let Some(value) = value else {
         return Err(AttentionError::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             format!("{name} is not a UUID"),
         ));
     };
-    let parsed = Uuid::parse_str(value)
-        .map_err(|_| AttentionError::new("record_invalid", format!("{name} is not a UUID")))?;
+    let parsed = Uuid::parse_str(value).map_err(|_| {
+        AttentionError::new(
+            DiagnosticCode::RecordInvalid,
+            format!("{name} is not a UUID"),
+        )
+    })?;
     if parsed.to_string() != value {
         return Err(AttentionError::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             format!("{name} is not canonical"),
         ));
     }
@@ -82,25 +86,36 @@ pub fn length_prefixed_digest<'a>(parts: impl IntoIterator<Item = &'a str>) -> S
 pub fn socket_identity(socket_value: &str) -> Result<(String, String, SocketMetadata)> {
     if !Path::new(socket_value).is_absolute() {
         return Err(AttentionError::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "WEZTERM_UNIX_SOCKET must be absolute",
         ));
     }
     let canonical = fs::canonicalize(socket_value).map_err(|_| {
-        AttentionError::new("probe_unavailable", "mux socket identity could not be read")
+        AttentionError::new(
+            DiagnosticCode::ProbeUnavailable,
+            "mux socket identity could not be read",
+        )
     })?;
     let metadata = fs::metadata(&canonical).map_err(|_| {
-        AttentionError::new("probe_unavailable", "mux socket identity could not be read")
+        AttentionError::new(
+            DiagnosticCode::ProbeUnavailable,
+            "mux socket identity could not be read",
+        )
     })?;
     if !metadata.file_type().is_socket() || metadata.uid() != unsafe { libc::geteuid() } {
         return Err(AttentionError::new(
-            "realm_unavailable",
+            DiagnosticCode::RealmUnavailable,
             "mux socket is unavailable or unsafe",
         ));
     }
     let canonical = canonical
         .to_str()
-        .ok_or_else(|| AttentionError::new("realm_unavailable", "mux socket path is not UTF-8"))?
+        .ok_or_else(|| {
+            AttentionError::new(
+                DiagnosticCode::RealmUnavailable,
+                "mux socket path is not UTF-8",
+            )
+        })?
         .to_owned();
     let realm_id = crate::protocol::sha256_hex(canonical.as_bytes());
     let device = metadata.dev().to_string();
@@ -109,7 +124,7 @@ pub fn socket_identity(socket_value: &str) -> Result<(String, String, SocketMeta
         i128::from(metadata.ctime()) * 1_000_000_000_i128 + i128::from(metadata.ctime_nsec());
     if ctime_ns_value < 0 {
         return Err(AttentionError::new(
-            "clock_skew",
+            DiagnosticCode::ClockSkew,
             "mux socket creation time is negative",
         ));
     }
@@ -137,7 +152,10 @@ pub fn pane_socket(env: &BTreeMap<String, String>) -> Result<&str> {
     env.get("WEZTERM_UNIX_SOCKET")
         .map(String::as_str)
         .ok_or_else(|| {
-            AttentionError::new("identity_unpublished", "WEZTERM_UNIX_SOCKET is missing")
+            AttentionError::new(
+                DiagnosticCode::IdentityUnpublished,
+                "WEZTERM_UNIX_SOCKET is missing",
+            )
         })
 }
 
@@ -157,7 +175,7 @@ pub fn pane_address(env: &BTreeMap<String, String>) -> Result<(PaneAddress, Sock
 pub fn tty_fingerprint_from_metadata(metadata: &fs::Metadata) -> Result<String> {
     if !metadata.file_type().is_char_device() || metadata.uid() != unsafe { libc::geteuid() } {
         return Err(AttentionError::new(
-            "unsafe_tty",
+            DiagnosticCode::UnsafeTty,
             "tty is not a same-UID character device",
         ));
     }
@@ -174,12 +192,12 @@ pub fn tty_fingerprint_from_metadata(metadata: &fs::Metadata) -> Result<String> 
 pub fn tty_fingerprint(path: &str) -> Result<String> {
     if !Path::new(path).is_absolute() {
         return Err(AttentionError::new(
-            "unsafe_tty",
+            DiagnosticCode::UnsafeTty,
             "tty path must be absolute",
         ));
     }
-    let metadata =
-        fs::metadata(path).map_err(|_| AttentionError::new("unsafe_tty", "tty is unavailable"))?;
+    let metadata = fs::metadata(path)
+        .map_err(|_| AttentionError::new(DiagnosticCode::UnsafeTty, "tty is unavailable"))?;
     tty_fingerprint_from_metadata(&metadata)
 }
 
@@ -191,7 +209,7 @@ pub fn monotonic_ns20() -> Result<String> {
     let result = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_RAW, &mut value) };
     if result != 0 || value.tv_sec < 0 || value.tv_nsec < 0 {
         return Err(AttentionError::new(
-            "probe_unavailable",
+            DiagnosticCode::ProbeUnavailable,
             "monotonic clock is unavailable",
         ));
     }

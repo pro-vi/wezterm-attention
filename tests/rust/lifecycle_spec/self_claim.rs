@@ -176,11 +176,17 @@ fn a_stale_inherited_launch_id_never_falls_through_to_the_agent_s_own_claim() {
     );
     let before = records(&setup);
     for event in every_action() {
-        assert_eq!(refused(&setup, &env, &event).code, "claim_stale");
+        assert_eq!(
+            refused(&setup, &env, &event).code,
+            DiagnosticCode::ClaimStale
+        );
     }
     env.insert("WEZTERM_ATTENTION_LAUNCH_ID".into(), "not-a-uuid".into());
     for event in every_action() {
-        assert_eq!(refused(&setup, &env, &event).code, "record_invalid");
+        assert_eq!(
+            refused(&setup, &env, &event).code,
+            DiagnosticCode::RecordInvalid
+        );
     }
     assert_eq!(records(&setup), before);
 }
@@ -205,7 +211,12 @@ fn a_shell_claim_refuses_every_event_that_lacks_its_launch_id() {
     let before = records(&setup);
     for event in every_action() {
         let diagnostic = refused(&setup, &setup.agent_env(), &event);
-        assert_eq!(diagnostic.code, "claim_stale", "{}", event.source_event);
+        assert_eq!(
+            diagnostic.code,
+            DiagnosticCode::ClaimStale,
+            "{}",
+            event.source_event
+        );
         assert!(diagnostic.message.contains("shell claim"), "{diagnostic:?}");
     }
     assert_eq!(records(&setup), before);
@@ -359,7 +370,7 @@ fn switched_off_or_unsupported_self_claim_never_takes_a_weaker_path() {
         env.insert("WEZTERM_ATTENTION_ENABLE_SELF_CLAIM".into(), value.into());
         for event in every_action() {
             let diagnostic = refused(&setup, &env, &event);
-            assert_eq!(diagnostic.code, "claim_stale", "{value:?}");
+            assert_eq!(diagnostic.code, DiagnosticCode::ClaimStale, "{value:?}");
             assert!(
                 diagnostic.message.contains("switched off"),
                 "{diagnostic:?}"
@@ -564,7 +575,8 @@ fn a_hook_whose_origin_is_not_proven_changes_nothing() {
         for event in every_action() {
             let diagnostic = refused(&setup, &env, &event);
             assert_eq!(
-                diagnostic.code, "self_claim_parent_unverified",
+                diagnostic.code,
+                DiagnosticCode::SelfClaimParentUnverified,
                 "{label}: {diagnostic:?}"
             );
         }
@@ -584,7 +596,7 @@ fn a_hook_under_another_parent_is_told_the_registration_that_works() {
         .processes
         .change(HOOK_PID, |hook| hook.parent_pid = 4500);
     let diagnostic = refused(&setup, &setup.agent_env(), &start("claude", "s"));
-    assert_eq!(diagnostic.code, "self_claim_parent_unverified");
+    assert_eq!(diagnostic.code, DiagnosticCode::SelfClaimParentUnverified);
     for part in [
         "inherited",
         "register the hook as `WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event ...`",
@@ -714,7 +726,7 @@ fn only_a_known_absent_terminal_lets_the_parent_s_terminal_decide() {
         );
         arrange(&setup);
         let diagnostic = refused(&setup, &setup.agent_env(), &tool);
-        assert_eq!(diagnostic.code, code, "{label}: {diagnostic:?}");
+        assert_eq!(diagnostic.code.as_str(), code, "{label}: {diagnostic:?}");
         *setup.processes.table.lock().unwrap() = setup_state.0;
         *setup.processes.devices.lock().unwrap() = setup_state.1;
         *setup.processes.boot.lock().unwrap() = setup_state.2;
@@ -768,7 +780,7 @@ fn a_session_start_needs_the_mux_to_list_the_pane_once_on_the_agent_s_terminal()
         arrange(&setup);
         let before = records(&setup);
         let diagnostic = refused(&setup, &setup.agent_env(), &start("codex", "s"));
-        assert_eq!(diagnostic.code, code, "{label}: {diagnostic:?}");
+        assert_eq!(diagnostic.code.as_str(), code, "{label}: {diagnostic:?}");
         assert_eq!(records(&setup), before, "{label}");
     }
 }
@@ -787,7 +799,11 @@ fn a_socket_replaced_while_the_agent_is_checked_proves_nothing() {
     }));
     let before = records(&setup);
     let diagnostic = refused(&setup, &setup.agent_env(), &start("codex", "s"));
-    assert_eq!(diagnostic.code, "incarnation_changed", "{diagnostic:?}");
+    assert_eq!(
+        diagnostic.code,
+        DiagnosticCode::IncarnationChanged,
+        "{diagnostic:?}"
+    );
     assert_eq!(records(&setup), before);
 }
 
@@ -964,7 +980,12 @@ fn only_a_session_start_claims_a_pane() {
             continue;
         }
         let diagnostic = refused(&setup, &setup.agent_env(), &event);
-        assert_eq!(diagnostic.code, "claim_stale", "{}", event.source_event);
+        assert_eq!(
+            diagnostic.code,
+            DiagnosticCode::ClaimStale,
+            "{}",
+            event.source_event
+        );
     }
     assert!(stored_claim(&setup).is_none());
     assert_eq!(listings.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -1105,7 +1126,7 @@ fn a_later_event_is_refused_unless_its_agent_still_runs_on_the_claim_s_terminal(
         let before = records(&setup);
         let tool = event("claude", "PreToolUse", "s", json!({"tool_name":"Bash"}));
         let diagnostic = refused(&setup, &env, &tool);
-        assert_eq!(diagnostic.code, code, "{label}: {diagnostic:?}");
+        assert_eq!(diagnostic.code.as_str(), code, "{label}: {diagnostic:?}");
         assert_eq!(records(&setup), before, "{label}");
         assert_eq!(
             listings.load(std::sync::atomic::Ordering::SeqCst),
@@ -1123,7 +1144,7 @@ fn an_agent_that_is_not_the_foreground_job_does_not_claim_but_keeps_its_claim_wh
         agent.terminal_foreground_group = SHELL_PID
     });
     let diagnostic = refused(&setup, &env, &start("claude", "s"));
-    assert_eq!(diagnostic.code, "claim_stale");
+    assert_eq!(diagnostic.code, DiagnosticCode::ClaimStale);
     assert!(diagnostic.message.contains("foreground"), "{diagnostic:?}");
     assert!(stored_claim(&setup).is_none());
 
@@ -1323,7 +1344,7 @@ fn a_running_or_unreadable_owner_keeps_the_pane() {
         arrange(&setup);
         let before = records(&setup);
         let diagnostic = refused(&setup, &second_env, &start("claude", "b"));
-        assert_eq!(diagnostic.code, code, "{label}: {diagnostic:?}");
+        assert_eq!(diagnostic.code.as_str(), code, "{label}: {diagnostic:?}");
         assert_eq!(stored_claim(&setup).as_ref(), Some(&claim), "{label}");
         assert_eq!(records(&setup), before, "{label}");
     }
@@ -1342,7 +1363,7 @@ fn a_running_or_unreadable_owner_keeps_the_pane() {
     *setup.processes.boot.lock().unwrap() = None;
     assert_eq!(
         refused(&setup, &second_env, &start("claude", "b")).code,
-        "probe_unavailable"
+        DiagnosticCode::ProbeUnavailable
     );
     assert_eq!(stored_claim(&setup).as_ref(), Some(&claim));
 }
@@ -1791,7 +1812,11 @@ fn a_launch_id_an_agent_s_own_claim_made_is_never_inherited() {
     ] {
         let refusal = wezterm_attention::claim_launch(&env, &setup.ports())
             .expect_err("a shell never keeps an agent's own claim as its own");
-        assert_eq!(refusal.diagnostic.code, "claim_stale", "{label}");
+        assert_eq!(
+            refusal.diagnostic.code,
+            DiagnosticCode::ClaimStale,
+            "{label}"
+        );
     }
     assert_eq!(records(&setup), before);
 
@@ -1799,7 +1824,10 @@ fn a_launch_id_an_agent_s_own_claim_made_is_never_inherited() {
     let mut env = prompt_env(&setup);
     env.insert("WEZTERM_ATTENTION_LAUNCH_ID".into(), agent_launch);
     for event in every_action() {
-        assert_eq!(refused(&setup, &env, &event).code, "claim_stale");
+        assert_eq!(
+            refused(&setup, &env, &event).code,
+            DiagnosticCode::ClaimStale
+        );
     }
     let prompt = prompt_return(&env, "00000000000000000600").expect("prompt return");
     assert_eq!(prompt.disposition, "ignored");
@@ -1825,7 +1853,7 @@ fn a_launch_id_an_agent_s_own_claim_made_is_never_inherited() {
     ];
     for (label, result) in marks {
         let error = result.expect_err(label);
-        assert_eq!(error.diagnostic.code, "claim_stale", "{label}");
+        assert_eq!(error.diagnostic.code, DiagnosticCode::ClaimStale, "{label}");
     }
     assert!(!binding.join("activity-clear.json").exists());
     assert_eq!(records(&setup), before);

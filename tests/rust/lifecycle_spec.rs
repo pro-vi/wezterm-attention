@@ -17,6 +17,7 @@ use wezterm_attention::lifecycle::{
     prompt_return,
 };
 use wezterm_attention::observations::LifecycleSnapshot;
+use wezterm_attention::protocol::DiagnosticCode;
 use wezterm_attention::providers::{ProviderAction, ProviderEvent, parse_provider_event};
 use wezterm_attention::query::read_bindings;
 use wezterm_attention::records::{atomic_replace, launch_dir, pane_dir, state_root, with_lock};
@@ -144,7 +145,7 @@ impl TtyWriter for FakeTty {
             .load(std::sync::atomic::Ordering::SeqCst)
         {
             return Err(wezterm_attention::protocol::AttentionError::new(
-                "unsafe_tty",
+                DiagnosticCode::UnsafeTty,
                 "synthetic terminal write failure",
             ));
         }
@@ -181,7 +182,7 @@ impl PaneLister for FakePanes {
         }
         self.rows.lock().expect("rows lock").clone().ok_or_else(|| {
             wezterm_attention::protocol::AttentionError::new(
-                "realm_unavailable",
+                DiagnosticCode::RealmUnavailable,
                 "synthetic listing failure",
             )
         })
@@ -1548,7 +1549,7 @@ fn launch_rotation_after_resolution_cannot_add_old_execution_facts() {
         claimed.unwrap();
         let result = pending.join().unwrap();
         assert_eq!(result.disposition, "ignored");
-        assert_eq!(result.diagnostic.unwrap().code, "claim_stale");
+        assert_eq!(result.diagnostic.unwrap().code, DiagnosticCode::ClaimStale);
     });
     assert_eq!(fs::read(path).unwrap(), before);
     assert_eq!(
@@ -2306,7 +2307,7 @@ fn future_review_is_never_deleted_or_replaced() {
         &setup.ports(),
     )
     .expect_err("future review cannot be replaced");
-    assert_eq!(replace_error.diagnostic.code, "future_schema");
+    assert_eq!(replace_error.diagnostic.code, DiagnosticCode::FutureSchema);
     assert_eq!(
         fs::read(&review_path).expect("review after replace"),
         future
@@ -2314,7 +2315,7 @@ fn future_review_is_never_deleted_or_replaced() {
 
     let delete_error = apply_mark_clear(&setup.env, "pi-bus", "00000000000000000400")
         .expect_err("future review cannot be deleted");
-    assert_eq!(delete_error.diagnostic.code, "future_schema");
+    assert_eq!(delete_error.diagnostic.code, DiagnosticCode::FutureSchema);
     assert_eq!(fs::read(review_path).expect("review after delete"), future);
 }
 
@@ -2392,7 +2393,7 @@ fn real_macos_controlling_tty_path_is_rejected_in_a_pty_child() {
         let error = writer
             .fingerprint(&path)
             .expect_err("macOS /dev/tty clone must not establish pane identity");
-        assert_eq!(error.diagnostic.code, "unsafe_tty");
+        assert_eq!(error.diagnostic.code, DiagnosticCode::UnsafeTty);
         return;
     }
     let executable = std::env::current_exe().expect("current test executable");
@@ -2442,7 +2443,7 @@ fn every_review_writer_obeys_claim_and_owner_locks() {
         apply_provider_event(&review, &setup.env, "00000000000000000300", &setup.ports())
     })
     .expect_err("Pi review must honor the owner lock");
-    assert_eq!(error.diagnostic.code, "probe_unavailable");
+    assert_eq!(error.diagnostic.code, DiagnosticCode::ProbeUnavailable);
     let review_path = pane.join("reviews").join(format!("{owner_key}.json"));
     assert!(!review_path.exists());
 
@@ -2451,7 +2452,7 @@ fn every_review_writer_obeys_claim_and_owner_locks() {
         apply_mark_review(&setup.env, "pi-bus")
     })
     .expect_err("manual review must honor the claim lock");
-    assert_eq!(error.diagnostic.code, "probe_unavailable");
+    assert_eq!(error.diagnostic.code, DiagnosticCode::ProbeUnavailable);
     assert!(!review_path.exists());
 }
 

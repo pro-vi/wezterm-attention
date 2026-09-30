@@ -18,7 +18,9 @@ use crate::lifecycle::outcome::{
     AdmittedHook, BindingTarget, HookPersistence, HookScope, Persistence,
 };
 use crate::observations::{LifecycleSnapshot, ObservationPools};
-use crate::protocol::{AttentionError, Diagnostic, Disposition, Result, free_of_control, manifest};
+use crate::protocol::{
+    AttentionError, Diagnostic, DiagnosticCode, Disposition, Result, free_of_control, manifest,
+};
 use crate::providers::{ProviderAction, ProviderEvent};
 use crate::records::{
     CommitPlan, PLUGIN_LOCK_TIMEOUT, PreparedRecordWrite, RecordIdentity, RecordRead, Replacement,
@@ -154,7 +156,7 @@ impl LifecycleResult {
         }
     }
 
-    fn diagnosed(disposition: Disposition, code: &str, message: &str) -> Self {
+    fn diagnosed(disposition: Disposition, code: DiagnosticCode, message: &str) -> Self {
         let mut result = Self::new(disposition);
         result.diagnostic = Some(Diagnostic::new(code, message));
         result
@@ -221,7 +223,7 @@ impl ResolvedLaunch<'_> {
         if current != Some(&self.claim) {
             return Some(LifecycleResult::diagnosed(
                 Disposition::Ignored,
-                "claim_stale",
+                DiagnosticCode::ClaimStale,
                 "the pane's claim changed after this event was resolved",
             ));
         }
@@ -292,7 +294,10 @@ fn read_current(
         .get("binding_id")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            AttentionError::new("record_invalid", "current binding pointer is invalid")
+            AttentionError::new(
+                DiagnosticCode::RecordInvalid,
+                "current binding pointer is invalid",
+            )
         })?;
     read_record_at(
         root,
@@ -300,21 +305,28 @@ fn read_current(
         &RecordIdentity::binding(address, launch_id, binding_id),
     )?
     .map(Some)
-    .ok_or_else(|| AttentionError::new("record_invalid", "current binding record is missing"))
+    .ok_or_else(|| {
+        AttentionError::new(
+            DiagnosticCode::RecordInvalid,
+            "current binding record is missing",
+        )
+    })
 }
 
 fn provider_name(event: &ProviderEvent) -> Result<&'static str> {
     event
         .provider
         .map(|provider| provider.as_str())
-        .ok_or_else(|| AttentionError::new("record_invalid", "provider is missing"))
+        .ok_or_else(|| AttentionError::new(DiagnosticCode::RecordInvalid, "provider is missing"))
 }
 
 fn event_binding_id(event: &ProviderEvent, launch_id: &str) -> Result<String> {
-    let session = event
-        .provider_session_id
-        .as_deref()
-        .ok_or_else(|| AttentionError::new("record_invalid", "provider session id is missing"))?;
+    let session = event.provider_session_id.as_deref().ok_or_else(|| {
+        AttentionError::new(
+            DiagnosticCode::RecordInvalid,
+            "provider session id is missing",
+        )
+    })?;
     Ok(binding_id(provider_name(event)?, session, launch_id))
 }
 
@@ -389,7 +401,7 @@ fn resolve_launch<'a>(
                 })
             }
             _ => Err(AttentionError::new(
-                "claim_stale",
+                DiagnosticCode::ClaimStale,
                 "inherited launch does not match the pane claim",
             )),
         };
@@ -439,10 +451,16 @@ fn binding_mutation(
 ) -> Result<Mutation> {
     let provider = provider_name(event)?;
     let session = event.provider_session_id.as_deref().ok_or_else(|| {
-        AttentionError::new("record_invalid", "binding event has no provider session")
+        AttentionError::new(
+            DiagnosticCode::RecordInvalid,
+            "binding event has no provider session",
+        )
     })?;
     let source = event.start_source.as_deref().ok_or_else(|| {
-        AttentionError::new("record_invalid", "binding event has no start source")
+        AttentionError::new(
+            DiagnosticCode::RecordInvalid,
+            "binding event has no start source",
+        )
     })?;
     let binding_id = binding_id(provider, session, &resolved.launch_id);
     let binding_path = resolved
@@ -474,7 +492,7 @@ fn binding_mutation(
                     return Ok(CommitPlan::reporting(Mutation::plain(
                         LifecycleResult::diagnosed(
                             Disposition::Ignored,
-                            "binding_conflict",
+                            DiagnosticCode::BindingConflict,
                             "older binding selection was ignored",
                         ),
                     )));
@@ -483,7 +501,7 @@ fn binding_mutation(
                     return Ok(CommitPlan::reporting(Mutation::plain(
                         LifecycleResult::diagnosed(
                             Disposition::Conflict,
-                            "binding_conflict",
+                            DiagnosticCode::BindingConflict,
                             "equal binding order names a different binding",
                         ),
                     )));
@@ -503,7 +521,7 @@ fn binding_mutation(
                     return Ok(CommitPlan::reporting(Mutation::plain(
                         LifecycleResult::diagnosed(
                             Disposition::Conflict,
-                            "binding_conflict",
+                            DiagnosticCode::BindingConflict,
                             "provider start cannot replace the active binding",
                         ),
                     )));
@@ -523,7 +541,7 @@ fn binding_mutation(
                 if observation < existing_order {
                     LifecycleResult::diagnosed(
                         Disposition::Ignored,
-                        "binding_conflict",
+                        DiagnosticCode::BindingConflict,
                         "older binding observation was ignored",
                     )
                 } else if observation == existing_order {
@@ -533,7 +551,7 @@ fn binding_mutation(
                     if conflicts {
                         LifecycleResult::diagnosed(
                             Disposition::Conflict,
-                            "binding_conflict",
+                            DiagnosticCode::BindingConflict,
                             "equal binding order has different facts",
                         )
                     } else {
@@ -636,11 +654,14 @@ fn activity_base(
     binding_id: &str,
 ) -> Result<Value> {
     let activity_type = event.activity_type.as_deref().ok_or_else(|| {
-        AttentionError::new("record_invalid", "provider activity type is missing")
+        AttentionError::new(
+            DiagnosticCode::RecordInvalid,
+            "provider activity type is missing",
+        )
     })?;
     if !manifest()?.enums.activity_types.contains(activity_type) {
         return Err(AttentionError::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "provider activity type is invalid",
         ));
     }
@@ -800,7 +821,7 @@ fn plan_activity(
             return kept(
                 LifecycleResult::diagnosed(
                     Disposition::Conflict,
-                    "record_invalid",
+                    DiagnosticCode::RecordInvalid,
                     "equal activity order has different content",
                 ),
                 Some(existing),
@@ -810,7 +831,7 @@ fn plan_activity(
             return kept(
                 LifecycleResult::diagnosed(
                     Disposition::Ignored,
-                    "binding_conflict",
+                    DiagnosticCode::BindingConflict,
                     "activity observation is covered by activity clear",
                 ),
                 Some(existing),
@@ -820,7 +841,7 @@ fn plan_activity(
         return kept(
             LifecycleResult::diagnosed(
                 Disposition::Ignored,
-                "binding_conflict",
+                DiagnosticCode::BindingConflict,
                 "activity observation is covered by activity clear",
             ),
             None,
@@ -901,7 +922,7 @@ fn append_observation(
             .is_none_or(|record| record["binding_id"].as_str() != Some(binding_id.as_str()))
         {
             return Err(AttentionError::new(
-                "claim_stale",
+                DiagnosticCode::ClaimStale,
                 "lifecycle binding changed",
             ));
         }
@@ -916,7 +937,10 @@ fn append_observation(
         let existing = read_record(&path, Some(kind), &identity)?;
         let mut snapshot = match existing {
             Some(value) => serde_json::from_value::<LifecycleSnapshot>(value).map_err(|_| {
-                AttentionError::new("record_invalid", "lifecycle snapshot is invalid")
+                AttentionError::new(
+                    DiagnosticCode::RecordInvalid,
+                    "lifecycle snapshot is invalid",
+                )
             })?,
             None => LifecycleSnapshot {
                 kind: kind.to_owned(),
@@ -932,7 +956,7 @@ fn append_observation(
         };
         if snapshot.provider != provider_name(event)? {
             return Err(AttentionError::new(
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 "lifecycle provider mismatches its binding",
             ));
         }
@@ -1043,8 +1067,12 @@ fn plan_children(
 ) -> Result<LifecycleResult> {
     let identity = resolved.binding(binding_id);
     let path = identity.path(&resolved.root, "child_presence_set")?;
-    let binding = read_record_at(&resolved.root, "binding", &identity)?
-        .ok_or_else(|| AttentionError::new("claim_stale", "child event has no matching binding"))?;
+    let binding = read_record_at(&resolved.root, "binding", &identity)?.ok_or_else(|| {
+        AttentionError::new(
+            DiagnosticCode::ClaimStale,
+            "child event has no matching binding",
+        )
+    })?;
     let end = read_record_at(&resolved.root, "binding_end", &identity)?;
     let empty =
         || ChildPresenceSet::empty(resolved.address.clone(), &resolved.launch_id, binding_id);
@@ -1055,7 +1083,10 @@ fn plan_children(
             // both readers hold.
             RecordRead::Present(value) if value["provider"].as_str() == Some(provider) => (
                 ChildPresenceSet::deserialize(&value).map_err(|_| {
-                    AttentionError::new("record_invalid", "child presence set could not be decoded")
+                    AttentionError::new(
+                        DiagnosticCode::RecordInvalid,
+                        "child presence set could not be decoded",
+                    )
                 })?,
                 false,
             ),
@@ -1067,7 +1098,7 @@ fn plan_children(
                     path.with_file_name(format!(".children.json.invalid.{}", Uuid::new_v4()));
                 std::fs::rename(&path, &aside).map_err(|_| {
                     AttentionError::new(
-                        "probe_unavailable",
+                        DiagnosticCode::ProbeUnavailable,
                         "invalid child presence set could not be moved aside",
                     )
                 })?;
@@ -1086,7 +1117,7 @@ fn plan_children(
         report_instead(
             &mut result.diagnostic,
             Diagnostic::new(
-                "record_invalid",
+                DiagnosticCode::RecordInvalid,
                 "an invalid child presence set was moved aside and started again",
             ),
         );
@@ -1095,7 +1126,10 @@ fn plan_children(
         set.revision = Uuid::new_v4().to_string();
         set.written_at_unix_ns = written_at.to_owned();
         let value = serde_json::to_value(&set).map_err(|_| {
-            AttentionError::new("record_invalid", "child presence set could not be encoded")
+            AttentionError::new(
+                DiagnosticCode::RecordInvalid,
+                "child presence set could not be encoded",
+            )
         })?;
         within_read_bound(&value)?;
         replacements.push(Replacement::always(path, value));
@@ -1141,7 +1175,7 @@ fn apply_activity(
                 return Ok(CommitPlan::reporting(Mutation::plain(
                     LifecycleResult::diagnosed(
                         Disposition::Ignored,
-                        "claim_stale",
+                        DiagnosticCode::ClaimStale,
                         "activity event is not for the current binding",
                     ),
                 )));
@@ -1209,7 +1243,10 @@ fn apply_activity(
             // and the stop still applies.
             if parent_stop && !matches!(result.disposition.as_str(), "ignored" | "conflict") {
                 let surviving_activity = activity.as_ref().ok_or_else(|| {
-                    AttentionError::new("record_invalid", "parent stop has no surviving activity")
+                    AttentionError::new(
+                        DiagnosticCode::RecordInvalid,
+                        "parent stop has no surviving activity",
+                    )
                 })?;
                 children_report = plan_children_beside_activity(
                     resolved,
@@ -1307,7 +1344,7 @@ fn plan_children_beside_activity(
         Ok(child) if child.disposition == Disposition::Conflict => {
             Err(child.diagnostic.unwrap_or_else(|| {
                 Diagnostic::new(
-                    "record_invalid",
+                    DiagnosticCode::RecordInvalid,
                     "child presence change conflicts with the set",
                 )
             }))
@@ -1403,7 +1440,7 @@ pub fn apply_mark_activity(
     }
     let Some(resolved) = inherited_launch(env)? else {
         return Err(AttentionError::new(
-            "claim_stale",
+            DiagnosticCode::ClaimStale,
             "current launch does not match claim",
         ));
     };
@@ -1415,7 +1452,7 @@ pub fn apply_mark_activity(
         |pointer| {
             if resolved.lapsed_now()?.is_some() {
                 return Err(AttentionError::new(
-                    "claim_stale",
+                    DiagnosticCode::ClaimStale,
                     "current launch does not match claim",
                 ));
             }
@@ -1501,7 +1538,7 @@ pub fn apply_mark_review(env: &BTreeMap<String, String>, source: &str) -> Result
                 .is_none_or(|claim| !inherited_claim_matches(claim, &address, &launch_id))
             {
                 return Err(AttentionError::new(
-                    "claim_stale",
+                    DiagnosticCode::ClaimStale,
                     "current launch does not match claim",
                 ));
             }
@@ -1619,7 +1656,7 @@ pub fn apply_mark_clear(
                 .is_none_or(|claim| !inherited_claim_matches(claim, &address, &launch_id))
             {
                 return Err(AttentionError::new(
-                    "claim_stale",
+                    DiagnosticCode::ClaimStale,
                     "current launch does not match claim",
                 ));
             }
@@ -1687,7 +1724,7 @@ fn require_plugin_claim(
         Ok(())
     } else {
         Err(AttentionError::new(
-            "claim_stale",
+            DiagnosticCode::ClaimStale,
             "the pane's claim does not name the launch the pane published",
         ))
     }
@@ -1827,10 +1864,9 @@ fn apply_child(
     written_at: &str,
 ) -> Result<LifecycleResult> {
     let binding_id = event_binding_id(event, &resolved.launch_id)?;
-    let agent_id = event
-        .agent_id
-        .as_deref()
-        .ok_or_else(|| AttentionError::new("record_invalid", "child event has no agent id"))?;
+    let agent_id = event.agent_id.as_deref().ok_or_else(|| {
+        AttentionError::new(DiagnosticCode::RecordInvalid, "child event has no agent id")
+    })?;
     let transition = match (event.action, event.source_event.as_str()) {
         (ProviderAction::ChildStopped, _) => ChildTransition::Stop {
             agent_id,
@@ -1860,7 +1896,7 @@ fn apply_child(
                 return Ok(CommitPlan::reporting(Mutation::plain(
                     LifecycleResult::diagnosed(
                         Disposition::Ignored,
-                        "claim_stale",
+                        DiagnosticCode::ClaimStale,
                         "child event has no matching binding",
                     ),
                 )));
@@ -1912,7 +1948,7 @@ fn apply_end(
                 return Ok(CommitPlan::reporting(Mutation::plain(
                     LifecycleResult::diagnosed(
                         Disposition::Ignored,
-                        "claim_stale",
+                        DiagnosticCode::ClaimStale,
                         "end event has no matching binding",
                     ),
                 )));
@@ -1921,7 +1957,7 @@ fn apply_end(
                 return Ok(CommitPlan::reporting(Mutation::plain(
                     LifecycleResult::diagnosed(
                         Disposition::Ignored,
-                        "binding_conflict",
+                        DiagnosticCode::BindingConflict,
                         "end observation predates binding",
                     ),
                 )));
@@ -2008,7 +2044,7 @@ fn apply_review_event(
                 return Ok(CommitPlan::reporting(Mutation::plain(
                     LifecycleResult::diagnosed(
                         Disposition::Ignored,
-                        "claim_stale",
+                        DiagnosticCode::ClaimStale,
                         "Pi review is not for the current binding",
                     ),
                 )));
@@ -2085,7 +2121,11 @@ fn apply_clear_event(
     let decide = |pointer: Option<Value>| {
         let ignored = |message| {
             Ok(CommitPlan::reporting(Mutation::plain(
-                LifecycleResult::diagnosed(Disposition::Ignored, "claim_stale", message),
+                LifecycleResult::diagnosed(
+                    Disposition::Ignored,
+                    DiagnosticCode::ClaimStale,
+                    message,
+                ),
             )))
         };
         let claim = read_claim(&resolved.root, &resolved.address)?;
@@ -2157,7 +2197,7 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
     let Some(resolved) = inherited_launch(env)? else {
         return Ok(LifecycleResult::diagnosed(
             Disposition::Ignored,
-            "claim_stale",
+            DiagnosticCode::ClaimStale,
             "prompt return has no matching claim",
         ));
     };
@@ -2219,7 +2259,7 @@ fn clear_at_prompt(resolved: ResolvedLaunch, observation: &str) -> Result<Lifecy
                 return Ok(CommitPlan::reporting(Mutation::plain(
                     LifecycleResult::diagnosed(
                         Disposition::Ignored,
-                        "claim_stale",
+                        DiagnosticCode::ClaimStale,
                         "prompt return has no matching claim",
                     ),
                 )));
@@ -2322,7 +2362,7 @@ fn apply_provider_event_inner(
     }
     if !crate::protocol::ns20_text(observation) {
         return Err(AttentionError::new(
-            "record_invalid",
+            DiagnosticCode::RecordInvalid,
             "observation is invalid",
         ));
     }
@@ -2436,7 +2476,7 @@ mod lifecycle_write_tests {
         .unwrap();
         let restart = "an invalid child presence set was moved aside and started again";
         let mut planned = LifecycleResult::new(Disposition::Applied);
-        planned.diagnostic = Some(Diagnostic::new("record_invalid", restart));
+        planned.diagnostic = Some(Diagnostic::new(DiagnosticCode::RecordInvalid, restart));
         let mutation = Mutation {
             result: planned,
             lifecycle_replacement: Some(PreparedRecordWrite::new(path.clone(), &snapshot).unwrap()),
@@ -2447,7 +2487,7 @@ mod lifecycle_write_tests {
             || {
                 apply_observed_outputs_with(&resolved, binding_id, &mutation, |_| {
                     Err(AttentionError::new(
-                        "state_permissions",
+                        DiagnosticCode::StatePermissions,
                         "synthetic snapshot write failure",
                     ))
                 })

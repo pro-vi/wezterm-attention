@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::identity::{PaneAddress, socket_identity};
-use crate::protocol::{AttentionError, Diagnostic, Result};
+use crate::protocol::{AttentionError, Diagnostic, DiagnosticCode, Result};
 use crate::records::{RecordIdentity, read_record_at};
 use crate::wezterm::{PaneLister, Presence, ProcessListing, ProcessProbe};
 
@@ -35,10 +35,12 @@ pub(crate) enum PaneEvidence {
 /// Whether a diagnostic says a pane's server may be gone, which
 /// [`PaneEvidence::KeptHistory`] carries: kept history, not a probe that did
 /// not answer.
-pub(crate) fn kept_history_code(code: &str) -> bool {
+pub(crate) fn kept_history_code(code: DiagnosticCode) -> bool {
     matches!(
         code,
-        "socket_gone" | "socket_refused" | "incarnation_changed"
+        DiagnosticCode::SocketGone
+            | DiagnosticCode::SocketRefused
+            | DiagnosticCode::IncarnationChanged
     )
 }
 
@@ -65,10 +67,13 @@ impl SocketChange {
     /// What a reader reports of it when nothing shows the server gone.
     fn diagnostic(&self) -> Diagnostic {
         match self {
-            Self::Gone => Diagnostic::new("socket_gone", "mux socket no longer exists"),
-            Self::IdentityChanged => {
-                Diagnostic::new("incarnation_changed", "realm socket identity changed")
+            Self::Gone => {
+                Diagnostic::new(DiagnosticCode::SocketGone, "mux socket no longer exists")
             }
+            Self::IdentityChanged => Diagnostic::new(
+                DiagnosticCode::IncarnationChanged,
+                "realm socket identity changed",
+            ),
         }
     }
 }
@@ -123,7 +128,7 @@ pub(crate) fn recorded_server(
             RecordedServer::Replaced(SocketChange::Gone)
         }
         // Something other than this user's socket now holds the path.
-        Err(error) if error.diagnostic.code == "realm_unavailable" => {
+        Err(error) if error.diagnostic.code == DiagnosticCode::RealmUnavailable => {
             RecordedServer::Replaced(SocketChange::IdentityChanged)
         }
         Err(error) => RecordedServer::Unreadable(error),
@@ -238,7 +243,7 @@ pub(crate) fn presence_at_socket(
     let observed = |presence: &str| PaneEvidence::Observed(presence.to_owned());
     let Some(panes) = panes else {
         diagnostics.push(Diagnostic::new(
-            "probe_unavailable",
+            DiagnosticCode::ProbeUnavailable,
             "pane probe is unavailable",
         ));
         return observed("unavailable");
@@ -257,7 +262,7 @@ pub(crate) fn presence_at_socket(
                 Some(Presence::Absent | Presence::Unseen) => observed("verified_absent"),
                 _ => {
                     diagnostics.push(Diagnostic::new(
-                        "probe_unavailable",
+                        DiagnosticCode::ProbeUnavailable,
                         "identity-scoped process probe is unavailable",
                     ));
                     observed("unavailable")
@@ -289,7 +294,10 @@ pub(crate) fn presence_at_socket(
             return observed("verified_absent");
         }
         return PaneEvidence::KeptHistory {
-            diagnostic: Diagnostic::new("socket_refused", "mux socket refuses connections"),
+            diagnostic: Diagnostic::new(
+                DiagnosticCode::SocketRefused,
+                "mux socket refuses connections",
+            ),
         };
     }
     diagnostics.push(error.diagnostic);
@@ -695,7 +703,10 @@ mod pane_listing_tests {
         impl PaneLister for AlwaysFails {
             fn list(&self, _socket_path: &str) -> Result<Vec<PaneRow>> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
-                Err(AttentionError::new("probe_unavailable", "socket is gone"))
+                Err(AttentionError::new(
+                    DiagnosticCode::ProbeUnavailable,
+                    "socket is gone",
+                ))
             }
         }
         let failing = AlwaysFails {
@@ -705,7 +716,7 @@ mod pane_listing_tests {
         for _ in 0..3 {
             assert_eq!(
                 once.list("/s/one").unwrap_err().diagnostic.code,
-                "probe_unavailable"
+                DiagnosticCode::ProbeUnavailable
             );
         }
         // Every pane on an unreachable socket reports the same failure, and one

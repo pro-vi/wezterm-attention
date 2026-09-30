@@ -49,7 +49,8 @@ fn a_session_run_by_a_server_with_no_terminal_writes_nothing_to_the_pane_it_inhe
         assert_eq!(result.disposition, "ignored", "{}", event.source_event);
         let diagnostic = result.diagnostic.expect("a refusal says why");
         assert_eq!(
-            diagnostic.code, "session_detached",
+            diagnostic.code,
+            DiagnosticCode::SessionDetached,
             "{}: {diagnostic:?}",
             event.source_event
         );
@@ -68,7 +69,10 @@ fn a_session_start_from_a_server_with_no_terminal_binds_nothing() {
     let env = asserting_env(&setup);
     let result = outcome(&setup, &env, &start("codex", "s"), "00000000000000000200");
     assert_eq!(result.disposition, "ignored");
-    assert_eq!(result.diagnostic.expect("why").code, "session_detached");
+    assert_eq!(
+        result.diagnostic.expect("why").code,
+        DiagnosticCode::SessionDetached
+    );
     assert!(!setup.binding_dir("codex", "s").exists());
 }
 
@@ -137,7 +141,7 @@ fn an_agent_on_another_terminal_or_one_that_cannot_be_read_writes_nothing() {
             let result = outcome(&setup, &env, &event, "00000000000000000900");
             assert_eq!(result.disposition, "ignored", "{label}");
             let diagnostic = result.diagnostic.expect("a refusal says why");
-            assert_eq!(diagnostic.code, code, "{label}: {diagnostic:?}");
+            assert_eq!(diagnostic.code.as_str(), code, "{label}: {diagnostic:?}");
         }
         assert_eq!(records(&setup), before, "{label}");
     }
