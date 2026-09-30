@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use crate::identity::PaneAddress;
 use crate::protocol::{
-    AttentionError, Diagnostic, DiagnosticCode, Disposition, Result, vocabulary,
+    AttentionError, Diagnostic, DiagnosticCode, Disposition, Provider, Result, vocabulary,
 };
 
 vocabulary!(ChildStatus { Running, Waiting });
@@ -37,7 +37,7 @@ pub struct ChildPresenceSet {
     pub address: PaneAddress,
     pub launch_id: String,
     pub binding_id: String,
-    pub provider: String,
+    pub provider: Provider,
     pub revision: String,
     pub written_at_unix_ns: String,
     pub live: Vec<LiveChild>,
@@ -169,16 +169,21 @@ impl Reduction {
 }
 
 impl ChildPresenceSet {
-    /// An empty set for the binding a writer is about to change, with the
-    /// provider and schema the writer sets before it writes.
-    pub fn empty(address: PaneAddress, launch_id: &str, binding_id: &str) -> Self {
+    /// An empty set for the binding a writer is about to change. It leaves
+    /// `schema`, `revision` and `written_at_unix_ns` for the writer to set.
+    pub fn empty(
+        address: PaneAddress,
+        launch_id: &str,
+        binding_id: &str,
+        provider: Provider,
+    ) -> Self {
         Self {
             kind: "child_presence_set".to_owned(),
             schema: 0,
             address,
             launch_id: launch_id.to_owned(),
             binding_id: binding_id.to_owned(),
-            provider: String::new(),
+            provider,
             revision: String::new(),
             written_at_unix_ns: String::new(),
             live: Vec::new(),

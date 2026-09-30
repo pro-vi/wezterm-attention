@@ -19,7 +19,8 @@ use crate::lifecycle::outcome::{
 };
 use crate::observations::{LifecycleSnapshot, ObservationPools};
 use crate::protocol::{
-    AttentionError, Diagnostic, DiagnosticCode, Disposition, Result, free_of_control, manifest,
+    AttentionError, Diagnostic, DiagnosticCode, Disposition, Provider, Result, free_of_control,
+    manifest,
 };
 use crate::providers::{ProviderAction, ProviderEvent};
 use crate::records::{
@@ -313,11 +314,14 @@ fn read_current(
     })
 }
 
-fn provider_name(event: &ProviderEvent) -> Result<&'static str> {
+fn event_provider(event: &ProviderEvent) -> Result<Provider> {
     event
         .provider
-        .map(|provider| provider.as_str())
         .ok_or_else(|| AttentionError::new(DiagnosticCode::RecordInvalid, "provider is missing"))
+}
+
+fn provider_name(event: &ProviderEvent) -> Result<&'static str> {
+    event_provider(event).map(Provider::as_str)
 }
 
 fn event_binding_id(event: &ProviderEvent, launch_id: &str) -> Result<String> {
@@ -948,13 +952,13 @@ fn append_observation(
                 address: resolved.address.clone(),
                 launch_id: resolved.launch_id.clone(),
                 binding_id,
-                provider: provider_name(event)?.to_owned(),
+                provider: event_provider(event)?,
                 snapshot_id: Uuid::new_v4().to_string(),
                 written_at_unix_ns: written_at.to_owned(),
                 pools: ObservationPools::default(),
             },
         };
-        if snapshot.provider != provider_name(event)? {
+        if snapshot.provider != event_provider(event)? {
             return Err(AttentionError::new(
                 DiagnosticCode::RecordInvalid,
                 "lifecycle provider mismatches its binding",
@@ -1074,22 +1078,30 @@ fn plan_children(
         )
     })?;
     let end = read_record_at(&resolved.root, "binding_end", &identity)?;
-    let empty =
-        || ChildPresenceSet::empty(resolved.address.clone(), &resolved.launch_id, binding_id);
-    let provider = provider_name(event)?;
+    let provider = event_provider(event)?;
+    let empty = || {
+        ChildPresenceSet::empty(
+            resolved.address.clone(),
+            &resolved.launch_id,
+            binding_id,
+            provider,
+        )
+    };
     let (mut set, started_again) =
         match read_record_typed(&path, Some("child_presence_set"), &identity) {
             // A set naming another provider than its binding is invalid, as
             // both readers hold.
-            RecordRead::Present(value) if value["provider"].as_str() == Some(provider) => (
-                ChildPresenceSet::deserialize(&value).map_err(|_| {
-                    AttentionError::new(
-                        DiagnosticCode::RecordInvalid,
-                        "child presence set could not be decoded",
-                    )
-                })?,
-                false,
-            ),
+            RecordRead::Present(value) if value["provider"].as_str() == Some(provider.as_str()) => {
+                (
+                    ChildPresenceSet::deserialize(&value).map_err(|_| {
+                        AttentionError::new(
+                            DiagnosticCode::RecordInvalid,
+                            "child presence set could not be decoded",
+                        )
+                    })?,
+                    false,
+                )
+            }
             RecordRead::Missing => (empty(), false),
             RecordRead::Present(_) | RecordRead::Invalid(_) => {
                 // A rename moves the file as it stands, a symlink included,
@@ -1106,7 +1118,6 @@ fn plan_children(
             }
             RecordRead::Unavailable(error) | RecordRead::Unsupported(error) => return Err(error),
         };
-    set.provider = provider.to_owned();
     set.schema = manifest()?.record_schema;
     let reduction = set.apply(EndMark::of(end.as_ref(), &binding), transition);
     let mut result = LifecycleResult::new(reduction.disposition);

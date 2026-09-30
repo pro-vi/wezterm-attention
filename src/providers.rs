@@ -33,7 +33,7 @@ pub struct HookDescription {
     pub wire_version: u64,
     pub record_schema: u64,
     pub writer_version: String,
-    pub provider: String,
+    pub provider: Provider,
     pub native_hooks: Vec<NativeHookSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extension_entrypoint: Option<String>,
@@ -41,7 +41,7 @@ pub struct HookDescription {
 
 pub fn describe_hooks(provider: &str) -> crate::protocol::Result<HookDescription> {
     let protocol = manifest()?;
-    let hooks = protocol.native_hooks.get(provider).ok_or_else(|| {
+    let unsupported = || {
         AttentionError::usage(format!(
             "--provider is not supported; expected one of: {}",
             protocol
@@ -52,27 +52,28 @@ pub fn describe_hooks(provider: &str) -> crate::protocol::Result<HookDescription
                 .collect::<Vec<_>>()
                 .join(", ")
         ))
-    })?;
+    };
+    let hooks = protocol
+        .native_hooks
+        .get(provider)
+        .ok_or_else(unsupported)?;
+    let provider = Provider::parse(provider).ok_or_else(unsupported)?;
+    let name = provider.as_str();
     Ok(HookDescription {
         manifest_schema: protocol.manifest_schema,
         wire_version: protocol.wire_version,
         record_schema: protocol.record_schema,
         writer_version: protocol.writer_version.clone(),
-        provider: provider.into(),
-        extension_entrypoint: (provider == "pi").then(|| "pi/index.ts".into()),
+        provider,
+        extension_entrypoint: (provider == Provider::Pi).then(|| "pi/index.ts".into()),
         native_hooks: hooks
             .iter()
             .map(|(event, declaration)| NativeHookSpec {
                 native_event: declaration.native_event.clone(),
-                arguments: vec![
-                    "hooks".into(),
-                    "event".into(),
-                    provider.into(),
-                    event.clone(),
-                ],
+                arguments: vec!["hooks".into(), "event".into(), name.into(), event.clone()],
                 registration: declaration.registration,
                 evidence: vec![
-                    format!("tests/fixtures/providers/{provider}.json"),
+                    format!("tests/fixtures/providers/{name}.json"),
                     "tests/fixtures/lifecycle/contact-cases.json".into(),
                     "docs/reviews/lifecycle-contact-results.md".into(),
                 ],

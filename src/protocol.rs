@@ -198,6 +198,27 @@ impl Provider {
     }
 }
 
+/// Serialized through `as_str` and read through `parse`, so the spellings
+/// have one definition each way rather than another in a derive attribute.
+impl Serialize for Provider {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Provider {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Self::parse(&name)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown provider {name:?}")))
+    }
+}
+
 /// Whether a provider's native hook is one Attention asks to be registered.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -464,6 +485,18 @@ pub fn parse_manifest(source: &str) -> Result<Manifest> {
         return Err(AttentionError::new(
             DiagnosticCode::IntegrationVersionMismatch,
             "manifest native hooks are invalid",
+        ));
+    }
+    // A child presence set decodes its provider as a `Provider`, so a
+    // sub-agent provider has to be one of the providers checked above.
+    if !parsed
+        .enums
+        .subagent_providers
+        .is_subset(&parsed.enums.providers)
+    {
+        return Err(AttentionError::new(
+            DiagnosticCode::IntegrationVersionMismatch,
+            "manifest subagent providers are invalid",
         ));
     }
     if parsed
@@ -1031,6 +1064,16 @@ mod consumer_manifest_tests {
         invalid["tool_classification"]["codex"]["request_permissions"]["question_mode"] =
             Value::from("blocking");
         assert!(parse_manifest(&invalid.to_string()).is_err());
+    }
+
+    #[test]
+    fn manifest_subagent_providers_must_be_providers() {
+        let mut manifest: Value = serde_json::from_str(EMBEDDED_MANIFEST).unwrap();
+        manifest["enums"]["subagent_providers"]
+            .as_array_mut()
+            .unwrap()
+            .push(Value::from("gemini"));
+        assert!(parse_manifest(&manifest.to_string()).is_err());
     }
 
     #[test]

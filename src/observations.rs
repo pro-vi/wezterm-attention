@@ -4,7 +4,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::identity::PaneAddress;
-use crate::protocol::{AttentionError, DiagnosticCode, Result, manifest, vocabulary};
+use crate::protocol::{AttentionError, DiagnosticCode, Provider, Result, manifest, vocabulary};
 
 // Defined in `protocol` because the manifest's tool classification is written in
 // them: a closed vocabulary the contract declares belongs with the contract.
@@ -152,7 +152,7 @@ pub struct LifecycleSnapshot {
     pub address: PaneAddress,
     pub launch_id: String,
     pub binding_id: String,
-    pub provider: String,
+    pub provider: Provider,
     pub snapshot_id: String,
     pub written_at_unix_ns: String,
     pub pools: ObservationPools,
@@ -323,7 +323,7 @@ impl LifecycleView {
                 ))
         });
         if let Some(snapshot) = lead.or(children) {
-            view.requests = request_evidence(&view.observations, &snapshot.provider);
+            view.requests = request_evidence(&view.observations, snapshot.provider.as_str());
         }
         view
     }
@@ -761,7 +761,7 @@ impl LifecycleSnapshot {
             for item in &pool.observations {
                 if !manifest()?
                     .lifecycle_sources
-                    .get(&self.provider)
+                    .get(self.provider.as_str())
                     .and_then(|kinds| kinds.get(item.body.kind()))
                     .is_some_and(|events| events.contains(&item.source_event))
                 {
@@ -811,13 +811,13 @@ impl LifecycleSnapshot {
                     agent_id,
                     agent_key,
                 } = &item.actor
-                    && (self.provider == "pi"
+                    && (self.provider == Provider::Pi
                         || crate::protocol::sha256_hex(agent_id.as_bytes()) != *agent_key)
                 {
                     return Err(invalid());
                 }
                 if let Some((tool, class, mode)) = item.body.tool() {
-                    if classify_tool(&self.provider, tool) != (class, mode) {
+                    if classify_tool(self.provider.as_str(), tool) != (class, mode) {
                         return Err(invalid());
                     }
                     if mode == Some(QuestionMode::Nonblocking) {

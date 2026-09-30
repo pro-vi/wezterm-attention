@@ -1169,7 +1169,7 @@ fn byte_pressure_is_pool_local_with_maximal_valid_metadata() {
     for requests in [false, true] {
         let mut snapshot: LifecycleSnapshot =
             serde_json::from_value(cases["cases"][1]["value"].clone()).unwrap();
-        snapshot.provider = "claude".into();
+        snapshot.provider = wezterm_attention::protocol::Provider::Claude;
         let mut item = snapshot.pools.general.observations[0].clone();
         item.source_version = Some("v".repeat(256));
         let agent_id = "a".repeat(256);
