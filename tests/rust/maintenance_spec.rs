@@ -588,6 +588,26 @@ fn the_manifest_declares_exactly_the_diagnostic_codes_the_binary_can_emit() {
     assert_eq!(declared, &emitted);
 }
 
+/// The manifest test compares sets, so it passes when two variants trade
+/// spellings. Tying each spelling to its variant's name catches that.
+#[test]
+fn each_diagnostic_code_is_published_as_its_variant_name_in_snake_case() {
+    for &code in DiagnosticCode::ALL {
+        let name = format!("{code:?}");
+        let mut expected = String::new();
+        for (index, letter) in name.char_indices() {
+            if letter.is_ascii_uppercase() && index > 0 {
+                expected.push('_');
+            }
+            expected.push(letter.to_ascii_lowercase());
+        }
+        let published =
+            serde_json::to_value(wezterm_attention::protocol::Diagnostic::new(code, ""))
+                .expect("diagnostic serializes");
+        assert_eq!(published["code"], expected.as_str(), "{name}");
+    }
+}
+
 struct SignalingPanes {
     entered: Arc<Barrier>,
     release: Arc<Barrier>,
