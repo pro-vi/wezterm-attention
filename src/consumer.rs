@@ -195,7 +195,11 @@ pub fn dispatch(executable: &str, bytes: &[u8], timeout: Duration) -> DeliveryOu
         .stderr(Stdio::null());
     // execvp on macOS can fall back to a shell for ENOEXEC. The contract is a
     // direct executable, so call execv after std has prepared child stdio.
-    // This closure performs only an async-signal-safe syscall after fork.
+    //
+    // SAFETY: after fork the closure allocates nothing. It calls `execv` and,
+    // if that returns, reads errno; both are async-signal-safe. Its pointers
+    // are into `program`, which the closure owns, and a stack array ending in
+    // null.
     unsafe {
         command.pre_exec(move || {
             let argv = [program.as_ptr(), std::ptr::null()];
@@ -213,7 +217,10 @@ pub fn dispatch(executable: &str, bytes: &[u8], timeout: Duration) -> DeliveryOu
         return outcome;
     };
     let fd = stdin.as_raw_fd();
+    // SAFETY: `fcntl` with these commands takes no pointers, and `fd` stays
+    // open while `stdin` lives.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    // SAFETY: as for the call above.
     if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
         outcome.exit_code = terminate_child(&mut child);
         return outcome;

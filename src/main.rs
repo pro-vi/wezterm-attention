@@ -1,3 +1,6 @@
+// Cargo.toml's lint table says why the tests are not held to this.
+#![cfg_attr(not(test), deny(clippy::undocumented_unsafe_blocks))]
+
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 

@@ -864,6 +864,8 @@ fn canonical_json(value: &Value) -> Result<Vec<u8>> {
 // implementation uses POSIX fsync for both files and parent directories, so
 // call that syscall directly to retain the same durability boundary.
 fn sync_via_fsync(file: &File) -> std::io::Result<()> {
+    // SAFETY: `fsync` takes no pointers, and the descriptor stays open while
+    // `file` is borrowed.
     let result = unsafe { libc::fsync(file.as_raw_fd()) };
     if result == 0 {
         Ok(())

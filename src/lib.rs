@@ -15,6 +15,9 @@
 //! `docs/accepted-limitations.md` records why that is documented rather than
 //! enforced.
 
+// Cargo.toml's lint table says why the tests are not held to this.
+#![cfg_attr(not(test), deny(clippy::undocumented_unsafe_blocks))]
+
 pub mod children;
 pub mod consumer;
 pub mod hook_content;

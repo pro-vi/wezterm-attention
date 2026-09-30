@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::identity::{
-    PaneAddress, monotonic_ns20, tty_fingerprint, tty_fingerprint_from_metadata,
+    PaneAddress, effective_uid, monotonic_ns20, tty_fingerprint, tty_fingerprint_from_metadata,
 };
 use crate::protocol::{
     AttentionError, DiagnosticCode, Result, Verdict, manifest, parse_wire_value,
@@ -381,7 +381,7 @@ impl ProcessInspector for SystemProcessInspector {
     fn terminal_device(&self, path: &str) -> Option<u64> {
         use std::os::unix::fs::{FileTypeExt, MetadataExt};
         let metadata = fs::metadata(path).ok()?;
-        (metadata.file_type().is_char_device() && metadata.uid() == unsafe { libc::geteuid() })
+        (metadata.file_type().is_char_device() && metadata.uid() == effective_uid())
             .then(|| u64::from(metadata.rdev() as u32))
     }
 }
@@ -485,6 +485,8 @@ fn with_kinfo_proc<T>(pid: i32, read: impl FnOnce(&[u8]) -> T) -> Option<T> {
     let mut buffer = [0_u64; kinfo::SIZE / 8 + 1];
     let mut size = std::mem::size_of_val(&buffer);
     let mut name = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
+    // SAFETY: `name` holds the 4 integers the call is told of, `buffer` is
+    // writable for the `size` bytes it is told of, and no new value is set.
     if unsafe {
         libc::sysctl(
             name.as_mut_ptr(),
@@ -498,6 +500,8 @@ fn with_kinfo_proc<T>(pid: i32, read: impl FnOnce(&[u8]) -> T) -> Option<T> {
     {
         return None;
     }
+    // SAFETY: the slice starts at `buffer`, which outlives it, covers no more
+    // than its bytes, and every byte of a `u64` array is an initialized `u8`.
     let bytes = unsafe {
         std::slice::from_raw_parts(
             buffer.as_ptr().cast::<u8>(),
@@ -528,6 +532,8 @@ fn read_boot_session() -> Option<String> {
     let mut buffer = [0_u8; 64];
     let mut size = buffer.len();
     let name = c"kern.bootsessionuuid";
+    // SAFETY: `name` is a NUL-terminated C string, `buffer` is writable for
+    // the `size` bytes it is told of, and no new value is set.
     if unsafe {
         libc::sysctlbyname(
             name.as_ptr(),
@@ -762,6 +768,8 @@ fn tty_name_for_fd(fd: libc::c_int) -> Result<String> {
 /// on some targets and `u8` on others (aarch64 Linux among them).
 fn ttyname(fd: libc::c_int) -> Option<Result<String>> {
     let mut buffer = vec![0_u8; 4096];
+    // SAFETY: `buffer` is writable for the `buffer.len()` bytes the call is
+    // told of. A descriptor that is not a terminal only makes it fail.
     let result =
         unsafe { libc::ttyname_r(fd, buffer.as_mut_ptr().cast::<libc::c_char>(), buffer.len()) };
     if result != 0 {
@@ -800,9 +808,14 @@ fn group_id(name: &str) -> Option<libc::gid_t> {
     let name = std::ffi::CString::new(name).ok()?;
     let mut size = 4096;
     while size <= 1 << 20 {
+        // SAFETY: `libc::group` holds only integers and pointers, and all
+        // zero bytes is a valid value for each (null, for the pointers).
         let mut group: libc::group = unsafe { std::mem::zeroed() };
         let mut buffer = vec![0_u8; size];
         let mut found: *mut libc::group = std::ptr::null_mut();
+        // SAFETY: `name` is a NUL-terminated C string, `group` and `found` are
+        // live locals, and `buffer` is writable for the length the call is
+        // told of. Afterwards only `gr_gid`, a plain integer, is read.
         let status = unsafe {
             libc::getgrnam_r(
                 name.as_ptr(),
@@ -864,7 +877,7 @@ fn is_trusted_fallback(path: &Path) -> bool {
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-    ancestry_is_trusted(&ancestry, unsafe { libc::geteuid() }, &administrators)
+    ancestry_is_trusted(&ancestry, effective_uid(), &administrators)
 }
 
 fn ancestry_is_trusted(
@@ -972,6 +985,8 @@ impl PaneLister for WeztermPaneLister {
 /// listener with a full backlog cannot stall a read.
 pub(crate) fn listener_refuses(socket_path: &str) -> bool {
     let bytes = socket_path.as_bytes();
+    // SAFETY: `sockaddr_un` holds only integers and a byte array, and all zero
+    // bytes is a valid value for each.
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     if bytes.is_empty() || bytes.len() >= address.sun_path.len() || bytes.contains(&0) {
         return false;
@@ -980,12 +995,16 @@ pub(crate) fn listener_refuses(socket_path: &str) -> bool {
     for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
         *slot = *byte as libc::c_char;
     }
+    // SAFETY: `socket` takes no pointers.
     let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
     if fd < 0 {
         return false;
     }
-    // Closed on every return.
+    // SAFETY: `socket` just returned `fd`, so it is open and nothing else owns
+    // it. `OwnedFd` closes it on every return.
     let _socket = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+    // SAFETY: `fcntl` with these commands takes no pointers, and `fd` stays
+    // open while `_socket` lives.
     let prepared = unsafe {
         libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) == 0
             && libc::fcntl(
@@ -997,6 +1016,8 @@ pub(crate) fn listener_refuses(socket_path: &str) -> bool {
     if !prepared {
         return false;
     }
+    // SAFETY: `address` is a fully initialized `sockaddr_un` that outlives the
+    // call, and the length passed is its size.
     let connected = unsafe {
         libc::connect(
             fd,
@@ -1037,6 +1058,8 @@ enum PidState {
 }
 
 fn pid_state(pid: libc::pid_t) -> PidState {
+    // SAFETY: signal 0 is never delivered. `kill` only checks that `pid`
+    // exists and may be signalled, and takes no pointers.
     if unsafe { libc::kill(pid, 0) } == 0 {
         return PidState::Running;
     }
@@ -1197,6 +1220,7 @@ fn run_bounded(
 /// lives, so this reaches a descendant even after the child was reaped.
 fn kill_group(child: &mut std::process::Child) {
     if let Ok(group) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: `killpg` takes no pointers.
         unsafe {
             libc::killpg(group, libc::SIGKILL);
         }
@@ -1241,19 +1265,24 @@ fn own_pane_processes() -> Option<PaneProcessSet> {
     /// `PROC_UID_ONLY` from `<libproc.h>`: processes whose effective uid is
     /// the one given.
     const PROC_UID_ONLY: u32 = 4;
-    let uid = unsafe { libc::geteuid() };
+    let uid = effective_uid();
     let pid_size = std::mem::size_of::<libc::pid_t>();
+    // SAFETY: a null buffer of size 0 asks only for the size needed, and
+    // nothing is written.
     let needed = unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, std::ptr::null_mut(), 0) };
     let needed = usize::try_from(needed).ok().filter(|bytes| *bytes > 0)?;
     // Room for processes started between the two calls.
     let mut pids = vec![0 as libc::pid_t; needed / pid_size + 256];
     let capacity = libc::c_int::try_from(pids.len() * pid_size).ok()?;
+    // SAFETY: `pids` is writable for `capacity` bytes, its length in bytes.
     let filled =
         unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, pids.as_mut_ptr().cast(), capacity) };
     pids.truncate(usize::try_from(filled).ok()? / pid_size);
     let mut argument_bytes: libc::c_int = 0;
     let mut size = std::mem::size_of::<libc::c_int>();
     let mut name = [libc::CTL_KERN, libc::KERN_ARGMAX];
+    // SAFETY: `name` holds the 2 integers the call is told of, the output is
+    // `argument_bytes`, whose size is `size`, and no new value is set.
     if unsafe {
         libc::sysctl(
             name.as_mut_ptr(),
@@ -1276,6 +1305,10 @@ fn own_pane_processes() -> Option<PaneProcessSet> {
         let mut size = buffer.len();
         // A process that exited is not listed. One the kernel will not
         // describe is still running, and whatever it carries is missed.
+        //
+        // SAFETY: `name` holds the 3 integers the call is told of, `buffer`
+        // is writable for the `size` bytes it is told of, and no new value
+        // is set.
         if unsafe {
             libc::sysctl(
                 name.as_mut_ptr(),
@@ -1319,7 +1352,7 @@ fn still_running(pid: libc::pid_t) -> bool {
 #[cfg(target_os = "linux")]
 fn own_pane_processes() -> Option<PaneProcessSet> {
     use std::os::unix::fs::MetadataExt;
-    let uid = unsafe { libc::geteuid() };
+    let uid = effective_uid();
     let own = std::process::id().to_string();
     let mut read_own = false;
     let mut processes = PaneProcessSet::default();

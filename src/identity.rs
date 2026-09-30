@@ -83,6 +83,12 @@ pub fn length_prefixed_digest<'a>(parts: impl IntoIterator<Item = &'a str>) -> S
     format!("{:x}", digest.finalize())
 }
 
+pub(crate) fn effective_uid() -> libc::uid_t {
+    // SAFETY: `geteuid` takes no arguments, touches no memory of ours and
+    // cannot fail.
+    unsafe { libc::geteuid() }
+}
+
 pub fn socket_identity(socket_value: &str) -> Result<(String, String, SocketMetadata)> {
     if !Path::new(socket_value).is_absolute() {
         return Err(AttentionError::new(
@@ -102,7 +108,7 @@ pub fn socket_identity(socket_value: &str) -> Result<(String, String, SocketMeta
             "mux socket identity could not be read",
         )
     })?;
-    if !metadata.file_type().is_socket() || metadata.uid() != unsafe { libc::geteuid() } {
+    if !metadata.file_type().is_socket() || metadata.uid() != effective_uid() {
         return Err(AttentionError::new(
             DiagnosticCode::RealmUnavailable,
             "mux socket is unavailable or unsafe",
@@ -173,7 +179,7 @@ pub fn pane_address(env: &BTreeMap<String, String>) -> Result<(PaneAddress, Sock
 }
 
 pub fn tty_fingerprint_from_metadata(metadata: &fs::Metadata) -> Result<String> {
-    if !metadata.file_type().is_char_device() || metadata.uid() != unsafe { libc::geteuid() } {
+    if !metadata.file_type().is_char_device() || metadata.uid() != effective_uid() {
         return Err(AttentionError::new(
             DiagnosticCode::UnsafeTty,
             "tty is not a same-UID character device",
@@ -206,6 +212,7 @@ pub fn monotonic_ns20() -> Result<String> {
         tv_sec: 0,
         tv_nsec: 0,
     };
+    // SAFETY: `value` is a live `timespec` for the call to write into.
     let result = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_RAW, &mut value) };
     if result != 0 || value.tv_sec < 0 || value.tv_nsec < 0 {
         return Err(AttentionError::new(
