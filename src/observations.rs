@@ -507,7 +507,17 @@ fn request_evidence(observations: &[PooledObservation], provider: &str) -> Vec<R
             ObservationBody::Notice { .. } => {
                 (RequestKind::Notice, Role::Request, None, None, "", None)
             }
-            _ => continue,
+            // A generic tool's call, and the rest of what a turn does, neither
+            // opens nor answers a request.
+            ObservationBody::ToolPreflight { .. }
+            | ObservationBody::ToolResult { .. }
+            | ObservationBody::PromptSubmitted { .. }
+            | ObservationBody::ResponseFinished { .. }
+            | ObservationBody::RunSettled
+            | ObservationBody::AttemptOutcome { .. }
+            | ObservationBody::UserInterrupt
+            | ObservationBody::CompactionAttempted { .. }
+            | ObservationBody::CompactionSucceeded { .. } => continue,
         };
         let (actor, agent) = match &item.actor {
             Actor::Lead => ("lead", ""),

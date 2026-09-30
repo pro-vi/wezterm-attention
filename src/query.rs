@@ -963,7 +963,11 @@ fn lifecycle_source(
         RecordAvailability::Absent => LifecycleAvailability::Absent,
         RecordAvailability::Unavailable => LifecycleAvailability::Unavailable,
         RecordAvailability::Unsupported => LifecycleAvailability::Unsupported,
-        _ => LifecycleAvailability::Invalid,
+        // Only an activity is ever cleared or expired; a lifecycle file is
+        // read as it lies, so neither arrives here.
+        RecordAvailability::Invalid | RecordAvailability::Cleared | RecordAvailability::Expired => {
+            LifecycleAvailability::Invalid
+        }
     };
     let mut diagnostics = read.diagnostics;
     let Some(record) = read.record else {
