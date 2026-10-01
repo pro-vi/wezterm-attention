@@ -1,5 +1,13 @@
 // Cargo.toml's lint table says why the tests are not held to this.
-#![cfg_attr(not(test), deny(clippy::undocumented_unsafe_blocks))]
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::undocumented_unsafe_blocks,
+        clippy::unwrap_used,
+        clippy::panic,
+        clippy::print_stdout,
+    )
+)]
 
 use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};

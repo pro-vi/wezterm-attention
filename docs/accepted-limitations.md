@@ -10,23 +10,18 @@ something still points at them: `hooks describe` names
 `docs/reviews/lifecycle-contact-results.md` in its evidence output, for one. This
 file is the maintained public account, and it is the one to read first.
 
-## Panic paths are not denied by lint
+## `expect` calls are not denied by lint
 
-`Cargo.toml` denies `dbg_macro`, `todo`, `unimplemented`, `unsafe_op_in_unsafe_fn`
-and `unused_must_use`. It does not deny `clippy::unwrap_used` or
-`clippy::expect_used`, which still fire at sites in the library.
+`clippy::expect_used` is not denied, and still fires at sites in the library and the
+binary.
 
-Denying them today would mean adding an allow attribute at each site, which announces an
+Denying it today would mean adding an allow attribute at each site, which announces an
 intention while changing nothing. The sites need reading individually: some are
-genuinely infallible and want a comment, some want an error path. Until that pass
-happens, the table locks in the lints the crate already satisfies and says
-nothing about the ones it does not.
+genuinely infallible and want a comment, some want an error path.
 
-To list the sites, run `cargo clippy --lib -- -W clippy::unwrap_used
--W clippy::expect_used`. The command also lints `build.rs`, and reports its one
-`expect` (cargo sets `CARGO_MANIFEST_DIR`), which is not a library site. Each
-site is one of three things, and they
-need separating before the lint can go on:
+To list the sites, run `cargo clippy -- -W clippy::expect_used`. The output also
+includes the one `expect` in `build.rs` (cargo sets `CARGO_MANIFEST_DIR`); ignore it.
+Each site is one of three things, and they need separating before the lint can go on:
 
 1. A genuine invariant. It keeps the call and gains an `#[allow]` with a
    one-line reason.
@@ -36,12 +31,13 @@ need separating before the lint can go on:
 3. A failure nothing handles, which should return an `AttentionError`. This is
    the set worth finding.
 
-Replacing `.unwrap()` with `.unwrap_or(default)` on a required field does not
+Replacing `.expect()` with `.unwrap_or(default)` on a required field does not
 count as handling it. It turns a loud failure into a silent wrong answer.
 
-A panic in a hook is not a clean abort. It interrupts processing wherever it
-lands, so the state a consumer then reads can be missing, stale, or updated in
-one file and not another. The record contract already declines to promise that
+A panic from one of these `expect` calls in a hook is not a clean abort. It
+interrupts processing wherever it lands, so the state a consumer then reads can be
+missing, stale, or updated in one file and not another. The record contract already
+declines to promise that
 independently written files form one atomic snapshot; nothing rolls back on
 failure. That is why this is a real gap rather than a stylistic preference.
 
