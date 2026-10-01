@@ -1095,7 +1095,10 @@ fn list_wezterm_inventory(socket_path: &str) -> Result<Vec<u8>> {
     run_bounded(&mut command, maximum, CHILD_DEADLINE).map_err(|failure| {
         let code = match failure {
             RunFailure::TooLarge => DiagnosticCode::RecordInvalid,
-            _ => DiagnosticCode::RealmUnavailable,
+            RunFailure::NotStarted
+            | RunFailure::TimedOut(_)
+            | RunFailure::Exited(_)
+            | RunFailure::Unreadable => DiagnosticCode::RealmUnavailable,
         };
         AttentionError::new(
             code,

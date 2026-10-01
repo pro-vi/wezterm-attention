@@ -669,6 +669,22 @@ fn validate_target(value: &Value) -> bool {
     }
 }
 
+fn fits_lifecycle_shape(name: &str, value: &Value, protocol: &Manifest) -> bool {
+    protocol
+        .lifecycle_shapes
+        .get(name)
+        .is_some_and(|spec| validate_shape(value, spec, protocol, None))
+}
+
+fn in_lifecycle_enum(name: &str, value: &Value, protocol: &Manifest) -> bool {
+    value.as_str().is_some_and(|text| {
+        protocol
+            .lifecycle_enums
+            .get(name)
+            .is_some_and(|values| values.contains(text))
+    })
+}
+
 fn validate_field(
     field_type: FieldType,
     value: &Value,
@@ -677,17 +693,9 @@ fn validate_field(
 ) -> bool {
     let limits = &protocol.limits;
     match field_type {
-        FieldType::LifecyclePools | FieldType::ObservationPool | FieldType::NativeCorrelation => {
-            let shape = match field_type {
-                FieldType::LifecyclePools => "pools",
-                FieldType::ObservationPool => "pool",
-                _ => "correlation",
-            };
-            protocol
-                .lifecycle_shapes
-                .get(shape)
-                .is_some_and(|spec| validate_shape(value, spec, protocol, None))
-        }
+        FieldType::LifecyclePools => fits_lifecycle_shape("pools", value, protocol),
+        FieldType::ObservationPool => fits_lifecycle_shape("pool", value, protocol),
+        FieldType::NativeCorrelation => fits_lifecycle_shape("correlation", value, protocol),
         FieldType::LifecycleActor => {
             value
                 .get("kind")
@@ -712,37 +720,17 @@ fn validate_field(
                         })
                 })
         }),
-        FieldType::ToolClass
-        | FieldType::QuestionMode
-        | FieldType::ResultSurface
-        | FieldType::AttemptOutcome
-        | FieldType::ElicitationMode
-        | FieldType::SelectionAction
-        | FieldType::NoticeSubtype
-        | FieldType::PolicyScope
-        | FieldType::InputSource
-        | FieldType::ErrorCategory
-        | FieldType::CompactionTrigger => {
-            let name = match field_type {
-                FieldType::ToolClass => "tool_class",
-                FieldType::QuestionMode => "question_mode",
-                FieldType::ResultSurface => "result_surface",
-                FieldType::AttemptOutcome => "attempt_outcome",
-                FieldType::ElicitationMode => "elicitation_mode",
-                FieldType::SelectionAction => "selection_action",
-                FieldType::NoticeSubtype => "notice_subtype",
-                FieldType::PolicyScope => "policy_scope",
-                FieldType::InputSource => "input_source",
-                FieldType::ErrorCategory => "error_category",
-                _ => "compaction_trigger",
-            };
-            value.as_str().is_some_and(|text| {
-                protocol
-                    .lifecycle_enums
-                    .get(name)
-                    .is_some_and(|values| values.contains(text))
-            })
-        }
+        FieldType::ToolClass => in_lifecycle_enum("tool_class", value, protocol),
+        FieldType::QuestionMode => in_lifecycle_enum("question_mode", value, protocol),
+        FieldType::ResultSurface => in_lifecycle_enum("result_surface", value, protocol),
+        FieldType::AttemptOutcome => in_lifecycle_enum("attempt_outcome", value, protocol),
+        FieldType::ElicitationMode => in_lifecycle_enum("elicitation_mode", value, protocol),
+        FieldType::SelectionAction => in_lifecycle_enum("selection_action", value, protocol),
+        FieldType::NoticeSubtype => in_lifecycle_enum("notice_subtype", value, protocol),
+        FieldType::PolicyScope => in_lifecycle_enum("policy_scope", value, protocol),
+        FieldType::InputSource => in_lifecycle_enum("input_source", value, protocol),
+        FieldType::ErrorCategory => in_lifecycle_enum("error_category", value, protocol),
+        FieldType::CompactionTrigger => in_lifecycle_enum("compaction_trigger", value, protocol),
         FieldType::RecordKind => value.as_str() == expected_kind,
         FieldType::RecordSchema => value.as_u64() == Some(protocol.record_schema),
         FieldType::WireVersion => value.as_u64() == Some(protocol.wire_version),
@@ -800,17 +788,8 @@ fn validate_field(
                         .all(|item| validate_shape(item, spec, protocol, None))
                 })
         }),
-        FieldType::ChildParentClear | FieldType::ChildLifetimeEnd => {
-            let shape = if field_type == FieldType::ChildParentClear {
-                "child_parent_clear"
-            } else {
-                "child_lifetime_end"
-            };
-            protocol
-                .lifecycle_shapes
-                .get(shape)
-                .is_some_and(|spec| validate_shape(value, spec, protocol, None))
-        }
+        FieldType::ChildParentClear => fits_lifecycle_shape("child_parent_clear", value, protocol),
+        FieldType::ChildLifetimeEnd => fits_lifecycle_shape("child_lifetime_end", value, protocol),
         FieldType::ChildAgentIds => value.as_array().is_some_and(|items| {
             items
                 .iter()
@@ -953,7 +932,9 @@ pub fn validate_record(value: &Value, expected_kind: Option<&str>) -> Result<()>
             DiagnosticCode::FutureSchema,
             "record schema is unsupported",
         )),
-        _ => Err(AttentionError::new(
+        // A valid record of another kind than the caller asked for is invalid
+        // to that caller.
+        Verdict::Valid | Verdict::RecordInvalid => Err(AttentionError::new(
             DiagnosticCode::RecordInvalid,
             "state record is invalid",
         )),

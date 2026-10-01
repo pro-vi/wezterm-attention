@@ -660,7 +660,20 @@ impl ObservationBody {
                 question_mode,
                 ..
             } => Some((tool_name, *tool_class, *question_mode)),
-            _ => None,
+            // `ApprovalRequested` (optionally) and `AutomaticDenial` store a tool
+            // name but no class, so there is no class to check against
+            // `classify_tool`.
+            Self::ApprovalRequested { .. } | Self::AutomaticDenial { .. } => None,
+            Self::PromptSubmitted { .. }
+            | Self::ResponseFinished { .. }
+            | Self::RunSettled
+            | Self::AttemptOutcome { .. }
+            | Self::UserInterrupt
+            | Self::ElicitationRequested { .. }
+            | Self::ElicitationActionSelected { .. }
+            | Self::Notice { .. }
+            | Self::CompactionAttempted { .. }
+            | Self::CompactionSucceeded { .. } => None,
         }
     }
 }
@@ -692,7 +705,14 @@ impl LifecycleObservation {
             | ObservationBody::ElicitationActionSelected { .. } => {
                 c.elicitation_id.as_deref().map(|id| ("elicitation_id", id))
             }
-            _ => c
+            ObservationBody::PromptSubmitted { .. }
+            | ObservationBody::ResponseFinished { .. }
+            | ObservationBody::RunSettled
+            | ObservationBody::AttemptOutcome { .. }
+            | ObservationBody::UserInterrupt
+            | ObservationBody::Notice { .. }
+            | ObservationBody::CompactionAttempted { .. }
+            | ObservationBody::CompactionSucceeded { .. } => c
                 .message_id
                 .as_deref()
                 .map(|id| ("message_id", id))

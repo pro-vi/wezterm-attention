@@ -1085,7 +1085,9 @@ fn run_inspect(
                     "scope stdin is empty; pipe a scope JSON object or use < scope.json".to_owned(),
                 serde_json::error::Category::Syntax | serde_json::error::Category::Eof =>
                     format!("scope JSON syntax is invalid at line {}, column {}", error.line(), error.column()),
-                _ => "scope requires address (realm_id and incarnation_id: 64 lowercase hex; pane_id: canonical decimal string), launch_id (UUID), and optional binding_id (64 lowercase hex); no extra fields".to_owned(),
+                // `bytes` is already in memory, so `Io` (serde_json 1.0.151: a failed
+                // stream read or write) cannot arrive here.
+                serde_json::error::Category::Io | serde_json::error::Category::Data => "scope requires address (realm_id and incarnation_id: 64 lowercase hex; pane_id: canonical decimal string), launch_id (UUID), and optional binding_id (64 lowercase hex); no extra fields".to_owned(),
             })
         })?;
     let read = wezterm_attention::records::state_root(environment)
