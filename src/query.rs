@@ -1110,6 +1110,7 @@ pub struct BindingRow {
 }
 
 /// What a reader found about a binding, beside the binding record itself.
+#[derive(Clone, Copy)]
 struct RowFacts<'a> {
     ended: bool,
     /// Whether the binding is its pane's current one.

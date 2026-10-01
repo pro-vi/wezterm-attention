@@ -2219,7 +2219,7 @@ pub fn prompt_return(env: &BTreeMap<String, String>, observation: &str) -> Resul
             "prompt return has no matching claim",
         ));
     };
-    clear_at_prompt(resolved, observation)
+    clear_at_prompt(&resolved, observation)
 }
 
 /// Prompt return in a pane whose shell carries no launch id, as the shell of
@@ -2252,20 +2252,20 @@ pub fn prompt_return_after_agent_exit(
         host: None,
         publication_diagnostic: None,
     };
-    clear_at_prompt(resolved, observation).map(Some)
+    clear_at_prompt(&resolved, observation).map(Some)
 }
 
 /// Clear the lead activity of `launch_id`'s current binding at a prompt,
 /// under the launch lock then the claim lock, while the pane's claim is still
 /// `claim`.
-fn clear_at_prompt(resolved: ResolvedLaunch, observation: &str) -> Result<LifecycleResult> {
+fn clear_at_prompt(resolved: &ResolvedLaunch, observation: &str) -> Result<LifecycleResult> {
     let ResolvedLaunch {
         root,
         address,
         launch_id,
         claim,
         ..
-    } = &resolved;
+    } = resolved;
     let launch = resolved.launch();
     let (mutation, ()) = commit(
         root,
