@@ -421,21 +421,11 @@ fn parse_kinfo_proc(buffer: &[u8], pid: i32) -> ProcessRead {
     if buffer.is_empty() {
         return ProcessRead::Gone;
     }
-    if buffer.len() != kinfo::SIZE {
+    let Ok(record) = <&[u8; kinfo::SIZE]>::try_from(buffer) else {
         return ProcessRead::Unknown;
-    }
-    let i32_at = |offset: usize| {
-        i32::from_ne_bytes(
-            buffer[offset..offset + 4]
-                .try_into()
-                .expect("four bytes inside the record"),
-        )
     };
-    let seconds = i64::from_ne_bytes(
-        buffer[kinfo::START_SECONDS..kinfo::START_SECONDS + 8]
-            .try_into()
-            .expect("eight bytes inside the record"),
-    );
+    let i32_at = |offset: usize| i32::from_ne_bytes(std::array::from_fn(|i| record[offset + i]));
+    let seconds = i64::from_ne_bytes(std::array::from_fn(|i| record[kinfo::START_SECONDS + i]));
     let microseconds = i32_at(kinfo::START_MICROSECONDS);
     let (Ok(seconds), Ok(microseconds)) = (u64::try_from(seconds), u32::try_from(microseconds))
     else {
@@ -464,7 +454,7 @@ fn parse_kinfo_proc(buffer: &[u8], pid: i32) -> ProcessRead {
             microseconds,
         },
         traced: flag & kinfo::TRACED != 0,
-        zombie: buffer[kinfo::STAT] as i8 == kinfo::ZOMBIE,
+        zombie: record[kinfo::STAT] as i8 == kinfo::ZOMBIE,
     })
 }
 

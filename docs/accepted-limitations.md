@@ -10,36 +10,28 @@ something still points at them: `hooks describe` names
 `docs/reviews/lifecycle-contact-results.md` in its evidence output, for one. This
 file is the maintained public account, and it is the one to read first.
 
-## `expect` calls are not denied by lint
+## `expect` calls that rest on another function
 
-`clippy::expect_used` is not denied, and still fires at sites in the library and the
-binary.
+`clippy::expect_used` is denied in shipped code, so every `expect` in `src/` outside
+`#[cfg(test)]` sits under an `#[expect(clippy::expect_used, reason = "...")]` that
+says why it cannot fail, and the gate fails when one stops firing. Most reasons are
+visible on the line. The ones that name another function rest on a guarantee it
+gives, so a change there turns the `expect` into a panic:
 
-Denying it today would mean adding an allow attribute at each site, which announces an
-intention while changing nothing. The sites need reading individually: some are
-genuinely infallible and want a comment, some want an error path.
+- the consumer timeout in `run_hooks_event`, which `validate_consumers` returns
+  whenever there is a consumer;
+- the operation id in `pane_retention`, which `sweep` sets whenever it applies;
+- the parent of a binding path in `sweep`, which `collect_binding_files` lists below
+  the state root;
+- the publication ids in `request_evidence`, which exist because snapshots are
+  validated before they are assembled and `classify_tool` pairs a nonblocking
+  result only with a question.
 
-To list the sites, run `cargo clippy -- -W clippy::expect_used`. The output also
-includes the one `expect` in `build.rs` (cargo sets `CARGO_MANIFEST_DIR`); ignore it.
-Each site is one of three things, and they need separating before the lint can go on:
-
-1. A genuine invariant. It keeps the call and gains an `#[allow]` with a
-   one-line reason.
-2. A read of a field the validator has already proved present. These belong to
-   "Validated record fields are read as if they could be missing" below, and
-   disappear when that view type exists.
-3. A failure nothing handles, which should return an `AttentionError`. This is
-   the set worth finding.
-
-Replacing `.expect()` with `.unwrap_or(default)` on a required field does not
-count as handling it. It turns a loud failure into a silent wrong answer.
-
-A panic from one of these `expect` calls in a hook is not a clean abort. It
-interrupts processing wherever it lands, so the state a consumer then reads can be
-missing, stale, or updated in one file and not another. The record contract already
-declines to promise that
-independently written files form one atomic snapshot; nothing rolls back on
-failure. That is why this is a real gap rather than a stylistic preference.
+A panic from an `expect` in a hook is not a clean abort. It interrupts processing
+wherever it lands, so the state a consumer then reads can be missing, stale, or
+updated in one file and not another. Replacing one with `.unwrap_or(default)` does not
+count as handling it: that turns a loud failure into a silent wrong answer. A failure
+that nothing handles should return an `AttentionError`.
 
 ## One timestamp field carries three roles
 

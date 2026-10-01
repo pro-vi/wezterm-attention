@@ -1075,6 +1075,10 @@ fn pane_retention(
         });
         return Ok(false);
     }
+    #[expect(
+        clippy::expect_used,
+        reason = "`sweep` sets an operation id whenever it applies, and a preview returned above"
+    )]
     let operation = run.operation_id.expect("apply operation id");
     let binding_identity = RecordIdentity::binding(address, launch_id, binding_id);
     // The presence above was taken before the locks, as for a binding's own
@@ -1346,6 +1350,10 @@ pub fn sweep(
         }
         let launch_id = binding["launch_id"].as_str().unwrap_or("");
         let binding_id = binding["binding_id"].as_str().unwrap_or("");
+        #[expect(
+            clippy::expect_used,
+            reason = "`collect_binding_files` lists paths below the state root"
+        )]
         let binding_dir = binding_path.parent().expect("binding parent");
         let state = binding_state(root, &address, launch_id, binding_id);
         let current = match binding_selection(root, &address, launch_id, binding_id, &state) {
@@ -1470,6 +1478,10 @@ pub fn sweep(
             }
             continue;
         }
+        #[expect(
+            clippy::expect_used,
+            reason = "`operation_id` is set above whenever `apply` is true, and a preview continues before here"
+        )]
         let operation = operation_id.as_deref().expect("apply operation id");
         // A fresh look for the decision, taken before the locks: listing panes
         // can take seconds, and a hook writer gives up on these locks after

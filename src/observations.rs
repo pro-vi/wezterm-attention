@@ -565,6 +565,11 @@ fn request_evidence(observations: &[PooledObservation], provider: &str) -> Vec<R
             Role::Result => &mut group.result_observation_ids,
             Role::Selection => &mut group.selection_observation_ids,
             Role::Denial => &mut group.denial_observation_ids,
+            #[expect(
+                clippy::expect_used,
+                reason = "snapshots are validated before they are assembled, and \
+                          `classify_tool` pairs a nonblocking result only with a question"
+            )]
             Role::Publication => group
                 .publication_observation_ids
                 .as_mut()
@@ -735,7 +740,15 @@ impl LifecycleObservation {
     }
 
     fn semantic(&self) -> Value {
+        #[expect(
+            clippy::expect_used,
+            reason = "`LifecycleObservation` holds only strings, bools and derived enums, which `to_value` always accepts"
+        )]
         let mut value = serde_json::to_value(self).expect("typed observation serializes");
+        #[expect(
+            clippy::expect_used,
+            reason = "a struct with named fields serializes to an object"
+        )]
         let object = value.as_object_mut().expect("observation is object");
         for key in ["observation_id", "observed_mono_ns", "written_at_unix_ns"] {
             object.remove(key);

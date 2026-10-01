@@ -41,8 +41,6 @@ uuid = { version = "1", features = ["v4"] }
 
 # Denied because the crate is already clean of them, so the table and the
 # crate-root attributes lock that in rather than announcing an intention.
-# `clippy::expect_used` is deliberately absent; docs/accepted-limitations.md says
-# why and lists the sites.
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 unused_must_use = "deny"
@@ -57,5 +55,6 @@ todo = "deny"
 unimplemented = "deny"
 # The lints denied by the `cfg_attr` at the top of src/lib.rs and src/main.rs are
 # kept out of this table, which also covers `build.rs` and the tests. `build.rs`
-# prints cargo directives on stdout; the tests use unsafe blocks without
-# `// SAFETY:` comments, `unwrap`, `panic!` and `println!`.
+# prints cargo directives on stdout and reads `CARGO_MANIFEST_DIR` with `expect`; the
+# tests use unsafe blocks without `// SAFETY:` comments, `unwrap`, `expect`, `panic!`
+# and `println!`.

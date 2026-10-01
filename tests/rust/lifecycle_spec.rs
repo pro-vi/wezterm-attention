@@ -2641,6 +2641,40 @@ fn manual_mark_targets_the_launch_and_a_duplicate_is_skipped() {
 }
 
 #[test]
+fn a_mark_past_the_frame_or_ttl_limit_is_refused_and_one_at_the_limit_applies() {
+    let setup = Setup::new();
+    setup.claim();
+    let limits = &wezterm_attention::protocol::manifest()
+        .expect("manifest")
+        .limits;
+    let mark = |frame, ttl_ms| {
+        apply_mark_activity(
+            &setup.env,
+            "notify",
+            "manual",
+            frame,
+            None,
+            ttl_ms,
+            "00000000000000000200",
+            "00000000012345678900",
+        )
+    };
+    for (frame, ttl_ms, message) in [
+        (Some(limits.frame_max + 1), None, "frame is out of range"),
+        (None, Some(0), "ttl_ms must be positive"),
+        (None, Some(limits.ttl_ms_max + 1), "ttl_ms must be positive"),
+    ] {
+        let error = mark(frame, ttl_ms).expect_err("a mark past a limit");
+        assert_eq!(error.diagnostic.message, message);
+    }
+    let at_the_limits = mark(Some(limits.frame_max), Some(limits.ttl_ms_max));
+    assert_eq!(
+        at_the_limits.expect("a mark at the limits").disposition,
+        "applied"
+    );
+}
+
+#[test]
 fn hooks_event_debug_uses_stderr_and_lifecycle_errors_are_non_strict() {
     let setup = Setup::new();
     setup.claim();

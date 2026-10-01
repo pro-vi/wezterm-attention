@@ -1117,7 +1117,9 @@ fn optional_observation_enum(
     vocabulary: &str,
 ) -> std::result::Result<Option<String>, Diagnostic> {
     let value = strict_optional_label(payload, field)?;
-    let known = &manifest().expect("manifest was validated").lifecycle_enums[vocabulary];
+    let known = &manifest()
+        .map_err(|error| error.diagnostic)?
+        .lifecycle_enums[vocabulary];
     // Providers add values before this writer learns them. The observation is
     // still true without the detail, so an unknown value becomes "unknown"
     // where the vocabulary has that word and is left out where it does not.

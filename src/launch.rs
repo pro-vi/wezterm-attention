@@ -46,16 +46,16 @@ fn claim_record(
     tty_path: &str,
     tty_fingerprint: &str,
     observation: &str,
-) -> Value {
-    json!({
+) -> Result<Value> {
+    Ok(json!({
         "kind": "claim",
-        "schema": manifest().expect("embedded manifest must load").record_schema,
+        "schema": manifest()?.record_schema,
         "address": address,
         "launch_id": launch_id,
         "tty_path": tty_path,
         "tty_fingerprint": tty_fingerprint,
         "observed_mono_ns": observation,
-    })
+    }))
 }
 
 fn manifests(
@@ -252,7 +252,7 @@ pub fn claim_launch_at_tty(
     };
     let fingerprint = ports.tty.fingerprint(tty_path)?;
     let observation = ports.clock.monotonic_ns20()?;
-    let proposed = claim_record(&address, &launch_id, tty_path, &fingerprint, &observation);
+    let proposed = claim_record(&address, &launch_id, tty_path, &fingerprint, &observation)?;
     let write = ClaimWrite::new(&root, &address, &metadata)?;
 
     let (mut selected, published) = commit(
@@ -1025,14 +1025,14 @@ fn self_owned_claim_record(
     launch_id: &str,
     proof: &HostProof,
     observation: &str,
-) -> Value {
+) -> Result<Value> {
     let mut record = claim_record(
         address,
         launch_id,
         &proof.tty_path,
         &proof.tty_fingerprint,
         observation,
-    );
+    )?;
     let owner = &proof.owner;
     for (field, value) in crate::protocol::CLAIM_OWNER_FIELDS.into_iter().zip([
         owner.pid.to_string(),
@@ -1042,7 +1042,7 @@ fn self_owned_claim_record(
     ]) {
         record[field] = json!(value);
     }
-    record
+    Ok(record)
 }
 
 /// Claim the pane for the agent process `proof` names, at a session start.
@@ -1111,7 +1111,7 @@ fn claim_for_host(
                 ));
             }
             let claim =
-                self_owned_claim_record(address, &Uuid::new_v4().to_string(), proof, &observation);
+                self_owned_claim_record(address, &Uuid::new_v4().to_string(), proof, &observation)?;
             write.plan(claim.clone(), Some(&claim))
         },
         |claim| {

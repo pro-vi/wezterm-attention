@@ -2,6 +2,7 @@
 #![cfg_attr(
     not(test),
     deny(
+        clippy::expect_used,
         clippy::undocumented_unsafe_blocks,
         clippy::unwrap_used,
         clippy::panic,
@@ -188,6 +189,10 @@ enum BindingField {
 }
 
 impl BindingField {
+    #[expect(
+        clippy::expect_used,
+        reason = "every variant is a clap value; none is skipped"
+    )]
     fn name(self) -> String {
         self.to_possible_value()
             .expect("field has a name")
@@ -442,6 +447,10 @@ fn query_json(command: &str) -> bool {
 }
 
 /// `value` as one line of JSON that is safe to print to a terminal.
+#[expect(
+    clippy::expect_used,
+    reason = "responses are structs and `Value`s with string-keyed maps"
+)]
 fn printable_json<T: Serialize>(value: &T) -> String {
     wezterm_attention::protocol::printable_json(value).expect("response serializes")
 }
@@ -586,6 +595,10 @@ fn run(cli: &Cli, name: &'static str) -> Result<ExitCode, AttentionError> {
         }
         Some(Command::Hooks { command: None }) => {
             let mut command = Cli::command();
+            #[expect(
+                clippy::expect_used,
+                reason = "the `Hooks` variant of `Command` is the subcommand clap names `hooks`"
+            )]
             let hooks = command
                 .find_subcommand_mut("hooks")
                 .expect("hooks subcommand is declared");
@@ -789,6 +802,10 @@ fn run_hooks_event(
         let prompt =
             wezterm_attention::providers::prompt_content(&event, &payload, args.include_prompt);
         let delivery = delivery_bytes(&outcome, reply, prompt);
+        #[expect(
+            clippy::expect_used,
+            reason = "`validate_consumers` returned above, and it gives a timeout whenever there is a consumer"
+        )]
         let consumers = args
             .consumer
             .iter()
@@ -941,18 +958,27 @@ fn run_bindings(
         "timing_ms": timing.as_millis(),
     });
     if let Some(fields) = fields {
-        for row in result["rows"]
+        #[expect(
+            clippy::expect_used,
+            reason = "`rows` is a `Vec`, which `json!` turns into an array"
+        )]
+        let rows = result["rows"]
             .as_array_mut()
-            .expect("rows serialize as an array")
-        {
-            row.as_object_mut()
-                .expect("binding serializes as an object")
-                .retain(|key, _| fields.contains(key));
+            .expect("rows serialize as an array");
+        for row in rows {
+            #[expect(
+                clippy::expect_used,
+                reason = "`BindingRow` is a struct with named fields"
+            )]
+            let row = row
+                .as_object_mut()
+                .expect("binding serializes as an object");
+            row.retain(|key, _| fields.contains(key));
         }
     }
     let socket_mode = scope.is_some();
     if let Some(scope) = scope {
-        result["scope"] = serde_json::to_value(scope).expect("scope serializes");
+        result["scope"] = serde_json::to_value(scope).map_err(AttentionError::record_json)?;
     }
     // `complete` describes the rows. A socket-scoped answer also needs
     // every probe to have answered, since a degraded probe leaves a

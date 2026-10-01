@@ -865,20 +865,29 @@ fn plan_activity(
     }
 }
 
-/// Makes `diagnostic` the one a hook reports and keeps the one it replaces,
-/// with whatever that one replaced, at the end of the `replaced` chain in its
-/// context: a hook reports one diagnostic, and none it replaces is dropped.
-fn report_instead(slot: &mut Option<Diagnostic>, mut diagnostic: Diagnostic) {
-    if let Some(replaced) = slot.take()
+/// Makes `diagnostic` the one a hook reports, with the one in `slot` kept beneath
+/// it: a hook reports one diagnostic, and none it replaces is dropped.
+fn report_instead(slot: &mut Option<Diagnostic>, diagnostic: Diagnostic) {
+    *slot = Some(reported_instead(slot.take(), diagnostic));
+}
+
+/// `diagnostic`, carrying `replaced` at the end of its `replaced` chain.
+fn reported_instead(replaced: Option<Diagnostic>, mut diagnostic: Diagnostic) -> Diagnostic {
+    if let Some(replaced) = replaced
         && let Ok(value) = serde_json::to_value(&replaced)
     {
         match diagnostic.context.get_mut("replaced") {
             None => diagnostic.set("replaced", value),
             Some(mut last) => {
                 while last.pointer("/context/replaced").is_some() {
-                    last = last
+                    #[expect(
+                        clippy::expect_used,
+                        reason = "the `while` condition resolved this same path on `last`"
+                    )]
+                    let next = last
                         .pointer_mut("/context/replaced")
                         .expect("the pointer was just found");
+                    last = next;
                 }
                 if let Some(context) = last.get_mut("context").and_then(Value::as_object_mut) {
                     context.insert("replaced".to_owned(), value);
@@ -886,7 +895,7 @@ fn report_instead(slot: &mut Option<Diagnostic>, mut diagnostic: Diagnostic) {
             }
         }
     }
-    *slot = Some(diagnostic);
+    diagnostic
 }
 
 // Called inside the selected launch's lock, after `ResolvedLaunch::lapsed`
@@ -1387,9 +1396,8 @@ fn apply_observed_outputs_with(
         replace(replacement).map_err(|mut error| {
             error.diagnostic.set("lifecycle_write", "unconfirmed");
             // What the hook planned to report is kept under the write error.
-            let mut reported = mutation.result.diagnostic.clone();
-            report_instead(&mut reported, error.diagnostic);
-            error.diagnostic = reported.expect("report_instead always leaves a diagnostic");
+            error.diagnostic =
+                reported_instead(mutation.result.diagnostic.clone(), error.diagnostic);
             error
         })?;
         if let Some(cell) = &resolved.evidence {
@@ -1434,19 +1442,18 @@ pub fn apply_mark_activity(
     observation: &str,
     written_at: &str,
 ) -> Result<LifecycleResult> {
-    if !manifest()?.enums.activity_types.contains(activity_type) {
+    let protocol = manifest()?;
+    if !protocol.enums.activity_types.contains(activity_type) {
         return Err(AttentionError::usage("mark state is invalid"));
     }
     safe_mark_source(source)?;
     if let Some(label) = label {
-        safe_mark_text(label, "label", manifest()?.limits.safe_label_max_bytes)?;
+        safe_mark_text(label, "label", protocol.limits.safe_label_max_bytes)?;
     }
-    if frame.is_some_and(|frame| frame > manifest().expect("manifest loaded").limits.frame_max) {
+    if frame.is_some_and(|frame| frame > protocol.limits.frame_max) {
         return Err(AttentionError::usage("frame is out of range"));
     }
-    if ttl_ms
-        .is_some_and(|ttl| ttl == 0 || ttl > manifest().expect("manifest loaded").limits.ttl_ms_max)
-    {
+    if ttl_ms.is_some_and(|ttl| ttl == 0 || ttl > protocol.limits.ttl_ms_max) {
         return Err(AttentionError::usage("ttl_ms must be positive"));
     }
     let Some(resolved) = inherited_launch(env)? else {
@@ -1486,7 +1493,7 @@ pub fn apply_mark_activity(
             let path = activity_identity.path(&resolved.root, "activity")?;
             let mut base = json!({
                 "kind": "activity",
-                "schema": manifest()?.record_schema,
+                "schema": protocol.record_schema,
                 "address": resolved.address,
                 "launch_id": resolved.launch_id,
                 "target": target,

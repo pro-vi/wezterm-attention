@@ -19,6 +19,7 @@
 #![cfg_attr(
     not(test),
     deny(
+        clippy::expect_used,
         clippy::undocumented_unsafe_blocks,
         clippy::unwrap_used,
         clippy::panic,
