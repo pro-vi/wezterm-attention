@@ -1,3 +1,4 @@
+use super::self_claim::start;
 use super::*;
 
 // Both providers start a forked session with source "fork": Claude for
@@ -38,6 +39,39 @@ fn forked_session_replaces_the_active_binding() {
             setup.apply(&stop, "00000000000000000400").disposition,
             "applied",
             "{provider}"
+        );
+    }
+}
+
+// Pi starts a session as "new", "resume" or "fork" and takes over a running
+// binding with each; a "startup" or "reload" start does not.
+#[test]
+fn a_pi_session_replaces_the_active_binding_on_new_resume_and_fork_only() {
+    for (source, disposition) in [
+        ("new", "replaced"),
+        ("resume", "replaced"),
+        ("fork", "replaced"),
+        ("startup", "conflict"),
+        ("reload", "conflict"),
+    ] {
+        let setup = Setup::new();
+        setup.claim();
+        assert_eq!(
+            setup
+                .apply(&start("pi", "first"), "00000000000000000200")
+                .disposition,
+            "applied"
+        );
+        let next = event(
+            "pi",
+            "session_start",
+            "next",
+            json!({"start_source":source}),
+        );
+        assert_eq!(
+            setup.apply(&next, "00000000000000000300").disposition,
+            disposition,
+            "{source}"
         );
     }
 }

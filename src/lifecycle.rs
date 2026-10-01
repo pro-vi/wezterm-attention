@@ -453,7 +453,7 @@ fn binding_mutation(
     observation: &str,
     written_at: &str,
 ) -> Result<Mutation> {
-    let provider = provider_name(event)?;
+    let provider = event_provider(event)?;
     let session = event.provider_session_id.as_deref().ok_or_else(|| {
         AttentionError::new(
             DiagnosticCode::RecordInvalid,
@@ -466,7 +466,7 @@ fn binding_mutation(
             "binding event has no start source",
         )
     })?;
-    let binding_id = binding_id(provider, session, &resolved.launch_id);
+    let binding_id = binding_id(provider.as_str(), session, &resolved.launch_id);
     let binding_path = resolved
         .binding(&binding_id)
         .path(&resolved.root, "binding")?;
@@ -517,9 +517,10 @@ fn binding_mutation(
                     .as_ref()
                     .is_some_and(|end| ends_binding(end, current));
                 let replace = match provider {
-                    "claude" | "codex" => matches!(source, "resume" | "clear" | "fork"),
-                    "pi" => matches!(source, "new" | "resume" | "fork"),
-                    _ => false,
+                    Provider::Claude | Provider::Codex => {
+                        matches!(source, "resume" | "clear" | "fork")
+                    }
+                    Provider::Pi => matches!(source, "new" | "resume" | "fork"),
                 };
                 if matches!(source, "compact" | "reload") || (!current_ended && !replace) {
                     return Ok(CommitPlan::reporting(Mutation::plain(
@@ -595,7 +596,7 @@ fn binding_mutation(
                     "launch_id": resolved.launch_id,
                     "binding_id": binding_id,
                     "event_id": event_id,
-                    "provider": provider,
+                    "provider": provider.as_str(),
                     "provider_session_id": session,
                     "start_source": source,
                     "observed_mono_ns": observation,
@@ -629,7 +630,7 @@ fn binding_mutation(
                     Replacement::if_different(
                         session_entry_path(
                             &resolved.root,
-                            provider,
+                            provider.as_str(),
                             session,
                             &resolved.address,
                             &resolved.launch_id,

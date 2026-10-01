@@ -209,7 +209,8 @@ A Codex turn that ends on an API error reports nothing either; see
 [Accepted limitations](accepted-limitations.md#a-codex-turn-that-ends-on-an-api-error-leaves-thinking-on-the-tab).
 
 `SessionStart` with source `fork` binds the forked session for Claude and Codex, replacing the
-active binding as `resume` and `clear` do.
+active binding as `resume` and `clear` do. A Pi `session_start` with source `new`, `resume` or
+`fork` replaces it; one with source `startup` or `reload` does not.
 
 A provider event with a malformed optional field keeps its action and loses only that field. The
 fields are `agent_type`, `transcript_path` or `session_file`, `cwd`, `CLAUDE_CONFIG_DIR`,
