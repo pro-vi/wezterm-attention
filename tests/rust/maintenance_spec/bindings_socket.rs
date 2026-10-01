@@ -512,6 +512,35 @@ fn socket_truncation_is_explicit_and_legacy_shape_is_preserved() {
     }
 }
 
+#[test]
+fn a_truncated_answer_is_still_printed_when_stderr_cannot_be_written() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    setup.provider_event(
+        "SessionStart",
+        "session-b",
+        json!({"source":"clear"}),
+        "00000000000000000300",
+    );
+    // A pipe nobody reads: every write to it fails with a broken pipe.
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .env_clear()
+        .envs(&setup.env)
+        .env(
+            "PATH",
+            super::unreadable_state::fake_wezterm_path(&setup, r#"[{"pane_id":"42"}]"#),
+        )
+        .args(["bindings", "--limit", "1", "--json"])
+        .stderr(writer)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["result"]["returned"], 1);
+}
+
 /// The stderr line fires only when rows were dropped: not for `--all`, not for
 /// a limit the matches fit under, and not for a filter that left few rows.
 #[test]

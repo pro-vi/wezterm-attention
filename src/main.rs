@@ -6,6 +6,7 @@
         clippy::undocumented_unsafe_blocks,
         clippy::unwrap_used,
         clippy::panic,
+        clippy::print_stderr,
         clippy::print_stdout,
     )
 )]
@@ -945,7 +946,9 @@ fn run_bindings(
     // Help is read once and output on every run, so the run says it.
     // stdout stays JSON; the line goes where a consumer's log looks.
     if truncated {
-        eprintln!("attention bindings: returned {returned} of {scanned}; use --all");
+        print_err(&format!(
+            "attention bindings: returned {returned} of {scanned}; use --all"
+        ));
     }
     let shown_diagnostics: Vec<Diagnostic> = diagnostics.iter().take(50).cloned().collect();
     let mut result = serde_json::json!({

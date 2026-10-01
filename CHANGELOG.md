@@ -119,6 +119,7 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - On Linux, closed panes can be verified absent; the crate builds on aarch64 Linux.
 - A non-UTF-8 environment variable is skipped instead of stopping every command. A non-UTF-8 `WEZTERM_ATTENTION_DIR` is refused as a relative one is, rather than skipped in favour of the default state root.
 - A closed stdout (`| head`) no longer makes a command panic.
+- `bindings` no longer exits 101 without its answer when it cannot write the truncation notice to stderr.
 - A symlinked `tabs/` directory is refused, and sweep never deletes through it.
 - Temporaries left by an interrupted write no longer keep a binding or pane tree from retention.
 - The process probe matches a socket path by its resolved directory, so a process that names the socket through `/tmp` on macOS or a symlinked directory is still found.
