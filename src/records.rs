@@ -934,7 +934,7 @@ impl RecordRead {
     pub fn record(&self) -> Option<&Value> {
         match self {
             Self::Present(value) => Some(value),
-            _ => None,
+            Self::Missing | Self::Unavailable(_) | Self::Invalid(_) | Self::Unsupported(_) => None,
         }
     }
 

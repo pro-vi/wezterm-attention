@@ -53,6 +53,7 @@ fn_params_excessive_bools = "deny"
 match_wildcard_for_single_variants = "deny"
 todo = "deny"
 unimplemented = "deny"
+wildcard_enum_match_arm = "deny"
 # The lints denied by the `cfg_attr` at the top of src/lib.rs and src/main.rs are
 # kept out of this table, which also covers `build.rs` and the tests. `build.rs`
 # prints cargo directives on stdout and reads `CARGO_MANIFEST_DIR` with `expect`; the

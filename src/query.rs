@@ -1588,12 +1588,11 @@ fn assemble_bindings(
     // A read as this answer reports it: named by the file it is about, and
     // in the socket-scoped answer an I/O failure is said to be one.
     let settle = |read: RecordRead, path: &Path| {
-        let read = match read {
-            RecordRead::Unavailable(mut error) if typed => {
-                error.diagnostic.message = "selected state record I/O is unavailable".into();
-                Err(error)
-            }
-            read => read.into_result(),
+        let read = if typed && let RecordRead::Unavailable(mut error) = read {
+            error.diagnostic.message = "selected state record I/O is unavailable".into();
+            Err(error)
+        } else {
+            read.into_result()
         };
         read.map_err(|error| naming_record(root, path, error))
     };

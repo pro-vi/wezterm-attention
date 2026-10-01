@@ -260,7 +260,7 @@ pub(crate) fn presence_at_socket(
             return match processes.map(|probe| probe.presence(socket_path, pane_id)) {
                 Some(Presence::Present) => observed("present"),
                 Some(Presence::Absent | Presence::Unseen) => observed("verified_absent"),
-                _ => {
+                None | Some(Presence::Unavailable) => {
                     diagnostics.push(Diagnostic::new(
                         DiagnosticCode::ProbeUnavailable,
                         "identity-scoped process probe is unavailable",

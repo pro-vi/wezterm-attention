@@ -1937,7 +1937,7 @@ mod tests {
         use super::{ControllingTerminal, ProcessRead, parse_kinfo_proc};
         let terminal = |flag, device| match parse_kinfo_proc(&kinfo_record(9, flag, 2, device), 9) {
             ProcessRead::Found(facts) => facts.terminal,
-            other => panic!("{other:?}"),
+            other @ (ProcessRead::Gone | ProcessRead::Unknown) => panic!("{other:?}"),
         };
         assert_eq!(terminal(0, -1), ControllingTerminal::Absent);
         assert_eq!(terminal(0x2, -1), ControllingTerminal::Unknown);
@@ -2171,7 +2171,9 @@ mod tests {
                 ProcessRead::Found(_) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
-                other => panic!("the child never became a zombie: {other:?}"),
+                other @ (ProcessRead::Found(_) | ProcessRead::Gone | ProcessRead::Unknown) => {
+                    panic!("the child never became a zombie: {other:?}")
+                }
             }
         }
         child.wait().expect("reap the child");

@@ -385,7 +385,7 @@ fn codex_server_probe(
     let listing = match processes.map(|probe| probe.pane_processes()) {
         Some(ProcessListing::Listed(listing)) => listing,
         Some(ProcessListing::NotOffered) => return "unobserved",
-        _ => return "unavailable",
+        None | Some(ProcessListing::Failed) => return "unavailable",
     };
     if listing.codex_servers().is_empty() {
         return "unobserved";

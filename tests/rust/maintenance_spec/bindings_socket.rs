@@ -665,6 +665,30 @@ fn selected_invalid_future_and_unreadable_binding_records_degrade_the_query() {
 }
 
 #[test]
+fn a_selected_binding_record_that_cannot_be_read_says_its_io_is_unavailable() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let root = state_root(&setup.env).unwrap();
+    let address = pane_address(&setup.env).unwrap().0;
+    let launch = &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"];
+    let binding = launch_dir(&root, &address, launch)
+        .join("bindings")
+        .join(binding_id("claude", "session-a", launch))
+        .join("binding.json");
+    fs::set_permissions(&binding, fs::Permissions::from_mode(0o000)).unwrap();
+    let (_, rows, diagnostics) = query(&setup);
+    // Readable again so the scratch tree can be removed.
+    fs::set_permissions(&binding, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(rows.is_empty());
+    assert!(
+        diagnostics.iter().any(|d| d
+            .message
+            .contains("selected state record I/O is unavailable")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
 fn socket_query_does_not_call_a_skipped_symlink_complete() {
     let setup = Setup::new();
     setup.claim_and_bind();

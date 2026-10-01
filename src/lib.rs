@@ -20,11 +20,11 @@
     not(test),
     deny(
         clippy::expect_used,
-        clippy::undocumented_unsafe_blocks,
-        clippy::unwrap_used,
         clippy::panic,
         clippy::print_stderr,
         clippy::print_stdout,
+        clippy::undocumented_unsafe_blocks,
+        clippy::unwrap_used,
     )
 )]
 
