@@ -863,8 +863,8 @@ fn an_environment_without_either_pane_variable_is_outside_a_pane() {
 }
 
 /// Outside a pane `mark`, `hooks publish` and `hooks event` say so, and
-/// exit as they do for any other failure. `hooks claim` checks its stdin
-/// first, and here stdin is not a terminal.
+/// exit as they do for any other failure. `hooks claim` is not run here: it
+/// checks its stdin first, and here stdin is a pipe.
 #[test]
 fn commands_run_outside_a_pane_report_outside_pane() {
     let scratch = Scratch::new();
@@ -884,7 +884,8 @@ fn commands_run_outside_a_pane_report_outside_pane() {
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn attention");
-        // `mark` and `hooks publish` exit without reading it.
+        // `mark` and `hooks publish` never read stdin, so this write can
+        // meet a closed pipe; its result does not matter.
         let _ = child
             .stdin
             .take()

@@ -100,11 +100,12 @@ does not know them refuses a self-owned claim as invalid rather than misreading 
 refuses a claim that names some but not all owner fields as `record_invalid`: the writer and the
 queries through the Rust record layer, the plugin reader, and `tests/fixtures/v2/check.py`.
 
-Where `WEZTERM_UNIX_SOCKET` or `WEZTERM_PANE` is not set, the process is outside a WezTerm pane,
-and `hooks claim`, `hooks publish` without `--socket`, `hooks event` and `mark` refuse it with
+Where `WEZTERM_UNIX_SOCKET` or `WEZTERM_PANE` is not set, the process is outside a WezTerm pane, and
+`hooks claim`, `hooks publish` without `--socket`, `hooks event` and `mark` refuse it with
 `outside_pane`, naming the missing variable. `hooks claim` checks its stdin first, so it reports
-`unsafe_tty` when stdin is not a terminal. `identity_unpublished` is for a pane whose server
-identity or claim nothing has published.
+`unsafe_tty` when stdin is not a terminal, and `hooks event` reads the pane only for an event it did
+not already ignore or skip. `identity_unpublished` is for a pane whose server identity or claim
+nothing has published.
 
 A provider event finds its launch in this order, and stops at the first rule that applies:
 
