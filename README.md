@@ -61,7 +61,7 @@ If the plugin cannot find the command, it logs once per config load, naming the 
 
 Reload the config afterwards. New panes then get `WEZTERM_ATTENTION_ROOT`, the checkout path. The plugin exports it only once the command is built: a producer that sees it runs that checkout's command, which would fail in every callback before the build. It always exports `WEZTERM_ATTENTION_DIR`, the state directory.
 
-`"$checkout/bin/attention" --version` prints the commit the command was built from, with `-dirty` if the tree had uncommitted changes. Compare it with `git -C "$checkout" rev-parse --short=12 HEAD` to see whether the build is current.
+`"$checkout/bin/attention" --version` prints the commit the command was built from, with `-dirty` if `src`, `protocol`, `build.rs`, `Cargo.toml` or `Cargo.lock` had uncommitted changes, new files included, when it was built. Compare it with `git -C "$checkout" rev-parse --short=12 HEAD` to see whether the build is current.
 
 Put the command on your PATH by linking the launcher:
 
