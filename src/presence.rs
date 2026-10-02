@@ -11,17 +11,28 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
+
 use crate::identity::{PaneAddress, socket_identity};
 use crate::protocol::{AttentionError, Diagnostic, DiagnosticCode, Result};
 use crate::records::{RecordIdentity, read_record_at};
 use crate::wezterm::{PaneLister, Presence, ProcessListing, ProcessProbe};
 
+/// A pane's presence as a reader reports it.
+#[derive(Clone, Copy, Debug, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PanePresence {
+    Present,
+    VerifiedAbsent,
+    Unavailable,
+}
+
 /// What the state and the mux say about one pane, before a caller decides
 /// what to make of it.
 pub(crate) enum PaneEvidence {
-    /// `present`, `verified_absent` or `unavailable`, as a reader reports it.
-    /// A pane whose server is shown to have exited reads `verified_absent`.
-    Observed(String),
+    /// The pane's presence as a reader reports it. A pane whose server is
+    /// shown to have exited reads `VerifiedAbsent`.
+    Observed(PanePresence),
     /// The realm's socket path no longer serves this incarnation: the file
     /// is gone (`socket_gone`), holds another identity
     /// (`incarnation_changed`), or refuses connections (`socket_refused`),
@@ -157,12 +168,12 @@ pub(crate) fn reader_presence(
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
     diagnostics: &mut Vec<Diagnostic>,
-) -> (String, bool) {
+) -> (PanePresence, bool) {
     match pane_evidence(root, address, panes, processes, diagnostics) {
         PaneEvidence::Observed(presence) => (presence, false),
         PaneEvidence::KeptHistory { diagnostic } => {
             diagnostics.push(diagnostic);
-            ("unavailable".to_owned(), true)
+            (PanePresence::Unavailable, true)
         }
     }
 }
@@ -174,7 +185,7 @@ pub(crate) fn pane_evidence(
     processes: Option<&dyn ProcessProbe>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> PaneEvidence {
-    let unavailable = || PaneEvidence::Observed("unavailable".to_owned());
+    let unavailable = || PaneEvidence::Observed(PanePresence::Unavailable);
     let Some(panes) = panes else {
         return unavailable();
     };
@@ -189,7 +200,7 @@ pub(crate) fn pane_evidence(
     let socket_path = socket_path.as_str();
     match server_state(socket_path, address, processes) {
         ServerState::Current => {}
-        ServerState::Exited => return PaneEvidence::Observed("verified_absent".to_owned()),
+        ServerState::Exited => return PaneEvidence::Observed(PanePresence::VerifiedAbsent),
         ServerState::KeptHistory(diagnostic) => return PaneEvidence::KeptHistory { diagnostic },
         ServerState::Unreadable(error) => {
             diagnostics.push(error.diagnostic);
@@ -240,17 +251,19 @@ pub(crate) fn presence_at_socket(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> PaneEvidence {
     let pane_id = address.pane_id.as_str();
-    let observed = |presence: &str| PaneEvidence::Observed(presence.to_owned());
+    let observed = PaneEvidence::Observed;
     let Some(panes) = panes else {
         diagnostics.push(Diagnostic::new(
             DiagnosticCode::ProbeUnavailable,
             "pane probe is unavailable",
         ));
-        return observed("unavailable");
+        return observed(PanePresence::Unavailable);
     };
     let listing = panes.list(socket_path);
     let error = match listing {
-        Ok(rows) if rows.iter().any(|row| row.pane_id == pane_id) => return observed("present"),
+        Ok(rows) if rows.iter().any(|row| row.pane_id == pane_id) => {
+            return observed(PanePresence::Present);
+        }
         // The server answered and does not list the pane, which is what shows
         // it gone; the process listing is asked only whether a process still
         // carries it. One that could not read every process has still read
@@ -258,14 +271,14 @@ pub(crate) fn presence_at_socket(
         // where the process listing is the only evidence.
         Ok(_) => {
             return match processes.map(|probe| probe.presence(socket_path, pane_id)) {
-                Some(Presence::Present) => observed("present"),
-                Some(Presence::Absent | Presence::Unseen) => observed("verified_absent"),
+                Some(Presence::Present) => observed(PanePresence::Present),
+                Some(Presence::Absent | Presence::Unseen) => observed(PanePresence::VerifiedAbsent),
                 None | Some(Presence::Unavailable) => {
                     diagnostics.push(Diagnostic::new(
                         DiagnosticCode::ProbeUnavailable,
                         "identity-scoped process probe is unavailable",
                     ));
-                    observed("unavailable")
+                    observed(PanePresence::Unavailable)
                 }
             };
         }
@@ -282,7 +295,7 @@ pub(crate) fn presence_at_socket(
     // A GUI that quit leaves its socket file behind, and its local panes
     // ended with it.
     if crate::wezterm::gui_process_exited(socket_path) && still_current() {
-        return observed("verified_absent");
+        return observed(PanePresence::VerifiedAbsent);
     }
     // A refusal says nothing listens now, not that the server exited: a
     // live server whose accept queue is full refuses, and so does one whose
@@ -291,7 +304,7 @@ pub(crate) fn presence_at_socket(
     // kept, with no probe failed.
     if crate::wezterm::listener_refuses(socket_path) && still_current() {
         if replaced_server_pane_gone(socket_path, pane_id, processes) {
-            return observed("verified_absent");
+            return observed(PanePresence::VerifiedAbsent);
         }
         return PaneEvidence::KeptHistory {
             diagnostic: Diagnostic::new(
@@ -301,7 +314,7 @@ pub(crate) fn presence_at_socket(
         };
     }
     diagnostics.push(error.diagnostic);
-    observed("unavailable")
+    observed(PanePresence::Unavailable)
 }
 
 /// Time spent inside the subprocesses one assembly spawned.

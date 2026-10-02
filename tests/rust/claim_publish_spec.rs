@@ -24,7 +24,9 @@ use wezterm_attention::protocol::{
     DiagnosticCode, EMBEDDED_MANIFEST, manifest, parse_manifest, parse_record_value,
     parse_wire_value,
 };
-use wezterm_attention::query::{read_bindings, read_bindings_with_ports};
+use wezterm_attention::query::{
+    BindingHealth, PanePresence, ReaderConfidence, read_bindings, read_bindings_with_ports,
+};
 use wezterm_attention::records::{
     RecordIdentity, RecordRead, atomic_replace, ends_binding, launch_dir, pane_dir,
     read_record_typed, state_root, with_lock,
@@ -1299,7 +1301,7 @@ fn bindings_query_rejects_foreign_end_pointer_and_claim_records() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].binding_phase, "active");
     assert!(!rows[0].current);
-    assert_eq!(rows[0].binding_health, "invalid");
+    assert_eq!(rows[0].binding_health, BindingHealth::Invalid);
     assert!(
         diagnostics
             .iter()
@@ -1336,7 +1338,10 @@ fn bindings_query_probes_presence_once_per_pane() {
     let (rows, _) = read_bindings_with_ports(&root, Some(&panes), None).expect("bindings query");
     assert_eq!(rows.len(), 2);
     assert_eq!(panes.calls.load(Ordering::SeqCst), 1);
-    assert!(rows.iter().all(|row| row.pane_presence == "present"));
+    assert!(
+        rows.iter()
+            .all(|row| row.pane_presence == PanePresence::Present)
+    );
 }
 
 #[test]
@@ -1376,8 +1381,8 @@ fn missing_incarnation_manifest_fails_presence_closed() {
         calls: AtomicUsize::new(0),
     };
     let (rows, _) = read_bindings_with_ports(&root, Some(&panes), None).expect("bindings query");
-    assert_eq!(rows[0].pane_presence, "unavailable");
-    assert_eq!(rows[0].reader_confidence, "unconfirmed");
+    assert_eq!(rows[0].pane_presence, PanePresence::Unavailable);
+    assert_eq!(rows[0].reader_confidence, ReaderConfidence::Unconfirmed);
     assert_eq!(panes.calls.load(Ordering::SeqCst), 0);
 }
 

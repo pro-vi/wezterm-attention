@@ -157,7 +157,8 @@ fn a_binding_ended_after_a_reboot_is_no_rival_for_its_session() {
             .expect("bindings");
     assert_eq!(rows.len(), 2);
     assert!(
-        rows.iter().all(|row| row.binding_health == "valid"),
+        rows.iter()
+            .all(|row| row.binding_health == BindingHealth::Valid),
         "{rows:?}"
     );
     assert!(
@@ -174,7 +175,9 @@ fn a_binding_ended_after_a_reboot_is_no_rival_for_its_session() {
     )
     .expect("bindings --socket");
     assert!(
-        socket_rows.iter().all(|row| row.binding_health == "valid"),
+        socket_rows
+            .iter()
+            .all(|row| row.binding_health == BindingHealth::Valid),
         "{socket_rows:?}"
     );
 

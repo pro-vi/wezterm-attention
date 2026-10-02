@@ -13,6 +13,9 @@ use crate::presence::{
     AssemblyListings, PaneEvidence, RecordedServer, ServerState, SocketChange, SpawnSpend,
     presence_at_socket, reader_presence, realm_socket, recorded_server, server_state,
 };
+// `presence` owns it, since the absence rule reads it too; re-exported here
+// because a row is where a reader looks for it.
+pub use crate::presence::PanePresence;
 use crate::protocol::{
     AttentionError, Diagnostic, DiagnosticCode, Result, canonical_decimal_text, elapsed_beyond,
     hex64_text, ns20_text,
@@ -348,13 +351,6 @@ pub struct PaneFacts {
 
 #[derive(Clone, Copy, Debug, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum PanePresence {
-    Present,
-    VerifiedAbsent,
-    Unavailable,
-}
-#[derive(Clone, Copy, Debug, Serialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
 pub enum ReaderConfidence {
     Confirmed,
     Unconfirmed,
@@ -366,26 +362,6 @@ pub enum BindingHealth {
     Invalid,
     FutureSchema,
     Conflicted,
-}
-
-impl BindingHealth {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Valid => "valid",
-            Self::Invalid => "invalid",
-            Self::FutureSchema => "future_schema",
-            Self::Conflicted => "conflicted",
-        }
-    }
-}
-
-impl ReaderConfidence {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Confirmed => "confirmed",
-            Self::Unconfirmed => "unconfirmed",
-        }
-    }
 }
 
 /// A binding's health, one rule for `bindings` and `inspect` so a row reads
@@ -408,8 +384,8 @@ fn binding_health(failed_reads: [Option<DiagnosticCode>; 4], conflicted: bool) -
 
 /// A reader can act on a row when it is the pane's current binding and the
 /// pane was seen. The same rule for `bindings` and `inspect`.
-fn reader_confidence(current: bool, presence: &str) -> ReaderConfidence {
-    if current && presence == "present" {
+fn reader_confidence(current: bool, presence: PanePresence) -> ReaderConfidence {
+    if current && presence == PanePresence::Present {
         ReaderConfidence::Confirmed
     } else {
         ReaderConfidence::Unconfirmed
@@ -422,8 +398,8 @@ fn reader_confidence(current: bool, presence: &str) -> ReaderConfidence {
 /// incarnation) is history. A session resumed in a new pane, or under a restarted
 /// mux, leaves one behind every time, and calling that a conflict hides the
 /// pane the session actually runs in.
-fn competes(ended: bool, kept_history: bool, presence: &str) -> bool {
-    !ended && !kept_history && presence != "verified_absent"
+fn competes(ended: bool, kept_history: bool, presence: PanePresence) -> bool {
+    !ended && !kept_history && presence != PanePresence::VerifiedAbsent
 }
 
 impl PaneFacts {
@@ -823,7 +799,7 @@ fn read_pane_facts_once(
     diagnostics.extend(lifecycle.diagnostics.clone());
     let before_presence = diagnostics.len();
     let presence = if server_exited {
-        "verified_absent".to_owned()
+        PanePresence::VerifiedAbsent
     } else {
         match presence_at_socket(socket, address, panes, processes, &mut diagnostics) {
             PaneEvidence::Observed(presence) => presence,
@@ -839,13 +815,13 @@ fn read_pane_facts_once(
     }
     // The claim names this launch and the pointer this binding, or the scope
     // would not have matched, so the row is the pane's current one.
-    let confidence = reader_confidence(true, &presence);
+    let confidence = reader_confidence(true, presence);
     let ended = end.availability == A::Present;
     // A scope whose records are kept history was answered above, so the one
     // left here is live or shown exited, as `bindings` would say of this row.
     let kept_history = false;
     let conflicted = binding.record.as_ref().is_some_and(|record| {
-        competes(ended, kept_history, &presence)
+        competes(ended, kept_history, presence)
             && session_live_elsewhere(
                 root,
                 address,
@@ -869,7 +845,7 @@ fn read_pane_facts_once(
                 RowFacts {
                     ended,
                     current: true,
-                    presence: &presence,
+                    presence,
                     health,
                 },
             )
@@ -923,11 +899,7 @@ fn read_pane_facts_once(
         scope: scope.clone(),
         scope_relation: ScopeRelation::Matched,
         binding: row,
-        pane_presence: match presence.as_str() {
-            "present" => PanePresence::Present,
-            "verified_absent" => PanePresence::VerifiedAbsent,
-            _ => PanePresence::Unavailable,
-        },
+        pane_presence: presence,
         reader_confidence: confidence,
         binding_health: health,
         activity,
@@ -1082,9 +1054,9 @@ pub struct BindingRow {
     pub provider: String,
     pub provider_session_id: String,
     pub binding_phase: String,
-    pub pane_presence: String,
-    pub reader_confidence: String,
-    pub binding_health: String,
+    pub pane_presence: PanePresence,
+    pub reader_confidence: ReaderConfidence,
+    pub binding_health: BindingHealth,
     pub current: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transcript_path: Option<String>,
@@ -1100,11 +1072,11 @@ pub struct BindingRow {
 
 /// What a reader found about a binding, beside the binding record itself.
 #[derive(Clone, Copy)]
-struct RowFacts<'a> {
+struct RowFacts {
     ended: bool,
     /// Whether the binding is its pane's current one.
     current: bool,
-    presence: &'a str,
+    presence: PanePresence,
     health: BindingHealth,
 }
 
@@ -1116,7 +1088,7 @@ impl BindingRow {
         address: PaneAddress,
         launch_id: String,
         binding_id: String,
-        facts: RowFacts<'_>,
+        facts: RowFacts,
     ) -> Self {
         let field = |name: &str| string(binding, name);
         Self {
@@ -1126,11 +1098,9 @@ impl BindingRow {
             provider: field("provider").unwrap_or_default(),
             provider_session_id: field("provider_session_id").unwrap_or_default(),
             binding_phase: if facts.ended { "ended" } else { "active" }.to_owned(),
-            pane_presence: facts.presence.to_owned(),
-            reader_confidence: reader_confidence(facts.current, facts.presence)
-                .as_str()
-                .to_owned(),
-            binding_health: facts.health.as_str().to_owned(),
+            pane_presence: facts.presence,
+            reader_confidence: reader_confidence(facts.current, facts.presence),
+            binding_health: facts.health,
             current: facts.current,
             transcript_path: field("transcript_path"),
             cwd: field("cwd"),
@@ -1452,7 +1422,7 @@ fn session_live_elsewhere(
         if competes(
             binding_ended(root, &binding, &identity),
             kept_history,
-            &presence,
+            presence,
         ) {
             return true;
         }
@@ -1661,7 +1631,7 @@ fn assemble_bindings(
     let mut admitted_rows = Vec::new();
     let mut kept_histories = Vec::new();
     let mut ignored = Vec::new();
-    let mut presence_cache: BTreeMap<PaneAddress, (String, bool)> = BTreeMap::new();
+    let mut presence_cache: BTreeMap<PaneAddress, (PanePresence, bool)> = BTreeMap::new();
     let mut claim_cache: BTreeMap<PaneAddress, RecordRead> = BTreeMap::new();
     for (_, binding, admitted) in assessed {
         let diagnostics = if admitted {
@@ -1724,11 +1694,14 @@ fn assemble_bindings(
         let current = state.current(&launch_id, &binding_id);
         let ended = state.ended(&binding);
         let (presence, kept_history) = if let Some(cached) = presence_cache.get(&address) {
-            cached.clone()
+            *cached
         } else {
             let before_presence = diagnostics.len();
             let observed = reader_presence(root, &address, panes, processes, diagnostics);
-            if typed && observed.0 == "unavailable" && diagnostics.len() == before_presence {
+            if typed
+                && observed.0 == PanePresence::Unavailable
+                && diagnostics.len() == before_presence
+            {
                 diagnostics.push(Diagnostic::new(
                     DiagnosticCode::ProbeUnavailable,
                     "selected binding presence is unavailable",
@@ -1737,7 +1710,7 @@ fn assemble_bindings(
             // One socket failure is reported once per pane it leaves unknown;
             // the address says which.
             name_address(&mut diagnostics[before_presence..], &address);
-            presence_cache.insert(address.clone(), observed.clone());
+            presence_cache.insert(address.clone(), observed);
             observed
         };
         let health = binding_health([None, end_failed, claim_failed, pointer_failed], false);
@@ -1749,7 +1722,7 @@ fn assemble_bindings(
             RowFacts {
                 ended,
                 current,
-                presence: &presence,
+                presence,
                 health,
             },
         ));
@@ -1761,7 +1734,7 @@ fn assemble_bindings(
         if !competes(
             row.binding_phase == "ended",
             kept_histories[index],
-            &row.pane_presence,
+            row.pane_presence,
         ) {
             continue;
         }
@@ -1777,7 +1750,7 @@ fn assemble_bindings(
             .collect();
         if addresses.len() > 1 {
             for index in indices {
-                rows[*index].binding_health = BindingHealth::Conflicted.as_str().to_owned();
+                rows[*index].binding_health = BindingHealth::Conflicted;
             }
             // Rows outside the filter that conflict only with each other are
             // not part of this answer.

@@ -308,7 +308,11 @@ fn an_exited_guis_stale_socket_file_is_reclaimed() {
         Some(&setup.processes),
     )
     .expect("bindings");
-    assert_eq!(rows[0].pane_presence, "verified_absent", "{diagnostics:?}");
+    assert_eq!(
+        rows[0].pane_presence,
+        PanePresence::VerifiedAbsent,
+        "{diagnostics:?}"
+    );
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     let (_, doctor_diagnostics) = wezterm_attention::maintenance::doctor_with_environment(
         &setup.root(),
@@ -620,7 +624,7 @@ fn every_reader_calls_a_removed_socket_gone() {
     let (rows, diagnostics) =
         read_bindings_with_ports(&root, Some(&setup.panes), Some(&setup.processes))
             .expect("bindings");
-    assert_eq!(rows[0].pane_presence, "unavailable");
+    assert_eq!(rows[0].pane_presence, PanePresence::Unavailable);
     assert_eq!(codes(&diagnostics), ["socket_gone"]);
     let facts = read_pane_facts_with_ports(
         &root,
@@ -809,7 +813,8 @@ fn a_binding_under_a_refusing_socket_is_no_rival_in_inspect() {
     let (rows, _) = read_bindings_with_ports(&setup.root(), Some(&panes), Some(&setup.processes))
         .expect("bindings");
     assert!(
-        rows.iter().all(|row| row.binding_health == "valid"),
+        rows.iter()
+            .all(|row| row.binding_health == BindingHealth::Valid),
         "{rows:?}"
     );
     let launch_id = setup.env["WEZTERM_ATTENTION_LAUNCH_ID"].clone();

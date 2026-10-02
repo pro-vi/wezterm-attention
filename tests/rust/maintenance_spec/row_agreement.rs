@@ -206,7 +206,8 @@ fn a_binding_under_a_server_that_is_gone_does_not_conflict() {
     let facts = assert_agree(&setup, &current_scope(&setup, "session-a"));
     assert_eq!(facts.binding_health, BindingHealth::Valid);
     assert!(
-        rows.iter().all(|row| row.binding_health == "valid"),
+        rows.iter()
+            .all(|row| row.binding_health == BindingHealth::Valid),
         "{rows:?}"
     );
 }

@@ -156,7 +156,7 @@ fn readers_report_a_vanished_socket_as_unavailable_and_change_nothing() {
     let (rows, diagnostics) =
         read_bindings_with_ports(&setup.root(), Some(&setup.panes), Some(&setup.processes))
             .expect("bindings");
-    assert_eq!(rows[0].pane_presence, "unavailable");
+    assert_eq!(rows[0].pane_presence, PanePresence::Unavailable);
     assert!(
         diagnostics
             .iter()

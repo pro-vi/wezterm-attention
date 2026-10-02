@@ -1333,7 +1333,7 @@ mod binding_field_tests {
     use super::*;
     use std::collections::BTreeSet;
     use wezterm_attention::identity::PaneAddress;
-    use wezterm_attention::query::BindingRow;
+    use wezterm_attention::query::{BindingHealth, BindingRow, PanePresence, ReaderConfidence};
 
     #[test]
     fn binding_fields_match_serialized_row_keys() {
@@ -1347,10 +1347,10 @@ mod binding_field_tests {
             binding_id: "c".repeat(64),
             provider: "claude".into(),
             provider_session_id: "session".into(),
-            binding_phase: "running".into(),
-            pane_presence: "present".into(),
-            reader_confidence: "current".into(),
-            binding_health: "healthy".into(),
+            binding_phase: "active".into(),
+            pane_presence: PanePresence::Present,
+            reader_confidence: ReaderConfidence::Confirmed,
+            binding_health: BindingHealth::Valid,
             current: true,
             transcript_path: Some("/test/transcript".into()),
             cwd: Some("/test".into()),

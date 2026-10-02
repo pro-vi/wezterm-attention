@@ -813,7 +813,7 @@ fn a_pane_the_mux_no_longer_lists_is_answered_from_the_process_listing() {
     let nobody = ListingProcesses::new("zsh HOME=/nowhere".to_owned());
     let rows = query_with(&setup, &nobody);
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].pane_presence, "verified_absent");
+    assert_eq!(rows[0].pane_presence, PanePresence::VerifiedAbsent);
     assert_eq!(nobody.listings.load(Ordering::SeqCst), 1);
     assert_eq!(nobody.single_looks.load(Ordering::SeqCst), 0);
 
@@ -837,7 +837,7 @@ fn a_pane_the_mux_no_longer_lists_is_answered_from_the_process_listing() {
         address.pane_id
     ));
     let rows = query_with(&setup, &still_running);
-    assert_eq!(rows[0].pane_presence, "present");
+    assert_eq!(rows[0].pane_presence, PanePresence::Present);
     assert_eq!(still_running.single_looks.load(Ordering::SeqCst), 0);
 }
 
@@ -898,7 +898,7 @@ fn the_process_probe_is_timed_only_when_it_runs() {
     setup.panes.0.lock().unwrap().clear();
     let (_, rows, _, timing) =
         read_bindings_for_socket_timed(&root, socket, Some(&setup.panes), Some(&slow)).unwrap();
-    assert_eq!(rows[0].pane_presence, "verified_absent");
+    assert_eq!(rows[0].pane_presence, PanePresence::VerifiedAbsent);
     assert!(
         timing.process_list >= std::time::Duration::from_millis(50),
         "{timing:?}"

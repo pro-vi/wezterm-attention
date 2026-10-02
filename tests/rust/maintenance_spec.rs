@@ -16,7 +16,9 @@ use wezterm_attention::maintenance::{
 };
 use wezterm_attention::protocol::DiagnosticCode;
 use wezterm_attention::providers::parse_provider_event;
-use wezterm_attention::query::read_bindings_with_ports;
+use wezterm_attention::query::{
+    BindingHealth, PanePresence, ReaderConfidence, read_bindings_with_ports,
+};
 use wezterm_attention::query::{PaneScope, read_pane_facts_with_ports};
 use wezterm_attention::records::{
     FileRecords, atomic_replace, launch_dir, pane_dir, state_root, with_lock,
@@ -359,8 +361,8 @@ fn doctor_reports_embedded_manifest_digest_and_confirmed_binding() {
     let (rows, _) =
         read_bindings_with_ports(&setup.root(), Some(&setup.panes), Some(&setup.processes))
             .expect("bindings");
-    assert_eq!(rows[0].pane_presence, "present");
-    assert_eq!(rows[0].reader_confidence, "confirmed");
+    assert_eq!(rows[0].pane_presence, PanePresence::Present);
+    assert_eq!(rows[0].reader_confidence, ReaderConfidence::Confirmed);
 }
 
 #[test]
@@ -1090,7 +1092,10 @@ fn a_session_resumed_in_a_new_pane_conflicts_only_while_both_panes_live() {
         read_bindings_with_ports(&root, Some(&setup.panes), Some(&setup.processes))
             .expect("bindings with both panes live");
     assert_eq!(rows.len(), 2);
-    assert!(rows.iter().all(|row| row.binding_health == "conflicted"));
+    assert!(
+        rows.iter()
+            .all(|row| row.binding_health == BindingHealth::Conflicted)
+    );
     let conflict = diagnostics
         .iter()
         .find(|item| item.code == DiagnosticCode::BindingConflict)
@@ -1115,13 +1120,13 @@ fn a_session_resumed_in_a_new_pane_conflicts_only_while_both_panes_live() {
         .iter()
         .find(|row| row.address.pane_id == "99")
         .expect("resumed pane row");
-    assert_eq!(gone.pane_presence, "verified_absent");
+    assert_eq!(gone.pane_presence, PanePresence::VerifiedAbsent);
     let live = rows
         .iter()
         .find(|row| row.address.pane_id == "42")
         .expect("live pane row");
-    assert_eq!(live.pane_presence, "present");
-    assert_eq!(live.binding_health, "valid");
+    assert_eq!(live.pane_presence, PanePresence::Present);
+    assert_eq!(live.binding_health, BindingHealth::Valid);
     assert!(
         !diagnostics
             .iter()
@@ -1593,7 +1598,7 @@ fn a_present_row_from_an_incomplete_bindings_answer_inspects_completely() {
         read_bindings_with_ports(&root, Some(&setup.panes), Some(&setup.processes)).expect("rows");
     let present = rows
         .iter()
-        .find(|row| row.current && row.pane_presence == "present")
+        .find(|row| row.current && row.pane_presence == PanePresence::Present)
         .expect("present current row");
     let scope = PaneScope::new(
         present.address.clone(),

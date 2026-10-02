@@ -9,8 +9,8 @@ use uuid::Uuid;
 
 use crate::identity::{PaneAddress, marker_address, socket_identity};
 use crate::presence::{
-    FailedListingOncePerSocket, ListOncePerSocket, PaneEvidence, ProbeOncePerAssembly,
-    kept_history_code, pane_evidence, reader_presence, recorded_socket,
+    FailedListingOncePerSocket, ListOncePerSocket, PaneEvidence, PanePresence,
+    ProbeOncePerAssembly, kept_history_code, pane_evidence, reader_presence, recorded_socket,
 };
 use crate::protocol::{
     AttentionError, Diagnostic, DiagnosticCode, EMBEDDED_MANIFEST, Result, elapsed_beyond,
@@ -593,17 +593,17 @@ pub fn binding_cap_paths_by_realm(
 }
 
 fn absence_action(
-    presence: &str,
+    presence: SweepPresence,
     probe: Option<&Value>,
     observation: &str,
 ) -> Result<&'static str> {
     match presence {
-        "present" => Ok(if probe.is_some() {
+        SweepPresence::Observed(PanePresence::Present) => Ok(if probe.is_some() {
             "clear_absence"
         } else {
             "present"
         }),
-        "verified_absent" => {
+        SweepPresence::Observed(PanePresence::VerifiedAbsent) => {
             let Some(probe) = probe else {
                 return Ok("first_absence");
             };
@@ -623,21 +623,29 @@ fn absence_action(
                 "end"
             })
         }
-        _ => Ok("unavailable"),
+        SweepPresence::Observed(PanePresence::Unavailable)
+        | SweepPresence::KeptHistory
+        | SweepPresence::NotRecorded => Ok("unavailable"),
     }
 }
 
-/// What [`absence_presence`] says of a pane whose server's socket no longer
-/// serves its incarnation when nothing shows the server gone. The server may
-/// still run with its socket removed, replaced or not accepting, so its
-/// records are kept.
-/// That is the state of the recorded history, not a probe that did not
-/// answer: sweep reports it once for the whole run and decides nothing on it.
-const KEPT_HISTORY: &str = "kept_history";
-
-/// Why a tab order naming a pane whose realm or incarnation record this store
-/// does not hold is kept: there is no socket to ask, and no probe failed.
-const NOT_RECORDED: &str = "not_recorded";
+/// A pane's presence as sweep reads it: what a reader reports, or one of two
+/// answers sweep decides nothing on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SweepPresence {
+    Observed(PanePresence),
+    /// What [`absence_presence`] says of a pane whose server's socket no
+    /// longer serves its incarnation when nothing shows the server gone. The
+    /// server may still run with its socket removed, replaced or not
+    /// accepting, so its records are kept.
+    /// That is the state of the recorded history, not a probe that did not
+    /// answer: sweep reports it once for the whole run and decides nothing on
+    /// it.
+    KeptHistory,
+    /// A pane a tab order names whose realm or incarnation record this store
+    /// does not hold: there is no socket to ask, and no probe failed.
+    NotRecorded,
+}
 
 /// A pane's presence as the absence rule reads it, with every diagnostic
 /// taken on the way named by the pane and the binding that asked.
@@ -648,13 +656,13 @@ fn absence_presence(
     panes: &dyn PaneLister,
     processes: Option<&dyn ProcessProbe>,
     diagnostics: &mut Vec<Diagnostic>,
-) -> String {
+) -> SweepPresence {
     let before = diagnostics.len();
     let presence = match pane_evidence(root, address, Some(panes), processes, diagnostics) {
-        PaneEvidence::Observed(presence) => presence,
+        PaneEvidence::Observed(presence) => SweepPresence::Observed(presence),
         PaneEvidence::KeptHistory { diagnostic } => {
             diagnostics.push(diagnostic);
-            KEPT_HISTORY.to_owned()
+            SweepPresence::KeptHistory
         }
     };
     name_pane(&mut diagnostics[before..], address, binding_id);
@@ -752,7 +760,7 @@ fn collect_tab_orders(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> usize {
     let mut failed = 0;
-    let mut presence_cache: BTreeMap<PaneAddress, String> = BTreeMap::new();
+    let mut presence_cache: BTreeMap<PaneAddress, SweepPresence> = BTreeMap::new();
     let (windows, read_diagnostics) = match read_tab_publications(root) {
         Ok(value) => value,
         Err(error) => {
@@ -777,7 +785,7 @@ fn collect_tab_orders(
         if keep.is_none() {
             for address in &addresses {
                 let presence = match presence_cache.get(address) {
-                    Some(cached) => cached.clone(),
+                    Some(cached) => *cached,
                     None => {
                         let before = diagnostics.len();
                         // A pane whose realm or incarnation this store does
@@ -792,17 +800,17 @@ fn collect_tab_orders(
                             recorded_socket(root, &address.realm_id, &address.incarnation_id),
                             Ok(None)
                         ) {
-                            NOT_RECORDED.to_owned()
+                            SweepPresence::NotRecorded
                         } else {
                             let (observed, kept_history) =
                                 reader_presence(root, address, Some(panes), processes, diagnostics);
-                            if observed == "unavailable" && !kept_history {
+                            if observed == PanePresence::Unavailable && !kept_history {
                                 diagnostics.push(Diagnostic::new(
                                     DiagnosticCode::ProbeUnavailable,
                                     "tab order pane presence cannot be established",
                                 ));
                             }
-                            observed
+                            SweepPresence::Observed(observed)
                         };
                         // Named by the file that asked and the pane it asked
                         // about, as a bindings answer names its panes.
@@ -810,20 +818,21 @@ fn collect_tab_orders(
                         for item in &mut diagnostics[before..] {
                             item.set("path", relative.as_str());
                         }
-                        presence_cache.insert(address.clone(), observed.clone());
+                        presence_cache.insert(address.clone(), observed);
                         observed
                     }
                 };
-                match presence.as_str() {
-                    "verified_absent" => {}
-                    "present" => {
+                match presence {
+                    SweepPresence::Observed(PanePresence::VerifiedAbsent) => {}
+                    SweepPresence::Observed(PanePresence::Present) => {
                         keep = Some("present");
                         break;
                     }
-                    NOT_RECORDED => {
-                        keep.get_or_insert(NOT_RECORDED);
+                    SweepPresence::NotRecorded => {
+                        keep.get_or_insert("not_recorded");
                     }
-                    _ => keep = Some("unavailable"),
+                    SweepPresence::Observed(PanePresence::Unavailable)
+                    | SweepPresence::KeptHistory => keep = Some("unavailable"),
                 }
             }
         }
@@ -1022,10 +1031,10 @@ fn pane_retention(
         run.processes,
         diagnostics,
     );
-    if presence == KEPT_HISTORY {
+    if presence == SweepPresence::KeptHistory {
         return Ok(false);
     }
-    let action = absence_action(&presence, probe.as_ref(), run.observation)?;
+    let action = absence_action(presence, probe.as_ref(), run.observation)?;
     let detail =
         |action: &str| json!({"kind":"pane_retention","binding_id":binding_id,"action":action});
     if action == "unavailable" {
@@ -1088,7 +1097,7 @@ fn pane_retention(
                 end,
                 run.observation,
             );
-            let action = absence_action(&presence, locked_probe.as_ref(), run.observation)?;
+            let action = absence_action(presence, locked_probe.as_ref(), run.observation)?;
             match action {
                 "clear_absence" if !removal_confined(root, &probe_path) => plan(
                     "keep",
@@ -1268,8 +1277,8 @@ pub fn sweep(
     let mut ended: BTreeMap<String, Vec<(String, PathBuf, bool)>> = BTreeMap::new();
     // The absence rule's view of each pane. The tab-order step keeps its
     // own, which reads a pane of kept history as unavailable where this one
-    // reads it as `KEPT_HISTORY`.
-    let mut absence_cache: BTreeMap<PaneAddress, String> = BTreeMap::new();
+    // reads it as `KeptHistory`.
+    let mut absence_cache: BTreeMap<PaneAddress, SweepPresence> = BTreeMap::new();
     if realm_filter.is_none() {
         failed += collect_tab_orders(
             root,
@@ -1384,7 +1393,7 @@ pub fn sweep(
             continue;
         }
         let presence = if let Some(cached) = absence_cache.get(&address) {
-            cached.clone()
+            *cached
         } else {
             let observed = absence_presence(
                 root,
@@ -1394,11 +1403,11 @@ pub fn sweep(
                 processes,
                 &mut diagnostics,
             );
-            absence_cache.insert(address.clone(), observed.clone());
+            absence_cache.insert(address.clone(), observed);
             observed
         };
         // Kept history: reported once for the run, and nothing to decide.
-        if presence == KEPT_HISTORY {
+        if presence == SweepPresence::KeptHistory {
             continue;
         }
         let probe_identity = RecordIdentity::pane(&address);
@@ -1411,7 +1420,7 @@ pub fn sweep(
                 continue;
             }
         };
-        let preview_action = absence_action(&presence, probe.as_ref(), &observation)?;
+        let preview_action = absence_action(presence, probe.as_ref(), &observation)?;
         if !apply {
             details.push(json!({"kind":"absence","binding_id":binding_id,"action":preview_action}));
             if preview_action == "unavailable" {
@@ -1468,7 +1477,7 @@ pub fn sweep(
                 let locked_probe =
                     read_record(&probe_path, Some("absence_probe"), &probe_identity)?;
                 let mut action =
-                    absence_action(&fresh_presence, locked_probe.as_ref(), &observation)?;
+                    absence_action(fresh_presence, locked_probe.as_ref(), &observation)?;
                 let mut replacements = Vec::new();
                 let mut removals = Vec::new();
                 if action == "clear_absence" {
@@ -1522,7 +1531,9 @@ pub fn sweep(
                     details.push(
                         json!({"kind":"absence","binding_id":binding_id,"action":outcome.action}),
                     );
-                    if outcome.action == "unavailable" && fresh_presence != KEPT_HISTORY {
+                    if outcome.action == "unavailable"
+                        && fresh_presence != SweepPresence::KeptHistory
+                    {
                         diagnostics.push(absence_unavailable(
                             "binding absence cannot be established",
                             &address,
