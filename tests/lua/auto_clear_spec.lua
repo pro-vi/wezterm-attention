@@ -1902,16 +1902,14 @@ end)
 
 test("an unchanged tab bar requests no redraw", function()
   write_activity(841, "thinking")
-  poll({ 840, 841 })
+  -- A hook's thinking has no frame, so the spinner frame comes from the
+  -- poll's clock: both polls get a time in the same second, so the frame
+  -- stays the same.
+  attention.poll(window_double({ tabs = { { 840, 841 } }, focused = false }),
+    { now_ms = 5000, now_unix_ns = fixture_now })
 
-  -- Pin the frame so the animation cannot manufacture a visible change.
-  local before_frame = select(2, attention.get_attention(841))
-  local file = assert(io.open(test_dir .. "/841", "w"))
-  file:write(string.format('{"type":"thinking","frame":%d}', before_frame))
-  file:close()
-  poll({ 840, 841 })
-
-  local w = poll_focused({ tabs = { { 840, 841 } }, active_pane_id = 840 })
+  local w = poll_focused({ tabs = { { 840, 841 } }, active_pane_id = 840,
+    opts = { now_ms = 5999 } })
 
   assert(#w.actions == 0, "nothing visible changed, so nothing should be redrawn")
 end)
