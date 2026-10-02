@@ -2999,6 +2999,47 @@ test("a stop outranks the flag until that stop is acknowledged", function()
   assert(path_exists(user_review_path(7611)), "acknowledgement never removes the flag")
 end)
 
+test("a tab carries the review flag when any of its panes does, whichever pane wins", function()
+  write_activity(7681, "notify")
+  write_activity(7682, "review")
+  poll_at({ 7681, 7682 })
+
+  local seen
+  attention.wrap_title_formatter(function(_, ctx)
+    seen = ctx.attention
+    return "base"
+  end)(tab(7681, 7682, false))
+  assert(seen.type == "notify", "notify outranks the flag, got " .. tostring(seen.type))
+  assert(seen.review == true,
+    "the tab carries the flag a press of the review key clears, got " .. tostring(seen.review))
+  assert(internal.resolve_visible_attention({ seeded_key(7682), seeded_key(7681) }).review == true,
+    "whichever pane comes first")
+end)
+
+test("a tab the review flag wins names the flagged pane's source and provider", function()
+  write_activity(7691, "thinking")
+  write_activity(7691, "review")
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { renderer = "manual", auto_poll = false, dir = test_dir,
+    review_key = false, show_provider = true })
+  instance.poll(window_double({ tabs = { { 7690, 7691 } }, focused = false }),
+    { now_unix_ns = fixture_now, call_after = function() end })
+
+  local seen
+  local rendered = instance.wrap_title_formatter(function(_, ctx)
+    seen = ctx.attention
+    return "base"
+  end)(tab(7691, 7690, false))
+  local view = assert(pane_view(7691, instance), "the flagged pane has a view")
+  assert(seen.type == "review" and view.type == "review", "precondition: the flag wins the tab")
+  assert(view.source == "claude" and view.provider == "claude", "precondition: the pane names both")
+  assert(seen.source == view.source and seen.provider == view.provider,
+    "the tab names the winning pane's source and provider, got "
+      .. tostring(seen.source) .. " and " .. tostring(seen.provider))
+  assert(rendered_text(rendered):find("base · Claude", 1, true),
+    "show_provider draws the provider, got " .. rendered_text(rendered))
+end)
+
 test("Alt+B flags a pane with an activity, and one press clears the user's flags from the tab", function()
   local review = dofile(repo_root .. "/plugin/init.lua")
   local config = {}

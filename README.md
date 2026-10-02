@@ -138,6 +138,8 @@ attention.apply_to_config(config, {
 
 `ctx.attention[1]`, `[2]` and `[3]` are the indicator, type and color, for formatters written against the positional form.
 
+The tab's `type`, `color`, `source`, `provider` and `binding_health` are those of the pane whose type ranks highest in `priority`. `subagents` is the sum of every pane's count, and `subagents_uncertain` and `review` are true when they are true for any pane of the tab.
+
 ## Configure
 
 All options are optional — defaults work out of the box. An unknown option, or a value of the wrong type, is named once in the WezTerm log and the default is used instead:

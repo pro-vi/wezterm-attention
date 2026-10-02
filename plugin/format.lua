@@ -41,17 +41,21 @@ return function(context)
     local best_frame    = nil
     local best_source   = nil
     local best_provider = nil
-    local best_review   = false
     local best_health   = nil
 
     local subagents = 0
     local subagents_uncertain = false
+    -- Any pane's review, whoever owns it, and not only the winning pane's: a
+    -- flag outranked by another pane's type is still on the tab, and the
+    -- review key acts on every pane of the tab.
+    local review = false
 
     for _, id in ipairs(pane_ids) do
       local cached = attention_cache[id]
       if cached then
         subagents = subagents + (cached.subagents or 0)
         subagents_uncertain = subagents_uncertain or cached.subagents_uncertain == true
+        review = review or cached.review == true
         -- A count-only entry has no type. It contributes its subagents and never
         -- competes for the tab's marker glyph.
         local candidate_type = cached.type
@@ -61,13 +65,8 @@ return function(context)
             best_type     = candidate_type
             best_priority = pri
             best_frame    = candidate_type == "thinking" and cached.frame or nil
-            if candidate_type == "review" then
-              best_source, best_provider = nil, nil
-            else
-              best_source, best_provider =
-                cached.source, cached.provider
-            end
-            best_review   = cached.review == true
+            best_source   = cached.source
+            best_provider = cached.provider
             best_health   = cached.binding_health
           end
         end
@@ -128,7 +127,7 @@ return function(context)
       subagents_uncertain = subagents_uncertain,
       source = best_source,
       provider = best_provider,
-      review = best_review,
+      review = review,
       binding_health = best_health,
       agent_suffix = show_provider and provider_display[best_provider] or nil,
     }
