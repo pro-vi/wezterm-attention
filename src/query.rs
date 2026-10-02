@@ -191,7 +191,6 @@ pub struct EvidenceCollection {
     pub availability: RecordAvailability,
     pub count: usize,
     pub evidence: Vec<Value>,
-    pub coverage: EvidenceCoverage,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -318,19 +317,12 @@ impl ChildrenFacet {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EvidenceCoverage {
-    EligibleRecords,
-}
-
 impl EvidenceCollection {
     fn empty(availability: RecordAvailability) -> Self {
         Self {
             availability,
             count: 0,
             evidence: vec![],
-            coverage: EvidenceCoverage::EligibleRecords,
             diagnostics: vec![],
         }
     }

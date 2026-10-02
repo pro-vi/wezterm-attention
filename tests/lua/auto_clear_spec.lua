@@ -4595,6 +4595,11 @@ test("lifecycle facts reach the cached reader without changing the badge", funct
   local view = assert(reloaded.get_attention_view(pane))
   assert(view.type == "notify" and view.lifecycle.availability == "available")
   assert(#view.lifecycle.observations == 2)
+  local fields = {}
+  for field in pairs(view.lifecycle) do fields[#fields + 1] = field end
+  table.sort(fields)
+  assert(table.concat(fields, ",") == "availability,diagnostics,observations,requests,retention_floors,snapshot_id",
+    "the lifecycle facet holds these fields and no others, got " .. table.concat(fields, ","))
   -- A consumer dates a pane's last request from these fields and keys an idle
   -- stretch by the binding, as a prompt-cache countdown in a WezTerm config
   -- does. It reads them without error handling beyond "absent means

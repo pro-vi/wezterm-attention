@@ -100,6 +100,30 @@ fn inspect_is_scoped_read_only_and_keeps_raw_activity_after_acknowledgement() {
     );
     assert_eq!(before, bytes(&state_root(&setup.env).unwrap()));
     let value = serde_json::to_value(facts).unwrap();
+    let keys = |facet: &str| {
+        value[facet]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        keys("lifecycle"),
+        [
+            "availability",
+            "badge_acknowledgement",
+            "diagnostics",
+            "observations",
+            "requests",
+            "retention_floors",
+            "snapshot_id"
+        ]
+    );
+    assert_eq!(
+        keys("review"),
+        ["availability", "count", "diagnostics", "evidence"]
+    );
     assert!(
         value["activity"]["record"]
             .get("observed_mono_ns")

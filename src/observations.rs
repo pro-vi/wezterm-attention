@@ -165,7 +165,6 @@ vocabulary!(LifecycleAvailability {
     Invalid,
     Unsupported
 });
-vocabulary!(Coverage { BoundedWindow });
 vocabulary!(RequestKind {
     Question,
     Permission,
@@ -214,7 +213,6 @@ pub struct RequestEvidence {
 #[derive(Clone, Debug, Serialize)]
 pub struct LifecycleView {
     pub availability: LifecycleAvailability,
-    pub coverage: Coverage,
     pub observations: Vec<PooledObservation>,
     pub requests: Vec<RequestEvidence>,
     pub retention_floors: std::collections::BTreeMap<String, String>,
@@ -229,7 +227,6 @@ impl LifecycleView {
     pub fn empty(availability: LifecycleAvailability) -> Self {
         Self {
             availability,
-            coverage: Coverage::BoundedWindow,
             observations: vec![],
             requests: vec![],
             retention_floors: Default::default(),

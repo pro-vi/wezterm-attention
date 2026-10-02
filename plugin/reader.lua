@@ -180,7 +180,7 @@ return function(context)
   local function lifecycle_facet(snapshot, status, problem, now_unix_ns, children, children_status, children_problem)
     local lead_availability = source_availability(status, problem)
     local children_availability = source_availability(children_status or "missing", children_problem)
-    local facet = { availability = lead_availability, coverage = "bounded_window", observations = {}, requests = {}, retention_floors = {}, diagnostics = {} }
+    local facet = { availability = lead_availability, observations = {}, requests = {}, retention_floors = {}, diagnostics = {} }
     local lead_snapshot, children_snapshot = snapshot, nil
     if problem then facet.diagnostics[1] = problem end
     if lead_availability == "available" or lead_availability == "cached" or lead_availability == "absent" then
