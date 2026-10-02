@@ -207,7 +207,7 @@ to report kept under `replaced`; a failed write of any other record is reported 
 
 The integration records nothing, on purpose, for four events it knows: Claude Code's `idle_prompt`
 notification, Pi's `agent_end`, a Pi `session_shutdown` for a reload, and a Pi `message_end` for a
-message that is not a reply, or for a reply that stopped with `stop`, `length`, `toolUse`, `pending`
+message whose role is not `assistant`, or for a reply that stopped with `stop`, `length`, `toolUse`, `pending`
 or `deferred`, the stop reasons Pi 0.85.1 defines besides `error` and `aborted`. The bundled Pi
 extension forwards `message_end` only for a failed or aborted reply, and sends neither `agent_end`
 nor the `session_shutdown` of a reload, so the three Pi cases come only from another caller. Such an
@@ -218,7 +218,8 @@ result under `result.native`; the consumer is not dispatched (`no_admitted_scope
 failure for such an event, so `--strict` exits 0 there too. An event this build does not recognise is `ignored` with
 `integration_version_mismatch`: an event name the manifest does not declare for that provider, or a
 value the event depends on that this build does not know, such as a `SessionStart` source, a
-notification type, or a Pi message role or stop reason.
+notification type, a Pi `message_end` with no role, or a Pi reply whose stop reason is missing or
+not listed above.
 
 A turn that ends without `Stop` still ends the activity when the provider reports the ending. A
 lead Claude `StopFailure` (an API error ended the turn) publishes `notify`, because the user must
@@ -434,7 +435,7 @@ the session now runs in. A row of a server that may be gone still reports `pane_
 
 JSON responses contain `schema`, `command`, `status`, `complete`, `result`, and `diagnostics`.
 `bindings` also reports where its time went, in `result.timing_ms`: `pane_list` (inside `wezterm cli list`), `process_list` (inside the process probe) and `records` (the rest: finding and reading the records). It is on every answer, without a flag or threshold, so a slow call names its phase.
-`bindings` returns every matching row unless `--limit` caps them. Every command lists every diagnostic, and `sweep` every detail.
+`bindings` returns every matching row unless `--limit` caps them. Every command lists every diagnostic it raises, and `sweep` every detail; the lifecycle facet of `inspect` alone bounds its own, as the [consumer guide](consumer-guide.md) says.
 
 ## Trust boundary
 
@@ -529,9 +530,11 @@ which processes it did not read, and counts as complete. Process environments ar
 or persisted.
 
 Each `sweep --apply` makes up a fresh operation id, writes it into the absence probes and binding
-ends it records, and reports it in `result.operation_id`. To finish a run that was interrupted, run
-`sweep --apply` again: an absence probe the interrupted run wrote is the first of the two sightings,
-and the new run ends the binding only if 60 seconds have passed since it.
+ends it records, and reports it in `result.operation_id`. After a run that was interrupted, run
+`sweep --apply` again: it counts an absence probe the interrupted run wrote as the first of the two
+sightings, and ends the binding only if 60 seconds have passed since it. A binding directory that a
+stopped removal left without its `binding.json` is not found; see
+[What sweep leaves behind](accepted-limitations.md#what-sweep-leaves-behind).
 
 Once a pane's current binding ended more than 30 days ago, `sweep --apply` removes the pane's
 whole tree, but only after two new sightings of absence, taken by two runs at least 60 seconds

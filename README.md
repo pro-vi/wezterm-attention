@@ -353,8 +353,9 @@ local marker_id = attention.pane_marker_id(pane)
 -- state is the effective type: "review" when the pane's review flag outranks
 -- its activity, else the activity's own type; nil when neither is in effect, as
 -- when the activity was acknowledged or only the pane's subagents are running.
--- frame is the spinner frame of a thinking pane. nil when the id is seen at more than one full pane address;
--- get_attention_view tells them apart.
+-- frame is the activity's frame; the `frame` row of docs/consumer-guide.md says
+-- where it comes from. The call returns a single nil when the id is seen at more
+-- than one full pane address; get_attention_view tells them apart.
 local state, frame = attention.get_attention(marker_id)
 
 -- Read seventeen cached base fields plus independent lifecycle evidence, without
@@ -541,7 +542,7 @@ The Lua implementation is split by responsibility under `plugin/`: protocol vali
 - Use `title_formatter` to customize the base title while keeping the plugin's indicators.
 
 **Alt+B not working?**
-- Check for keybind conflicts. Move the binding by setting `review_key = { key = "...", mods = "..." }`. The default, `Alt+B`, is also the shell's "move back one word" key in readline and zsh's emacs mode, so the plugin takes that key from the shell in every pane.
+- Check for keybind conflicts. Move the binding by setting `review_key = { key = "...", mods = "..." }`. The default, `Alt+B`, also moves back one word in bash 3.2 and in zsh 5.9's emacs mode, so choose another key if you use that.
 - It works on a pane an agent is running in: the flag is a record of its own. If the tab still shows `✓` or `!` after a press, that activity outranks the flag; the ◆ appears once you have seen it.
 - On a pane no launch has claimed, such as a shell without the integration, a press that would flag it is refused and logged once, because no reader would show the flag. A press there on a tab that carries your flag still clears it. A mux-attached pane that has not published its identity refuses every press, since its tab cannot be found.
 - A press runs the `attention` command. When it refuses, the reason is logged once for each kind of refusal on that pane (`attention plugin set-review failed for pane N: ...`) and the tab does not change: `claim_stale` means the pane's launch claim is not the launch the pane last published, which the next prompt republishes. `probe_unavailable` means a hook held the pane's records at that moment; press again. A command built before the plugin was updated answers nothing: the focused tab shows `⚠ rebuild attention` and the log says the command may predate the plugin. Run `scripts/install-cli.sh` again; the warning goes once a command answers.

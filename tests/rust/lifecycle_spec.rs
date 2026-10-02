@@ -2736,6 +2736,64 @@ fn hooks_event_debug_uses_stderr_and_lifecycle_errors_are_non_strict() {
     assert_eq!(strict.status.code(), Some(1));
 }
 
+/// Only an event skipped on purpose owes its consumers nothing. A second end
+/// of a binding the launch has moved on from is skipped too, as a repeat, and
+/// admits no scope; its undelivered consumer still fails `--strict`.
+#[test]
+fn a_repeated_end_with_an_undelivered_consumer_still_fails_strict() {
+    let setup = Setup::new();
+    setup.claim();
+    for (name, session, patch, observation) in [
+        (
+            "SessionStart",
+            "ended",
+            json!({"source":"startup"}),
+            "00000000000000000200",
+        ),
+        (
+            "SessionEnd",
+            "ended",
+            json!({"reason":"other"}),
+            "00000000000000000300",
+        ),
+        (
+            "SessionStart",
+            "next",
+            json!({"source":"startup"}),
+            "00000000000000000400",
+        ),
+    ] {
+        setup.apply(&event("claude", name, session, patch), observation);
+    }
+    let repeated = run_hook(
+        &setup,
+        &[
+            "hooks",
+            "event",
+            "claude",
+            "SessionEnd",
+            "--strict",
+            "--consumer",
+            "/nonexistent/consumer",
+            "--consumer-timeout-ms",
+            "1000",
+        ],
+        &payload("claude", "SessionEnd", "ended", json!({"reason":"other"})),
+    );
+    let envelope: Value =
+        serde_json::from_slice(&repeated.stderr).expect("consumer envelope on stderr");
+    assert_eq!(
+        envelope["result"]["native"]["disposition"], "skipped",
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["result"]["consumers"][0]["reason"], "no_admitted_scope",
+        "{envelope}"
+    );
+    assert_eq!(envelope["complete"], false, "{envelope}");
+    assert_eq!(repeated.status.code(), Some(1), "{repeated:?}");
+}
+
 #[test]
 fn a_known_event_skipped_on_purpose_passes_strict_and_says_why_only_under_debug() {
     let setup = Setup::new();

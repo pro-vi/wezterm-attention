@@ -20,7 +20,6 @@ gives, so a change there turns the `expect` into a panic:
 
 - the consumer timeout in `run_hooks_event`, which `validate_consumers` returns
   whenever there is a consumer;
-- the operation id in `pane_retention`, which `sweep` sets whenever it applies;
 - the parent of a binding path in `sweep`, which `collect_binding_files` lists below
   the state root;
 - the publication ids in `request_evidence`, which exist because snapshots are
@@ -111,7 +110,8 @@ registering a second executable:
 
 A failing consumer never stops the ones after it, and that part is genuinely per
 consumer. `--strict` is not. It is one decision about the hook's exit code,
-testing a single flag that any consumer which did not complete will raise -- and
+testing a single flag that any consumer which did not complete will raise, except
+one not dispatched for an event skipped on purpose -- and
 that a native outcome of ignored, conflict or partial raises just the same. One
 consumer cannot be marked as allowed to fail while another is not.
 
@@ -171,9 +171,11 @@ mean four kinds of leftover stay on disk:
   `<review>.json.<session>.<ms>.clear` while clearing it, and never finished with. They do not stop a binding or pane tree from being
   pruned, and they go with that tree when it is, but sweep collects none on its
   own.
-- **A half-removed binding directory in a live pane.** A crash while a binding
-  directory was being removed can leave part of it behind. While the pane is
-  live, retention does not touch its tree, so the remainder stays.
+- **A half-removed binding directory.** A crash while a binding directory was
+  being removed can leave part of it behind. While the pane is live, retention
+  does not touch its tree, so the remainder stays. Sweep finds a binding by its
+  `binding.json`, so a directory left without one also stays after the pane
+  closes: no command lists it, and `sweep --apply` reports a complete run.
 - **Per-child sub-agent files an earlier build wrote.** Builds before
   `children.json` wrote `agents/`, `agents-clear.json` and `agents-floor.json`
   into each binding. Nothing reads them now. Sweep removes them only with their

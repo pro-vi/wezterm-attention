@@ -46,8 +46,7 @@ return function(context)
     local subagents = 0
     local subagents_uncertain = false
     -- Any pane's review, whoever owns it, and not only the winning pane's: a
-    -- flag outranked by another pane's type is still on the tab, and the
-    -- review key acts on every pane of the tab.
+    -- flag outranked by another pane's type is still on the tab.
     local review = false
 
     for _, id in ipairs(pane_ids) do

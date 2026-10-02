@@ -431,9 +431,12 @@ impl<T: Serialize> Response<T> {
 }
 
 /// The envelope of a command that failed. An error answers nothing, so it
-/// is never complete, and its result is empty.
+/// is never complete, and its result is empty. A usage error names its
+/// command's `--help`; no other error carries help.
 fn error_response(error: &AttentionError, command: &str) -> Response<serde_json::Value> {
+    let mut diagnostic = error.diagnostic.clone();
     let status = if error.exit_code == 2 {
+        diagnostic.help = Some(format!("attention {command} --help"));
         "usage_error"
     } else {
         "unavailable"
@@ -442,7 +445,7 @@ fn error_response(error: &AttentionError, command: &str) -> Response<serde_json:
         command,
         status,
         false,
-        vec![error.diagnostic.clone()],
+        vec![diagnostic],
         serde_json::json!({}),
     )
 }
@@ -491,9 +494,8 @@ fn emit<T: Serialize>(response: &Response<T>, as_json: bool, quiet: bool) {
     if as_json || query_json(&response.command) {
         print_out(&printable_json(response));
     } else {
-        // The status word alone cannot say what to fix, and every
-        // diagnostic points here. Its reasons go to stderr, so a script
-        // that reads stdout reads only the word.
+        // The status word alone cannot say what to fix. Its reasons go to
+        // stderr, so a script that reads stdout reads only the word.
         print_out(&response.status);
         for diagnostic in &response.diagnostics {
             let message = wezterm_attention::protocol::terminal_safe(&diagnostic.message);
@@ -514,19 +516,18 @@ fn query_exit(complete: bool) -> ExitCode {
 }
 
 fn emit_error(error: &AttentionError, as_json: bool, command: &str) -> ExitCode {
-    let mut error = error.clone();
-    if error.exit_code == 2 {
-        error.diagnostic.help = Some(format!("attention {command} --help"));
-    }
+    let response = error_response(error, command);
     if as_json || query_json(command) {
-        print_out(&printable_json(&error_response(&error, command)));
+        print_out(&printable_json(&response));
     } else {
-        print_err(&format!(
-            "attention: {}: {}",
-            error.diagnostic.code, error.diagnostic.message
-        ));
-        if let Some(help) = &error.diagnostic.help {
-            print_err(&format!("help: {help}"));
+        for diagnostic in &response.diagnostics {
+            print_err(&format!(
+                "attention: {}: {}",
+                diagnostic.code, diagnostic.message
+            ));
+            if let Some(help) = &diagnostic.help {
+                print_err(&format!("help: {help}"));
+            }
         }
     }
     // 2 is kept for a command line that could not be used; every other
@@ -799,7 +800,7 @@ fn run_hooks_event(
     );
     if !args.consumer.is_empty() {
         use wezterm_attention::consumer::{
-            DeliveryStage, NotDispatchedReason, delivery_bytes, dispatch, not_dispatched,
+            DeliveryStage, delivery_bytes, dispatch, not_dispatched,
         };
         let outcome = wezterm_attention::lifecycle::apply_provider_event_with_outcome(
             &event,
@@ -828,21 +829,18 @@ fn run_hooks_event(
                 Err(reason) => not_dispatched(executable, *reason),
             })
             .collect::<Vec<_>>();
-        let skipped = outcome
-            .result
-            .as_ref()
-            .is_ok_and(|result| matches!(result.disposition, Disposition::Skipped));
+        // An event skipped on purpose admits no scope, so it owes its
+        // consumers no delivery.
+        let skipped_on_purpose = event.skip_reason.is_some();
         let failed = outcome.result.as_ref().map_or(true, |result| {
             matches!(
                 result.disposition,
                 Disposition::Ignored | Disposition::Conflict | Disposition::Partial
             )
-        }) || consumers.iter().any(|result| {
-            // An event skipped on purpose admits no scope, so it owes its
-            // consumers no delivery.
-            result.stage != DeliveryStage::Completed
-                && !(skipped && result.reason == Some(NotDispatchedReason::NoAdmittedScope))
-        });
+        }) || (!skipped_on_purpose
+            && consumers
+                .iter()
+                .any(|result| result.stage != DeliveryStage::Completed));
         let diagnostics = match &outcome.result {
             Ok(result) => result.diagnostic.iter().cloned().collect(),
             Err(error) => vec![error.diagnostic.clone()],

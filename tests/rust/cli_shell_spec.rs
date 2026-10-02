@@ -738,25 +738,39 @@ fn json_publication_and_binding_output_report_what_they_left_out() {
     assert_eq!(envelope["complete"], false);
 }
 
+/// Pane 42, which the bindings these tests write belong to.
+fn test_pane() -> wezterm_attention::identity::PaneAddress {
+    wezterm_attention::identity::PaneAddress {
+        realm_id: "a".repeat(64),
+        incarnation_id: "b".repeat(64),
+        pane_id: "42".to_owned(),
+    }
+}
+
+/// Creates the directory of one binding of that pane in the state root
+/// `state` and returns the path of its `binding.json`.
+fn create_binding_dir(state: &Path, launch_id: &str, binding_id: &str) -> PathBuf {
+    let file = wezterm_attention::records::binding_path(state, &test_pane(), launch_id, binding_id);
+    fs::create_dir_all(file.parent().expect("binding directory"))
+        .expect("create binding directory");
+    file
+}
+
+/// Writes a binding record that cannot be read.
+fn write_unreadable_binding(state: &Path, launch_id: &str, binding_id: &str) {
+    fs::write(create_binding_dir(state, launch_id, binding_id), "invalid")
+        .expect("write invalid binding");
+}
+
 /// Writes `count` bindings, each of its own provider session, under one launch
 /// of pane 42 in the state root `state`.
 fn write_bindings(state: &Path, count: usize) {
-    let address = json!({"realm_id":"a".repeat(64),"incarnation_id":"b".repeat(64),"pane_id":"42"});
+    let address = test_pane();
     let launch_id = "00000000-0000-4000-8000-000000000701";
     for index in 1..=count {
         let binding_id = format!("{index:064x}");
-        let binding_dir = state
-            .join("v2/realms")
-            .join("a".repeat(64))
-            .join("incarnations")
-            .join("b".repeat(64))
-            .join("panes/42/launches")
-            .join(launch_id)
-            .join("bindings")
-            .join(&binding_id);
-        fs::create_dir_all(&binding_dir).expect("create binding directory");
         fs::write(
-            binding_dir.join("binding.json"),
+            create_binding_dir(state, launch_id, &binding_id),
             serde_json::to_vec(&json!({
                 "kind":"binding","schema":3,"address":address,"launch_id":launch_id,
                 "binding_id":binding_id,"event_id":format!("00000000-0000-4000-8000-{index:012}"),
@@ -780,15 +794,11 @@ fn sweep_and_doctor_list_every_detail_and_diagnostic_and_stay_complete() {
     // that cannot be read, each a diagnostic of both commands.
     write_bindings(&state, 60);
     for index in 1..=60 {
-        let binding_dir = state
-            .join("v2/realms")
-            .join("a".repeat(64))
-            .join("incarnations")
-            .join("b".repeat(64))
-            .join("panes/42/launches/00000000-0000-4000-8000-000000000702/bindings")
-            .join(format!("{index:064x}"));
-        fs::create_dir_all(&binding_dir).expect("create binding directory");
-        fs::write(binding_dir.join("binding.json"), "invalid").expect("write invalid binding");
+        write_unreadable_binding(
+            &state,
+            "00000000-0000-4000-8000-000000000702",
+            &format!("{index:064x}"),
+        );
     }
     let run = |command: &str| {
         let output = Command::new(env!("CARGO_BIN_EXE_attention"))
@@ -1881,15 +1891,11 @@ fn doctor_and_sweep_print_the_json_envelope_by_default() {
     let scratch = Scratch::new();
     let state = scratch.0.join("state");
     // A record that cannot be read is a finding of both commands.
-    let binding_dir = state
-        .join("v2/realms")
-        .join("a".repeat(64))
-        .join("incarnations")
-        .join("b".repeat(64))
-        .join("panes/42/launches/00000000-0000-4000-8000-000000000701/bindings")
-        .join("c".repeat(64));
-    fs::create_dir_all(&binding_dir).expect("create binding directory");
-    fs::write(binding_dir.join("binding.json"), "invalid").expect("write invalid binding");
+    write_unreadable_binding(
+        &state,
+        "00000000-0000-4000-8000-000000000701",
+        &"c".repeat(64),
+    );
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_attention"))
             .args(args)
@@ -1936,15 +1942,11 @@ fn doctor_and_sweep_print_the_json_envelope_by_default() {
 fn only_a_usage_error_names_a_command_for_help() {
     let scratch = Scratch::new();
     let state = scratch.0.join("state");
-    let binding_dir = state
-        .join("v2/realms")
-        .join("a".repeat(64))
-        .join("incarnations")
-        .join("b".repeat(64))
-        .join("panes/42/launches/00000000-0000-4000-8000-000000000701/bindings")
-        .join("c".repeat(64));
-    fs::create_dir_all(&binding_dir).expect("create binding directory");
-    fs::write(binding_dir.join("binding.json"), "invalid").expect("write invalid binding");
+    write_unreadable_binding(
+        &state,
+        "00000000-0000-4000-8000-000000000701",
+        &"c".repeat(64),
+    );
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_attention"))
             .args(args)
@@ -1963,6 +1965,15 @@ fn only_a_usage_error_names_a_command_for_help() {
     let usage: Value =
         serde_json::from_slice(&run(&["doctor", "--no-such-flag"]).stdout).expect("JSON envelope");
     assert_eq!(usage["diagnostics"][0]["help"], "attention doctor --help");
+    // A hook's usage error names its own help too: an empty stdin is one.
+    let hook = run(&["hooks", "event", "claude", "Stop", "--debug"]);
+    assert_eq!(hook.status.code(), Some(0), "{hook:?}");
+    let hook: Value = serde_json::from_slice(&hook.stderr).expect("JSON envelope on stderr");
+    assert_eq!(hook["status"], "usage_error", "{hook}");
+    assert_eq!(
+        hook["diagnostics"][0]["help"], "attention hooks event --help",
+        "{hook}"
+    );
     // Without a launch, mark fails past its command line.
     let failed = run(&["mark", "thinking"]);
     assert_eq!(failed.status.code(), Some(1), "{failed:?}");
