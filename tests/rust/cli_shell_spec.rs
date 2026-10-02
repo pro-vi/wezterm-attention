@@ -525,10 +525,20 @@ fn query_defaults_errors_and_help_support_agent_composition() {
     let text = String::from_utf8(help.stdout).unwrap();
     assert!(!text.contains("00000000-0000-4000-8000-000000000001"));
     assert!(text.contains("result.operation_id"));
-    assert!(text.contains("canonical lowercase UUID"));
+    assert!(!text.contains("--operation-id"));
     assert!(text.contains("Preview is the default"));
     assert!(text.contains("Every detail and diagnostic is listed"));
     assert!(text.contains("complete"));
+    // Each apply makes up its own operation id; none can be passed in.
+    let replay = run(&[
+        "sweep",
+        "--apply",
+        "--operation-id",
+        "00000000-0000-4000-8000-000000000001",
+    ]);
+    assert_eq!(replay.status.code(), Some(2));
+    let error: Value = serde_json::from_slice(&replay.stdout).unwrap();
+    assert_eq!(error["status"], "usage_error");
     let help = run(&["hooks", "event", "--help"]);
     let text = String::from_utf8(help.stdout).unwrap();
     assert!(text.contains("required with --consumer") && text.contains("Retrying"));

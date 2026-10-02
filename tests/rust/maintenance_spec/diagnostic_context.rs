@@ -73,7 +73,7 @@ fn doctor_and_sweep_name_a_record_they_could_not_read() {
     fs::write(&review, "not json").expect("unreadable review");
     let relative = |path: &Path| json!(path.strip_prefix(&root).unwrap().to_str().unwrap());
     let (_, doctor) = setup.doctor();
-    let (_, swept) = setup.run_sweep(false, None);
+    let (_, swept) = setup.run_sweep(false);
     for (command, diagnostics, paths) in [
         ("doctor", &doctor, vec![&claim, &review]),
         ("sweep", &swept, vec![&claim]),

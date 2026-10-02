@@ -391,15 +391,13 @@ struct MarkArgs {
 
 #[derive(Clone, Debug, Args)]
 #[command(
-    after_help = "Preview is the default and removes nothing. Example: attention sweep --json\nEvery detail and diagnostic is listed. complete is false when a probe did not answer or an apply step failed.\nApply: attention sweep --apply --json\nEach apply without --operation-id gets a fresh one, reported in result.operation_id.\nPass --operation-id only to replay that operation; it must be a canonical lowercase UUID."
+    after_help = "Preview is the default and removes nothing. Example: attention sweep --json\nEvery detail and diagnostic is listed. complete is false when a probe did not answer or an apply step failed.\nApply: attention sweep --apply --json\nEach apply gets a fresh operation id, reported in result.operation_id."
 )]
 struct SweepArgs {
     #[arg(long)]
     realm: Option<String>,
     #[arg(long)]
     apply: bool,
-    #[arg(long, requires = "apply")]
-    operation_id: Option<String>,
     /// Return the JSON envelope (also the default).
     #[arg(long)]
     json: bool,
@@ -1250,7 +1248,6 @@ fn run_sweep(
         &root,
         args.realm.as_deref(),
         args.apply,
-        args.operation_id.as_deref(),
         &SystemClock,
         &WeztermPaneLister,
         Some(&SystemProcessProbe),

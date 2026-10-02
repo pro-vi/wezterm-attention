@@ -3,7 +3,7 @@
 //! The index is derived state: a store written before it existed answers the
 //! same by the walk, and `sweep --apply` completes it.
 
-use super::pane_retention::{OP_1, OP_2, OP_3, actions, end_long_ago, setup_pane_dir};
+use super::pane_retention::{actions, end_long_ago, setup_pane_dir};
 use super::*;
 use wezterm_attention::query::read_bindings_for_socket_with_ports;
 use wezterm_attention::records::{session_entry_path, session_index_path};
@@ -135,7 +135,7 @@ fn the_indexed_answer_is_the_walked_answer_on_a_mixed_store() {
     let walked = answers(&setup);
     assert_eq!(walked.1, "conflicted", "the rival is found: {walked:?}");
 
-    let (_, diagnostics) = setup.run_sweep(true, Some(OP_1));
+    let (_, diagnostics) = setup.run_sweep(true);
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     assert!(session_index_path(&setup.root()).exists());
     assert!(
@@ -177,7 +177,7 @@ fn an_unreadable_binding_leaves_the_index_unmarked() {
     fs::remove_file(session_index_path(&setup.root())).expect("unmark the index");
     let binding = setup.binding_dir().join("binding.json");
     fs::write(&binding, b"{").expect("break the binding");
-    setup.run_sweep(true, Some(OP_1));
+    setup.run_sweep(true);
     assert!(!session_index_path(&setup.root()).exists());
 }
 
@@ -191,12 +191,12 @@ fn pane_retention_removes_the_entries_of_the_tree_it_removes() {
     let entry = own_entry(&setup);
     assert!(entry.exists());
     setup.clock.set_monotonic(1_000);
-    setup.run_sweep(true, Some(OP_2));
+    setup.run_sweep(true);
     assert!(entry.exists(), "one sighting removes nothing");
     setup
         .clock
         .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
-    let (result, _) = setup.run_sweep(true, Some(OP_3));
+    let (result, _) = setup.run_sweep(true);
     assert_eq!(
         actions(&result.details, "pane_retention"),
         [&json!("prune")]
@@ -233,7 +233,7 @@ fn binding_retention_removes_the_entry_of_the_binding_it_removes() {
         &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"],
     );
     setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
-    setup.run_sweep(true, Some(OP_1));
+    setup.run_sweep(true);
     assert!(!setup.binding_dir().exists());
     assert!(!old_entry.exists());
     assert!(current_entry.exists());

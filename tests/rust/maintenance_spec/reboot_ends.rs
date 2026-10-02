@@ -2,10 +2,8 @@
 //! carries a larger stamp than anything written after it. An end that sweep
 //! writes for such a binding after the reboot still ends it, for every reader.
 
-use super::pane_retention::{OP_1, OP_2, OP_3, OP_4, actions, setup_pane_dir};
+use super::pane_retention::{actions, setup_pane_dir};
 use super::*;
-
-const OP_5: &str = "00000000-0000-4000-8000-000000000915";
 
 /// Uptime when the binding was recorded, before the reboot.
 const BEFORE_REBOOT: &str = "09000000000000000000";
@@ -25,7 +23,7 @@ fn end_after_a_reboot(setup: &Setup) -> Value {
     setup.panes.set(Vec::new());
     setup.processes.set(Presence::Absent);
     setup.clock.set_monotonic(AFTER_REBOOT);
-    let (first, _) = setup.run_sweep(true, Some(OP_1));
+    let (first, _) = setup.run_sweep(true);
     assert_eq!(
         actions(&first.details, "absence"),
         [&json!("first_absence")]
@@ -33,7 +31,7 @@ fn end_after_a_reboot(setup: &Setup) -> Value {
     setup
         .clock
         .set_monotonic(AFTER_REBOOT + ABSENCE_INTERVAL_NS as u64);
-    let (second, _) = setup.run_sweep(true, Some(OP_2));
+    let (second, _) = setup.run_sweep(true);
     assert_eq!(actions(&second.details, "absence"), [&json!("end")]);
     read_json(&setup.binding_dir().join("end.json"))
 }
@@ -66,7 +64,7 @@ fn an_end_written_after_a_reboot_ends_the_binding_for_sweep_bindings_and_inspect
     setup
         .clock
         .set_monotonic(AFTER_REBOOT + 2 * ABSENCE_INTERVAL_NS as u64);
-    let (third, _) = setup.run_sweep(true, Some(OP_3));
+    let (third, _) = setup.run_sweep(true);
     assert_eq!(
         actions(&third.details, "absence"),
         [&json!("already_ended")]
@@ -107,7 +105,7 @@ fn a_pane_ended_after_a_reboot_is_retained_by_the_usual_rule() {
     setup
         .clock
         .set_monotonic(AFTER_REBOOT + 2 * ABSENCE_INTERVAL_NS as u64);
-    let (first, _) = setup.run_sweep(true, Some(OP_4));
+    let (first, _) = setup.run_sweep(true);
     assert_eq!(
         actions(&first.details, "pane_retention"),
         [&json!("first_absence")]
@@ -115,7 +113,7 @@ fn a_pane_ended_after_a_reboot_is_retained_by_the_usual_rule() {
     setup
         .clock
         .set_monotonic(AFTER_REBOOT + 3 * ABSENCE_INTERVAL_NS as u64);
-    let (second, _) = setup.run_sweep(true, Some(OP_5));
+    let (second, _) = setup.run_sweep(true);
     assert_eq!(
         actions(&second.details, "pane_retention"),
         [&json!("prune")]

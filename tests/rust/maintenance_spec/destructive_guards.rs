@@ -3,9 +3,6 @@
 
 use super::*;
 
-const OP_1: &str = "00000000-0000-4000-8000-000000000931";
-const OP_2: &str = "00000000-0000-4000-8000-000000000932";
-
 /// Lists no panes, and on its second call records a hook's end for the
 /// binding, as a SessionEnd landing while sweep decides would.
 struct EndingPanes {
@@ -33,7 +30,7 @@ fn sweep_never_overwrites_a_newer_end() {
     setup.panes.set(Vec::new());
     setup.processes.set(Presence::Absent);
     setup.clock.set_monotonic(1_000);
-    setup.run_sweep(true, Some(OP_1));
+    setup.run_sweep(true);
     let observation = 1_000 + ABSENCE_INTERVAL_NS as u64;
     setup.clock.set_monotonic(observation);
     let binding: Value =
@@ -55,7 +52,6 @@ fn sweep_never_overwrites_a_newer_end() {
         &setup.root(),
         None,
         true,
-        Some(OP_2),
         &setup.clock,
         &panes,
         Some(&setup.processes),
@@ -98,7 +94,7 @@ fn retention_keeps_a_binding_holding_a_symlink() {
     let outside = setup._scratch.0.join("outside-end.json");
     fs::rename(old_dir.join("end.json"), &outside).expect("move end outside");
     symlink(&outside, old_dir.join("end.json")).expect("link end");
-    setup.run_sweep(true, Some(OP_1));
+    setup.run_sweep(true);
     assert!(old_dir.exists());
 }
 
@@ -123,7 +119,7 @@ fn retention_keeps_a_binding_holding_another_bindings_record() {
         serde_json::to_vec(&foreign).expect("JSON"),
     )
     .expect("foreign record");
-    let (_, diagnostics) = setup.run_sweep(true, Some(OP_1));
+    let (_, diagnostics) = setup.run_sweep(true);
     assert!(old_dir.exists());
     assert!(
         diagnostics
@@ -170,7 +166,7 @@ fn pane_retention_keeps_a_pane_claimed_again_during_the_decision() {
     setup.processes.set(Presence::Absent);
     let pane = pane_dir(&setup.root(), &pane_address(&setup.env).expect("address").0);
     setup.clock.set_monotonic(1_000);
-    setup.run_sweep(true, Some(OP_1));
+    setup.run_sweep(true);
     assert!(pane.join("absence-probe.json").exists());
     setup
         .clock
@@ -183,7 +179,6 @@ fn pane_retention_keeps_a_pane_claimed_again_during_the_decision() {
         &setup.root(),
         None,
         true,
-        Some(OP_2),
         &setup.clock,
         &panes,
         Some(&setup.processes),
@@ -215,7 +210,7 @@ fn an_absence_probe_is_never_cleared_through_a_symlinked_state_directory() {
     setup.panes.set(Vec::new());
     setup.processes.set(Presence::Absent);
     setup.clock.set_monotonic(1_000);
-    setup.run_sweep(true, Some(OP_1));
+    setup.run_sweep(true);
     let probe = pane_dir(&setup.root(), &pane_address(&setup.env).expect("address").0)
         .join("absence-probe.json");
     assert!(probe.exists());
@@ -228,7 +223,7 @@ fn an_absence_probe_is_never_cleared_through_a_symlinked_state_directory() {
         pane_id: "42".to_owned(),
         tty_name: Some("/dev/ttys888".to_owned()),
     }]);
-    let (result, diagnostics) = setup.run_sweep(true, Some(OP_2));
+    let (result, diagnostics) = setup.run_sweep(true);
     assert!(outside.join(&relative).exists(), "{diagnostics:?}");
     assert!(
         diagnostics
@@ -251,7 +246,7 @@ fn a_retention_probe_is_never_cleared_through_a_symlinked_state_directory() {
     setup.panes.set(Vec::new());
     setup.processes.set(Presence::Absent);
     setup.clock.set_monotonic(1_000);
-    let (first, _) = setup.run_sweep(true, Some(OP_1));
+    let (first, _) = setup.run_sweep(true);
     assert_eq!(
         super::pane_retention::actions(&first.details, "pane_retention"),
         [&json!("first_absence")]
@@ -267,7 +262,7 @@ fn a_retention_probe_is_never_cleared_through_a_symlinked_state_directory() {
         pane_id: "42".to_owned(),
         tty_name: Some("/dev/ttys888".to_owned()),
     }]);
-    let (result, diagnostics) = setup.run_sweep(true, Some(OP_2));
+    let (result, diagnostics) = setup.run_sweep(true);
     assert!(outside.join(&relative).exists(), "{diagnostics:?}");
     assert!(
         diagnostics

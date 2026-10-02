@@ -597,7 +597,6 @@ pub fn binding_cap_paths_by_realm(
 fn absence_action(
     presence: &str,
     probe: Option<&Value>,
-    operation_id: Option<&str>,
     observation: &str,
 ) -> Result<&'static str> {
     match presence {
@@ -607,9 +606,6 @@ fn absence_action(
             "present"
         }),
         "verified_absent" => {
-            if probe.is_some_and(|probe| probe["operation_id"].as_str() == operation_id) {
-                return Ok("replay_first");
-            }
             let Some(probe) = probe else {
                 return Ok("first_absence");
             };
@@ -1031,7 +1027,7 @@ fn pane_retention(
     if presence == KEPT_HISTORY {
         return Ok(false);
     }
-    let action = absence_action(&presence, probe.as_ref(), run.operation_id, run.observation)?;
+    let action = absence_action(&presence, probe.as_ref(), run.observation)?;
     let detail =
         |action: &str| json!({"kind":"pane_retention","binding_id":binding_id,"action":action});
     if action == "unavailable" {
@@ -1094,12 +1090,7 @@ fn pane_retention(
                 end,
                 run.observation,
             );
-            let action = absence_action(
-                &presence,
-                locked_probe.as_ref(),
-                Some(operation),
-                run.observation,
-            )?;
+            let action = absence_action(&presence, locked_probe.as_ref(), run.observation)?;
             match action {
                 "clear_absence" if !removal_confined(root, &probe_path) => plan(
                     "keep",
@@ -1228,25 +1219,15 @@ pub fn sweep(
     root: &Path,
     realm_filter: Option<&str>,
     apply: bool,
-    operation_id: Option<&str>,
     clock: &dyn Clock,
     panes: &dyn PaneLister,
     processes: Option<&dyn ProcessProbe>,
 ) -> Result<(SweepResult, Vec<Diagnostic>)> {
-    let operation_id = operation_id
-        .map(|value| {
-            Uuid::parse_str(value)
-                .ok()
-                .filter(|parsed| parsed.to_string() == value)
-                .map(|_| value.to_owned())
-                .ok_or_else(|| AttentionError::usage("operation id is not canonical"))
-        })
-        .transpose()?;
-    // An operation id lets a retried apply recognise its own earlier work: a
-    // repeat under the same id ends nothing new. An apply with nothing to
-    // retry gets a fresh id, so running it again is a new observation; the
-    // result reports the id it used.
-    let operation_id = operation_id.or_else(|| apply.then(|| Uuid::new_v4().to_string()));
+    // Each apply gets a fresh id, which the absence probes and binding ends
+    // it writes carry and the result reports. A run after an interrupted one
+    // is a new observation, so an absence probe the interrupted run wrote
+    // counts toward an end only once the interval has passed.
+    let operation_id = apply.then(|| Uuid::new_v4().to_string());
     if let Some(realm) = realm_filter
         && !hex64_text(realm)
     {
@@ -1381,14 +1362,8 @@ pub fn sweep(
             continue;
         }
         if ended_now {
-            let action = if operation_id.as_deref()
-                == end.as_ref().and_then(|end| end["operation_id"].as_str())
-            {
-                "replay_end"
-            } else {
-                "already_ended"
-            };
-            details.push(json!({"kind":"absence","binding_id":binding_id,"action":action}));
+            details
+                .push(json!({"kind":"absence","binding_id":binding_id,"action":"already_ended"}));
             if let Some(end) = &end {
                 let run = SweepRun {
                     root,
@@ -1438,12 +1413,7 @@ pub fn sweep(
                 continue;
             }
         };
-        let preview_action = absence_action(
-            &presence,
-            probe.as_ref(),
-            operation_id.as_deref(),
-            &observation,
-        )?;
+        let preview_action = absence_action(&presence, probe.as_ref(), &observation)?;
         if !apply {
             details.push(json!({"kind":"absence","binding_id":binding_id,"action":preview_action}));
             if preview_action == "unavailable" {
@@ -1499,12 +1469,8 @@ pub fn sweep(
                 }
                 let locked_probe =
                     read_record(&probe_path, Some("absence_probe"), &probe_identity)?;
-                let mut action = absence_action(
-                    &fresh_presence,
-                    locked_probe.as_ref(),
-                    Some(operation),
-                    &observation,
-                )?;
+                let mut action =
+                    absence_action(&fresh_presence, locked_probe.as_ref(), &observation)?;
                 let mut replacements = Vec::new();
                 let mut removals = Vec::new();
                 if action == "clear_absence" {

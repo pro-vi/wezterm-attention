@@ -436,7 +436,7 @@ A current binding is selected by the pane's current claim and then that launch's
 inside a historical launch cannot make its binding current or confirmed. Doctor validates v2
 records in its file and version scope even when a pane has no binding.
 
-Destructive absence needs two sightings of absence under different operation IDs at least 60
+Destructive absence needs two sightings of absence, taken by two `sweep --apply` runs at least 60
 monotonic seconds apart. A sighting is a pane-list negative plus an identity-scoped process
 negative for the full socket path and pane ID. There the mux answered and does not list the pane,
 which is what shows it gone; the process probe is asked only whether a process still carries the
@@ -508,15 +508,15 @@ panes of a mux server whose socket is gone absent; see
 which processes it did not read, and counts as complete. Process environments are never printed
 or persisted.
 
-Each `sweep --apply` makes up a fresh operation id and reports it in `result.operation_id`.
-`--operation-id` (a canonical lowercase UUID) exists to retry an interrupted run: a run under an id
-already used is treated as a replay of that run. It ends no binding, because the absence rule needs
-two observations under different ids.
+Each `sweep --apply` makes up a fresh operation id, writes it into the absence probes and binding
+ends it records, and reports it in `result.operation_id`. To finish a run that was interrupted, run
+`sweep --apply` again: an absence probe the interrupted run wrote is the first of the two sightings,
+and the new run ends the binding only if 60 seconds have passed since it.
 
 Once a pane's current binding ended more than 30 days ago, `sweep --apply` removes the pane's
-whole tree, but only after two new sightings of absence under different operation ids at least 60
-seconds apart; sightings from before that binding ended do not count. A tree holding any file sweep does not recognise is kept. Each step appears as a `pane_retention` detail, with action
-`first_absence`, `too_soon`, `replay_first`, `clear_absence`, `present`, `unavailable`, `prune` or
+whole tree, but only after two new sightings of absence, taken by two runs at least 60 seconds
+apart; sightings from before that binding ended do not count. A tree holding any file sweep does not recognise is kept. Each step appears as a `pane_retention` detail, with action
+`first_absence`, `too_soon`, `clear_absence`, `present`, `unavailable`, `prune` or
 `keep`; the preview says `keep` wherever apply would keep. Temporary files left by an interrupted
 write, a review that an earlier plugin build had moved aside to `<review>.json.<session>.<ms>.clear`
 while clearing it and never finished with, and the lock `reviews/.<owner key>.lock` that every

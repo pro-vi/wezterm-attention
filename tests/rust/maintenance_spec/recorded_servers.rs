@@ -6,9 +6,7 @@
 //! doctor and sweep report that history once, however much of it there is. A
 //! mux that did not answer leaves them incomplete.
 
-use super::pane_retention::{
-    OP_1, OP_2, actions, end_long_ago, end_reason, setup_pane_dir, tree_bytes,
-};
+use super::pane_retention::{actions, end_long_ago, end_reason, setup_pane_dir, tree_bytes};
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 use wezterm_attention::protocol::{AttentionError, Diagnostic};
@@ -34,7 +32,7 @@ impl PaneLister for UnansweredPanes {
 fn two_applies(setup: &Setup, panes: &dyn PaneLister) -> (Vec<Vec<Value>>, Vec<Diagnostic>) {
     let mut runs = Vec::new();
     let mut diagnostics = Vec::new();
-    for (step, operation) in [OP_1, OP_2].into_iter().enumerate() {
+    for step in 0..2 {
         setup
             .clock
             .set_monotonic(1_000 + step as u64 * ABSENCE_INTERVAL_NS as u64);
@@ -42,7 +40,6 @@ fn two_applies(setup: &Setup, panes: &dyn PaneLister) -> (Vec<Vec<Value>>, Vec<D
             &setup.root(),
             None,
             true,
-            Some(operation),
             &setup.clock,
             panes,
             Some(&setup.processes),
@@ -433,12 +430,11 @@ fn a_failed_listing_leaves_a_tab_order_undecided_as_it_does_a_binding() {
         let (address, _) = pane_address(&setup.env).expect("address");
         let marker = format!("v2:{}:{}:42", address.realm_id, address.incarnation_id);
         let path = write_tab_order(&setup.root(), 5, &[&marker]);
-        for operation in [None, Some(OP_1)] {
+        for apply in [false, true] {
             let (_, diagnostics) = sweep(
                 &setup.root(),
                 None,
-                operation.is_some(),
-                operation,
+                apply,
                 &setup.clock,
                 &FailingPanes(code),
                 Some(&setup.processes),
@@ -480,7 +476,6 @@ fn an_apply_asks_an_unanswered_socket_once() {
         &setup.root(),
         None,
         true,
-        Some(OP_1),
         &setup.clock,
         &panes,
         Some(&setup.processes),
@@ -701,12 +696,11 @@ fn sweep_names_each_pane_it_could_not_decide_once() {
         "session-a",
         &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"],
     );
-    for operation in [None, Some(OP_1)] {
+    for apply in [false, true] {
         let (_, diagnostics) = sweep(
             &setup.root(),
             None,
-            operation.is_some(),
-            operation,
+            apply,
             &setup.clock,
             &UnansweredPanes,
             Some(&setup.processes),

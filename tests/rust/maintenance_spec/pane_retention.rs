@@ -6,11 +6,6 @@
 use super::lock_scope::LockCheckingPanes;
 use super::*;
 
-pub(super) const OP_1: &str = "00000000-0000-4000-8000-000000000911";
-pub(super) const OP_2: &str = "00000000-0000-4000-8000-000000000912";
-pub(super) const OP_3: &str = "00000000-0000-4000-8000-000000000913";
-pub(super) const OP_4: &str = "00000000-0000-4000-8000-000000000914";
-
 pub(super) fn setup_pane_dir(setup: &Setup) -> PathBuf {
     pane_dir(&setup.root(), &pane_address(&setup.env).expect("address").0)
 }
@@ -40,7 +35,7 @@ fn a_binding_on_a_vanished_socket_ends_after_two_observations() {
     fs::remove_file(&setup.env["WEZTERM_UNIX_SOCKET"]).expect("remove socket");
     setup.processes.set(Presence::Absent);
     setup.clock.set_monotonic(1_000);
-    let (first, _) = setup.run_sweep(true, Some(OP_1));
+    let (first, _) = setup.run_sweep(true);
     assert_eq!(
         actions(&first.details, "absence"),
         [&json!("first_absence")]
@@ -53,7 +48,7 @@ fn a_binding_on_a_vanished_socket_ends_after_two_observations() {
     setup
         .clock
         .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
-    let (second, _) = setup.run_sweep(true, Some(OP_2));
+    let (second, _) = setup.run_sweep(true);
     assert_eq!(actions(&second.details, "absence"), [&json!("end")]);
     assert_eq!(end_reason(&binding_dir), Some(json!("sweep_absent")));
 }
@@ -68,7 +63,7 @@ fn a_process_still_on_a_vanished_socket_is_not_absence() {
     let pane = setup_pane_dir(&setup);
     fs::remove_file(&setup.env["WEZTERM_UNIX_SOCKET"]).expect("remove socket");
     setup.processes.set(Presence::Present);
-    let (result, _) = setup.run_sweep(true, Some(OP_1));
+    let (result, _) = setup.run_sweep(true);
     assert!(actions(&result.details, "absence").is_empty());
     assert!(!pane.join("absence-probe.json").exists());
 }
@@ -88,11 +83,7 @@ fn a_vanished_socket_without_a_process_answer_never_ends_a_binding() {
     fs::remove_file(&setup.env["WEZTERM_UNIX_SOCKET"]).expect("remove socket");
     setup.processes.set(Presence::Unavailable);
     let probes: [Option<&dyn ProcessProbe>; 2] = [Some(&setup.processes), None];
-    for (step, (operation, processes)) in [OP_1, OP_2, OP_3, OP_4]
-        .into_iter()
-        .zip(probes.into_iter().cycle())
-        .enumerate()
-    {
+    for (step, processes) in probes.into_iter().cycle().take(4).enumerate() {
         setup
             .clock
             .set_monotonic(1_000 + step as u64 * ABSENCE_INTERVAL_NS as u64);
@@ -100,7 +91,6 @@ fn a_vanished_socket_without_a_process_answer_never_ends_a_binding() {
             &setup.root(),
             None,
             true,
-            Some(operation),
             &setup.clock,
             &setup.panes,
             processes,
@@ -135,7 +125,7 @@ fn a_vanished_socket_without_a_process_answer_keeps_an_old_panes_tree() {
     let probes: [Option<&dyn ProcessProbe>; 2] = [Some(&setup.processes), None];
     for processes in probes {
         let before = tree_bytes(&setup.root());
-        for (step, operation) in [OP_1, OP_2].into_iter().enumerate() {
+        for step in 0..2 {
             setup
                 .clock
                 .set_monotonic(1_000 + step as u64 * ABSENCE_INTERVAL_NS as u64);
@@ -143,7 +133,6 @@ fn a_vanished_socket_without_a_process_answer_keeps_an_old_panes_tree() {
                 &setup.root(),
                 None,
                 true,
-                Some(operation),
                 &setup.clock,
                 &setup.panes,
                 processes,
@@ -179,7 +168,7 @@ fn readers_report_a_vanished_socket_as_unavailable_and_change_nothing() {
             .any(|d| d.code == DiagnosticCode::ProbeUnavailable)
     );
     setup.doctor();
-    setup.run_sweep(false, None);
+    setup.run_sweep(false);
     assert_eq!(tree_bytes(&setup.root()), before);
 }
 
@@ -212,12 +201,11 @@ pub(super) fn end_long_ago(setup: &Setup) {
     setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
 }
 
-fn sweep_with(setup: &Setup, panes: &dyn PaneLister, operation: Option<&str>) -> Vec<Value> {
+fn sweep_with(setup: &Setup, panes: &dyn PaneLister, apply: bool) -> Vec<Value> {
     sweep(
         &setup.root(),
         None,
-        operation.is_some(),
-        operation,
+        apply,
         &setup.clock,
         panes,
         Some(&setup.processes),
@@ -236,7 +224,7 @@ fn a_closed_panes_tree_is_removed_only_by_apply_after_two_observations() {
     let panes = LockCheckingPanes::for_setup(&setup);
     let pane = setup_pane_dir(&setup);
 
-    let preview = sweep_with(&setup, &panes, None);
+    let preview = sweep_with(&setup, &panes, false);
     assert_eq!(
         actions(&preview, "pane_retention"),
         [&json!("first_absence")]
@@ -247,25 +235,25 @@ fn a_closed_panes_tree_is_removed_only_by_apply_after_two_observations() {
     );
 
     setup.clock.set_monotonic(1_000);
-    let first = sweep_with(&setup, &panes, Some(OP_1));
+    let first = sweep_with(&setup, &panes, true);
     assert_eq!(actions(&first, "pane_retention"), [&json!("first_absence")]);
     assert!(pane.join("claim.json").exists());
 
     setup
         .clock
         .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64 - 1);
-    let soon = sweep_with(&setup, &panes, Some(OP_2));
+    let soon = sweep_with(&setup, &panes, true);
     assert_eq!(actions(&soon, "pane_retention"), [&json!("too_soon")]);
     assert!(pane.exists());
 
     setup
         .clock
         .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
-    let preview = sweep_with(&setup, &panes, None);
+    let preview = sweep_with(&setup, &panes, false);
     assert_eq!(actions(&preview, "pane_retention"), [&json!("prune")]);
     assert!(pane.exists(), "a preview removes nothing");
 
-    let second = sweep_with(&setup, &panes, Some(OP_3));
+    let second = sweep_with(&setup, &panes, true);
     assert_eq!(actions(&second, "pane_retention"), [&json!("prune")]);
     assert!(!pane.exists(), "the whole pane tree is gone");
     assert_eq!(panes.asked_under_lock.load(Ordering::SeqCst), 0);
@@ -283,14 +271,13 @@ fn a_preview_lists_each_socket_and_the_processes_once() {
     let (address, _) = pane_address(&setup.env).expect("address");
     let marker = format!("v2:{}:{}:42", address.realm_id, address.incarnation_id);
     write_tab_order(&setup.root(), 7, &[&marker]);
-    let count = |apply: bool, operation: Option<&str>| {
+    let count = |apply: bool| {
         let panes = LockCheckingPanes::for_setup(&setup);
         let processes = super::doctor_probes::CountingListing::new();
         let (result, _) = sweep(
             &setup.root(),
             None,
             apply,
-            operation,
             &setup.clock,
             &panes,
             Some(&processes),
@@ -306,12 +293,8 @@ fn a_preview_lists_each_socket_and_the_processes_once() {
                 + processes.single_looks.load(Ordering::SeqCst),
         )
     };
-    assert_eq!(count(false, None), (1, 1), "a preview lists once");
-    assert_eq!(
-        count(true, Some(OP_1)),
-        (2, 2),
-        "an apply looks per decision"
-    );
+    assert_eq!(count(false), (1, 1), "a preview lists once");
+    assert_eq!(count(true), (2, 2), "an apply looks per decision");
 }
 
 #[test]
@@ -319,11 +302,11 @@ fn a_present_pane_is_never_pruned_however_old_its_binding() {
     let setup = Setup::new();
     setup.claim_and_bind();
     end_long_ago(&setup);
-    for (step, operation) in [OP_1, OP_2, OP_3].into_iter().enumerate() {
+    for step in 0..3 {
         setup
             .clock
             .set_monotonic(1_000 + step as u64 * ABSENCE_INTERVAL_NS as u64);
-        let (result, _) = setup.run_sweep(true, Some(operation));
+        let (result, _) = setup.run_sweep(true);
         assert_eq!(
             actions(&result.details, "pane_retention"),
             [&json!("present")]
@@ -346,11 +329,11 @@ fn a_binding_ended_recently_keeps_its_pane() {
     setup.clock.set_unix(RETENTION_AGE_NS as u64 - 1);
     setup.panes.set(Vec::new());
     setup.processes.set(Presence::Absent);
-    for (step, operation) in [OP_1, OP_2].into_iter().enumerate() {
+    for step in 0..2 {
         setup
             .clock
             .set_monotonic(1_000 + step as u64 * ABSENCE_INTERVAL_NS as u64);
-        let (result, _) = setup.run_sweep(true, Some(operation));
+        let (result, _) = setup.run_sweep(true);
         assert!(actions(&result.details, "pane_retention").is_empty());
     }
     assert!(setup_pane_dir(&setup).join("claim.json").exists());
@@ -377,7 +360,7 @@ fn a_probe_from_before_the_end_does_not_count_toward_removal() {
     setup
         .clock
         .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
-    let (result, _) = setup.run_sweep(true, Some(OP_1));
+    let (result, _) = setup.run_sweep(true);
     assert_eq!(
         actions(&result.details, "pane_retention"),
         [&json!("first_absence")]
@@ -396,11 +379,11 @@ fn an_unknown_file_keeps_the_pane_tree() {
     let unknown = setup_pane_dir(&setup).join("notes.txt");
     fs::write(&unknown, "keep me").expect("unknown file");
     setup.clock.set_monotonic(1_000);
-    setup.run_sweep(true, Some(OP_1));
+    setup.run_sweep(true);
     setup
         .clock
         .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
-    let (result, diagnostics) = setup.run_sweep(true, Some(OP_2));
+    let (result, diagnostics) = setup.run_sweep(true);
     assert!(unknown.exists());
     assert!(setup_pane_dir(&setup).join("claim.json").exists());
     assert!(
@@ -431,11 +414,11 @@ fn a_review_left_mid_clear_does_not_keep_the_pane_tree() {
     )
     .expect("review left mid-clear");
     setup.clock.set_monotonic(1_000);
-    setup.run_sweep(true, Some(OP_1));
+    setup.run_sweep(true);
     setup
         .clock
         .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
-    let (result, diagnostics) = setup.run_sweep(true, Some(OP_2));
+    let (result, diagnostics) = setup.run_sweep(true);
     assert_eq!(
         actions(&result.details, "pane_retention"),
         [&json!("prune")],
@@ -463,7 +446,7 @@ fn a_probe_from_before_a_restart_starts_the_count_again() {
     setup.panes.set(Vec::new());
     setup.processes.set(Presence::Absent);
     setup.clock.set_monotonic(5_000);
-    let (result, _) = setup.run_sweep(true, Some(OP_1));
+    let (result, _) = setup.run_sweep(true);
     assert_eq!(
         actions(&result.details, "absence"),
         [&json!("first_absence")]
@@ -472,25 +455,25 @@ fn a_probe_from_before_a_restart_starts_the_count_again() {
         serde_json::from_slice(&fs::read(pane.join("absence-probe.json")).expect("probe"))
             .expect("probe JSON");
     assert_eq!(probe["observed_mono_ns"], "00000000000000005000");
-    assert_eq!(probe["operation_id"], OP_1);
+    assert_eq!(probe["operation_id"], json!(result.operation_id));
 }
 
-/// An operation id is how a retried apply recognises its own earlier work.
-/// A caller with nothing to retry need not invent one: each apply without an
-/// id gets a fresh one, so two runs a minute apart are two observations.
+/// Each apply gets a fresh operation id, so two runs a minute apart are two
+/// observations, also when the first was interrupted after writing its probe:
+/// the second finishes the work.
 #[test]
-fn an_apply_without_an_operation_id_uses_a_fresh_one() {
+fn each_apply_uses_a_fresh_operation_id() {
     let setup = Setup::new();
     setup.claim_and_bind();
     let binding_dir = setup.binding_dir();
     setup.panes.set(Vec::new());
     setup.processes.set(Presence::Absent);
     setup.clock.set_monotonic(1_000);
-    let (first, _) = setup.run_sweep(true, None);
+    let (first, _) = setup.run_sweep(true);
     setup
         .clock
         .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
-    let (second, _) = setup.run_sweep(true, None);
+    let (second, _) = setup.run_sweep(true);
     assert_eq!(actions(&second.details, "absence"), [&json!("end")]);
     assert_eq!(end_reason(&binding_dir), Some(json!("sweep_absent")));
     let ids: Vec<String> = [first.operation_id, second.operation_id]
@@ -502,7 +485,7 @@ fn an_apply_without_an_operation_id_uses_a_fresh_one() {
         assert_eq!(Uuid::parse_str(id).expect("UUID").to_string(), *id);
     }
     // A preview has no operation.
-    assert_eq!(setup.run_sweep(false, None).0.operation_id, None);
+    assert_eq!(setup.run_sweep(false).0.operation_id, None);
 }
 
 /// A process that lives until dropped, running `program` with exactly
@@ -541,7 +524,7 @@ fn real_sweeps(
 ) {
     let mut runs = Vec::new();
     let mut diagnostics = Vec::new();
-    for (step, operation) in [OP_1, OP_2].into_iter().enumerate() {
+    for step in 0..2 {
         setup
             .clock
             .set_monotonic(1_000 + step as u64 * ABSENCE_INTERVAL_NS as u64);
@@ -549,7 +532,6 @@ fn real_sweeps(
             &setup.root(),
             None,
             true,
-            Some(operation),
             &setup.clock,
             &setup.panes,
             Some(&wezterm_attention::wezterm::SystemProcessProbe),
@@ -716,11 +698,11 @@ fn a_pane_where_reviews_were_marked_and_cleared_is_removed_once_old() {
     setup.panes.set(Vec::new());
     setup.processes.set(Presence::Absent);
     setup.clock.set_monotonic(1_000);
-    setup.run_sweep(true, Some(OP_1));
+    setup.run_sweep(true);
     setup
         .clock
         .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
-    let (result, diagnostics) = setup.run_sweep(true, Some(OP_2));
+    let (result, diagnostics) = setup.run_sweep(true);
     assert_eq!(
         actions(&result.details, "pane_retention"),
         [&json!("prune")],
@@ -746,11 +728,11 @@ fn a_pane_still_flagged_for_review_is_removed_once_old() {
     setup.panes.set(Vec::new());
     setup.processes.set(Presence::Absent);
     setup.clock.set_monotonic(1_000);
-    setup.run_sweep(true, Some(OP_1));
+    setup.run_sweep(true);
     setup
         .clock
         .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
-    let (result, diagnostics) = setup.run_sweep(true, Some(OP_2));
+    let (result, diagnostics) = setup.run_sweep(true);
     assert_eq!(
         actions(&result.details, "pane_retention"),
         [&json!("prune")],
@@ -780,11 +762,11 @@ fn a_lock_like_file_the_review_writer_does_not_leave_keeps_the_pane_tree() {
         fs::create_dir_all(planted.parent().expect("parent")).expect("create parent");
         fs::write(&planted, "").expect("plant lock-like file");
         setup.clock.set_monotonic(1_000);
-        setup.run_sweep(true, Some(OP_1));
+        setup.run_sweep(true);
         setup
             .clock
             .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
-        let (result, _) = setup.run_sweep(true, Some(OP_2));
+        let (result, _) = setup.run_sweep(true);
         assert!(planted.exists(), "{relative} was removed");
         assert!(
             !actions(&result.details, "pane_retention").contains(&&json!("prune")),

@@ -328,7 +328,6 @@ impl Setup {
     fn run_sweep(
         &self,
         apply: bool,
-        operation: Option<&str>,
     ) -> (
         wezterm_attention::maintenance::SweepResult,
         Vec<wezterm_attention::protocol::Diagnostic>,
@@ -337,7 +336,6 @@ impl Setup {
             &self.root(),
             None,
             apply,
-            operation,
             &self.clock,
             &self.panes,
             Some(&self.processes),
@@ -403,7 +401,7 @@ fn sweep_preview_writes_nothing_and_two_absences_end_one_binding() {
     setup.clock.set_monotonic(300);
     let pane = pane_dir(&setup.root(), &pane_address(&setup.env).expect("address").0);
     let probe = pane.join("absence-probe.json");
-    let preview = setup.run_sweep(false, None).0;
+    let preview = setup.run_sweep(false).0;
     assert!(
         preview
             .details
@@ -411,15 +409,12 @@ fn sweep_preview_writes_nothing_and_two_absences_end_one_binding() {
             .any(|detail| detail["action"] == "first_absence")
     );
     assert!(!probe.exists());
-    let operation_one = "00000000-0000-4000-8000-000000000711";
-    setup.run_sweep(true, Some(operation_one));
+    setup.run_sweep(true);
     assert!(probe.exists());
     setup
         .clock
         .set_monotonic(300 + ABSENCE_INTERVAL_NS as u64 - 1);
-    let too_soon = setup
-        .run_sweep(true, Some("00000000-0000-4000-8000-000000000712"))
-        .0;
+    let too_soon = setup.run_sweep(true).0;
     assert!(
         too_soon
             .details
@@ -428,9 +423,7 @@ fn sweep_preview_writes_nothing_and_two_absences_end_one_binding() {
     );
     assert!(!setup.binding_dir().join("end.json").exists());
     setup.clock.set_monotonic(300 + ABSENCE_INTERVAL_NS as u64);
-    let ended = setup
-        .run_sweep(true, Some("00000000-0000-4000-8000-000000000713"))
-        .0;
+    let ended = setup.run_sweep(true).0;
     assert!(ended.details.iter().any(|detail| detail["action"] == "end"));
     assert!(setup.binding_dir().join("end.json").exists());
 }
@@ -441,7 +434,7 @@ fn unavailable_process_probe_never_counts_as_absence() {
     setup.claim_and_bind();
     setup.panes.set(Vec::new());
     setup.processes.set(Presence::Unavailable);
-    let (_, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000714"));
+    let (_, diagnostics) = setup.run_sweep(true);
     assert!(
         diagnostics
             .iter()
@@ -457,7 +450,7 @@ fn absence_process_negative_is_scoped_to_socket_and_pane() {
     setup.claim_and_bind();
     setup.panes.set(Vec::new());
     setup.processes.set(Presence::Absent);
-    setup.run_sweep(false, None);
+    setup.run_sweep(false);
     let expected_socket = fs::canonicalize(&setup.env["WEZTERM_UNIX_SOCKET"])
         .expect("socket path")
         .to_string_lossy()
@@ -478,14 +471,14 @@ fn live_pane_clears_the_first_absence_probe() {
     setup.claim_and_bind();
     setup.panes.set(Vec::new());
     setup.processes.set(Presence::Absent);
-    setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000715"));
+    setup.run_sweep(true);
     let pane = pane_dir(&setup.root(), &pane_address(&setup.env).expect("address").0);
     assert!(pane.join("absence-probe.json").exists());
     setup.panes.set(vec![PaneRow {
         pane_id: "42".to_owned(),
         tty_name: Some("/dev/ttys888".to_owned()),
     }]);
-    setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000716"));
+    setup.run_sweep(true);
     assert!(!pane.join("absence-probe.json").exists());
 }
 
@@ -565,7 +558,7 @@ fn old_noncurrent_binding_is_pruned_but_current_binding_is_preserved() {
         .join("bindings")
         .join(binding_id("claude", "session-b", launch_id));
     setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
-    setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000721"));
+    setup.run_sweep(true);
     assert!(!old_dir.exists());
     assert!(current_dir.exists());
 }
@@ -644,7 +637,6 @@ fn sweep_apply_uses_the_binding_reread_after_selection() {
                 &root,
                 None,
                 true,
-                Some("00000000-0000-4000-8000-000000000724"),
                 &setup.clock,
                 &panes,
                 Some(&setup.processes),
@@ -699,7 +691,7 @@ fn missing_claim_preserves_old_binding_history() {
     let (address, _) = pane_address(&setup.env).expect("address");
     fs::remove_file(pane_dir(&setup.root(), &address).join("claim.json")).expect("remove claim");
     setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
-    let (result, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000725"));
+    let (result, _) = setup.run_sweep(true);
     assert!(old_dir.exists());
     assert!(result.details.iter().any(|detail| {
         detail["kind"] == "binding_selection" && detail["action"] == "unavailable"
@@ -716,7 +708,7 @@ fn malformed_claim_is_contained_to_its_binding_selection() {
         b"not json",
     )
     .expect("corrupt claim");
-    let (result, diagnostics) = setup.run_sweep(false, None);
+    let (result, diagnostics) = setup.run_sweep(false);
     assert!(
         diagnostics
             .iter()
@@ -771,9 +763,7 @@ fn sweep_never_follows_a_symlinked_binding_tree_outside_the_state_root() {
     let outside = setup._scratch.0.join("outside-bindings");
     fs::rename(&bindings, &outside).expect("move bindings outside state root");
     symlink(&outside, &bindings).expect("link bindings outside state root");
-    let result = setup
-        .run_sweep(true, Some("00000000-0000-4000-8000-000000000727"))
-        .0;
+    let result = setup.run_sweep(true).0;
     assert_eq!(result.scanned, 0);
     assert!(
         outside
@@ -804,7 +794,7 @@ fn retention_preserves_unknown_files_inside_an_old_binding() {
     fs::create_dir_all(unknown.parent().expect("agents directory")).expect("create agents");
     fs::write(&unknown, b"preserve").expect("write unknown state");
     setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
-    let (_, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000728"));
+    let (_, diagnostics) = setup.run_sweep(true);
     assert!(old_dir.exists());
     assert!(unknown.exists());
     assert!(
@@ -849,7 +839,7 @@ fn an_old_binding_holding_per_child_records_is_pruned_whole() {
         );
     }
     setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
-    let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000731"));
+    let (result, diagnostics) = setup.run_sweep(true);
     assert!(!old_dir.exists(), "{diagnostics:?}");
     let old_id = old_dir.file_name().unwrap().to_str().unwrap();
     assert!(
@@ -890,7 +880,7 @@ fn an_old_binding_holding_a_newer_per_child_record_is_kept() {
         "00000000000000000400",
     );
     setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
-    let (_, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000732"));
+    let (_, diagnostics) = setup.run_sweep(true);
     assert!(old_dir.exists(), "{diagnostics:?}");
     assert!(presence.exists());
 }
@@ -940,7 +930,7 @@ fn an_old_binding_holding_a_child_set_and_moved_aside_records_is_pruned_whole() 
         )
         .expect("moved-aside record");
     }
-    let (_, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000733"));
+    let (_, diagnostics) = setup.run_sweep(true);
     assert!(!old_dir.exists(), "{diagnostics:?}");
 }
 
@@ -954,7 +944,7 @@ fn an_old_binding_holding_a_newer_child_set_is_kept() {
     let mut set: Value = serde_json::from_slice(&fs::read(&path).expect("set")).expect("set JSON");
     set["schema"] = json!(999);
     fs::write(&path, serde_json::to_vec(&set).expect("future JSON")).expect("write future set");
-    let (_, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000734"));
+    let (_, diagnostics) = setup.run_sweep(true);
     assert!(path.exists(), "{diagnostics:?}");
 }
 
@@ -1003,7 +993,7 @@ fn an_old_binding_holding_childrens_lifecycle_evidence_is_pruned_whole() {
         "doctor names {relative}: {doctor:?}"
     );
     setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
-    let (_, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000735"));
+    let (_, diagnostics) = setup.run_sweep(true);
     assert!(!old_dir.exists(), "{diagnostics:?}");
 }
 
@@ -1041,7 +1031,7 @@ fn a_current_binding_keeps_its_per_child_records() {
         .map(|path| fs::read(path).expect("per-child record"))
         .collect();
     setup.clock.set_unix(RETENTION_AGE_NS as u64 + 2);
-    let (result, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000732"));
+    let (result, _) = setup.run_sweep(true);
     for (path, bytes) in per_child.iter().zip(&before) {
         assert_eq!(
             &fs::read(path).expect("per-child record"),
@@ -1149,8 +1139,8 @@ fn sweep_leaves_files_at_the_top_of_the_root_alone() {
     for name in ["42", "42.agents", "42.ack", "42.review"] {
         fs::write(root.join(name), "{}\n").expect("write top-level file");
     }
-    let (preview, _) = setup.run_sweep(false, None);
-    let (applied, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000801"));
+    let (preview, _) = setup.run_sweep(false);
+    let (applied, _) = setup.run_sweep(true);
     for details in [&preview.details, &applied.details] {
         assert!(
             details
@@ -1395,7 +1385,7 @@ fn sweep_uses_validated_tab_publication_path() {
     )
     .unwrap();
     let legacy = write_tab_order(&root, 7, &["17"]);
-    let (preview, _) = setup.run_sweep(false, None);
+    let (preview, _) = setup.run_sweep(false);
     assert!(
         preview
             .details
@@ -1403,7 +1393,7 @@ fn sweep_uses_validated_tab_publication_path() {
             .any(|row| row["path"] == relative && row["action"] == "collect")
     );
     assert!(file.exists() && legacy.exists());
-    let (applied, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000749"));
+    let (applied, _) = setup.run_sweep(true);
     assert!(
         applied
             .details
@@ -1436,7 +1426,7 @@ fn sweep_collects_a_tab_order_only_when_every_pane_it_names_is_verified_absent()
     let unclaimed = write_tab_order(&root, 9, &["17"]);
     let empty = write_tab_order(&root, 10, &[]);
 
-    let (preview, _) = setup.run_sweep(false, None);
+    let (preview, _) = setup.run_sweep(false);
     assert_eq!(tab_order_detail(&preview.details, 7)["action"], "keep");
     assert_eq!(tab_order_detail(&preview.details, 7)["reason"], "present");
     assert_eq!(tab_order_detail(&preview.details, 8)["action"], "collect");
@@ -1452,7 +1442,7 @@ fn sweep_collects_a_tab_order_only_when_every_pane_it_names_is_verified_absent()
         "a preview writes nothing"
     );
 
-    let (applied, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000721"));
+    let (applied, _) = setup.run_sweep(true);
     assert_eq!(tab_order_detail(&applied.details, 8)["action"], "collected");
     assert_eq!(
         tab_order_detail(&applied.details, 10)["action"],
@@ -1480,7 +1470,7 @@ fn sweep_keeps_a_tab_order_whose_panes_could_not_be_probed() {
             address.realm_id, address.incarnation_id
         )],
     );
-    let (applied, _) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000722"));
+    let (applied, _) = setup.run_sweep(true);
     assert_eq!(tab_order_detail(&applied.details, 11)["action"], "keep");
     assert_eq!(
         tab_order_detail(&applied.details, 11)["reason"],
@@ -1506,11 +1496,8 @@ fn sweep_keeps_a_tab_order_naming_an_unrecorded_pane_without_calling_it_unprobed
     let before_present = format!("v2:{}:{}:7", address.realm_id, "0".repeat(64));
     let present = format!("v2:{}:{}:42", address.realm_id, address.incarnation_id);
     let with_present = write_tab_order(&root, 10, &[&before_present, &present]);
-    for operation in [
-        "00000000-0000-4000-8000-000000000724",
-        "00000000-0000-4000-8000-000000000725",
-    ] {
-        let (applied, diagnostics) = setup.run_sweep(true, Some(operation));
+    for _ in 0..2 {
+        let (applied, diagnostics) = setup.run_sweep(true);
         assert_eq!(tab_order_detail(&applied.details, 9)["action"], "keep");
         assert_eq!(
             tab_order_detail(&applied.details, 9)["reason"],
@@ -1547,7 +1534,6 @@ fn a_realm_filtered_sweep_leaves_tab_orders_alone() {
         &root,
         Some(&address.realm_id),
         true,
-        Some("00000000-0000-4000-8000-000000000723"),
         &setup.clock,
         &setup.panes,
         Some(&setup.processes),
@@ -1566,7 +1552,7 @@ fn a_realm_filtered_sweep_leaves_tab_orders_alone() {
 fn an_empty_state_root_answers_completely() {
     let setup = Setup::new();
     fs::create_dir_all(setup.root()).expect("create state root");
-    let (result, diagnostics) = setup.run_sweep(false, None);
+    let (result, diagnostics) = setup.run_sweep(false);
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     assert!(result.details.is_empty());
 }

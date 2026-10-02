@@ -96,7 +96,7 @@ fn a_symlinked_tabs_directory_is_refused_and_nothing_behind_it_is_deleted() {
     fs::rename(outside.join("tabs").join("7.json"), &planted).expect("flatten");
     symlink(&outside, root.join("tabs")).expect("link tabs outside the state root");
 
-    let (result, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000901"));
+    let (result, diagnostics) = setup.run_sweep(true);
     assert!(planted.exists(), "a file outside the state root survives");
     assert!(
         result
@@ -156,7 +156,6 @@ fn a_tab_order_rewritten_during_the_decision_is_kept() {
         &root,
         None,
         true,
-        Some("00000000-0000-4000-8000-000000000902"),
         &setup.clock,
         &panes,
         Some(&setup.processes),
@@ -186,11 +185,8 @@ fn a_tab_order_naming_a_pane_of_a_gone_socket_is_kept_and_named() {
     let marker = format!("v2:{}:{}:42", address.realm_id, address.incarnation_id);
     let path = write_tab_order(&root, 5, &[&marker]);
     fs::remove_file(&setup.env["WEZTERM_UNIX_SOCKET"]).expect("remove socket");
-    for (apply, operation) in [
-        (false, None),
-        (true, Some("00000000-0000-4000-8000-000000000903")),
-    ] {
-        let (result, diagnostics) = setup.run_sweep(apply, operation);
+    for apply in [false, true] {
+        let (result, diagnostics) = setup.run_sweep(apply);
         assert!(path.exists());
         let detail = result
             .details

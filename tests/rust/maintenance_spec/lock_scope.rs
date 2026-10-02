@@ -51,7 +51,6 @@ fn sweep_apply_never_lists_panes_while_holding_a_pane_lock() {
         &setup.root(),
         None,
         true,
-        Some("00000000-0000-4000-8000-000000000903"),
         &setup.clock,
         &panes,
         Some(&setup.processes),
