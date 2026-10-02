@@ -544,6 +544,14 @@ fn query_defaults_errors_and_help_support_agent_composition() {
     assert!(text.contains("required with --consumer") && text.contains("Retrying"));
     assert!(text.contains("stdout stays empty") && text.contains("default hooks exit zero"));
     assert!(text.contains("--include-prompt") && text.contains("transient consumer stdin"));
+    let help = run(&["bindings", "--help"]);
+    let text = String::from_utf8(help.stdout).unwrap();
+    let current = text
+        .lines()
+        .find(|line| line.starts_with("current "))
+        .expect("a line on current");
+    assert!(current.contains("ended") && current.contains("pane is gone"));
+    assert!(current.contains("binding_phase=active") && current.contains("pane_presence=present"));
 }
 
 #[test]
