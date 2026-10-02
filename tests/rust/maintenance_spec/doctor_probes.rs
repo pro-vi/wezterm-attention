@@ -87,7 +87,7 @@ fn probe_status(result: &Value, name: &str) -> Value {
 
 /// With no state, no claims and no pane around it, doctor checked nothing,
 /// and "healthy" would say it had. Each probe that found nothing to check
-/// says unobserved, and the result lists it among the unobserved scopes.
+/// says unobserved, and `unobserved` lists exactly those probes.
 #[test]
 fn doctor_on_an_empty_setup_says_what_it_could_not_observe() {
     let setup = Setup::new();
@@ -120,6 +120,14 @@ fn doctor_on_an_empty_setup_says_what_it_could_not_observe() {
         );
     }
     assert_eq!(probe_status(&result, "versions"), "healthy");
+    let nothing_to_check: Vec<Value> = result["probes"]
+        .as_array()
+        .expect("probes")
+        .iter()
+        .filter(|probe| probe["status"] == "unobserved")
+        .map(|probe| probe["name"].clone())
+        .collect();
+    assert_eq!(result["unobserved"], json!(nothing_to_check), "{result}");
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
 

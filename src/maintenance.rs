@@ -325,13 +325,11 @@ pub fn doctor_with_environment(
     probes.push(json!({"name":"codex_server","status":codex_status}));
     diagnostics.extend(state_diagnostics);
     let diagnostics = fold_kept_history(diagnostics);
-    let mut unobserved = vec![json!("gui_user_vars")];
-    unobserved.extend(
-        probes
-            .iter()
-            .filter(|probe| probe["status"] == "unobserved")
-            .map(|probe| probe["name"].clone()),
-    );
+    let unobserved: Vec<Value> = probes
+        .iter()
+        .filter(|probe| probe["status"] == "unobserved")
+        .map(|probe| probe["name"].clone())
+        .collect();
     Ok((
         json!({
             "scope": ["state_files","socket","processes","permissions","versions","environment","codex_server"],
