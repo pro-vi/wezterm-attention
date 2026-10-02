@@ -6,8 +6,8 @@ fixed or by being reclassified as intended behaviour, not by being forgotten.
 
 Most working notes — plans, review write-ups, triage records — stay on the
 author's machine and are not in this repository. A few are tracked because
-something still points at them: `hooks describe` names
-`docs/reviews/lifecycle-contact-results.md` in its evidence output, for one. This
+something still points at them: the README and the consumer guide link to
+`docs/reviews/lifecycle-contact-results.md`, for one. This
 file is the maintained public account, and it is the one to read first.
 
 ## `expect` calls that rest on another function

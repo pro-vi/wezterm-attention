@@ -1777,7 +1777,7 @@ fn hook_description_is_exhaustive_read_only_and_pins_public_fields() {
                     .keys()
                     .map(String::as_str)
                     .collect::<Vec<_>>(),
-                vec!["arguments", "evidence", "native_event", "registration"]
+                vec!["arguments", "native_event", "registration"]
             );
         }
     }

@@ -24,7 +24,6 @@ pub struct NativeHookSpec {
     pub native_event: String,
     pub arguments: Vec<String>,
     pub registration: HookRegistration,
-    pub evidence: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,11 +71,6 @@ pub fn describe_hooks(provider: &str) -> crate::protocol::Result<HookDescription
                 native_event: declaration.native_event.clone(),
                 arguments: vec!["hooks".into(), "event".into(), name.into(), event.clone()],
                 registration: declaration.registration,
-                evidence: vec![
-                    format!("tests/fixtures/providers/{name}.json"),
-                    "tests/fixtures/lifecycle/contact-cases.json".into(),
-                    "docs/reviews/lifecycle-contact-results.md".into(),
-                ],
             })
             .collect(),
     })
