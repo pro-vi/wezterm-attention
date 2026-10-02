@@ -16,7 +16,7 @@ mkdir -p "$scratch/root/bin"
 cat > "$scratch/root/bin/attention" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$scratch/calls"
-printf '%s\n' 'attention: identity_unpublished: stand-in failure' >&2
+printf '%s\n' 'attention: claim_stale: stand-in failure' >&2
 exit 3
 EOF
 chmod 755 "$scratch/root/bin/attention"

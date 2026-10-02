@@ -153,21 +153,27 @@ pub fn socket_identity(socket_value: &str) -> Result<(String, String, SocketMeta
     ))
 }
 
+/// The value of `variable`, one of the two that name the pane; a process
+/// missing either is outside any pane.
+fn pane_variable<'a>(env: &'a BTreeMap<String, String>, variable: &str) -> Result<&'a str> {
+    env.get(variable).map(String::as_str).ok_or_else(|| {
+        AttentionError::new(
+            DiagnosticCode::OutsidePane,
+            format!("{variable} is missing"),
+        )
+    })
+}
+
 /// The mux socket a pane's environment names.
 pub fn pane_socket(env: &BTreeMap<String, String>) -> Result<&str> {
-    env.get("WEZTERM_UNIX_SOCKET")
-        .map(String::as_str)
-        .ok_or_else(|| {
-            AttentionError::new(
-                DiagnosticCode::IdentityUnpublished,
-                "WEZTERM_UNIX_SOCKET is missing",
-            )
-        })
+    pane_variable(env, "WEZTERM_UNIX_SOCKET")
 }
 
 pub fn pane_address(env: &BTreeMap<String, String>) -> Result<(PaneAddress, SocketMetadata)> {
-    let (realm_id, incarnation_id, metadata) = socket_identity(pane_socket(env)?)?;
-    let pane_id = canonical_pane_id(env.get("WEZTERM_PANE").map(String::as_str).unwrap_or(""))?;
+    let socket = pane_socket(env)?;
+    let pane = pane_variable(env, "WEZTERM_PANE")?;
+    let (realm_id, incarnation_id, metadata) = socket_identity(socket)?;
+    let pane_id = canonical_pane_id(pane)?;
     Ok((
         PaneAddress {
             realm_id,

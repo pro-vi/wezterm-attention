@@ -238,7 +238,8 @@
       "bad_usage",
       "self_claim_parent_unverified",
       "session_detached",
-      "child_active_after_parent_clear"
+      "child_active_after_parent_clear",
+      "outside_pane"
     ],
     "end_reasons": ["session_end", "sweep_absent"],
     "pane_presence": ["present", "verified_absent", "unavailable"],

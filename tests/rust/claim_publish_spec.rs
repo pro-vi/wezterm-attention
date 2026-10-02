@@ -5,7 +5,7 @@ mod trusted_scratch;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::fd::FromRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
@@ -834,6 +834,74 @@ fn equal_pane_numbers_in_two_sockets_have_distinct_addresses() {
     assert_eq!(first.pane_id, second.pane_id);
     assert_ne!(first.realm_id, second.realm_id);
     assert_ne!(first.incarnation_id, second.incarnation_id);
+}
+
+#[test]
+fn an_environment_without_either_pane_variable_is_outside_a_pane() {
+    let (_scratch, _listener, environment) = setup();
+    for variable in ["WEZTERM_UNIX_SOCKET", "WEZTERM_PANE"] {
+        let mut outside = environment.clone();
+        outside.remove(variable);
+        let error = pane_address(&outside).expect_err(variable);
+        assert_eq!(
+            error.diagnostic.code,
+            DiagnosticCode::OutsidePane,
+            "{variable}"
+        );
+        assert_eq!(error.diagnostic.message, format!("{variable} is missing"));
+    }
+    // A pane id that is set, even to nothing, is malformed, not missing.
+    for value in ["042", ""] {
+        let mut malformed = environment.clone();
+        malformed.insert("WEZTERM_PANE".to_owned(), value.to_owned());
+        assert_eq!(
+            pane_address(&malformed).expect_err(value).diagnostic.code,
+            DiagnosticCode::RecordInvalid,
+            "{value:?}"
+        );
+    }
+}
+
+/// Outside a pane `mark`, `hooks publish` and `hooks event` say so, and
+/// exit as they do for any other failure. `hooks claim` checks its stdin
+/// first, and here stdin is not a terminal.
+#[test]
+fn commands_run_outside_a_pane_report_outside_pane() {
+    let scratch = Scratch::new();
+    for (arguments, exit) in [
+        (&["mark", "thinking"][..], 1),
+        (&["hooks", "publish"][..], 1),
+        (&["hooks", "event", "claude", "Stop"][..], 0),
+        (&["hooks", "event", "claude", "Stop", "--strict"][..], 1),
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_attention"))
+            .args(arguments)
+            .env_clear()
+            .env("HOME", &scratch.path)
+            .env("WEZTERM_ATTENTION_DIR", scratch.path.join("state"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn attention");
+        // `mark` and `hooks publish` exit without reading it.
+        let _ = child
+            .stdin
+            .take()
+            .expect("child stdin")
+            .write_all(br#"{"session_id":"outside","hook_event_name":"Stop"}"#);
+        let output = child.wait_with_output().expect("wait for attention");
+        assert_eq!(
+            output.status.code(),
+            Some(exit),
+            "{arguments:?}: {output:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .starts_with("attention: outside_pane: WEZTERM_UNIX_SOCKET is missing\n"),
+            "{arguments:?}: {output:?}"
+        );
+    }
 }
 
 #[test]
