@@ -31,7 +31,7 @@ use wezterm_attention::wezterm::{
     name = "attention",
     version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("ATTENTION_BUILD_COMMIT"), ")"),
     about = "Publish and maintain mux-native WezTerm attention state.",
-    after_help = "Example: attention bindings --socket /absolute/mux.sock\nRead commands (bindings, tabs, tab-source, inspect, hooks describe) return JSON by default.\nCheck status and complete before using query results.\nRegistration requirements: attention hooks describe --provider claude"
+    after_help = "Example: attention bindings --socket /absolute/mux.sock\nQueries (bindings, tabs, tab-source, inspect, doctor, sweep) and hooks describe return JSON by default.\nCheck status and complete before using query results.\nRegistration requirements: attention hooks describe --provider claude"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -63,7 +63,7 @@ enum Command {
     /// Set current activity or a source-owned review.
     Mark(MarkArgs),
     /// Inspect CLI integration health.
-    Doctor(OutputArgs),
+    Doctor(DoctorArgs),
     /// Preview or apply conservative retention work.
     Sweep(SweepArgs),
 }
@@ -127,6 +127,13 @@ fn provider_event_help() -> String {
 
 #[derive(Clone, Debug, Args)]
 struct OutputArgs {
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Clone, Debug, Args)]
+struct DoctorArgs {
+    /// Return the JSON envelope (also the default).
     #[arg(long)]
     json: bool,
 }
@@ -387,6 +394,7 @@ struct SweepArgs {
     apply: bool,
     #[arg(long, requires = "apply")]
     operation_id: Option<String>,
+    /// Return the JSON envelope (also the default).
     #[arg(long)]
     json: bool,
 }
@@ -440,7 +448,7 @@ fn error_response(error: &AttentionError, command: &str) -> Response<serde_json:
 fn query_json(command: &str) -> bool {
     matches!(
         command,
-        "bindings" | "tabs" | "tab-source" | "inspect" | "hooks describe"
+        "bindings" | "tabs" | "tab-source" | "inspect" | "doctor" | "sweep" | "hooks describe"
     ) || command == "plugin"
         || command.starts_with("plugin ")
 }
@@ -1166,7 +1174,7 @@ fn run_mark(
 }
 
 fn run_doctor(
-    args: &OutputArgs,
+    args: &DoctorArgs,
     name: &str,
     environment: &BTreeMap<String, String>,
 ) -> Result<ExitCode, AttentionError> {

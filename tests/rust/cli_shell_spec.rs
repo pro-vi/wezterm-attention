@@ -1797,22 +1797,57 @@ fn doctor_that_had_nothing_to_look_at_says_unobserved_not_healthy() {
     assert_eq!(envelope["complete"], true);
 }
 
+/// Doctor and sweep print the JSON envelope on their own, as the read
+/// commands do: what they found is in it, and stderr stays empty. A usage
+/// error is an envelope too.
 #[test]
-fn doctor_in_text_mode_gives_its_reasons_on_stderr() {
+fn doctor_and_sweep_print_the_json_envelope_by_default() {
     let scratch = Scratch::new();
     let state = scratch.0.join("state");
-    fs::create_dir_all(&state).expect("create state root");
-    fs::set_permissions(&state, fs::Permissions::from_mode(0o755)).expect("shared state root");
-    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
-        .arg("doctor")
-        .env_clear()
-        .env("HOME", &scratch.0)
-        .env("WEZTERM_ATTENTION_DIR", &state)
-        .output()
-        .expect("run doctor");
-    assert_eq!(output.stdout, b"findings\n");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
-        "attention: state_permissions: state directory is accessible to other users\n"
-    );
+    // A record that cannot be read is a finding of both commands.
+    let binding_dir = state
+        .join("v2/realms")
+        .join("a".repeat(64))
+        .join("incarnations")
+        .join("b".repeat(64))
+        .join("panes/42/launches/00000000-0000-4000-8000-000000000701/bindings")
+        .join("c".repeat(64));
+    fs::create_dir_all(&binding_dir).expect("create binding directory");
+    fs::write(binding_dir.join("binding.json"), "invalid").expect("write invalid binding");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_attention"))
+            .args(args)
+            .env_clear()
+            .env("HOME", &scratch.0)
+            .env("WEZTERM_ATTENTION_DIR", &state)
+            .output()
+            .expect("run command")
+    };
+    for command in ["doctor", "sweep"] {
+        let default = run(&[command]);
+        let explicit = run(&[command, "--json"]);
+        assert_eq!(default.status.code(), Some(0), "{command}: {default:?}");
+        assert!(default.stderr.is_empty(), "{command}: {default:?}");
+        let envelope: Value = serde_json::from_slice(&default.stdout).expect("JSON envelope");
+        let requested: Value = serde_json::from_slice(&explicit.stdout).expect("JSON envelope");
+        assert_eq!(envelope["command"], command);
+        assert_eq!(envelope["status"], "findings", "{command}: {envelope}");
+        assert_eq!(envelope["complete"], true, "{command}: {envelope}");
+        assert_eq!(
+            envelope["diagnostics"], requested["diagnostics"],
+            "{command}"
+        );
+        assert!(
+            envelope["diagnostics"]
+                .as_array()
+                .expect("diagnostics")
+                .iter()
+                .any(|diagnostic| diagnostic["code"] == "record_invalid"),
+            "{command}: {envelope}"
+        );
+        let usage = run(&[command, "--no-such-flag"]);
+        assert_eq!(usage.status.code(), Some(2), "{command}: {usage:?}");
+        let error: Value = serde_json::from_slice(&usage.stdout).expect("usage envelope");
+        assert_eq!(error["status"], "usage_error", "{command}: {error}");
+    }
 }

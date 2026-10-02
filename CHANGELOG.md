@@ -26,7 +26,7 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - **The default state directory follows `XDG_STATE_HOME`.** The order is `WEZTERM_ATTENTION_DIR`, then `$XDG_STATE_HOME/wezterm-attention` when `XDG_STATE_HOME` is set, non-empty and absolute, then `~/.local/state/wezterm-attention`. 0.6 always used the last. If `XDG_STATE_HOME` is set where WezTerm starts, the directory moves; set `dir` to keep the old one. A `dir` option or `WEZTERM_ATTENTION_DIR` that is not UTF-8 is ignored with a warning by the plugin.
 - **`acknowledge_types` is not an option.** The option is `auto_clear`, as in 0.6; an earlier README named the wrong one. The plugin now logs `acknowledge_types` as unknown and names `auto_clear`.
 - **Hook commands registered for untagged builds must be registered again for an agent to claim its own pane.** A plain `attention hooks event PROVIDER EVENT` registration asserts no host pid, so every event of an agent no shell claimed for is refused with `self_claim_parent_unverified` and its tab shows nothing. Register each command as `WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event PROVIDER EVENT`, as the README shows. This affects only registrations written for untagged builds; 0.6 had no command.
-- **Read commands print JSON by default.** `bindings`, `tabs`, `inspect` and `hooks describe` return the JSON envelope on terminals and pipes alike. This affects only scripts written against untagged builds; 0.6 had no command.
+- **Queries print JSON by default.** `bindings`, `tabs`, `inspect`, `doctor`, `sweep` and `hooks describe` return the JSON envelope on terminals and pipes alike, and so does a usage error of any of them; `--json` is still accepted. `doctor` and `sweep` no longer print a bare status word, which hid what they found and, for `sweep`, whether the preview was complete. This affects only scripts written against untagged builds; 0.6 had no command.
 - **`attention mark clear --source NAME` also withdraws that source's activity**, when the activity the tab shows came from it, not only its review flag. The source name `user` is reserved for `Alt+B` and refused by every `mark` state.
 - **Commands exit 0, 1 or 2, and never 3.** A query (`bindings`, `tabs`, `inspect`, `doctor`, `sweep`) exits 0 when its answer is complete and 1 when it is incomplete or failed; 2 is only for a command-line error of a non-hook command. Diagnostics alone no longer change the exit code, so a complete `bindings` answer with diagnostics exits 0, and one that `--limit` truncated exits 1. Every other failure, including `mark`, `hooks claim` and `hooks publish`, exits 1, and so does `bin/attention` without the built binary for any non-hook command. Every error envelope has `complete=false`.
 - **Hook commands never exit 2**, which Claude Code and Codex read as "block". `hooks event` exits 0 with the reason on stderr, or 1 under `--strict`, even for a command line it cannot parse or a malformed `--consumer` option. A usage error of `hooks describe`, `hooks claim` or `hooks publish`, or an unknown `hooks` subcommand, exits 1.
@@ -61,7 +61,7 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 
 ### Changed
 
-- Usage errors for `bindings --limit`, `--realm` and `--provider`, `sweep --operation-id` without `--apply`, and `hooks publish --json --quiet` carry clap's message text. The `bad_usage` code, exit codes and JSON envelopes are unchanged; without `--json`, `sweep` prints clap's error text instead of `attention: bad_usage: …`.
+- Usage errors for `bindings --limit`, `--realm` and `--provider`, `sweep --operation-id` without `--apply`, and `hooks publish --json --quiet` carry clap's message text. The `bad_usage` code, exit codes and JSON envelopes are unchanged.
 - A prompt tints the pane `thinking` straight away, instead of waiting for the first tool call.
 - `thinking` from v2 records animates like the v1 spinner.
 - The tab text published in `tabs/*.json` always shows the spinner's first frame, so a spinning tab does not rewrite that file every second. The bar on screen still animates.
@@ -82,7 +82,7 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - The process probe no longer runs `ps` on macOS or Linux: it reads this user's process environments directly, never their arguments. Linux (glibc, including aarch64) is supported; macOS and Linux are the tested platforms.
 - `inspect` computes `binding_health` and `reader_confidence` with the same rule as `bindings`, so it can now report `conflicted`.
 - Realm-wide `bindings` applies `--realm` and `--provider` before asking any socket, asks sockets in parallel, and reports an unreadable state directory as an incomplete answer.
-- Without `--json`, `doctor`, `sweep`, `mark` and `hooks publish` print each diagnostic on stderr as `attention: <code>: <message>`; stdout still carries only the status word.
+- Without `--json`, `mark` and `hooks publish` print each diagnostic on stderr as `attention: <code>: <message>`; stdout still carries only the status word.
 - JSON output escapes U+0080–U+009F. `attention --version` says `-dirty` only when source, protocol or build files differ from the commit.
 - Sweep checks a pane before taking its locks, so hooks are not held up behind a slow mux.
 
