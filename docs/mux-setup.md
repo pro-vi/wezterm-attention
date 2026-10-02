@@ -19,7 +19,7 @@ attention.apply_to_config(config, {
 })
 ```
 
-The plugin always exports `WEZTERM_ATTENTION_DIR` to new panes. It exports `WEZTERM_ATTENTION_ROOT` only when `libexec/attention-rs` exists under the integration root, which is the plugin's own checkout unless `integration_root` names another; otherwise it logs once that the command is missing.
+The plugin exports `WEZTERM_ATTENTION_DIR` to new panes unless `integration_root` is not an absolute path: then it exports neither variable and logs `v2 integration root is unavailable`. It exports `WEZTERM_ATTENTION_ROOT` only when `libexec/attention-rs` exists under the integration root, which is the plugin's own checkout unless `integration_root` names another; otherwise it logs once that the command is missing.
 
 After a GUI attaches to an existing mux, it waits for two polls with the same pane count, republishes valid claims, and retries after 2, 5, 10, and 30 seconds while any pane remains unpublished. One schedule is shared per socket. The child PATH includes WezTerm's executable directory. A timer rechecks GUI-window inventory before retrying. If inventory is unavailable, another pane poll must renew the unpublished observation; otherwise that retry is retired. Fresh polls can restart publication. This retires retry evidence, not pane state.
 
