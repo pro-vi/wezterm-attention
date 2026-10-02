@@ -578,12 +578,25 @@ fn rust_and_installed_lua_share_relation_cases_and_retention_floors() {
             _ => {}
         }
         snapshot.pools = Default::default();
+        let mut siblings = snapshot.clone();
+        siblings.kind = "child_lifecycle_snapshot".into();
         snapshot.reduce(pre).unwrap();
-        snapshot.reduce(post).unwrap();
+        // A child's observation is read from the children's file.
+        let children = if post.actor == Actor::Lead {
+            snapshot.reduce(post).unwrap();
+            None
+        } else {
+            siblings.reduce(post).unwrap();
+            Some(siblings)
+        };
         snapshot.pools.requests.retention_floor_mono_ns = Some("00000000000000000001".into());
         snapshot.pools.general.retention_floor_mono_ns = Some("00000000000000000002".into());
-        let view =
-            LifecycleView::assemble(Some(&snapshot), None, Some("99999999999999999999"), vec![]);
+        let view = LifecycleView::assemble(
+            Some(&snapshot),
+            children.as_ref(),
+            Some("99999999999999999999"),
+            vec![],
+        );
         assert_eq!(
             view.retention_floors.keys().collect::<Vec<_>>(),
             ["general", "lead_general", "lead_requests", "requests"]
@@ -596,7 +609,11 @@ fn rust_and_installed_lua_share_relation_cases_and_retention_floors() {
                 .sum::<usize>() as u64,
             case["relations"].as_u64().unwrap()
         );
-        cases.push(json!({"id":case["id"],"snapshot":snapshot,"now":"99999999999999999999","expected":view}));
+        let mut parity = json!({"id":case["id"],"snapshot":snapshot,"now":"99999999999999999999","expected":view});
+        if let Some(children) = children {
+            parity["children"] = json!(children);
+        }
+        cases.push(parity);
     }
     let input = setup._scratch.0.join("parity.json");
     fs::write(&input, serde_json::to_vec(&cases).unwrap()).unwrap();

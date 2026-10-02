@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-28
+- **Amended:** 2026-10-02 — readers leave out the sub-agent observations they find in `lifecycle.json`
 
 ## Context
 
@@ -21,14 +22,24 @@ sub-agents' in `children-lifecycle.json` beside it (kind
 `child_lifecycle_snapshot`), which has the same shape, pools and limits; a lead
 observation in the children's file makes it invalid. A hook writes one of the
 two, and a lead observation never reads the children's file. Sub-agent
-observations already in `lifecycle.json` are not moved; readers settle them
-against the children's file. Both readers assemble one lifecycle facet from the
-two files. Observations from the children's file have the pools
+observations already in `lifecycle.json` are not moved, and the file stays
+valid; readers leave them out, with no diagnostic. Both readers assemble one
+lifecycle facet from the two files, and its sub-agent observations come only
+from the children's file. Observations from the children's file have the pools
 `child_general` and `child_requests`, each file's floors appear as
 `lead_<pool>` and `child_<pool>`, and `general` and `requests` stay the later
 floor of either file, so a consumer reading them keeps the meaning "some
 evidence of that pool was evicted". Neither the record nor the manifest schema
 changes.
+
+Until 2026-10-02 both readers instead settled the sub-agent observations in
+`lifecycle.json` against the children's file each time they built the facet of
+a binding that had one, showing one copy of an observation found in both files
+and reporting copies that disagreed as `record_invalid`. No build since the
+split writes a sub-agent observation into `lifecycle.json`. On one state store
+on 2026-10-02, 4 of 114 `lifecycle.json` files held 72 sub-agent observations,
+the newest written on 2026-09-28, and none of the four had a children's file
+beside it.
 
 Rejected:
 
@@ -46,6 +57,10 @@ The split isolates the lead's evidence; it does not make it fresh. The newest
 lead observation shown can still be older than the lead's last hook when the
 writer refuses a repeat, a fenced or an evicted observation, or times out on
 the lock. Sub-agents share one file and can still evict each other's evidence.
+Sub-agent observations already in `lifecycle.json` take places in the lead's
+pools until lead observations displace them, so a binding written across the
+split shows fewer lead observations than its pools hold, and a lead floor it
+carried over may come from sub-agent traffic.
 A poll reads two files per pane, and a pane now holds up to twice as many
 observations: the lead's and its children's. A poll that must parse both full
 files costs about as much more as the extra observations it holds. Measured
@@ -55,6 +70,9 @@ before the split when the old file held mostly the lead's observations (2.24
 times), 14.4 ms when it held an even mix (1.55 times) and 19.6 ms when it held
 only sub-agents' (1.20 times), since the old reader hashed every sub-agent id
 on each read. A poll where only one of the two files changed took 11 to 15 ms.
+These figures were measured while readers still settled the old file's
+sub-agent observations against the children's file, and have not been measured
+since.
 `snapshot_id` identifies `lifecycle.json` only. A consumer that asks only about
 the lead reads `lead_requests` or `lead_general`; one that reads `general` or
 `requests` gets no benefit from the split until it switches. A plugin from
@@ -67,9 +85,12 @@ made for another reason, which would allow folding the two files into one
 snapshot.
 
 Enforced by `more_child_observations_than_a_pool_holds_leave_the_leads_newest_in_place`,
-`a_leads_observation_goes_to_lifecycle_json_and_a_childs_to_its_own_file` and
-`a_corrupt_childrens_file_rejects_only_the_childrens_observations` in the Rust
-lifecycle suite; `rust_and_installed_lua_share_relation_cases_and_retention_floors`,
+`a_leads_observation_goes_to_lifecycle_json_and_a_childs_to_its_own_file`,
+`a_corrupt_childrens_file_is_started_again_and_leaves_the_leads_alone`,
+`a_childs_observation_in_lifecycle_json_is_left_out_without_a_diagnostic`,
+`the_childrens_observations_come_only_from_the_childrens_file` and
+`inspect_reads_an_older_lifecycle_json_without_the_childs_observation_it_holds`
+in the Rust lifecycle suite; `rust_and_installed_lua_share_relation_cases_and_retention_floors`,
 which runs every two-file case of `two_file_cases` through the Rust and the
 installed Lua reader; and the fixture cases `children-snapshot` and
 `lead-in-children-snapshot` in `tests/fixtures/lifecycle/observations.json`,

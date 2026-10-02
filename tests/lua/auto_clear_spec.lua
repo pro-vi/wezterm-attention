@@ -4836,6 +4836,15 @@ test("question publication, tool return, and badge dismissal stay independent", 
   post.actor = { kind = "child", agent_id = "child-a", agent_key = internal.sha256("child-a") }
   pre.actor = { kind = "child", agent_id = "child-b", agent_key = internal.sha256("child-b") }
   view = read(false)
+  assert(view.lifecycle.availability == "available" and #view.lifecycle.observations == 1
+    and #view.lifecycle.requests == 0 and #view.lifecycle.diagnostics == 0,
+    "children's observations in lifecycle.json are left out, and the file still reads")
+  -- Children's observations are read from their own file.
+  local siblings = copy_json(snapshot)
+  siblings.kind = "child_lifecycle_snapshot"
+  siblings.pools.general.observations[1].actor = pre.actor
+  write_json_path(directory .. "/children-lifecycle.json", siblings)
+  view = read(false)
   assert(#view.lifecycle.requests == 2 and #view.lifecycle.requests[1].relations == 0 and #view.lifecycle.requests[2].relations == 0,
     "sibling children cannot correlate equal native tool IDs")
   assert(view._records == nil and view.cache_key == nil and view.next_wakeup_unix_ns == nil)

@@ -242,11 +242,13 @@ impl LifecycleView {
     /// can hold both files' pools, so it is not a snapshot and is never
     /// validated as one.
     ///
-    /// Observations from `lifecycle.json` keep the pool names `general` and
-    /// `requests`, the children's file's take `child_general` and
+    /// The lead's observations from `lifecycle.json` keep the pool names
+    /// `general` and `requests`, the children's file's take `child_general` and
     /// `child_requests`. Each file's floors appear as `lead_<pool>` and
     /// `child_<pool>`, and `general` and `requests` are the later of the two,
     /// so that they still mean that some evidence of that pool was evicted.
+    /// A child's observation found in `lifecycle.json` is left out: only a
+    /// writer from before children had their own file put one there.
     pub fn assemble(
         lead: Option<&LifecycleSnapshot>,
         children: Option<&LifecycleSnapshot>,
@@ -256,7 +258,6 @@ impl LifecycleView {
         let mut view = Self::empty(LifecycleAvailability::Available);
         view.diagnostics = problems;
         view.snapshot_id = lead.map(|snapshot| snapshot.snapshot_id.clone());
-        let (mut leads, mut legacy, mut sibling) = (vec![], vec![], vec![]);
         for (source, snapshot) in [("lead", lead), ("child", children)] {
             let Some(snapshot) = snapshot else { continue };
             for (name, pool) in [
@@ -275,27 +276,20 @@ impl LifecycleView {
                     }
                 }
                 for observation in &pool.observations {
-                    let pooled = PooledObservation {
+                    if source == "lead" && observation.actor != Actor::Lead {
+                        continue;
+                    }
+                    view.observations.push(PooledObservation {
                         pool: if source == "lead" {
                             name.to_owned()
                         } else {
                             format!("child_{name}")
                         },
                         observation: observation.clone(),
-                    };
-                    match (source, &observation.actor) {
-                        ("lead", Actor::Lead) => leads.push(pooled),
-                        ("lead", Actor::Child { .. }) => legacy.push(pooled),
-                        _ => sibling.push(pooled),
-                    }
+                    });
                 }
             }
         }
-        if let Some(children) = children {
-            (legacy, sibling) =
-                reconcile_children(legacy, sibling, &leads, children, &mut view.diagnostics);
-        }
-        view.observations = leads.into_iter().chain(legacy).chain(sibling).collect();
         for pooled in &view.observations {
             if now.is_some_and(|now| now < pooled.observation.written_at_unix_ns.as_str())
                 && view.diagnostics.len() < 8
@@ -324,96 +318,6 @@ impl LifecycleView {
         }
         view
     }
-}
-
-/// Settles the children's evidence that can appear in both lifecycle files:
-/// `legacy` are children's observations a writer put in `lifecycle.json`
-/// before children had their own file, `sibling` the members of
-/// `children-lifecycle.json`. Nothing moves the old ones, so the same
-/// observation can be in both; the rules below decide which copy is shown.
-/// The lead's observations are never dropped here. Returns what is left of
-/// `legacy` and `sibling`.
-fn reconcile_children(
-    legacy: Vec<PooledObservation>,
-    sibling: Vec<PooledObservation>,
-    leads: &[PooledObservation],
-    children: &LifecycleSnapshot,
-    diagnostics: &mut Vec<crate::protocol::Diagnostic>,
-) -> (Vec<PooledObservation>, Vec<PooledObservation>) {
-    // Each conflict is reported, within the facet's eight diagnostics.
-    let conflict = |diagnostics: &mut Vec<crate::protocol::Diagnostic>| {
-        if diagnostics.len() < 8 {
-            diagnostics.push(crate::protocol::Diagnostic::new(
-                DiagnosticCode::RecordInvalid,
-                "the two lifecycle snapshots disagree about one observation",
-            ));
-        }
-    };
-    let mut dropped = vec![false; sibling.len()];
-    let mut kept = Vec::new();
-    {
-        // A key names one observation in each file, so one lookup per old
-        // copy finds its counterpart.
-        let by_key: std::collections::BTreeMap<_, _> = sibling
-            .iter()
-            .enumerate()
-            .map(|(index, new)| (new.observation.storage_key_parts(), index))
-            .collect();
-        for old in legacy {
-            // At or below the children's floor for its pool: the children's
-            // file had already let go of it.
-            let pool = if old.pool == "requests" {
-                &children.pools.requests
-            } else {
-                &children.pools.general
-            };
-            if pool
-                .retention_floor_mono_ns
-                .as_ref()
-                .is_some_and(|floor| old.observation.observed_mono_ns <= *floor)
-            {
-                continue;
-            }
-            // The same observation in both: the later copy stands, and at
-            // the same instant the children's copy does.
-            let Some(&index) = by_key.get(&old.observation.storage_key_parts()) else {
-                kept.push(old);
-                continue;
-            };
-            let new = &sibling[index].observation;
-            match old.observation.observed_mono_ns.cmp(&new.observed_mono_ns) {
-                std::cmp::Ordering::Greater => {
-                    dropped[index] = true;
-                    kept.push(old);
-                }
-                std::cmp::Ordering::Less => {}
-                std::cmp::Ordering::Equal => {
-                    if old.observation.semantic() != new.semantic() {
-                        conflict(diagnostics);
-                    }
-                }
-            }
-        }
-    }
-    // One id naming two different observations: the copy in the children's
-    // file is left out, so nothing lifecycle.json shows is displaced.
-    let taken: std::collections::BTreeSet<&str> = leads
-        .iter()
-        .chain(&kept)
-        .map(|member| member.observation.observation_id.as_str())
-        .collect();
-    let mut shown = Vec::new();
-    for (new, dropped) in sibling.into_iter().zip(dropped) {
-        if dropped {
-            continue;
-        }
-        if taken.contains(new.observation.observation_id.as_str()) {
-            conflict(diagnostics);
-        } else {
-            shown.push(new);
-        }
-    }
-    (kept, shown)
 }
 
 fn request_evidence(observations: &[PooledObservation], provider: &str) -> Vec<RequestEvidence> {

@@ -1,6 +1,6 @@
 use super::child_presence::{SESSION, bound, child, lead, live, moved_aside};
 use super::*;
-use wezterm_attention::observations::LifecycleView;
+use wezterm_attention::observations::{LifecycleObservation, LifecycleView};
 use wezterm_attention::protocol::Disposition;
 
 fn lead_path(setup: &Setup, provider: &str) -> PathBuf {
@@ -89,14 +89,12 @@ fn more_child_observations_than_a_pool_holds_leave_the_leads_newest_in_place() {
     assert!(children["pools"]["general"]["retention_floor_mono_ns"].is_string());
 }
 
-// A `lifecycle.json` written before children had their own file holds both
-// actors' observations. A child's next observation goes to the children's file
-// and leaves the old one as it is: nothing is moved.
-#[test]
-fn a_childs_observation_leaves_an_older_lifecycle_json_as_it_is() {
-    let setup = bound("claude");
+/// Records the lead's tool call at 300, then adds a child's observation at 350
+/// and a general floor at 100 to its `lifecycle.json`, as a writer from before
+/// children had their own file left one. Returns the file's path.
+fn older_lifecycle_json(setup: &Setup) -> PathBuf {
     setup.apply(&lead("claude", "PreToolUse"), &mono(300));
-    let path = lead_path(&setup, "claude");
+    let path = lead_path(setup, "claude");
     let mut snapshot = read_json(&path);
     let mut member = snapshot["pools"]["general"]["observations"][0].clone();
     member["observation_id"] = json!(Uuid::new_v4().to_string());
@@ -111,6 +109,16 @@ fn a_childs_observation_leaves_an_older_lifecycle_json_as_it_is() {
         .push(member);
     snapshot["pools"]["general"]["retention_floor_mono_ns"] = json!(mono(100));
     atomic_replace(&path, &snapshot).expect("older lifecycle.json");
+    path
+}
+
+// A `lifecycle.json` written before children had their own file holds both
+// actors' observations. A child's next observation goes to the children's file
+// and leaves the old one as it is: nothing is moved.
+#[test]
+fn a_childs_observation_leaves_an_older_lifecycle_json_as_it_is() {
+    let setup = bound("claude");
+    let path = older_lifecycle_json(&setup);
     let before = fs::read(&path).expect("older lifecycle.json");
     setup.apply(
         &child("claude", "PreToolUse", "child-a", Some("Explore")),
@@ -118,6 +126,40 @@ fn a_childs_observation_leaves_an_older_lifecycle_json_as_it_is() {
     );
     assert_eq!(fs::read(&path).expect("lifecycle.json"), before);
     assert!(children_path(&setup, "claude").exists());
+}
+
+// Such a file stays valid: inspect shows it available with the lead's
+// observation, and the children's from their own file, and leaves out the
+// child's observation it holds without a diagnostic.
+#[test]
+fn inspect_reads_an_older_lifecycle_json_without_the_childs_observation_it_holds() {
+    let setup = bound("claude");
+    older_lifecycle_json(&setup);
+    setup.apply(
+        &child("claude", "PreToolUse", "child-a", Some("Explore")),
+        &mono(400),
+    );
+    let lifecycle = super::child_presence::facts(&setup, "claude").lifecycle;
+    assert_eq!(
+        lifecycle.availability,
+        wezterm_attention::observations::LifecycleAvailability::Available
+    );
+    assert!(
+        lifecycle.diagnostics.is_empty(),
+        "{:?}",
+        lifecycle.diagnostics
+    );
+    assert_eq!(
+        lifecycle
+            .observations
+            .iter()
+            .map(|pooled| (
+                pooled.pool.as_str(),
+                pooled.observation.observed_mono_ns.clone()
+            ))
+            .collect::<Vec<_>>(),
+        [("general", mono(300)), ("child_general", mono(400))]
+    );
 }
 
 // The children's file is the only one a child's observation reads, and the
@@ -203,9 +245,10 @@ fn the_childrens_file_is_read_under_the_lifecycle_bound() {
     assert_eq!(observations[0]["observed_mono_ns"], mono(400));
 }
 
-/// A generic Codex tool call observed at `at`, by the lead, or by the child
-/// `agent`, correlated by the tool call id `call`.
-fn tool_call(id: u64, at: u64, agent: Option<&str>, call: &str) -> Value {
+/// A Codex observation of `kind` observed at `at`, by the lead, or by the
+/// child `agent`, correlated by the tool call id `call`: a generic tool call,
+/// or a permission request.
+fn observed(kind: &str, id: u64, at: u64, agent: Option<&str>, call: &str) -> Value {
     let actor = match agent {
         Some(agent) => json!({
             "kind":"child","agent_id":agent,
@@ -213,19 +256,31 @@ fn tool_call(id: u64, at: u64, agent: Option<&str>, call: &str) -> Value {
         }),
         None => json!({"kind":"lead"}),
     };
-    json!({
-        "kind":"tool_preflight","tool_name":"shell","tool_class":"generic",
+    let mut item = json!({
+        "kind":kind,"tool_name":"shell",
         "observation_id":format!("00000000-0000-4000-8000-{id:012}"),
-        "source_event":"PreToolUse","observed_mono_ns":mono(at),
+        "observed_mono_ns":mono(at),
         "written_at_unix_ns":"00000000000000001000","actor":actor,
         "correlation":{"tool_call_id":call}
-    })
+    });
+    if kind == "approval_requested" {
+        item["source_event"] = json!("PermissionRequest");
+    } else {
+        item["tool_class"] = json!("generic");
+        item["source_event"] = json!("PreToolUse");
+    }
+    item
 }
 
-/// A valid snapshot of `kind` holding `general`, with the given pool floors.
+fn tool_call(id: u64, at: u64, agent: Option<&str>, call: &str) -> Value {
+    observed("tool_preflight", id, at, agent, call)
+}
+
+/// A valid snapshot of `kind` holding `observations`, each in the pool of its
+/// kind, with the given pool floors.
 fn snapshot_of(
     kind: &str,
-    general: Vec<Value>,
+    observations: Vec<Value>,
     general_floor: Option<u64>,
     requests_floor: Option<u64>,
 ) -> LifecycleSnapshot {
@@ -233,8 +288,15 @@ fn snapshot_of(
         serde_json::from_str(include_str!("../../fixtures/lifecycle/observations.json")).unwrap();
     let mut value = fixture["cases"][1]["value"].clone();
     value["kind"] = json!(kind);
-    value["pools"]["general"] = json!({"observations":general});
+    value["pools"]["general"] = json!({"observations":[]});
     value["pools"]["requests"] = json!({"observations":[]});
+    for item in observations {
+        let typed: LifecycleObservation = serde_json::from_value(item.clone()).unwrap();
+        value["pools"][typed.body.pool()]["observations"]
+            .as_array_mut()
+            .unwrap()
+            .push(item);
+    }
     for (pool, floor) in [("general", general_floor), ("requests", requests_floor)] {
         if let Some(floor) = floor {
             value["pools"][pool]["retention_floor_mono_ns"] = json!(mono(floor));
@@ -249,12 +311,17 @@ fn snapshot_of(
     serde_json::from_value(value).unwrap()
 }
 
-fn lead_snapshot(general: Vec<Value>, general_floor: Option<u64>) -> LifecycleSnapshot {
-    snapshot_of("lifecycle_snapshot", general, general_floor, None)
+fn lead_snapshot(observations: Vec<Value>, general_floor: Option<u64>) -> LifecycleSnapshot {
+    snapshot_of("lifecycle_snapshot", observations, general_floor, None)
 }
 
-fn children_snapshot(general: Vec<Value>, general_floor: Option<u64>) -> LifecycleSnapshot {
-    snapshot_of("child_lifecycle_snapshot", general, general_floor, None)
+fn children_snapshot(observations: Vec<Value>, general_floor: Option<u64>) -> LifecycleSnapshot {
+    snapshot_of(
+        "child_lifecycle_snapshot",
+        observations,
+        general_floor,
+        None,
+    )
 }
 
 /// How both readers must assemble one binding's two lifecycle files, by what
@@ -266,81 +333,35 @@ pub(super) fn two_file_cases() -> Vec<(
     Option<LifecycleSnapshot>,
 )> {
     let lead = || tool_call(1, 50, None, "m");
-    let old_copy = || tool_call(2, 100, Some("child-a"), "k");
-    let mut differing = tool_call(5, 100, Some("child-a"), "k");
+    let mut differing = tool_call(5, 100, Some("child-a"), "j");
     differing["source_version"] = json!("another");
     vec![
         (
-            "an old child copy under a later one in the children's file",
-            Some(lead_snapshot(vec![lead(), old_copy()], None)),
-            Some(children_snapshot(
-                vec![tool_call(3, 200, Some("child-a"), "k")],
-                None,
-            )),
-        ),
-        (
-            "an old child copy later than the children's",
+            "a lifecycle file holding children's observations and a floor",
             Some(lead_snapshot(
-                vec![lead(), tool_call(2, 300, Some("child-a"), "k")],
-                None,
+                vec![
+                    lead(),
+                    tool_call(2, 100, Some("child-a"), "k"),
+                    observed("approval_requested", 7, 120, Some("child-a"), "r"),
+                ],
+                Some(20),
             )),
-            Some(children_snapshot(
-                vec![tool_call(3, 200, Some("child-a"), "k")],
-                None,
-            )),
-        ),
-        (
-            "one child observation in both files, identical",
-            Some(lead_snapshot(
-                vec![lead(), tool_call(6, 100, Some("child-a"), "k")],
-                None,
-            )),
-            Some(children_snapshot(
-                vec![tool_call(6, 100, Some("child-a"), "k")],
-                None,
-            )),
-        ),
-        (
-            "an old child copy at or below the children's floor",
-            Some(lead_snapshot(vec![lead(), old_copy()], None)),
-            Some(children_snapshot(
-                vec![tool_call(4, 300, Some("child-b"), "d")],
-                Some(150),
-            )),
-        ),
-        (
-            "an old child copy exactly at the children's floor",
-            Some(lead_snapshot(vec![lead(), old_copy()], None)),
-            Some(children_snapshot(
-                vec![tool_call(4, 300, Some("child-b"), "d")],
-                Some(100),
-            )),
-        ),
-        (
-            "one child observation at one instant with different content",
-            Some(lead_snapshot(vec![lead(), old_copy()], None)),
-            Some(children_snapshot(vec![differing], None)),
-        ),
-        (
-            "one id naming a lead observation and a child's",
-            Some(lead_snapshot(vec![lead()], None)),
-            Some(children_snapshot(
-                vec![tool_call(1, 400, Some("child-a"), "e")],
-                None,
-            )),
-        ),
-        (
-            "one id naming an old child observation and a later, different one",
-            Some(lead_snapshot(vec![lead(), old_copy()], None)),
-            Some(children_snapshot(
-                vec![tool_call(2, 200, Some("child-a"), "other")],
-                None,
-            )),
-        ),
-        (
-            "an old lifecycle file holding children's observations and a floor",
-            Some(lead_snapshot(vec![lead(), old_copy()], Some(20))),
             None,
+        ),
+        (
+            "children's observations in both files",
+            Some(lead_snapshot(
+                vec![
+                    lead(),
+                    tool_call(4, 100, Some("child-a"), "j"),
+                    tool_call(2, 300, Some("child-a"), "k"),
+                ],
+                None,
+            )),
+            Some(children_snapshot(
+                vec![differing, tool_call(3, 200, Some("child-a"), "k")],
+                None,
+            )),
         ),
         (
             "only the children's file",
@@ -366,21 +387,6 @@ pub(super) fn two_file_cases() -> Vec<(
             )),
         ),
         (
-            "more conflicts than the facet reports",
-            Some(lead_snapshot(
-                (1..=9)
-                    .map(|id| tool_call(id, 10 * id, None, &format!("lead-{id}")))
-                    .collect(),
-                None,
-            )),
-            Some(children_snapshot(
-                (1..=9)
-                    .map(|id| tool_call(id, 10 * id + 1, Some("child-a"), &format!("child-{id}")))
-                    .collect(),
-                None,
-            )),
-        ),
-        (
             "a request floor in the children's file only",
             Some(lead_snapshot(vec![lead()], None)),
             Some(snapshot_of(
@@ -396,6 +402,7 @@ pub(super) fn two_file_cases() -> Vec<(
 /// What the tests compare of the view assembled from a named case's files.
 struct Assembled {
     shown: Vec<(String, String)>,
+    requests: usize,
     floors: BTreeMap<String, String>,
     diagnostics: Vec<String>,
     snapshot_id: Option<String>,
@@ -423,6 +430,7 @@ fn assembled(case: &str) -> Assembled {
                 )
             })
             .collect(),
+        requests: view.requests.len(),
         floors: view.retention_floors.into_iter().collect(),
         diagnostics: view
             .diagnostics
@@ -440,97 +448,19 @@ fn shown_as(pairs: &[(u64, &str)]) -> Vec<(String, String)> {
         .collect()
 }
 
+// A child's observation in `lifecycle.json` opens no request and adds no
+// diagnostic, and the file still reads as the lead's evidence.
 #[test]
-fn a_later_copy_in_the_childrens_file_replaces_an_old_one() {
-    let Assembled {
-        shown, diagnostics, ..
-    } = assembled("an old child copy under a later one in the children's file");
-    assert_eq!(shown, shown_as(&[(1, "general"), (3, "child_general")]));
-    assert!(diagnostics.is_empty());
-}
-
-#[test]
-fn an_old_child_copy_later_than_the_childrens_stands() {
-    let Assembled {
-        shown, diagnostics, ..
-    } = assembled("an old child copy later than the children's");
-    assert_eq!(shown, shown_as(&[(1, "general"), (2, "general")]));
-    assert!(diagnostics.is_empty());
-}
-
-#[test]
-fn one_observation_in_both_files_is_shown_once_from_the_childrens() {
-    let Assembled {
-        shown, diagnostics, ..
-    } = assembled("one child observation in both files, identical");
-    assert_eq!(shown, shown_as(&[(1, "general"), (6, "child_general")]));
-    assert!(diagnostics.is_empty());
-}
-
-#[test]
-fn an_old_child_copy_exactly_at_the_childrens_floor_is_dropped() {
-    let Assembled {
-        shown, diagnostics, ..
-    } = assembled("an old child copy exactly at the children's floor");
-    assert_eq!(shown, shown_as(&[(1, "general"), (4, "child_general")]));
-    assert!(diagnostics.is_empty());
-}
-
-#[test]
-fn an_old_child_copy_the_childrens_floor_fences_is_dropped() {
+fn a_childs_observation_in_lifecycle_json_is_left_out_without_a_diagnostic() {
     let Assembled {
         shown,
-        floors,
-        diagnostics,
-        ..
-    } = assembled("an old child copy at or below the children's floor");
-    assert_eq!(shown, shown_as(&[(1, "general"), (4, "child_general")]));
-    assert_eq!(
-        floors.get("child_general").map(String::as_str),
-        Some(mono(150).as_str())
-    );
-    assert_eq!(floors.get("general"), floors.get("child_general"));
-    assert!(!floors.contains_key("lead_general"));
-    assert!(diagnostics.is_empty());
-}
-
-#[test]
-fn two_copies_of_one_child_observation_that_differ_are_reported() {
-    let Assembled {
-        shown, diagnostics, ..
-    } = assembled("one child observation at one instant with different content");
-    assert_eq!(shown, shown_as(&[(1, "general"), (5, "child_general")]));
-    assert_eq!(diagnostics, ["record_invalid"]);
-}
-
-#[test]
-fn a_childs_observation_never_displaces_the_leads_with_the_same_id() {
-    let Assembled {
-        shown, diagnostics, ..
-    } = assembled("one id naming a lead observation and a child's");
-    assert_eq!(shown, shown_as(&[(1, "general")]));
-    assert_eq!(diagnostics, ["record_invalid"]);
-}
-
-#[test]
-fn an_old_child_observation_keeps_its_id_over_the_childrens_file() {
-    let Assembled {
-        shown, diagnostics, ..
-    } = assembled("one id naming an old child observation and a later, different one");
-    assert_eq!(shown, shown_as(&[(1, "general"), (2, "general")]));
-    assert_eq!(diagnostics, ["record_invalid"]);
-}
-
-#[test]
-fn an_old_lifecycle_file_reads_as_before_with_its_floor_named_as_the_leads() {
-    let Assembled {
-        shown,
+        requests,
         floors,
         diagnostics,
         snapshot_id,
-        ..
-    } = assembled("an old lifecycle file holding children's observations and a floor");
-    assert_eq!(shown, shown_as(&[(1, "general"), (2, "general")]));
+    } = assembled("a lifecycle file holding children's observations and a floor");
+    assert_eq!(shown, shown_as(&[(1, "general")]));
+    assert_eq!(requests, 0);
     assert_eq!(
         floors,
         BTreeMap::from([
@@ -540,6 +470,22 @@ fn an_old_lifecycle_file_reads_as_before_with_its_floor_named_as_the_leads() {
     );
     assert!(diagnostics.is_empty());
     assert!(snapshot_id.is_some());
+}
+
+// Children's observations are shown only from the children's file, whatever a
+// copy in `lifecycle.json` holds: one observed later than the children's copy,
+// and one observed at the same instant with different content, are both left
+// out.
+#[test]
+fn the_childrens_observations_come_only_from_the_childrens_file() {
+    let Assembled {
+        shown, diagnostics, ..
+    } = assembled("children's observations in both files");
+    assert_eq!(
+        shown,
+        shown_as(&[(1, "general"), (5, "child_general"), (3, "child_general")])
+    );
+    assert!(diagnostics.is_empty());
 }
 
 #[test]
@@ -566,16 +512,6 @@ fn an_aggregate_floor_is_the_later_of_the_two_files() {
     let Assembled { floors, .. } = assembled("a request floor in the children's file only");
     assert_eq!(floors.get("requests"), Some(&mono(9)));
     assert!(!floors.contains_key("lead_requests"));
-}
-
-#[test]
-fn conflicts_are_reported_within_the_facets_eight_diagnostics() {
-    let Assembled {
-        shown, diagnostics, ..
-    } = assembled("more conflicts than the facet reports");
-    assert_eq!(shown.len(), 9);
-    assert!(shown.iter().all(|(_, pool)| pool == "general"));
-    assert_eq!(diagnostics, ["record_invalid"; 8]);
 }
 
 // A provider that runs no sub-agents has no children's file to read, and a

@@ -1019,7 +1019,6 @@ return function(context)
     diagnostic = diagnostic,
     invalid = invalid,
     sha256 = sha256,
-    observation_key = observation_key,
     parse_wire_value = parse_wire_value,
     parse_wire_json = parse_wire_json,
     parse_v2_record = parse_v2_record,

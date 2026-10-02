@@ -21,8 +21,6 @@ return function(context)
   local age_exceeds_ms = protocol_api.age_exceeds_ms
   local list_contains = protocol_api.list_contains
   local deep_copy = protocol_api.deep_copy
-  local deep_equal = protocol_api.deep_equal
-  local observation_key = protocol_api.observation_key
 
   local function request_evidence(observations, provider)
     local groups, ordered = {}, {}
@@ -102,73 +100,6 @@ return function(context)
     return lifecycle_availability[status] or "absent"
   end
 
-  -- What an observation says, apart from its id, when it was observed and when
-  -- it was written.
-  local not_compared = { observation_id = true, observed_mono_ns = true, written_at_unix_ns = true }
-  local function same_observation(a, b)
-    for key, value in pairs(a) do
-      if not not_compared[key] and not deep_equal(value, b[key]) then return false end
-    end
-    for key in pairs(b) do
-      if not not_compared[key] and a[key] == nil then return false end
-    end
-    return true
-  end
-
-  -- Each conflict is reported, within the facet's eight diagnostics.
-  local function report_conflict(diagnostics)
-    if #diagnostics < 8 then
-      diagnostics[#diagnostics + 1] = invalid("the two lifecycle snapshots disagree about one observation")
-    end
-  end
-
-  -- Settles the children's evidence that can appear in both lifecycle files:
-  -- `legacy` are children's observations a writer put in lifecycle.json before
-  -- children had their own file, `sibling` the members of
-  -- children-lifecycle.json. Nothing moves the old ones, so the same
-  -- observation can be in both; the rules below decide which copy is shown.
-  -- The lead's observations are never dropped here. Each entry is
-  -- { pool, item }. Returns what is left of `legacy` and `sibling`.
-  local function reconcile_children(legacy, sibling, leads, children, diagnostics)
-    -- A key names one observation in each file, so one lookup per old copy
-    -- finds its counterpart.
-    local by_key, dropped, kept = {}, {}, {}
-    for _, new in ipairs(sibling) do by_key[observation_key(new.item)] = new end
-    for _, old in ipairs(legacy) do
-      -- At or below the children's floor for its pool: the children's file
-      -- had already let go of it.
-      local floor = children.pools[old.pool].retention_floor_mono_ns
-      if not floor or old.item.observed_mono_ns > floor then
-        -- The same observation in both: the later copy stands, and at the
-        -- same instant the children's copy does.
-        local new = by_key[observation_key(old.item)]
-        if not new then
-          kept[#kept + 1] = old
-        elseif old.item.observed_mono_ns > new.item.observed_mono_ns then
-          dropped[new] = true
-          kept[#kept + 1] = old
-        elseif old.item.observed_mono_ns == new.item.observed_mono_ns and not same_observation(old.item, new.item) then
-          report_conflict(diagnostics)
-        end
-      end
-    end
-    -- One id naming two different observations: the copy in the children's
-    -- file is left out, so nothing lifecycle.json shows is displaced.
-    local taken, shown = {}, {}
-    for _, lead in ipairs(leads) do taken[lead.item.observation_id] = true end
-    for _, old in ipairs(kept) do taken[old.item.observation_id] = true end
-    for _, new in ipairs(sibling) do
-      if not dropped[new] then
-        if taken[new.item.observation_id] then
-          report_conflict(diagnostics)
-        else
-          shown[#shown + 1] = new
-        end
-      end
-    end
-    return kept, shown
-  end
-
   --- The lifecycle facet from the lead's snapshot and the children's beside
   --- it, as Rust's lifecycle_from_reads and LifecycleView::assemble build it.
   --- The lead's file is read first and decides: while it is unavailable,
@@ -190,7 +121,6 @@ return function(context)
     end
     if not lead_snapshot and not children_snapshot then return facet end
     facet.snapshot_id = lead_snapshot and lead_snapshot.snapshot_id or nil
-    local leads, legacy, sibling = {}, {}, {}
     for _, source in ipairs({ { "lead", lead_snapshot }, { "child", children_snapshot } }) do
       local name_prefix, current = source[1], source[2]
       if current then
@@ -203,29 +133,20 @@ return function(context)
             if not aggregate or floor > aggregate then facet.retention_floors[name] = floor end
           end
           for _, item in ipairs(pool.observations) do
-            local entry = { pool = name, item = item }
-            if name_prefix == "child" then
-              sibling[#sibling + 1] = entry
-            elseif item.actor.kind == "lead" then
-              leads[#leads + 1] = entry
-            else
-              legacy[#legacy + 1] = entry
+            -- A child's observation in lifecycle.json is left out: only a
+            -- writer from before children had their own file put one there.
+            if name_prefix == "child" or item.actor.kind == "lead" then
+              local copy = deep_copy(item)
+              copy.pool = (name_prefix == "child" and "child_" or "") .. name
+              facet.observations[#facet.observations + 1] = copy
             end
           end
         end
       end
     end
-    if children_snapshot then
-      legacy, sibling = reconcile_children(legacy, sibling, leads, children_snapshot, facet.diagnostics)
-    end
-    for _, group in ipairs({ { "", leads }, { "", legacy }, { "child_", sibling } }) do
-      for _, entry in ipairs(group[2]) do
-        local copy = deep_copy(entry.item)
-        copy.pool = group[1] .. entry.pool
-        facet.observations[#facet.observations + 1] = copy
-        if now_unix_ns and now_unix_ns < entry.item.written_at_unix_ns and #facet.diagnostics < 8 then
-          facet.diagnostics[#facet.diagnostics + 1] = diagnostic("clock_skew", "lifecycle write time is ahead of UTC")
-        end
+    for _, item in ipairs(facet.observations) do
+      if now_unix_ns and now_unix_ns < item.written_at_unix_ns and #facet.diagnostics < 8 then
+        facet.diagnostics[#facet.diagnostics + 1] = diagnostic("clock_skew", "lifecycle write time is ahead of UTC")
       end
     end
     table.sort(facet.observations, function(a,b)
