@@ -309,6 +309,12 @@ local function usable_options(opts)
       .. usable.renderer .. '"; the default "tab" is used')
     usable.renderer = nil
   end
+  if usable.title_formatter ~= nil and usable.renderer == "manual" then
+    report_warning_once("option:title_formatter", 'option title_formatter is ignored with renderer = '
+      .. '"manual", which draws no tab titles; wrap the function with wrap_title_formatter and '
+      .. 'register the result for "format-tab-title" instead')
+    usable.title_formatter = nil
+  end
   -- Exported to every pane, where the attention command refuses a root it
   -- would not write to; the same rule as for WEZTERM_ATTENTION_DIR.
   if usable.dir ~= nil then
@@ -326,13 +332,20 @@ local function usable_options(opts)
     end
   end
   -- Values inside the option tables, each checked where it is used: a wrong
-  -- one is named and left out, so the default for that one entry applies.
+  -- one is named and left out, so the default for that one entry applies. A
+  -- name the table does not have is named and left out too.
   local function usable_entries(name, value, rules)
     if value == nil then return nil end
+    local names = {}
+    for key in pairs(rules) do names[#names + 1] = key end
+    table.sort(names)
     local kept = {}
     for key, entry in pairs(value) do
       local rule = rules[key]
-      if rule and not rule.check(entry) then
+      if not rule then
+        report_warning_once("option:" .. name .. "." .. tostring(key), "unknown option " .. name .. "."
+          .. tostring(key) .. " is ignored; the options in " .. name .. " are " .. table.concat(names, ", "))
+      elseif not rule.check(entry) then
         report_warning_once("option:" .. name .. "." .. tostring(key), "option " .. name .. "."
           .. tostring(key) .. " must be " .. rule.kind .. ", not " .. type(entry) .. "; the default is used")
       else
@@ -357,6 +370,37 @@ local function usable_options(opts)
   })
   usable.colors = usable_entries("colors", usable.colors,
     { thinking = text, stop = text, notify = text, review = text })
+  -- priority and auto_clear are lists of the attention types the default
+  -- ranking names. A table with other keys, or a name that is no attention
+  -- type, means the option's default: a list with that entry left out would
+  -- rank or acknowledge what neither the list nor the default says.
+  local type_names = table.concat(defaults.priority, ", ", 1, #defaults.priority - 1)
+    .. " or " .. defaults.priority[#defaults.priority]
+  local type_list_defaults = { priority = defaults.priority, auto_clear = defaults.acknowledge_types }
+  for _, name in ipairs({ "priority", "auto_clear" }) do
+    local list = usable[name]
+    local problem
+    if list ~= nil then
+      local count = 0
+      for _ in pairs(list) do count = count + 1 end
+      if count ~= #list then
+        problem = 'must be a list like { "' .. table.concat(type_list_defaults[name], '", "')
+          .. '" }, with no other keys'
+      else
+        for _, entry in ipairs(list) do
+          if not protocol_api.list_contains(defaults.priority, entry) then
+            problem = "names " .. (type(entry) == "string" and ('"' .. entry .. '"') or ("a " .. type(entry)))
+              .. ", which is not " .. type_names
+            break
+          end
+        end
+      end
+    end
+    if problem then
+      report_warning_once("option:" .. name, "option " .. name .. " " .. problem .. "; the default is used")
+      usable[name] = nil
+    end
+  end
   local review_key = usable.review_key
   if review_key and (type(review_key.key) ~= "string"
       or (review_key.mods ~= nil and type(review_key.mods) ~= "string")) then
@@ -368,7 +412,11 @@ local function usable_options(opts)
 end
 
 function M.apply_to_config(config, opts)
-  if applied then return end
+  if applied then
+    report_warning_once("apply-to-config", "apply_to_config takes effect once per config load; "
+      .. "this second call and its options are ignored")
+    return
+  end
   applied = true
 
   opts = usable_options(opts or {})

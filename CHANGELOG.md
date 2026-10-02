@@ -83,7 +83,7 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - A Codex sub-agent that works after its parent's `Stop` stopped counting it is counted again, and its hook reports `child_active_after_parent_clear`, a new diagnostic code, on stderr; so does its `SubagentStop` when that comes after the parent's `Stop`. Only the latest parent `Stop` is covered.
 - Forked Claude and Codex sessions (`SessionStart` with source `fork`) are bound.
 - A malformed optional field in a provider event is dropped with one diagnostic, instead of the whole event being ignored.
-- Unknown options and wrong option types are named once in the WezTerm log and the default is used. An unknown `renderer` means `tab`.
+- Unknown options, wrong option types, and a `priority` or `auto_clear` that is not a list of attention types are named once in the WezTerm log, and the default is used. An unknown `renderer` means `tab`. An unknown name inside `colors` or `indicators`, a `title_formatter` given with `renderer = "manual"`, which draws no titles, and a second `apply_to_config` call are named too, and have no effect.
 - Exec, serial and WSL domains count as local, so their panes are named by their own pane id, as in 0.6. On local panes the pane's own id wins over a user variable printed by terminal output.
 - After a reattach, the plugin also republishes through WezTerm's implicit `unix` domain and any unix domain without a `socket_path`.
 - The plugin creates the state directory and `tabs/` private (mode 0700).

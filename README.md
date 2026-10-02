@@ -142,7 +142,7 @@ The tab's `type`, `color`, `source`, `provider` and `binding_health` are those o
 
 ## Configure
 
-All options are optional — defaults work out of the box. An unknown option, or a value of the wrong type, is named once in the WezTerm log and the default is used instead:
+All options are optional — defaults work out of the box. An unknown option, a value of the wrong type, and a `priority` or `auto_clear` that is not a list of attention types are each named once in the WezTerm log, and the default is used instead. An unknown name inside `colors` or `indicators` is named and ignored. A `title_formatter` given with `renderer = "manual"`, which draws no titles, is named and not used, and a second `apply_to_config` call is named and changes nothing:
 
 ```lua
 attention.apply_to_config(config, {

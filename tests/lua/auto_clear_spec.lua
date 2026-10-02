@@ -5582,6 +5582,105 @@ test("a wrong value inside an option table is named, and its default used", func
   end
 end)
 
+test("an unknown name inside colors or indicators is named, and left out", function()
+  write_activity(9770, "thinking")
+  local cases = {
+    { indicators = { thinking = "x " }, name = "indicators.thinking", known = "thinking_frames" },
+    { colors = { notfy = "#000000" }, name = "colors.notfy", known = "notify" },
+  }
+  for _, case in ipairs(cases) do
+    local instance = dofile(repo_root .. "/plugin/init.lua")
+    local handler = #(handlers["format-tab-title"] or {}) + 1
+    instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+      integration_root = writer_root, indicators = case.indicators, colors = case.colors })
+    local warnings = table.concat(drain_warnings(), "\n")
+    assert(warnings:find("unknown option " .. case.name .. " is ignored", 1, true)
+        and warnings:find(case.known, 1, true),
+      case.name .. " must be named with the names there are: " .. warnings)
+    assert(instance._active_indicators.thinking == nil and instance._active_colors.notfy == nil,
+      case.name .. ": the unknown name is left out")
+    instance.poll(window_double({ tabs = { { 9770 } }, focused = false }),
+      { now_unix_ns = fixture_now })
+    local rendered = handlers["format-tab-title"][handler](tab(9770, 9771, false))
+    assert(rendered_text(rendered):find("[◌◔◑◕]") and rendered[1].Background.Color == "#1c1730",
+      case.name .. ": the default spinner and tint are drawn, got " .. rendered_text(rendered))
+  end
+end)
+
+test("a priority or auto_clear that is not a list of attention types is named, and its default used", function()
+  local cases = {
+    { priority = { notify = 4 }, name = "priority", says = "list" },
+    { priority = { "thinking", "reveiw", "stop", "notify" }, name = "priority", says = '"reveiw"' },
+    { auto_clear = { stop = true }, name = "auto_clear", says = "list" },
+    { auto_clear = { "stop", "notfy" }, name = "auto_clear", says = '"notfy"' },
+  }
+  for _, case in ipairs(cases) do
+    local instance = dofile(repo_root .. "/plugin/init.lua")
+    instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+      renderer = "manual", integration_root = writer_root,
+      priority = case.priority, auto_clear = case.auto_clear })
+    local warnings = table.concat(drain_warnings(), "\n")
+    assert(warnings:find("option " .. case.name, 1, true) and warnings:find(case.says, 1, true)
+        and warnings:find("the default is used", 1, true),
+      case.name .. " must be named with what was wrong: " .. warnings)
+    local ranking, acknowledged = instance._active_priority_map, instance._active_acknowledge_set
+    assert(ranking.thinking == 1 and ranking.review == 2 and ranking.stop == 3 and ranking.notify == 4,
+      case.name .. ": the default ranking applies")
+    assert(acknowledged.stop and acknowledged.notify and not acknowledged.thinking,
+      case.name .. ": the default auto_clear applies")
+  end
+end)
+
+test("a title_formatter given with the manual renderer is named as unused", function()
+  local before = #(handlers["format-tab-title"] or {})
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root,
+    title_formatter = function() return "unused" end })
+  local warnings = table.concat(drain_warnings(), "\n")
+  assert(warnings:find("option title_formatter", 1, true)
+      and warnings:find("wrap_title_formatter", 1, true),
+    "the formatter is named with where it belongs: " .. warnings)
+  assert(#(handlers["format-tab-title"] or {}) == before, "the manual renderer registers no handler")
+end)
+
+test("a second apply_to_config is named, and changes nothing", function()
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    renderer = "manual", integration_root = writer_root })
+  local first = drain_warnings()
+  assert(#first == 0, "precondition: the first call is quiet, got " .. table.concat(first, "\n"))
+  local config = {}
+  instance.apply_to_config(config, { auto_poll = false, dir = test_dir, renderer = "manual",
+    integration_root = writer_root, show_provider = true })
+  local warnings = table.concat(drain_warnings(), "\n")
+  assert(warnings:find("apply_to_config", 1, true), "the second call is named: " .. warnings)
+  assert(instance._active_show_provider == false and config.keys == nil,
+    "the second call's options change nothing")
+end)
+
+test("a valid value for every option logs no warning, and is used as given", function()
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  local config = {}
+  instance.apply_to_config(config, {
+    auto_poll = false, dir = test_dir, integration_root = writer_root, renderer = "tab",
+    review_key = { key = "r", mods = "CTRL" }, title_formatter = function() return "base" end,
+    on_view_change = function() end, request_redraw = false, show_provider = true,
+    show_directory = false, settled_title_fallback = false,
+    colors = { thinking = "#000001", stop = "#000002", notify = "#000003", review = "#000004" },
+    indicators = { thinking_frames = { "a ", "b " }, stop = "s ", notify = "n ", review = "r " },
+    priority = { "notify", "stop", "review", "thinking" }, auto_clear = {},
+  })
+  local warnings = drain_warnings()
+  assert(#warnings == 0, "a valid configuration is quiet, got " .. table.concat(warnings, "\n"))
+  assert(instance._active_priority_map.notify == 1 and instance._active_priority_map.thinking == 4,
+    "the ranking is the one given")
+  assert(next(instance._active_acknowledge_set) == nil, "an empty auto_clear acknowledges nothing")
+  assert(instance._active_colors.review == "#000004"
+      and instance._active_indicators.thinking_frames[2] == "b ", "colors and indicators are as given")
+  assert(config.keys[1].key == "r", "the review key is the one given")
+end)
+
 test("the state root and tabs directory are created private to the user", function()
   local root = test_dir .. "/private-root"
   local instance = dofile(repo_root .. "/plugin/init.lua")
