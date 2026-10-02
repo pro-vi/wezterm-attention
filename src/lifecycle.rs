@@ -2431,8 +2431,8 @@ fn apply_provider_event_inner(
     evidence: Option<Rc<RefCell<HookEvidence>>>,
 ) -> Result<LifecycleResult> {
     if event.action == ProviderAction::Ignored {
-        // An event skipped on purpose is accepted with nothing to write, so it
-        // is not a failure under --strict.
+        // An event skipped on purpose is accepted with nothing to write, and
+        // `skipped` is not a disposition --strict counts as a failure.
         let mut result = LifecycleResult::new(if event.skip_reason.is_some() {
             Disposition::Skipped
         } else {

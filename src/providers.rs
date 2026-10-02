@@ -671,22 +671,36 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
             event.action = ProviderAction::Observation
         }
         "tool_execution_end" => event.action = ProviderAction::Observation,
-        // Pi 0.85.1 sends message_end for every message, prompts and tool
-        // results included.
-        "message_end" => {
-            if payload.get("role").and_then(Value::as_str) != Some("assistant")
-                || !matches!(
-                    payload.get("stop_reason").and_then(Value::as_str),
-                    Some("error" | "aborted")
-                )
+        "message_end" => match (
+            payload.get("role").and_then(Value::as_str),
+            payload.get("stop_reason").and_then(Value::as_str),
+        ) {
+            (Some("assistant"), Some("error" | "aborted")) => {
+                event.action = ProviderAction::Observation
+            }
+            // Pi 0.85.1 sends message_end for every message, prompts and tool
+            // results included, and its StopReason type lists these besides
+            // error and aborted.
+            (Some(role), stop)
+                if role != "assistant"
+                    || matches!(
+                        stop,
+                        Some("stop" | "length" | "toolUse" | "pending" | "deferred")
+                    ) =>
             {
                 return ProviderEvent::skipped(
                     Provider::Pi,
                     "Pi message is not a failed or aborted reply",
                 );
             }
-            event.action = ProviderAction::Observation;
-        }
+            _ => {
+                return ProviderEvent::ignored(
+                    Some(Provider::Pi),
+                    DiagnosticCode::IntegrationVersionMismatch,
+                    "Pi message role or stop reason is not supported",
+                );
+            }
+        },
         "session_start" => {
             let source = payload
                 .get("start_source")

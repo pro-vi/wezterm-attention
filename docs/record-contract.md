@@ -204,17 +204,20 @@ write of the lifecycle observation, which is written last, is reported with what
 to report kept under `replaced`; a failed write of any other record is reported alone (see
 [accepted limitations](accepted-limitations.md#a-record-write-can-be-reported-failed-after-readers-already-see-it)).
 
-The integration records nothing, on purpose, for four events it knows: Claude Code's
-`idle_prompt` notification, Pi's `agent_end`, a Pi `session_shutdown` for a reload, and a Pi
-`message_end` that is not a failed or aborted reply. The bundled Pi extension forwards none of the
-three Pi cases, so they come only from another caller. Such an event answers `skipped` with no
-diagnostic, and the result's `message`, present only then, says why. Without `--consumer` the hook
-prints nothing on stderr unless `--debug` is given, and `--strict` exits 0. With `--consumer` the
-hook prints its JSON envelope on stderr, as for every event, with the result under
-`result.native`; the consumer is not dispatched (`no_admitted_scope`), and `--strict` exits 1 for
-that. An event this build does not recognise is `ignored` with `integration_version_mismatch`: an
-event name the manifest does not declare for that provider, or a value the event depends on that
-this build does not know, such as a `SessionStart` source or a notification type.
+The integration records nothing, on purpose, for four events it knows: Claude Code's `idle_prompt`
+notification, Pi's `agent_end`, a Pi `session_shutdown` for a reload, and a Pi `message_end` for a
+message that is not a reply, or for a reply that stopped with `stop`, `length`, `toolUse`, `pending`
+or `deferred`, the stop reasons Pi 0.85.1 defines besides `error` and `aborted`. The bundled Pi
+extension forwards `message_end` only for a failed or aborted reply, and sends neither `agent_end`
+nor the `session_shutdown` of a reload, so the three Pi cases come only from another caller. Such an
+event answers `skipped` with no diagnostic, and the result's `message`, present only then, says why.
+Without `--consumer` the hook prints nothing on stderr unless `--debug` is given, and `--strict`
+exits 0. With `--consumer` the hook prints its JSON envelope on stderr, as for every event, with the
+result under `result.native`; the consumer is not dispatched (`no_admitted_scope`), and `--strict`
+exits 1 for that. An event this build does not recognise is `ignored` with
+`integration_version_mismatch`: an event name the manifest does not declare for that provider, or a
+value the event depends on that this build does not know, such as a `SessionStart` source, a
+notification type, or a Pi message role or stop reason.
 
 A turn that ends without `Stop` still ends the activity when the provider reports the ending. A
 lead Claude `StopFailure` (an API error ended the turn) publishes `notify`, because the user must

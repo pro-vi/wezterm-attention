@@ -21,6 +21,8 @@
     { "id": "finished_reply_is_inert", "event": "message_end", "patch": { "role": "assistant", "stop_reason": "stop" }, "expected": "ignored" },
     { "id": "prompt_message_is_inert", "event": "message_end", "patch": { "role": "user" }, "expected": "ignored" },
     { "id": "failed_reply_is_an_outcome", "event": "message_end", "patch": { "role": "assistant", "stop_reason": "error" }, "expected": "observation" },
+    { "id": "unknown_stop_reason_is_inert", "event": "message_end", "patch": { "role": "assistant", "stop_reason": "mystery" }, "expected": "ignored", "diagnostic": "integration_version_mismatch" },
+    { "id": "roleless_message_is_inert", "event": "message_end", "patch": { "stop_reason": "stop" }, "expected": "ignored", "diagnostic": "integration_version_mismatch" },
     { "id": "quit_shutdown_ends", "event": "session_shutdown", "patch": { "reason": "quit" }, "expected": "end" },
     { "id": "unknown_shutdown_reason_is_inert", "event": "session_shutdown", "patch": { "reason": "mystery" }, "expected": "ignored", "diagnostic": "integration_version_mismatch" },
     { "id": "bus_notify", "event": "bus", "patch": { "state": "notify" }, "expected": "activity", "activity_type": "notify" },
