@@ -2672,25 +2672,43 @@ test("static pane title settles on the second poll and clears on change", functi
     "a title change must clear fallback until the new value settles")
 end)
 
-test("server tab name and directory outrank settled pane title", function()
+test("the tab's own title and directory outrank settled pane title", function()
   local window = window_double({
     tabs = { { { id = 17641, title = "settled-pane" } } }, focused = false,
   })
   attention.poll(window)
   attention.poll(window)
-  local server_tab = tab(17641, 17642, false)
-  server_tab.tab_title = "server-name"
-  local server_rendered = format_tab_title(server_tab)
-  assert(server_rendered:find("server-name", 1, true)
-      and not server_rendered:find("settled-pane", 1, true),
-    "server tab name must be the highest base source")
+  local named_tab = tab(17641, 17642, false)
+  named_tab.tab_title = "tab-name"
+  local named_rendered = format_tab_title(named_tab)
+  assert(named_rendered:find("tab-name", 1, true)
+      and not named_rendered:find("settled-pane", 1, true),
+    "the tab's own title must be the highest base source")
 
   local directory_tab = tab(17641, 17642, false)
   directory_tab.active_pane.current_working_dir = { file_path = "/tmp/project-dir" }
   local directory_rendered = format_tab_title(directory_tab)
   assert(directory_rendered:find("project-dir", 1, true)
       and not directory_rendered:find("settled-pane", 1, true),
-    "directory must outrank settled pane title when no server name exists")
+    "directory must outrank settled pane title when the tab has no title of its own")
+end)
+
+test("a title formatter reads the tab's own title as ctx.tab_title", function()
+  local seen
+  local formatter = attention.wrap_title_formatter(function(_, ctx)
+    seen = ctx
+    return ctx.default_title
+  end)
+  local named = tab(17643, 17644, false)
+  named.tab_title = "named-tab"
+  formatter(named)
+  assert(seen.tab_title == "named-tab",
+    "ctx.tab_title is the tab's own title, got " .. tostring(seen.tab_title))
+  assert(seen.server_title == nil, "and the context has no second name for it")
+  local unnamed = tab(17643, 17644, false)
+  unnamed.tab_title = ""
+  formatter(unnamed)
+  assert(seen.tab_title == nil, "an empty title is nil, got " .. tostring(seen.tab_title))
 end)
 
 test("title churn logs once per full launch and never writes a title", function()
@@ -2725,13 +2743,13 @@ end)
 
 test("invalid pane title cannot destroy a higher base source", function()
   local title_tab = tab(17661, 17662, false)
-  title_tab.tab_title = "server-safe"
+  title_tab.tab_title = "tab-safe"
   internal.sample_settled_title("17661", "launch", "valid", nil)
   internal.sample_settled_title("17661", "launch", "valid", nil)
   internal.sample_settled_title("17661", "launch", "bad\nvalue", nil)
   local rendered = format_tab_title(title_tab)
-  assert(rendered:find("server-safe", 1, true),
-    "an invalid fallback sample must not affect the server-owned title")
+  assert(rendered:find("tab-safe", 1, true),
+    "an invalid fallback sample must not affect the tab's own title")
 end)
 
 local function has_control(text)

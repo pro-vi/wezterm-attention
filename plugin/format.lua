@@ -183,7 +183,7 @@ return function(context)
       hover = values.hover,
       max_width = values.max_width,
       default_title = titles.base_title,
-      server_title = titles.server_title,
+      tab_title = titles.tab_title,
       directory = titles.directory,
       settled_title = titles.settled_title,
       -- One home per fact. `attention` carries the positional entries for

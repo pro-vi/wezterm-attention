@@ -127,7 +127,7 @@ In `tab` mode, pass a `title_formatter` to replace the base title without losing
 attention.apply_to_config(config, {
   title_formatter = function(tab, ctx)
     -- ctx.default_title: the base title from the rule above
-    -- ctx.server_title, ctx.directory, ctx.settled_title: its sources, nil when empty
+    -- ctx.tab_title, ctx.directory, ctx.settled_title: its sources, nil when empty
     -- ctx.attention: { indicator, type, color, subagents, subagents_uncertain,
     --   source, provider, review, binding_health }
     local pane = tab.active_pane

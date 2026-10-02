@@ -52,9 +52,9 @@ local defaults = {
   -- Optional provider suffix. Off preserves the shipped title shape.
   show_provider = false,
 
-  -- Base-title sources: server name, then directory, then a two-poll settled
-  -- process title, and the title as it is right now only when none of those
-  -- has anything to say.
+  -- Base-title sources: the tab's own title, then directory, then a pane
+  -- title that held for two polls, and the pane title as it is right now
+  -- only when none of those has anything to say.
   show_directory = true,
   settled_title_fallback = true,
 }

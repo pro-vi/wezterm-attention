@@ -175,12 +175,12 @@ return function(context)
     state.changes = state.changes + 1
     if state.changes >= 2 then
       local provider_hint = {
-        claude = "Claude pane title is changing on every poll; prefer a server tab name or disable Claude title updates",
-        codex = "Codex pane title is changing on every poll; prefer a server tab name or disable Codex title updates",
-        pi = "Pi pane title is changing on every poll; prefer a server tab name or disable Pi title updates",
+        claude = "Claude pane title is changing on every poll; give the tab a title of its own or disable Claude title updates",
+        codex = "Codex pane title is changing on every poll; give the tab a title of its own or disable Codex title updates",
+        pi = "Pi pane title is changing on every poll; give the tab a title of its own or disable Pi title updates",
       }
       report_error_once("title-churn:" .. cache_key .. ":" .. scope,
-        provider_hint[provider] or "pane title is changing on every poll; prefer a server tab name")
+        provider_hint[provider] or "pane title is changing on every poll; give the tab a title of its own")
     end
     return nil
   end
@@ -200,7 +200,7 @@ return function(context)
   end
 
   local function title_sources(tab)
-    local server_title = nonempty(display_text(tab.tab_title, 256))
+    local tab_title = nonempty(display_text(tab.tab_title, 256))
     local pane = tab.active_pane
     local directory
     if M._active_show_directory ~= false then
@@ -211,12 +211,12 @@ return function(context)
       end
     end
     local settled_title = settled_title_for_tab(tab)
-    local base_title = server_title or directory or settled_title
+    local base_title = tab_title or directory or settled_title
     -- Nothing else to go by: the title as it is right now, however often it
     -- changes, rather than a tab with no name at all.
     if not base_title then base_title = display_text(pane and pane.title, 256) or "" end
     return {
-      server_title = server_title,
+      tab_title = tab_title,
       directory = directory,
       settled_title = settled_title,
       base_title = base_title,
