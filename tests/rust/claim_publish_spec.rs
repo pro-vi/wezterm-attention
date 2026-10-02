@@ -534,7 +534,7 @@ fn realm_publish_skips_only_the_row_without_a_tty() {
     .expect("realm publish returns a report");
     assert_eq!(report.attempted, 2);
     assert_eq!(report.published, 1);
-    assert_eq!(report.v2_published, 1);
+    assert_eq!(report.launches_published, 1);
     assert_eq!(report.skipped, 1);
     assert_eq!(report.diagnostics[0].code, DiagnosticCode::UnsafeTty);
 }
@@ -1942,7 +1942,7 @@ fn a_publication_that_found_no_claim_never_outlasts_a_new_one() {
     fs::create_dir_all(&pane).expect("pane state");
     let (waited, writes) = claim_during_publication(&environment, |ports| {
         let report = wezterm_attention::publish_current(&environment, ports).expect("publication");
-        assert_eq!(report.v2_published, 0);
+        assert_eq!(report.launches_published, 0);
     });
     assert!(waited, "the claim changed during the terminal write");
     assert_eq!(

@@ -341,7 +341,10 @@ fn rust_cli_help_errors_and_empty_hook_input_keep_the_documented_shape() {
     let binary = env!("CARGO_BIN_EXE_attention");
     let home = Command::new(binary).output().expect("run help");
     assert!(home.status.success());
-    assert!(String::from_utf8_lossy(&home.stdout).contains("Example:"));
+    let home = String::from_utf8_lossy(&home.stdout);
+    assert!(home.contains("Example:"));
+    // Only the plugin runs the hidden tab-source command.
+    assert!(!home.contains("tab-source"), "{home}");
     let operational = Command::new(binary)
         .args(["mark", "notify", "--json"])
         .env_clear()
@@ -1576,6 +1579,10 @@ fn a_pane_listing_runs_the_cli_beside_the_mux_server_and_never_starts_a_server()
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     let envelope: Value = serde_json::from_slice(&output.stdout).expect("publish JSON");
     assert_eq!(envelope["complete"], true, "{envelope}");
+    assert_eq!(
+        envelope["result"],
+        json!({"attempted": 0, "published": 0, "launches_published": 0, "skipped": 0})
+    );
     assert!(!server_ran.exists(), "the mux server must never be run");
     assert_eq!(
         fs::read_to_string(&arguments).expect("the CLI ran"),

@@ -31,7 +31,7 @@ use wezterm_attention::wezterm::{
     name = "attention",
     version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("ATTENTION_BUILD_COMMIT"), ")"),
     about = "Publish and maintain mux-native WezTerm attention state.",
-    after_help = "Example: attention bindings --socket /absolute/mux.sock\nQueries (bindings, tabs, tab-source, inspect, doctor, sweep) and hooks describe return JSON by default.\nCheck status and complete before using query results.\nRegistration requirements: attention hooks describe --provider claude"
+    after_help = "Example: attention bindings --socket /absolute/mux.sock\nQueries (bindings, tabs, inspect, doctor, sweep) and hooks describe return JSON by default.\nCheck status and complete before using query results.\nRegistration requirements: attention hooks describe --provider claude"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -730,7 +730,7 @@ fn run_hooks_publish(
     let result = serde_json::json!({
         "attempted": report.attempted,
         "published": report.published,
-        "v2_published": report.v2_published,
+        "launches_published": report.launches_published,
         "skipped": report.skipped,
     });
     emit(

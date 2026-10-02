@@ -35,7 +35,9 @@ pub struct ApplyResult {
 pub struct PublishReport {
     pub attempted: usize,
     pub published: usize,
-    pub v2_published: usize,
+    /// Of `published`, the publications that also named the launch the
+    /// pane's claim was made for.
+    pub launches_published: usize,
     pub skipped: usize,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -480,7 +482,7 @@ pub fn publish_current(
     Ok(PublishReport {
         attempted: 1,
         published: 1,
-        v2_published: usize::from(launch_id.is_some()),
+        launches_published: usize::from(launch_id.is_some()),
         skipped: 0,
         diagnostics: Vec::new(),
     })
@@ -503,7 +505,7 @@ pub fn publish_realm(
     let mut report = PublishReport {
         attempted: rows.len(),
         published: 0,
-        v2_published: 0,
+        launches_published: 0,
         skipped: 0,
         diagnostics: Vec::new(),
     };
@@ -531,9 +533,9 @@ pub fn publish_realm(
             .map(|launch_id| launch_id.is_some())
         })();
         match result {
-            Ok(has_v2) => {
+            Ok(has_launch) => {
                 report.published += 1;
-                report.v2_published += usize::from(has_v2);
+                report.launches_published += usize::from(has_launch);
             }
             Err(error) => report.diagnostics.push(error.diagnostic),
         }
