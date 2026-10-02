@@ -115,7 +115,7 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 - The Pi extension refuses a `WEZTERM_ATTENTION_DIR` or `XDG_STATE_HOME` that is not UTF-8, where it decides the state root, and reports it instead of starting the command. Pi hands the command the value re-encoded as valid UTF-8, so the command would have written Pi's records to a directory no reader uses.
 
 - Sourcing the bash integration twice no longer crashes the shell, and it works beside bash-preexec. It keeps `$?` and `$_` for later prompt commands and commands.
-- The shell integration stays quiet outside a WezTerm pane, and `wezterm_attention_claim && claude` starts the agent there.
+- The shell integration stays quiet outside a WezTerm pane, and in zsh its `wezterm_attention_claim` returns 0 there, so `wezterm_attention_claim && claude` starts the agent. Where the guard in `~/.zshrc` skipped the integration file, `wezterm_attention_claim` is not defined; the `~/.zshrc` line after the guard defines one that returns 0.
 - `bin/attention` without the built binary exits 0 for hook commands (1 under `--strict`), and works through a symlinked `bin` directory.
 - `scripts/install-cli.sh` builds into `./target` even when `CARGO_TARGET_DIR` or `build.target-dir` points elsewhere.
 - Every text check refuses C1 control characters (U+0080–U+009F) as well as C0 and DEL, and the plugin strips control characters from tab text it draws or publishes.

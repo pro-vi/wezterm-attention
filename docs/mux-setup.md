@@ -68,6 +68,7 @@ command, so its claim is explicit. In `~/.zshrc`:
 
 ```zsh
 [[ -n "${WEZTERM_ATTENTION_ROOT:-}" ]] && source "$WEZTERM_ATTENTION_ROOT/shell/wezterm-attention.zsh"
+(( $+functions[wezterm_attention_claim] )) || wezterm_attention_claim() { return 0 }
 ```
 
 Then launch agents through the claim:
@@ -79,7 +80,7 @@ wezterm_attention_claim && pi
 ```
 
 Call `wezterm_attention_claim` once immediately before each supported agent launch. The zsh prompt
-hook still republishes the current claim automatically. Both run only inside a WezTerm pane: outside one, the prompt hook does nothing and `wezterm_attention_claim` returns 0, so `wezterm_attention_claim && claude` still starts the agent. Inside a pane whose `WEZTERM_ATTENTION_ROOT` names no built command, the claim returns 1.
+hook still republishes the current claim automatically. Both run only inside a WezTerm pane: outside one, the prompt hook does nothing and the integration file's `wezterm_attention_claim` returns 0, so `wezterm_attention_claim && claude` still starts the agent. Where the guard skipped the file, the second line above defines a `wezterm_attention_claim` that returns 0, so the agent starts there too. Inside a pane whose `WEZTERM_ATTENTION_ROOT` names no built command, the claim returns 1.
 
 ### Where a redirect may go
 
