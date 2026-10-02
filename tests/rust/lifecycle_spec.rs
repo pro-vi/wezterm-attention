@@ -2783,6 +2783,42 @@ fn a_known_event_skipped_on_purpose_passes_strict_and_says_why_only_under_debug(
         assert_eq!(envelope["result"]["disposition"], "skipped", "{name}");
         assert_eq!(envelope["result"]["diagnostic"], Value::Null, "{name}");
         assert_eq!(envelope["result"]["message"], reason, "{name}");
+        // The event admits no scope, so a consumer is owed no delivery and
+        // its absence is not a failure.
+        let consumed = run_hook(
+            &setup,
+            &[
+                "hooks",
+                "event",
+                provider,
+                name,
+                "--strict",
+                "--consumer",
+                "/nonexistent/consumer",
+                "--consumer-timeout-ms",
+                "1000",
+            ],
+            &payload,
+        );
+        assert_eq!(consumed.status.code(), Some(0), "{name}: {consumed:?}");
+        let envelope: Value =
+            serde_json::from_slice(&consumed.stderr).expect("consumer envelope on stderr");
+        assert_eq!(envelope["status"], "ok", "{name}");
+        assert_eq!(envelope["complete"], true, "{name}");
+        assert_eq!(
+            envelope["result"]["native"]["disposition"], "skipped",
+            "{name}"
+        );
+        assert_eq!(
+            envelope["result"]["consumers"],
+            json!([{
+                "executable": "/nonexistent/consumer",
+                "stage": "not_dispatched",
+                "effect": "none",
+                "reason": "no_admitted_scope",
+            }]),
+            "{name}"
+        );
     }
     // A value this build does not know is still a version mismatch.
     let unknown = run_hook(

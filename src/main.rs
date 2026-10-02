@@ -799,7 +799,7 @@ fn run_hooks_event(
     );
     if !args.consumer.is_empty() {
         use wezterm_attention::consumer::{
-            DeliveryStage, delivery_bytes, dispatch, not_dispatched,
+            DeliveryStage, NotDispatchedReason, delivery_bytes, dispatch, not_dispatched,
         };
         let outcome = wezterm_attention::lifecycle::apply_provider_event_with_outcome(
             &event,
@@ -828,14 +828,21 @@ fn run_hooks_event(
                 Err(reason) => not_dispatched(executable, *reason),
             })
             .collect::<Vec<_>>();
+        let skipped = outcome
+            .result
+            .as_ref()
+            .is_ok_and(|result| matches!(result.disposition, Disposition::Skipped));
         let failed = outcome.result.as_ref().map_or(true, |result| {
             matches!(
                 result.disposition,
                 Disposition::Ignored | Disposition::Conflict | Disposition::Partial
             )
-        }) || consumers
-            .iter()
-            .any(|result| result.stage != DeliveryStage::Completed);
+        }) || consumers.iter().any(|result| {
+            // An event skipped on purpose admits no scope, so it owes its
+            // consumers no delivery.
+            result.stage != DeliveryStage::Completed
+                && !(skipped && result.reason == Some(NotDispatchedReason::NoAdmittedScope))
+        });
         let diagnostics = match &outcome.result {
             Ok(result) => result.diagnostic.iter().cloned().collect(),
             Err(error) => vec![error.diagnostic.clone()],

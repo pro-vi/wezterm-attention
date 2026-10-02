@@ -214,8 +214,8 @@ nor the `session_shutdown` of a reload, so the three Pi cases come only from ano
 event answers `skipped` with no diagnostic, and the result's `message`, present only then, says why.
 Without `--consumer` the hook prints nothing on stderr unless `--debug` is given, and `--strict`
 exits 0. With `--consumer` the hook prints its JSON envelope on stderr, as for every event, with the
-result under `result.native`; the consumer is not dispatched (`no_admitted_scope`), and `--strict`
-exits 1 for that. An event this build does not recognise is `ignored` with
+result under `result.native`; the consumer is not dispatched (`no_admitted_scope`), which is not a
+failure for such an event, so `--strict` exits 0 there too. An event this build does not recognise is `ignored` with
 `integration_version_mismatch`: an event name the manifest does not declare for that provider, or a
 value the event depends on that this build does not know, such as a `SessionStart` source, a
 notification type, or a Pi message role or stop reason.
