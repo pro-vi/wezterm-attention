@@ -651,14 +651,27 @@ fn json_publication_and_binding_output_report_bounded_completeness() {
     assert_eq!(envelope["diagnostics"].as_array().map(Vec::len), Some(50));
     assert_eq!(envelope["complete"], false);
 
-    let address = json!({"realm_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","incarnation_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","pane_id":"42"});
+    write_bindings(&state, 2);
+    let bindings = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .args(["bindings", "--json", "--limit", "1"])
+        .env_clear()
+        .env("WEZTERM_ATTENTION_DIR", &state)
+        .output()
+        .expect("run bounded bindings");
+    let envelope: Value = serde_json::from_slice(&bindings.stdout).expect("bindings JSON");
+    assert_eq!(envelope["result"]["scanned"], 2);
+    assert_eq!(envelope["result"]["returned"], 1);
+    assert_eq!(envelope["result"]["truncated"], true);
+    assert_eq!(envelope["complete"], false);
+}
+
+/// Writes `count` bindings, each of its own provider session, under one launch
+/// of pane 42 in the state root `state`.
+fn write_bindings(state: &Path, count: usize) {
+    let address = json!({"realm_id":"a".repeat(64),"incarnation_id":"b".repeat(64),"pane_id":"42"});
     let launch_id = "00000000-0000-4000-8000-000000000701";
-    for index in 1..=2 {
-        let binding_id = if index == 1 {
-            "c".repeat(64)
-        } else {
-            "d".repeat(64)
-        };
+    for index in 1..=count {
+        let binding_id = format!("{index:064x}");
         let binding_dir = state
             .join("v2/realms")
             .join("a".repeat(64))
@@ -673,25 +686,49 @@ fn json_publication_and_binding_output_report_bounded_completeness() {
             binding_dir.join("binding.json"),
             serde_json::to_vec(&json!({
                 "kind":"binding","schema":3,"address":address,"launch_id":launch_id,
-                "binding_id":binding_id,"event_id":format!("00000000-0000-4000-8000-00000000070{index}"),
+                "binding_id":binding_id,"event_id":format!("00000000-0000-4000-8000-{index:012}"),
                 "provider":"claude","provider_session_id":format!("session-{index}"),
-                "start_source":"startup","observed_mono_ns":format!("0000000000000000070{index}"),
+                "start_source":"startup","observed_mono_ns":format!("{:020}", 700 + index),
                 "written_at_unix_ns":"00000000001000000000","writer_version":"1.0.0"
             }))
             .expect("binding JSON"),
         )
         .expect("write binding");
     }
-    let bindings = Command::new(env!("CARGO_BIN_EXE_attention"))
-        .args(["bindings", "--json", "--limit", "1"])
-        .env_clear()
-        .env("WEZTERM_ATTENTION_DIR", &state)
-        .output()
-        .expect("run bounded bindings");
-    let envelope: Value = serde_json::from_slice(&bindings.stdout).expect("bindings JSON");
-    assert_eq!(envelope["result"]["scanned"], 2);
-    assert_eq!(envelope["result"]["returned"], 1);
-    assert_eq!(envelope["result"]["truncated"], true);
+}
+
+/// Without --limit every matching row is returned, however many match, and
+/// the answer is complete. --all asks for the same thing, so it cannot be
+/// combined with a limit.
+#[test]
+fn bindings_returns_every_matching_row_unless_a_limit_is_given() {
+    let scratch = Scratch::new();
+    let state = scratch.0.join("state");
+    write_bindings(&state, 101);
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_attention"))
+            .arg("bindings")
+            .args(args)
+            .env_clear()
+            .env("WEZTERM_ATTENTION_DIR", &state)
+            .output()
+            .expect("run bindings")
+    };
+    for args in [vec![], vec!["--all"]] {
+        let output = run(&args);
+        let envelope: Value = serde_json::from_slice(&output.stdout).expect("bindings JSON");
+        assert_eq!(envelope["result"]["scanned"], 101, "{args:?}");
+        assert_eq!(envelope["result"]["returned"], 101, "{args:?}");
+        assert_eq!(envelope["result"]["truncated"], false, "{args:?}");
+        assert_eq!(envelope["complete"], true, "{args:?}");
+        assert_eq!(output.status.code(), Some(0), "{args:?}");
+        assert!(output.stderr.is_empty(), "{args:?}");
+    }
+    let output = run(&["--all", "--limit", "5"]);
+    assert_eq!(output.status.code(), Some(2));
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("usage JSON envelope");
+    assert_eq!(envelope["status"], "usage_error");
+    assert_eq!(envelope["diagnostics"][0]["code"], "bad_usage");
     assert_eq!(envelope["complete"], false);
 }
 

@@ -507,7 +507,7 @@ fn socket_truncation_is_explicit_and_legacy_shape_is_preserved() {
         assert_eq!(response["result"].get("scope").is_some(), socket_mode);
         assert_eq!(
             String::from_utf8_lossy(&output.stderr).trim(),
-            "attention bindings: returned 1 of 2; use --all"
+            "attention bindings: returned 1 of 2; raise or drop --limit"
         );
     }
 }

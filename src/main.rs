@@ -204,7 +204,7 @@ impl BindingField {
 
 fn bindings_help() -> String {
     format!(
-        "Example: attention bindings --all --fields address,provider,current\nFields: {}\ncomplete is false when --limit truncated the rows or a state directory could not be read, and with --socket on any diagnostic: a probe that did not answer, a selected record that could not be read, a binding_conflict. Exit 0 when complete, 1 when not, 2 for a usage error.\nDropped diagnostics are counted: result.diagnostic_count of result.total_diagnostic_count.\nresult.timing_ms says where the call's time went: pane_list (wezterm cli list), process_list (the process probe), records (the file walk).\nIf truncated, narrow with --provider, raise --limit (maximum 1000), or explicitly use --all.\n--socket queries prevent WezTerm auto-start; --realm selects a recorded realm ID.",
+        "Example: attention bindings --fields address,provider,current\nFields: {}\nEvery matching row is returned unless --limit caps them.\ncomplete is false when --limit truncated the rows or a state directory could not be read, and with --socket on any diagnostic: a probe that did not answer, a selected record that could not be read, a binding_conflict. Exit 0 when complete, 1 when not, 2 for a usage error.\nDropped diagnostics are counted: result.diagnostic_count of result.total_diagnostic_count.\nresult.timing_ms says where the call's time went: pane_list (wezterm cli list), process_list (the process probe), records (the file walk).\nIf truncated, narrow with --provider, or raise or drop --limit.\n--socket queries prevent WezTerm auto-start; --realm selects a recorded realm ID.",
         BindingField::value_variants()
             .iter()
             .map(|field| field.name())
@@ -278,9 +278,9 @@ struct BindingsArgs {
     #[arg(long, value_parser = supported_provider)]
     provider: Option<String>,
     /// Maximum returned rows, 1..=1000; truncation sets complete=false.
-    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
-    limit: u16,
-    /// Return every matching row instead of limiting output.
+    #[arg(long, conflicts_with = "all", value_parser = clap::value_parser!(u16).range(1..=1000))]
+    limit: Option<u16>,
+    /// Return every matching row (also the default).
     #[arg(long)]
     all: bool,
     /// Comma-separated top-level row fields; omitted fields retain their usual absence.
@@ -938,8 +938,8 @@ fn run_bindings(
         (None, answer.rows, answer.diagnostics, answer.timing)
     };
     let scanned = rows.len();
-    if !args.all {
-        rows.truncate(usize::from(args.limit));
+    if let Some(limit) = args.limit {
+        rows.truncate(usize::from(limit));
     }
     let returned = rows.len();
     let truncated = returned < scanned;
@@ -947,7 +947,7 @@ fn run_bindings(
     // stdout stays JSON; the line goes where a consumer's log looks.
     if truncated {
         print_err(&format!(
-            "attention bindings: returned {returned} of {scanned}; use --all"
+            "attention bindings: returned {returned} of {scanned}; raise or drop --limit"
         ));
     }
     let shown_diagnostics: Vec<Diagnostic> = diagnostics.iter().take(50).cloned().collect();
