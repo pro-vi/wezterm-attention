@@ -4870,7 +4870,7 @@ test("consumer dismissal is scoped to displayed publications and never implies a
   assert(first.appearance(view) == "base" and second.appearance(view) == "follow_up")
   assert(view.lifecycle.requests[1].publication_observation_ids[1] == "publication-1")
   view.lifecycle.requests[1].publication_observation_ids = { "publication-2" }
-  view.lifecycle.retention_floors.requests = "00000000000000000100"
+  view.lifecycle.retention_floors.lead_requests = "00000000000000000100"
   assert(first.appearance(view) == "unknown", "eviction is not resolution")
   view.lifecycle.availability = "cached"
   assert(first.appearance(view) == "unknown")
@@ -4881,7 +4881,7 @@ test("consumer dismissal is scoped to displayed publications and never implies a
   assert(first.appearance(view) == "follow_up", "new binding does not inherit dismissal")
   local fresh = module.new()
   view.lifecycle.requests = {}
-  view.lifecycle.retention_floors = { child_requests = "00000000000000000100", requests = "00000000000000000100" }
+  view.lifecycle.retention_floors = { child_requests = "00000000000000000100" }
   assert(fresh.appearance(view) == "base", "a floor in the children's file hides no publication")
   view.lifecycle.retention_floors.lead_requests = "00000000000000000100"
   assert(fresh.appearance(view) == "unknown", "a floor in the lead's file may hide one")

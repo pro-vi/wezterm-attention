@@ -39,8 +39,8 @@ function M.new()
       if not dismissed[id] then displayed[id], attention_needed = true, true end
     end
     if attention_needed then return "follow_up" end
-    -- Only the lead publishes nonblocking questions, so only the lead's evicted
-    -- requests can hide one; `requests` would count its sub-agents' too.
+    -- Only the lead publishes nonblocking questions, so only a floor on the
+    -- lead's requests can hide one.
     if evidence_lost or lifecycle.retention_floors.lead_requests then return "unknown" end
     -- Base appearance is a display choice, not proof that nothing is unanswered.
     return "base"

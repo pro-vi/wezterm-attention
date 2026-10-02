@@ -245,10 +245,8 @@ impl LifecycleView {
     /// The lead's observations from `lifecycle.json` keep the pool names
     /// `general` and `requests`, the children's file's take `child_general` and
     /// `child_requests`. Each file's floors appear as `lead_<pool>` and
-    /// `child_<pool>`, and `general` and `requests` are the later of the two,
-    /// so that they still mean that some evidence of that pool was evicted.
-    /// A child's observation found in `lifecycle.json` is left out: only a
-    /// writer from before children had their own file put one there.
+    /// `child_<pool>`. A child's observation found in `lifecycle.json` is left
+    /// out: only a writer from before children had their own file put one there.
     pub fn assemble(
         lead: Option<&LifecycleSnapshot>,
         children: Option<&LifecycleSnapshot>,
@@ -267,13 +265,6 @@ impl LifecycleView {
                 if let Some(floor) = &pool.retention_floor_mono_ns {
                     view.retention_floors
                         .insert(format!("{source}_{name}"), floor.clone());
-                    let aggregate = view
-                        .retention_floors
-                        .entry(name.to_owned())
-                        .or_insert_with(|| floor.clone());
-                    if floor > aggregate {
-                        aggregate.clone_from(floor);
-                    }
                 }
                 for observation in &pool.observations {
                     if source == "lead" && observation.actor != Actor::Lead {

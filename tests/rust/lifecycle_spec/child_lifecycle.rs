@@ -463,10 +463,7 @@ fn a_childs_observation_in_lifecycle_json_is_left_out_without_a_diagnostic() {
     assert_eq!(requests, 0);
     assert_eq!(
         floors,
-        BTreeMap::from([
-            ("general".to_owned(), mono(20)),
-            ("lead_general".to_owned(), mono(20)),
-        ])
+        BTreeMap::from([("lead_general".to_owned(), mono(20))])
     );
     assert!(diagnostics.is_empty());
     assert!(snapshot_id.is_some());
@@ -501,17 +498,22 @@ fn the_childrens_file_alone_is_shown_and_names_no_snapshot() {
     assert_eq!(snapshot_id, None, "the snapshot id is the lead's file's");
 }
 
-// `requests` still says that some request evidence was evicted, whichever
-// file evicted it; a consumer that asks about the lead reads `lead_requests`.
+// Each file's floor appears under its own key, and no key stands for both.
 #[test]
-fn an_aggregate_floor_is_the_later_of_the_two_files() {
+fn each_files_floor_is_named_for_its_file() {
     let Assembled { floors, .. } = assembled("request floors in both files");
-    assert_eq!(floors.get("lead_requests"), Some(&mono(5)));
-    assert_eq!(floors.get("child_requests"), Some(&mono(9)));
-    assert_eq!(floors.get("requests"), Some(&mono(9)));
+    assert_eq!(
+        floors,
+        BTreeMap::from([
+            ("child_requests".to_owned(), mono(9)),
+            ("lead_requests".to_owned(), mono(5)),
+        ])
+    );
     let Assembled { floors, .. } = assembled("a request floor in the children's file only");
-    assert_eq!(floors.get("requests"), Some(&mono(9)));
-    assert!(!floors.contains_key("lead_requests"));
+    assert_eq!(
+        floors,
+        BTreeMap::from([("child_requests".to_owned(), mono(9))])
+    );
 }
 
 // A provider that runs no sub-agents has no children's file to read, and a
@@ -576,9 +578,10 @@ fn inspect_keeps_the_leads_newest_past_more_child_observations_than_a_pool_holds
             .count(),
         64
     );
-    assert!(lifecycle.retention_floors.contains_key("child_general"));
-    assert!(lifecycle.retention_floors.contains_key("general"));
-    assert!(!lifecycle.retention_floors.contains_key("lead_general"));
+    assert_eq!(
+        lifecycle.retention_floors.keys().collect::<Vec<_>>(),
+        ["child_general"]
+    );
 }
 
 #[test]

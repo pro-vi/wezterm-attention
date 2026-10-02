@@ -599,7 +599,7 @@ fn rust_and_installed_lua_share_relation_cases_and_retention_floors() {
         );
         assert_eq!(
             view.retention_floors.keys().collect::<Vec<_>>(),
-            ["general", "lead_general", "lead_requests", "requests"]
+            ["lead_general", "lead_requests"]
         );
         assert_eq!(view.requests.len() as u64, case["groups"].as_u64().unwrap());
         assert_eq!(

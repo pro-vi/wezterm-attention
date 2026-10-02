@@ -127,11 +127,7 @@ return function(context)
         for _, name in ipairs({ "requests", "general" }) do
           local pool = current.pools[name]
           local floor = pool.retention_floor_mono_ns
-          if floor then
-            facet.retention_floors[name_prefix .. "_" .. name] = floor
-            local aggregate = facet.retention_floors[name]
-            if not aggregate or floor > aggregate then facet.retention_floors[name] = floor end
-          end
+          if floor then facet.retention_floors[name_prefix .. "_" .. name] = floor end
           for _, item in ipairs(pool.observations) do
             -- A child's observation in lifecycle.json is left out: only a
             -- writer from before children had their own file put one there.
