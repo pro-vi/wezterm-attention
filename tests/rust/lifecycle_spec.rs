@@ -2987,7 +2987,7 @@ fn manual_mark_after_an_acknowledged_mark_publishes_a_fresh_event_id() {
 // still wins against a newer observation it should have lost to. The fence
 // cannot simply be advanced here: `observed_mono_ns` is also the subagent-clear
 // watermark a parent stop writes, so advancing it would clear children that
-// started after the stop. See "One timestamp field carries three roles" in
+// started after the stop. See "One timestamp field carries four roles" in
 // docs/accepted-limitations.md.
 #[test]
 fn a_deduplicated_activity_does_not_advance_the_ordering_fence() {

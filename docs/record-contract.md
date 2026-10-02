@@ -300,7 +300,7 @@ stamp is skipped when it would leave the entry as it is, and is a conflict other
 Nothing removes a child for being quiet, and the set keeps no record of children that stopped. Both
 rest on each hook running to completion before the agent goes on, which Claude Code 2.1.283 and
 Codex at source commit `985cf47a4` do for a command hook unless it is registered with
-`async: true`: one child's events then reach the writer in the order they happened, and no older
+`async: true`, or in Claude Code `asyncRewake: true`: one child's events then reach the writer in the order they happened, and no older
 event of a child arrives after its stop. The [accepted
 limitations](accepted-limitations.md#the-sub-agent-count-depends-on-how-claude-code-and-codex-send-hooks)
 say how that was checked and what an asynchronous hook costs.

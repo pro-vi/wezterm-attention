@@ -425,7 +425,7 @@ In `~/.claude/settings.json`:
 }
 ```
 
-Merge these into any hooks you already have, and keep them synchronous: do not add `async: true`, which lets one subagent's events arrive out of order, so that a subagent can stay counted after it stopped. `SubagentStart` counts a subagent from its start, and again when it resumes, which Claude Code 2.1.283 reports as a new start under the same id. `SubagentStop` removes that same subagent. A root `Stop` removes only the subagents its `background_tasks` no longer lists, because background subagents can outlive it: Claude Code 2.1.283 sent the lead's `Stop` while a subagent was still running, and 2.1.284 lists it there. A `StopFailure` (the turn ended on an API error) shows `notify`.
+Merge these into any hooks you already have, and keep them synchronous: do not add `async: true` or `asyncRewake: true`, either of which lets one subagent's events arrive out of order, so that a subagent can stay counted after it stopped. `SubagentStart` counts a subagent from its start, and again when it resumes, which Claude Code 2.1.283 reports as a new start under the same id. `SubagentStop` removes that same subagent. A root `Stop` removes only the subagents its `background_tasks` no longer lists, because background subagents can outlive it: Claude Code 2.1.283 sent the lead's `Stop` while a subagent was still running, and 2.1.284 lists it there. A `StopFailure` (the turn ended on an API error) shows `notify`.
 
 ## Codex hooks
 

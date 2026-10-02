@@ -33,11 +33,14 @@ updated in one file and not another. Replacing one with `.unwrap_or(default)` do
 count as handling it: that turns a loud failure into a silent wrong answer. A failure
 that nothing handles should return an `AttentionError`.
 
-## One timestamp field carries three roles
+## One timestamp field carries four roles
 
 `observed_mono_ns` decides which of two competing writes publishes, serves as the
-watermark an activity-clear compares against, and is the cutoff at which a Codex
-parent `Stop` removes its sub-agents. `apply_activity` passes the surviving
+watermark an activity-clear compares against, is the cutoff at which a Codex
+parent `Stop` removes its sub-agents, and decides whether a sub-agent waiting for
+permission still holds the tab on `notify`: the lead's next tool call keeps that
+`notify` only while the sub-agent's last event is no older than the stored
+activity's `observed_mono_ns`. `apply_activity` passes the surviving
 activity's `observed_mono_ns` as the order of the parent clear it applies to
 `children.json`, so the coupling is semantic rather than a shared field name.
 
@@ -195,8 +198,10 @@ stops holding.
   documentation, read on 2026-09-27 with Claude Code 2.1.283 installed ("By
   default, hooks block Claude's execution until they complete"), and in Codex
   source at commit `985cf47a4`, which awaits each hook it runs; not run live on
-  Codex. Both let a command hook opt out with `async: true`, and the README's
-  blocks do not set it. Under an asynchronous hook, a sub-agent's older tool
+  Codex. Both let a command hook opt out with `async: true`, and Claude Code
+  also with `asyncRewake: true`, which its hooks reference, read on
+  2026-10-01 with Claude Code 2.1.287 installed, says "runs in the
+  background"; the README's blocks set neither. Under an asynchronous hook, a sub-agent's older tool
   call can arrive after its `SubagentStop` and add it again, and it then stays
   counted until its session ends.
 - **A Codex parent stops only after its sub-agents have.** A Codex parent
@@ -219,7 +224,7 @@ stops holding.
   therefore stays counted until a later parent `Stop` is published after its
   last event, or its session ends; a `Stop` that repeats the stop the tab
   already shows is skipped and keeps the earlier cutoff (see
-  [One timestamp field carries three roles](#one-timestamp-field-carries-three-roles)). If Codex starts sending either report, it can
+  [One timestamp field carries four roles](#one-timestamp-field-carries-four-roles)). If Codex starts sending either report, it can
   replace the parent-stop rule above.
 - **Codex sends `SubagentStart` for the sub-agents it spawns.** Codex source at
   `985cf47a4` dispatches it, with the sub-agent's `agent_id` and `agent_type`,
@@ -237,8 +242,8 @@ stops holding.
   instead.
 - **Claude Code lists the tasks it still runs when the lead stops.** In two
   headless sessions of Claude Code 2.1.284 on 2026-09-29, all 7 lead `Stop`s
-  and all 4 `SubagentStop`s carried `background_tasks`, and its hooks reference
-  documents the field from v2.1.145. A lead `Stop` named each running
+  and all 4 `SubagentStop`s carried `background_tasks`, and its changelog
+  adds the field in 2.1.145. A lead `Stop` named each running
   sub-agent under the id its `SubagentStart` carried, and named none once they
   had ended. The list on a `SubagentStop` still names the sub-agent that is
   stopping, so only the lead's `Stop` is read. A sub-agent given a model id that
@@ -271,9 +276,12 @@ stops holding.
   through the Agent tool carried its `agent_type` in that session. The session
   ran with transcript saving turned off, which may change what these agents
   send.
-  Sessions started with `--agent` were not captured: if their internal agents'
-  events carry the session's agent name as `agent_type`, one that sends a tool
-  call and no stop is counted until its session ends.
+  Claude Code's hooks reference, read on 2026-10-01 with Claude Code 2.1.287
+  installed, says an internal agent's `SubagentStop` carries as `agent_type`
+  the agent name the session runs as, set with `--agent` or the `agent`
+  setting, and an empty one without it. No such session was captured. If an
+  internal agent's tool call carries that name too, one that sends a tool call
+  and no stop is counted until its session ends.
 
 ## A sub-agent whose end is never reported stays counted until its session ends
 
@@ -291,8 +299,8 @@ The end goes missing when:
 - the user pressed Esc on a foreground sub-agent, if Claude Code sends no
   `SubagentStop` then. This is untested: Claude Code 2.1.283 launched every
   sub-agent in the background (2 of 2, also when asked for the foreground), and
-  its hooks documentation, read on 2026-09-27, says sub-agents run in the
-  background by default since 2.1.198. Esc on the lead while a background
+  its changelog for 2.1.198 says "Subagents now run in the background by
+  default". Esc on the lead while a background
   sub-agent ran fired no hook, and the sub-agent sent its `SubagentStop` when it
   finished its command;
 - the API ended the sub-agent. In Claude Code 2.1.283, two sub-agents stopped
@@ -506,11 +514,17 @@ Any program that prints to a pane can set that pane's `WEZTERM_ATTENTION` user
 variable. On a pane in the GUI's own domains, the plugin refuses an identity
 whose pane id differs from the pane's own, and once the `attention tab-source`
 answer has arrived it also refuses an identity whose realm or incarnation is not
-the GUI's own mux. Until that answer arrives, shortly after startup, the realm is
-compared with a digest of the GUI's `WEZTERM_UNIX_SOCKET` as the plugin sees it:
-the incarnation cannot be checked yet, and the digest equals the writer's realm
-only when that path is already canonical. A mismatch in that window is held back,
-not refused, until the answer arrives.
+the GUI's own mux. Until that answer arrives, the realm is compared with a digest
+of the GUI's `WEZTERM_UNIX_SOCKET` as the plugin sees it: the incarnation cannot
+be checked, and the digest equals the writer's realm only when that path is
+already canonical. While the plugin is still asking, through the first run and
+its retries 2, 5, 10 and 30 seconds apart, a mismatch is held back. Once it has
+stopped waiting, a mismatch is refused and the comparison stays the socket-path
+digest. It stops waiting when it cannot ask at all, as when no writer is
+installed, and then runs no retry; or when none of those runs answered, and then
+later retries every thirty seconds can still bring the answer. A GUI whose
+`tab-source` never answers checks a local pane's realm by socket path, and never
+its incarnation, for as long as it runs.
 
 ## bash-preexec loaded after the first prompt
 
@@ -543,8 +557,11 @@ when that GUI's bar changes. Only GUIs without a source answer share a name.
 
 ## A second agent in one launch after the first died without ending
 
-A launch claim covers one command line, so two agents can start under one
-claim: `claude; claude` on one line, or a wrapper that restarts the agent.
+A launch claim can cover more than one agent: in zsh, `claude; claude` on the
+line after `wezterm_attention_claim`; in bash with bash-preexec, a line such as
+`claude -c; claude`, claimed once from its first word; or a wrapper that
+restarts the agent. Bash without bash-preexec claims each agent command
+separately.
 When the first agent dies without its session-end hook running (killed, or
 crashed), its binding is never ended. The second agent's fresh session start is
 then refused (`binding_conflict`, "provider start cannot replace the active
@@ -677,17 +694,17 @@ plugin's Lua API, and that no Rust item the crate exports is supported for use
 outside this repository. This section explains why that is a declaration rather
 than an enforced boundary.
 
-The modules are public because the `attention` binary and the integration tests
-under `tests/rust` link the library, and those tests drive storage mechanics --
-locking, atomic replacement, path construction, durable deletion -- in
-`records` directly. Several test files mix such white-box storage tests with
+Twelve of its fourteen modules are public, because the `attention` binary and
+the integration tests under `tests/rust` link the library, and those tests
+drive storage mechanics -- locking, atomic replacement, path construction,
+durable deletion -- in `records` directly. Several test files mix such white-box storage tests with
 CLI subprocess tests in one module, so they cannot simply move inward.
 
 Documenting the boundary does not prevent an external program from compiling
 against the crate; only privacy does that. `publish = false` in `Cargo.toml`
 keeps the crate off crates.io, so such a program has to build from a checkout,
 and it takes whatever the next commit changes. Once modules start moving to
-`pub(crate)`, `clippy::unreachable_pub` becomes a useful lint to turn on.
+`pub(crate)`, rustc's `unreachable_pub` lint becomes a useful one to turn on.
 
 ## Validated record fields are read as if they could be missing
 
@@ -695,7 +712,7 @@ and it takes whatever the next commit changes. Once modules start moving to
 then hands callers a `serde_json::Value` that remembers none of it. Later reads
 re-derive each field with a fallback, most often
 `record["observed_mono_ns"].as_str().unwrap_or("")`. `src/lifecycle.rs` and
-`src/maintenance.rs` hold about fifteen of these each.
+`src/maintenance.rs` hold about a dozen of these each.
 
 The fallback is unreachable today. `protocol/v2.json` declares `observed_mono_ns`
 required on `activity` and `activity_clear`, `validate_shape` rejects a missing
