@@ -542,7 +542,7 @@ The Lua implementation is split by responsibility under `plugin/`: protocol vali
 - Use `title_formatter` to customize the base title while keeping the plugin's indicators.
 
 **Alt+B not working?**
-- Check for keybind conflicts. Set `review_key = false` and bind manually if needed.
+- Check for keybind conflicts. Move the binding by setting `review_key = { key = "...", mods = "..." }`. The default, `Alt+B`, is also the shell's "move back one word" key in readline and zsh's emacs mode, so the plugin takes that key from the shell in every pane.
 - It works on a pane an agent is running in: the flag is a record of its own. If the tab still shows `✓` or `!` after a press, that activity outranks the flag; the ◆ appears once you have seen it.
 - On a pane no launch has claimed, such as a shell without the integration, a press that would flag it is refused and logged once, because no reader would show the flag. A press there on a tab that carries your flag still clears it. A mux-attached pane that has not published its identity refuses every press, since its tab cannot be found.
 - A press runs the `attention` command. When it refuses, the reason is logged once for each kind of refusal on that pane (`attention plugin set-review failed for pane N: ...`) and the tab does not change: `claim_stale` means the pane's launch claim is not the launch the pane last published, which the next prompt republishes. `probe_unavailable` means a hook held the pane's records at that moment; press again. A command built before the plugin was updated answers nothing: the focused tab shows `⚠ rebuild attention` and the log says the command may predate the plugin. Run `scripts/install-cli.sh` again; the warning goes once a command answers.
