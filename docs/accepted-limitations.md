@@ -386,15 +386,6 @@ Updating the plugin does not rebuild the command, so run
 `scripts/install-cli.sh` after `wezterm.plugin.update_all()`, as
 [Install](../README.md#install) says.
 
-## The six-value query cannot say a sub-agent count is unknown
-
-`get_attention` keeps its six values, as the record contract promises, and its
-fifth, `subagents`, is 0 both when no sub-agent runs and when the pane's count
-could not be read. Only `get_attention_view(pane).subagents_uncertain`, and
-`ctx.attention.subagents_uncertain` in a title formatter, tell the two apart. A
-manual renderer that draws from `get_attention` shows nothing where the bundled
-renderer shows `+?`, until it reads that field.
-
 ## A record write can be reported failed after readers already see it
 
 Every record is written the same way, by `atomic_replace_bytes` in

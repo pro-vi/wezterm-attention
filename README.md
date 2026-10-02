@@ -347,22 +347,19 @@ local attention = wezterm.plugin.require("https://github.com/pro-vi/wezterm-atte
 -- published (WEZTERM_ATTENTION, else WEZTERM_PANE); nil when it published neither.
 local marker_id = attention.pane_marker_id(pane)
 
--- Read cached attention state:
--- returns (type, frame, source, reserved, subagents, review) or nil.
--- source is the activity's "source" (nil when it carried none);
--- reserved is always false; it preserves the positions of later tuple values;
--- subagents is how many of the pane's subagents are running, 0 when none and
--- also when the count could not be read (get_attention_view(pane).subagents_uncertain
--- tells the two apart). A pane with running subagents and no activity returns
--- (nil, nil, nil, false, n).
--- review is true when the pane carries a review flag. state is the effective
--- type: "review" when the flag outranks the activity, the activity's own type
--- when that outranks the flag -- and then review is still true. nil when the id
--- is seen at more than one full pane address; get_attention_view tells them apart.
-local state, frame, source, reserved, subagents, review = attention.get_attention(marker_id)
+-- Read cached attention state: returns (type, frame) or nil.
+-- state is the effective type: "review" when the pane's review flag outranks
+-- its activity, else the activity's own type; nil when neither is in effect, as
+-- when the activity was acknowledged or only the pane's subagents are running.
+-- frame is the spinner frame of a thinking pane. nil when the id is seen at more than one full pane address;
+-- get_attention_view tells them apart.
+local state, frame = attention.get_attention(marker_id)
 
--- Read sixteen cached base fields plus independent lifecycle evidence, without
--- I/O. Nested returned values do not share mutable state with the plugin cache.
+-- Read seventeen cached base fields plus independent lifecycle evidence, without
+-- I/O: type and frame as above, the activity's source, the subagent count and
+-- whether it could be read, the review flag, the provider binding and more; see
+-- docs/consumer-guide.md. Nested returned values do not share mutable state with
+-- the plugin cache.
 local view = attention.get_attention_view(pane)
 
 -- Poll manually (for auto_poll = false)

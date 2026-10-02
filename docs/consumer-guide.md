@@ -17,6 +17,7 @@ Use the full pane object. A server pane ID alone is not globally unique across m
 | Fields | Meaning |
 |---|---|
 | `type` | Existing display winner after activity/review priority |
+| `frame` | The spinner frame `get_attention` returns second; a `thinking` pane whose writer gave none gets one from the clock, a new one each second |
 | `activity_type`, `event_id`, `source` | Eligible lead activity, independently of review |
 | `review` | Owner-scoped review presence |
 | `subagents`, `subagents_uncertain` | How many of the pane's sub-agents are running, and whether that count could not be read; `subagents` is 0 when it could not |
@@ -25,7 +26,7 @@ Use the full pane object. A server pane ID alone is not globally unique across m
 | `pane_presence`, `reader_confidence`, `binding_health` | Read assessment; preserve uncertainty instead of treating it as absence |
 | `lifecycle` | Optional bounded observations and derived request evidence |
 
-These are sixteen base fields plus the lifecycle facet. Nil remains nil and false remains false. Internal records, cache keys, formatter state, deadlines, and root diagnostics are private. The scalar `get_attention` keeps six positions; its fourth return is reserved and always false, and the full view has no corresponding field. Its fifth is `subagents`, 0 both when no sub-agent runs and when the count could not be read; only the view's `subagents_uncertain` tells the two apart.
+These are seventeen base fields plus the lifecycle facet. Nil remains nil and false remains false. Internal records, cache keys, formatter state, deadlines, and root diagnostics are private. The scalar `get_attention` returns `type` and `frame` alone; read the other fields from the view.
 
 The view's `binding_health` comes from the plugin's own read of the pane's records, not from the rule `bindings` and `inspect` share, and it can differ from theirs for the same binding. It never says `conflicted`, since the plugin does not look for the session at other pane addresses. Any diagnostic from its read, an unreadable review file included, makes it `invalid`, or `future_schema` when one of them is.
 
@@ -350,7 +351,7 @@ attention.apply_to_config(config, {
 })
 ```
 
-Initial/updated messages contain `kind`, GUI-local `window_id`, full `scope` and detached `view`. Scope has address, launch and a launch or binding target. Scope-lost messages contain only `kind`, `window_id` and `previous_scope`. Window context is not source identity or control permission. An unpublished pane, or one no launch has claimed, never gets a fabricated v2 scope.
+Initial/updated messages contain `kind`, GUI-local `window_id`, full `scope` and detached `view`. The view has every field `get_attention_view` returns except `frame`. Scope has address, launch and a launch or binding target. Scope-lost messages contain only `kind`, `window_id` and `previous_scope`. Window context is not source identity or control permission. An unpublished pane, or one no launch has claimed, never gets a fabricated v2 scope.
 
 Each window has its own baseline, and messages are not ordered across windows: a pane moved from one window to another is `scope_lost` in one and `initial` in the other, in whichever order the two windows poll. A window counts as closed only when it is gone from both `wezterm.gui.gui_windows()` and `wezterm.mux.all_windows()`, so switching workspaces does not report the hidden panes as lost. A confirmed source replacement emits loss before initial; ending the same binding is an update. Fresh target selection can establish a degraded new binding view. Unavailable target selection retains the last established scope only as degraded context; it does not restore old facts. Lifecycle-only, confidence and floor changes count; spinner animation alone does not. Delivery follows cache refresh and configured acknowledgement, including in unfocused windows.
 

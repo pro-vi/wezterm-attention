@@ -362,11 +362,10 @@ from a binding that is still current.
 ## Precedence and the plugin's writes
 
 A valid v2 claim selects v2 records. An invalid or future-schema v2 record is reported and never
-read as something else. The public Lua query remains six values:
-`type, frame, source, reserved, subagents, review`. `get_attention(id)` returns unavailable
-(`nil`) when the scalar ID is observed at multiple full pane addresses. `get_attention_view(pane)`
-selects the exact pane instead. The fourth return is reserved and always false; controller
-ownership is not an Attention fact.
+read as something else. The public Lua query `get_attention(id)` returns two values, `type, frame`,
+and returns unavailable (`nil`) when the scalar ID is observed at multiple full pane addresses.
+`get_attention_view(pane)` selects the exact pane instead, and carries its source, sub-agent count,
+review flag and the pane's other public facts. Controller ownership is not an Attention fact.
 
 The plugin's two writes go through a hidden command, `attention plugin`, which is the only writer
 of these records and is not a public interface. The plugin is not a process in the pane, so every
@@ -407,7 +406,7 @@ acknowledgement counts as none, so it can only leave the earlier behaviour in pl
 
 ## Consumer boundary
 
-`get_attention_view(pane)` exposes sixteen copied base fields plus an independent cached `lifecycle` facet. See the [consumer guide](consumer-guide.md) for exact availability, request/publication relations, acknowledgement meaning, and display ownership. No `answered`, `currently_waiting`, or complete pending-count claim is made.
+`get_attention_view(pane)` exposes seventeen copied base fields plus an independent cached `lifecycle` facet. See the [consumer guide](consumer-guide.md) for exact availability, request/publication relations, acknowledgement meaning, and display ownership. No `answered`, `currently_waiting`, or complete pending-count claim is made.
 
 Lifecycle evidence stays outside `activity.json` because adding request IDs to activity would change `semantic_activity` equality and could redisplay an acknowledged badge. `append_observation` and the request/focus/result tests enforce that separation. Revisit it only if badge identity is deliberately redesigned, not to simplify one consumer.
 

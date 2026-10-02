@@ -82,12 +82,15 @@ return function()
     -- consumer. A `redraw` field that changes makes the tab bar draw again; a
     -- `public` field is part of what get_attention_view and on_view_change hand
     -- out. Both read this one list, so a field added here says in one place
-    -- whether the bar repaints for it and whether consumers receive it.
+    -- whether the bar repaints for it and whether consumers receive it. An
+    -- `animated` field changes every second while a spinner turns, so
+    -- on_view_change leaves it out: a message for each turn would report
+    -- nothing about the pane.
     local function as_count(value) return value or 0 end
     local function as_flag(value) return value == true end
     local view_fields = {
       { name = "type", redraw = true, public = true },
-      { name = "frame", redraw = true },
+      { name = "frame", redraw = true, public = true, animated = true },
       { name = "activity_type", redraw = true, public = true },
       { name = "event_id", redraw = true, public = true },
       { name = "source", redraw = true, public = true },
@@ -822,37 +825,26 @@ return function()
     -- ── Public API ──────────────────────────────────────────────────────────────
 
     --- Read the cached attention state for a marker id (see M.pane_marker_id).
-    --- Returns (type, frame, source, reserved, subagents, review) or nil. `source` is
-    --- the activity's `source` when it carried one; `reserved` is always
-    --- false to retain tuple positions; `subagents` is how many of the pane's
-    --- subagents are running, 0 when none or when the count could not be read
-    --- (get_attention_view(pane).subagents_uncertain tells the two apart);
-    --- `review` is true when the pane carries a review flag.
-    ---
-    --- `type` is the effective one: it is `review` when the flag outranks the
-    --- activity, and the activity's own type when that outranks the flag — in
-    --- which case the flag is still reported by the sixth return.
-    ---
-    --- A pane with running subagents and no activity returns (nil, nil, nil, false, n):
-    --- the count is real even though there is no type to report.
+    --- Returns (type, frame) or nil. `type` is the effective one: `review`
+    --- when the pane's review flag outranks its activity, else the activity's
+    --- own type, and nil when neither is in effect, as when the activity was
+    --- acknowledged or only the pane's subagents are running.
     --- A scalar observed at more than one full address returns nil. Use
-    --- get_attention_view(pane) to disambiguate.
+    --- get_attention_view(pane), which also carries the pane's other public
+    --- facts, to disambiguate.
     function M.get_attention(marker_id)
       local mapped = cache_key_by_marker_id[tostring(marker_id)]
       local cached = mapped and attention_cache[mapped] or nil
-      if cached then
-        return cached.type, cached.frame, cached.source, false, cached.subagents or 0,
-          cached.review == true
-      end
+      if cached then return cached.type, cached.frame end
       return nil
     end
 
-    --- Return a copy of the cached full-pane v2 view for a pane, or nil when the
-    --- pane has no cache entry. This performs no filesystem or process work.
-    local function copy_public_view(cached)
+    --- A copy of the public fields of a cached view; `delivered` leaves out
+    --- the animated ones, for a view on_view_change hands out.
+    local function copy_public_view(cached, delivered)
       local view = {}
       for _, field in ipairs(view_fields) do
-        if field.public then
+        if field.public and not (delivered and field.animated) then
           local value = field_value(cached, field)
           if field.nested and value ~= nil then value = protocol_api.deep_copy(value) end
           view[field.name] = value
@@ -861,6 +853,9 @@ return function()
       return view
     end
 
+    --- Return a copy of the public fields of the pane's cached view, or nil
+    --- when the pane has no cache entry or the entry belongs to another
+    --- launch. This performs no filesystem or process work.
     function M.get_attention_view(pane)
       local read = resolve_pane_read(pane)
       local cached = read.cache_key and attention_cache[read.cache_key] or nil
@@ -915,7 +910,7 @@ return function()
           local scope = target and { address = protocol_api.deep_copy(read.address), launch_id = read.launch_id, target = protocol_api.deep_copy(target) }
           if not scope and old and old.scope.launch_id == read.launch_id then scope = old.scope end
           if scope then
-            local view = copy_public_view(cached)
+            local view = copy_public_view(cached, true)
             local replaced = old and not protocol_api.deep_equal(old.scope, scope)
             if replaced then lost(old, window:window_id()) end
             if not old or replaced or not protocol_api.deep_equal(old.view, view) then

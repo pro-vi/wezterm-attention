@@ -637,6 +637,12 @@ local function pane_from_entry(entry)
   return mux_pane(entry)
 end
 
+--- What get_attention_view hands out for the pane a window double's entry
+--- stands for, from `instance`, the suite's plugin unless a test says.
+local function pane_view(entry, instance)
+  return (instance or attention).get_attention_view(pane_from_entry(entry))
+end
+
 local function gui_pane(pane_id)
   return {
     pane_id = pane_id,
@@ -836,6 +842,26 @@ test("time-derived frames preserve the public get_attention return shape", funct
 
   assert(state == "thinking", "the first return remains the marker type")
   assert(frame == 3, "the second return remains the derived frame, got " .. tostring(frame))
+  local view = assert(pane_view(732), "the pane has a view")
+  assert(view.type == state and view.frame == frame,
+    "the view carries the same type and frame, got " .. tostring(view.frame))
+end)
+
+test("a turning spinner sends no view message, and messages leave the frame out", function()
+  write_activity(733, "thinking")
+  local messages = {}
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    on_view_change = function(message) messages[#messages + 1] = message end })
+  local w = window_double({ tabs = { { 733 } }, focused = false })
+
+  instance.poll(w, { now_ms = 1000, now_unix_ns = fixture_now, call_after = function() end })
+  assert(#messages == 1 and messages[1].kind == "initial", "precondition: one initial view")
+  assert(messages[1].view.frame == nil, "a message's view leaves the frame out")
+  instance.poll(w, { now_ms = 2000, now_unix_ns = fixture_now, call_after = function() end })
+  assert(#messages == 1, "the spinner turning alone is not a change to report, got " .. #messages)
+  assert(pane_view(733, instance).frame == select(2, instance.get_attention(733)),
+    "get_attention_view carries the frame the spinner is on now")
 end)
 
 -- ── Read-only rendering ─────────────────────────────────────────────────────
@@ -2141,8 +2167,7 @@ test("the review key redraws after the command it runs succeeds, and only then",
     "--launch-id", wire.launch_id,
   }, " "), "an unflagged tab flags the focused pane: " .. tostring(plugin_arguments(spawned[1] or {})))
   assert(unflagged.action_calls == 1, "setting the flag should redraw once")
-  assert(review.get_attention(974) == "review" or select(6, review.get_attention(974)) == true,
-    "the flag shows at once")
+  assert(pane_view(974, review).review == true, "the flag is in the pane's view at once")
 
   write_activity(975, "notify")
   local failed = window_double({ tabs = { { 975 } }, focused = true, active_pane_id = 975 })
@@ -2352,15 +2377,17 @@ end)
 
 -- ── Activity metadata on the public read ──────────────────────────────────────
 
-test("get_attention reports the activity's source and reserved tuple slot", function()
+test("get_attention returns the type and frame alone, and the view carries the source", function()
   write_activity(7201, "notify")
   poll({ 7201 })
 
-  local atype, frame, source, reserved = attention.get_attention(7201)
-  assert(atype == "notify", "the first two returns keep their meaning")
+  local count = select("#", attention.get_attention(7201))
+  assert(count == 2, "get_attention returns two values, got " .. count)
+  local atype, frame = attention.get_attention(7201)
+  assert(atype == "notify", "the first return is the type, got " .. tostring(atype))
   assert(frame == nil, "a notify activity carries no frame")
-  assert(source == "claude", "source should be the activity's source, got " .. tostring(source))
-  assert(reserved == false, "the fourth tuple slot is reserved and always false")
+  local view = assert(pane_view(7201), "the pane has a view")
+  assert(view.source == "claude", "the view carries the activity's source, got " .. tostring(view.source))
 end)
 
 -- ── Hosts that repaint their own titles ─────────────────────────────────────
@@ -2421,11 +2448,10 @@ test("live subagents keep a pane visible with no activity of its own", function(
 
   poll_at({ 7510, 7511 })
 
-  local atype, frame, source, reserved, subagents = attention.get_attention(7511)
-  assert(atype == nil, "a pane with no activity reports no type, got " .. tostring(atype))
-  assert(frame == nil and source == nil, "and no frame or source")
-  assert(reserved == false, "the fourth tuple slot stays false, got " .. tostring(reserved))
-  assert(subagents == 2, "but its live subagents are reported, got " .. tostring(subagents))
+  local view = assert(pane_view(7511), "the pane has a view")
+  assert(view.type == nil, "a pane with no activity reports no type, got " .. tostring(view.type))
+  assert(view.frame == nil and view.source == nil, "and no frame or source")
+  assert(view.subagents == 2, "but its live subagents are reported, got " .. tostring(view.subagents))
 end)
 
 test("an acknowledged activity leaves its pane's subagent count behind", function()
@@ -2439,9 +2465,9 @@ test("an acknowledged activity leaves its pane's subagent count behind", functio
 
   poll_at({ 7560, 7561 })
 
-  local atype, _, _, _, subagents = attention.get_attention(7561)
-  assert(atype == nil, "the acknowledged activity is no longer effective")
-  assert(subagents == 2, "but its subagents are still working, got " .. tostring(subagents))
+  local view = assert(pane_view(7561), "the pane has a view")
+  assert(view.type == nil, "the acknowledged activity is no longer effective")
+  assert(view.subagents == 2, "but its subagents are still working, got " .. tostring(view.subagents))
   assert(internal.resolve_visible_attention({ seeded_key(7561) }).indicator == "+2 ",
     "so its tab shows the count alone")
 end)
@@ -2870,7 +2896,7 @@ test("a change in the subagent count alone requests a redraw", function()
   write_subagents(7531, 3)
   attention.poll(w, { now_unix_ns = fixture_now, call_after = function() end })
 
-  assert(select(5, attention.get_attention(7531)) == 3, "the third subagent should be counted")
+  assert(pane_view(7531).subagents == 3, "the third subagent should be counted")
   assert(#w.actions == 2,
     "the count changing is itself a visible change, got " .. #w.actions)
 end)
@@ -2912,22 +2938,21 @@ test("a count that becomes unknown alone repaints the tab and reaches consumers 
       assert(after[field] == value, field .. " changed as well, so the test proves nothing")
     end
   end
-  assert(select("#", instance.get_attention(7541)) == 6
-      and select(5, instance.get_attention(7541)) == 0,
-    "the six-value tuple keeps a numeric count")
+  assert(pane_view(7541, instance).subagents == 0,
+    "get_attention_view keeps subagents a number beside subagents_uncertain")
   drain_errors()
 end)
 
 test("a child that stopped and started again is counted again", function()
   write_subagents(7551, 1)
   poll_at({ 7551 })
-  assert(select(5, attention.get_attention(7551)) == 1, "precondition: one running child")
+  assert(pane_view(7551).subagents == 1, "precondition: one running child")
   write_subagents(7551, 0)
   poll_at({ 7551 })
-  assert(select(5, attention.get_attention(7551)) == 0, "a stopped child leaves the set")
+  assert(pane_view(7551).subagents == 0, "a stopped child leaves the set")
   write_subagents(7551, 1)
   poll_at({ 7551 })
-  assert(select(5, attention.get_attention(7551)) == 1, "the same child starting again is counted")
+  assert(pane_view(7551).subagents == 1, "the same child starting again is counted")
 end)
 
 -- ── The review flag ─────────────────────────────────────────────────────────
@@ -2938,9 +2963,10 @@ test("the review flag outranks a thinking activity without replacing it", functi
 
   poll_at({ 7600, 7601 })
 
-  local atype, frame, _, _, _, flagged = attention.get_attention(7601)
+  local atype, frame = attention.get_attention(7601)
   assert(atype == "review", "the flag should outrank thinking, got " .. tostring(atype))
   assert(frame == nil, "a review indicator carries no spinner frame, got " .. tostring(frame))
+  local flagged = pane_view(7601).review
   assert(flagged == true, "the entry should record the flag, got " .. tostring(flagged))
   assert(internal.attention_cache[seeded_key(7601)].activity_type == "thinking",
     "the activity underneath is untouched")
@@ -2953,7 +2979,8 @@ test("a stop outranks the flag until that stop is acknowledged", function()
   write_activity(7611, "review")
 
   poll_at({ 7610, 7611 })
-  local atype, _, _, _, _, flagged = attention.get_attention(7611)
+  local atype = attention.get_attention(7611)
+  local flagged = pane_view(7611).review
   assert(atype == "stop", "stop outranks review, got " .. tostring(atype))
   assert(flagged == true, "but the entry still carries the flag, got " .. tostring(flagged))
   assert(internal.resolve_visible_attention({ seeded_key(7611) }).indicator == "✓ ",
@@ -2964,7 +2991,8 @@ test("a stop outranks the flag until that stop is acknowledged", function()
   end)
   assert(acknowledgement_exists(7611), "precondition: the viewed stop is acknowledged")
 
-  local after, _, _, _, _, after_flagged = attention.get_attention(7611)
+  local after = attention.get_attention(7611)
+  local after_flagged = pane_view(7611).review
   assert(after == "review",
     "with the stop acknowledged the flag becomes visible, got " .. tostring(after))
   assert(after_flagged == true, "and is still recorded, got " .. tostring(after_flagged))
@@ -3053,7 +3081,7 @@ test("flagging a pane whose stop is already shown requests a redraw", function()
   write_activity(7671, "review")
   attention.poll(w, { now_unix_ns = fixture_now })
 
-  assert(select(6, attention.get_attention(7671)) == true, "the flag should be recorded")
+  assert(pane_view(7671).review == true, "the flag should be recorded")
   assert(#w.actions == 2, "the flag arriving is itself a change, got " .. #w.actions)
 end)
 
@@ -3444,9 +3472,9 @@ test("a child's count does not depend on the clock, and a quiet child keeps coun
   }) do
     options.call_after = function() end
     attention.poll(window_double({ tabs = { { 4246, 4247 } }, focused = false }), options)
-    local atype, _, _, _, subagents = attention.get_attention(4247)
-    assert(atype == "notify", "non-TTL activity must survive any clock")
-    assert(subagents == 2, "both running children are counted, got " .. tostring(subagents))
+    local view = assert(pane_view(4247), "the pane has a view")
+    assert(view.type == "notify", "non-TTL activity must survive any clock")
+    assert(view.subagents == 2, "both running children are counted, got " .. tostring(view.subagents))
   end
   local errors = drain_errors()
   assert(#errors >= 1 and errors[1]:find("probe_unavailable", 1, true),
@@ -3610,7 +3638,7 @@ test("a child set that cannot be counted shows +? until a readable one replaces 
   assert(view.subagents == 0 and view.subagents_uncertain == true,
     "a set with a repeated child has no count to give")
   assert(visible.indicator == "+? ", "the tab says the count is unknown, got " .. visible.indicator)
-  assert(select(5, attention.get_attention(4249)) == 0, "the six-value tuple keeps a number")
+  assert(pane_view(4249).subagents == 0, "the public view keeps a number")
   assert(view.binding_health == "invalid", "the invalid set is diagnosed")
 
   set = seeded_record(4249, "child_presence_set")
