@@ -739,32 +739,3 @@ that really are optional.
 
 A fix is done when a record with a missing or mistyped `observed_mono_ns` is
 rejected before any visibility decision runs.
-
-## Record validity is decided in two layers inside one function
-
-`protocol::parse_record_value` checks a record's shape against the manifest and
-then does kind-specific semantic validation in the same function. For
-`lifecycle_snapshot` it calls up into
-`crate::observations::LifecycleSnapshot::validate_semantics`. That call is the
-only edge keeping `protocol`, `observations` and `identity` in a module cycle:
-`identity -> protocol -> observations -> identity`. There is no runtime
-consequence; the cost is that `protocol` cannot be read or tested without the
-observation model.
-
-Three ways out were weighed and each costs more than the edge. Moving
-`LifecycleSnapshot` into `protocol` drags the whole observation model with it,
-since `validate_semantics` touches `Actor`, `ObservationBody`, the elicitation
-types, `ResultSurface`, `PostHook`, `PostToolUse`, `ToolResult`, `Lead` and
-`Child`. Moving the semantic check down to `records::decode_record` changes what
-`parse_record_value` means, from "is this record valid" to "is its shape valid",
-while cases in `tests/fixtures/lifecycle/observations.json` expect
-`record_invalid` on semantic grounds and the lifecycle and claim-publish specs
-treat that function as the authority. A registry that `protocol` calls into is
-machinery for one call site.
-
-What resolves it is a decision on whether shape validity and semantic validity
-are one verdict or two. If two, `Verdict` gains a variant or the semantic pass
-becomes a separate function the reader calls, the fixture corpus gains a column
-for which layer rejected each case, and the cycle disappears as a side effect.
-That is worth doing when the record set next changes shape, not as its own
-errand.
