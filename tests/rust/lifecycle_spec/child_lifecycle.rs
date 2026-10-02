@@ -1,4 +1,4 @@
-use super::child_presence::{SESSION, bound, child, lead, live};
+use super::child_presence::{SESSION, bound, child, lead, live, moved_aside};
 use super::*;
 use wezterm_attention::observations::LifecycleView;
 use wezterm_attention::protocol::Disposition;
@@ -123,7 +123,7 @@ fn a_childs_observation_leaves_an_older_lifecycle_json_as_it_is() {
 // The children's file is the only one a child's observation reads, and the
 // lead's observations never read it.
 #[test]
-fn a_corrupt_childrens_file_rejects_only_the_childrens_observations() {
+fn a_corrupt_childrens_file_is_started_again_and_leaves_the_leads_alone() {
     let setup = bound("claude");
     setup.apply(
         &child("claude", "PreToolUse", "child-a", Some("Explore")),
@@ -138,22 +138,35 @@ fn a_corrupt_childrens_file_rejects_only_the_childrens_observations() {
         "{:?}",
         led.diagnostic
     );
+    assert_eq!(fs::read(&children).expect("children's file"), b"{not json");
     let lead_bytes = fs::read(lead_path(&setup, "claude")).expect("lead snapshot");
-    let rejected = setup.apply(
+    let restarted = setup.apply(
         &child("claude", "PreToolUse", "child-b", Some("Explore")),
         &mono(500),
     );
-    assert_eq!(rejected.disposition, Disposition::Partial);
+    assert_eq!(restarted.disposition, Disposition::Applied);
+    let diagnostic = restarted.diagnostic.expect("a diagnostic");
     assert_eq!(
-        rejected.diagnostic.as_ref().map(|d| d.code.as_str()),
-        Some("record_invalid")
+        (diagnostic.code.as_str(), diagnostic.message.as_str()),
+        (
+            "record_invalid",
+            "an invalid child lifecycle snapshot was moved aside and started again"
+        )
     );
-    assert_eq!(fs::read(&children).expect("children's file"), b"{not json");
+    let aside = moved_aside(&children);
+    assert_eq!(aside.len(), 1);
+    assert_eq!(fs::read(&aside[0]).expect("moved aside"), b"{not json");
+    let snapshot = read_json(&children);
+    let observations = snapshot["pools"]["general"]["observations"]
+        .as_array()
+        .expect("general pool");
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0]["actor"]["agent_id"], "child-b");
     assert_eq!(
         fs::read(lead_path(&setup, "claude")).expect("lead snapshot"),
         lead_bytes
     );
-    // The child is still counted: presence is its own record.
+    // Presence is its own record.
     assert!(live(&setup, "claude").iter().any(|(id, _)| id == "child-b"));
 }
 
@@ -172,12 +185,22 @@ fn the_childrens_file_is_read_under_the_lifecycle_bound() {
     let mut padded = fs::read(&path).expect("children's file");
     padded.resize(limits.lifecycle_max_json_bytes + 1, b' ');
     fs::write(&path, &padded).expect("pad the children's file");
-    let rejected = setup.apply(
+    // Read as a valid file, it would have kept its observation and gained
+    // the new one; read as too large, it is invalid and started again.
+    let restarted = setup.apply(
         &child("claude", "PreToolUse", "child-a", Some("Explore")),
         &mono(400),
     );
-    assert_eq!(rejected.disposition, Disposition::Partial);
-    assert_eq!(fs::read(&path).expect("children's file"), padded);
+    assert_eq!(restarted.disposition, Disposition::Applied);
+    let aside = moved_aside(&path);
+    assert_eq!(aside.len(), 1);
+    assert_eq!(fs::read(&aside[0]).expect("moved aside"), padded);
+    let snapshot = read_json(&path);
+    let observations = snapshot["pools"]["general"]["observations"]
+        .as_array()
+        .expect("general pool");
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0]["observed_mono_ns"], mono(400));
 }
 
 /// A generic Codex tool call observed at `at`, by the lead, or by the child

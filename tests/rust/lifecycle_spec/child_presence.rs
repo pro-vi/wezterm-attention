@@ -988,17 +988,13 @@ fn a_restart_keeps_the_transitions_and_the_activitys_diagnostics_in_order() {
     );
 }
 
-/// The invalid sets moved aside beside `path`.
-fn moved_aside(path: &std::path::Path) -> Vec<PathBuf> {
+/// The invalid records moved aside from `path`.
+pub(super) fn moved_aside(path: &std::path::Path) -> Vec<PathBuf> {
+    let prefix = format!(".{}.invalid.", path.file_name().unwrap().to_string_lossy());
     fs::read_dir(path.parent().unwrap())
         .unwrap()
         .flatten()
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".children.json.invalid.")
-        })
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
         .map(|entry| entry.path())
         .collect()
 }

@@ -560,11 +560,12 @@ fn prompt_cli_opt_in_limits_and_rejection_do_not_leak_content() {
         .success()
     );
     assert!(!sink.exists());
+    // A lifecycle file a newer writer wrote is refused, never overwritten.
     fs::write(
         setup
             .binding_dir("claude", "consumer-session")
             .join("lifecycle.json"),
-        "invalid",
+        r#"{"schema":99}"#,
     )
     .unwrap();
     let output = hook(&setup, "claude", &payload, &[consumer], &args);
@@ -581,11 +582,12 @@ fn prompt_cli_opt_in_limits_and_rejection_do_not_leak_content() {
 fn rejected_and_partial_native_application_never_dispatch() {
     let setup = Setup::new();
     bind(&setup, "claude");
+    // A lifecycle file a newer writer wrote is refused, never overwritten.
     fs::write(
         setup
             .binding_dir("claude", "consumer-session")
             .join("lifecycle.json"),
-        "invalid",
+        r#"{"schema":99}"#,
     )
     .unwrap();
     let event = event("claude", "Stop", "consumer-session", json!({}));
@@ -619,6 +621,87 @@ fn rejected_and_partial_native_application_never_dispatch() {
     let outcome =
         apply_provider_event_with_outcome(&event, &legacy, "00000000000000000500", &setup.ports());
     assert!(outcome.admission.is_none());
+}
+
+// An invalid lifecycle file, or one naming another provider, is moved aside
+// and started again, so it does not keep consumers from the events after it.
+// The new file's floors say that earlier evidence was evicted.
+#[test]
+fn an_invalid_lifecycle_file_is_started_again_and_its_event_delivered() {
+    for case in ["corrupt", "foreign"] {
+        let setup = Setup::new();
+        bind(&setup, "claude");
+        let path = setup
+            .binding_dir("claude", "consumer-session")
+            .join("lifecycle.json");
+        let content = if case == "corrupt" {
+            b"invalid".to_vec()
+        } else {
+            setup.apply(
+                &event(
+                    "claude",
+                    "PreToolUse",
+                    "consumer-session",
+                    json!({"tool_name":"Bash","tool_use_id":"tool-1"}),
+                ),
+                "00000000000000000300",
+            );
+            let mut snapshot: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            snapshot["provider"] = json!("codex");
+            snapshot["pools"] =
+                json!({"requests":{"observations":[]},"general":{"observations":[]}});
+            serde_json::to_vec(&snapshot).unwrap()
+        };
+        fs::write(&path, &content).unwrap();
+        let outcome = apply_provider_event_with_outcome(
+            &event("claude", "Stop", "consumer-session", json!({})),
+            &setup.env,
+            "00000000000000000400",
+            &setup.ports(),
+        );
+        assert_eq!(
+            outcome.persistence.lifecycle,
+            Persistence::Confirmed,
+            "{case}"
+        );
+        assert!(
+            consumer::delivery_bytes(
+                &outcome,
+                HookContent::NotRequested,
+                HookContent::NotRequested
+            )
+            .is_ok(),
+            "{case}"
+        );
+        let diagnostic = outcome.result.as_ref().unwrap().diagnostic.clone().unwrap();
+        assert_eq!(
+            (diagnostic.code.as_str(), diagnostic.message.as_str()),
+            (
+                "record_invalid",
+                "an invalid lifecycle snapshot was moved aside and started again"
+            ),
+            "{case}"
+        );
+        let aside = super::child_presence::moved_aside(&path);
+        assert_eq!(aside.len(), 1, "{case}");
+        assert_eq!(fs::read(&aside[0]).unwrap(), content, "{case}");
+        let snapshot: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(snapshot["provider"], "claude", "{case}");
+        for pool in ["requests", "general"] {
+            assert_eq!(
+                snapshot["pools"][pool]["retention_floor_mono_ns"], "00000000000000000399",
+                "{case}: {pool}"
+            );
+        }
+        let observations = [
+            &snapshot["pools"]["requests"]["observations"],
+            &snapshot["pools"]["general"]["observations"],
+        ]
+        .iter()
+        .map(|pool| pool.as_array().unwrap().len())
+        .sum::<usize>();
+        assert_eq!(observations, 1, "{case}");
+    }
 }
 
 #[test]

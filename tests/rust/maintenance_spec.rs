@@ -925,17 +925,21 @@ fn aged_binding_with_a_child_set(setup: &Setup) -> PathBuf {
     old_dir
 }
 
-// A binding's child set, and an invalid one a writer moved aside, go with
-// their binding once it has aged out.
+// A binding's child set, and the invalid records a writer moved aside, go
+// with their binding once it has aged out.
 #[test]
-fn an_old_binding_holding_a_child_set_and_a_moved_aside_one_is_pruned_whole() {
+fn an_old_binding_holding_a_child_set_and_moved_aside_records_is_pruned_whole() {
     let setup = Setup::new();
     let old_dir = aged_binding_with_a_child_set(&setup);
-    fs::write(
-        old_dir.join(".children.json.invalid.00000000-0000-4000-8000-000000000001"),
-        b"{not json",
-    )
-    .expect("moved-aside set");
+    for name in ["children.json", "lifecycle.json", "children-lifecycle.json"] {
+        fs::write(
+            old_dir.join(format!(
+                ".{name}.invalid.00000000-0000-4000-8000-000000000001"
+            )),
+            b"{not json",
+        )
+        .expect("moved-aside record");
+    }
     let (_, diagnostics) = setup.run_sweep(true, Some("00000000-0000-4000-8000-000000000733"));
     assert!(!old_dir.exists(), "{diagnostics:?}");
 }

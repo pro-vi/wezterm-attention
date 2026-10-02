@@ -913,6 +913,7 @@ fn append_observation(
     if let Some(evidence) = &resolved.evidence {
         evidence.borrow_mut().planned_native = Some(accepted(&plan.result.result));
     }
+    let mut moved_aside = None;
     let prepared = (|| -> Result<Option<PreparedRecordWrite>> {
         if let Some(diagnostic) = &event.observation_diagnostic {
             return Err(AttentionError {
@@ -948,32 +949,42 @@ fn append_observation(
             crate::observations::Actor::Child { .. } => "child_lifecycle_snapshot",
         };
         let path = identity.path(&resolved.root, kind)?;
-        let existing = read_record(&path, Some(kind), &identity)?;
-        let mut snapshot = match existing {
-            Some(value) => serde_json::from_value::<LifecycleSnapshot>(value).map_err(|_| {
-                AttentionError::new(
-                    DiagnosticCode::RecordInvalid,
-                    "lifecycle snapshot is invalid",
-                )
-            })?,
-            None => LifecycleSnapshot {
+        let provider = event_provider(event)?;
+        let found = read_or_move_aside(&path, kind, &identity, provider)?;
+        let mut pools = ObservationPools::default();
+        if let Replacing::MovedAside = found {
+            moved_aside = Some(kind);
+            // Readers no longer see what the invalid file held, so both pools
+            // of the new one start with a floor just below this observation:
+            // they then see that evidence as evicted, not as never recorded.
+            let floor = observation
+                .parse::<u128>()
+                .ok()
+                .and_then(|order| order.checked_sub(1))
+                .map(|order| format!("{order:020}"));
+            pools.requests.retention_floor_mono_ns.clone_from(&floor);
+            pools.general.retention_floor_mono_ns = floor;
+        }
+        let mut snapshot = match found {
+            Replacing::Present(value) => serde_json::from_value::<LifecycleSnapshot>(value)
+                .map_err(|_| {
+                    AttentionError::new(
+                        DiagnosticCode::RecordInvalid,
+                        "lifecycle snapshot is invalid",
+                    )
+                })?,
+            Replacing::Missing | Replacing::MovedAside => LifecycleSnapshot {
                 kind: kind.to_owned(),
                 schema: manifest()?.record_schema,
                 address: resolved.address.clone(),
                 launch_id: resolved.launch_id.clone(),
                 binding_id,
-                provider: event_provider(event)?,
+                provider,
                 snapshot_id: Uuid::new_v4().to_string(),
                 written_at_unix_ns: written_at.to_owned(),
-                pools: ObservationPools::default(),
+                pools,
             },
         };
-        if snapshot.provider != event_provider(event)? {
-            return Err(AttentionError::new(
-                DiagnosticCode::RecordInvalid,
-                "lifecycle provider mismatches its binding",
-            ));
-        }
         let mut candidate = draft.clone();
         candidate.observed_mono_ns = observation.to_owned();
         candidate.written_at_unix_ns = written_at.to_owned();
@@ -989,6 +1000,14 @@ fn append_observation(
         let value = serde_json::to_value(snapshot).map_err(AttentionError::record_json)?;
         Ok(Some(PreparedRecordWrite::new(path, &value)?))
     })();
+    // Reported first, so that an error preparing the new file, or a failed
+    // write of it, is reported over it and keeps it under `replaced`.
+    if let Some(kind) = moved_aside {
+        report_instead(
+            &mut plan.result.result.diagnostic,
+            started_again_diagnostic(kind),
+        );
+    }
     match prepared {
         Ok(Some(replacement)) => plan.result.lifecycle_replacement = Some(replacement),
         Ok(None) => {}
@@ -1063,14 +1082,74 @@ fn child_still_waits(resolved: &ResolvedLaunch, binding_id: &str, since: &str) -
     set.waits_since(EndMark::of(end.as_ref(), &binding), since)
 }
 
+/// A record of the binding's that a hook is about to replace, as it found it.
+enum Replacing {
+    Present(Value),
+    Missing,
+    /// The record was invalid and is now under a write-leftover name, so the
+    /// hook starts a new one.
+    MovedAside,
+}
+
+/// Reads the record of `kind` at `path` that a hook is about to replace. A
+/// record this user cannot read is refused rather than overwritten, and one a
+/// newer writer wrote is never overwritten. An invalid record, or one naming
+/// another provider than its binding's, which both readers hold invalid, is
+/// renamed to `.<file name>.invalid.<uuid>`: what it held stays on disk until
+/// its binding goes, and the hook starts the record again.
+fn read_or_move_aside(
+    path: &Path,
+    kind: &str,
+    identity: &RecordIdentity,
+    provider: Provider,
+) -> Result<Replacing> {
+    match read_record_typed(path, Some(kind), identity) {
+        RecordRead::Present(value) if value["provider"].as_str() == Some(provider.as_str()) => {
+            Ok(Replacing::Present(value))
+        }
+        RecordRead::Missing => Ok(Replacing::Missing),
+        RecordRead::Present(_) | RecordRead::Invalid(_) => {
+            // A rename moves the file as it stands, a symlink included,
+            // without reading it.
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("record");
+            let aside = path.with_file_name(format!(".{name}.invalid.{}", Uuid::new_v4()));
+            std::fs::rename(path, aside).map_err(|_| {
+                AttentionError::new(
+                    DiagnosticCode::ProbeUnavailable,
+                    format!(
+                        "invalid {} could not be moved aside",
+                        kind.replace('_', " ")
+                    ),
+                )
+            })?;
+            Ok(Replacing::MovedAside)
+        }
+        RecordRead::Unavailable(error) | RecordRead::Unsupported(error) => Err(error),
+    }
+}
+
+/// What a hook reports when it moved an invalid record of `kind` aside:
+/// starting again loses what that record held.
+fn started_again_diagnostic(kind: &str) -> Diagnostic {
+    Diagnostic::new(
+        DiagnosticCode::RecordInvalid,
+        format!(
+            "an invalid {} was moved aside and started again",
+            kind.replace('_', " ")
+        ),
+    )
+}
+
 /// Plans one change to the binding's child set, inside the launch and claim
 /// locks: reads the binding, its end and the set, applies `transition`, and
-/// adds the replacement when the set changed. A set this user cannot read is
-/// refused rather than overwritten; a set written by a newer writer is never
-/// overwritten; an invalid set is moved aside under a write-leftover name and
-/// replaced by a new one even when the event changes nothing, and children it
-/// held reappear at their next event. A set its readers would reject as too
-/// large is refused rather than written.
+/// adds the replacement when the set changed. The set is read through
+/// [`read_or_move_aside`]; an invalid one is replaced by a new one even when
+/// the event changes nothing, and children it held reappear at their next
+/// event. A set its readers would reject as too large is refused rather than
+/// written.
 fn plan_children(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
@@ -1080,7 +1159,8 @@ fn plan_children(
     replacements: &mut Vec<Replacement>,
 ) -> Result<LifecycleResult> {
     let identity = resolved.binding(binding_id);
-    let path = identity.path(&resolved.root, "child_presence_set")?;
+    let kind = "child_presence_set";
+    let path = identity.path(&resolved.root, kind)?;
     let binding = read_record_at(&resolved.root, "binding", &identity)?.ok_or_else(|| {
         AttentionError::new(
             DiagnosticCode::ClaimStale,
@@ -1097,37 +1177,17 @@ fn plan_children(
             provider,
         )
     };
-    let (mut set, started_again) =
-        match read_record_typed(&path, Some("child_presence_set"), &identity) {
-            // A set naming another provider than its binding is invalid, as
-            // both readers hold.
-            RecordRead::Present(value) if value["provider"].as_str() == Some(provider.as_str()) => {
-                (
-                    ChildPresenceSet::deserialize(&value).map_err(|_| {
-                        AttentionError::new(
-                            DiagnosticCode::RecordInvalid,
-                            "child presence set could not be decoded",
-                        )
-                    })?,
-                    false,
-                )
-            }
-            RecordRead::Missing => (empty(), false),
-            RecordRead::Present(_) | RecordRead::Invalid(_) => {
-                // A rename moves the file as it stands, a symlink included,
-                // without reading it.
-                let aside =
-                    path.with_file_name(format!(".children.json.invalid.{}", Uuid::new_v4()));
-                std::fs::rename(&path, &aside).map_err(|_| {
-                    AttentionError::new(
-                        DiagnosticCode::ProbeUnavailable,
-                        "invalid child presence set could not be moved aside",
-                    )
-                })?;
-                (empty(), true)
-            }
-            RecordRead::Unavailable(error) | RecordRead::Unsupported(error) => return Err(error),
-        };
+    let found = read_or_move_aside(&path, kind, &identity, provider)?;
+    let started_again = matches!(found, Replacing::MovedAside);
+    let mut set = match found {
+        Replacing::Present(value) => ChildPresenceSet::deserialize(&value).map_err(|_| {
+            AttentionError::new(
+                DiagnosticCode::RecordInvalid,
+                "child presence set could not be decoded",
+            )
+        })?,
+        Replacing::Missing | Replacing::MovedAside => empty(),
+    };
     set.schema = manifest()?.record_schema;
     let reduction = set.apply(EndMark::of(end.as_ref(), &binding), transition);
     let mut result = LifecycleResult::new(reduction.disposition);
@@ -1135,13 +1195,7 @@ fn plan_children(
     // Starting again loses what the invalid set held, so the hook reports
     // that instead of anything the transition itself says.
     if started_again {
-        report_instead(
-            &mut result.diagnostic,
-            Diagnostic::new(
-                DiagnosticCode::RecordInvalid,
-                "an invalid child presence set was moved aside and started again",
-            ),
-        );
+        report_instead(&mut result.diagnostic, started_again_diagnostic(kind));
     }
     if reduction.changed || started_again {
         set.revision = Uuid::new_v4().to_string();

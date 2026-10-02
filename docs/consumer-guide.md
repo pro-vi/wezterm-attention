@@ -42,7 +42,7 @@ Controller ownership and permissions belong to consumers. Key application-owned 
 | `invalid` | A successful read returned malformed or contradictory data |
 | `unsupported` | The record declares a future schema |
 
-Missing, invalid, unsupported, and unavailable data are not an empty pending-request list. A successfully read invalid/future file never falls back to older cached facts. Optional lifecycle failure does not invalidate an otherwise valid activity badge.
+Missing, invalid, unsupported, and unavailable data are not an empty pending-request list. A successfully read invalid/future file never falls back to older cached facts. Optional lifecycle failure does not invalidate an otherwise valid activity badge. The next hook that adds an observation moves an invalid file aside and starts a new one, whose retention floors sit just below that observation: what the old file held then reads as evicted.
 
 The facet contains `snapshot_id`, a flat `observations` array, `requests`, `retention_floors`, `coverage="bounded_window"`, at most eight diagnostics, and an exact `badge_acknowledgement` when one matches the stored activity. Each observation names its pool: `requests` or `general` for one from `lifecycle.json`, `child_requests` or `child_general` for one from `children-lifecycle.json`.
 

@@ -1239,8 +1239,9 @@ fn pane_entries_prunable(
 /// its temporary `.<record>.<uuid>`. Plugin builds that wrote pane records
 /// themselves left `<record>.<session>.tmp`, and a review they were clearing
 /// moved aside to `<record>.<session>.<ms>.clear`; nothing reads either, so
-/// one a crash left goes with its tree. A child set found invalid is moved
-/// aside to `.children.json.invalid.<uuid>`, which this name also covers.
+/// one a crash left goes with its tree. A child set or lifecycle file a hook
+/// found invalid is moved aside to `.<file name>.invalid.<uuid>`, which this
+/// name also covers.
 fn write_leftover(name: &str) -> bool {
     name.contains(".json.")
         && (name.starts_with('.') || name.ends_with(".tmp") || name.ends_with(".clear"))

@@ -396,6 +396,8 @@ Lifecycle evidence stays outside `activity.json` because adding request IDs to a
 
 Unknown fields, nulls, object-shaped arrays, invalid nested child digests, wrong pool membership, duplicate identities, below-floor members, and incompatible provider/tool/question-mode tuples are rejected. Native elicitation correlation includes the MCP server namespace. A local receipt UUID cannot stand in for a native request identifier.
 
+A writer adding an observation to a lifecycle file that is invalid, or whose `provider` is not its binding's, renames it to `.<file name>.invalid.<uuid>` as it does an invalid `children.json`, and reduces the observation into a new file whose two pools both carry a retention floor one nanosecond below it, so readers see what the old file held as evicted. An observation at or below that floor, from a hook that stamped it before the restart, is refused. The hook reports the restart (`record_invalid`); a failed write of the new file is reported instead, keeping the restart under `replaced`, while a failed write before it is reported alone. A file a newer writer wrote (`future_schema`), one that cannot be read, or one that cannot be moved aside (`probe_unavailable`) is left as it was, and the observation is refused.
+
 Existing native mutations run before lifecycle replacement. There is no multi-file atomicity promise. An independently valid native effect can survive rich-evidence rejection or a failed sidecar write; partial work is diagnostic and strict hook mode fails. A post-rename failure requires reading actual state before retry.
 
 `attention bindings --json` returns validated facts and four independent axes: binding phase, pane

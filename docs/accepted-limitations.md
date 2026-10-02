@@ -308,50 +308,64 @@ sub-agents still running one long command. A count that can stay too high was
 chosen over one that drops a sub-agent that is still working. There is no
 command to remove such a sub-agent by hand.
 
-## An invalid child set is started again, and its sub-agents return at their next event
+## An invalid child set or lifecycle file is started again, and loses what it held
 
-A writer that finds `children.json` invalid renames it to
-`.children.json.invalid.<uuid>`, applies its event to a new, empty set, and
-writes that set even when the event changes nothing else; its hook reports
-`record_invalid`. A `children.json` that something else replaced with a link to a
-file that is not a valid set is moved aside as a link, and sweep then keeps that
-binding, as it keeps any that holds a link; a link to a valid set, or to
-nothing, is replaced by a regular file at the next write. Until the next event that writes the set (a child's start, stop, tool call or permission request, a Codex parent's `Stop`, or a Claude lead's `Stop` that lists tasks), the tab shows `+?`. The
-sub-agents the invalid set held are counted again only at their next event, so
-one in the middle of a long command stays uncounted until it calls another tool
-or stops. The rename happens while the hook plans its writes, so if a write in
-the same hook fails before the new set is in place, no `children.json` is left:
-the tab then shows no count, not `+?`, until the next event that writes the set
-writes a new one. A failure after the new set is in place, such as a failed sync of its
-directory or a failed write of the lifecycle observation, leaves the new set, as
-[A record write can be reported failed after readers already see it](#a-record-write-can-be-reported-failed-after-readers-already-see-it)
-describes. The renamed files are write leftovers: they go with their binding,
-and sweep collects none on its own (see
+A hook that finds `children.json`, `lifecycle.json` or `children-lifecycle.json`
+invalid, or naming another provider than its binding, renames it to
+`.<file name>.invalid.<uuid>`, applies its event to a new file, and reports
+`record_invalid`. The rename moves the file as it stands: a link to a file that
+is not valid is moved aside as a link, and sweep then keeps that binding, as it
+keeps any that holds a link; a link to a valid file, or to nothing, is replaced
+by a regular file at the next write. The renamed files are write leftovers:
+they go with their binding, and sweep collects none on its own (see
 [What sweep leaves behind](#what-sweep-leaves-behind)).
 
-Counting what an invalid file held would mean trusting a file that failed
-validation. Starting again loses only what each sub-agent's next event restores.
+What starting again loses differs by file:
 
-## An invalid lifecycle file stops recording until its session ends
+- **The child set.** The new set is written even when the event changes
+  nothing else. While the set is invalid, until the next event that writes it
+  (a child's start, stop, tool call or permission request, a Codex parent's
+  `Stop`, or a Claude lead's `Stop` that lists tasks), the tab shows `+?`. The
+  sub-agents the
+  invalid set held are counted again only at their next event, so one in
+  the middle of a long command stays uncounted until it calls another tool or
+  stops.
+- **A lifecycle file.** The new file holds only the observation the hook was
+  adding, and both its pools carry a retention floor just below that
+  observation, so readers see the earlier evidence as evicted rather than as
+  never recorded. A hook that was already running when the file started
+  again, and stamped its observation earlier, falls at or below that floor:
+  its observation is refused, as one below an eviction floor is, and its
+  consumer is not run. A hook only reads a lifecycle file when it has an
+  observation to add, so an invalid one stays in place, and readers show it
+  as invalid, until the next such hook.
 
-A writer that cannot use a binding's `lifecycle.json` or
-`children-lifecycle.json`, because it is invalid, written by a newer version,
-unreadable or names another provider, refuses the observation it was adding to
-that file and leaves the file as it is. The hook reports it with a diagnostic,
-a `--strict` hook exits 1, and the consumer the hook would have run is not run.
-Every later observation of the same actor in that binding is refused the same
-way while the file stays as it is, which for an invalid file or one a newer
-version wrote is until the binding ends or you delete the file.
-The other file is unaffected: a bad children's file never stops the lead's
-observations, and a bad `lifecycle.json` never stops the children's, though
-readers then show neither (see the
-[consumer guide](consumer-guide.md#lifecycle-availability)). `attention doctor`
-names the file, and sweep keeps an ended binding that holds it, as it keeps any
-binding holding a record it cannot validate.
+The rename happens while the hook plans its writes, so if a write in the same
+hook fails before the new file is in place, or the lifecycle observation is
+itself refused, no file is left. Without a `children.json` the tab shows no
+count, not `+?`, until the next event that writes the set. Without a lifecycle
+file readers show no evidence from it, and the next observation starts a file
+with no floor. A failure after the new file is in place, such as a failed sync
+of its directory, leaves the new file, as
+[A record write can be reported failed after readers already see it](#a-record-write-can-be-reported-failed-after-readers-already-see-it)
+describes.
 
-Unlike `children.json`, a bad lifecycle file is not moved aside and started
-again. Starting again would discard the evidence the file holds, and nothing
-the tab shows depends on it: activity comes from `activity.json`.
+Counting what an invalid set held, or showing what an invalid lifecycle file
+held, would mean trusting a file that failed validation. The moved-aside file
+keeps that evidence on disk until its binding goes.
+
+## A child set or lifecycle file you cannot read, or a newer version wrote, refuses every change
+
+A hook never overwrites `children.json`, `lifecycle.json` or
+`children-lifecycle.json` when this user cannot read it or a newer version
+wrote it. The hook refuses its change to that file with a diagnostic, and the
+consumer the hook would have run is not run. Every later change to the file is
+refused the same way until you delete it: sweep keeps a binding that holds
+such a file, and resuming the same session in the same launch reuses its
+directory.
+
+Overwriting a file a newer version wrote would lose what that version
+recorded, and a file that cannot be read cannot be shown to be invalid.
 
 ## A plugin and a command from either side of the child set show no sub-agents
 
@@ -384,7 +398,7 @@ new record is already in place and every reader sees it. The hook then reports
 its event as failed, and the records its plan would have written after that one
 are not written. A failed write of any record written before the lifecycle
 observation is reported alone: what the plan itself would have reported, such as
-the restart of an invalid child set, is not in the report. Only the lifecycle
+the restart of an invalid child set or lifecycle file, is not in the report. Only the lifecycle
 observation, which is written last, keeps the plan's diagnostic under `replaced`
 in its write error. A directory that cannot be opened for the sync is not synced,
 and the write is reported as made, though a crash can still undo it.
