@@ -58,8 +58,9 @@ writer refuses a repeat, a fenced or an evicted observation, or times out on
 the lock. Sub-agents share one file and can still evict each other's evidence.
 Sub-agent observations already in `lifecycle.json` take places in the lead's
 pools until lead observations displace them, so a binding written across the
-split shows fewer lead observations than its pools hold, and a lead floor it
-carried over may come from sub-agent traffic.
+split shows fewer lead observations than its pools hold, and a lead floor in it
+may mark the eviction of sub-agent observations, set before the split or by a
+later lead observation.
 A poll reads two files per pane, and a pane now holds up to twice as many
 observations: the lead's and its children's. A poll that must parse both full
 files costs about as much more as the extra observations it holds. Measured

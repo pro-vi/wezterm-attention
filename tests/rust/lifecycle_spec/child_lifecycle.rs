@@ -315,13 +315,8 @@ fn lead_snapshot(observations: Vec<Value>, general_floor: Option<u64>) -> Lifecy
     snapshot_of("lifecycle_snapshot", observations, general_floor, None)
 }
 
-fn children_snapshot(observations: Vec<Value>, general_floor: Option<u64>) -> LifecycleSnapshot {
-    snapshot_of(
-        "child_lifecycle_snapshot",
-        observations,
-        general_floor,
-        None,
-    )
+fn children_snapshot(observations: Vec<Value>) -> LifecycleSnapshot {
+    snapshot_of("child_lifecycle_snapshot", observations, None, None)
 }
 
 /// How both readers must assemble one binding's two lifecycle files, by what
@@ -358,18 +353,20 @@ pub(super) fn two_file_cases() -> Vec<(
                 ],
                 None,
             )),
-            Some(children_snapshot(
-                vec![differing, tool_call(3, 200, Some("child-a"), "k")],
-                None,
-            )),
+            Some(children_snapshot(vec![
+                differing,
+                tool_call(3, 200, Some("child-a"), "k"),
+            ])),
         ),
         (
             "only the children's file",
             None,
-            Some(children_snapshot(
-                vec![tool_call(3, 200, Some("child-a"), "k")],
-                None,
-            )),
+            Some(children_snapshot(vec![tool_call(
+                3,
+                200,
+                Some("child-a"),
+                "k",
+            )])),
         ),
         (
             "request floors in both files",
