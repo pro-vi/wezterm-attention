@@ -187,8 +187,6 @@ enum BindingField {
     ReaderConfidence,
     BindingHealth,
     Current,
-    ExpectedSessionMatch,
-    ExpectedSessionId,
     TranscriptPath,
     Cwd,
     ConfigDir,
@@ -1352,8 +1350,6 @@ mod binding_field_tests {
             reader_confidence: "current".into(),
             binding_health: "healthy".into(),
             current: true,
-            expected_session_match: None,
-            expected_session_id: Some("session".into()),
             transcript_path: Some("/test/transcript".into()),
             cwd: Some("/test".into()),
             config_dir: Some("/test/config".into()),
@@ -1367,7 +1363,6 @@ mod binding_field_tests {
             .map(|field| field.name())
             .collect();
         assert_eq!(keys, selectable);
-        assert!(value["expected_session_match"].is_null());
         let help = bindings_help();
         for name in keys {
             assert!(help.contains(&name));

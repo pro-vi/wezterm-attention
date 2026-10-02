@@ -151,7 +151,6 @@ pub struct ProviderEvent {
     pub cwd: Option<String>,
     pub config_dir: Option<String>,
     pub model: Option<String>,
-    pub expected_session_id: Option<String>,
     pub diagnostic: Option<Diagnostic>,
 }
 
@@ -174,7 +173,6 @@ impl ProviderEvent {
             cwd: None,
             config_dir: None,
             model: None,
-            expected_session_id: None,
             diagnostic: Some(Diagnostic::new(code, message)),
         }
     }
@@ -312,16 +310,6 @@ fn parse_provider_common(
         Provider::Codex => "CODEX_HOME",
         Provider::Pi => "PI_CODING_AGENT_DIR",
     };
-    let expected_session_id = match env
-        .get("WEZTERM_ATTENTION_EXPECTED_SESSION_ID")
-        .filter(|value| !value.is_empty())
-    {
-        Some(value) => Some(safe_label(
-            &Value::String(value.clone()),
-            "WEZTERM_ATTENTION_EXPECTED_SESSION_ID",
-        )?),
-        None => None,
-    };
     let mut dropped = DroppedFields::default();
     // Claude Code 2.1.283 sends an empty `agent_type` for the agents it runs
     // for itself; that says no type, and is not malformed.
@@ -359,7 +347,6 @@ fn parse_provider_common(
         cwd,
         config_dir,
         model,
-        expected_session_id,
         diagnostic: dropped.diagnostic(),
     };
     Ok(event)

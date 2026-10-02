@@ -1094,9 +1094,6 @@ pub struct BindingRow {
     pub reader_confidence: String,
     pub binding_health: String,
     pub current: bool,
-    pub expected_session_match: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expected_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transcript_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1130,15 +1127,12 @@ impl BindingRow {
         facts: RowFacts<'_>,
     ) -> Self {
         let field = |name: &str| string(binding, name);
-        let provider_session_id = field("provider_session_id");
         Self {
             address,
             launch_id,
             binding_id,
             provider: field("provider").unwrap_or_default(),
-            expected_session_match: field("expected_session_id")
-                .map(|expected| provider_session_id.as_ref() == Some(&expected)),
-            provider_session_id: provider_session_id.unwrap_or_default(),
+            provider_session_id: field("provider_session_id").unwrap_or_default(),
             binding_phase: if facts.ended { "ended" } else { "active" }.to_owned(),
             pane_presence: facts.presence.to_owned(),
             reader_confidence: reader_confidence(facts.current, facts.presence)
@@ -1146,7 +1140,6 @@ impl BindingRow {
                 .to_owned(),
             binding_health: facts.health.as_str().to_owned(),
             current: facts.current,
-            expected_session_id: field("expected_session_id"),
             transcript_path: field("transcript_path"),
             cwd: field("cwd"),
             config_dir: field("config_dir"),

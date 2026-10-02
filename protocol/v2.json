@@ -916,7 +916,7 @@
     },
     "binding": {
       "required": ["kind", "schema", "address", "launch_id", "binding_id", "event_id", "provider", "provider_session_id", "start_source", "observed_mono_ns", "written_at_unix_ns", "writer_version"],
-      "optional": ["expected_session_id", "transcript_path", "cwd", "config_dir", "model"],
+      "optional": ["transcript_path", "cwd", "config_dir", "model"],
       "types": {
         "kind": "record_kind",
         "schema": "record_schema",
@@ -930,7 +930,6 @@
         "observed_mono_ns": "monotonic_ns20",
         "written_at_unix_ns": "unix_ns20",
         "writer_version": "writer_version",
-        "expected_session_id": "safe_label",
         "transcript_path": "absolute_path",
         "cwd": "absolute_path",
         "config_dir": "absolute_path",

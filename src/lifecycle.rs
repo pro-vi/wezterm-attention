@@ -436,7 +436,6 @@ fn resolve_launch<'a>(
 
 fn binding_facts(event: &ProviderEvent) -> Vec<(&'static str, String)> {
     [
-        ("expected_session_id", event.expected_session_id.as_ref()),
         ("transcript_path", event.transcript_path.as_ref()),
         ("cwd", event.cwd.as_ref()),
         ("config_dir", event.config_dir.as_ref()),

@@ -217,9 +217,8 @@ fields are `agent_type`, `transcript_path` or `session_file`, `cwd`, `CLAUDE_CON
 `CODEX_HOME`, `PI_CODING_AGENT_DIR`, `model`, and the Pi bus `label`. One `record_invalid`
 diagnostic names them, with message `optional fields were dropped: …` and the list in
 `context.dropped_fields`. An empty `agent_type` is not malformed: it says the agent has no type, as
-Claude Code 2.1.283 sends for the agents it runs for itself. A malformed `session_id` or
-`WEZTERM_ATTENTION_EXPECTED_SESSION_ID` still ignores the event, because those are identity, not
-metadata. A native enum value this version does
+Claude Code 2.1.283 sends for the agents it runs for itself. A malformed `session_id` still
+ignores the event, because it is identity, not metadata. A native enum value this version does
 not know keeps the observation: an unknown `error_category` becomes `unknown`, and an unknown
 `input_source` or compaction trigger is omitted.
 

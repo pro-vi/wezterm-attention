@@ -55,7 +55,6 @@
       "event_id": "00000000-0000-4000-8000-000000000002",
       "provider": "claude",
       "provider_session_id": "session-42",
-      "expected_session_id": "session-42",
       "transcript_path": "/tmp/attention-v2/transcript.jsonl",
       "cwd": "/tmp/attention-v2/project",
       "config_dir": "/tmp/attention-v2/config",

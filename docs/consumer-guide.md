@@ -159,8 +159,8 @@ For publication, `hooks publish --socket <PATH>` takes an existing socket path a
 Use `attention bindings --fields address,provider,current` to select top-level
 row fields. Field selection does not change query
 work, row limits, scope, diagnostics, completeness or exit codes. `address` stays a
-whole object. Optional fields that were absent stay absent, and explicit nulls stay
-null; a selected row can therefore be `{}`. Without `--fields`, rows are unchanged.
+whole object. Optional fields that were absent stay absent, so a selected row can
+be `{}`. Without `--fields`, rows are unchanged.
 See `bindings --help` for accepted names. Unknown names, empty comma components,
 nested paths and wildcards are usage errors.
 

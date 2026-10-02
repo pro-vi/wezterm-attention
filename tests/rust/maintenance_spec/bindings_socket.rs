@@ -77,8 +77,8 @@ fn binding_projection_preserves_query_metadata() {
             );
             for (fields, keys) in [
                 (
-                    " address, provider,address,expected_session_match ",
-                    vec!["address", "provider", "expected_session_match"],
+                    " address, provider,address,current ",
+                    vec!["address", "provider", "current"],
                 ),
                 ("transcript_path", vec!["transcript_path"]),
             ] {
@@ -119,6 +119,8 @@ fn binding_fields_validate_before_discovery() {
         "*",
         "address.pane_id",
         "missing",
+        "expected_session_id",
+        "expected_session_match",
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_attention"))
             .env_clear()
