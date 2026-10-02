@@ -12,7 +12,7 @@ use uuid::Uuid;
 use wezterm_attention::identity::pane_address;
 use wezterm_attention::lifecycle::{apply_provider_event, binding_id};
 use wezterm_attention::maintenance::{
-    ABSENCE_INTERVAL_NS, RETENTION_AGE_NS, binding_cap_paths_by_realm, limit_sweep_preview, sweep,
+    ABSENCE_INTERVAL_NS, RETENTION_AGE_NS, binding_cap_paths_by_realm, sweep,
 };
 use wezterm_attention::protocol::DiagnosticCode;
 use wezterm_attention::providers::parse_provider_event;
@@ -1560,43 +1560,6 @@ fn a_realm_filtered_sweep_leaves_tab_orders_alone() {
             .all(|detail| detail["kind"] != "tab_order_collection")
     );
     assert!(dead.exists());
-}
-
-#[test]
-fn leftover_preview_keeps_every_collection_row() {
-    let mut details = Vec::new();
-    for pane in 0..51 {
-        details.push(json!({
-            "kind": "tab_order_collection",
-            "path": format!("tabs/{pane}.json"),
-        }));
-    }
-    for index in 0..51 {
-        details.push(json!({
-            "kind": "absence",
-            "binding_id": index.to_string(),
-            "action": "replay_end",
-        }));
-    }
-    let (shown, total) = limit_sweep_preview(details.clone(), false);
-    assert_eq!(total, 102);
-    assert_eq!(
-        shown
-            .iter()
-            .filter(|detail| detail["kind"] == "tab_order_collection")
-            .count(),
-        51
-    );
-    assert_eq!(
-        shown
-            .iter()
-            .filter(|detail| detail["kind"] == "absence")
-            .count(),
-        50
-    );
-    let (all, all_total) = limit_sweep_preview(details, true);
-    assert_eq!(all_total, 102);
-    assert_eq!(all.len(), 102);
 }
 
 #[test]

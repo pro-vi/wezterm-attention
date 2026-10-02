@@ -586,10 +586,10 @@ fn only_a_query_that_dropped_rows_says_so_on_stderr() {
     }
 }
 
-/// A realm-wide answer with more diagnostics than the envelope shows is still
-/// complete: the rows are all there, and the counts say what was dropped.
+/// A realm-wide answer lists every diagnostic, however many, and is still
+/// complete: the rows are all there.
 #[test]
-fn realm_wide_diagnostics_are_counted_and_never_make_the_rows_incomplete() {
+fn realm_wide_diagnostics_are_all_listed_and_never_make_the_rows_incomplete() {
     let setup = Setup::new();
     setup.claim_and_bind();
     let root = state_root(&setup.env).unwrap();
@@ -613,15 +613,8 @@ fn realm_wide_diagnostics_are_counted_and_never_make_the_rows_incomplete() {
     assert_eq!(response["status"], "findings");
     assert_eq!(response["complete"], true);
     assert_eq!(response["result"]["truncated"], false);
-    assert_eq!(response["result"]["diagnostic_count"], 50);
     // The sixty unreadable records plus whatever the unscoped probe reports.
-    assert!(
-        response["result"]["total_diagnostic_count"]
-            .as_u64()
-            .unwrap()
-            >= 60
-    );
-    assert_eq!(response["diagnostics"].as_array().unwrap().len(), 50);
+    assert!(response["diagnostics"].as_array().unwrap().len() >= 60);
     assert!(output.stderr.is_empty());
 
     // Scoped to the socket, one unanswered probe is still incomplete.

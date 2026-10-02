@@ -36,36 +36,12 @@ pub struct SweepResult {
     pub apply: bool,
     pub operation_id: Option<String>,
     pub scanned: usize,
-    pub detail_count: usize,
-    pub total_detail_count: usize,
     pub details: Vec<Value>,
     /// How many steps an apply set out to take and could not: a record it
     /// could not read to decide on, or a removal or write that failed. Any
     /// makes the answer incomplete. A preview counts none.
     #[serde(skip)]
     pub failed_steps: usize,
-}
-
-pub fn limit_sweep_preview(details: Vec<Value>, all_details: bool) -> (Vec<Value>, usize) {
-    let total = details.len();
-    if all_details {
-        return (details, total);
-    }
-    let mut leftover = Vec::new();
-    let mut rest = Vec::new();
-    for detail in details {
-        if matches!(
-            detail.get("kind").and_then(Value::as_str),
-            Some("tab_order_collection")
-        ) {
-            leftover.push(detail);
-        } else {
-            rest.push(detail);
-        }
-    }
-    rest.truncate(50);
-    leftover.extend(rest);
-    (leftover, total)
 }
 
 /// The first absence probe of the pane at `address`, taken by the sweep
@@ -1755,14 +1731,11 @@ pub fn sweep(
             }
         }
     }
-    let detail_count = details.len();
     Ok((
         SweepResult {
             apply,
             operation_id,
             scanned: files.len(),
-            detail_count,
-            total_detail_count: detail_count,
             details,
             failed_steps: if apply { failed } else { 0 },
         },

@@ -414,8 +414,7 @@ the session now runs in. A row of a server that may be gone still reports `pane_
 
 JSON responses contain `schema`, `command`, `status`, `complete`, `result`, and `diagnostics`.
 `bindings` also reports where its time went, in `result.timing_ms`: `pane_list` (inside `wezterm cli list`), `process_list` (inside the process probe) and `records` (the rest: finding and reading the records). It is on every answer, without a flag or threshold, so a slow call names its phase.
-`bindings` returns every matching row unless `--limit` caps them. Use `sweep --all-details` only when complete sweep detail is required.
-Sweep `tab_order_collection` rows are listed in full even when other sweep details are truncated.
+`bindings` returns every matching row unless `--limit` caps them. Every command lists every diagnostic, and `sweep` every detail.
 
 ## Trust boundary
 

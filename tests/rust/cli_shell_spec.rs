@@ -473,7 +473,7 @@ fn query_defaults_errors_and_help_support_agent_composition() {
     assert!(text.contains("result.operation_id"));
     assert!(text.contains("canonical lowercase UUID"));
     assert!(text.contains("Preview is the default"));
-    assert!(text.contains("--all-details"));
+    assert!(text.contains("Every detail and diagnostic is listed"));
     assert!(text.contains("complete"));
     let help = run(&["hooks", "event", "--help"]);
     let text = String::from_utf8(help.stdout).unwrap();
@@ -617,7 +617,7 @@ fn installer_creates_libexec_in_a_fresh_checkout() {
 }
 
 #[test]
-fn json_publication_and_binding_output_report_bounded_completeness() {
+fn json_publication_and_binding_output_report_what_they_left_out() {
     let scratch = Scratch::new();
     let socket_path = scratch.0.join("mux.sock");
     let _listener = UnixListener::bind(&socket_path).expect("bind socket");
@@ -645,10 +645,11 @@ fn json_publication_and_binding_output_report_bounded_completeness() {
         .env("PATH", &path)
         .env("WEZTERM_ATTENTION_DIR", &state)
         .output()
-        .expect("run bounded publish");
+        .expect("run publish");
     assert_eq!(publish.status.code(), Some(1));
     let envelope: Value = serde_json::from_slice(&publish.stdout).expect("publish JSON");
-    assert_eq!(envelope["diagnostics"].as_array().map(Vec::len), Some(50));
+    assert_eq!(envelope["diagnostics"].as_array().map(Vec::len), Some(60));
+    assert_eq!(envelope["result"]["skipped"], 60);
     assert_eq!(envelope["complete"], false);
 
     write_bindings(&state, 2);
@@ -657,7 +658,7 @@ fn json_publication_and_binding_output_report_bounded_completeness() {
         .env_clear()
         .env("WEZTERM_ATTENTION_DIR", &state)
         .output()
-        .expect("run bounded bindings");
+        .expect("run limited bindings");
     let envelope: Value = serde_json::from_slice(&bindings.stdout).expect("bindings JSON");
     assert_eq!(envelope["result"]["scanned"], 2);
     assert_eq!(envelope["result"]["returned"], 1);
@@ -694,6 +695,121 @@ fn write_bindings(state: &Path, count: usize) {
             .expect("binding JSON"),
         )
         .expect("write binding");
+    }
+}
+
+/// Sweep and doctor list everything they found, however much: whether their
+/// answer is complete never depends on how much of it there is.
+#[test]
+fn sweep_and_doctor_list_every_detail_and_diagnostic_and_stay_complete() {
+    let scratch = Scratch::new();
+    let state = scratch.0.join("state");
+    // Sixty bindings no claim selects, each a sweep detail, and sixty records
+    // that cannot be read, each a diagnostic of both commands.
+    write_bindings(&state, 60);
+    for index in 1..=60 {
+        let binding_dir = state
+            .join("v2/realms")
+            .join("a".repeat(64))
+            .join("incarnations")
+            .join("b".repeat(64))
+            .join("panes/42/launches/00000000-0000-4000-8000-000000000702/bindings")
+            .join(format!("{index:064x}"));
+        fs::create_dir_all(&binding_dir).expect("create binding directory");
+        fs::write(binding_dir.join("binding.json"), "invalid").expect("write invalid binding");
+    }
+    let run = |command: &str| {
+        let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+            .args([command, "--json"])
+            .env_clear()
+            .env("HOME", &scratch.0)
+            .env("WEZTERM_ATTENTION_DIR", &state)
+            .output()
+            .expect("run command");
+        let envelope: Value = serde_json::from_slice(&output.stdout).expect("JSON envelope");
+        assert_eq!(envelope["complete"], true, "{command}: {envelope}");
+        assert_eq!(output.status.code(), Some(0), "{command}: {envelope}");
+        let unreadable = envelope["diagnostics"]
+            .as_array()
+            .expect("diagnostics")
+            .iter()
+            .filter(|diagnostic| diagnostic["code"] == "record_invalid")
+            .count();
+        assert_eq!(unreadable, 60, "{command}: {envelope}");
+        envelope
+    };
+    let sweep = run("sweep");
+    let details = sweep["result"]["details"].as_array().expect("details");
+    assert_eq!(details.len(), 60, "{sweep}");
+    assert!(sweep["result"].get("detail_count").is_none(), "{sweep}");
+    run("doctor");
+}
+
+/// Every tab-order file that could not be read is named, however many.
+#[test]
+fn tabs_lists_every_window_file_it_refused() {
+    let scratch = Scratch::new();
+    let state = scratch.0.join("state");
+    let tabs = state.join("tabs");
+    fs::create_dir_all(&tabs).expect("create tab publication directory");
+    for window in 1..=60 {
+        fs::write(tabs.join(format!("{window}.json")), "invalid").expect("write tab order");
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .arg("tabs")
+        .env_clear()
+        .env("WEZTERM_ATTENTION_DIR", &state)
+        .output()
+        .expect("run tabs");
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("tabs JSON");
+    assert_eq!(envelope["complete"], false, "{envelope}");
+    assert_eq!(output.status.code(), Some(1), "{envelope}");
+    assert_eq!(
+        envelope["diagnostics"].as_array().map(Vec::len),
+        Some(60),
+        "{envelope}"
+    );
+    assert_eq!(envelope["result"], json!({"windows": []}));
+}
+
+/// A provider event that recorded nothing is work left undone: its debug
+/// envelope says `complete=false`, as `--strict` says with exit 1.
+#[test]
+fn a_hook_event_that_failed_is_not_complete() {
+    use std::io::Write;
+    let scratch = Scratch::new();
+    let state = scratch.0.join("state");
+    for extra in [
+        vec!["--debug"],
+        vec![
+            "--consumer",
+            "/usr/bin/true",
+            "--consumer-timeout-ms",
+            "1000",
+        ],
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_attention"))
+            .args(["hooks", "event", "claude", "Stop", "--strict"])
+            .args(&extra)
+            .env_clear()
+            .env("HOME", &scratch.0)
+            .env("WEZTERM_ATTENTION_DIR", &state)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run hook");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(br#"{"hook_event_name":"Stop","session_id":"s"}"#)
+            .expect("write payload");
+        let output = child.wait_with_output().expect("hook output");
+        assert_eq!(output.status.code(), Some(1), "{extra:?}: {output:?}");
+        let envelope: Value = serde_json::from_slice(&output.stderr).expect("stderr JSON");
+        assert_eq!(envelope["status"], "findings", "{extra:?}: {envelope}");
+        assert_eq!(envelope["complete"], false, "{extra:?}: {envelope}");
     }
 }
 
@@ -802,13 +918,12 @@ fn published_tab_orders_are_read_and_one_refused_file_does_not_withhold_the_othe
     assert_eq!(envelope["command"], "tabs");
     assert_eq!(envelope["status"], "findings");
     assert_eq!(envelope["complete"], false);
-    let shown = envelope["diagnostics"]
-        .as_array()
-        .expect("diagnostics")
-        .len();
-    assert!(shown > 0);
-    assert_eq!(envelope["result"]["diagnostic_count"], shown);
-    assert_eq!(envelope["result"]["total_diagnostic_count"], shown);
+    assert!(
+        !envelope["diagnostics"]
+            .as_array()
+            .expect("diagnostics")
+            .is_empty()
+    );
 
     let windows = envelope["result"]["windows"]
         .as_array()
@@ -1408,6 +1523,8 @@ fn a_pane_listing_runs_the_cli_beside_the_mux_server_and_never_starts_a_server()
     );
     let (output, _) = publish_socket_with(&[("WEZTERM_EXECUTABLE", &server)]);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("publish JSON");
+    assert_eq!(envelope["complete"], true, "{envelope}");
     assert!(!server_ran.exists(), "the mux server must never be run");
     assert_eq!(
         fs::read_to_string(&arguments).expect("the CLI ran"),

@@ -204,7 +204,7 @@ impl BindingField {
 
 fn bindings_help() -> String {
     format!(
-        "Example: attention bindings --fields address,provider,current\nFields: {}\nEvery matching row is returned unless --limit caps them.\ncomplete is false when --limit truncated the rows or a state directory could not be read, and with --socket on any diagnostic: a probe that did not answer, a selected record that could not be read, a binding_conflict. Exit 0 when complete, 1 when not, 2 for a usage error.\nDropped diagnostics are counted: result.diagnostic_count of result.total_diagnostic_count.\nresult.timing_ms says where the call's time went: pane_list (wezterm cli list), process_list (the process probe), records (the file walk).\nIf truncated, narrow with --provider, or raise or drop --limit.\n--socket queries prevent WezTerm auto-start; --realm selects a recorded realm ID.",
+        "Example: attention bindings --fields address,provider,current\nFields: {}\nEvery matching row is returned unless --limit caps them.\ncomplete is false when --limit truncated the rows or a state directory could not be read, and with --socket on any diagnostic: a probe that did not answer, a selected record that could not be read, a binding_conflict. Exit 0 when complete, 1 when not, 2 for a usage error.\nresult.timing_ms says where the call's time went: pane_list (wezterm cli list), process_list (the process probe), records (the file walk).\nIf truncated, narrow with --provider, or raise or drop --limit.\n--socket queries prevent WezTerm auto-start; --realm selects a recorded realm ID.",
         BindingField::value_variants()
             .iter()
             .map(|field| field.name())
@@ -378,7 +378,7 @@ struct MarkArgs {
 
 #[derive(Clone, Debug, Args)]
 #[command(
-    after_help = "Preview is the default and removes nothing. Example: attention sweep --json\nTab orders to collect are always listed in full; --all-details includes the rest when complete is false.\nApply: attention sweep --apply --json\nEach apply without --operation-id gets a fresh one, reported in result.operation_id.\nPass --operation-id only to replay that operation; it must be a canonical lowercase UUID."
+    after_help = "Preview is the default and removes nothing. Example: attention sweep --json\nEvery detail and diagnostic is listed. complete is false when a probe did not answer or an apply step failed.\nApply: attention sweep --apply --json\nEach apply without --operation-id gets a fresh one, reported in result.operation_id.\nPass --operation-id only to replay that operation; it must be a canonical lowercase UUID."
 )]
 struct SweepArgs {
     #[arg(long)]
@@ -389,8 +389,6 @@ struct SweepArgs {
     operation_id: Option<String>,
     #[arg(long)]
     json: bool,
-    #[arg(long)]
-    all_details: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -712,22 +710,21 @@ fn run_hooks_publish(
     } else {
         "findings"
     };
-    let diagnostics: Vec<Diagnostic> = report.diagnostics.iter().take(50).cloned().collect();
-    let complete = diagnostics.len() == report.diagnostics.len();
+    // A pane it could not publish to is work left undone, which is also
+    // what the exit code says.
+    let complete = skipped == 0;
     let result = serde_json::json!({
         "attempted": report.attempted,
         "published": report.published,
         "v2_published": report.v2_published,
         "skipped": report.skipped,
-        "detail_count": diagnostics.len(),
-        "total_detail_count": report.diagnostics.len(),
     });
     emit(
-        &Response::new(name, status, complete, diagnostics, result),
+        &Response::new(name, status, complete, report.diagnostics, result),
         args.json,
         args.quiet,
     );
-    Ok(if skipped == 0 {
+    Ok(if complete {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
@@ -836,7 +833,7 @@ fn run_hooks_event(
         print_err(&printable_json(&Response::new(
             name,
             if failed { "findings" } else { "ok" },
-            true,
+            !failed,
             diagnostics,
             result,
         )));
@@ -865,7 +862,7 @@ fn run_hooks_event(
         let response = Response::new(
             name,
             if failed { "findings" } else { "ok" },
-            true,
+            !failed,
             result.diagnostic.iter().cloned().collect(),
             result,
         );
@@ -950,14 +947,11 @@ fn run_bindings(
             "attention bindings: returned {returned} of {scanned}; raise or drop --limit"
         ));
     }
-    let shown_diagnostics: Vec<Diagnostic> = diagnostics.iter().take(50).cloned().collect();
     let mut result = serde_json::json!({
         "rows": rows,
         "scanned": scanned,
         "returned": returned,
         "truncated": truncated,
-        "diagnostic_count": shown_diagnostics.len(),
-        "total_diagnostic_count": diagnostics.len(),
         "timing_ms": timing.as_millis(),
     });
     if let Some(fields) = fields {
@@ -985,11 +979,11 @@ fn run_bindings(
     }
     // `complete` describes the rows. A socket-scoped answer also needs
     // every probe to have answered, since a degraded probe leaves a
-    // pane's presence unknown; a realm-wide answer reports its
-    // diagnostics through the two counts instead, because on a machine
-    // where panes outlive mux incarnations they never run out, and a
-    // flag that is always false says nothing about the rows. A
-    // directory that could not be read may hold rows, so it does.
+    // pane's presence unknown; a realm-wide answer only lists its
+    // diagnostics, because on a machine where panes outlive mux
+    // incarnations they never run out, and a flag that is always false
+    // says nothing about the rows. A directory that could not be read
+    // may hold rows, so it does.
     let complete = !truncated && walked_every_directory && (!socket_mode || diagnostics.is_empty());
     emit(
         &Response::new(
@@ -1000,7 +994,7 @@ fn run_bindings(
                 "findings"
             },
             complete,
-            shown_diagnostics,
+            diagnostics,
             result,
         ),
         args.json,
@@ -1070,28 +1064,21 @@ fn run_tabs(
         &wezterm_attention::wezterm::ExistingWeztermWindowLister,
         &SystemClock,
     )?;
+    // A window that could not be read is a window missing from the
+    // answer, so the answer is not the whole tab bar.
+    let complete = diagnostics.is_empty();
     emit(
         &Response::new(
             name,
-            if diagnostics.is_empty() {
-                "ok"
-            } else {
-                "findings"
-            },
-            // A window that could not be read is a window missing from
-            // the answer, so the answer is not the whole tab bar.
-            diagnostics.is_empty(),
-            diagnostics.iter().take(50).cloned().collect(),
-            serde_json::json!({
-                "windows": windows,
-                "diagnostic_count": diagnostics.len().min(50),
-                "total_diagnostic_count": diagnostics.len(),
-            }),
+            if complete { "ok" } else { "findings" },
+            complete,
+            diagnostics,
+            serde_json::json!({ "windows": windows }),
         ),
         args.json,
         false,
     );
-    Ok(query_exit(diagnostics.is_empty()))
+    Ok(query_exit(complete))
 }
 
 fn run_inspect(
@@ -1221,15 +1208,9 @@ fn run_doctor(
         "findings"
     };
     // A probe that did not answer leaves part of the report unknown.
-    let complete = !unavailable && diagnostics.len() <= 50;
+    let complete = !unavailable;
     emit(
-        &Response::new(
-            name,
-            status,
-            complete,
-            diagnostics.iter().take(50).cloned().collect(),
-            result,
-        ),
+        &Response::new(name, status, complete, diagnostics, result),
         args.json,
         false,
     );
@@ -1242,7 +1223,7 @@ fn run_sweep(
     environment: &BTreeMap<String, String>,
 ) -> Result<ExitCode, AttentionError> {
     let root = wezterm_attention::records::state_root(environment)?;
-    let (mut result, diagnostics) = wezterm_attention::maintenance::sweep(
+    let (result, diagnostics) = wezterm_attention::maintenance::sweep(
         &root,
         args.realm.as_deref(),
         args.apply,
@@ -1251,11 +1232,6 @@ fn run_sweep(
         &WeztermPaneLister,
         Some(&SystemProcessProbe),
     )?;
-    let (shown, total_details) =
-        wezterm_attention::maintenance::limit_sweep_preview(result.details, args.all_details);
-    result.details = shown;
-    result.detail_count = result.details.len();
-    result.total_detail_count = total_details;
     let unavailable = diagnostics
         .iter()
         .any(|item| item.code == DiagnosticCode::ProbeUnavailable);
@@ -1266,19 +1242,11 @@ fn run_sweep(
     } else {
         "findings"
     };
-    let shown_diagnostics: Vec<_> = if args.all_details {
-        diagnostics.clone()
-    } else {
-        diagnostics.iter().take(50).cloned().collect()
-    };
     // A probe that did not answer leaves some pane's fate undecided,
     // and an apply step that failed left its work undone.
-    let complete = !unavailable
-        && result.failed_steps == 0
-        && result.details.len() == total_details
-        && shown_diagnostics.len() == diagnostics.len();
+    let complete = !unavailable && result.failed_steps == 0;
     emit(
-        &Response::new(name, status, complete, shown_diagnostics, result),
+        &Response::new(name, status, complete, diagnostics, result),
         args.json,
         false,
     );
