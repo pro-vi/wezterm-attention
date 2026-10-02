@@ -125,7 +125,6 @@ return function(context)
       code = code,
       message = message,
       context = context or {},
-      help = "attention doctor",
     }
   end
 

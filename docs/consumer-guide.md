@@ -211,7 +211,7 @@ Attention records use schema **3**. CLI envelopes and `HookDelivery` use schema 
 
 ### Exit codes and envelopes
 
-Every JSON envelope has `schema`, `command`, `status`, `complete`, `result` and `diagnostics`. An envelope printed for an error has `complete=false`, `status` `usage_error` or `unavailable`, and an empty `result` object, `{}`; to tell an error from an answer, read `status`, not whether `result` is there. Every JSON document the CLI prints escapes U+0080–U+009F as `\u0080`-style escapes, which decode to the same value, so a C1 control character never reaches a terminal raw.
+Every JSON envelope has `schema`, `command`, `status`, `complete`, `result` and `diagnostics`. Each diagnostic has `code`, `message` and `context`, and a usage error's also has `help`, which names the command's `--help`. An envelope printed for an error has `complete=false`, `status` `usage_error` or `unavailable`, and an empty `result` object, `{}`; to tell an error from an answer, read `status`, not whether `result` is there. Every JSON document the CLI prints escapes U+0080–U+009F as `\u0080`-style escapes, which decode to the same value, so a C1 control character never reaches a terminal raw.
 
 The query commands (`bindings`, `tabs`, `inspect`, `doctor`, `sweep`) exit:
 

@@ -77,7 +77,10 @@ pub struct Diagnostic {
     pub code: DiagnosticCode,
     pub message: String,
     pub context: BTreeMap<String, Value>,
-    pub help: String,
+    /// The command that helps with this diagnostic in particular, when there
+    /// is one: a usage error names its command's `--help`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub help: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -87,14 +90,13 @@ pub struct AttentionError {
 }
 
 impl Diagnostic {
-    /// A diagnostic with nothing in its context, pointing at `attention
-    /// doctor` for help.
+    /// A diagnostic with nothing in its context and no help.
     pub fn new(code: DiagnosticCode, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
             context: BTreeMap::new(),
-            help: "attention doctor".to_owned(),
+            help: None,
         }
     }
 

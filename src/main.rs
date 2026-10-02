@@ -516,7 +516,7 @@ fn query_exit(complete: bool) -> ExitCode {
 fn emit_error(error: &AttentionError, as_json: bool, command: &str) -> ExitCode {
     let mut error = error.clone();
     if error.exit_code == 2 {
-        error.diagnostic.help = format!("attention {command} --help");
+        error.diagnostic.help = Some(format!("attention {command} --help"));
     }
     if as_json || query_json(command) {
         print_out(&printable_json(&error_response(&error, command)));
@@ -525,7 +525,9 @@ fn emit_error(error: &AttentionError, as_json: bool, command: &str) -> ExitCode 
             "attention: {}: {}",
             error.diagnostic.code, error.diagnostic.message
         ));
-        print_err(&format!("help: {}", error.diagnostic.help));
+        if let Some(help) = &error.diagnostic.help {
+            print_err(&format!("help: {help}"));
+        }
     }
     // 2 is kept for a command line that could not be used; every other
     // failure, whatever the error's own code, is 1. A hook command never

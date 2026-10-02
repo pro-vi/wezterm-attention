@@ -1919,3 +1919,58 @@ fn doctor_and_sweep_print_the_json_envelope_by_default() {
         assert_eq!(error["status"], "usage_error", "{command}: {error}");
     }
 }
+
+/// A diagnostic names a command for help only when that command helps with
+/// it in particular: a usage error names its command's `--help`. Every other
+/// diagnostic, the ones doctor prints included, has no `help`, and printed as
+/// text it has no `help:` line.
+#[test]
+fn only_a_usage_error_names_a_command_for_help() {
+    let scratch = Scratch::new();
+    let state = scratch.0.join("state");
+    let binding_dir = state
+        .join("v2/realms")
+        .join("a".repeat(64))
+        .join("incarnations")
+        .join("b".repeat(64))
+        .join("panes/42/launches/00000000-0000-4000-8000-000000000701/bindings")
+        .join("c".repeat(64));
+    fs::create_dir_all(&binding_dir).expect("create binding directory");
+    fs::write(binding_dir.join("binding.json"), "invalid").expect("write invalid binding");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_attention"))
+            .args(args)
+            .env_clear()
+            .env("HOME", &scratch.0)
+            .env("WEZTERM_ATTENTION_DIR", &state)
+            .output()
+            .expect("run command")
+    };
+    let doctor: Value = serde_json::from_slice(&run(&["doctor"]).stdout).expect("JSON envelope");
+    let diagnostics = doctor["diagnostics"].as_array().expect("diagnostics");
+    assert!(!diagnostics.is_empty(), "{doctor}");
+    for diagnostic in diagnostics {
+        assert!(diagnostic.get("help").is_none(), "{diagnostic}");
+    }
+    let usage: Value =
+        serde_json::from_slice(&run(&["doctor", "--no-such-flag"]).stdout).expect("JSON envelope");
+    assert_eq!(usage["diagnostics"][0]["help"], "attention doctor --help");
+    // Without a launch, mark fails past its command line.
+    let failed = run(&["mark", "thinking"]);
+    assert_eq!(failed.status.code(), Some(1), "{failed:?}");
+    let stderr = String::from_utf8(failed.stderr).expect("stderr");
+    assert!(stderr.starts_with("attention: "), "{stderr}");
+    assert!(
+        !stderr.lines().any(|line| line.starts_with("help:")),
+        "{stderr}"
+    );
+    let misused = run(&["mark", "review", "--frame", "3"]);
+    assert_eq!(misused.status.code(), Some(2), "{misused:?}");
+    let stderr = String::from_utf8(misused.stderr).expect("stderr");
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line == "help: attention mark --help"),
+        "{stderr}"
+    );
+}
