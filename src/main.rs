@@ -369,16 +369,22 @@ struct TabSourceArgs {
 
 #[derive(Clone, Debug, Args)]
 struct MarkArgs {
+    /// thinking, stop or notify sets the pane's activity; review flags the pane for --source; clear withdraws that source's review, and its activity if the tab shows it.
     #[arg(value_parser = ["thinking", "stop", "notify", "review", "clear"])]
     state: String,
+    /// Who is marking: the activity's source, or the review's owner. Every state; "user" is refused.
     #[arg(long, default_value = "manual")]
     source: String,
+    /// Print the JSON envelope instead of the status word. Every state.
     #[arg(long)]
     json: bool,
+    /// Store a frame number (0..=1000000) on the activity; for thinking the tab holds its spinner on that frame, modulo the frame count, instead of animating. thinking, stop and notify only.
     #[arg(long)]
     frame: Option<u64>,
+    /// Store a label (1..=256 bytes, no control characters) on the activity; inspect returns it, the tab does not show it. thinking, stop and notify only.
     #[arg(long)]
     label: Option<String>,
+    /// The activity expires this many milliseconds after it is written, and the tab stops showing it. thinking, stop and notify only.
     #[arg(long)]
     ttl_ms: Option<u64>,
 }
@@ -1142,6 +1148,15 @@ fn run_mark(
     name: &str,
     environment: &BTreeMap<String, String>,
 ) -> Result<ExitCode, AttentionError> {
+    // A review or a clear writes no activity, so these would be dropped.
+    if matches!(args.state.as_str(), "review" | "clear")
+        && (args.frame.is_some() || args.label.is_some() || args.ttl_ms.is_some())
+    {
+        return Err(AttentionError::usage(format!(
+            "--frame, --label and --ttl-ms describe an activity; mark {} takes none of them",
+            args.state
+        )));
+    }
     let observation = || SystemClock.monotonic_ns20();
     let result = match args.state.as_str() {
         "review" => wezterm_attention::lifecycle::apply_mark_review(environment, &args.source),

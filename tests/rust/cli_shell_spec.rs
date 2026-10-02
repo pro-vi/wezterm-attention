@@ -383,6 +383,57 @@ fn rust_cli_help_errors_and_empty_hook_input_keep_the_documented_shape() {
     assert_eq!(envelope["complete"], false);
 }
 
+/// --frame, --label and --ttl-ms describe the activity `mark` writes. A review
+/// or a clear writes none, so with them each option is a usage error rather
+/// than dropped; the activity states still take them.
+#[test]
+fn mark_refuses_activity_options_with_review_and_clear() {
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_attention"))
+            .arg("mark")
+            .args(args)
+            .env_clear()
+            .output()
+            .expect("run mark")
+    };
+    for state in ["review", "clear"] {
+        for option in [["--frame", "3"], ["--label", "x"], ["--ttl-ms", "5"]] {
+            let output = run(&[state, option[0], option[1], "--json"]);
+            assert_eq!(output.status.code(), Some(2), "{state} {option:?}");
+            let envelope: Value = serde_json::from_slice(&output.stdout).expect("JSON envelope");
+            assert_eq!(envelope["status"], "usage_error", "{state} {option:?}");
+            assert_eq!(envelope["diagnostics"][0]["code"], "bad_usage");
+            assert_eq!(envelope["diagnostics"][0]["help"], "attention mark --help");
+            let text = run(&[state, option[0], option[1]]);
+            assert_eq!(text.status.code(), Some(2), "{state} {option:?}");
+            assert!(
+                String::from_utf8_lossy(&text.stderr).starts_with("attention: bad_usage: "),
+                "{state} {option:?}: {text:?}"
+            );
+        }
+    }
+    // Past the command line, an activity state fails on the missing pane.
+    let activity = run(&[
+        "thinking", "--frame", "3", "--label", "x", "--ttl-ms", "5", "--json",
+    ]);
+    assert_eq!(activity.status.code(), Some(1));
+    let help = String::from_utf8(run(&["--help"]).stdout).expect("help");
+    for option in ["--frame", "--label", "--ttl-ms"] {
+        let line = help
+            .lines()
+            .find(|line| line.trim_start().starts_with(option))
+            .expect("option line");
+        assert!(line.contains("thinking, stop and notify only"), "{line}");
+    }
+    for option in ["--source", "--json"] {
+        let line = help
+            .lines()
+            .find(|line| line.trim_start().starts_with(option))
+            .expect("option line");
+        assert!(line.contains("Every state"), "{line}");
+    }
+}
+
 #[test]
 fn query_defaults_errors_and_help_support_agent_composition() {
     use std::io::Write;
