@@ -46,7 +46,7 @@ attention.apply_to_config(config)
 
 ### 2. Build the `attention` command
 
-`wezterm.plugin.require` clones this repository into WezTerm's own plugin directory, and by default the plugin looks for the command only in that copy. Build it there. This needs macOS or Linux (glibc, including aarch64), the two tested platforms, and a Rust toolchain with `cargo` (the minimum version is `rust-version` in `Cargo.toml`). WezTerm creates the directory the first time it loads a config that requires the plugin, so start WezTerm once first.
+`wezterm.plugin.require` clones this repository into WezTerm's own plugin directory, and by default the plugin looks for the command only in that copy. Build it there. This needs macOS or Linux (glibc, including aarch64), the two tested platforms, and a Rust toolchain with `cargo` (the minimum version is 1.94, the `rust-version` in `Cargo.toml`). WezTerm creates the directory the first time it loads a config that requires the plugin, so start WezTerm once first.
 
 ```sh
 case "$(uname)" in
