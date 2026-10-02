@@ -965,7 +965,7 @@ fn session_entries_below(root: &Path, dir: &Path) -> Vec<PathBuf> {
 struct SweepRun<'a> {
     root: &'a Path,
     apply: bool,
-    operation_id: Option<&'a str>,
+    operation_id: &'a str,
     observation: &'a str,
     now: &'a str,
     panes: &'a dyn PaneLister,
@@ -1054,11 +1054,6 @@ fn pane_retention(
         });
         return Ok(false);
     }
-    #[expect(
-        clippy::expect_used,
-        reason = "`sweep` sets an operation id whenever it applies, and a preview returned above"
-    )]
-    let operation = run.operation_id.expect("apply operation id");
     let binding_identity = RecordIdentity::binding(address, launch_id, binding_id);
     // The presence above was taken before the locks, as for a binding's own
     // absence. Under them only the records are checked again.
@@ -1111,7 +1106,7 @@ fn pane_retention(
                 "first_absence" => Ok(CommitPlan {
                     replacements: vec![Replacement::always(
                         probe_path.clone(),
-                        absence_probe_record(address, operation, run.observation)?,
+                        absence_probe_record(address, run.operation_id, run.observation)?,
                     )],
                     ..CommitPlan::reporting((action.to_owned(), Vec::new()))
                 }),
@@ -1230,11 +1225,12 @@ pub fn sweep(
     panes: &dyn PaneLister,
     processes: Option<&dyn ProcessProbe>,
 ) -> Result<(SweepResult, Vec<Diagnostic>)> {
-    // Each apply gets a fresh id, which the absence probes and binding ends
-    // it writes carry and the result reports. A run after an interrupted one
-    // is a new observation, so an absence probe the interrupted run wrote
-    // counts toward an end only once the interval has passed.
-    let operation_id = apply.then(|| Uuid::new_v4().to_string());
+    // Each run gets a fresh id. An apply writes it into its absence probes
+    // and binding ends and reports it; a preview does neither. A run after an
+    // interrupted one is a new observation, so an absence probe the
+    // interrupted run wrote counts toward an end only once the interval has
+    // passed.
+    let operation_id = Uuid::new_v4().to_string();
     if let Some(realm) = realm_filter
         && !hex64_text(realm)
     {
@@ -1375,7 +1371,7 @@ pub fn sweep(
                 let run = SweepRun {
                     root,
                     apply,
-                    operation_id: operation_id.as_deref(),
+                    operation_id: &operation_id,
                     observation: &observation,
                     now: &now,
                     panes,
@@ -1432,11 +1428,6 @@ pub fn sweep(
             }
             continue;
         }
-        #[expect(
-            clippy::expect_used,
-            reason = "`operation_id` is set above whenever `apply` is true, and a preview continues before here"
-        )]
-        let operation = operation_id.as_deref().expect("apply operation id");
         // A fresh look for the decision, taken before the locks: listing panes
         // can take seconds, and a hook writer gives up on these locks after
         // two. Under the locks only the records are checked again.
@@ -1494,7 +1485,7 @@ pub fn sweep(
                 } else if action == "first_absence" {
                     replacements.push(Replacement::always(
                         probe_path.clone(),
-                        absence_probe_record(&address, operation, &observation)?,
+                        absence_probe_record(&address, &operation_id, &observation)?,
                     ));
                 } else if action == "end" {
                     let locked_end =
@@ -1509,7 +1500,7 @@ pub fn sweep(
                     } else {
                         replacements.push(Replacement::always(
                             end_path.clone(),
-                            json!({"kind":"binding_end","schema":manifest()?.record_schema,"address":address,"launch_id":launch_id,"binding_id":binding_id,"reason":"sweep_absent","operation_id":operation,"event_id":Uuid::new_v4().to_string(),"binding_event_id":binding["event_id"],"observed_mono_ns":observation,"written_at_unix_ns":clock.unix_ns20()?}),
+                            json!({"kind":"binding_end","schema":manifest()?.record_schema,"address":address,"launch_id":launch_id,"binding_id":binding_id,"reason":"sweep_absent","operation_id":operation_id,"event_id":Uuid::new_v4().to_string(),"binding_event_id":binding["event_id"],"observed_mono_ns":observation,"written_at_unix_ns":clock.unix_ns20()?}),
                         ));
                     }
                 }
@@ -1709,7 +1700,7 @@ pub fn sweep(
     Ok((
         SweepResult {
             apply,
-            operation_id,
+            operation_id: apply.then_some(operation_id),
             scanned: files.len(),
             details,
             failed_steps: if apply { failed } else { 0 },

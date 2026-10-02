@@ -85,7 +85,7 @@ fn declared_hook(provider: Provider, event: &str) -> bool {
     })
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderAction {
     Binding,
@@ -96,6 +96,7 @@ pub enum ProviderAction {
     End,
     Review,
     Clear,
+    #[default]
     Ignored,
     Observation,
 }
@@ -130,7 +131,7 @@ impl ProviderAction {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ProviderEvent {
     pub source_event: String,
     pub observation: Option<LifecycleObservation>,
@@ -176,24 +177,8 @@ impl ProviderEvent {
 
     fn inert(provider: Option<Provider>) -> Self {
         Self {
-            source_event: String::new(),
-            observation: None,
-            observation_diagnostic: None,
-            action: ProviderAction::Ignored,
             provider,
-            provider_session_id: None,
-            start_source: None,
-            activity_type: None,
-            label: None,
-            agent_id: None,
-            agent_type: None,
-            in_flight_task_ids: None,
-            transcript_path: None,
-            cwd: None,
-            config_dir: None,
-            model: None,
-            diagnostic: None,
-            skip_reason: None,
+            ..Self::default()
         }
     }
 }
@@ -348,27 +333,19 @@ fn parse_provider_common(
         None
     };
     let event = ProviderEvent {
-        source_event: String::new(),
-        observation: None,
-        observation_diagnostic: None,
-        action: ProviderAction::Ignored,
-        provider: Some(provider),
         provider_session_id: Some(provider_session_id),
-        start_source: None,
-        activity_type: None,
         label,
         // Checked before dispatch: a bad child identity ignores the event.
         agent_id: payload
             .get("agent_id")
             .and_then(|value| safe_label(value, "agent_id").ok()),
         agent_type,
-        in_flight_task_ids: None,
         transcript_path,
         cwd,
         config_dir,
         model,
         diagnostic: dropped.diagnostic(),
-        skip_reason: None,
+        ..ProviderEvent::inert(Some(provider))
     };
     Ok(event)
 }
