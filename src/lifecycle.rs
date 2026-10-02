@@ -2394,7 +2394,6 @@ pub fn apply_provider_event_with_outcome(
                 event.action,
                 ProviderAction::Activity | ProviderAction::ParentStop | ProviderAction::Clear
             )),
-            compatibility: Persistence::NotRequested,
             lifecycle: requested(
                 event.observation.is_some() || event.observation_diagnostic.is_some(),
             ),
@@ -2509,7 +2508,6 @@ mod lifecycle_write_tests {
             persistence: HookPersistence {
                 native_state: Persistence::Unconfirmed,
                 activity: Persistence::Unconfirmed,
-                compatibility: Persistence::NotRequested,
                 lifecycle: Persistence::Unconfirmed,
             },
         }));
@@ -2573,10 +2571,6 @@ mod lifecycle_write_tests {
         let evidence = evidence.borrow();
         assert_eq!(evidence.persistence.native_state, Persistence::Confirmed);
         assert_eq!(evidence.persistence.activity, Persistence::Confirmed);
-        assert_eq!(
-            evidence.persistence.compatibility,
-            Persistence::NotRequested
-        );
         assert_eq!(evidence.persistence.lifecycle, Persistence::Unconfirmed);
         assert!(evidence.observation_id.is_none());
         drop(evidence);

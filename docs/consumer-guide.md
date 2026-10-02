@@ -258,13 +258,12 @@ Repeat `--consumer` for multiple executables. Each gets the explicit positive, r
 
 Identity is captured inside the same native application path. Delivery requires a claimed launch, as for lifecycle observations above, and a matching current provider binding. A consumer run for an event admitted through the agent's own pane claim inherits no `WEZTERM_ATTENTION_LAUNCH_ID`, so `attention mark` called from it is refused. The label remains that admitted source even if a newer occupant appears before a consumer acts. No executable runs inside an Attention writer lock.
 
-Persistence reports four independent fields:
+Persistence reports three independent fields:
 
 | Field | What is covered |
 |---|---|
 | `native_state` | All native record effects selected by `action`, excluding lifecycle output: binding/current pointer, activity, the child presence set, binding end, review or clear/removal as applicable |
 | `activity` | The lead activity or activity-clear subset, when selected |
-| `compatibility` | Reserved. Always `not_requested` |
 | `lifecycle` | This callback's requested lifecycle observation |
 
 Each field is `not_requested`, `confirmed`, `rejected` or `unconfirmed`. Confirmed does not require new bytes when the required state already matches. Unconfirmed does not establish that no writes happened. A rejected or unconfirmed requested effect suppresses delivery. Lifecycle preparation/write failure can coexist with confirmed native effects. `observation_id` appears only when the native application confirms writing that observation; it is never a provider request ID or controller token. Optional correlation is omitted when absent.
@@ -289,7 +288,7 @@ attention hooks event claude UserPromptSubmit \
   --consumer-timeout-ms 1000 --include-prompt
 ```
 
-The provider supplies callback JSON on stdin; the executable receives the full scoped delivery. Use `codex` for its equivalent callback. A lead submit starts the turn's `thinking` activity, so `native_state`, `activity` and `lifecycle` are confirmed while `compatibility` stays `not_requested`. A child actor's submit stays observation-only: `lifecycle` is confirmed while the other three are not_requested. Exact means the decoded provider callback string, not original keystrokes, complete multimodal input, or proof that the model processed it. Consumers own markers, correlation, receipts and acceptance decisions. A missed delivery leaves content unavailable for recovery from Attention records.
+The provider supplies callback JSON on stdin; the executable receives the full scoped delivery. Use `codex` for its equivalent callback. A lead submit starts the turn's `thinking` activity, so `native_state`, `activity` and `lifecycle` are all confirmed. A child actor's submit stays observation-only: `lifecycle` is confirmed while the other two are not_requested. Exact means the decoded provider callback string, not original keystrokes, complete multimodal input, or proof that the model processed it. Consumers own markers, correlation, receipts and acceptance decisions. A missed delivery leaves content unavailable for recovery from Attention records.
 
 The whole delivery must fit Attention's hook JSON byte limit. On overflow, available content becomes too_large with text omitted, never truncated; all other availability values stay intact. If metadata alone still exceeds the bound, delivery is not_dispatched. Prompt/reply bodies enter no Attention record, diagnostic or GUI cache. Oversized native stdin is rejected before application; delivery too_large describes admitted content whose serialized envelope exceeds the bound.
 
