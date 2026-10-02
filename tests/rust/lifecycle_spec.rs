@@ -1678,12 +1678,20 @@ fn provider_fixtures_equal_the_closed_action_vocabulary() {
                 "{provider}:{} activity",
                 case["id"]
             );
-            if let Some(expected) = case.get("diagnostic").and_then(Value::as_str) {
-                assert_eq!(
-                    parsed.diagnostic.as_ref().map(|item| item.code.as_str()),
-                    Some(expected)
-                );
-            }
+            assert_eq!(
+                parsed.diagnostic.as_ref().map(|item| item.code.as_str()),
+                case.get("diagnostic").and_then(Value::as_str),
+                "{provider}:{} diagnostic",
+                case["id"]
+            );
+            // An ignored event either names what went wrong or was skipped on
+            // purpose and says why; never both, never neither.
+            assert_eq!(
+                parsed.skip_reason.is_some(),
+                parsed.action == ProviderAction::Ignored && parsed.diagnostic.is_none(),
+                "{provider}:{} skip reason",
+                case["id"]
+            );
             seen.insert(parsed.action.as_str());
         }
     }
@@ -2726,6 +2734,73 @@ fn hooks_event_debug_uses_stderr_and_lifecycle_errors_are_non_strict() {
         &payload,
     );
     assert_eq!(strict.status.code(), Some(1));
+}
+
+#[test]
+fn a_known_event_skipped_on_purpose_passes_strict_and_says_why_only_under_debug() {
+    let setup = Setup::new();
+    setup.claim();
+    for (provider, name, patch, reason) in [
+        (
+            "claude",
+            "Notification",
+            json!({"notification_type":"idle_prompt"}),
+            "idle prompt does not replace terminal activity",
+        ),
+        ("pi", "agent_end", json!({}), "Pi agent_end is not terminal"),
+        (
+            "pi",
+            "session_shutdown",
+            json!({"reason":"reload"}),
+            "Pi reload keeps the current binding",
+        ),
+        (
+            "pi",
+            "message_end",
+            json!({"role":"assistant","stop_reason":"stop"}),
+            "Pi message is not a failed or aborted reply",
+        ),
+    ] {
+        let payload = payload(provider, name, "skipped", patch);
+        let strict = run_hook(
+            &setup,
+            &["hooks", "event", provider, name, "--strict"],
+            &payload,
+        );
+        assert_eq!(strict.status.code(), Some(0), "{name}: {strict:?}");
+        assert!(strict.stdout.is_empty(), "{name}: {strict:?}");
+        assert!(strict.stderr.is_empty(), "{name}: {strict:?}");
+        let debug = run_hook(
+            &setup,
+            &["hooks", "event", provider, name, "--strict", "--debug"],
+            &payload,
+        );
+        assert_eq!(debug.status.code(), Some(0), "{name}: {debug:?}");
+        let envelope: Value =
+            serde_json::from_slice(&debug.stderr).expect("debug envelope on stderr");
+        assert_eq!(envelope["status"], "ok", "{name}");
+        assert_eq!(envelope["diagnostics"], json!([]), "{name}");
+        assert_eq!(envelope["result"]["disposition"], "skipped", "{name}");
+        assert_eq!(envelope["result"]["diagnostic"], Value::Null, "{name}");
+        assert_eq!(envelope["result"]["message"], reason, "{name}");
+    }
+    // A value this build does not know is still a version mismatch.
+    let unknown = run_hook(
+        &setup,
+        &["hooks", "event", "pi", "session_shutdown", "--strict"],
+        &payload(
+            "pi",
+            "session_shutdown",
+            "unknown",
+            json!({"reason":"mystery"}),
+        ),
+    );
+    assert_eq!(unknown.status.code(), Some(1), "{unknown:?}");
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr)
+            .starts_with("attention: integration_version_mismatch: "),
+        "{unknown:?}"
+    );
 }
 
 #[test]

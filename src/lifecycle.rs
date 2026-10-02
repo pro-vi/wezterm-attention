@@ -146,6 +146,9 @@ pub struct LifecycleResult {
     pub disposition: Disposition,
     pub diagnostic: Option<Diagnostic>,
     pub event_id: Option<String>,
+    /// Why a provider event was skipped on purpose; printed only then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 impl LifecycleResult {
@@ -154,6 +157,7 @@ impl LifecycleResult {
             disposition,
             diagnostic: None,
             event_id: None,
+            message: None,
         }
     }
 
@@ -2427,8 +2431,15 @@ fn apply_provider_event_inner(
     evidence: Option<Rc<RefCell<HookEvidence>>>,
 ) -> Result<LifecycleResult> {
     if event.action == ProviderAction::Ignored {
-        let mut result = LifecycleResult::new(Disposition::Ignored);
+        // An event skipped on purpose is accepted with nothing to write, so it
+        // is not a failure under --strict.
+        let mut result = LifecycleResult::new(if event.skip_reason.is_some() {
+            Disposition::Skipped
+        } else {
+            Disposition::Ignored
+        });
         result.diagnostic = event.diagnostic.clone();
+        result.message = event.skip_reason.clone();
         return Ok(result);
     }
     if !crate::protocol::ns20_text(observation) {

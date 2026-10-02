@@ -30,8 +30,8 @@
     { "id": "subagent_start_marks_a_child_running", "event": "SubagentStart", "patch": { "agent_id": "child-a", "agent_type": "Explore" }, "expected": "child_active" },
     { "id": "subagent_start_without_id_is_inert", "event": "SubagentStart", "patch": { "agent_type": "Explore" }, "expected": "ignored", "diagnostic": "record_invalid" },
     { "id": "missing_stop_id_is_inert", "event": "SubagentStop", "patch": { "stop_hook_active": false }, "expected": "ignored", "diagnostic": "record_invalid" },
-    { "id": "background_is_inert", "event": "SessionStart", "patch": { "source": "startup" }, "env": { "CLAUDE_JOB_DIR": "/tmp/job" }, "expected": "ignored" },
-    { "id": "cursor_is_inert", "event": "SessionStart", "patch": { "source": "startup" }, "env": { "CURSOR_AGENT": "1" }, "expected": "ignored" },
+    { "id": "background_is_inert", "event": "SessionStart", "patch": { "source": "startup" }, "env": { "CLAUDE_JOB_DIR": "/tmp/job" }, "expected": "ignored", "diagnostic": "claim_stale" },
+    { "id": "cursor_is_inert", "event": "SessionStart", "patch": { "source": "startup" }, "env": { "CURSOR_AGENT": "1" }, "expected": "ignored", "diagnostic": "claim_stale" },
     { "id": "unknown_source_is_inert", "event": "SessionStart", "patch": { "source": "mystery" }, "expected": "ignored", "diagnostic": "integration_version_mismatch" },
     { "id": "mismatched_event_name_is_inert", "event": "Stop", "patch": { "hook_event_name": "PreToolUse" }, "expected": "ignored", "diagnostic": "record_invalid" }
   ]

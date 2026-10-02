@@ -152,10 +152,29 @@ pub struct ProviderEvent {
     pub config_dir: Option<String>,
     pub model: Option<String>,
     pub diagnostic: Option<Diagnostic>,
+    /// Why the event was skipped on purpose; never set together with
+    /// `diagnostic`.
+    pub skip_reason: Option<String>,
 }
 
 impl ProviderEvent {
     fn ignored(provider: Option<Provider>, code: DiagnosticCode, message: &str) -> Self {
+        Self {
+            diagnostic: Some(Diagnostic::new(code, message)),
+            ..Self::inert(provider)
+        }
+    }
+
+    /// An event the integration knows and deliberately does nothing with:
+    /// nothing went wrong, so it says why without a diagnostic.
+    fn skipped(provider: Provider, reason: &str) -> Self {
+        Self {
+            skip_reason: Some(reason.to_owned()),
+            ..Self::inert(Some(provider))
+        }
+    }
+
+    fn inert(provider: Option<Provider>) -> Self {
         Self {
             source_event: String::new(),
             observation: None,
@@ -173,7 +192,8 @@ impl ProviderEvent {
             cwd: None,
             config_dir: None,
             model: None,
-            diagnostic: Some(Diagnostic::new(code, message)),
+            diagnostic: None,
+            skip_reason: None,
         }
     }
 }
@@ -348,6 +368,7 @@ fn parse_provider_common(
         config_dir,
         model,
         diagnostic: dropped.diagnostic(),
+        skip_reason: None,
     };
     Ok(event)
 }
@@ -589,9 +610,8 @@ fn parse_claude_or_codex(
                 return event;
             }
             if notification == Some("idle_prompt") {
-                return ProviderEvent::ignored(
-                    Some(provider),
-                    DiagnosticCode::IntegrationVersionMismatch,
+                return ProviderEvent::skipped(
+                    provider,
                     "idle prompt does not replace terminal activity",
                 );
             }
@@ -651,6 +671,8 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
             event.action = ProviderAction::Observation
         }
         "tool_execution_end" => event.action = ProviderAction::Observation,
+        // Pi 0.85.1 sends message_end for every message, prompts and tool
+        // results included.
         "message_end" => {
             if payload.get("role").and_then(Value::as_str) != Some("assistant")
                 || !matches!(
@@ -658,10 +680,9 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
                     Some("error" | "aborted")
                 )
             {
-                return ProviderEvent::ignored(
-                    Some(Provider::Pi),
-                    DiagnosticCode::IntegrationVersionMismatch,
-                    "Pi message has no supported attempt outcome",
+                return ProviderEvent::skipped(
+                    Provider::Pi,
+                    "Pi message is not a failed or aborted reply",
                 );
             }
             event.action = ProviderAction::Observation;
@@ -684,11 +705,7 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
         "session_shutdown" => {
             let reason = payload.get("reason").and_then(Value::as_str).unwrap_or("");
             if reason == "reload" {
-                return ProviderEvent::ignored(
-                    Some(Provider::Pi),
-                    DiagnosticCode::IntegrationVersionMismatch,
-                    "Pi reload keeps the current binding",
-                );
+                return ProviderEvent::skipped(Provider::Pi, "Pi reload keeps the current binding");
             }
             if !["quit", "new", "resume", "fork"].contains(&reason) {
                 return ProviderEvent::ignored(
@@ -708,11 +725,7 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
             event.activity_type = Some("stop".to_owned());
         }
         "agent_end" => {
-            return ProviderEvent::ignored(
-                Some(Provider::Pi),
-                DiagnosticCode::IntegrationVersionMismatch,
-                "Pi agent_end is not terminal",
-            );
+            return ProviderEvent::skipped(Provider::Pi, "Pi agent_end is not terminal");
         }
         "bus" => match payload.get("state").and_then(Value::as_str) {
             Some("review") => event.action = ProviderAction::Review,

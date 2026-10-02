@@ -228,6 +228,7 @@ Without `--json`, `mark` and `hooks publish` (unless `--quiet`) print only the s
 Hook commands never exit 2, because Claude Code and Codex read exit 2 as "block": a prompt is dropped, a tool is denied, or a Stop hook makes the agent loop on the error text.
 
 - `hooks event` exits 0 with the reason on stderr, or 1 under `--strict`. That includes a command line it cannot parse, such as a misspelled or removed flag, and a malformed `--consumer` or `--consumer-timeout-ms`.
+- An event the integration knows and records nothing for on purpose, such as Claude Code's `idle_prompt` notification, is `skipped`, not a failure. Without `--consumer` it prints nothing unless `--debug` is given, and exits 0 under `--strict`; with `--consumer` its consumers are not dispatched (`no_admitted_scope`), and `--strict` exits 1. The [record contract](record-contract.md#ordering-and-wall-age) lists these events.
 - A usage error of `hooks describe`, `hooks claim` or `hooks publish`, or an unknown `hooks` subcommand, exits 1. With `--json`, the envelope's `command` names the subcommand.
 - `bin/attention` without the binary exits 0 for any `hooks …` command, or 1 with `--strict`.
 

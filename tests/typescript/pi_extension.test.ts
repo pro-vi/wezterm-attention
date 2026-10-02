@@ -305,7 +305,7 @@ test("v2 dispatch: Pi reload drains queued writes without sending an end event o
 	mkdirSync(bin);
 	writeFileSync(
 		join(bin, "attention"),
-		'#!/bin/sh\nprintf "%s\\n" "$*" >> "$WEZTERM_ATTENTION_TEST_LOG"\nIFS= read -r payload\nprintf "%s\\n" "$payload" >> "$WEZTERM_ATTENTION_TEST_LOG"\ncase "$*" in *session_shutdown*) printf "%s\\n" "attention: integration_version_mismatch: Pi reload keeps the current binding" >&2;; esac\n',
+		'#!/bin/sh\nprintf "%s\\n" "$*" >> "$WEZTERM_ATTENTION_TEST_LOG"\nIFS= read -r payload\nprintf "%s\\n" "$payload" >> "$WEZTERM_ATTENTION_TEST_LOG"\ncase "$*" in *session_shutdown*) printf "%s\\n" "attention: record_invalid: stand-in refusal" >&2;; esac\n',
 	);
 	chmodSync(join(bin, "attention"), 0o755);
 	process.env.WEZTERM_ATTENTION_ROOT = root;

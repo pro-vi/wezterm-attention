@@ -198,6 +198,18 @@ write of the lifecycle observation, which is written last, is reported with what
 to report kept under `replaced`; a failed write of any other record is reported alone (see
 [accepted limitations](accepted-limitations.md#a-record-write-can-be-reported-failed-after-readers-already-see-it)).
 
+The integration records nothing, on purpose, for four events it knows: Claude Code's
+`idle_prompt` notification, Pi's `agent_end`, a Pi `session_shutdown` for a reload, and a Pi
+`message_end` that is not a failed or aborted reply. The bundled Pi extension forwards none of the
+three Pi cases, so they come only from another caller. Such an event answers `skipped` with no
+diagnostic, and the result's `message`, present only then, says why. Without `--consumer` the hook
+prints nothing on stderr unless `--debug` is given, and `--strict` exits 0. With `--consumer` the
+hook prints its JSON envelope on stderr, as for every event, with the result under
+`result.native`; the consumer is not dispatched (`no_admitted_scope`), and `--strict` exits 1 for
+that. An event this build does not recognise is `ignored` with `integration_version_mismatch`: an
+event name the manifest does not declare for that provider, or a value the event depends on that
+this build does not know, such as a `SessionStart` source or a notification type.
+
 A turn that ends without `Stop` still ends the activity when the provider reports the ending. A
 lead Claude `StopFailure` (an API error ended the turn) publishes `notify`, because the user must
 act. A Codex `Interrupt` writes an activity clear for that session, because the user stopped the
