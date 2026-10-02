@@ -247,7 +247,7 @@ Ignored rows are not installation registrations. Pi additionally supplies `exten
 
 ```sh
 export ATTENTION_REPLY_FILE=/absolute/application-data/reply.json
-attention hooks event claude Stop \
+WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude Stop \
   --consumer /absolute/checkout/examples/reply-sink.mjs \
   --consumer-timeout-ms 1000 --include-reply
 ```
@@ -283,7 +283,7 @@ For a submit callback carrying `"prompt":"Check 中文\n"`, these are the exact 
 Register a consumer for submit callbacks using:
 
 ```sh
-attention hooks event claude UserPromptSubmit \
+WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude UserPromptSubmit \
   --consumer /absolute/application/prompt-consumer \
   --consumer-timeout-ms 1000 --include-prompt
 ```
