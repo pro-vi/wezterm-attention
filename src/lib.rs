@@ -44,7 +44,8 @@ pub mod records;
 pub mod wezterm;
 
 pub use launch::{
-    ApplyResult, PublishReport, claim_launch, claim_launch_at_tty, publish_current, publish_realm,
+    ApplyResult, PublicationExclusions, PublishReport, claim_launch, claim_launch_at_tty,
+    publish_current, publish_realm,
 };
 
 use std::collections::BTreeMap;

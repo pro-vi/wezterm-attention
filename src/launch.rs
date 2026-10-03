@@ -5,7 +5,7 @@
 //! told. The crate root re-exports this surface, so these names can move within
 //! the module without moving for a caller.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -40,6 +40,13 @@ pub struct PublishReport {
     pub launches_published: usize,
     pub skipped: usize,
     pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Identities a GUI already sees, scoped to the socket it observed.
+/// These are publication hints, not proof of terminal ownership.
+pub struct PublicationExclusions {
+    pub incarnation_id: String,
+    pub pane_ids: BTreeSet<String>,
 }
 
 fn claim_record(
@@ -490,18 +497,35 @@ pub fn publish_current(
 
 pub fn publish_realm(
     socket_path: &str,
+    exclusions: Option<&PublicationExclusions>,
     env: &BTreeMap<String, String>,
     ports: &RuntimePorts<'_>,
 ) -> Result<PublishReport> {
+    if let Some(exclusions) = exclusions {
+        if !crate::protocol::hex64_text(&exclusions.incarnation_id) {
+            return Err(AttentionError::new(
+                DiagnosticCode::RecordInvalid,
+                "publication exclusions require a 64-character lowercase hex incarnation id",
+            ));
+        }
+        for pane_id in &exclusions.pane_ids {
+            crate::identity::canonical_pane_id(pane_id)?;
+        }
+    }
     let root = state_root(env)?;
     let (realm_id, incarnation_id, _) = crate::identity::socket_identity(socket_path)?;
-    let rows = ports.panes.list(socket_path)?;
+    let mut rows = ports.panes.list(socket_path)?;
     same_incarnation(
         socket_path,
         &realm_id,
         &incarnation_id,
         "during enumeration",
     )?;
+    // An old hint cannot exclude a pane of a replacement server. A replacement
+    // during this operation still fails the checks around enumeration and writes.
+    if let Some(exclusions) = exclusions.filter(|value| value.incarnation_id == incarnation_id) {
+        rows.retain(|row| !exclusions.pane_ids.contains(&row.pane_id));
+    }
     let mut report = PublishReport {
         attempted: rows.len(),
         published: 0,

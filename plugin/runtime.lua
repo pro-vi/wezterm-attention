@@ -332,14 +332,66 @@ return function()
       return argv
     end
 
-    local function spawn_republish(domain, socket, root)
+    --- A live hint about what this GUI already sees. Missing windows, tabs and
+    --- identities leave panes out of the hint, so the writer still publishes them.
+    local function publication_exclusions(socket, root)
+      if type(wezterm.run_child_process) ~= "function" or not wezterm.mux
+          or type(wezterm.mux.all_windows) ~= "function" then return nil end
+      local ok, success, stdout = pcall(wezterm.run_child_process,
+        { root .. "/bin/attention", "tab-source", "--socket", socket })
+      local source = ok and success and parse_tab_source_response(stdout) or nil
+      if not source then return nil end
+      local listed, windows = pcall(wezterm.mux.all_windows)
+      if not listed or type(windows) ~= "table" then return nil end
+      local counts, seen = {}, {}
+      for _, window in ipairs(windows) do
+        local tabs_ok, tabs = pcall(window.tabs, window)
+        for _, tab in ipairs(tabs_ok and type(tabs) == "table" and tabs or {}) do
+          local panes_ok, panes = pcall(tab.panes, tab)
+          for _, pane in ipairs(panes_ok and type(panes) == "table" and panes or {}) do
+            local local_id = pane_method(pane, "pane_id")
+            local pane_domain = pane_method(pane, "get_domain_name")
+            if local_id ~= nil and not seen[local_id]
+                and reader.unix_domain_socket(pane_domain) == socket then
+              seen[local_id] = true
+              local read = resolve_pane_read(pane)
+              if read.kind == "unclaimed" or (read.kind == "claimed"
+                  and read.address.realm_id == source.realm_id
+                  and read.address.incarnation_id == source.incarnation_id) then
+                counts[read.marker_id] = (counts[read.marker_id] or 0) + 1
+              end
+            end
+          end
+        end
+      end
+      local ids = {}
+      for id, count in pairs(counts) do
+        if count == 1 then ids[#ids + 1] = id end
+      end
+      table.sort(ids)
+      if #ids == 0 then return nil end
+      return ids, source.incarnation_id
+    end
+
+    local function spawn_republish(domain, socket, root, selective)
       if type(wezterm.background_child_process) ~= "function" then
         report_error_once("publish-spawn:" .. socket,
           "cannot republish mux identity: background_child_process is unavailable")
         return false
       end
-      local argv = attention_argv(root, M._active_dir,
-        { "hooks", "publish", "--socket", socket, "--quiet" })
+      local arguments = { "hooks", "publish", "--socket", socket, "--quiet" }
+      if selective then
+        local ids, incarnation = publication_exclusions(socket, root)
+        if ids then
+          arguments[#arguments + 1] = "--incarnation-id"
+          arguments[#arguments + 1] = incarnation
+          for _, id in ipairs(ids) do
+            arguments[#arguments + 1] = "--except-pane"
+            arguments[#arguments + 1] = id
+          end
+        end
+      end
+      local argv = attention_argv(root, M._active_dir, arguments)
       local ok, started = pcall(wezterm.background_child_process, argv)
       if not ok or started == false then
         report_error_once("publish-spawn:" .. socket,
@@ -726,6 +778,7 @@ return function()
           token = 0,
           unpublished = true,
           started = false,
+          publication_attempted = false,
         }
         return false
       end
@@ -781,7 +834,12 @@ return function()
       if observation.stable_polls < 2 then return false end
       schedule.started = true
       for _, item in pairs(schedule.window_observations) do item.fresh = false end
-      spawn_republish(domain, socket, root)
+      -- Copied terminal output can name another pane even in a fresh read.
+      -- If identities stay missing, publish fully until this schedule retires;
+      -- restabilizing a changed pane count must not renew the exclusion hint.
+      local selective = not schedule.publication_attempted
+      schedule.publication_attempted = true
+      spawn_republish(domain, socket, root, selective)
       schedule_publish_retry(schedule, opts)
       return true
     end

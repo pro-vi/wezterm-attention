@@ -236,8 +236,8 @@ So the pane publishes who it is: the `attention` command emits the
 `WEZTERM_PANE` user variable and, once a launch has claimed the pane, the
 `WEZTERM_ATTENTION` identity, and `pane:get_user_vars()` reads them back for
 local and mux-client panes alike. The shell integration republishes them at
-every prompt, which covers a reattach; after a reconnect the plugin also runs
-one realm publication itself (see [How it works](#how-it-works)).
+every prompt. The plugin also requests publication when a mux pane has no
+identity, including after a reconnect (see [How it works](#how-it-works)).
 
 **A mux-attached pane that has published nothing shows nothing.** The plugin
 reads and acknowledges nothing for it, and it contributes no indicator to its
@@ -516,7 +516,26 @@ WezTerm rebuilds tab titles when something it knows about changes, and a record 
 
 Set `request_redraw = false` to switch that request off, for a host whose own `update-status` handler already redraws the titles it owns. The redraw action can pass through WezTerm's normal tab-activation path, including terminal focus reporting. It therefore runs only when the window has keyboard focus and a valid active pane. Generated spinner frames use one-second wall-clock buckets, so polls induced by the action see the same frame and terminate. If an action fails, that window logs once and stops requesting redraws.
 
-For mux domains, the poller also recovers identity after a GUI reconnect. It waits for the pane count to be stable across two polls, runs one realm publication, then retries after 2, 5, 10, and 30 seconds while any pane remains unpublished. The child PATH includes `wezterm.executable_dir`; publication writes terminal output and never pane input.
+For mux domains, a pane without a published identity starts a publication
+schedule. After two polls see a stable pane count in a window, its first attempt
+excludes the server pane IDs currently published by live panes on that socket.
+The exclusion set names the socket incarnation; if that incarnation changed
+before the command started, it publishes all panes. Duplicate IDs, unreadable
+panes and claimed identities from another socket scope do not exclude anything.
+With no usable exclusions, the first attempt also publishes all panes.
+
+Published variables can be copied from another terminal, so a selective attempt
+is only an optimization. While identities remain missing, later attempts publish
+the whole realm after waits of 2, 5, 10, then 30 seconds repeatedly. Pane-count
+changes do not grant another selective attempt until the old schedule retires.
+Publication writes terminal output, never pane input, and retains the socket and
+tty checks around those writes. The child PATH includes `wezterm.executable_dir`.
+
+For CLI callers, `hooks publish --socket PATH --incarnation-id ID --except-pane N`
+excludes a canonical server pane ID; repeat `--except-pane` for more IDs. Both
+`--socket` and `--incarnation-id` are required for exclusions. The JSON report's
+`attempted` counts selected panes and `skipped` counts failed publications;
+excluded panes are neither attempted nor failures.
 
 The Lua implementation is split by responsibility under `plugin/`: protocol validation, record reading, runtime polling, tab-order publication and error reporting, title sampling, and formatting. `plugin/init.lua` owns configuration, composition, callback registration, and the public API.
 

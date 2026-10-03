@@ -4345,6 +4345,165 @@ test("a stop hidden behind a higher-ranked review flag is not acknowledged", fun
   assert(#spawned == 0, "the pane showed its review flag, not the notify")
 end)
 
+local function with_publication_capture(callback)
+  local original_run, original_background = wezterm.run_child_process, wezterm.background_child_process
+  local original_windows = wezterm.mux.all_windows
+  local socket = "/tmp/attention-selective-publication.sock"
+  local capture = { spawned = {}, queries = 0, scheduled = {}, socket = socket,
+    source = { socket_path = socket, realm_id = internal.sha256(socket), incarnation_id = string.rep("a", 64) } }
+  wezterm.run_child_process = function(argv)
+    for _, argument in ipairs(argv) do
+      if argument == "tab-source" then
+        capture.queries = capture.queries + 1
+        if capture.on_query then capture.on_query() end
+        if capture.unavailable then return false, "" end
+        return true, encode_json({ schema = 1, command = "tab-source", status = "ok",
+          complete = true, result = capture.source })
+      end
+    end
+    if original_run then return original_run(argv) end
+    return false, ""
+  end
+  wezterm.background_child_process = function(argv)
+    capture.spawned[#capture.spawned + 1] = argv
+    return true
+  end
+  capture.options = { call_after = function(delay, callback)
+    capture.scheduled[#capture.scheduled + 1] = { delay = delay, callback = callback }
+  end }
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({ unix_domains = { { name = "selective", socket_path = socket } } },
+    { auto_poll = false, dir = test_dir, review_key = false, integration_root = writer_root })
+  local ok, err = pcall(callback, instance, capture)
+  wezterm.run_child_process, wezterm.background_child_process = original_run, original_background
+  wezterm.mux.all_windows = original_windows
+  assert(ok, err)
+end
+
+local function publication_exclusions(argv)
+  local ids, incarnation = {}, nil
+  for index, value in ipairs(argv) do
+    if value == "--except-pane" then ids[argv[index + 1]] = true end
+    if value == "--incarnation-id" then incarnation = argv[index + 1] end
+  end
+  return ids, incarnation
+end
+
+test("initial publication excludes live server ids across windows, not GUI-local ids", function()
+  with_publication_capture(function(instance, capture)
+    local first, second = {}, {}
+    for id = 1, 66 do
+      local into = id <= 33 and first or second
+      into[#into + 1] = { id = 18000 + id, published = id, domain = "selective" }
+    end
+    first[#first + 1] = { id = 18067, domain = "selective" }
+    local window = window_double({ window_id = 18000, tabs = { first }, focused = false })
+    window_double({ window_id = 18001, tabs = { second }, focused = false })
+    -- The query runs between the triggering poll and the exclusion read.
+    capture.on_query = function()
+      window:mux_window():tabs()[1]:panes()[1]:get_user_vars().WEZTERM_PANE = "101"
+    end
+    instance.poll(window, capture.options); instance.poll(window, capture.options)
+    assert(#capture.spawned == 1 and capture.queries == 1)
+    local excluded, incarnation = publication_exclusions(capture.spawned[1])
+    assert(incarnation == capture.source.incarnation_id)
+    assert(excluded["101"] and not excluded["1"], "read live identity after the socket query")
+    for id = 2, 66 do assert(excluded[tostring(id)], "missing server id " .. id) end
+    assert(not excluded["18067"] and not excluded["18001"], "never use GUI-local ids")
+  end)
+end)
+
+test("publication exclusions omit duplicate, unreadable and foreign-scope identities", function()
+  with_publication_capture(function(instance, capture)
+    local wire = copy_json(seeded_wire(83) or materialize_v2_fixture(83))
+    wire.address = { pane_id = "7", realm_id = capture.source.realm_id,
+      incarnation_id = capture.source.incarnation_id }
+    local wrong_realm, wrong_incarnation = copy_json(wire), copy_json(wire)
+    wrong_realm.address.realm_id = string.rep("b", 64); wrong_realm.address.pane_id = "8"
+    wrong_incarnation.address.incarnation_id = string.rep("b", 64); wrong_incarnation.address.pane_id = "9"
+    local window = window_double({ window_id = 18010, tabs = { {
+      { id = 18101, published = 1, domain = "selective" }, { id = 18102, domain = "selective" },
+    } }, focused = false })
+    window_double({ window_id = 18011, tabs = { {
+      { id = 18103, published = 1, domain = "selective" },
+      { id = 18104, attention = wire, domain = "selective" },
+      { id = 18105, attention = wrong_realm, domain = "selective" },
+      { id = 18106, attention = wrong_incarnation, domain = "selective" },
+      { id = 18107, published = 10, domain = "other" },
+      { id = 18108, unresolvable = true },
+    }, { tab_id = 181, gone = true } }, focused = false })
+    instance.poll(window, capture.options); instance.poll(window, capture.options)
+    local excluded = publication_exclusions(capture.spawned[1])
+    assert(excluded["7"])
+    for _, id in ipairs({"1", "8", "9", "10"}) do assert(not excluded[id], id .. " is not excludable") end
+  end)
+end)
+
+test("full retries survive pane-count changes and selection resets only after resolution", function()
+  with_publication_capture(function(instance, capture)
+    local entries = { { id = 18201, published = 1, domain = "selective" },
+      { id = 18202, domain = "selective" } }
+    local function window()
+      return window_double({ window_id = 18020, tabs = { entries }, focused = false })
+    end
+    local w = window()
+    instance.poll(w, capture.options); instance.poll(w, capture.options)
+    assert(publication_exclusions(capture.spawned[1])["1"])
+    instance.poll(w, capture.options)
+    capture.scheduled[1].callback()
+    assert(next(publication_exclusions(capture.spawned[2])) == nil, "retry must publish fully")
+    entries[3] = { id = 18203, domain = "selective" }
+    w = window()
+    instance.poll(w, capture.options); instance.poll(w, capture.options)
+    assert(#capture.spawned == 3 and next(publication_exclusions(capture.spawned[3])) == nil)
+    assert(capture.queries == 1, "restabilization must not grant another selective attempt")
+    entries[2].published, entries[3].published = 2, 3
+    instance.poll(window(), capture.options)
+    for _, timer in ipairs(capture.scheduled) do timer.callback() end
+    assert(#capture.spawned == 3, "resolution cancels retries")
+    entries[4] = { id = 18204, domain = "selective" }
+    w = window()
+    instance.poll(w, capture.options); instance.poll(w, capture.options)
+    assert(capture.queries == 2 and publication_exclusions(capture.spawned[4])["3"])
+  end)
+end)
+
+test("publication remains full when socket identity or the pane inventory is unavailable", function()
+  for _, failed in ipairs({ "source", "inventory", "empty" }) do
+    with_publication_capture(function(instance, capture)
+      capture.unavailable = failed == "source"
+      local w = window_double({ window_id = 18030, tabs = { {
+        { id = 18301, published = failed ~= "empty" and 1 or nil, domain = "selective" },
+        { id = 18302, domain = "selective" },
+      } }, focused = false })
+      if failed == "inventory" then wezterm.mux.all_windows = function() error("unavailable") end end
+      instance.poll(w, capture.options); instance.poll(w, capture.options)
+      local excluded, incarnation = publication_exclusions(capture.spawned[1])
+      assert(next(excluded) == nil and incarnation == nil, failed)
+    end)
+  end
+end)
+
+test("a pane-count change during the socket query cannot start another selective attempt", function()
+  with_publication_capture(function(instance, capture)
+    local entries = { { id = 18401, published = 1, domain = "selective" },
+      { id = 18402, domain = "selective" } }
+    local function window()
+      return window_double({ window_id = 18040, tabs = { entries }, focused = false })
+    end
+    capture.on_query = function()
+      capture.on_query = nil
+      entries[3] = { id = 18403, domain = "selective" }
+      local changed = window()
+      instance.poll(changed, capture.options); instance.poll(changed, capture.options)
+    end
+    local w = window()
+    instance.poll(w, capture.options); instance.poll(w, capture.options)
+    assert(capture.queries == 1, "mark the attempt before the socket query can yield")
+    assert(#capture.spawned == 2 and next(publication_exclusions(capture.spawned[1])) == nil)
+  end)
+end)
+
 test("unpublished mux pane schedules one realm publish from the integration root", function()
   local spawned = {}
   local original_background = wezterm.background_child_process

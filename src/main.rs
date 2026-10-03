@@ -168,6 +168,12 @@ struct PublishArgs {
     /// Existing socket path.
     #[arg(long)]
     socket: Option<String>,
+    /// Skip this server pane (repeatable); requires --socket and --incarnation-id.
+    #[arg(long, requires_all = ["socket", "incarnation_id"])]
+    except_pane: Vec<String>,
+    /// Socket incarnation for --except-pane; a different incarnation publishes all panes.
+    #[arg(long, requires = "except_pane")]
+    incarnation_id: Option<String>,
     #[arg(long, conflicts_with = "quiet")]
     json: bool,
     #[arg(long)]
@@ -688,8 +694,16 @@ fn run_hooks_publish(
 ) -> Result<ExitCode, AttentionError> {
     let ports = system_ports();
     let selected_socket = args.socket.as_deref();
+    let exclusions = args.incarnation_id.as_ref().map(|incarnation_id| {
+        wezterm_attention::PublicationExclusions {
+            incarnation_id: incarnation_id.clone(),
+            pane_ids: args.except_pane.iter().cloned().collect(),
+        }
+    });
     let mut report = match selected_socket {
-        Some(socket) => wezterm_attention::publish_realm(socket, environment, &ports),
+        Some(socket) => {
+            wezterm_attention::publish_realm(socket, exclusions.as_ref(), environment, &ports)
+        }
         None => wezterm_attention::publish_current(environment, &ports),
     }?;
     if selected_socket.is_none() {

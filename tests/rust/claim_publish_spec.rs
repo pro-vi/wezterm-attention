@@ -55,6 +55,7 @@ fn c8_socket_rebirth_inside_realm_publication_is_rejected() {
     }]);
     let report = wezterm_attention::publish_realm(
         &environment["WEZTERM_UNIX_SOCKET"],
+        None,
         &environment,
         &ports(&clock, &tty, &panes),
     )
@@ -64,6 +65,74 @@ fn c8_socket_rebirth_inside_realm_publication_is_rejected() {
         report.diagnostics[0].code,
         DiagnosticCode::IncarnationChanged
     );
+}
+
+#[test]
+fn selective_publication_refuses_socket_replacement_even_when_all_rows_are_excluded() {
+    struct ReplacingPanes {
+        socket: PathBuf,
+        listener: Mutex<Option<UnixListener>>,
+    }
+    impl PaneLister for ReplacingPanes {
+        fn list(&self, _: &str) -> wezterm_attention::protocol::Result<Vec<PaneRow>> {
+            fs::remove_file(&self.socket).expect("remove socket");
+            *self.listener.lock().expect("listener") =
+                Some(UnixListener::bind(&self.socket).expect("replace socket"));
+            Ok(vec![PaneRow {
+                pane_id: "42".into(),
+                tty_name: None,
+            }])
+        }
+    }
+    let (scratch, _listener, environment) = setup();
+    let (address, _) = pane_address(&environment).expect("address");
+    let exclusions = wezterm_attention::PublicationExclusions {
+        incarnation_id: address.incarnation_id,
+        pane_ids: ["42".to_owned()].into(),
+    };
+    let panes = ReplacingPanes {
+        socket: scratch.path.join("mux.sock"),
+        listener: Mutex::new(None),
+    };
+    let tty = FakeTty::new();
+    let result = wezterm_attention::publish_realm(
+        &environment["WEZTERM_UNIX_SOCKET"],
+        Some(&exclusions),
+        &environment,
+        &ports(&FixedClock("00000000000000000100"), &tty, &panes),
+    );
+    assert_eq!(
+        result.expect_err("replacement must refuse").diagnostic.code,
+        DiagnosticCode::IncarnationChanged
+    );
+    assert!(tty.writes.lock().expect("writes").is_empty());
+}
+
+#[test]
+fn invalid_publication_exclusions_are_refused_before_pane_enumeration() {
+    let (_scratch, _listener, environment) = setup();
+    let panes = CountingPanes {
+        calls: AtomicUsize::new(0),
+    };
+    let tty = FakeTty::new();
+    for (incarnation, id) in [("wrong".to_owned(), "42"), ("a".repeat(64), "042")] {
+        let exclusions = wezterm_attention::PublicationExclusions {
+            incarnation_id: incarnation,
+            pane_ids: [id.to_owned()].into(),
+        };
+        let result = wezterm_attention::publish_realm(
+            &environment["WEZTERM_UNIX_SOCKET"],
+            Some(&exclusions),
+            &environment,
+            &ports(&FixedClock("00000000000000000100"), &tty, &panes),
+        );
+        assert_eq!(
+            result.expect_err("invalid exclusion").diagnostic.code,
+            DiagnosticCode::RecordInvalid
+        );
+    }
+    assert_eq!(panes.calls.load(Ordering::SeqCst), 0);
+    assert!(tty.writes.lock().expect("writes").is_empty());
 }
 
 impl Scratch {
@@ -530,6 +599,7 @@ fn realm_publish_skips_only_the_row_without_a_tty() {
     ]);
     let report = wezterm_attention::publish_realm(
         &environment["WEZTERM_UNIX_SOCKET"],
+        None,
         &environment,
         &ports(&clock, &tty, &panes),
     )
@@ -1212,6 +1282,7 @@ fn full_tty_output_queue_does_not_block_later_realm_panes() {
     let started = Instant::now();
     let report = wezterm_attention::publish_realm(
         &environment["WEZTERM_UNIX_SOCKET"],
+        None,
         &environment,
         &ports(&clock, &writer, &panes),
     )
@@ -1974,6 +2045,7 @@ fn every_publisher_holds_the_claim_until_its_terminal_write_lands() {
             Box::new(|environment, ports| {
                 let report = wezterm_attention::publish_realm(
                     &environment["WEZTERM_UNIX_SOCKET"],
+                    None,
                     environment,
                     ports,
                 )

@@ -97,6 +97,8 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 
 ### Fixed
 
+- A missing mux-pane identity no longer requires republishing identities that the GUI already sees on the first attempt. Exclusions are read live and scoped to the socket incarnation; full retries preserve reconnect recovery and recovery from copied user variables.
+
 - The plugin's poll no longer slows down as a session runs more sub-agents. It read every sub-agent record the binding had ever written; it now reads the binding's one `children.json`, which holds only the sub-agents running now, and reuses it while its bytes are unchanged. With 100 running sub-agents and the file rewritten before every read, that read took a median 1.57 ms inside WezTerm 20260905-195314-b99b1ca2 on an M5 Max.
 - A sub-agent that runs one long command no longer disappears from its tab after ten minutes. It stays counted until its `SubagentStop`, a Codex parent's `Stop` after its last event, a Claude lead's `Stop` that no longer lists it in `background_tasks` (Claude Code's changelog documents the list from 2.1.145), or its session's end; one whose end is never reported and that Claude Code still lists stays counted until its session ends ([accepted limitations](docs/accepted-limitations.md#a-sub-agent-whose-end-is-never-reported-stays-counted-until-its-session-ends)).
 - A sub-agent whose type is `permission` no longer reads as waiting for permission: only a permission request marks a sub-agent waiting.

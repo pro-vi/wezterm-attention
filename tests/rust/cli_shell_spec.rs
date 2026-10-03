@@ -1,5 +1,6 @@
 use std::fs;
-use std::os::fd::FromRawFd;
+use std::io::Read;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
@@ -686,6 +687,137 @@ fn installer_creates_libexec_in_a_fresh_checkout() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(scratch.0.join("libexec/attention-rs").is_file());
+}
+
+#[test]
+fn publication_exclusions_require_both_socket_and_incarnation() {
+    for args in [
+        vec!["--except-pane", "42"],
+        vec!["--socket", "/unused.sock", "--except-pane", "42"],
+        vec![
+            "--incarnation-id",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+            .args(["hooks", "publish", "--json"])
+            .args(args)
+            .env_clear()
+            .stdin(Stdio::null())
+            .output()
+            .expect("reject incomplete exclusion arguments");
+        assert_eq!(output.status.code(), Some(1));
+        let response: Value = serde_json::from_slice(&output.stdout).expect("usage envelope");
+        assert_eq!(response["status"], "usage_error");
+        assert_eq!(response["diagnostics"][0]["code"], "bad_usage");
+        assert!(response["diagnostics"].to_string().contains("--help"));
+    }
+}
+
+#[test]
+fn selective_publication_writes_only_selected_terminals_and_discards_stale_exclusions() {
+    let scratch = Scratch::new();
+    let socket_path = scratch.0.join("mux.sock");
+    let _listener = UnixListener::bind(&socket_path).expect("bind socket");
+    let (_, incarnation, _) =
+        wezterm_attention::identity::socket_identity(socket_path.to_str().expect("socket path"))
+            .expect("socket identity");
+    let mut terminals: Vec<_> = (0..3)
+        .map(|_| {
+            let (mut master, mut slave) = (0, 0);
+            assert_eq!(
+                unsafe {
+                    libc::openpty(
+                        &mut master,
+                        &mut slave,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    )
+                },
+                0
+            );
+            let path = wezterm_attention::wezterm::tty_path_from_fd(slave).expect("tty name");
+            (
+                unsafe { fs::File::from_raw_fd(master) },
+                unsafe { fs::File::from_raw_fd(slave) },
+                path,
+            )
+        })
+        .collect();
+    let rows: Vec<_> = terminals
+        .iter()
+        .enumerate()
+        .map(|(index, (_, _, tty))| json!({"pane_id": index + 42, "tty_name": tty}))
+        .collect();
+    let wezterm = scratch.0.join("wezterm");
+    fs::write(
+        &wezterm,
+        format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", json!(rows)),
+    )
+    .expect("write pane lister");
+    fs::set_permissions(&wezterm, fs::Permissions::from_mode(0o755)).expect("chmod lister");
+    let mut publish = |expected: &str, excluded: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_attention"));
+        command
+            .args(["hooks", "publish", "--json", "--socket"])
+            .arg(&socket_path)
+            .args(["--incarnation-id", expected])
+            .env_clear()
+            .env("PATH", format!("{}:/usr/bin:/bin", scratch.0.display()))
+            .env("WEZTERM_ATTENTION_DIR", scratch.0.join("state"));
+        for id in excluded {
+            command.args(["--except-pane", id]);
+        }
+        let output = command.output().expect("publish");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let envelope: Value = serde_json::from_slice(&output.stdout).expect("publish envelope");
+        assert_eq!(envelope["complete"], true);
+        assert_eq!(envelope["result"]["skipped"], 0);
+        let counts: Vec<_> = terminals
+            .iter_mut()
+            .map(|(master, slave, _)| {
+                let mut descriptor = libc::pollfd {
+                    fd: master.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let mut bytes = Vec::new();
+                while unsafe { libc::poll(&mut descriptor, 1, 20) } > 0 {
+                    let mut buffer = [0; 4096];
+                    let count = master.read(&mut buffer).expect("read terminal output");
+                    bytes.extend_from_slice(&buffer[..count]);
+                }
+                descriptor.fd = slave.as_raw_fd();
+                assert_eq!(
+                    unsafe { libc::poll(&mut descriptor, 1, 0) },
+                    0,
+                    "publication must not send terminal input"
+                );
+                bytes
+                    .windows(b"SetUserVar=WEZTERM_PANE=".len())
+                    .filter(|part| *part == b"SetUserVar=WEZTERM_PANE=")
+                    .count()
+            })
+            .collect();
+        (envelope, counts)
+    };
+    let (selected, counts) = publish(&incarnation, &["42", "43", "43", "999"]);
+    assert_eq!(counts, [0, 0, 1]);
+    assert_eq!(selected["result"]["attempted"], 1);
+    let (empty, counts) = publish(&incarnation, &["42", "43", "44"]);
+    assert_eq!(counts, [0, 0, 0]);
+    assert_eq!(empty["result"]["attempted"], 0);
+
+    fs::remove_file(&socket_path).expect("replace socket while old listener stays open");
+    let _replacement = UnixListener::bind(&socket_path).expect("replacement socket");
+    let (stale, counts) = publish(&incarnation, &["42", "43", "44"]);
+    assert_eq!(counts, [1, 1, 1]);
+    assert_eq!(stale["result"]["attempted"], 3);
 }
 
 #[test]
