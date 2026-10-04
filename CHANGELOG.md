@@ -97,6 +97,8 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 
 ### Fixed
 
+- A session resumed after its old terminal server is replaced carries your review flag to its new pane at registration. Only the user flag moves, once; a later clear stays clear. A stopped or failed transfer may lose the flag after consuming its source.
+
 - When a pane listing fails, presence checks open at most one listener-probe connection per socket per command. Bindings, inspect, doctor and sweep share the bounded answer while preserving the distinction between a slow server and an exited server.
 
 - A missing mux-pane identity no longer requires republishing identities that the GUI already sees on the first attempt. Exclusions are read live and scoped to the socket incarnation; full retries preserve reconnect recovery and recovery from copied user variables.

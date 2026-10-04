@@ -317,12 +317,27 @@ Which one wins is the configured `priority` order, with the flag standing in for
 `review`: by default `notify > stop > review > thinking`. The flag is never
 acknowledged — `auto_clear` does not include `review` — so a flagged pane
 comes back to `◆` once its `stop` or `notify` has been seen, and stays there
-until you clear it.
+until you clear it, while that pane remains available.
 
 A review is withdrawn only by its owner. A review another source published —
 `attention mark review --source NAME`, or Pi's bus as `pi-bus` — also shows
 `◆`, and `Alt+B` leaves it; `attention mark clear --source NAME` withdraws it.
 
+
+For an agent session, Attention carries your flag when the session registers
+with `resume` in a new pane after its old socket is removed or replaced, or
+after its GUI is proven gone. Closing a pane on a live server does not carry
+it. Only your `user` flag moves; other review owners and activity stay behind.
+The newest prior binding must still be selected by its old pane. A newer retained,
+unflagged binding prevents an older flag from returning.
+
+The first eligible resume consumes the old flag before setting the new one.
+Another resume or a repeated registration does not duplicate it or restore it
+after you clear it. If Attention stops between those two writes, the flag can
+be lost. If `attention sweep --apply` already removed the old records, there
+is nothing to carry. Flags on plain claimed commands remain tied to their
+pane. A provider that delays resume registration carries its flag only when
+that registration arrives.
 ## Existing update-status handler?
 
 By default, the plugin registers its own `update-status` handler to poll pane records. If you already have one (e.g., for a git status bar), use manual polling instead:

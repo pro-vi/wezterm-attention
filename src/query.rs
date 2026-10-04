@@ -22,9 +22,9 @@ use crate::protocol::{
 };
 use crate::records::{
     BINDING_FILE, BindingState, FileRecords, RecordIdentity, RecordRead, RecordReader,
-    binding_ended, binding_path, collect_binding_files, ends_binding, incarnation_dir,
-    name_address, name_path, naming_record, read_record, read_record_typed, record_address,
-    reviews_dir, session_dir, session_entry_path, session_index_path, unreadable_state,
+    binding_ended, collect_binding_files, ends_binding, incarnation_dir, name_address, name_path,
+    naming_record, read_record, read_record_typed, record_address, reviews_dir,
+    session_binding_files, unreadable_state,
 };
 use crate::wezterm::{Clock, GuiWindowLister, PaneLister, ProcessProbe};
 
@@ -1271,47 +1271,6 @@ fn collect_selected_binding_files(
             _ => {}
         }
     }
-}
-
-/// The binding records of one provider session, from the session index, or
-/// None when the index cannot answer and the caller has to walk every
-/// binding: it is not marked complete, or a directory or entry of it could
-/// not be read. An entry whose binding is gone is still listed, and reads as
-/// no record, as a walk would not have found it.
-fn session_binding_files(root: &Path, provider: &str, session: &str) -> Option<Vec<PathBuf>> {
-    read_record(
-        &session_index_path(root),
-        Some("session_index"),
-        &RecordIdentity::unscoped(),
-    )
-    .ok()??;
-    let dir = session_dir(root, provider, session);
-    let entries = match fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
-        Err(_) => return None,
-    };
-    let mut files = Vec::new();
-    for entry in entries {
-        let name = entry.ok()?.file_name();
-        let name = name.to_str()?;
-        // A temporary left by an interrupted write, not an entry.
-        if name.starts_with('.') {
-            continue;
-        }
-        let path = dir.join(name);
-        let record =
-            read_record(&path, Some("session_binding"), &RecordIdentity::unscoped()).ok()??;
-        let address = record_address(&record)?;
-        let launch_id = string(&record, "launch_id")?;
-        let binding_id = string(&record, "binding_id")?;
-        // An entry names the binding its file name was made from, and no other.
-        if session_entry_path(root, provider, session, &address, &launch_id, &binding_id) != path {
-            return None;
-        }
-        files.push(binding_path(root, &address, &launch_id, &binding_id));
-    }
-    Some(files)
 }
 
 /// The binding records that may hold one of these provider sessions: the

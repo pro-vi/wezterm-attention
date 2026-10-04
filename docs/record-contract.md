@@ -368,8 +368,8 @@ and returns unavailable (`nil`) when the scalar ID is observed at multiple full 
 `get_attention_view(pane)` selects the exact pane instead, and carries its source, sub-agent count,
 review flag and the pane's other public facts. Controller ownership is not an Attention fact.
 
-The plugin's two writes go through a hidden command, `attention plugin`, which is the only writer
-of these records and is not a public interface. The plugin is not a process in the pane, so every
+The plugin's writes go through a hidden command, `attention plugin`, which is not a public
+interface. Binding registration can also carry the `user` review under the resume rule below. The plugin is not a process in the pane, so every
 call names the pane by `--realm-id`, `--incarnation-id` and `--pane-id`, and the launch the pane
 published by `--launch-id`. Each write but a withdrawal refuses with `claim_stale` unless the
 pane's claim names that launch, whichever kind of claim it is, and none replaces or removes a
@@ -409,6 +409,24 @@ A held Claude Stop retains native activity `type=stop` and stores validated `hol
 
 Its native lead lifecycle observation retains the original event/actor/time and gains Attention-owned `turn_end` applicability, held state and per-program execution facts. This is written after native effects, not an application claim. Audit is excluded from native replay equality. The native-only observation allowance remains 2048 bytes; a separate 16384-byte allowance includes the annotation field's encoding overhead, for a total 18432-byte item limit. Exact nested notes require depth 9. Pool count/byte and snapshot limits remain unchanged. Registration reserves worst-case escaped audit bytes before native application so optional audit cannot displace native fields. The transient task array and reply are not stored here.
 
+
+An incoming resume registration can move the user review from its newest
+validated previous session binding to a different pane after the old socket
+is gone or replaced by another socket object, or its GUI is proven gone.
+A current server's closed pane, a failed listing, or a ctime-only socket
+metadata change does not qualify. The source claim and current-binding
+pointer must still select that session. Missing or unsupported records and
+ambiguous prior ordering leave the flag unchanged and do not create one.
+
+Registration holds `v2/sessions/<session-key>/.registration.lock` before pane
+locks. Multi-pane groups follow full address order; each group retains launch,
+claim and owner-review order. Both reviews and source selection are rechecked
+under those locks. After writing the destination binding, the writer durably
+consumes the source review before replacing the destination review. An
+existing destination flag is preserved. A failure between the two review
+writes may lose the flag; there is no transfer receipt or retry. A confirmed
+binding never repeats carry. Sweep-removed source records cannot restore a
+flag. See [ADR 0006](adr/0006-user-review-carries-on-session-resume.md).
 ## Consumer boundary
 
 `get_attention_view(pane)` exposes copied base fields plus an independent cached `lifecycle` facet. See the [consumer guide](consumer-guide.md) for exact availability, request/publication relations, acknowledgement meaning, and display ownership. No `answered`, `currently_waiting`, or complete pending-count claim is made.

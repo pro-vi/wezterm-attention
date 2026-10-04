@@ -776,6 +776,56 @@ pub fn session_index_marker() -> Result<Value> {
     Ok(serde_json::json!({"kind": "session_index", "schema": manifest()?.record_schema}))
 }
 
+/// Serializes registrations for one provider session across pane addresses.
+pub(crate) fn session_registration_lock(root: &Path, provider: &str, session: &str) -> PathBuf {
+    session_dir(root, provider, session).join(".registration.lock")
+}
+
+/// The binding records of one provider session, from the session index, or
+/// None when the index cannot answer and the caller has to walk every
+/// binding: it is not marked complete, or a directory or entry of it could
+/// not be read. An entry whose binding is gone is still listed, and reads as
+/// no record, as a walk would not have found it.
+pub(crate) fn session_binding_files(
+    root: &Path,
+    provider: &str,
+    session: &str,
+) -> Option<Vec<PathBuf>> {
+    read_record(
+        &session_index_path(root),
+        Some("session_index"),
+        &RecordIdentity::unscoped(),
+    )
+    .ok()??;
+    let dir = session_dir(root, provider, session);
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let name = entry.ok()?.file_name();
+        let name = name.to_str()?;
+        // Registration locks and interrupted temporary writes are not entries.
+        if name.starts_with('.') {
+            continue;
+        }
+        let path = dir.join(name);
+        let record =
+            read_record(&path, Some("session_binding"), &RecordIdentity::unscoped()).ok()??;
+        let address = record_address(&record)?;
+        let launch_id = record.get("launch_id")?.as_str()?.to_owned();
+        let binding_id = record.get("binding_id")?.as_str()?.to_owned();
+        // An entry names the binding its file name was made from, and no other.
+        if session_entry_path(root, provider, session, &address, &launch_id, &binding_id) != path {
+            return None;
+        }
+        files.push(binding_path(root, &address, &launch_id, &binding_id));
+    }
+    Some(files)
+}
+
 /// Whether an end record ends this binding record, the one rule every reader
 /// and writer applies.
 ///

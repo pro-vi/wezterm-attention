@@ -47,6 +47,9 @@ mod untrusted_text;
 #[path = "lifecycle_spec/session_starts.rs"]
 mod session_starts;
 
+#[path = "lifecycle_spec/review_resume.rs"]
+mod review_resume;
+
 #[path = "lifecycle_spec/turn_endings.rs"]
 mod turn_endings;
 
@@ -326,7 +329,7 @@ impl ProcessInspector for FakeProcesses {
 
 struct Setup {
     _scratch: Scratch,
-    _socket: UnixListener,
+    _socket: Option<UnixListener>,
     env: BTreeMap<String, String>,
     tty: FakeTty,
     panes: FakePanes,
@@ -363,7 +366,7 @@ impl Setup {
         ]);
         Self {
             _scratch: scratch,
-            _socket: socket,
+            _socket: Some(socket),
             env,
             tty,
             panes,

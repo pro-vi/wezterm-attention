@@ -25,10 +25,12 @@ use crate::protocol::{
 };
 use crate::providers::{ProviderAction, ProviderEvent};
 use crate::records::{
-    CommitPlan, PLUGIN_LOCK_TIMEOUT, PreparedRecordWrite, RecordIdentity, RecordRead, Replacement,
-    claim_lock, commit, commit_waiting, ends_binding, launch_lock, pane_dir, read_claim,
-    read_record, read_record_at, read_record_typed, read_record_typed_at, review_lock,
-    session_entry, session_entry_path, state_root, within_read_bound,
+    CommitPlan, LOCK_TIMEOUT, PLUGIN_LOCK_TIMEOUT, PreparedRecordWrite, RecordIdentity, RecordRead,
+    Replacement, atomic_replace, claim_lock, collect_binding_files, commit, commit_waiting,
+    ends_binding, launch_lock, pane_dir, read_claim, read_record, read_record_at,
+    read_record_typed, read_record_typed_at, removal_confined, remove_file_durable, review_lock,
+    session_binding_files, session_entry, session_entry_path, session_registration_lock,
+    state_root, with_lock, within_read_bound,
 };
 use crate::wezterm::RuntimePorts;
 
@@ -475,6 +477,310 @@ fn binding_mutation(
             "binding event has no provider session",
         )
     })?;
+    with_lock(
+        &session_registration_lock(&resolved.root, provider.as_str(), session),
+        LOCK_TIMEOUT,
+        || {
+            let prior = if event.start_source.as_deref() == Some("resume") {
+                resume_review_source(resolved, provider.as_str(), session)
+            } else {
+                Ok(None)
+            };
+            let (prior, diagnostic) = match prior {
+                Ok(prior) => (prior, None),
+                Err(error) => (None, Some(error.diagnostic.with("facet", "review_carry"))),
+            };
+            let mut result = binding_mutation_for_session(
+                resolved,
+                event,
+                observation,
+                written_at,
+                prior.as_ref(),
+            )?;
+            if result.result.diagnostic.is_none() {
+                result.result.diagnostic = diagnostic;
+            }
+            Ok(result)
+        },
+    )
+}
+
+struct ResumeReview {
+    address: PaneAddress,
+    launch_id: String,
+    binding_id: String,
+    binding: Value,
+    socket: String,
+}
+
+fn resume_review_source(
+    resolved: &ResolvedLaunch,
+    provider: &str,
+    session: &str,
+) -> Result<Option<ResumeReview>> {
+    let root = &resolved.root;
+    let files = match session_binding_files(root, provider, session) {
+        Some(files) => files,
+        None => {
+            let mut files = Vec::new();
+            let mut diagnostics = Vec::new();
+            collect_binding_files(root, &mut files, &mut diagnostics);
+            if !diagnostics.is_empty() {
+                return Err(AttentionError::new(
+                    DiagnosticCode::StatePermissions,
+                    "prior session bindings could not all be read",
+                ));
+            }
+            files
+        }
+    };
+    let mut latest: Option<Value> = None;
+    let mut tied = false;
+    for file in files {
+        let identity = RecordIdentity::from_state_path(root, &file, "binding")?;
+        let Some(binding) = read_record(&file, Some("binding"), &identity)? else {
+            continue;
+        };
+        if binding["provider"] != provider || binding["provider_session_id"] != session {
+            continue;
+        }
+        let order = binding["written_at_unix_ns"].as_str().unwrap_or("");
+        match latest
+            .as_ref()
+            .map(|old| order.cmp(old["written_at_unix_ns"].as_str().unwrap_or("")))
+        {
+            None | Some(std::cmp::Ordering::Greater) => {
+                latest = Some(binding);
+                tied = false;
+            }
+            Some(std::cmp::Ordering::Equal) => tied = true,
+            Some(std::cmp::Ordering::Less) => {}
+        }
+    }
+    if tied {
+        return Err(AttentionError::new(
+            DiagnosticCode::BindingConflict,
+            "newest prior session binding is ambiguous; review was not carried",
+        ));
+    }
+    let Some(binding) = latest else {
+        return Ok(None);
+    };
+    let address: PaneAddress =
+        serde_json::from_value(binding["address"].clone()).map_err(AttentionError::record_json)?;
+    if address == resolved.address {
+        return Ok(None);
+    }
+    let Some(socket) =
+        crate::presence::recorded_socket(root, &address.realm_id, &address.incarnation_id)?
+    else {
+        return Ok(None);
+    };
+    let source = ResumeReview {
+        address,
+        launch_id: binding["launch_id"].as_str().unwrap_or("").to_owned(),
+        binding_id: binding["binding_id"].as_str().unwrap_or("").to_owned(),
+        binding,
+        socket,
+    };
+    Ok(source.server_retired(root)?.then_some(source))
+}
+
+impl ResumeReview {
+    fn server_retired(&self, root: &Path) -> Result<bool> {
+        use crate::presence::{RecordedServer, SocketChange, recorded_server};
+        if crate::wezterm::gui_process_exited(&self.socket) {
+            return Ok(true);
+        }
+        match recorded_server(
+            &self.socket,
+            &self.address.realm_id,
+            &self.address.incarnation_id,
+        ) {
+            RecordedServer::Current => Ok(false),
+            RecordedServer::Replaced(SocketChange::Gone) => Ok(true),
+            RecordedServer::Replaced(SocketChange::IdentityChanged) => {
+                let old = read_record_at(
+                    root,
+                    "incarnation",
+                    &RecordIdentity::incarnation(
+                        &self.address.realm_id,
+                        &self.address.incarnation_id,
+                    ),
+                )?;
+                let current = crate::identity::socket_identity(&self.socket);
+                // ctime alone changes under chmod/touch on a still-live socket.
+                // A different socket object retires the old namespace; it may
+                // reuse a pane number, so the new pane list cannot identify it.
+                Ok(old
+                    .zip(current.ok())
+                    .is_some_and(|(old, (_, _, metadata))| {
+                        old["socket_device"].as_str() != Some(metadata.socket_device.as_str())
+                            || old["socket_inode"].as_str() != Some(metadata.socket_inode.as_str())
+                    }))
+            }
+            RecordedServer::Unreadable(error) => Err(error),
+        }
+    }
+
+    fn locks(&self, root: &Path) -> Result<Vec<PathBuf>> {
+        Ok(vec![
+            launch_lock(root, &self.address, &self.launch_id),
+            claim_lock(root, &self.address),
+            review_slot(root, &self.address, USER_REVIEW_OWNER)?.lock,
+        ])
+    }
+
+    fn prepare(&self, resolved: &ResolvedLaunch) -> Result<Option<(PathBuf, Replacement)>> {
+        let root = &resolved.root;
+        if !self.server_retired(root)? {
+            return Ok(None);
+        }
+        let identity = RecordIdentity::binding(&self.address, &self.launch_id, &self.binding_id);
+        if read_record_at(root, "binding", &identity)?.as_ref() != Some(&self.binding) {
+            return Ok(None);
+        }
+        let claim = read_claim(root, &self.address)?;
+        if claim
+            .as_ref()
+            .is_none_or(|claim| !record_matches_launch(claim, &self.address, &self.launch_id))
+        {
+            return Ok(None);
+        }
+        let pointer = read_record_at(
+            root,
+            "current_binding",
+            &RecordIdentity::launch(&self.address, &self.launch_id),
+        )?;
+        if pointer.as_ref().and_then(|p| p["binding_id"].as_str()) != Some(self.binding_id.as_str())
+        {
+            return Ok(None);
+        }
+        let source = review_slot(root, &self.address, USER_REVIEW_OWNER)?;
+        let Some(_) = read_record(&source.path, Some("review"), &source.identity)? else {
+            return Ok(None);
+        };
+        let destination = review_slot(root, &resolved.address, USER_REVIEW_OWNER)?;
+        // Preserve an existing destination flag, including its event identity.
+        let record = match read_record(&destination.path, Some("review"), &destination.identity)? {
+            Some(record) => record,
+            None => {
+                destination
+                    .plan(ReviewChange::Set)?
+                    .replacements
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| {
+                        AttentionError::new(
+                            DiagnosticCode::RecordInvalid,
+                            "user review replacement is missing",
+                        )
+                    })?
+                    .value
+            }
+        };
+        Ok(Some((
+            source.path,
+            Replacement::always(destination.path, record),
+        )))
+    }
+}
+
+fn consume_review_before_replace(
+    root: &Path,
+    source: &Path,
+    destination: &Replacement,
+) -> Result<()> {
+    if !removal_confined(root, source) || !removal_confined(root, &destination.path) {
+        return Err(AttentionError::new(
+            DiagnosticCode::StatePermissions,
+            "review carry path is outside the private state tree",
+        ));
+    }
+    // Consumption is durable before the destination is set. An interrupted
+    // write may lose the flag, but no later registration can carry it again.
+    if remove_file_durable(source)? {
+        atomic_replace(&destination.path, &destination.value)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod review_carry_failure_tests {
+    use super::*;
+
+    #[test]
+    fn consumed_review_is_not_retried_after_destination_write_failure() {
+        let root = std::env::temp_dir().join(format!("carry-{}", Uuid::new_v4()));
+        let address = |pane: &str| PaneAddress {
+            realm_id: "a".repeat(64),
+            incarnation_id: "b".repeat(64),
+            pane_id: pane.to_owned(),
+        };
+        let old_address = address("1");
+        let new_address = address("2");
+        let source = review_slot(&root, &old_address, USER_REVIEW_OWNER).unwrap();
+        let destination = review_slot(&root, &new_address, USER_REVIEW_OWNER).unwrap();
+        crate::records::mkdir_private(source.path.parent().unwrap()).unwrap();
+        crate::records::mkdir_private(destination.path.parent().unwrap()).unwrap();
+        let old = source
+            .plan(ReviewChange::Set)
+            .unwrap()
+            .replacements
+            .remove(0);
+        let new = destination
+            .plan(ReviewChange::Set)
+            .unwrap()
+            .replacements
+            .remove(0);
+        atomic_replace(&old.path, &old.value).unwrap();
+        // The replacement fails after the valid source was consumed.
+        std::fs::create_dir(&new.path).unwrap();
+        assert!(consume_review_before_replace(&root, &old.path, &new).is_err());
+        assert!(!old.path.exists());
+        std::fs::remove_dir(&new.path).unwrap();
+        consume_review_before_replace(&root, &old.path, &new).unwrap();
+        assert!(!new.path.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_symlinked_destination_is_refused_before_consuming_source() {
+        let root = std::env::temp_dir().join(format!("carry-{}", Uuid::new_v4()));
+        let directory = root.join("private");
+        crate::records::mkdir_private(&directory).unwrap();
+        let source = directory.join("source.json");
+        atomic_replace(&source, &json!({"flag": true})).unwrap();
+        let before = std::fs::read(&source).unwrap();
+        let external = root.with_extension("external");
+        crate::records::mkdir_private(&external).unwrap();
+        let sentinel = external.join("review.json");
+        std::fs::write(&sentinel, b"unchanged").unwrap();
+        let link = directory.join("linked");
+        std::os::unix::fs::symlink(&external, &link).unwrap();
+        let replacement = Replacement::always(link.join("review.json"), json!({"flag": true}));
+        assert!(consume_review_before_replace(&root, &source, &replacement).is_err());
+        assert_eq!(std::fs::read(&source).unwrap(), before);
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"unchanged");
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(external).unwrap();
+    }
+}
+
+fn binding_mutation_for_session(
+    resolved: &ResolvedLaunch,
+    event: &ProviderEvent,
+    observation: &str,
+    written_at: &str,
+    prior: Option<&ResumeReview>,
+) -> Result<Mutation> {
+    let provider = event_provider(event)?;
+    let session = event.provider_session_id.as_deref().ok_or_else(|| {
+        AttentionError::new(
+            DiagnosticCode::RecordInvalid,
+            "binding event has no provider session",
+        )
+    })?;
     let source = event.start_source.as_deref().ok_or_else(|| {
         AttentionError::new(
             DiagnosticCode::RecordInvalid,
@@ -486,9 +792,22 @@ fn binding_mutation(
         .binding(&binding_id)
         .path(&resolved.root, "binding")?;
     let pointer_path = resolved.launch().path(&resolved.root, "current_binding")?;
+    let mut locks = vec![resolved.launch_lock(), resolved.claim_lock()];
+    if let Some(prior) = prior {
+        locks.push(review_slot(&resolved.root, &resolved.address, USER_REVIEW_OWNER)?.lock);
+        let mut source_locks = prior.locks(&resolved.root)?;
+        if prior.address < resolved.address {
+            source_locks.extend(locks);
+            locks = source_locks;
+        } else {
+            locks.extend(source_locks);
+        }
+    }
+    let lock_refs: Vec<&Path> = locks.iter().map(PathBuf::as_path).collect();
+    let carry = RefCell::new(None);
     let (mutation, _) = commit(
         &resolved.root,
-        &[&resolved.launch_lock(), &resolved.claim_lock()],
+        &lock_refs,
         "current_binding",
         &resolved.launch(),
         |pointer| {
@@ -503,6 +822,7 @@ fn binding_mutation(
             )?;
             let existing =
                 read_record_at(&resolved.root, "binding", &resolved.binding(&binding_id))?;
+            let is_new_binding = existing.is_none();
             if let Some(current) = &current
                 && current.get("binding_id").and_then(Value::as_str) != Some(binding_id.as_str())
             {
@@ -655,6 +975,21 @@ fn binding_mutation(
                     ),
                 );
             }
+            let mut result = result;
+            if is_new_binding
+                && matches!(
+                    result.disposition,
+                    Disposition::Applied | Disposition::Replaced
+                )
+                && let Some(prior) = prior
+            {
+                match prior.prepare(resolved) {
+                    Ok(prepared) => *carry.borrow_mut() = prepared,
+                    Err(error) => {
+                        result.diagnostic = Some(error.diagnostic.with("facet", "review_carry"))
+                    }
+                }
+            }
             Ok(CommitPlan {
                 replacements,
                 ..CommitPlan::reporting(Mutation::plain(result))
@@ -662,6 +997,9 @@ fn binding_mutation(
         },
         |mutation| {
             confirm_native(resolved, &binding_id, mutation);
+            if let Some((source, destination)) = carry.borrow_mut().take() {
+                consume_review_before_replace(&resolved.root, &source, &destination)?;
+            }
             Ok(())
         },
     )?;
@@ -1560,7 +1898,8 @@ fn safe_mark_text(value: &str, field: &str, maximum: usize) -> Result<()> {
 }
 
 /// The review key owns the review named "user", the user's own flag, and
-/// only `attention plugin` writes it; a producer that used the name would
+/// `attention plugin` writes it, and a checked resume can carry it after
+/// server loss; a producer that used the name would
 /// share that file and clear or forge the user's flag.
 const USER_REVIEW_OWNER: &str = "user";
 
