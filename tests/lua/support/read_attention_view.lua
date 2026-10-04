@@ -36,6 +36,13 @@ local function run()
     return "user_review=" .. tostring(internal.user_review_present(read, dir))
   end
   local view = internal.read_attention_view(read, now, { dir = dir, glob = wezterm.glob })
+  if os.getenv("WEZTERM_ATTENTION_VIEW_QUESTION") == "held_render" then
+    internal.attention_cache[read.cache_key] = view
+    local visible = internal.resolve_visible_attention({ read.cache_key })
+    return string.format("raw=%s shown=%s held=%s indicator=%s published=%s color=%s",
+      tostring(view.activity_type), tostring(view.type), tostring(view.turn_end_held),
+      visible.indicator, visible.still_indicator, tostring(visible.color))
+  end
   return string.format("activity=%s source=%s",
     tostring(view.activity_type or "none"), tostring(view.source or "none"))
 end

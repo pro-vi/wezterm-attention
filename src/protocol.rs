@@ -318,6 +318,7 @@ pub struct Manifest {
     pub lifecycle_variants: BTreeMap<String, ShapeSpec>,
     pub lifecycle_enums: BTreeMap<String, BTreeSet<String>>,
     pub lifecycle_sources: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    pub turn_end_sources: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -361,6 +362,7 @@ pub struct Limits {
     pub lifecycle_pool_max_bytes: usize,
     pub lifecycle_envelope_max_bytes: usize,
     pub lifecycle_observation_max_bytes: usize,
+    pub lifecycle_native_observation_max_bytes: usize,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -391,6 +393,15 @@ pub struct ShapeSpec {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldType {
+    HoldNotes,
+    HoldNote,
+    HoldCheckArray,
+    HoldCheckStage,
+    HoldCheckBypass,
+    TurnEndStatus,
+    UnsignedInteger,
+    ExitCode,
+    TurnEnd,
     LifecyclePools,
     ObservationPool,
     ObservationArray,
@@ -696,6 +707,38 @@ fn validate_field(
 ) -> bool {
     let limits = &protocol.limits;
     match field_type {
+        FieldType::HoldNote => {
+            fits_lifecycle_shape("hold_note", value, protocol)
+                && serde_json::from_value::<crate::hold_check::HoldNote>(value.clone())
+                    .is_ok_and(|note| note.valid())
+        }
+        FieldType::HoldNotes => value.as_object().is_some_and(|notes| {
+            !notes.is_empty()
+                && notes.iter().all(|(name, note)| {
+                    name.len() <= limits.safe_label_max_bytes
+                        && crate::hold_check::valid_name(name)
+                        && validate_field(FieldType::HoldNote, note, protocol, None)
+                })
+        }),
+        FieldType::HoldCheckArray => value.as_array().is_some_and(|checks| {
+            checks.iter().all(|check| {
+                fits_lifecycle_shape("hold_check_outcome", check, protocol)
+                    && serde_json::from_value::<crate::hold_check::HoldCheckOutcome>(check.clone())
+                        .is_ok_and(|check| check.valid())
+            })
+        }),
+        FieldType::TurnEnd => {
+            fits_lifecycle_shape("turn_end", value, protocol)
+                && serde_json::from_value::<crate::observations::TurnEnd>(value.clone())
+                    .is_ok_and(|end| end.valid())
+        }
+        FieldType::HoldCheckStage => in_lifecycle_enum("hold_check_stage", value, protocol),
+        FieldType::HoldCheckBypass => in_lifecycle_enum("hold_check_bypass", value, protocol),
+        FieldType::TurnEndStatus => in_lifecycle_enum("turn_end_status", value, protocol),
+        FieldType::UnsignedInteger => value.as_u64().is_some(),
+        FieldType::ExitCode => value
+            .as_i64()
+            .is_some_and(|code| i32::try_from(code).is_ok()),
         FieldType::LifecyclePools => fits_lifecycle_shape("pools", value, protocol),
         FieldType::ObservationPool => fits_lifecycle_shape("pool", value, protocol),
         FieldType::NativeCorrelation => fits_lifecycle_shape("correlation", value, protocol),
@@ -860,6 +903,11 @@ pub fn parse_record_value(value: &Value, protocol: &Manifest) -> Verdict {
         return Verdict::RecordInvalid;
     }
     let digest_matches = match kind {
+        "activity" if value.get("hold_notes").is_some() => {
+            value["type"] == "stop"
+                && value["source"] == "claude"
+                && value["target"]["kind"] == "binding"
+        }
         kind if is_lifecycle_snapshot_kind(kind) => {
             crate::observations::LifecycleSnapshot::deserialize(value)
                 .is_ok_and(|snapshot| snapshot.validate_semantics().is_ok())

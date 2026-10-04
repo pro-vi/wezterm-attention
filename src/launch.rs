@@ -990,11 +990,11 @@ pub(crate) fn confirm_inherited_host(
     ports: &RuntimePorts<'_>,
     address: &PaneAddress,
     claim: &Value,
-) -> Result<()> {
+) -> Result<Option<HostProof>> {
     if !env.contains_key("WEZTERM_ATTENTION_HOST_PID") || !ports.processes.self_claim_supported() {
-        return Ok(());
+        return Ok(None);
     }
-    HostProof::of_shell_claim(env, ports, address, claim).map(|_| ())
+    HostProof::of_shell_claim(env, ports, address, claim).map(Some)
 }
 
 /// A launch resolved for an agent event that carries no launch id: the claim

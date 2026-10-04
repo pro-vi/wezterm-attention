@@ -208,11 +208,12 @@
     "subagent_ttl_ms": 600000,
     "max_json_bytes": 1048576,
     "lifecycle_max_json_bytes": 262144,
-    "lifecycle_max_depth": 8,
+    "lifecycle_max_depth": 9,
     "lifecycle_pool_max_count": 64,
     "lifecycle_pool_max_bytes": 122880,
     "lifecycle_envelope_max_bytes": 16384,
-    "lifecycle_observation_max_bytes": 2048
+    "lifecycle_observation_max_bytes": 18432,
+    "lifecycle_native_observation_max_bytes": 2048
   },
   "enums": {
     "activity_types": ["thinking", "stop", "notify"],
@@ -428,6 +429,55 @@
         "elicitation_id": "safe_label",
         "message_id": "safe_label"
       }
+    },
+    "hold_note": {
+      "required": [
+        "hold",
+        "answer"
+      ],
+      "optional": [],
+      "types": {
+        "hold": "boolean",
+        "answer": "safe_label"
+      }
+    },
+    "hold_check_outcome": {
+      "required": [
+        "name",
+        "executable",
+        "stage",
+        "elapsed_ms"
+      ],
+      "optional": [
+        "check_id",
+        "exit_code",
+        "reason",
+        "note"
+      ],
+      "types": {
+        "name": "safe_label",
+        "executable": "absolute_path",
+        "stage": "hold_check_stage",
+        "elapsed_ms": "unsigned_integer",
+        "check_id": "uuid",
+        "exit_code": "exit_code",
+        "reason": "hold_check_bypass",
+        "note": "hold_note"
+      }
+    },
+    "turn_end": {
+      "required": [
+        "status",
+        "hold_checks"
+      ],
+      "optional": [
+        "held"
+      ],
+      "types": {
+        "status": "turn_end_status",
+        "held": "boolean",
+        "hold_checks": "hold_check_array"
+      }
     }
   },
   "lifecycle_variants": {
@@ -589,7 +639,8 @@
       "optional": [
         "source_version",
         "correlation",
-        "stop_hook_active"
+        "stop_hook_active",
+        "turn_end"
       ],
       "types": {
         "kind": "record_kind",
@@ -600,7 +651,8 @@
         "written_at_unix_ns": "unix_ns20",
         "actor": "lifecycle_actor",
         "correlation": "native_correlation",
-        "stop_hook_active": "boolean"
+        "stop_hook_active": "boolean",
+        "turn_end": "turn_end"
       }
     },
     "run_settled": {
@@ -614,7 +666,8 @@
       ],
       "optional": [
         "source_version",
-        "correlation"
+        "correlation",
+        "turn_end"
       ],
       "types": {
         "kind": "record_kind",
@@ -624,7 +677,8 @@
         "observed_mono_ns": "monotonic_ns20",
         "written_at_unix_ns": "unix_ns20",
         "actor": "lifecycle_actor",
-        "correlation": "native_correlation"
+        "correlation": "native_correlation",
+        "turn_end": "turn_end"
       }
     },
     "attempt_outcome": {
@@ -640,7 +694,8 @@
       "optional": [
         "source_version",
         "correlation",
-        "error_category"
+        "error_category",
+        "turn_end"
       ],
       "types": {
         "kind": "record_kind",
@@ -652,7 +707,8 @@
         "actor": "lifecycle_actor",
         "correlation": "native_correlation",
         "outcome": "attempt_outcome",
-        "error_category": "error_category"
+        "error_category": "error_category",
+        "turn_end": "turn_end"
       }
     },
     "user_interrupt": {
@@ -666,7 +722,8 @@
       ],
       "optional": [
         "source_version",
-        "correlation"
+        "correlation",
+        "turn_end"
       ],
       "types": {
         "kind": "record_kind",
@@ -676,7 +733,8 @@
         "observed_mono_ns": "monotonic_ns20",
         "written_at_unix_ns": "unix_ns20",
         "actor": "lifecycle_actor",
-        "correlation": "native_correlation"
+        "correlation": "native_correlation",
+        "turn_end": "turn_end"
       }
     },
     "elicitation_requested": {
@@ -857,6 +915,29 @@
       "manual",
       "threshold",
       "overflow"
+    ],
+    "hold_check_stage": [
+      "not_dispatched",
+      "not_started",
+      "completed",
+      "failed",
+      "stdin_failed",
+      "stdout_failed",
+      "timed_out",
+      "invalid_output",
+      "output_too_large"
+    ],
+    "hold_check_bypass": [
+      "not_applicable",
+      "no_current_scope",
+      "reply_unavailable",
+      "input_too_large",
+      "total_deadline"
+    ],
+    "turn_end_status": [
+      "recorded",
+      "superseded",
+      "unconfirmed"
     ]
   },
   "wire": {
@@ -950,7 +1031,12 @@
     },
     "activity": {
       "required": ["kind", "schema", "address", "launch_id", "target", "event_id", "type", "source", "observed_mono_ns", "written_at_unix_ns"],
-      "optional": ["frame", "label", "ttl_ms"],
+      "optional": [
+        "frame",
+        "label",
+        "ttl_ms",
+        "hold_notes"
+      ],
       "types": {
         "kind": "record_kind",
         "schema": "record_schema",
@@ -964,7 +1050,8 @@
         "written_at_unix_ns": "unix_ns20",
         "frame": "nonnegative_integer",
         "label": "safe_label",
-        "ttl_ms": "positive_integer"
+        "ttl_ms": "positive_integer",
+        "hold_notes": "hold_notes"
       }
     },
     "activity_clear": {
@@ -1114,6 +1201,29 @@
         "kind": "record_kind",
         "schema": "record_schema"
       }
+    }
+  },
+  "turn_end_sources": {
+    "claude": {
+      "response_finished": [
+        "Stop"
+      ],
+      "attempt_outcome": [
+        "StopFailure"
+      ]
+    },
+    "codex": {
+      "response_finished": [
+        "Stop"
+      ],
+      "user_interrupt": [
+        "Interrupt"
+      ]
+    },
+    "pi": {
+      "run_settled": [
+        "agent_settled"
+      ]
     }
   }
 }

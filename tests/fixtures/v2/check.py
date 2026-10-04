@@ -96,7 +96,47 @@ def validate_typed_field(
     expected_kind: str | None,
 ) -> None:
     limits = manifest["limits"]
-    if field_type in {"lifecycle_pools", "observation_pool", "native_correlation"}:
+    if field_type == "hold_note":
+        validate_shape(value, manifest["lifecycle_shapes"]["hold_note"], manifest, None)
+        if value["hold"] is not True or not re.fullmatch(r"[a-z][a-z0-9_]*", value["answer"]):
+            raise InvalidRecord("invalid hold note")
+    elif field_type == "hold_notes":
+        if not isinstance(value, dict) or not value:
+            raise InvalidRecord("invalid hold notes")
+        for name, note in value.items():
+            if not is_safe_text(name, limits["safe_label_max_bytes"]) or not re.fullmatch(r"[a-z][a-z0-9_-]*", name):
+                raise InvalidRecord("invalid hold name")
+            validate_typed_field("hold_note", note, manifest, None)
+    elif field_type == "hold_check_array":
+        if not isinstance(value, list):
+            raise InvalidRecord("invalid check array")
+        for check in value:
+            validate_shape(check, manifest["lifecycle_shapes"]["hold_check_outcome"], manifest, None)
+            bypassed = check["stage"] == "not_dispatched"
+            if (not re.fullmatch(r"[a-z][a-z0-9_-]*", check["name"])
+                or bypassed != ("reason" in check) or bypassed != ("check_id" not in check)
+                or (bypassed and check["elapsed_ms"] != 0)
+                or ((bypassed or check["stage"] == "not_started") and "exit_code" in check)
+                or (check["stage"] == "completed" and check.get("exit_code") != 0)
+                or ("note" in check and (check["stage"] != "completed" or check.get("exit_code") != 0))):
+                raise InvalidRecord("invalid check outcome")
+    elif field_type == "turn_end":
+        validate_shape(value, manifest["lifecycle_shapes"]["turn_end"], manifest, None)
+        names = [check["name"] for check in value["hold_checks"]]
+        held = any("note" in check for check in value["hold_checks"])
+        if len(names) != len(set(names)):
+            raise InvalidRecord("duplicate check name")
+        if value["status"] == "unconfirmed":
+            if "held" in value: raise InvalidRecord("unconfirmed hold claim")
+        elif value.get("held") is not (value["status"] == "recorded" and held):
+            raise InvalidRecord("hold state disagrees")
+    elif field_type == "unsigned_integer":
+        if type(value) is not int or not 0 <= value <= 2**64 - 1:
+            raise InvalidRecord("invalid unsigned integer")
+    elif field_type == "exit_code":
+        if type(value) is not int or not -(2**31) <= value < 2**31:
+            raise InvalidRecord("invalid exit code")
+    elif field_type in {"lifecycle_pools", "observation_pool", "native_correlation"}:
         name = {"lifecycle_pools": "pools", "observation_pool": "pool", "native_correlation": "correlation"}[field_type]
         validate_shape(value, manifest["lifecycle_shapes"][name], manifest, None)
     elif field_type == "lifecycle_actor":
@@ -262,6 +302,10 @@ def parse_record(value: Any, manifest: dict[str, Any]) -> str:
         return "record_invalid"
     try:
         validate_shape(value, spec, manifest, kind)
+        if kind == "activity" and "hold_notes" in value and (
+            value["type"] != "stop" or value["source"] != "claude" or value["target"]["kind"] != "binding"
+        ):
+            raise InvalidRecord("hold notes require a Claude binding stop")
         if kind in LIFECYCLE_SNAPSHOT_KINDS:
             validate_lifecycle(value, manifest)
         if kind == "child_presence_set":
@@ -391,6 +435,17 @@ def validate_lifecycle(value: dict[str, Any], manifest: dict[str, Any]) -> None:
                         raise InvalidRecord("async question is root only")
                     if kind == "tool_result" and (item["source_event"] != "PostToolUse" or item["result_surface"] != "post_hook" or item.get("is_error") is True or item.get("interrupted") is True):
                         raise InvalidRecord("invalid publication result")
+            native = {key: field for key, field in item.items() if key != "turn_end"}
+            if compact_size(native) > limits["lifecycle_native_observation_max_bytes"]:
+                raise InvalidRecord("native observation bound")
+            if "turn_end" in item:
+                end = item["turn_end"]
+                sources = manifest["turn_end_sources"].get(value["provider"], {}).get(kind, [])
+                if (actor["kind"] != "lead" or item["source_event"] not in sources
+                    or compact_size(item) - compact_size(native) > limits["lifecycle_envelope_max_bytes"]
+                    or (any("note" in check for check in end["hold_checks"])
+                        and (value["provider"] != "claude" or item["source_event"] != "Stop"))):
+                    raise InvalidRecord("invalid annotated turn end")
             if name != ("requests" if request else "general") or compact_size(item) > limits["lifecycle_observation_max_bytes"]:
                 raise InvalidRecord("observation membership or bound")
             if item["observed_mono_ns"] <= pool.get("retention_floor_mono_ns", ""):

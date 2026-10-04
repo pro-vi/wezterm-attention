@@ -1008,6 +1008,7 @@ fn observation_for_body(
         uuid::Uuid::new_v4().to_string()
     };
     Ok(LifecycleObservation {
+        turn_end: None,
         observation_id,
         source_event: event_name.to_owned(),
         source_version: None,

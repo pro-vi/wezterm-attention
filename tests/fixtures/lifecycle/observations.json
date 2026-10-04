@@ -1239,6 +1239,778 @@
           }
         }
       }
+    },
+    {
+      "id": "hold_turn_recorded",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 3,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "claude",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "response_finished",
+                "observation_id": "00000000-0000-4000-8000-000000000015",
+                "source_event": "Stop",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "turn_end": {
+                  "status": "recorded",
+                  "held": true,
+                  "hold_checks": [
+                    {
+                      "name": "jev",
+                      "executable": "/opt/example/check",
+                      "stage": "completed",
+                      "elapsed_ms": 240,
+                      "check_id": "11111111-1111-4111-8111-111111111111",
+                      "exit_code": 0,
+                      "note": {
+                        "hold": true,
+                        "answer": "waiting_on_own_work"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "expected": "valid"
+    },
+    {
+      "id": "hold_turn_superseded",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 3,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "claude",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "response_finished",
+                "observation_id": "00000000-0000-4000-8000-000000000015",
+                "source_event": "Stop",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "turn_end": {
+                  "status": "superseded",
+                  "held": false,
+                  "hold_checks": [
+                    {
+                      "name": "jev",
+                      "executable": "/opt/example/check",
+                      "stage": "completed",
+                      "elapsed_ms": 240,
+                      "check_id": "11111111-1111-4111-8111-111111111111",
+                      "exit_code": 0,
+                      "note": {
+                        "hold": true,
+                        "answer": "waiting_on_own_work"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "expected": "valid"
+    },
+    {
+      "id": "hold_turn_unconfirmed",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 3,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "claude",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "response_finished",
+                "observation_id": "00000000-0000-4000-8000-000000000015",
+                "source_event": "Stop",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "turn_end": {
+                  "status": "unconfirmed",
+                  "hold_checks": [
+                    {
+                      "name": "jev",
+                      "executable": "/opt/example/check",
+                      "stage": "completed",
+                      "elapsed_ms": 240,
+                      "check_id": "11111111-1111-4111-8111-111111111111",
+                      "exit_code": 0,
+                      "note": {
+                        "hold": true,
+                        "answer": "waiting_on_own_work"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "expected": "valid"
+    },
+    {
+      "id": "hold_turn_timed_out",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 3,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "claude",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "response_finished",
+                "observation_id": "00000000-0000-4000-8000-000000000015",
+                "source_event": "Stop",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "turn_end": {
+                  "status": "recorded",
+                  "held": false,
+                  "hold_checks": [
+                    {
+                      "name": "jev",
+                      "executable": "/opt/example/check",
+                      "stage": "timed_out",
+                      "elapsed_ms": 240,
+                      "check_id": "11111111-1111-4111-8111-111111111111"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "expected": "valid"
+    },
+    {
+      "id": "hold_turn_mismatched_bool",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 3,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "claude",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "response_finished",
+                "observation_id": "00000000-0000-4000-8000-000000000015",
+                "source_event": "Stop",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "turn_end": {
+                  "status": "recorded",
+                  "held": false,
+                  "hold_checks": [
+                    {
+                      "name": "jev",
+                      "executable": "/opt/example/check",
+                      "stage": "completed",
+                      "elapsed_ms": 240,
+                      "check_id": "11111111-1111-4111-8111-111111111111",
+                      "exit_code": 0,
+                      "note": {
+                        "hold": true,
+                        "answer": "waiting_on_own_work"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "expected": "record_invalid"
+    },
+    {
+      "id": "hold_turn_duplicate_program",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 3,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "claude",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "response_finished",
+                "observation_id": "00000000-0000-4000-8000-000000000015",
+                "source_event": "Stop",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "turn_end": {
+                  "status": "recorded",
+                  "held": true,
+                  "hold_checks": [
+                    {
+                      "name": "jev",
+                      "executable": "/opt/example/check",
+                      "stage": "completed",
+                      "elapsed_ms": 240,
+                      "check_id": "11111111-1111-4111-8111-111111111111",
+                      "exit_code": 0,
+                      "note": {
+                        "hold": true,
+                        "answer": "waiting_on_own_work"
+                      }
+                    },
+                    {
+                      "name": "jev",
+                      "executable": "/opt/example/check",
+                      "stage": "completed",
+                      "elapsed_ms": 240,
+                      "check_id": "11111111-1111-4111-8111-111111111111",
+                      "exit_code": 0,
+                      "note": {
+                        "hold": true,
+                        "answer": "waiting_on_own_work"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "expected": "record_invalid"
+    },
+    {
+      "id": "hold_turn_failed_note",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 3,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "claude",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "response_finished",
+                "observation_id": "00000000-0000-4000-8000-000000000015",
+                "source_event": "Stop",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "turn_end": {
+                  "status": "recorded",
+                  "held": true,
+                  "hold_checks": [
+                    {
+                      "name": "jev",
+                      "executable": "/opt/example/check",
+                      "stage": "failed",
+                      "elapsed_ms": 240,
+                      "check_id": "11111111-1111-4111-8111-111111111111",
+                      "exit_code": 1,
+                      "note": {
+                        "hold": true,
+                        "answer": "waiting_on_own_work"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "expected": "record_invalid"
+    },
+    {
+      "id": "hold_turn_missing_zero_exit",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 3,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "claude",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "response_finished",
+                "observation_id": "00000000-0000-4000-8000-000000000015",
+                "source_event": "Stop",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "turn_end": {
+                  "status": "recorded",
+                  "held": true,
+                  "hold_checks": [
+                    {
+                      "name": "jev",
+                      "executable": "/opt/example/check",
+                      "stage": "completed",
+                      "elapsed_ms": 240,
+                      "check_id": "11111111-1111-4111-8111-111111111111",
+                      "note": {
+                        "hold": true,
+                        "answer": "waiting_on_own_work"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "expected": "record_invalid"
+    },
+    {
+      "id": "hold_turn_unknown_stage",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 3,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "claude",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "response_finished",
+                "observation_id": "00000000-0000-4000-8000-000000000015",
+                "source_event": "Stop",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "turn_end": {
+                  "status": "recorded",
+                  "held": true,
+                  "hold_checks": [
+                    {
+                      "name": "jev",
+                      "executable": "/opt/example/check",
+                      "stage": "unknown",
+                      "elapsed_ms": 240,
+                      "check_id": "11111111-1111-4111-8111-111111111111",
+                      "exit_code": 0,
+                      "note": {
+                        "hold": true,
+                        "answer": "waiting_on_own_work"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "expected": "record_invalid"
+    },
+    {
+      "id": "hold_turn_false_note",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 3,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "claude",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "response_finished",
+                "observation_id": "00000000-0000-4000-8000-000000000015",
+                "source_event": "Stop",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "turn_end": {
+                  "status": "recorded",
+                  "held": true,
+                  "hold_checks": [
+                    {
+                      "name": "jev",
+                      "executable": "/opt/example/check",
+                      "stage": "completed",
+                      "elapsed_ms": 240,
+                      "check_id": "11111111-1111-4111-8111-111111111111",
+                      "exit_code": 0,
+                      "note": {
+                        "hold": false,
+                        "answer": "waiting_on_own_work"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "expected": "record_invalid"
+    },
+    {
+      "id": "hold_turn_on_prompt",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 3,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "claude",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "prompt_submitted",
+                "observation_id": "00000000-0000-4000-8000-000000000015",
+                "source_event": "UserPromptSubmit",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "turn_end": {
+                  "status": "recorded",
+                  "held": true,
+                  "hold_checks": [
+                    {
+                      "name": "jev",
+                      "executable": "/opt/example/check",
+                      "stage": "completed",
+                      "elapsed_ms": 240,
+                      "check_id": "11111111-1111-4111-8111-111111111111",
+                      "exit_code": 0,
+                      "note": {
+                        "hold": true,
+                        "answer": "waiting_on_own_work"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "expected": "record_invalid"
+    },
+    {
+      "id": "hold_turn_on_wrong_provider",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 3,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "codex",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "response_finished",
+                "observation_id": "00000000-0000-4000-8000-000000000015",
+                "source_event": "Stop",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "turn_end": {
+                  "status": "recorded",
+                  "held": true,
+                  "hold_checks": [
+                    {
+                      "name": "jev",
+                      "executable": "/opt/example/check",
+                      "stage": "completed",
+                      "elapsed_ms": 240,
+                      "check_id": "11111111-1111-4111-8111-111111111111",
+                      "exit_code": 0,
+                      "note": {
+                        "hold": true,
+                        "answer": "waiting_on_own_work"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "expected": "record_invalid"
+    },
+    {
+      "id": "hold_turn_unconfirmed_with_bool",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 3,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "claude",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "response_finished",
+                "observation_id": "00000000-0000-4000-8000-000000000015",
+                "source_event": "Stop",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "turn_end": {
+                  "status": "unconfirmed",
+                  "held": true,
+                  "hold_checks": [
+                    {
+                      "name": "jev",
+                      "executable": "/opt/example/check",
+                      "stage": "completed",
+                      "elapsed_ms": 240,
+                      "check_id": "11111111-1111-4111-8111-111111111111",
+                      "exit_code": 0,
+                      "note": {
+                        "hold": true,
+                        "answer": "waiting_on_own_work"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "expected": "record_invalid"
+    },
+    {
+      "id": "hold_turn_null_note",
+      "value": {
+        "kind": "lifecycle_snapshot",
+        "schema": 3,
+        "address": {
+          "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "pane_id": "42"
+        },
+        "launch_id": "00000000-0000-4000-8000-000000000001",
+        "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "provider": "claude",
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "written_at_unix_ns": "00000000000000001000",
+        "pools": {
+          "requests": {
+            "observations": []
+          },
+          "general": {
+            "observations": [
+              {
+                "kind": "response_finished",
+                "observation_id": "00000000-0000-4000-8000-000000000015",
+                "source_event": "Stop",
+                "observed_mono_ns": "00000000000000000500",
+                "written_at_unix_ns": "00000000000000001000",
+                "actor": {
+                  "kind": "lead"
+                },
+                "turn_end": {
+                  "status": "recorded",
+                  "held": true,
+                  "hold_checks": [
+                    {
+                      "name": "jev",
+                      "executable": "/opt/example/check",
+                      "stage": "completed",
+                      "elapsed_ms": 240,
+                      "check_id": "11111111-1111-4111-8111-111111111111",
+                      "exit_code": 0,
+                      "note": null
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "expected": "record_invalid"
     }
   ],
   "raw_cases": [

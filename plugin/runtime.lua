@@ -92,6 +92,7 @@ return function()
       { name = "type", redraw = true, public = true },
       { name = "frame", redraw = true, public = true, animated = true },
       { name = "activity_type", redraw = true, public = true },
+      { name = "turn_end_held", redraw = true, public = true, normal = as_flag },
       { name = "event_id", redraw = true, public = true },
       { name = "source", redraw = true, public = true },
       { name = "provider", redraw = true, public = true },
@@ -503,7 +504,7 @@ return function()
       local acknowledge_set = M._active_acknowledge_set or { stop = true, notify = true }
       -- Only what the tab shows is seen: when the review flag outranks the
       -- activity, the tab shows the flag, and the activity stays for later.
-      if not (candidate and candidate.shown and acknowledge_set[candidate.shown]) then
+      if not (candidate and not candidate.turn_end_held and candidate.shown and acknowledge_set[candidate.shown]) then
         return "absent"
       end
       local state = acknowledging[read.cache_key]
@@ -598,7 +599,7 @@ return function()
         -- so here keeps the contract in the decision rather than leaving the
         -- executor to notice that its expected value is missing.
         if not pane.event_id then return nil end
-        return { event_id = pane.event_id, shown = pane.shown }
+        return { event_id = pane.event_id, shown = pane.shown, turn_end_held = pane.turn_end_held }
     end
 
     --- What may be reported about a domain's publication work? A count and a
@@ -1187,7 +1188,7 @@ return function()
             local view = read_attention_view(read, now_unix_ns, read_opts)
             -- A hook writes no frame, so a thinking view is animated from the
             -- wall clock.
-            if view.type == "thinking" and view.frame == nil then
+            if view.type == "thinking" and view.frame == nil and not view.turn_end_held then
               view.frame = frame_for_now(now, frame_count)
             end
             attention_cache[key] = view
@@ -1195,6 +1196,7 @@ return function()
             -- The activity the tab shows for this pane, if it shows one: a
             -- review flag that outranks it hides it.
             evidence.panes[key].shown = view.type == view.activity_type and view.activity_type or nil
+            evidence.panes[key].turn_end_held = view.turn_end_held
             for _, item in ipairs(view.diagnostics or {}) do
               report_error_once("v2:" .. key .. ":" .. item.code .. ":" .. item.message,
                 item.code .. ": " .. item.message)

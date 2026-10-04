@@ -32,6 +32,7 @@ local defaults = {
   indicators = {
     thinking_frames = { "◌ ", "◔ ", "◑ ", "◕ " },
     stop   = "✓ ",
+    held   = "◑ ",
     notify = "! ",
     review = "◆ ",
   },
@@ -357,6 +358,7 @@ local function usable_options(opts)
   local function is_string(entry) return type(entry) == "string" end
   local text = { kind = "a string", check = is_string }
   usable.indicators = usable_entries("indicators", usable.indicators, {
+    held = text,
     thinking_frames = { kind = "a non-empty list of strings", check = function(entry)
       if type(entry) ~= "table" or #entry == 0 then return false end
       local count = 0

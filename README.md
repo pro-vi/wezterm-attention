@@ -427,6 +427,14 @@ In `~/.claude/settings.json`:
 
 Merge these into any hooks you already have, and keep them synchronous: do not add `async: true` or `asyncRewake: true`, either of which lets one subagent's events arrive out of order, so that a subagent can stay counted after it stopped. `SubagentStart` counts a subagent from its start, and again when it resumes, which Claude Code 2.1.283 reports as a new start under the same id. `SubagentStop` removes that same subagent. A root `Stop` removes only the subagents its `background_tasks` no longer lists, because background subagents can outlive it: Claude Code 2.1.283 sent the lead's `Stop` while a subagent was still running, and 2.1.284 lists it there. A `StopFailure` (the turn ended on an API error) shows `notify`.
 
+A lead Stop can optionally run an application-owned check before its finish activity is recorded:
+
+```sh
+WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude Stop \
+  --hold-check jev=/absolute/application/stop-hold
+```
+
+Only a non-empty native `background_tasks` array with available reply text runs the check. Its input contains the checked scope, reply and unchanged array; neither content is stored by Attention. A validated hold shows fixed `◑` with thinking color and is not automatically acknowledged. Timeout or failure supplies no hold. The checks share a 2000 ms outer budget; ordinary consumer and native-work time are additional. See [the exact input, output and record contract](docs/consumer-guide.md#pre-write-hold-checks) and [ADR 0005](docs/adr/0005-application-hold-notes-on-recorded-turn-ends.md). Update matching readers and writers before activation; this repository does not register or install the check for you.
 ## Codex hooks
 
 Codex reads lifecycle hooks from `~/.codex/hooks.json`, and asks you to approve each new or edited hook once (`/hooks` in Codex). `attention hooks describe --provider codex --json` lists the rows; the same rule and command form apply as for Claude Code, for the same reasons, and so does the advice to register the link on your PATH.

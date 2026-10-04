@@ -30,6 +30,7 @@
 
 pub mod children;
 pub mod consumer;
+pub mod hold_check;
 pub mod hook_content;
 pub mod identity;
 mod launch;

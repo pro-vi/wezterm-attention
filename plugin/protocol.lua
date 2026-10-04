@@ -378,9 +378,48 @@ return function(context)
   end
 
   local validate_shape
+  local function valid_check(check)
+    if not validate_shape(check, protocol.lifecycle_shapes.hold_check_outcome) then return false end
+    local bypassed = check.stage == "not_dispatched"
+    if not check.name:match("^[a-z][a-z0-9_%-]*$")
+      or bypassed ~= (check.reason ~= nil) or bypassed ~= (check.check_id == nil)
+      or (bypassed and check.elapsed_ms ~= 0)
+      or ((bypassed or check.stage == "not_started") and check.exit_code ~= nil)
+      or (check.stage == "completed" and check.exit_code ~= 0) then return false end
+    return not check.note or (check.stage == "completed" and check.exit_code == 0)
+  end
+
   local function validate_field(field_type, value, expected_kind)
     local limits = protocol.limits
-    if field_type == "child_presence_entries" then
+    if field_type == "hold_note" then
+      return validate_shape(value, protocol.lifecycle_shapes.hold_note) ~= nil
+        and value.hold == true and value.answer:match("^[a-z][a-z0-9_]*$") ~= nil
+    elseif field_type == "hold_notes" then
+      if type(value) ~= "table" or is_array(value) or next(value) == nil then return false end
+      for name, note in pairs(value) do
+        if not is_safe_text(name, limits.safe_label_max_bytes) or not name:match("^[a-z][a-z0-9_%-]*$")
+          or not validate_field("hold_note", note) then return false end
+      end
+      return true
+    elseif field_type == "hold_check_array" then
+      if not is_array(value) then return false end
+      container_kinds[value] = "["
+      for _, check in ipairs(value) do if not valid_check(check) then return false end end
+      return true
+    elseif field_type == "turn_end" then
+      if not validate_shape(value, protocol.lifecycle_shapes.turn_end) then return false end
+      local names, held = {}, false
+      for _, check in ipairs(value.hold_checks) do
+        if names[check.name] then return false end
+        names[check.name], held = true, held or check.note ~= nil
+      end
+      if value.status == "unconfirmed" then return value.held == nil end
+      return value.held == (value.status == "recorded" and held)
+    elseif field_type == "unsigned_integer" then
+      return is_integer(value) and value >= 0 and value <= 18446744073709551615
+    elseif field_type == "exit_code" then
+      return is_integer(value) and value >= -2147483648 and value <= 2147483647
+    elseif field_type == "child_presence_entries" then
       if not is_array(value) then return false end
       for _, item in ipairs(value) do
         if not validate_shape(item, protocol.lifecycle_shapes.child_presence_entry) then return false end
@@ -546,6 +585,18 @@ return function(context)
       if #pool.observations > limits.lifecycle_pool_max_count or compact_size(pool) > limits.lifecycle_pool_max_bytes then return false end
       local prior
       for _, item in ipairs(pool.observations) do
+        local native = {}
+        for key, field in pairs(item) do if key ~= "turn_end" then native[key] = field end end
+        if compact_size(native) > limits.lifecycle_native_observation_max_bytes then return false end
+        if item.turn_end then
+          local sources = protocol.turn_end_sources[value.provider]
+          sources = sources and sources[item.kind]
+          if item.actor.kind ~= "lead" or not list_contains(sources, item.source_event)
+            or compact_size(item) - compact_size(native) > limits.lifecycle_envelope_max_bytes then return false end
+          for _, check in ipairs(item.turn_end.hold_checks) do
+            if check.note and (value.provider ~= "claude" or item.source_event ~= "Stop") then return false end
+          end
+        end
         local allowed_sources = protocol.lifecycle_sources[value.provider] and protocol.lifecycle_sources[value.provider][item.kind]
         if not list_contains(allowed_sources, item.source_event) then return false end
         if item.correlation and item.correlation.mcp_server_name and item.kind ~= "elicitation_requested" and item.kind ~= "elicitation_action_selected" then return false end
@@ -670,6 +721,10 @@ return function(context)
     if not spec then return nil, invalid("unknown record kind") end
     local parsed, err = validate_shape(value, spec, kind)
     if not parsed then return nil, invalid("invalid " .. kind .. " record: " .. tostring(err)) end
+    if kind == "activity" and parsed.hold_notes
+      and (parsed.type ~= "stop" or parsed.source ~= "claude" or parsed.target.kind ~= "binding") then
+      return nil, invalid("hold notes require a Claude binding stop")
+    end
     if kind == "subagent_presence" and sha256(parsed.agent_id) ~= parsed.agent_key then
       return nil, invalid("subagent_presence agent_key does not match agent_id")
     end

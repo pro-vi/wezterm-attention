@@ -103,6 +103,9 @@ struct EventArgs {
     /// Include supported submit text only in transient consumer stdin, never records.
     #[arg(long)]
     include_prompt: bool,
+    /// Named executable returning an optional hold note before a lead Claude Stop; repeatable.
+    #[arg(long)]
+    hold_check: Vec<String>,
 }
 
 fn provider_event_help() -> String {
@@ -318,7 +321,9 @@ enum PluginCommand {
     /// Withdraw the user's review flag; other owners' reviews stay.
     ClearReview(PluginPaneArgs),
     /// Acknowledge the activity the user saw, if it is still the one shown.
-    Acknowledge(AcknowledgeArgs),
+    Acknowledge(ActivityEventArgs),
+    /// Explicitly clear the named current activity, including a held turn end.
+    ClearActivity(ActivityEventArgs),
 }
 
 #[derive(Clone, Debug, Args)]
@@ -334,7 +339,7 @@ struct PluginPaneArgs {
 }
 
 #[derive(Clone, Debug, Args)]
-struct AcknowledgeArgs {
+struct ActivityEventArgs {
     #[command(flatten)]
     pane: PluginPaneArgs,
     #[arg(long)]
@@ -347,6 +352,7 @@ impl PluginCommand {
             Self::SetReview(_) => "plugin set-review",
             Self::ClearReview(_) => "plugin clear-review",
             Self::Acknowledge(_) => "plugin acknowledge",
+            Self::ClearActivity(_) => "plugin clear-activity",
         }
     }
 }
@@ -764,6 +770,11 @@ fn run_hooks_event(
     environment: &BTreeMap<String, String>,
 ) -> Result<ExitCode, AttentionError> {
     let ports = system_ports();
+    let hold_checks = match wezterm_attention::hold_check::validate_registrations(&args.hold_check)
+    {
+        Ok(registrations) => registrations,
+        Err(error) => return Ok(emit_hook_error(&error, args.debug, args.strict, name)),
+    };
     let consumer_timeout = match wezterm_attention::consumer::validate_consumers(
         &args.consumer,
         args.consumer_timeout_ms,
@@ -812,15 +823,32 @@ fn run_hooks_event(
         &payload,
         environment,
     );
-    if !args.consumer.is_empty() {
+    if !args.consumer.is_empty() || !hold_checks.is_empty() {
         use wezterm_attention::consumer::{
             DeliveryStage, delivery_bytes, dispatch, not_dispatched,
         };
-        let outcome = wezterm_attention::lifecycle::apply_provider_event_with_outcome(
+        let background_tasks = payload
+            .get("background_tasks")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::as_slice);
+        let check_applies = !hold_checks.is_empty()
+            && event.provider == Some(wezterm_attention::protocol::Provider::Claude)
+            && event.source_event == "Stop"
+            && event.agent_id.is_none()
+            && background_tasks.is_some_and(|tasks| !tasks.is_empty());
+        let check_reply =
+            wezterm_attention::providers::reply_content(&event, &payload, check_applies);
+        let request = wezterm_attention::hold_check::Request {
+            registrations: &hold_checks,
+            reply: &check_reply,
+            background_tasks,
+        };
+        let outcome = wezterm_attention::lifecycle::apply_provider_event_with_checks(
             &event,
             environment,
             &observation,
             &ports,
+            &request,
         );
         let reply =
             wezterm_attention::providers::reply_content(&event, &payload, args.include_reply);
@@ -851,15 +879,16 @@ fn run_hooks_event(
                 result.disposition,
                 Disposition::Ignored | Disposition::Conflict | Disposition::Partial
             )
-        }) || (!skipped_on_purpose
-            && consumers
-                .iter()
-                .any(|result| result.stage != DeliveryStage::Completed));
+        }) || wezterm_attention::hold_check::failed(&outcome.hold_checks)
+            || (!skipped_on_purpose
+                && consumers
+                    .iter()
+                    .any(|result| result.stage != DeliveryStage::Completed));
         let diagnostics = match &outcome.result {
             Ok(result) => result.diagnostic.iter().cloned().collect(),
             Err(error) => vec![error.diagnostic.clone()],
         };
-        let result = serde_json::json!({"native": outcome.result.as_ref().ok(), "admission": outcome.admission, "persistence": outcome.persistence, "consumers": consumers});
+        let result = serde_json::json!({"native": outcome.result.as_ref().ok(), "admission": outcome.admission, "persistence": outcome.persistence, "consumers": consumers, "hold_checks": outcome.hold_checks, "turn_end": outcome.turn_end});
         // Prompt/reply bodies and child output never enter this diagnostic projection.
         print_err(&printable_json(&Response::new(
             name,
@@ -1051,7 +1080,7 @@ fn run_plugin(
 ) -> Result<ExitCode, AttentionError> {
     let pane = match command {
         PluginCommand::SetReview(pane) | PluginCommand::ClearReview(pane) => pane,
-        PluginCommand::Acknowledge(args) => &args.pane,
+        PluginCommand::Acknowledge(args) | PluginCommand::ClearActivity(args) => &args.pane,
     };
     let scope = pane.scope()?;
     let root = wezterm_attention::records::state_root(environment)?;
@@ -1073,6 +1102,21 @@ fn run_plugin(
                 scope.address(),
                 scope.launch_id(),
                 &activity_event_id,
+            )
+        }
+        PluginCommand::ClearActivity(args) => {
+            let activity_event_id = wezterm_attention::identity::canonical_uuid(
+                Some(&args.activity_event_id),
+                "--activity-event-id",
+            )
+            .map_err(|error| AttentionError::usage(error.diagnostic.message))?;
+            let observation = system_ports().clock.monotonic_ns20()?;
+            wezterm_attention::lifecycle::clear_shown_activity(
+                &root,
+                scope.address(),
+                scope.launch_id(),
+                &activity_event_id,
+                &observation,
             )
         }
     }?;

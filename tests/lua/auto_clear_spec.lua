@@ -799,6 +799,32 @@ end
 
 -- ── Visible-attention projection ────────────────────────────────────────────
 
+test("held turn ends keep a fixed indicator and cannot be automatically acknowledged", function()
+  local pane_id = 710
+  seed_pane(pane_id)
+  write_activity(pane_id, "stop")
+  local file = seeded_records_root(pane_id) .. "/activity.json"
+  local activity = decode_json(assert(read_path(file)))
+  activity.source = "claude"
+  activity.hold_notes = { jev = { hold = true, answer = "waiting_on_own_work" } }
+  write_json_path(file, activity)
+  local old_set = attention._active_acknowledge_set
+  attention._active_acknowledge_set = { stop = true, thinking = true, notify = true }
+  local w = window_double({ tabs = { { pane_id } }, focused = true, active_pane_id = pane_id })
+  local spawned = with_plugin_command(function() error("held activity tried to acknowledge") end, function()
+    attention.poll(w, { now_ms = 1000, now_unix_ns = fixture_now })
+    attention.poll(w, { now_ms = 2000, now_unix_ns = fixture_now })
+  end)
+  attention._active_acknowledge_set = old_set
+  assert(#spawned == 0, "held activity launched an acknowledgement")
+  local view = assert(pane_view(pane_id))
+  assert(view.activity_type == "stop" and view.type == "thinking" and view.turn_end_held == true)
+  assert(view.frame == nil, "held activity must not acquire a spinner frame")
+  local visible = internal.resolve_visible_attention({ seeded_key(pane_id) })
+  assert(visible.indicator == "◑ " and visible.still_indicator == "◑ ")
+  assert(visible.color == "#1c1730")
+end)
+
 test("projection returns the highest-priority cached pane and ignores uncached ones", function()
   write_activity(711, "thinking")
   write_activity(712, "notify")

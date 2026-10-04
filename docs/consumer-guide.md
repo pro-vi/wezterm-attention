@@ -309,6 +309,82 @@ Consumer outcomes and native persistence are reported on structured stderr; chil
 
 A consumer that exits zero after deciding to do nothing has no channel to say why, and that is deliberate rather than an oversight. Its stderr is not passed through under `--debug`, because the hook's stderr there is a single JSON document a reader parses, and interleaved child output would stop it parsing. Its stderr is not captured into the `consumers[]` entry either, because the delivery envelope carries prompt and reply content, and a consumer that echoes any of it would return that content to a channel the provider may log. Write reasons to a log file the consumer owns, or to a path passed in its own configuration; do not assume anyone sees stderr.
 
+#### Pre-write hold checks
+
+`attention hooks event claude Stop --hold-check jev=/absolute/application/stop-hold` declares an application program that may attach one hold note before native persistence. Repeat the flag for multiple unique lowercase names, in declaration order. It accepts an absolute executable, without arguments or shell syntax. Consumers still run after persistence and receive the final decision.
+
+A check runs only for a lead Claude Stop with a non-empty native `background_tasks` array, available reply and a verified current scope. A non-empty array remains eligible even if child reconciliation cannot read its task ids. Other events, child actors, missing/unreadable/empty arrays and unavailable reply launch no check. The reply is requested for this point independently of `--include-reply` for consumers.
+
+Stdin is one JSON object, newline and EOF:
+
+```json
+{
+  "schema": 1,
+  "phase": "before_turn_end",
+  "check_id": "11111111-1111-4111-8111-111111111111",
+  "check_name": "jev",
+  "scope": {
+    "address": {
+      "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pane_id": "42"
+    },
+    "launch_id": "22222222-2222-4222-8222-222222222222",
+    "target": {"kind": "binding", "binding_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+  },
+  "provider": "claude",
+  "provider_session_id": "synthetic-session",
+  "source_event": "Stop",
+  "actor": {"kind": "lead"},
+  "observed_mono_ns": "00000000000100000000",
+  "reply": {"availability": "available", "text": "The build is running."},
+  "background_tasks": [{"id": "job-1", "type": "shell", "status": "running", "description": "Run the build"}]
+}
+```
+
+The array's JSON elements and fields are forwarded unchanged. There is no persistence claim: the scope was checked before execution and is checked again before writing. Input must fit the existing hook byte bound; oversized input supplies no hold. Replies and task arrays remain transient in Attention. Applications own any logging they perform.
+
+An unheld program prints nothing (whitespace-only output is also accepted) and exits zero. A held program prints one JSON object and exits zero:
+
+```json
+{"hold": true, "answer": "waiting_on_own_work"}
+```
+
+Spaces between JSON tokens and a terminal newline are accepted. Only `hold=true` and an `answer` token matching `[a-z][a-z0-9_]*`, within the safe-label byte limit, are accepted. The token is application-owned. Unknown or duplicate keys, extra documents, false hold, wrong types, malformed/oversized output, incomplete input/output, nonzero exit or timeout supply no note. A line printed before a hang or failed exit does not count. Raw stdout/stderr are never recorded or included in diagnostics.
+
+Programs share a 2000 ms monotonic budget covering launch, stdin, stdout EOF and direct-child exit. Each gets the remaining budget. Attention terminates its invocation-owned process group and reaps its direct child on failure/timeout. Descendants that escape that group are not contained. Later failures cannot cancel an earlier accepted note; later programs still run while budget remains. No retry or queue is provided.
+
+The budget does not bound the entire hook. Preparation and final application each take launch and claim locks with up to 2 s per lock; ordinary filesystem/process work and cleanup have no whole-hook deadline. Each configured consumer adds its own deadline. With a 2000 ms check budget and one 1000 ms consumer, up to 3000 ms is reserved for executable work, before Attention's work. A provider hook timeout of 5 s can therefore expire before the complete hook finishes, including under lock contention.
+
+Each lead native turn-end observation carries an Attention-written `turn_end`:
+
+```json
+{
+  "status": "recorded",
+  "held": true,
+  "hold_checks": [{
+    "name": "jev",
+    "executable": "/absolute/application/stop-hold",
+    "check_id": "11111111-1111-4111-8111-111111111111",
+    "stage": "completed",
+    "elapsed_ms": 240,
+    "exit_code": 0,
+    "note": {"hold": true, "answer": "waiting_on_own_work"}
+  }]
+}
+```
+
+`recorded` confirms the scoped lead activity/clear effects before the lifecycle write. `superseded` means newer native state displaced that turn end and has `held=false`; a program's unapplied note remains only in its audit entry. `unconfirmed` carries no `held` claim. Child reconciliation is independent. Binding/claim loss writes nothing for a new occupant and leaves outcomes in the hook report.
+
+Stages are `not_dispatched`, `not_started`, `completed`, `failed`, `stdin_failed`, `stdout_failed`, `timed_out`, `invalid_output` and `output_too_large`. Only completed can have a note. `reason` appears only for not_dispatched: `not_applicable`, `no_current_scope`, `reply_unavailable`, `input_too_large` or `total_deadline`. Bypassed entries have zero elapsed time and no check_id. Attempted entries retain the input's check_id. Exit codes appear only when observed. Paths identify the invoked path, not executable bytes/version. Every configured entry appears in order; no configured checks gives an empty array.
+
+Public inspection and the GUI lifecycle view retain this observation. `HookDelivery.turn_end`, when present, is copied from the exact stored observation named by its observation_id. It is absent for non-turn-end callbacks. Native correlated replay retains the stored observation ID and decision, and can repeat delivery.
+
+A finish-sound reader accepts a lead turn-end observation with `turn_end.status=recorded` and `held=false`, then deduplicates full address/launch/binding scope plus observation_id. A held observation is also marked seen. Do not use activity.event_id, which can repeat across distinct Stops, or the glyph, which review/other panes can mask. The application chooses whether failed/interrupted turn ends deserve its sound. Old unannotated observations establish a baseline rather than new playback. Retention floors indicate missing coverage; no exactly-once playback or durable sound queue is promised.
+
+Held activity retains raw `type=stop` and accepted `hold_notes`. The GUI exposes `activity_type=stop`, effective `type=thinking`, and `turn_end_held=true`; its fixed `indicators.held` defaults to `◑`, with thinking color and priority. Published tab text uses the same indicator. Automatic acknowledgement excludes held activity even under custom auto_clear. A later applicable unheld Stop restores ordinary finished presentation. Explicit scoped clear uses the current activity ID through `attention plugin clear-activity`; it is separate from automatic acknowledgement and works with agent-owned claims.
+
+These optional fields require matching updated Rust/Lua readers and writers. Existing unannotated records remain readable by the new readers. Old strict readers reject annotated records; an old writer can move an annotated snapshot aside. Drain old hooks and update matching readers/writers before activation. Downgrading annotated state needs separate review; do not delete user state as an upgrade step.
 ### Scoped headless inspection
 
 ```sh

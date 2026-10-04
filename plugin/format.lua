@@ -42,6 +42,7 @@ return function(context)
     local best_source   = nil
     local best_provider = nil
     local best_health   = nil
+    local best_held     = false
 
     local subagents = 0
     local subagents_uncertain = false
@@ -67,6 +68,7 @@ return function(context)
             best_source   = cached.source
             best_provider = cached.provider
             best_health   = cached.binding_health
+            best_held     = cached.turn_end_held == true
           end
         end
       end
@@ -104,7 +106,9 @@ return function(context)
     -- What the bar draws for this state whatever the frame. The published copy
     -- of the bar uses it, so a spinner does not rewrite that file every second.
     local still_indicator
-    if best_type == "thinking" then
+    if best_type == "thinking" and best_held then
+      indicator = cfg_indicators.held or defaults.indicators.held
+    elseif best_type == "thinking" then
       local frames = cfg_indicators.thinking_frames
       if frames and #frames > 0 then
         indicator = frames[((best_frame or 0) % #frames) + 1]
@@ -121,6 +125,7 @@ return function(context)
       indicator = indicator,
       still_indicator = still_indicator or indicator,
       type = best_type,
+      turn_end_held = best_held,
       color = cfg_colors[best_type],
       subagents = subagents,
       subagents_uncertain = subagents_uncertain,
@@ -167,6 +172,7 @@ return function(context)
       visible.indicator, visible.type, visible.color,
       indicator = visible.indicator,
       type = visible.type,
+      turn_end_held = visible.turn_end_held == true,
       color = visible.color,
       subagents = visible.subagents or 0,
       subagents_uncertain = visible.subagents_uncertain == true,

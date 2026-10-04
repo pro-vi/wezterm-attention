@@ -27,6 +27,8 @@ pub struct HookDelivery {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observation_id: Option<String>,
     pub persistence: HookPersistence,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_end: Option<crate::observations::TurnEnd>,
     pub reply: HookContent,
     pub prompt: HookContent,
 }
@@ -133,6 +135,7 @@ pub fn delivery_bytes(
         source,
         observation_id: outcome.observation_id.clone(),
         persistence: outcome.persistence.clone(),
+        turn_end: outcome.turn_end.clone(),
         reply,
         prompt,
     };

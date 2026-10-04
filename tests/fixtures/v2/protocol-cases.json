@@ -297,7 +297,99 @@
     { "id": "record_review_rejects_old_monotonic_field", "parser": "record", "sample": "review", "patch": { "observed_mono_ns": "00000000001000000000" }, "expected": "record_invalid" },
     { "id": "record_review_owner_key_matches_owner_id", "parser": "record", "sample": "review", "patch": { "owner_key": "9999999999999999999999999999999999999999999999999999999999999999" }, "expected": "record_invalid" },
     { "id": "record_subagent_key_matches_agent_id", "parser": "record", "sample": "subagent_presence", "patch": { "agent_key": "9999999999999999999999999999999999999999999999999999999999999999" }, "expected": "record_invalid" },
-    { "id": "record_subagent_ttl_is_fixed", "parser": "record", "sample": "subagent_presence", "patch": { "ttl_ms": 599999 }, "expected": "record_invalid" }
+    { "id": "record_subagent_ttl_is_fixed", "parser": "record", "sample": "subagent_presence", "patch": { "ttl_ms": 599999 }, "expected": "record_invalid" },
+    {
+      "id": "hold_note_on_claude_stop",
+      "parser": "record",
+      "sample": "activity",
+      "patch": {
+        "type": "stop",
+        "source": "claude",
+        "hold_notes": {
+          "jev": {
+            "hold": true,
+            "answer": "waiting_on_own_work"
+          }
+        }
+      },
+      "expected": "valid"
+    },
+    {
+      "id": "hold_note_on_thinking",
+      "parser": "record",
+      "sample": "activity",
+      "patch": {
+        "type": "thinking",
+        "source": "claude",
+        "hold_notes": {
+          "jev": {
+            "hold": true,
+            "answer": "waiting_on_own_work"
+          }
+        }
+      },
+      "expected": "record_invalid"
+    },
+    {
+      "id": "hold_note_false",
+      "parser": "record",
+      "sample": "activity",
+      "patch": {
+        "type": "stop",
+        "source": "claude",
+        "hold_notes": {
+          "jev": {
+            "hold": false,
+            "answer": "needs_user"
+          }
+        }
+      },
+      "expected": "record_invalid"
+    },
+    {
+      "id": "hold_note_unknown_field",
+      "parser": "record",
+      "sample": "activity",
+      "patch": {
+        "type": "stop",
+        "source": "claude",
+        "hold_notes": {
+          "jev": {
+            "hold": true,
+            "answer": "a",
+            "actor": "lead"
+          }
+        }
+      },
+      "expected": "record_invalid"
+    },
+    {
+      "id": "hold_note_invalid_owner",
+      "parser": "record",
+      "sample": "activity",
+      "patch": {
+        "type": "stop",
+        "source": "claude",
+        "hold_notes": {
+          "not an owner": {
+            "hold": true,
+            "answer": "a"
+          }
+        }
+      },
+      "expected": "record_invalid"
+    },
+    {
+      "id": "hold_note_empty_map",
+      "parser": "record",
+      "sample": "activity",
+      "patch": {
+        "type": "stop",
+        "source": "claude",
+        "hold_notes": {}
+      },
+      "expected": "record_invalid"
+    }
   ],
   "children_coverage_cases": [
     {"id": "a_binding_whose_end_ends_it_counts_no_children", "binding": {}, "end": {}, "children": {}, "expected": {"count": 0, "waiting": 0, "coverage": "ended", "renders": ""}},

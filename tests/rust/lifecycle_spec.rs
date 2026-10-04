@@ -32,6 +32,9 @@ mod executables;
 #[path = "lifecycle_spec/hook_consumer.rs"]
 mod hook_consumer;
 
+#[path = "lifecycle_spec/hold_check.rs"]
+mod hold_check;
+
 #[path = "lifecycle_spec/pane_facts.rs"]
 mod pane_facts;
 
@@ -75,7 +78,7 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Self {
-        let path = PathBuf::from("/tmp").join(format!("wl-{}", Uuid::new_v4().simple()));
+        let path = std::env::temp_dir().join(format!("wl-{}", Uuid::new_v4().simple()));
         fs::create_dir_all(&path).expect("create scratch directory");
         Self(path)
     }
@@ -506,10 +509,14 @@ fn lifecycle_manifest_and_typed_union_agree() {
     assert_eq!(kinds.len(), 14);
     assert_eq!(protocol.limits.lifecycle_pool_max_count, 64);
     assert_eq!(protocol.limits.lifecycle_pool_max_bytes, 122_880);
-    assert_eq!(protocol.limits.lifecycle_observation_max_bytes, 2_048);
+    assert_eq!(
+        protocol.limits.lifecycle_native_observation_max_bytes,
+        2_048
+    );
+    assert_eq!(protocol.limits.lifecycle_observation_max_bytes, 18_432);
     assert_eq!(protocol.limits.lifecycle_max_json_bytes, 262_144);
     assert_eq!(protocol.limits.lifecycle_envelope_max_bytes, 16_384);
-    assert_eq!(protocol.limits.lifecycle_max_depth, 8);
+    assert_eq!(protocol.limits.lifecycle_max_depth, 9);
 }
 
 #[test]
@@ -692,7 +699,8 @@ fn lifecycle_raw_read_is_bounded_before_decode() {
     use wezterm_attention::protocol::{bounded_lifecycle_json, manifest};
     let limit = manifest().unwrap().limits.lifecycle_max_json_bytes;
     assert!(!bounded_lifecycle_json(&vec![b' '; limit + 1]));
-    assert!(!bounded_lifecycle_json(b"[[[[[[[[[]]]]]]]]]"));
+    assert!(bounded_lifecycle_json(b"[[[[[[[[[]]]]]]]]]"));
+    assert!(!bounded_lifecycle_json(b"[[[[[[[[[[]]]]]]]]]]"));
     assert!(bounded_lifecycle_json(br#"{"quoted":"[[[[[[[[[[[[["}"#));
     let setup = Setup::new();
     let file = setup._scratch.0.join("lifecycle.json");

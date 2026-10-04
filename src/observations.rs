@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::hold_check::HoldCheckOutcome;
+
 use crate::identity::PaneAddress;
 use crate::protocol::{AttentionError, DiagnosticCode, Provider, Result, manifest, vocabulary};
 
@@ -125,8 +127,42 @@ pub struct LifecycleObservation {
     pub actor: Actor,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub correlation: Option<NativeCorrelation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_end: Option<TurnEnd>,
     #[serde(flatten)]
     pub body: ObservationBody,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnEndStatus {
+    Recorded,
+    Superseded,
+    Unconfirmed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TurnEnd {
+    pub status: TurnEndStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held: Option<bool>,
+    pub hold_checks: Vec<HoldCheckOutcome>,
+}
+
+impl TurnEnd {
+    pub fn valid(&self) -> bool {
+        let mut names = std::collections::BTreeSet::new();
+        let notes = self.hold_checks.iter().any(|check| check.note.is_some());
+        self.hold_checks
+            .iter()
+            .all(|check| check.valid() && names.insert(&check.name))
+            && match self.status {
+                TurnEndStatus::Recorded => self.held == Some(notes),
+                TurnEndStatus::Superseded => self.held == Some(false),
+                TurnEndStatus::Unconfirmed => self.held.is_none(),
+            }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
@@ -576,6 +612,27 @@ impl ObservationBody {
 }
 
 impl LifecycleObservation {
+    pub fn ends_turn(&self, provider: Provider) -> bool {
+        self.actor == Actor::Lead
+            && manifest().is_ok_and(|m| {
+                m.turn_end_sources
+                    .get(provider.as_str())
+                    .and_then(|kinds| kinds.get(self.body.kind()))
+                    .is_some_and(|sources| sources.contains(&self.source_event))
+            })
+    }
+
+    fn within_bounds(&self) -> Result<bool> {
+        let limits = &manifest()?.limits;
+        let mut native = self.clone();
+        native.turn_end = None;
+        let native_size = compact_size(&native)?;
+        let size = compact_size(self)?;
+        Ok(native_size <= limits.lifecycle_native_observation_max_bytes
+            && size <= limits.lifecycle_observation_max_bytes
+            && size.saturating_sub(native_size) <= limits.lifecycle_envelope_max_bytes)
+    }
+
     /// Kind is part of storage identity, not of cross-phase relation identity.
     pub fn storage_key(&self) -> String {
         let mut key = String::new();
@@ -642,7 +699,12 @@ impl LifecycleObservation {
             reason = "a struct with named fields serializes to an object"
         )]
         let object = value.as_object_mut().expect("observation is object");
-        for key in ["observation_id", "observed_mono_ns", "written_at_unix_ns"] {
+        for key in [
+            "observation_id",
+            "observed_mono_ns",
+            "written_at_unix_ns",
+            "turn_end",
+        ] {
             object.remove(key);
         }
         value
@@ -684,6 +746,14 @@ impl LifecycleSnapshot {
             }
             let mut prior = None;
             for item in &pool.observations {
+                if let Some(end) = &item.turn_end
+                    && (!item.ends_turn(self.provider)
+                        || !end.valid()
+                        || (end.hold_checks.iter().any(|check| check.note.is_some())
+                            && (self.provider != Provider::Claude || item.source_event != "Stop")))
+                {
+                    return Err(invalid());
+                }
                 if !manifest()?
                     .lifecycle_sources
                     .get(self.provider.as_str())
@@ -705,7 +775,7 @@ impl LifecycleSnapshot {
                 let order = (&item.observed_mono_ns, &item.observation_id);
                 if prior.is_some_and(|before| before > order)
                     || item.body.pool() != name
-                    || compact_size(item)? > limits.lifecycle_observation_max_bytes
+                    || !item.within_bounds()?
                     || pool
                         .retention_floor_mono_ns
                         .as_ref()
@@ -779,7 +849,7 @@ impl LifecycleSnapshot {
     pub fn reduce(&mut self, candidate: LifecycleObservation) -> Result<bool> {
         self.validate_semantics()?;
         let limits = &manifest()?.limits;
-        if compact_size(&candidate)? > limits.lifecycle_observation_max_bytes {
+        if !candidate.within_bounds()? {
             return Err(invalid());
         }
         let key = candidate.storage_key_parts();

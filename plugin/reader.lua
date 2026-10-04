@@ -640,7 +640,8 @@ return function(context)
     end
 
     local activity_type = activity and activity.type or nil
-    local effective_type = effective_attention_type(activity_type, review)
+    local turn_end_held = activity and activity.hold_notes and next(activity.hold_notes) ~= nil or false
+    local effective_type = effective_attention_type(turn_end_held and "thinking" or activity_type, review)
     local unavailable = diagnostics_have_unavailable_io(diagnostics)
     -- The lead's lifecycle snapshot, and the one its children write beside it
     -- when the provider runs sub-agents.
@@ -714,6 +715,7 @@ return function(context)
       lifecycle = lifecycle,
       type = effective_type,
       activity_type = activity_type,
+      turn_end_held = turn_end_held,
       frame = effective_type == activity_type and activity and activity.frame or nil,
       source = activity and activity.source or nil,
       subagents = children.count,
