@@ -302,7 +302,7 @@ pub(crate) fn presence_at_socket(
     // listener stopped accepting while its panes run on. It is read as a
     // socket that is gone is: absent only on the same proof, and otherwise
     // kept, with no probe failed.
-    if crate::wezterm::listener_refuses(socket_path) && still_current() {
+    if panes.listener_refuses(socket_path) && still_current() {
         if replaced_server_pane_gone(socket_path, pane_id, processes) {
             return observed(PanePresence::VerifiedAbsent);
         }
@@ -335,21 +335,33 @@ fn record_spent<T>(spent: &Mutex<Duration>, call: impl FnOnce() -> T) -> T {
     answer
 }
 
-/// One pane listing per socket, rather than one per bound pane.
-///
-/// Resolving a binding's presence asks whether its pane id appears in the
-/// socket's pane list. Every bound pane on one socket asks that of the same
-/// list, and asking it afresh for each miss would spawn a `wezterm cli list`
-/// subprocess per bound pane -- about 20 ms each on top of a 5 ms floor, paid
-/// on every call.
-/// The answers are memoised for the lifetime of one assembly and no longer, so
-/// a later call still observes panes that opened or closed in between. A sweep
-/// preview shares one across its steps; an apply does not, for the reason
-/// given at [`ProbeOncePerAssembly`].
+type ListenerAnswers = Mutex<BTreeMap<String, (Option<String>, bool)>>;
+
+fn listener_refuses_once(
+    answers: &ListenerAnswers,
+    inner: &dyn PaneLister,
+    socket_path: &str,
+) -> bool {
+    let incarnation = socket_identity(socket_path).ok().map(|(_, id, _)| id);
+    // Losing the cache must not turn a failed read into a connection per pane.
+    let Ok(mut answers) = answers.lock() else {
+        return false;
+    };
+    let (observed, refused) = answers
+        .entry(socket_path.to_owned())
+        .or_insert_with(|| (incarnation.clone(), inner.listener_refuses(socket_path)));
+    // A cached refusal cannot establish anything about a replacement listener.
+    observed == &incarnation && *refused
+}
+
+/// One pane listing and refusal check per socket for an assembly. A later
+/// command takes fresh observations; a cached refusal never names a socket
+/// incarnation that replaced the one checked.
 pub(crate) struct ListOncePerSocket<'a> {
     inner: &'a dyn PaneLister,
     listed: Mutex<BTreeMap<String, Result<Vec<crate::wezterm::PaneRow>>>>,
     spent: Mutex<Duration>,
+    listeners: ListenerAnswers,
 }
 
 impl<'a> ListOncePerSocket<'a> {
@@ -358,6 +370,7 @@ impl<'a> ListOncePerSocket<'a> {
             inner,
             listed: Mutex::new(BTreeMap::new()),
             spent: Mutex::new(Duration::ZERO),
+            listeners: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -398,6 +411,10 @@ impl<'a> ListOncePerSocket<'a> {
 }
 
 impl PaneLister for ListOncePerSocket<'_> {
+    fn listener_refuses(&self, socket_path: &str) -> bool {
+        listener_refuses_once(&self.listeners, self.inner, socket_path)
+    }
+
     fn list(&self, socket_path: &str) -> Result<Vec<crate::wezterm::PaneRow>> {
         // A poisoned lock would mean a panic inside `list`; fall back to the
         // uncached path rather than propagating a panic through a read command.
@@ -497,6 +514,7 @@ impl ProcessProbe for ProbeOncePerAssembly<'_> {
 pub(crate) struct FailedListingOncePerSocket<'a> {
     inner: &'a dyn PaneLister,
     failed: Mutex<BTreeMap<String, AttentionError>>,
+    listeners: ListenerAnswers,
 }
 
 impl<'a> FailedListingOncePerSocket<'a> {
@@ -504,11 +522,16 @@ impl<'a> FailedListingOncePerSocket<'a> {
         Self {
             inner,
             failed: Mutex::new(BTreeMap::new()),
+            listeners: Mutex::new(BTreeMap::new()),
         }
     }
 }
 
 impl PaneLister for FailedListingOncePerSocket<'_> {
+    fn listener_refuses(&self, socket_path: &str) -> bool {
+        listener_refuses_once(&self.listeners, self.inner, socket_path)
+    }
+
     fn list(&self, socket_path: &str) -> Result<Vec<crate::wezterm::PaneRow>> {
         if let Some(error) = self
             .failed
@@ -582,6 +605,63 @@ mod process_probe_tests {
     use super::*;
     use crate::wezterm::PaneProcessSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountedListener {
+        calls: AtomicUsize,
+        refused: bool,
+    }
+
+    impl PaneLister for CountedListener {
+        fn list(&self, _: &str) -> Result<Vec<crate::wezterm::PaneRow>> {
+            Ok(Vec::new())
+        }
+
+        fn listener_refuses(&self, _: &str) -> bool {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.refused
+        }
+    }
+
+    #[test]
+    fn accepted_and_refused_listener_answers_are_scoped_to_one_command() {
+        for refused in [false, true] {
+            let inner = CountedListener {
+                calls: AtomicUsize::new(0),
+                refused,
+            };
+            for apply in [false, true] {
+                let reader = ListOncePerSocket::new(&inner);
+                let writer = FailedListingOncePerSocket::new(&inner);
+                let cached: &dyn PaneLister = if apply { &writer } else { &reader };
+                let before = inner.calls.load(Ordering::SeqCst);
+                for _ in 0..20 {
+                    assert_eq!(cached.listener_refuses("/test/one"), refused);
+                }
+                assert_eq!(cached.listener_refuses("/test/two"), refused);
+                assert_eq!(inner.calls.load(Ordering::SeqCst) - before, 2);
+            }
+        }
+    }
+
+    #[test]
+    fn a_cached_refusal_does_not_describe_a_replacement_listener() {
+        let directory = std::env::temp_dir().join(format!("listener-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let socket = directory.join("sock");
+        let old = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let inner = CountedListener {
+            calls: AtomicUsize::new(0),
+            refused: true,
+        };
+        let cached = ListOncePerSocket::new(&inner);
+        assert!(cached.listener_refuses(socket.to_str().unwrap()));
+        std::fs::remove_file(&socket).unwrap();
+        let new = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        assert!(!cached.listener_refuses(socket.to_str().unwrap()));
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+        drop((old, new));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     struct CountingProbe {
         listing: Listing,

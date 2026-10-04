@@ -35,6 +35,13 @@ pub trait TtyWriter: Send + Sync {
 
 pub trait PaneLister: Send + Sync {
     fn list(&self, socket_path: &str) -> Result<Vec<PaneRow>>;
+
+    /// A failed listing may need independent listener evidence. Invocation
+    /// wrappers cache this operation as well as the listing: connecting is
+    /// work for a server even when the client closes immediately.
+    fn listener_refuses(&self, socket_path: &str) -> bool {
+        listener_refuses(socket_path)
+    }
 }
 
 pub trait GuiWindowLister: Send + Sync {

@@ -97,6 +97,8 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 
 ### Fixed
 
+- When a pane listing fails, presence checks open at most one listener-probe connection per socket per command. Bindings, inspect, doctor and sweep share the bounded answer while preserving the distinction between a slow server and an exited server.
+
 - A missing mux-pane identity no longer requires republishing identities that the GUI already sees on the first attempt. Exclusions are read live and scoped to the socket incarnation; full retries preserve reconnect recovery and recovery from copied user variables.
 
 - The plugin's poll no longer slows down as a session runs more sub-agents. It read every sub-agent record the binding had ever written; it now reads the binding's one `children.json`, which holds only the sub-agents running now, and reuses it while its bytes are unchanged. With 100 running sub-agents and the file rewritten before every read, that read took a median 1.57 ms inside WezTerm 20260905-195314-b99b1ca2 on an M5 Max.

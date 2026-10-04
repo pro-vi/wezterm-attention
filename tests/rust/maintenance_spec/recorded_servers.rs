@@ -19,6 +19,46 @@ use wezterm_attention::query::{
 /// nobody answers on.
 struct UnansweredPanes;
 
+fn drain_probe_connections(setup: &Setup) -> usize {
+    let guard = setup.listener.lock().unwrap();
+    let listener = guard.as_ref().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut accepted = 0;
+    loop {
+        match listener.accept() {
+            Ok(_) => accepted += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return accepted,
+            Err(error) => panic!("accept: {error}"),
+        }
+    }
+}
+
+#[test]
+fn failed_presence_checks_open_one_connection_per_socket_per_command() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    bind_panes(&setup, 16);
+    assert_eq!(drain_probe_connections(&setup), 0);
+    for arguments in [
+        &["bindings", "--all", "--json"][..],
+        &["doctor", "--json"],
+        &["sweep", "--json"],
+        &["sweep", "--apply", "--json"],
+        &["bindings", "--all", "--json"],
+    ] {
+        let (_, response) = run_cli(&setup, "exit 3", arguments);
+        assert!(
+            response["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| { d["code"] == "realm_unavailable" }),
+            "{arguments:?}: {response}"
+        );
+        assert_eq!(drain_probe_connections(&setup), 1, "{arguments:?}");
+    }
+}
+
 impl PaneLister for UnansweredPanes {
     fn list(&self, _socket_path: &str) -> wezterm_attention::protocol::Result<Vec<PaneRow>> {
         Err(AttentionError::new(
