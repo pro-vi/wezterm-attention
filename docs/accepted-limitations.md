@@ -615,6 +615,34 @@ Checked against Claude Code 2.1.283. In one session, an Esc before any output
 and an Esc after a tool call had run each ran no hook within 90 seconds, while
 a normal turn ran `Stop` and then `idle_prompt` 63 seconds later.
 
+## A sub-agent that starts waiting during a hold check can leave the hold recorded
+
+The writer reads the sub-agent set once, before the hold check runs, and skips
+the check when a sub-agent the Stop keeps is waiting on a permission prompt.
+Each event is ordered by when its hook began. A permission request whose hook
+began after the lead's Stop supersedes that Stop: its turn end is recorded
+`superseded`, not held, and the tab shows `notify`. A request whose hook began
+before the Stop's but was written only after the writer read the set, within
+the check's 2000 ms budget, is not seen: the program's hold is recorded, and a
+sound reader that follows `turn_end.held` stays silent for that turn end. The
+tab still shows `notify` for the waiting sub-agent. Rechecking under the
+writer's locks would need a held answer the record could keep without
+applying, which the record contract does not have: a `recorded` turn end's
+`held` is true exactly when a check returned a note.
+
+## A sub-agent whose permission was granted reads as waiting until its next tool call
+
+A sub-agent is marked waiting when it asks for permission, running again at
+its next tool call (`PreToolUse`), and removed when it stops. No event
+Attention records marks the moment the user grants the permission, and
+`PostToolUse` does not change the mark. So
+while the granted tool runs, a long build for example, the sub-agent still
+reads as waiting, and a lead `Stop` in that time is recorded unheld, so a
+sound reader plays it as finished although the lead will wake itself. This errs
+toward a call the user did not need, never toward a missed one. Claude Code
+2.1.289 lists the sub-agent as running in `background_tasks` either way, so
+the Stop cannot tell the two apart.
+
 ## A Codex turn that ends on an API error leaves `thinking` on the tab
 
 Codex runs no hook when a turn ends on an error. Its turn loop runs `Stop` only

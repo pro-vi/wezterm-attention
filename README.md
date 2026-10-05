@@ -19,7 +19,7 @@ Known compromises are listed in [docs/accepted-limitations.md](docs/accepted-lim
 | `notify` | ! | Rose | Something needs your attention |
 | `review` | ◆ | Gold | Manually flagged for review (`Alt+B`) |
 
-Tabs light up when an agent or script records a state for its pane—even when another pane in that tab is currently focused, and even when the tab itself is not the one you are on. Focusing a pane acknowledges only that pane's `stop` and `notify`; states of unfocused sibling panes remain visible until you visit them. `thinking` persists until its writer replaces or clears it, or until the TTL it was written with expires; a `review` flag persists until you press `Alt+B` again.
+Tabs light up when an agent or script records a state for its pane—even when another pane in that tab is currently focused, and even when the tab itself is not the one you are on. Focusing a pane acknowledges only that pane's `stop` and `notify` (not a `notify` shown over its agent's finished turn while a sub-agent waits for permission); states of unfocused sibling panes remain visible until you visit them. `thinking` persists until its writer replaces or clears it, or until the TTL it was written with expires; a `review` flag persists until you press `Alt+B` again.
 
 Only the active pane of the focused window is acknowledged. The writer's record stays in place; the plugin has the `attention` command record which activity you were shown, and only while that activity is still the pane's, so an unseen notification remains visible.
 
@@ -189,6 +189,7 @@ attention.apply_to_config(config, {
   indicators = {
     thinking_frames = { "◌ ", "◔ ", "◑ ", "◕ " },
     stop   = "✓ ",
+    held   = "⏾ ",
     notify = "! ",
     review = "◆ ",
   },
@@ -273,6 +274,7 @@ occupies:
 |----------|-----------|-----------|
 | `stop` | 0 | `✓ ` |
 | `stop` | 2 | `✓+2 ` |
+| `stop` | 1, waiting for permission | `!+1 ` |
 | `thinking` | 3 | `◑+3 ` |
 | `notify` | 1 | `!+1 ` |
 | none | 2 | `+2 ` with default tab colors |
@@ -451,7 +453,7 @@ WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude Stop \
   --hold-check jev=/absolute/application/stop-hold
 ```
 
-Only a non-empty native `background_tasks` array with available reply text runs the check. Its input contains the checked scope, reply and unchanged array; neither content is stored by Attention. A validated hold shows fixed `◑` with thinking color and is not automatically acknowledged; while a sub-agent waits for permission, the tab shows `notify` instead. Timeout or failure supplies no hold. The checks share a 2000 ms outer budget; ordinary consumer and native-work time are additional. See [the exact input, output and record contract](docs/consumer-guide.md#pre-write-hold-checks) and [ADR 0005](docs/adr/0005-application-hold-notes-on-recorded-turn-ends.md). Update matching readers and writers before activation; this repository does not register or install the check for you.
+Only a non-empty native `background_tasks` array with available reply text runs the check. Its input contains the checked scope, reply and unchanged array; neither content is stored by Attention. A validated hold shows fixed `⏾` with thinking color and is not automatically acknowledged. While a sub-agent waits for permission, no check runs, the turn end is recorded unheld, and the tab shows `notify` until the wait ends. Timeout or failure supplies no hold. The checks share a 2000 ms outer budget; ordinary consumer and native-work time are additional. See [the exact input, output and record contract](docs/consumer-guide.md#pre-write-hold-checks) and [ADR 0005](docs/adr/0005-application-hold-notes-on-recorded-turn-ends.md). Update matching readers and writers before activation; this repository does not register or install the check for you.
 ## Codex hooks
 
 Codex reads lifecycle hooks from `~/.codex/hooks.json`, and asks you to approve each new or edited hook once (`/hooks` in Codex). `attention hooks describe --provider codex --json` lists the rows; the same rule and command form apply as for Claude Code, for the same reasons, and so does the advice to register the link on your PATH.

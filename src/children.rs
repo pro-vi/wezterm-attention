@@ -353,9 +353,8 @@ impl ChildPresenceSet {
     /// event. Nothing is recorded of the children it ends.
     fn reconcile(&mut self, order: &str, in_flight: &[String]) -> Reduction {
         let before = self.live.len();
-        self.live.retain(|child| {
-            child.last_mono_ns.as_str() > order || in_flight.contains(&child.agent_id)
-        });
+        self.live
+            .retain(|child| kept_through_stop(child, order, in_flight));
         if self.live.len() == before {
             Reduction::of(false, Disposition::Skipped)
         } else {
@@ -503,4 +502,25 @@ impl ChildPresenceSet {
             child.status == ChildStatus::Waiting && child.last_mono_ns.as_str() >= since
         })
     }
+
+    /// Whether some counted child waiting for permission outlasts the lead's
+    /// stop at `order`: one its list names or one with an event after it, or
+    /// every child when it has no list.
+    pub fn waits_through_stop(
+        &self,
+        end: Option<EndMark<'_>>,
+        order: &str,
+        in_flight: Option<&[String]>,
+    ) -> bool {
+        self.counted(end).iter().any(|child| {
+            child.status == ChildStatus::Waiting
+                && in_flight.is_none_or(|listed| kept_through_stop(child, order, listed))
+        })
+    }
+}
+
+/// Whether a lead stop at `order` whose list names `in_flight` keeps `child`
+/// counted: see `reconcile`.
+fn kept_through_stop(child: &LiveChild, order: &str, in_flight: &[String]) -> bool {
+    child.last_mono_ns.as_str() > order || in_flight.contains(&child.agent_id)
 }

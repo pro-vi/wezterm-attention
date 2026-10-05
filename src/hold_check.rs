@@ -78,6 +78,9 @@ pub enum Bypass {
     ReplyUnavailable,
     InputTooLarge,
     TotalDeadline,
+    /// A sub-agent waits on a permission prompt, so the lead is not waiting
+    /// on work that will finish without the user.
+    ChildWaiting,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -162,7 +165,7 @@ pub fn failed(outcomes: &[HoldCheckOutcome]) -> bool {
         Stage::Completed => false,
         Stage::NotDispatched => !matches!(
             o.reason,
-            Some(Bypass::NotApplicable | Bypass::NoCurrentScope)
+            Some(Bypass::NotApplicable | Bypass::NoCurrentScope | Bypass::ChildWaiting)
         ),
         Stage::NotStarted
         | Stage::Failed

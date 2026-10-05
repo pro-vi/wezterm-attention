@@ -192,8 +192,8 @@ marks the child `waiting` in the binding's `children.json`; its observation stil
 as the actor. While that child waits, the lead's next `thinking` does not replace the visible
 `notify`. The wait has no time limit, because a child blocked on a prompt sends nothing: it ends at
 the child's next tool call, its `SubagentStop`, a Codex parent stop or a Claude lead `Stop` that
-removes it, or the binding's end. A user prompt or any lead activity other than `thinking` replaces the `notify` at
-once. A child set that cannot be read or changed does not stop the `notify`; the event reports
+removes it, or the binding's end. A user prompt or any lead activity other than `thinking` replaces the stored `notify`
+at once; a lead `stop` still shows as `notify` while a counted child waits. A child set that cannot be read or changed does not stop the `notify`; the event reports
 `partial` with that record's diagnostic.
 
 A hook reports one diagnostic. Where one replaces another, the later one is reported and the one it
@@ -405,7 +405,7 @@ new `event_id` instead of reporting the acknowledged one unchanged. Without that
 activity is a `stop` the human already dismissed would never light the tab again. An unreadable
 acknowledgement counts as none, so it can only leave the earlier behaviour in place.
 
-A held Claude Stop retains native activity `type=stop` and stores validated `hold_notes` under the configured program names. The GUI derives fixed held presentation from these notes, except while the binding's child set holds a waiting child, when it presents `notify` instead. Automatic acknowledgement refuses held activity under the writer locks, including when custom auto_clear includes its displayed type. Explicit `attention plugin clear-activity --activity-event-id E` verifies the current claim/target and exact activity id under the same locks, then writes the activity-clear watermark (or removes a launch-only activity). A stale id clears nothing; this explicit operation is never called by focused-pane acknowledgement.
+A held Claude Stop retains native activity `type=stop` and stores validated `hold_notes` under the configured program names. The GUI derives fixed held presentation from these notes. While the binding's child set holds a waiting child, the GUI presents any lead `stop`, held or not, as `notify`. The writer runs no hold check for a Stop that keeps a waiting child counted, and records each configured program as `not_dispatched` with reason `child_waiting` ([ADR 0005](adr/0005-application-hold-notes-on-recorded-turn-ends.md) says which children a Stop keeps). Automatic acknowledgement refuses held activity under the writer locks, including when custom auto_clear includes its displayed type. Explicit `attention plugin clear-activity --activity-event-id E` verifies the current claim/target and exact activity id under the same locks, then writes the activity-clear watermark (or removes a launch-only activity). A stale id clears nothing; this explicit operation is never called by focused-pane acknowledgement.
 
 Its native lead lifecycle observation retains the original event/actor/time and gains Attention-owned `turn_end` applicability, held state and per-program execution facts. This is written after native effects, not an application claim. Audit is excluded from native replay equality. The native-only observation allowance remains 2048 bytes; a separate 16384-byte allowance includes the annotation field's encoding overhead, for a total 18432-byte item limit. Exact nested notes require depth 9. Pool count/byte and snapshot limits remain unchanged. Registration reserves worst-case escaped audit bytes before native application so optional audit cannot displace native fields. The transient task array and reply are not stored here.
 

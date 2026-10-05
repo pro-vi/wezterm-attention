@@ -640,13 +640,14 @@ return function(context)
     end
 
     local activity_type = activity and activity.type or nil
-    -- A hold means the lead wakes itself when its own work ends. A child
-    -- waiting on a permission prompt cannot end without the user, so the hold
-    -- is ignored while one waits.
+    -- A child waiting on a permission prompt cannot go on without the user, so
+    -- its prompt shows over the lead's turn end, held or not, while it waits.
+    -- Otherwise a hold means the lead wakes itself when its own work ends.
     local turn_end_held, shown_type = false, activity_type
-    if activity and activity.hold_notes and next(activity.hold_notes) then
-      turn_end_held = children.waiting == 0
-      shown_type = turn_end_held and "thinking" or "notify"
+    if activity_type == "stop" and children.waiting > 0 then
+      shown_type = "notify"
+    elseif activity and activity.hold_notes and next(activity.hold_notes) then
+      turn_end_held, shown_type = true, "thinking"
     end
     local effective_type = effective_attention_type(shown_type, review)
     local unavailable = diagnostics_have_unavailable_io(diagnostics)

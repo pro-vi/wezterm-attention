@@ -32,7 +32,7 @@ local defaults = {
   indicators = {
     thinking_frames = { "◌ ", "◔ ", "◑ ", "◕ " },
     stop   = "✓ ",
-    held   = "◑ ",
+    held   = "⏾ ",
     notify = "! ",
     review = "◆ ",
   },

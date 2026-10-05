@@ -1452,11 +1452,14 @@ fn apply_observation(
     Ok(mutation.result)
 }
 
-/// Whether some child of `binding_id` asked for permission at or after
-/// `since` and has done nothing since, so it can hold a notify ordered at
-/// `since`. A set, binding or end that cannot be read answers no, which
-/// leaves the activity to its usual order.
-fn child_still_waits(resolved: &ResolvedLaunch, binding_id: &str, since: &str) -> bool {
+/// What `waits` says of the child set of `binding_id`, counted under the
+/// binding's end. A set, binding or end that cannot be read answers no, which
+/// leaves the activity to its usual order and the hold check to run.
+fn child_waits(
+    resolved: &ResolvedLaunch,
+    binding_id: &str,
+    waits: impl FnOnce(&ChildPresenceSet, Option<EndMark<'_>>) -> bool,
+) -> bool {
     let identity = resolved.binding(binding_id);
     let RecordRead::Present(value) =
         read_record_typed_at(&resolved.root, "child_presence_set", &identity)
@@ -1475,7 +1478,7 @@ fn child_still_waits(resolved: &ResolvedLaunch, binding_id: &str, since: &str) -
     if binding["provider"].as_str() != Some(set.provider.as_str()) {
         return false;
     }
-    set.waits_since(EndMark::of(end.as_ref(), &binding), since)
+    waits(&set, EndMark::of(end.as_ref(), &binding))
 }
 
 /// A record of the binding's that a hook is about to replace, as it found it.
@@ -1666,11 +1669,12 @@ fn apply_activity(
                 && visible
                 && existing.as_ref().is_some_and(|activity| {
                     activity["type"] == "notify"
-                        && child_still_waits(
-                            resolved,
-                            &binding_id,
-                            activity["observed_mono_ns"].as_str().unwrap_or(""),
-                        )
+                        && child_waits(resolved, &binding_id, |set, end| {
+                            set.waits_since(
+                                end,
+                                activity["observed_mono_ns"].as_str().unwrap_or(""),
+                            )
+                        })
                 });
             let ActivityOutcome {
                 result,
@@ -3128,6 +3132,15 @@ fn obtain_hold_notes(
     let Ok(Some(scope)) = prepare_hold_scope(resolved, event) else {
         return skip(Bypass::NoCurrentScope);
     };
+    // A sub-agent waiting on a permission prompt cannot finish without the
+    // user, so the lead is not waiting on its own work, whatever its reply
+    // says. Only one this Stop keeps counts: one it no longer lists has ended.
+    let BindingTarget::Binding { binding_id } = &scope.target;
+    if child_waits(resolved, binding_id, |set, end| {
+        set.waits_through_stop(end, observation, event.in_flight_task_ids.as_deref())
+    }) {
+        return skip(Bypass::ChildWaiting);
+    }
     let Some(tasks) = request.background_tasks else {
         return skip(Bypass::NotApplicable);
     };

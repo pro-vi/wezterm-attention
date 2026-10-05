@@ -932,7 +932,8 @@
       "no_current_scope",
       "reply_unavailable",
       "input_too_large",
-      "total_deadline"
+      "total_deadline",
+      "child_waiting"
     ],
     "turn_end_status": [
       "recorded",

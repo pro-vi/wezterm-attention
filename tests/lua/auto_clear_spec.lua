@@ -821,8 +821,11 @@ test("held turn ends keep a fixed indicator and cannot be automatically acknowle
   assert(view.activity_type == "stop" and view.type == "thinking" and view.turn_end_held == true)
   assert(view.frame == nil, "held activity must not acquire a spinner frame")
   local visible = internal.resolve_visible_attention({ seeded_key(pane_id) })
-  assert(visible.indicator == "◑ " and visible.still_indicator == "◑ ")
+  assert(visible.indicator == "⏾ " and visible.still_indicator == "⏾ ")
   assert(visible.color == "#1c1730")
+  for _, frame in ipairs(attention._active_indicators.thinking_frames) do
+    assert(frame ~= visible.indicator, "a held tab must not pass for a running one")
+  end
 end)
 
 test("projection returns the highest-priority cached pane and ignores uncached ones", function()
@@ -2499,6 +2502,25 @@ test("a held turn end yields to a child waiting on a permission prompt", functio
   poll_at({ pane_id })
   view = assert(pane_view(pane_id))
   assert(view.type == "thinking" and view.turn_end_held == true, "the hold returns when the wait ends")
+end)
+
+test("an unheld turn end yields to a child waiting on a permission prompt", function()
+  local pane_id = 7591
+  write_activity(pane_id, "stop")
+  write_subagents(pane_id, 1, "waiting")
+  poll_at({ pane_id })
+  local view = assert(pane_view(pane_id))
+  assert(view.activity_type == "stop" and view.type == "notify" and view.turn_end_held == false,
+    "a waiting child must show notify over a finished turn, got " .. tostring(view.type))
+  local w = window_double({ tabs = { { pane_id } }, focused = true, active_pane_id = pane_id })
+  local spawned = with_plugin_command(function() error("a finished turn was acknowledged while its child waits") end, function()
+    attention.poll(w, { now_ms = 1000, now_unix_ns = fixture_now })
+  end)
+  assert(#spawned == 0, "focusing the pane while its child waits launched an acknowledgement")
+  write_subagents(pane_id, 1)
+  poll_at({ pane_id })
+  view = assert(pane_view(pane_id))
+  assert(view.type == "stop", "the finished turn shows again when the wait ends, got " .. tostring(view.type))
 end)
 
 test("live subagents keep a pane visible with no activity of its own", function()

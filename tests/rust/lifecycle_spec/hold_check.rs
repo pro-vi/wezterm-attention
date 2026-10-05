@@ -123,7 +123,7 @@ fn always_hold_keeps_running_claude_stop_out_of_checkmark() {
     let shown = super::mark_clear::plugin_reader_answer(&setup, "held_render");
     assert_eq!(
         shown,
-        "raw=stop shown=thinking held=true indicator=◑  published=◑  color=#1c1730"
+        "raw=stop shown=thinking held=true indicator=⏾  published=⏾  color=#1c1730"
     );
     assert!(!shown.contains('✓'));
     assert_eq!(activity["hold_notes"]["jev"]["hold"], true);
@@ -158,6 +158,73 @@ fn always_hold_keeps_running_claude_stop_out_of_checkmark() {
         super::mark_clear::plugin_reader_answer(&setup, "activity"),
         "activity=none source=none"
     );
+}
+
+/// A sub-agent waiting on a permission prompt cannot finish without the user,
+/// so the lead's turn end is not held for it: no check runs, and the turn end
+/// is recorded unheld. That holds for a waiting sub-agent the Stop still lists,
+/// as Claude Code lists one blocked on a prompt as running. One the Stop no
+/// longer lists has ended, and a sub-agent that is only running keeps the check.
+#[test]
+fn a_child_waiting_for_permission_keeps_the_hold_check_from_running() {
+    for (child_event, listed, held) in [
+        ("PermissionRequest", true, false),
+        ("PermissionRequest", false, true),
+        ("SubagentStart", true, true),
+    ] {
+        let case = format!("{child_event} listed={listed}");
+        let setup = Setup::new();
+        bind(&setup, "claude");
+        let mut patch = json!({"agent_id":"child-a","agent_type":"Explore"});
+        if child_event == "PermissionRequest" {
+            patch["tool_name"] = json!("Bash");
+        }
+        setup.apply(
+            &event("claude", child_event, "hold-session", patch),
+            "00000000000000000300",
+        );
+        let mut input = payload();
+        if listed {
+            input["background_tasks"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id":"child-a","type":"subagent","status":"running"}));
+        }
+        let ran = setup._scratch.0.join("ran");
+        let check = executable(
+            &setup,
+            &format!(
+                "/usr/bin/touch '{}'\n/bin/cat >/dev/null\nprintf '%s' '{}'",
+                ran.display(),
+                HOLD_LINE
+            ),
+        );
+        let output = hook(&setup, &input, &check, &["--strict"]);
+        assert!(
+            output.status.success(),
+            "{case}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(ran.exists(), held, "{case}: whether the check ran");
+        let (activity, snapshot) = records(&setup, "claude");
+        assert_eq!(activity["type"], "stop", "{case}");
+        assert_eq!(activity.get("hold_notes").is_some(), held, "{case}");
+        let end = last_end(&snapshot);
+        assert_eq!(end["turn_end"]["held"], held, "{case}");
+        if !held {
+            assert_eq!(end["turn_end"]["hold_checks"][0]["stage"], "not_dispatched");
+            assert_eq!(end["turn_end"]["hold_checks"][0]["reason"], "child_waiting");
+        }
+        // The plugin reads the same records: the waiting child's prompt shows
+        // over the finished turn, and a hold shows only once nothing waits.
+        let shown = super::mark_clear::plugin_reader_answer(&setup, "held_render");
+        let expected = if held {
+            "raw=stop shown=thinking held=true"
+        } else {
+            "raw=stop shown=notify held=false"
+        };
+        assert!(shown.starts_with(expected), "{case}: {shown}");
+    }
 }
 
 #[test]
