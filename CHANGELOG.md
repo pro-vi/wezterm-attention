@@ -97,6 +97,8 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 
 ### Fixed
 
+- A held turn end no longer hides a sub-agent's permission prompt: while a child waits for permission, the tab shows the notify glyph (`!` by default) instead of the held one, and the hold returns when the wait ends. `turn_end.held` is still recorded as true, so a sound reader that follows it stays silent.
+
 - A session resumed after its old terminal server is replaced carries your review flag to its new pane at registration. Only the user flag moves, once; a later clear stays clear. A stopped or failed transfer may lose the flag after consuming its source.
 
 - When a pane listing fails, presence checks open at most one listener-probe connection per socket per command. Bindings, inspect, doctor and sweep share the bounded answer while preserving the distinction between a slow server and an exited server.

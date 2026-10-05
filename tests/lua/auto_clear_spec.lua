@@ -2440,9 +2440,9 @@ end)
 
 -- ── Subagents ───────────────────────────────────────────────────────────────
 
---- Give the pane `count` running subagents, in place of any it had, as the
---- writer's set of running children.
-local function write_subagents(pane_id, count)
+--- Give the pane `count` subagents, in place of any it had, as the writer's
+--- set of running children. `status` is "running" unless given.
+local function write_subagents(pane_id, count, status)
   if not path_exists(seeded_pane_root(pane_id) .. "/claim.json") then seed_pane(pane_id) end
   local set = seeded_record(pane_id, "child_presence_set")
   set.revision = next_event_id()
@@ -2450,7 +2450,8 @@ local function write_subagents(pane_id, count)
   set.live = {}
   for index = 1, count do
     set.live[index] = {
-      agent_id = "agent-" .. index, last_event = "tool", status = "running",
+      agent_id = "agent-" .. index, last_event = status == "waiting" and "permission" or "tool",
+      status = status or "running",
       last_mono_ns = string.format("%020d", 300000000000 + index),
     }
   end
@@ -2468,6 +2469,37 @@ local function poll_at(pane_ids, spec)
   attention.poll(w, { now_unix_ns = fixture_now, call_after = function() end })
   return w
 end
+
+test("a held turn end yields to a child waiting on a permission prompt", function()
+  local pane_id = 7590
+  write_activity(pane_id, "stop")
+  local file = seeded_records_root(pane_id) .. "/activity.json"
+  local activity = decode_json(assert(read_path(file)))
+  activity.source = "claude"
+  activity.hold_notes = { jev = { hold = true, answer = "waiting_on_own_work" } }
+  write_json_path(file, activity)
+  write_subagents(pane_id, 1)
+  poll_at({ pane_id })
+  local view = assert(pane_view(pane_id))
+  assert(view.type == "thinking" and view.turn_end_held == true,
+    "a running child keeps the hold, got " .. tostring(view.type))
+  write_subagents(pane_id, 1, "waiting")
+  poll_at({ pane_id })
+  view = assert(pane_view(pane_id))
+  assert(view.activity_type == "stop" and view.type == "notify" and view.turn_end_held == false,
+    "a waiting child must show notify, got " .. tostring(view.type) .. " held=" .. tostring(view.turn_end_held))
+  local visible = internal.resolve_visible_attention({ seeded_key(pane_id) })
+  assert(visible.type == "notify" and visible.indicator:find("^!") ~= nil, "got indicator " .. tostring(visible.indicator))
+  local w = window_double({ tabs = { { pane_id } }, focused = true, active_pane_id = pane_id })
+  local spawned = with_plugin_command(function() error("a held activity tried to acknowledge") end, function()
+    attention.poll(w, { now_ms = 1000, now_unix_ns = fixture_now })
+  end)
+  assert(#spawned == 0, "focusing the pane while its child waits launched an acknowledgement")
+  write_subagents(pane_id, 1)
+  poll_at({ pane_id })
+  view = assert(pane_view(pane_id))
+  assert(view.type == "thinking" and view.turn_end_held == true, "the hold returns when the wait ends")
+end)
 
 test("live subagents keep a pane visible with no activity of its own", function()
   write_subagents(7511, 2)

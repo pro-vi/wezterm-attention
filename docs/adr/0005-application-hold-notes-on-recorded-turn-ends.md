@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-10-04
+- **Amended:** 2026-10-04 — a child waiting on a permission prompt overrides the held presentation
 
 ## Context
 
@@ -25,6 +26,8 @@ Retain native `type=stop` and `kind=response_finished`. Accepted notes become ac
 
 Derive held GUI presentation from validated activity notes: raw `activity_type=stop`, effective thinking priority/color, fixed `indicators.held` (default `◑`), and `turn_end_held=true`. Use the same held indicator in published tab text. Automatic acknowledgement refuses held activity even under custom auto-clear settings. Review and multi-pane priority continue to apply. A later applicable unheld Stop restores ordinary `✓`; an explicit scoped clear of the current activity remains available, including for an agent-owned claim. There is no automatic hold-release timer.
 
+A hold assumes the lead's own work will wake it. A child with `status=waiting` in the binding's `children.json` is blocked on a permission prompt and cannot finish without the user, yet Claude Code lists it as `running` in `background_tasks`, so the hold check cannot see it. The held Stop also replaces the `notify` the child published. While the child set holds a waiting child, the reader therefore ignores hold notes: `turn_end_held` is false and the effective type is `notify`, with its indicator, color and priority. Focusing the pane acknowledges nothing, because the shown type is not the stored one and the writer refuses to acknowledge activity with hold notes. When the wait ends, the notes apply again.
+
 Expose the exact stored `turn_end` through lifecycle inspection/view and post-persistence delivery. Annotate existing lead turn ends across providers, while running a check only for the eligible Claude Stop. A sound reader distinguishes recorded unheld from recorded held and superseded, and deduplicates by full source scope and stored observation ID. Badge IDs and glyphs do not identify turn-end receipts. Application sound policy and playback remain outside Attention.
 
 Reserve bounded execution metadata before running programs. Preserve the native 2048-byte allowance, add a 16384-byte annotation allowance, and keep snapshot/pool bounds. The specified nested note grammar requires depth 9. Update Rust, Lua and Python validators together; never truncate native fields or drop native evidence to fit optional audit.
@@ -37,7 +40,7 @@ Lifecycle metadata places the hold and applicability decision on the recorded na
 
 ## Consequences and revisit
 
-Check failure leaves ordinary Stop behavior available; it cannot override a newer native fence. A mistaken hold can remain if no later event arrives, so this decision does not promise that every held agent wakes or that a needed call cannot be lost. Polling can miss bounded retained observations. Native persistence can succeed while lifecycle persistence fails; no sound receipt is invented in that case.
+Check failure leaves ordinary Stop behavior available; it cannot override a newer native fence. A waiting child does not change what the CLI records: `hold_notes` and `turn_end.held` stay as the check returned them, so a sound reader stays silent for that Stop; only the GUI presentation yields. A mistaken hold can remain if no later event arrives, so this decision does not promise that every held agent wakes or that a needed call cannot be lost. Polling can miss bounded retained observations. Native persistence can succeed while lifecycle persistence fails; no sound receipt is invented in that case.
 
 The current strict readers reject these annotations. New readers accept existing unannotated state, but annotated state requires matching writers/readers and drained old hook invocations before activation. Amend the current schema in place; add no parallel implementation or state deletion. Downgrading annotated state to old readers requires separate review. Installation and live hook/sound registration are a later action.
 
