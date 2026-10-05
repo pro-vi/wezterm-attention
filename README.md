@@ -33,6 +33,8 @@ A pane can also report how many subagents are still working inside it. The tab a
 
 There are two parts. The Lua plugin draws the tab bar and reads what writers record. The `attention` command is a small Rust program that agent hooks and scripts call to record what a pane's agent is doing. The plugin shows only what the command records, so both are needed.
 
+Upgrading from 0.6? Follow [the upgrade steps in the changelog](CHANGELOG.md#upgrading-from-06).
+
 ### 1. Load the plugin
 
 This needs WezTerm `20230320-124340-559cb7b0` or newer, the first release with `wezterm.plugin.require`. Add the plugin before any other `format-tab-title` handler:
