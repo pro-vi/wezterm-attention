@@ -6,7 +6,7 @@ use wezterm_attention::observations::{
     Actor, LifecycleAvailability, LifecycleView, NativeCorrelation,
 };
 use wezterm_attention::query::{
-    PaneFacts, PanePresence, PaneScope, RecordAvailability as A, ScopeRelation,
+    PaneFacts, PanePresence, PaneScope, ReaderConfidence, RecordAvailability as A, ScopeRelation,
     read_pane_facts_with_ports,
 };
 use wezterm_attention::records::{FileRecords, RecordIdentity, RecordRead, RecordReader};
@@ -59,6 +59,20 @@ fn bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         }
     }
     result
+}
+
+/// Makes each pane listing first replace the server at the pane's socket, as a
+/// mux server restarting at the same path does. The returned slot holds the
+/// replacement's listener; keep it alive for the read.
+fn replace_server_on_list(setup: &Setup) -> std::sync::Arc<Mutex<Option<UnixListener>>> {
+    let socket = PathBuf::from(&setup.env["WEZTERM_UNIX_SOCKET"]);
+    let replacement = std::sync::Arc::new(Mutex::new(None));
+    let slot = replacement.clone();
+    *setup.panes.on_list.lock().unwrap() = Some(std::sync::Arc::new(move || {
+        fs::remove_file(&socket).unwrap();
+        *slot.lock().unwrap() = Some(UnixListener::bind(&socket).unwrap());
+    }));
+    replacement
 }
 
 #[test]
@@ -182,30 +196,13 @@ fn inspector_rechecks_socket_and_preserves_unbound_optionality() {
     assert!(facts.complete());
     assert!(facts.binding.is_none());
     assert_eq!(facts.activity.availability, A::Absent);
-    struct Rebirth {
-        socket: PathBuf,
-        replacement: Mutex<Option<UnixListener>>,
-    }
-    impl PaneLister for Rebirth {
-        fn list(&self, _: &str) -> wezterm_attention::protocol::Result<Vec<PaneRow>> {
-            fs::remove_file(&self.socket).unwrap();
-            *self.replacement.lock().unwrap() = Some(UnixListener::bind(&self.socket).unwrap());
-            Ok(vec![PaneRow {
-                pane_id: "42".into(),
-                tty_name: None,
-            }])
-        }
-    }
-    let rebirth = Rebirth {
-        socket: PathBuf::from(&setup.env["WEZTERM_UNIX_SOCKET"]),
-        replacement: Mutex::new(None),
-    };
+    let _replacement = replace_server_on_list(&setup);
     let facts = read_pane_facts_with_ports(
         &state_root(&setup.env).unwrap(),
         &scope,
         &FileRecords,
         &setup.clock,
-        Some(&rebirth),
+        Some(&setup.panes),
         None,
     )
     .unwrap();
@@ -219,6 +216,44 @@ fn inspector_rechecks_socket_and_preserves_unbound_optionality() {
         A::Unavailable,
         "mixed snapshot must be discarded"
     );
+}
+
+#[test]
+fn a_server_shown_exited_during_the_read_leaves_the_pane_absent() {
+    use wezterm_attention::wezterm::{Presence, ProcessProbe};
+    // No process carries the pane, so once the socket is replaced the scope's
+    // server is shown to have exited while the read ran, whether or not the
+    // replacement answered the listing.
+    struct NoProcess;
+    impl ProcessProbe for NoProcess {
+        fn available(&self) -> bool {
+            true
+        }
+        fn presence(&self, _: &str, _: &str) -> Presence {
+            Presence::Absent
+        }
+    }
+    for lists in [true, false] {
+        let setup = setup();
+        let _replacement = replace_server_on_list(&setup);
+        if !lists {
+            setup.panes.set(None);
+        }
+        let facts = read_pane_facts_with_ports(
+            &state_root(&setup.env).unwrap(),
+            &scope(&setup),
+            &FileRecords,
+            &setup.clock,
+            Some(&setup.panes),
+            Some(&NoProcess),
+        )
+        .unwrap();
+        assert!(facts.complete(), "lists={lists}: {:?}", facts.diagnostics);
+        assert_eq!(facts.pane_presence, PanePresence::VerifiedAbsent);
+        assert_eq!(facts.reader_confidence, ReaderConfidence::Unconfirmed);
+        let row = facts.binding.expect("the binding row");
+        assert_eq!(row.pane_presence, PanePresence::VerifiedAbsent);
+    }
 }
 
 #[test]

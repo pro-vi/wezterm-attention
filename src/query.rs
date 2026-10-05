@@ -813,9 +813,6 @@ fn read_pane_facts_once(
     for item in &mut diagnostics[before_presence..] {
         item.set("facet", "pane_presence");
     }
-    // The claim names this launch and the pointer this binding, or the scope
-    // would not have matched, so the row is the pane's current one.
-    let confidence = reader_confidence(true, presence);
     let ended = end.availability == A::Present;
     // A scope whose records are kept history was answered above, so the one
     // left here is live or shown exited, as `bindings` would say of this row.
@@ -831,25 +828,6 @@ fn read_pane_facts_once(
                 processes,
             )
     });
-    let health = binding_health([None, end.failure_code(), None, None], conflicted);
-    let row = binding
-        .record
-        .as_ref()
-        .zip(selected)
-        .map(|(record, selected)| {
-            BindingRow::of(
-                record,
-                address.clone(),
-                scope.launch_id.clone(),
-                selected.to_owned(),
-                RowFacts {
-                    ended,
-                    current: true,
-                    presence,
-                    health,
-                },
-            )
-        });
     let after_claim = RecordFacet::at(
         reader,
         root,
@@ -864,9 +842,22 @@ fn read_pane_facts_once(
         &RecordIdentity::launch(address, &scope.launch_id),
         "binding_selection",
     );
-    if let Err(diagnostic) = check_socket() {
-        return Ok(PaneFacts::scope_unavailable(scope, diagnostic));
-    }
+    // As at the first check, a server shown to have exited leaves the pane
+    // absent. Once the first check has shown that, a later server at the
+    // socket can only be a replacement, so there is nothing to recheck.
+    let exited_during_read = !server_exited
+        && match check_socket() {
+            Ok(exited) => exited,
+            Err(diagnostic) => return Ok(PaneFacts::scope_unavailable(scope, diagnostic)),
+        };
+    let presence = if exited_during_read {
+        // What the listing reported was about the replacement.
+        diagnostics.truncate(before_presence);
+        PanePresence::VerifiedAbsent
+    } else {
+        presence
+    };
+    let conflicted = conflicted && competes(ended, kept_history, presence);
     if after_claim.failed() || after_pointer.failed() {
         return Ok(PaneFacts::unavailable(
             scope,
@@ -895,6 +886,28 @@ fn read_pane_facts_once(
             None,
         ));
     }
+    // The claim names this launch and the pointer this binding, or the scope
+    // would not have matched, so the row is the pane's current one.
+    let confidence = reader_confidence(true, presence);
+    let health = binding_health([None, end.failure_code(), None, None], conflicted);
+    let row = binding
+        .record
+        .as_ref()
+        .zip(selected)
+        .map(|(record, selected)| {
+            BindingRow::of(
+                record,
+                address.clone(),
+                scope.launch_id.clone(),
+                selected.to_owned(),
+                RowFacts {
+                    ended,
+                    current: true,
+                    presence,
+                    health,
+                },
+            )
+        });
     Ok(PaneFacts {
         scope: scope.clone(),
         scope_relation: ScopeRelation::Matched,

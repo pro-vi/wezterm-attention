@@ -97,6 +97,8 @@ In these notes, "v1 flat markers" are the one-file-per-pane-id JSON files of 0.6
 
 ### Fixed
 
+- `attention inspect` no longer reports a pane `present` from a server that took the scope's socket during the read: when the scope's server is shown to have exited, the pane is `verified_absent`, as when it exited before the read.
+
 - A held turn end no longer hides a sub-agent's permission prompt: while a child waits for permission, the tab shows the notify glyph (`!` by default) instead of the held one, and the hold returns when the wait ends. `turn_end.held` is still recorded as true, so a sound reader that follows it stays silent.
 
 - A session resumed after its old terminal server is replaced carries your review flag to its new pane at registration. Only the user flag moves, once; a later clear stays clear. A stopped or failed transfer may lose the flag after consuming its source.
