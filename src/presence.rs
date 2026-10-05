@@ -198,16 +198,43 @@ pub(crate) fn pane_evidence(
         }
     };
     let socket_path = socket_path.as_str();
-    match server_state(socket_path, address, processes) {
-        ServerState::Current => {}
-        ServerState::Exited => return PaneEvidence::Observed(PanePresence::VerifiedAbsent),
-        ServerState::KeptHistory(diagnostic) => return PaneEvidence::KeptHistory { diagnostic },
-        ServerState::Unreadable(error) => {
-            diagnostics.push(error.diagnostic);
-            return unavailable();
+    if let Some(evidence) = evidence_unless_current(socket_path, address, processes, diagnostics) {
+        return evidence;
+    }
+    let before = diagnostics.len();
+    let evidence = presence_at_socket(socket_path, address, Some(panes), processes, diagnostics);
+    // The identity is read again after the look: a server that took the socket
+    // meanwhile answered for its own panes, so the old server's state decides,
+    // and what the look reported goes with it.
+    let mut found = Vec::new();
+    match evidence_unless_current(socket_path, address, processes, &mut found) {
+        None => evidence,
+        Some(state) => {
+            diagnostics.truncate(before);
+            diagnostics.extend(found);
+            state
         }
     }
-    presence_at_socket(socket_path, address, Some(panes), processes, diagnostics)
+}
+
+/// The pane's evidence from its server's state when the socket no longer
+/// carries the incarnation or cannot be read; None while it does, and a look
+/// at the socket speaks for that server.
+fn evidence_unless_current(
+    socket_path: &str,
+    address: &PaneAddress,
+    processes: Option<&dyn ProcessProbe>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<PaneEvidence> {
+    match server_state(socket_path, address, processes) {
+        ServerState::Current => None,
+        ServerState::Exited => Some(PaneEvidence::Observed(PanePresence::VerifiedAbsent)),
+        ServerState::KeptHistory(diagnostic) => Some(PaneEvidence::KeptHistory { diagnostic }),
+        ServerState::Unreadable(error) => {
+            diagnostics.push(error.diagnostic);
+            Some(PaneEvidence::Observed(PanePresence::Unavailable))
+        }
+    }
 }
 
 /// The socket a realm's record names, when both the realm and its

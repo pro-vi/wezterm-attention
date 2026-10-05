@@ -1000,3 +1000,150 @@ fn a_relative_state_home_that_is_not_utf8_is_ignored() {
     assert_eq!(not_utf8.0, Some(0), "{not_utf8:?}");
     assert_eq!(not_utf8, relative);
 }
+
+/// Removes the socket file and, when `rebind`, binds a new server at its path:
+/// a mux that exits, or is replaced, in the middle of a reader's look.
+fn change_socket(setup: &Setup, socket_path: &str, rebind: bool) {
+    fs::remove_file(socket_path).expect("remove socket");
+    if rebind {
+        *setup.listener.lock().expect("listener lock") =
+            Some(UnixListener::bind(socket_path).expect("rebind socket"));
+    }
+}
+
+/// A pane lister whose socket changes before its `on_call`-th listing answers.
+/// That listing lists what the setup's panes list, as a replacement reusing
+/// the pane ids would, or fails when not `answers`, as one the change cut off.
+struct ReplacedWhileListing<'a> {
+    setup: &'a Setup,
+    rebind: bool,
+    answers: bool,
+    on_call: usize,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl PaneLister for ReplacedWhileListing<'_> {
+    fn list(&self, socket_path: &str) -> wezterm_attention::protocol::Result<Vec<PaneRow>> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) + 1 == self.on_call {
+            change_socket(self.setup, socket_path, self.rebind);
+            if !self.answers {
+                return Err(AttentionError::new(
+                    DiagnosticCode::RealmUnavailable,
+                    "wezterm cli list failed",
+                ));
+            }
+        }
+        self.setup.panes.list(socket_path)
+    }
+}
+
+/// A process probe whose socket is replaced before its first answer, after the
+/// pane listing was taken. It answers as the setup's probe does.
+struct ReplacedWhileProbing<'a> {
+    setup: &'a Setup,
+    replaced: std::sync::atomic::AtomicBool,
+}
+
+impl ProcessProbe for ReplacedWhileProbing<'_> {
+    fn available(&self) -> bool {
+        self.setup.processes.available()
+    }
+
+    fn presence(&self, socket_path: &str, pane_id: &str) -> Presence {
+        if !self.replaced.swap(true, Ordering::SeqCst) {
+            change_socket(self.setup, socket_path, true);
+        }
+        self.setup.processes.presence(socket_path, pane_id)
+    }
+}
+
+/// The presence of the one row `bindings` reads with these ports, and the code
+/// of every diagnostic it reports.
+fn bindings_presence(
+    setup: &Setup,
+    panes: &dyn PaneLister,
+    processes: &dyn ProcessProbe,
+) -> (PanePresence, Vec<String>) {
+    let (rows, diagnostics) =
+        read_bindings_with_ports(&setup.root(), Some(panes), Some(processes)).expect("bindings");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let codes = diagnostics.iter().map(|item| item.code.as_str().to_owned());
+    (rows[0].pane_presence, codes.collect())
+}
+
+/// A pane looked at while its socket changed reads as it does when the change
+/// came before the look: whether the change came during the listing, cut the
+/// listing off, or came after it, while the process listing was asked.
+#[test]
+fn a_socket_changed_during_a_bindings_look_reads_as_one_changed_before() {
+    for (probe, expected) in [
+        (Presence::Absent, PanePresence::VerifiedAbsent),
+        (Presence::Present, PanePresence::Unavailable),
+    ] {
+        for (rebind, answers) in [(true, true), (false, true), (true, false), (false, false)] {
+            let setup = Setup::new();
+            setup.claim_and_bind();
+            setup.processes.set(probe);
+            let lister = ReplacedWhileListing {
+                setup: &setup,
+                rebind,
+                answers,
+                on_call: 1,
+                calls: Default::default(),
+            };
+            let during = bindings_presence(&setup, &lister, &setup.processes);
+            let before = bindings_presence(&setup, &setup.panes, &setup.processes);
+            let case = format!("{probe:?} rebind={rebind} answers={answers}");
+            assert_eq!(during.0, expected, "{case}");
+            assert_eq!(during, before, "{case}");
+        }
+        // The old server lists no such pane, and a replacement takes the
+        // socket before the process listing is asked whether one carries it.
+        let setup = Setup::new();
+        setup.claim_and_bind();
+        setup.processes.set(probe);
+        setup.panes.set(Vec::new());
+        let probing = ReplacedWhileProbing {
+            setup: &setup,
+            replaced: Default::default(),
+        };
+        let during = bindings_presence(&setup, &setup.panes, &probing);
+        let before = bindings_presence(&setup, &setup.panes, &setup.processes);
+        assert_eq!(during.0, expected, "{probe:?} while probing");
+        assert_eq!(during, before, "{probe:?} while probing");
+    }
+}
+
+/// A sweep apply decides on a fresh look taken after its first. When a
+/// replacement answers that fresh look's listing, the pane counts absent only
+/// on the proof a replacement before the listing needs: the binding ends when
+/// no process carries the pane, and never while one does.
+#[test]
+fn a_server_replaced_while_sweep_lists_ends_only_on_proof() {
+    for (probe, ends) in [(Presence::Absent, true), (Presence::Present, false)] {
+        let setup = Setup::new();
+        setup.claim_and_bind();
+        let binding_dir = setup.binding_dir();
+        setup.processes.set(probe);
+        let lister = ReplacedWhileListing {
+            setup: &setup,
+            rebind: true,
+            answers: true,
+            on_call: 2,
+            calls: Default::default(),
+        };
+        let (runs, _) = two_applies(&setup, &lister);
+        let calls = lister.calls.load(Ordering::SeqCst);
+        assert!(calls >= lister.on_call, "the fresh look listed: {calls}");
+        if ends {
+            assert_eq!(actions(&runs[0], "absence"), [&json!("first_absence")]);
+            assert_eq!(actions(&runs[1], "absence"), [&json!("end")]);
+            assert_eq!(end_reason(&binding_dir), Some(json!("sweep_absent")));
+        } else {
+            for run in &runs {
+                assert!(!actions(run, "absence").contains(&&json!("end")), "{run:?}");
+            }
+            assert_eq!(end_reason(&binding_dir), None);
+        }
+    }
+}

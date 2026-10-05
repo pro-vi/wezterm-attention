@@ -492,8 +492,9 @@ Every reader and sweep classify the server behind a recorded incarnation the sam
 whether the socket at the realm record's path still carries that incarnation (the digest of its
 resolved path, device, inode and change time) and what else can be shown:
 
-- **Live.** The socket still carries the incarnation and its pane listing answers. Presence is
-  decided per pane as above.
+- **Live.** The socket carries the incarnation before the look at the pane and still does after
+  it, and its pane listing answers. Presence is decided per pane as above. A socket that changed
+  during the look is read as one that changed before it, and what the look found is not used.
 - **Exited.** Either the socket file is named `gui-sock-<pid>`, as a WezTerm GUI names its own,
   and no process with that pid exists, since a GUI's local panes end with it (a GUI that quit
   usually leaves that file behind; when the file still carries the incarnation, this is asked
