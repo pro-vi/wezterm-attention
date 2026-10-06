@@ -416,7 +416,8 @@ fn dispatch(
         };
         // Spaced JSON and a terminal newline fit. This limits transport
         // bytes, not the whitespace accepted between JSON tokens.
-        let maximum = m.limits.safe_label_max_bytes + b"{\"quiet\": true, \"answer\": \"\"}\n".len();
+        let maximum =
+            m.limits.safe_label_max_bytes + b"{\"quiet\": true, \"answer\": \"\"}\n".len();
         let mut input = Some(stdin);
         let mut offset = 0;
         let mut captured = Vec::new();
