@@ -29,6 +29,8 @@ use wezterm_attention::wezterm::{
 #[derive(Debug, Parser)]
 #[command(
     name = "attention",
+    // The wrapper runs libexec/attention-rs; without this, usage text names that file.
+    bin_name = "attention",
     version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("ATTENTION_BUILD_COMMIT"), ")"),
     about = "Publish and maintain mux-native WezTerm attention state.",
     after_help = "Example: attention bindings --socket /absolute/mux.sock\nQueries (bindings, tabs, inspect, doctor, sweep) and hooks describe return JSON by default.\nCheck status and complete before using query results.\nRegistration requirements: attention hooks describe --provider claude"
@@ -622,6 +624,8 @@ fn run(cli: &Cli, name: &'static str) -> Result<ExitCode, AttentionError> {
         }
         Some(Command::Hooks { command: None }) => {
             let mut command = Cli::command();
+            // Building fills in each subcommand's full name; unbuilt, the usage line says `hooks`.
+            command.build();
             #[expect(
                 clippy::expect_used,
                 reason = "the `Hooks` variant of `Command` is the subcommand clap names `hooks`"

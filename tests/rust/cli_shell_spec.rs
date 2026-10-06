@@ -3,6 +3,7 @@ use std::io::Read;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -335,6 +336,31 @@ fn the_binary_names_the_commit_it_was_built_from() {
             || (commit.len() == 12 && commit.bytes().all(|b| b.is_ascii_hexdigit())),
         "build is a 12-hex commit or unknown, got {build:?}"
     );
+}
+
+#[test]
+fn usage_text_names_the_attention_command() {
+    let binary = env!("CARGO_BIN_EXE_attention");
+    // As the installed wrapper runs it, from `libexec/attention-rs`.
+    let error = Command::new(binary)
+        .arg0("attention-rs")
+        .args(["bindings", "--bogus"])
+        .env_clear()
+        .output()
+        .expect("run with an unknown flag");
+    let envelope: Value = serde_json::from_slice(&error.stdout).expect("usage JSON envelope");
+    let message = envelope["diagnostics"][0]["message"]
+        .as_str()
+        .expect("message");
+    assert!(message.contains("Usage: attention bindings"), "{message}");
+
+    let hooks = Command::new(binary)
+        .arg("hooks")
+        .env_clear()
+        .output()
+        .expect("run hooks without a subcommand");
+    let help = String::from_utf8_lossy(&hooks.stdout);
+    assert!(help.contains("Usage: attention hooks"), "{help}");
 }
 
 #[test]
