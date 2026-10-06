@@ -459,6 +459,15 @@ JSON responses contain `schema`, `command`, `status`, `complete`, `result`, and 
 `bindings` also reports where its time went, in `result.timing_ms`: `pane_list` (inside `wezterm cli list`), `process_list` (inside the process probe) and `records` (the rest: finding and reading the records). It is on every answer, without a flag or threshold, so a slow call names its phase.
 `bindings` returns every matching row unless `--limit` caps them. Every command lists every diagnostic it raises, and `sweep` every detail; the lifecycle facet of `inspect` alone bounds its own, as the [consumer guide](consumer-guide.md) says.
 
+
+A `hold_notes` entry may instead contain exactly `quiet=true` and an `answer`
+token. This is allowed on Claude and Codex binding Stops. Its corresponding
+`turn_end.hold_checks` entry retains the same note. `held` is derived only from
+hold notes. Quiet presentation is derived from quiet notes and yields to held
+presentation and waiting permissions. A failed revalidation removes the
+applicable note and records `evidence_changed`; no stored quiet boolean is
+added. See the consumer guide's pre-write checks for frozen input and final
+revalidation.
 ## Trust boundary
 
 Trust means schema-valid, internally addressed, correctly fenced cooperative state. It is not

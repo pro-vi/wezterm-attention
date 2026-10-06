@@ -709,7 +709,7 @@ fn validate_field(
     match field_type {
         FieldType::HoldNote => {
             fits_lifecycle_shape("hold_note", value, protocol)
-                && serde_json::from_value::<crate::hold_check::HoldNote>(value.clone())
+                && serde_json::from_value::<crate::hold_check::TurnEndNote>(value.clone())
                     .is_ok_and(|note| note.valid())
         }
         FieldType::HoldNotes => value.as_object().is_some_and(|notes| {
@@ -905,7 +905,11 @@ pub fn parse_record_value(value: &Value, protocol: &Manifest) -> Verdict {
     let digest_matches = match kind {
         "activity" if value.get("hold_notes").is_some() => {
             value["type"] == "stop"
-                && value["source"] == "claude"
+                && (value["source"] == "claude"
+                    || (value["source"] == "codex"
+                        && value["hold_notes"]
+                            .as_object()
+                            .is_some_and(|notes| notes.values().all(|note| note["quiet"] == true))))
                 && value["target"]["kind"] == "binding"
         }
         kind if is_lifecycle_snapshot_kind(kind) => {

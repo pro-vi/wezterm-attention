@@ -311,7 +311,7 @@ A consumer that exits zero after deciding to do nothing has no channel to say wh
 
 #### Pre-write hold checks
 
-`attention hooks event claude Stop --hold-check jev=/absolute/application/stop-hold` declares an application program that may attach one hold note before native persistence. Repeat the flag for multiple unique lowercase names, in declaration order. It accepts an absolute executable, without arguments or shell syntax. Consumers still run after persistence and receive the final decision.
+`attention hooks event claude Stop --hold-check jev=/absolute/application/stop-hold` declares an application program that may attach one hold note before native persistence. Repeat either check flag for multiple unique lowercase names. Hold checks run first, then quiet checks, preserving order within each flag. It accepts an absolute executable, without arguments or shell syntax. Consumers still run after persistence and receive the final decision.
 
 A check runs only for a lead Claude Stop with a non-empty native `background_tasks` array, available reply and a verified current scope. A non-empty array remains eligible even if child reconciliation cannot read its task ids. Other events, child actors, missing/unreadable/empty arrays and unavailable reply launch no check. Nor does a Stop that keeps a sub-agent counted while it waits on a permission prompt (`child_waiting`). The reply is requested for this point independently of `--include-reply` for consumers.
 
@@ -376,15 +376,51 @@ Each lead native turn-end observation carries an Attention-written `turn_end`:
 
 `recorded` confirms the scoped lead activity/clear effects before the lifecycle write. `superseded` means newer native state displaced that turn end and has `held=false`; a program's unapplied note remains only in its audit entry. `unconfirmed` carries no `held` claim. Child reconciliation is independent. Binding/claim loss writes nothing for a new occupant and leaves outcomes in the hook report.
 
-Stages are `not_dispatched`, `not_started`, `completed`, `failed`, `stdin_failed`, `stdout_failed`, `timed_out`, `invalid_output` and `output_too_large`. Only completed can have a note. `reason` appears only for not_dispatched: `not_applicable`, `no_current_scope`, `reply_unavailable`, `input_too_large`, `total_deadline` or `child_waiting`. Under `--strict`, any entry other than `completed`, or `not_dispatched` with `not_applicable`, `no_current_scope` or `child_waiting`, exits 1. Bypassed entries have zero elapsed time and no check_id. Attempted entries retain the input's check_id. Exit codes appear only when observed. Paths identify the invoked path, not executable bytes/version. Every configured entry appears in order; no configured checks gives an empty array.
+Stages are `evidence_changed`, `not_dispatched`, `not_started`, `completed`, `failed`, `stdin_failed`, `stdout_failed`, `timed_out`, `invalid_output` and `output_too_large`. Only completed can have a note. `reason` appears only for not_dispatched: `not_applicable`, `no_current_scope`, `reply_unavailable`, `input_too_large`, `total_deadline`, `child_waiting` or `history_unavailable`. Under `--strict`, any entry other than `completed`, `evidence_changed`, or `not_dispatched` with `not_applicable`, `no_current_scope`, `child_waiting` or `history_unavailable`, exits 1. Bypassed entries have zero elapsed time and no check_id. Attempted entries retain the input's check_id. Exit codes appear only when observed. Paths identify the invoked path, not executable bytes/version. Every configured entry appears in order; no configured checks gives an empty array.
 
 Public inspection and the GUI lifecycle view retain this observation. `HookDelivery.turn_end`, when present, is copied from the exact stored observation named by its observation_id. It is absent for non-turn-end callbacks. Native correlated replay retains the stored observation ID and decision, and can repeat delivery.
 
-A finish-sound reader accepts a lead turn-end observation with `turn_end.status=recorded` and `held=false`, then deduplicates full address/launch/binding scope plus observation_id. A held observation is also marked seen. Do not use activity.event_id, which can repeat across distinct Stops, or the glyph, which review/other panes can mask. The application chooses whether failed/interrupted turn ends deserve its sound. Old unannotated observations establish a baseline rather than new playback. Retention floors indicate missing coverage; no exactly-once playback or durable sound queue is promised.
+A finish-sound reader accepts a lead turn-end observation with `turn_end.status=recorded`, `held=false`, and no validated quiet note, then deduplicates full address/launch/binding scope plus observation_id. A held observation is also marked seen. Do not use activity.event_id, which can repeat across distinct Stops, or the glyph, which review/other panes can mask. The application chooses whether failed/interrupted turn ends deserve its sound. Old unannotated observations establish a baseline rather than new playback. Retention floors indicate missing coverage; no exactly-once playback or durable sound queue is promised.
 
 Held activity retains raw `type=stop` and accepted `hold_notes`. The GUI exposes `activity_type=stop`, effective `type=thinking`, and `turn_end_held=true`; its fixed `indicators.held` defaults to `⏾`, with thinking color and priority. Published tab text uses the same indicator. Automatic acknowledgement excludes held activity even under custom auto_clear. While a child of the pane's agent waits for permission, the GUI shows the lead's `stop`, held or not, as `type` `notify` with `turn_end_held` false, and focusing the pane acknowledges nothing; the held or finished presentation returns when the wait ends. A later applicable unheld Stop restores ordinary finished presentation. Explicit scoped clear uses the current activity ID through `attention plugin clear-activity`; it is separate from automatic acknowledgement and works with agent-owned claims.
 
 These optional fields require matching updated Rust/Lua readers and writers. Existing unannotated records remain readable by the new readers. Old strict readers reject annotated records; an old writer can move an annotated snapshot aside. Drain old hooks and update matching readers/writers before activation. Downgrading annotated state needs separate review; do not delete user state as an upgrade step.
+
+`--quiet-check NAME=/absolute/executable` uses the same runner for lead Claude
+and Codex `Stop` events. It does not require a reply or background task. Its
+input adds `lifecycle`, the public lead lifecycle view frozen under the writer
+locks, and `prospective_observation`, the native observation about to be
+recorded. The prospective observation has its ID and observation time, but no
+write time or `turn_end`: neither fact exists yet. The scope and provider
+session identify the window. Missing or unreadable history, a native replay,
+or an event at or after this Stop's observation time supplies no check input
+(`history_unavailable`).
+
+A quiet-check executable may return exactly
+`{"quiet":true,"answer":"controller_submitted"}` or empty output. A hold-check
+executable may return only a hold note; the two outputs cannot be combined in
+one note. Quiet means the application has proved that this completion should
+not call the human. It is not pane ownership, acceptance proof, or proof that
+a controller has read the reply. The application supplies its own evidence.
+
+Before applying a quiet note, Attention rechecks the same lifecycle snapshot
+ID under the writer locks. A changed or unreadable snapshot discards the note
+and records `stage=evidence_changed`. Before applying either note, it also
+rechecks retained child permission waits. A waiting child or unreadable child
+state discards the note. The audit retains execution timing and exit facts,
+but no applicable note. A newer recorded lead event also fences an older
+Stop even when its visible activity was deduplicated. Native correlated
+replays retain the stored decision without replacing later activity or
+clearing later children.
+
+Quiet notes use the existing `hold_notes` map and `hold_checks` audit. They do
+not set `held`; no additional persisted boolean mirrors the note. The GUI
+exposes `turn_end_quiet=true` and uses `indicators.quiet` (default `↪`) with
+`colors.quiet` (default `#122033`). Other panes' ordinary attention outranks a
+quiet completion. Held presentation and waiting permissions take precedence.
+Quiet completion can be acknowledged like an ordinary Stop. A later human
+prompt and completion receive ordinary presentation unless independently
+proved quiet. All checks share the existing 2000 ms budget.
 ### Scoped headless inspection
 
 ```sh

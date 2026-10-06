@@ -153,7 +153,10 @@ pub struct TurnEnd {
 impl TurnEnd {
     pub fn valid(&self) -> bool {
         let mut names = std::collections::BTreeSet::new();
-        let notes = self.hold_checks.iter().any(|check| check.note.is_some());
+        let notes = self
+            .hold_checks
+            .iter()
+            .any(|check| check.note.as_ref().is_some_and(|note| note.holds()));
         self.hold_checks
             .iter()
             .all(|check| check.valid() && names.insert(&check.name))
@@ -749,8 +752,17 @@ impl LifecycleSnapshot {
                 if let Some(end) = &item.turn_end
                     && (!item.ends_turn(self.provider)
                         || !end.valid()
-                        || (end.hold_checks.iter().any(|check| check.note.is_some())
-                            && (self.provider != Provider::Claude || item.source_event != "Stop")))
+                        || (end
+                            .hold_checks
+                            .iter()
+                            .any(|check| check.note.as_ref().is_some_and(|note| note.holds()))
+                            && (self.provider != Provider::Claude || item.source_event != "Stop"))
+                        || (end
+                            .hold_checks
+                            .iter()
+                            .any(|check| check.note.as_ref().is_some_and(|note| !note.holds()))
+                            && (!matches!(self.provider, Provider::Claude | Provider::Codex)
+                                || item.source_event != "Stop")))
                 {
                     return Err(invalid());
                 }

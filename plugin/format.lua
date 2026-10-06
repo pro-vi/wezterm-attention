@@ -43,6 +43,7 @@ return function(context)
     local best_provider = nil
     local best_health   = nil
     local best_held     = false
+    local best_quiet    = false
 
     local subagents = 0
     local subagents_uncertain = false
@@ -60,7 +61,7 @@ return function(context)
         -- competes for the tab's marker glyph.
         local candidate_type = cached.type
         if candidate_type then
-          local pri = cfg_priority[candidate_type] or 0
+          local pri = cached.turn_end_quiet and 0 or (cfg_priority[candidate_type] or 0)
           if pri > best_priority then
             best_type     = candidate_type
             best_priority = pri
@@ -69,6 +70,7 @@ return function(context)
             best_provider = cached.provider
             best_health   = cached.binding_health
             best_held     = cached.turn_end_held == true
+            best_quiet    = cached.turn_end_quiet == true
           end
         end
       end
@@ -114,6 +116,8 @@ return function(context)
         indicator = frames[((best_frame or 0) % #frames) + 1]
         still_indicator = with_count(frames[1])
       end
+    elseif best_type == "stop" and best_quiet then
+      indicator = cfg_indicators.quiet or defaults.indicators.quiet
     elseif cfg_indicators[best_type] then
       indicator = cfg_indicators[best_type]
     end
@@ -126,7 +130,8 @@ return function(context)
       still_indicator = still_indicator or indicator,
       type = best_type,
       turn_end_held = best_held,
-      color = cfg_colors[best_type],
+      turn_end_quiet = best_quiet,
+      color = best_quiet and (cfg_colors.quiet or defaults.colors.quiet) or cfg_colors[best_type],
       subagents = subagents,
       subagents_uncertain = subagents_uncertain,
       source = best_source,
@@ -173,6 +178,7 @@ return function(context)
       indicator = visible.indicator,
       type = visible.type,
       turn_end_held = visible.turn_end_held == true,
+      turn_end_quiet = visible.turn_end_quiet == true,
       color = visible.color,
       subagents = visible.subagents or 0,
       subagents_uncertain = visible.subagents_uncertain == true,

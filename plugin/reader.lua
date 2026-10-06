@@ -646,8 +646,19 @@ return function(context)
     local turn_end_held, shown_type = false, activity_type
     if activity_type == "stop" and children.waiting > 0 then
       shown_type = "notify"
-    elseif activity and activity.hold_notes and next(activity.hold_notes) then
-      turn_end_held, shown_type = true, "thinking"
+    elseif activity and activity.hold_notes then
+      for _, note in pairs(activity.hold_notes) do
+        if note.hold then turn_end_held, shown_type = true, "thinking" end
+      end
+    end
+    local turn_end_quiet = false
+    if shown_type == "stop" and activity and activity.hold_notes then
+      for _, note in pairs(activity.hold_notes) do
+        if note.quiet then turn_end_quiet = true end
+      end
+    end
+    if turn_end_quiet and review then
+      shown_type, turn_end_quiet = "review", false
     end
     local effective_type = effective_attention_type(shown_type, review)
     local unavailable = diagnostics_have_unavailable_io(diagnostics)
@@ -724,6 +735,7 @@ return function(context)
       type = effective_type,
       activity_type = activity_type,
       turn_end_held = turn_end_held,
+      turn_end_quiet = turn_end_quiet,
       frame = effective_type == activity_type and activity and activity.frame or nil,
       source = activity and activity.source or nil,
       subagents = children.count,

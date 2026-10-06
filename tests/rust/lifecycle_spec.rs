@@ -3162,15 +3162,10 @@ fn manual_mark_after_an_acknowledged_mark_publishes_a_fresh_event_id() {
     assert_ne!(second.event_id.as_deref(), Some(acknowledged.as_str()));
 }
 
-// Characterization, not an endorsement. A duplicate activity leaves
-// `observed_mono_ns` at the older value, so an older event that commits later
-// still wins against a newer observation it should have lost to. The fence
-// cannot simply be advanced here: `observed_mono_ns` is also the subagent-clear
-// watermark a parent stop writes, so advancing it would clear children that
-// started after the stop. See "One timestamp field carries four roles" in
-// docs/accepted-limitations.md.
+// A repeated activity keeps its timestamp, which also controls child clears.
+// The recorded prompt still fences an older Stop that commits afterwards.
 #[test]
-fn a_deduplicated_activity_does_not_advance_the_ordering_fence() {
+fn a_recorded_prompt_fences_stop_even_when_activity_is_deduplicated() {
     let setup = Setup::new();
     setup.claim();
     setup.apply(
@@ -3196,14 +3191,15 @@ fn a_deduplicated_activity_does_not_advance_the_ordering_fence() {
         serde_json::from_slice(&fs::read(binding_dir.join("activity.json")).expect("activity"))
             .expect("activity JSON");
     assert_eq!(fenced["observed_mono_ns"], json!("00000000000000000300"));
-    // Consequence: the older Stop still publishes over the newer prompt.
+    // The lifecycle event supplies the newer order without refreshing the badge.
     let stale = setup.apply(
         &event("claude", "Stop", "fence", json!({})),
         "00000000000000000400",
     );
-    assert_eq!(stale.disposition, "applied");
+    assert_eq!(stale.disposition, "ignored");
     let final_activity: Value =
         serde_json::from_slice(&fs::read(binding_dir.join("activity.json")).expect("activity"))
             .expect("activity JSON");
-    assert_eq!(final_activity["type"], "stop");
+    assert_eq!(final_activity["type"], "thinking");
+    assert_eq!(final_activity, fenced);
 }

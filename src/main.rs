@@ -106,6 +106,9 @@ struct EventArgs {
     /// Named executable returning an optional hold note before a lead Claude Stop; repeatable.
     #[arg(long)]
     hold_check: Vec<String>,
+    /// Named executable proving a quiet lead Stop from frozen lifecycle evidence; repeatable.
+    #[arg(long)]
+    quiet_check: Vec<String>,
 }
 
 fn provider_event_help() -> String {
@@ -770,11 +773,11 @@ fn run_hooks_event(
     environment: &BTreeMap<String, String>,
 ) -> Result<ExitCode, AttentionError> {
     let ports = system_ports();
-    let hold_checks = match wezterm_attention::hold_check::validate_registrations(&args.hold_check)
-    {
-        Ok(registrations) => registrations,
-        Err(error) => return Ok(emit_hook_error(&error, args.debug, args.strict, name)),
-    };
+    let hold_checks =
+        match wezterm_attention::hold_check::validate_checks(&args.hold_check, &args.quiet_check) {
+            Ok(registrations) => registrations,
+            Err(error) => return Ok(emit_hook_error(&error, args.debug, args.strict, name)),
+        };
     let consumer_timeout = match wezterm_attention::consumer::validate_consumers(
         &args.consumer,
         args.consumer_timeout_ms,

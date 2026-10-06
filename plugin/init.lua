@@ -24,6 +24,7 @@ local defaults = {
   colors = {
     thinking = "#1c1730",
     stop     = "#12271c",
+    quiet    = "#122033",
     notify   = "#240f16",
     review   = "#1a1a0c",
   },
@@ -33,6 +34,7 @@ local defaults = {
     thinking_frames = { "◌ ", "◔ ", "◑ ", "◕ " },
     stop   = "✓ ",
     held   = "⏾ ",
+    quiet  = "↪ ",
     notify = "! ",
     review = "◆ ",
   },
@@ -358,7 +360,7 @@ local function usable_options(opts)
   local function is_string(entry) return type(entry) == "string" end
   local text = { kind = "a string", check = is_string }
   usable.indicators = usable_entries("indicators", usable.indicators, {
-    held = text,
+    held = text, quiet = text,
     thinking_frames = { kind = "a non-empty list of strings", check = function(entry)
       if type(entry) ~= "table" or #entry == 0 then return false end
       local count = 0
@@ -371,7 +373,7 @@ local function usable_options(opts)
     stop = text, notify = text, review = text,
   })
   usable.colors = usable_entries("colors", usable.colors,
-    { thinking = text, stop = text, notify = text, review = text })
+    { thinking = text, stop = text, quiet = text, notify = text, review = text })
   -- priority and auto_clear are lists of the attention types the default
   -- ranking names. A table with other keys, or a name that is no attention
   -- type, means the option's default: a list with that entry left out would

@@ -317,8 +317,21 @@ fn next_unheld_stop_replaces_held_stop_and_delivers_exact_receipt() {
 
 #[test]
 fn newer_prompt_supersedes_stop_while_checks_run_without_locks() {
+    assert_newer_prompt_supersedes_stop(false);
+}
+
+#[test]
+fn newer_prompt_supersedes_stop_while_already_thinking() {
+    assert_newer_prompt_supersedes_stop(true);
+}
+
+fn assert_newer_prompt_supersedes_stop(already_thinking: bool) {
     let setup = Setup::new();
     bind(&setup, "claude");
+    if already_thinking {
+        let prompt = event("claude", "UserPromptSubmit", "hold-session", json!({}));
+        setup.apply(&prompt, "00000000000000000300");
+    }
     let ready = setup._scratch.0.join("ready");
     let released = setup._scratch.0.join("released");
     let check = executable(
@@ -791,4 +804,238 @@ fn hold_audit_reservation_preserves_large_native_observation() {
     assert!(
         super::mark_clear::plugin_reader_answer(&setup, "held_render").contains("indicator=✓ ")
     );
+}
+
+const QUIET_LINE: &str = "{\"quiet\":true,\"answer\":\"wezpup_submitted\"}\n";
+
+fn quiet_stop(
+    setup: &Setup,
+    provider: &str,
+    check: &std::path::Path,
+    order: &str,
+) -> wezterm_attention::lifecycle::HookOutcome {
+    let registrations =
+        hold_check::validate_checks(&[], &[format!("wezpup={}", check.display())]).unwrap();
+    let stop = event(
+        provider,
+        "Stop",
+        "hold-session",
+        json!({"turn_id":"driven-turn"}),
+    );
+    apply_provider_event_with_checks(
+        &stop,
+        &setup.env,
+        order,
+        &setup.ports(),
+        &Request {
+            registrations: &registrations,
+            reply: &wezterm_attention::hook_content::HookContent::NotRequested,
+            background_tasks: None,
+        },
+    )
+}
+
+#[test]
+fn quiet_checks_receive_frozen_history_without_reply_or_background_tasks() {
+    for provider in ["claude", "codex"] {
+        let setup = Setup::new();
+        bind(&setup, provider);
+        setup.apply(
+            &event(
+                provider,
+                "UserPromptSubmit",
+                "hold-session",
+                json!({"turn_id":"driven-turn"}),
+            ),
+            "00000000000000000300",
+        );
+        let captured = setup._scratch.0.join("quiet-input.json");
+        let check = executable(
+            &setup,
+            &format!(
+                "/bin/cat > '{}'\nprintf '%s' '{}'",
+                captured.display(),
+                QUIET_LINE
+            ),
+        );
+        let outcome = quiet_stop(&setup, provider, &check, "00000000000000000400");
+        assert_eq!(outcome.result.as_ref().unwrap().disposition, "applied");
+        assert_eq!(outcome.turn_end.as_ref().unwrap().held, Some(false));
+        let (activity, snapshot) = records(&setup, provider);
+        assert_eq!(activity["type"], "stop");
+        assert_eq!(activity["hold_notes"]["wezpup"]["quiet"], true);
+        assert_eq!(
+            last_end(&snapshot)["turn_end"]["hold_checks"][0]["note"]["quiet"],
+            true
+        );
+        let input: Value = serde_json::from_slice(&fs::read(captured).unwrap()).unwrap();
+        assert_eq!(input["provider"], provider);
+        assert_eq!(input["reply"]["availability"], "not_requested");
+        assert!(input["lifecycle"]["snapshot_id"].is_string());
+        assert_eq!(
+            input["lifecycle"]["observations"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(input["prospective_observation"]["source_event"], "Stop");
+        assert!(
+            input["prospective_observation"]
+                .get("written_at_unix_ns")
+                .is_none()
+        );
+        // The duplicate native identity must retain the original decision.
+        if provider == "codex" {
+            let repeated = quiet_stop(&setup, provider, &check, "00000000000000000500");
+            assert_eq!(repeated.observation_id, outcome.observation_id);
+            assert_eq!(records(&setup, provider).0, activity);
+            setup.apply(
+                &event(
+                    provider,
+                    "UserPromptSubmit",
+                    "hold-session",
+                    json!({"turn_id":"human-turn"}),
+                ),
+                "00000000000000000600",
+            );
+            quiet_stop(&setup, provider, &check, "00000000000000000700");
+            assert_eq!(records(&setup, provider).0["type"], "thinking");
+        }
+    }
+}
+
+#[test]
+fn a_prompt_committed_during_quiet_check_discards_its_note() {
+    for prompt_order in ["00000000000000000350", "00000000000000000500"] {
+        let setup = Setup::new();
+        bind(&setup, "claude");
+        setup.apply(
+            &event("claude", "UserPromptSubmit", "hold-session", json!({})),
+            "00000000000000000300",
+        );
+        let ready = setup._scratch.0.join("ready");
+        let released = setup._scratch.0.join("released");
+        let check = executable(
+            &setup,
+            &format!(
+                "/bin/cat >/dev/null\n: > '{}'\nwhile [ ! -f '{}' ]; do :; done\nprintf '%s' '{}'",
+                ready.display(),
+                released.display(),
+                QUIET_LINE
+            ),
+        );
+        thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                let until = Instant::now() + Duration::from_secs(5);
+                while !ready.exists() {
+                    assert!(Instant::now() < until, "check never began");
+                    thread::sleep(Duration::from_millis(2));
+                }
+                setup.apply(
+                    &event("claude", "UserPromptSubmit", "hold-session", json!({})),
+                    prompt_order,
+                );
+                fs::write(&released, "").unwrap();
+            });
+            let outcome = quiet_stop(&setup, "claude", &check, "00000000000000000400");
+            writer.join().unwrap();
+            assert_eq!(
+                outcome.hold_checks[0].stage,
+                hold_check::Stage::EvidenceChanged
+            );
+            assert!(outcome.hold_checks[0].note.is_none());
+            assert!(records(&setup, "claude").0.get("hold_notes").is_none());
+            if prompt_order > "00000000000000000400" {
+                assert_eq!(outcome.result.as_ref().unwrap().disposition, "ignored");
+            } else {
+                assert_eq!(outcome.result.as_ref().unwrap().disposition, "applied");
+            }
+        });
+    }
+}
+
+#[test]
+fn a_child_permission_committed_during_quiet_check_discards_its_note() {
+    permission_during_check(false);
+}
+
+#[test]
+fn a_child_permission_committed_during_hold_check_discards_its_note() {
+    permission_during_check(true);
+}
+
+fn permission_during_check(hold: bool) {
+    let setup = Setup::new();
+    bind(&setup, "claude");
+    setup.apply(
+        &event("claude", "UserPromptSubmit", "hold-session", json!({})),
+        "00000000000000000300",
+    );
+    setup.apply(
+        &event(
+            "claude",
+            "SubagentStart",
+            "hold-session",
+            json!({"agent_id":"child-a"}),
+        ),
+        "00000000000000000310",
+    );
+    let ready = setup._scratch.0.join("ready");
+    let released = setup._scratch.0.join("released");
+    let check = executable(
+        &setup,
+        &format!(
+            "/bin/cat >/dev/null\n: > '{}'\nwhile [ ! -f '{}' ]; do :; done\nprintf '%s' '{}'",
+            ready.display(),
+            released.display(),
+            if hold { HOLD_LINE } else { QUIET_LINE }
+        ),
+    );
+    let named = vec![format!("checker={}", check.display())];
+    let registrations = if hold {
+        hold_check::validate_checks(&named, &[])
+    } else {
+        hold_check::validate_checks(&[], &named)
+    }
+    .unwrap();
+    let payload = json!({"hook_event_name":"Stop", "session_id":"hold-session",
+        "last_assistant_message":"still waiting", "background_tasks":[{"id":"child-a","type":"subagent","status":"running"}]});
+    let stop = parse_provider_event("claude", "Stop", &payload, &setup.env);
+    let reply = wezterm_attention::providers::reply_content(&stop, &payload, true);
+    thread::scope(|scope| {
+        let writer = scope.spawn(|| {
+            let until = Instant::now() + Duration::from_secs(5);
+            while !ready.exists() {
+                assert!(Instant::now() < until, "check never began");
+                thread::sleep(Duration::from_millis(2));
+            }
+            setup.apply(
+                &event(
+                    "claude",
+                    "PermissionRequest",
+                    "hold-session",
+                    json!({"agent_id":"child-a","tool_name":"Bash"}),
+                ),
+                "00000000000000000350",
+            );
+            fs::write(&released, "").unwrap();
+        });
+        let outcome = apply_provider_event_with_checks(
+            &stop,
+            &setup.env,
+            "00000000000000000400",
+            &setup.ports(),
+            &Request {
+                registrations: &registrations,
+                reply: &reply,
+                background_tasks: payload["background_tasks"].as_array().map(Vec::as_slice),
+            },
+        );
+        writer.join().unwrap();
+        assert_eq!(
+            outcome.hold_checks[0].stage,
+            hold_check::Stage::EvidenceChanged
+        );
+        assert!(outcome.hold_checks[0].note.is_none());
+        assert_eq!(outcome.turn_end.unwrap().held, Some(false));
+        assert!(records(&setup, "claude").0.get("hold_notes").is_none());
+    });
 }

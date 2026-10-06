@@ -393,7 +393,8 @@ return function(context)
     local limits = protocol.limits
     if field_type == "hold_note" then
       return validate_shape(value, protocol.lifecycle_shapes.hold_note) ~= nil
-        and value.hold == true and value.answer:match("^[a-z][a-z0-9_]*$") ~= nil
+        and ((value.hold == true and value.quiet == nil) or (value.quiet == true and value.hold == nil))
+        and value.answer:match("^[a-z][a-z0-9_]*$") ~= nil
     elseif field_type == "hold_notes" then
       if type(value) ~= "table" or is_array(value) or next(value) == nil then return false end
       for name, note in pairs(value) do
@@ -411,7 +412,7 @@ return function(context)
       local names, held = {}, false
       for _, check in ipairs(value.hold_checks) do
         if names[check.name] then return false end
-        names[check.name], held = true, held or check.note ~= nil
+        names[check.name], held = true, held or (check.note ~= nil and check.note.hold == true)
       end
       if value.status == "unconfirmed" then return value.held == nil end
       return value.held == (value.status == "recorded" and held)
@@ -594,7 +595,9 @@ return function(context)
           if item.actor.kind ~= "lead" or not list_contains(sources, item.source_event)
             or compact_size(item) - compact_size(native) > limits.lifecycle_envelope_max_bytes then return false end
           for _, check in ipairs(item.turn_end.hold_checks) do
-            if check.note and (value.provider ~= "claude" or item.source_event ~= "Stop") then return false end
+            if check.note and (item.source_event ~= "Stop"
+              or (check.note.hold and value.provider ~= "claude")
+              or (check.note.quiet and value.provider ~= "claude" and value.provider ~= "codex")) then return false end
           end
         end
         local allowed_sources = protocol.lifecycle_sources[value.provider] and protocol.lifecycle_sources[value.provider][item.kind]
@@ -721,9 +724,15 @@ return function(context)
     if not spec then return nil, invalid("unknown record kind") end
     local parsed, err = validate_shape(value, spec, kind)
     if not parsed then return nil, invalid("invalid " .. kind .. " record: " .. tostring(err)) end
-    if kind == "activity" and parsed.hold_notes
-      and (parsed.type ~= "stop" or parsed.source ~= "claude" or parsed.target.kind ~= "binding") then
-      return nil, invalid("hold notes require a Claude binding stop")
+    if kind == "activity" and parsed.hold_notes then
+      if parsed.type ~= "stop" or parsed.target.kind ~= "binding" then
+        return nil, invalid("turn-end notes require a binding stop")
+      end
+      for _, note in pairs(parsed.hold_notes) do
+        if parsed.source ~= "claude" and not (parsed.source == "codex" and note.quiet) then
+          return nil, invalid("turn-end note is not supported for this provider")
+        end
+      end
     end
     if kind == "subagent_presence" and sha256(parsed.agent_id) ~= parsed.agent_key then
       return nil, invalid("subagent_presence agent_key does not match agent_id")

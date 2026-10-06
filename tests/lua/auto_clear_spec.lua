@@ -2504,6 +2504,37 @@ test("a held turn end yields to a child waiting on a permission prompt", functio
   assert(view.type == "thinking" and view.turn_end_held == true, "the hold returns when the wait ends")
 end)
 
+test("quiet completion has its own color and yields to human attention", function()
+  local pane_id = 7592
+  write_activity(pane_id, "stop")
+  local file = seeded_records_root(pane_id) .. "/activity.json"
+  local activity = decode_json(assert(read_path(file)))
+  activity.source = "claude"
+  activity.hold_notes = { wezpup = { quiet = true, answer = "wezpup_submitted" } }
+  write_json_path(file, activity)
+  poll_at({ pane_id })
+  local view = assert(pane_view(pane_id))
+  assert(view.type == "stop" and view.turn_end_quiet and not view.turn_end_held)
+  local visible = internal.resolve_visible_attention({ seeded_key(pane_id) })
+  assert(visible.indicator == "↪ " and visible.color == "#122033")
+  local review = seeded_record(pane_id, "review")
+  write_json_path(user_review_path(pane_id), review)
+  poll_at({ pane_id })
+  visible = internal.resolve_visible_attention({ seeded_key(pane_id) })
+  assert(visible.type == "review" and not visible.turn_end_quiet)
+  os.remove(user_review_path(pane_id))
+  write_activity(7593, "stop")
+  poll_at({ pane_id, 7593 })
+  visible = internal.resolve_visible_attention({ seeded_key(pane_id), seeded_key(7593) })
+  assert(visible.indicator == "✓ " and not visible.turn_end_quiet)
+  write_subagents(pane_id, 1, "waiting")
+  poll_at({ pane_id })
+  view = assert(pane_view(pane_id))
+  assert(view.type == "notify" and not view.turn_end_quiet)
+  visible = internal.resolve_visible_attention({ seeded_key(pane_id) })
+  assert(visible.indicator:find("^!") and visible.color == "#240f16")
+end)
+
 test("an unheld turn end yields to a child waiting on a permission prompt", function()
   local pane_id = 7591
   write_activity(pane_id, "stop")

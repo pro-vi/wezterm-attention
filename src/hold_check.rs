@@ -24,6 +24,13 @@ pub const TOTAL_BUDGET: Duration = Duration::from_millis(2000);
 pub struct Registration {
     pub name: String,
     pub executable: String,
+    pub purpose: Purpose,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Purpose {
+    Hold,
+    Quiet,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -31,6 +38,40 @@ pub struct Registration {
 pub struct HoldNote {
     pub hold: bool,
     pub answer: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct QuietNote {
+    pub quiet: bool,
+    pub answer: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(untagged)]
+pub enum TurnEndNote {
+    Hold(HoldNote),
+    Quiet(QuietNote),
+}
+
+impl TurnEndNote {
+    pub fn holds(&self) -> bool {
+        matches!(self, Self::Hold(_))
+    }
+
+    pub fn valid(&self) -> bool {
+        match self {
+            Self::Hold(note) => note.valid(),
+            Self::Quiet(note) => {
+                note.quiet
+                    && HoldNote {
+                        hold: true,
+                        answer: note.answer.clone(),
+                    }
+                    .valid()
+            }
+        }
+    }
 }
 
 fn token(text: &str, name: bool) -> bool {
@@ -68,6 +109,7 @@ pub enum Stage {
     TimedOut,
     InvalidOutput,
     OutputTooLarge,
+    EvidenceChanged,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -81,6 +123,7 @@ pub enum Bypass {
     /// A sub-agent waits on a permission prompt, so the lead is not waiting
     /// on work that will finish without the user.
     ChildWaiting,
+    HistoryUnavailable,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -97,7 +140,7 @@ pub struct HoldCheckOutcome {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<Bypass>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub note: Option<HoldNote>,
+    pub note: Option<TurnEndNote>,
 }
 
 impl HoldCheckOutcome {
@@ -148,7 +191,7 @@ pub fn bypass(registrations: &[Registration], reason: Bypass) -> Vec<HoldCheckOu
         .collect()
 }
 
-pub fn notes(outcomes: &[HoldCheckOutcome]) -> BTreeMap<String, HoldNote> {
+pub fn notes(outcomes: &[HoldCheckOutcome]) -> BTreeMap<String, TurnEndNote> {
     outcomes
         .iter()
         .filter_map(|result| {
@@ -163,9 +206,15 @@ pub fn notes(outcomes: &[HoldCheckOutcome]) -> BTreeMap<String, HoldNote> {
 pub fn failed(outcomes: &[HoldCheckOutcome]) -> bool {
     outcomes.iter().any(|o| match o.stage {
         Stage::Completed => false,
+        Stage::EvidenceChanged => false,
         Stage::NotDispatched => !matches!(
             o.reason,
-            Some(Bypass::NotApplicable | Bypass::NoCurrentScope | Bypass::ChildWaiting)
+            Some(
+                Bypass::NotApplicable
+                    | Bypass::NoCurrentScope
+                    | Bypass::ChildWaiting
+                    | Bypass::HistoryUnavailable
+            )
         ),
         Stage::NotStarted
         | Stage::Failed
@@ -178,10 +227,18 @@ pub fn failed(outcomes: &[HoldCheckOutcome]) -> bool {
 }
 
 pub fn validate_registrations(values: &[String]) -> Result<Vec<Registration>> {
+    validate_checks(values, &[])
+}
+
+pub fn validate_checks(holds: &[String], quiets: &[String]) -> Result<Vec<Registration>> {
     let limits = &manifest()?.limits;
     let mut names = BTreeSet::new();
     let mut registrations = Vec::new();
-    for value in values {
+    for (value, purpose) in holds
+        .iter()
+        .map(|v| (v, Purpose::Hold))
+        .chain(quiets.iter().map(|v| (v, Purpose::Quiet)))
+    {
         let Some((name, executable)) = value.split_once('=') else {
             return Err(AttentionError::usage(
                 "--hold-check requires NAME=/absolute/executable",
@@ -201,6 +258,7 @@ pub fn validate_registrations(values: &[String]) -> Result<Vec<Registration>> {
         registrations.push(Registration {
             name: name.into(),
             executable: executable.into(),
+            purpose,
         });
     }
     // Reserve the longest typed outcome, including worst JSON escaping for
@@ -213,11 +271,11 @@ pub fn validate_registrations(values: &[String]) -> Result<Vec<Registration>> {
             elapsed_ms: u64::MAX,
             check_id: Some("ffffffff-ffff-4fff-bfff-ffffffffffff".into()),
             exit_code: Some(i32::MIN),
-            reason: Some(Bypass::ReplyUnavailable),
-            note: Some(HoldNote {
-                hold: true,
+            reason: Some(Bypass::HistoryUnavailable),
+            note: Some(TurnEndNote::Quiet(QuietNote {
+                quiet: true,
                 answer: "a".repeat(limits.safe_label_max_bytes),
-            }),
+            })),
             ..initial(r)
         })
         .collect();
@@ -247,6 +305,10 @@ pub struct HoldCheckInput<'a> {
     pub observed_mono_ns: &'a str,
     pub reply: &'a HookContent,
     pub background_tasks: &'a [Value],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<&'a crate::observations::LifecycleView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prospective_observation: Option<&'a Value>,
 }
 
 pub struct Request<'a> {
@@ -354,7 +416,7 @@ fn dispatch(
         };
         // Spaced JSON and a terminal newline fit. This limits transport
         // bytes, not the whitespace accepted between JSON tokens.
-        let maximum = m.limits.safe_label_max_bytes + b"{\"hold\": true, \"answer\": \"\"}\n".len();
+        let maximum = m.limits.safe_label_max_bytes + b"{\"quiet\": true, \"answer\": \"\"}\n".len();
         let mut input = Some(stdin);
         let mut offset = 0;
         let mut captured = Vec::new();
@@ -435,8 +497,11 @@ fn dispatch(
                     if captured.iter().all(u8::is_ascii_whitespace) {
                         result.stage = Stage::Completed;
                     } else {
-                        match serde_json::from_slice::<HoldNote>(&captured) {
-                            Ok(note) if note.valid() => {
+                        match serde_json::from_slice::<TurnEndNote>(&captured) {
+                            Ok(note)
+                                if note.valid()
+                                    && note.holds() == (registration.purpose == Purpose::Hold) =>
+                            {
                                 result.stage = Stage::Completed;
                                 result.note = Some(note);
                             }
@@ -468,6 +533,7 @@ mod tests {
         let r = Registration {
             name: "jev".into(),
             executable: executable.to_str().unwrap().into(),
+            purpose: Purpose::Hold,
         };
         (root, r)
     }

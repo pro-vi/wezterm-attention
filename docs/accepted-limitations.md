@@ -34,59 +34,25 @@ that nothing handles should return an `AttentionError`.
 
 ## One timestamp field carries four roles
 
-`observed_mono_ns` decides which of two competing writes publishes, serves as the
-watermark an activity-clear compares against, is the cutoff at which a Codex
-parent `Stop` removes its sub-agents, and decides whether a sub-agent waiting for
-permission still holds the tab on `notify`: the lead's next tool call keeps that
-`notify` only while the sub-agent's last event is no older than the stored
-activity's `observed_mono_ns`. `apply_activity` passes the surviving
-activity's `observed_mono_ns` as the order of the parent clear it applies to
-`children.json`, so the coupling is semantic rather than a shared field name.
+`observed_mono_ns` orders activity writes, fences activity clears, supplies the
+cutoff for a Codex parent's child clear, and controls how long a child's
+permission request holds `notify` against the lead's tool calls.
 
-One consequence is known and characterised: when an incoming activity is
-semantically equal to the published one, the write is skipped, the stored order
-keeps its older value, and an event carrying a timestamp between the two can
-still publish over it if it commits later. The interleaving is narrow and the
-wrong tint clears on the next distinct activity. The same skip keeps a Codex
-parent clear at the earlier stop's order, so a sub-agent whose last event falls
-between that stop and a repeat of it stays counted until a distinct `Stop`.
-`a_deduplicated_activity_does_not_advance_the_ordering_fence` in
-`tests/rust/lifecycle_spec.rs` pins the current behaviour so a change to it is
-deliberate.
+A semantically repeated activity keeps its earlier timestamp. Advancing it
+would let a repeated Codex Stop clear children that started after the original
+Stop. Repeated activity also keeps its event ID and write time.
 
-Separating the roles is a record-contract change: a new field the Lua reader must
-tolerate on records written before and after, schema validation, pruning in
-`maintenance.rs`, reporting in `query.rs`, and a decision about which of the two
-meanings the parent-clear cutoff actually wants. That is not a change to
-make on the way out of the door.
+A lead turn end now checks the recorded lifecycle events under the writer
+locks as well. A newer prompt therefore supersedes an older Stop even when
+both prompts produced the same `thinking` activity. The tests
+`a_recorded_prompt_fences_stop_even_when_activity_is_deduplicated` and
+`duplicate_codex_stop_keeps_a_child_newer_than_the_surviving_activity` pin both
+requirements in `tests/rust/lifecycle_spec.rs`.
 
-The sequence, with one current binding, no acknowledgement and no
-activity-clear:
-
-| step | order | result |
-|---|---|---|
-| `PreToolUse` publishes `thinking` | 300 | applied |
-| `UserPromptSubmit` repeats `thinking` | 500 | skipped, stored order stays 300 |
-| `Stop` commits late | 400 | applied, publishes `stop` |
-
-The tab reads `stop` while the agent works on the prompt submitted at 500. If
-that turn calls no tool, nothing republishes `thinking`. Commit order differs
-from timestamp order because the `hooks event` command in `src/main.rs` takes
-`monotonic_ns20()` before its blocking `read_to_end` of stdin, and the commit
-then waits up to two seconds on the launch lock.
-
-The obvious fix was tried and does not work. Advancing `observed_mono_ns` on a
-duplicate breaks
-`duplicate_codex_stop_keeps_a_child_newer_than_the_surviving_activity`, because
-a repeated Codex `Stop` would then clear children that started after the first
-one. It also breaks `same_claim_event_reaches_snapshot` ("facts must not refresh
-an equal badge") and the record contract's promise that a duplicate event does
-not refresh timestamps.
-
-A fix is done when the table above ends with the `Stop` at 400 `ignored` and
-`thinking` surviving, the duplicate-Codex-stop test passes unchanged, and a
-duplicate still leaves `event_id` and `written_at_unix_ns` untouched.
-
+This additional check needs readable lifecycle history. If that history is
+unavailable, native activity retains its existing timestamp-based ordering.
+Ordinary non-terminal activity writes still use that ordering alone. Splitting
+all four roles remains a record-contract change.
 ## Consumer options belong to the hook invocation, not to each consumer
 
 `--consumer` repeats, so one hook can deliver to several executables. The options
@@ -614,21 +580,6 @@ Codex sends `Interrupt`, and is not affected.
 Checked against Claude Code 2.1.283. In one session, an Esc before any output
 and an Esc after a tool call had run each ran no hook within 90 seconds, while
 a normal turn ran `Stop` and then `idle_prompt` 63 seconds later.
-
-## A sub-agent that starts waiting during a hold check can leave the hold recorded
-
-The writer reads the sub-agent set once, before the hold check runs, and skips
-the check when a sub-agent the Stop keeps is waiting on a permission prompt.
-Each event is ordered by when its hook began. A permission request whose hook
-began after the lead's Stop supersedes that Stop: its turn end is recorded
-`superseded`, not held, and the tab shows `notify`. A request whose hook began
-before the Stop's but was written only after the writer read the set, within
-the check's 2000 ms budget, is not seen: the program's hold is recorded, and a
-sound reader that follows `turn_end.held` stays silent for that turn end. The
-tab still shows `notify` for the waiting sub-agent. Rechecking under the
-writer's locks would need a held answer the record could keep without
-applying, which the record contract does not have: a `recorded` turn end's
-`held` is true exactly when a check returned a note.
 
 ## A sub-agent whose permission was granted reads as waiting until its next tool call
 

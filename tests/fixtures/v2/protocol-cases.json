@@ -389,7 +389,12 @@
         "hold_notes": {}
       },
       "expected": "record_invalid"
-    }
+    },
+    {"id":"quiet_note_claude","parser":"record","sample":"activity","patch":{"type":"stop","source":"claude","hold_notes":{"wezpup":{"quiet":true,"answer":"wezpup_submitted"}}},"expected":"valid"},
+    {"id":"quiet_note_codex","parser":"record","sample":"activity","patch":{"type":"stop","source":"codex","hold_notes":{"wezpup":{"quiet":true,"answer":"wezpup_submitted"}}},"expected":"valid"},
+    {"id":"quiet_note_both","parser":"record","sample":"activity","patch":{"type":"stop","source":"claude","hold_notes":{"wezpup":{"quiet":true,"hold":true,"answer":"wezpup_submitted"}}},"expected":"record_invalid"},
+    {"id":"quiet_note_false","parser":"record","sample":"activity","patch":{"type":"stop","source":"claude","hold_notes":{"wezpup":{"quiet":false,"answer":"wezpup_submitted"}}},"expected":"record_invalid"},
+    {"id":"quiet_note_neither","parser":"record","sample":"activity","patch":{"type":"stop","source":"claude","hold_notes":{"wezpup":{"answer":"wezpup_submitted"}}},"expected":"record_invalid"}
   ],
   "children_coverage_cases": [
     {"id": "a_binding_whose_end_ends_it_counts_no_children", "binding": {}, "end": {}, "children": {}, "expected": {"count": 0, "waiting": 0, "coverage": "ended", "renders": ""}},

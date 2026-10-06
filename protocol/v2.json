@@ -432,13 +432,16 @@
     },
     "hold_note": {
       "required": [
-        "hold",
         "answer"
       ],
-      "optional": [],
+      "optional": [
+        "hold",
+        "quiet"
+      ],
       "types": {
         "hold": "boolean",
-        "answer": "safe_label"
+        "answer": "safe_label",
+        "quiet": "boolean"
       }
     },
     "hold_check_outcome": {
@@ -925,7 +928,8 @@
       "stdout_failed",
       "timed_out",
       "invalid_output",
-      "output_too_large"
+      "output_too_large",
+      "evidence_changed"
     ],
     "hold_check_bypass": [
       "not_applicable",
@@ -933,7 +937,8 @@
       "reply_unavailable",
       "input_too_large",
       "total_deadline",
-      "child_waiting"
+      "child_waiting",
+      "history_unavailable"
     ],
     "turn_end_status": [
       "recorded",

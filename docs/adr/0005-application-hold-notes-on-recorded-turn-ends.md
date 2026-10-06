@@ -31,10 +31,25 @@ A hold assumes the lead's own work will wake it. A child with `status=waiting` i
 
 The writer runs no check while the child set already holds a waiting child that the Stop keeps counted (one its `background_tasks` lists, as Claude Code lists a child blocked on a prompt as running, or one with an event after the Stop; every waiting child when the array's task ids cannot be read): each configured program is recorded `not_dispatched` with reason `child_waiting`, no note is attached, and the turn end is recorded unheld, so a sound reader treats it as finished. `--strict` does not count that as a failure.
 
-Expose the exact stored `turn_end` through lifecycle inspection/view and post-persistence delivery. Annotate existing lead turn ends across providers, while running a check only for the eligible Claude Stop. A sound reader distinguishes recorded unheld from recorded held and superseded, and deduplicates by full source scope and stored observation ID. Badge IDs and glyphs do not identify turn-end receipts. Application sound policy and playback remain outside Attention.
+Expose the exact stored `turn_end` through lifecycle inspection/view and post-persistence delivery. Annotate existing lead turn ends across providers, while hold checks run only for the eligible Claude Stop. A sound reader distinguishes recorded unheld without a quiet note from recorded held, quiet and superseded, and deduplicates by full source scope and stored observation ID. Badge IDs and glyphs do not identify turn-end receipts. Application sound policy and playback remain outside Attention.
 
 Reserve bounded execution metadata before running programs. Preserve the native 2048-byte allowance, add a 16384-byte annotation allowance, and keep snapshot/pool bounds. The specified nested note grammar requires depth 9. Update Rust, Lua and Python validators together; never truncate native fields or drop native evidence to fit optional audit.
 
+
+Amendment, 2026-10-05: add `--quiet-check` for lead Claude and Codex Stops.
+Applications prove completion provenance from a frozen lifecycle view and a
+prospective native observation; Attention does not interpret controller
+records. Accept an exclusive `quiet=true` note through the existing runner,
+audit and activity-note map. Derive a distinct `↪` presentation and quiet
+sound policy from that note, without adding pane ownership or a duplicate
+stored quiet flag. Human attention in another pane outranks quiet completion.
+
+A quiet decision requires the same lifecycle snapshot at commit. Recheck
+child permission state for both note kinds under the final locks. Changed or
+unreadable evidence removes the note with `evidence_changed`. Native replay
+retains its original decision and cannot overwrite later activity. The
+existing hold-only executable contract remains in use; each registration
+accepts only its own note kind and both share the same transport budget.
 ## Rationale
 
 A pre-write application check keeps message judgment with the application while Attention owns native facts and final state. Post-write consumers are too late. Keeping the preceding activity can keep an earlier checkmark. An internal question-matching heuristic duplicates application policy and gives Attention responsibility for message interpretation.
@@ -43,7 +58,7 @@ Lifecycle metadata places the hold and applicability decision on the recorded na
 
 ## Consequences and revisit
 
-Check failure leaves ordinary Stop behavior available; it cannot override a newer native fence. A child whose permission request races a running check can leave the Stop's hold recorded; [accepted limitations](../accepted-limitations.md) says when. A mistaken hold can remain if no later event arrives, so this decision does not promise that every held agent wakes or that a needed call cannot be lost. Polling can miss bounded retained observations. Native persistence can succeed while lifecycle persistence fails; no sound receipt is invented in that case.
+Check failure leaves ordinary Stop behavior available; it cannot override a newer native fence. A child permission request committed during a check invalidates its note under the final writer locks. A mistaken hold can remain if no later event arrives, so this decision does not promise that every held agent wakes or that a needed call cannot be lost. Polling can miss bounded retained observations. Native persistence can succeed while lifecycle persistence fails; no sound receipt is invented in that case.
 
 The current strict readers reject these annotations. New readers accept existing unannotated state, but annotated state requires matching writers/readers and drained old hook invocations before activation. Amend the current schema in place; add no parallel implementation or state deletion. Downgrading annotated state to old readers requires separate review. Installation and live hook/sound registration are a later action.
 

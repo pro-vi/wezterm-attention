@@ -98,7 +98,7 @@ def validate_typed_field(
     limits = manifest["limits"]
     if field_type == "hold_note":
         validate_shape(value, manifest["lifecycle_shapes"]["hold_note"], manifest, None)
-        if value["hold"] is not True or not re.fullmatch(r"[a-z][a-z0-9_]*", value["answer"]):
+        if not ((value.get("hold") is True and "quiet" not in value) or (value.get("quiet") is True and "hold" not in value)) or not re.fullmatch(r"[a-z][a-z0-9_]*", value["answer"]):
             raise InvalidRecord("invalid hold note")
     elif field_type == "hold_notes":
         if not isinstance(value, dict) or not value:
@@ -123,7 +123,7 @@ def validate_typed_field(
     elif field_type == "turn_end":
         validate_shape(value, manifest["lifecycle_shapes"]["turn_end"], manifest, None)
         names = [check["name"] for check in value["hold_checks"]]
-        held = any("note" in check for check in value["hold_checks"])
+        held = any(check.get("note", {}).get("hold") is True for check in value["hold_checks"])
         if len(names) != len(set(names)):
             raise InvalidRecord("duplicate check name")
         if value["status"] == "unconfirmed":
@@ -303,7 +303,8 @@ def parse_record(value: Any, manifest: dict[str, Any]) -> str:
     try:
         validate_shape(value, spec, manifest, kind)
         if kind == "activity" and "hold_notes" in value and (
-            value["type"] != "stop" or value["source"] != "claude" or value["target"]["kind"] != "binding"
+            value["type"] != "stop" or value["target"]["kind"] != "binding"
+            or (value["source"] != "claude" and not (value["source"] == "codex" and all(note.get("quiet") is True for note in value["hold_notes"].values())))
         ):
             raise InvalidRecord("hold notes require a Claude binding stop")
         if kind in LIFECYCLE_SNAPSHOT_KINDS:
@@ -443,8 +444,10 @@ def validate_lifecycle(value: dict[str, Any], manifest: dict[str, Any]) -> None:
                 sources = manifest["turn_end_sources"].get(value["provider"], {}).get(kind, [])
                 if (actor["kind"] != "lead" or item["source_event"] not in sources
                     or compact_size(item) - compact_size(native) > limits["lifecycle_envelope_max_bytes"]
-                    or (any("note" in check for check in end["hold_checks"])
-                        and (value["provider"] != "claude" or item["source_event"] != "Stop"))):
+                    or any("note" in check and (item["source_event"] != "Stop"
+                        or (check["note"].get("hold") and value["provider"] != "claude")
+                        or (check["note"].get("quiet") and value["provider"] not in {"claude", "codex"}))
+                        for check in end["hold_checks"])):
                     raise InvalidRecord("invalid annotated turn end")
             if name != ("requests" if request else "general") or compact_size(item) > limits["lifecycle_observation_max_bytes"]:
                 raise InvalidRecord("observation membership or bound")

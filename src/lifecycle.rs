@@ -58,6 +58,7 @@ struct HookEvidence {
     pending_turn_end: Option<TurnEnd>,
     turn_end: Option<TurnEnd>,
     hold_checks: Vec<HoldCheckOutcome>,
+    quiet_snapshot: Option<String>,
 }
 
 fn accepted(result: &LifecycleResult) -> bool {
@@ -1148,6 +1149,30 @@ struct ActivityOutcome {
     written: Option<Value>,
 }
 
+fn newer_lead_observation(root: &Path, identity: &RecordIdentity, observation: &str) -> bool {
+    // Repeated thinking can keep the activity stamp unchanged. The lead's
+    // recorded events still show whether it advanced while a check ran.
+    // Unavailable rich history does not veto an independent native mutation;
+    // append_observation retains the read diagnostic on its existing path.
+    let Some(snapshot) = read_record_at(root, "lifecycle_snapshot", identity)
+        .ok()
+        .flatten()
+        .and_then(|value| serde_json::from_value::<LifecycleSnapshot>(value).ok())
+    else {
+        return false;
+    };
+    snapshot
+        .pools
+        .general
+        .observations
+        .iter()
+        .chain(&snapshot.pools.requests.observations)
+        .any(|event| {
+            event.actor == crate::observations::Actor::Lead
+                && event.observed_mono_ns.as_str() > observation
+        })
+}
+
 /// The one ordering every activity writer applies. An activity with content
 /// `base`, observed at `observation`, meets the activity `existing` in its
 /// slot and the slot's `clear` watermark. The same content still `visible`
@@ -1361,7 +1386,12 @@ fn append_observation(
                 } else {
                     TurnEndStatus::Superseded
                 },
-                held: Some(recorded && checks.iter().any(|check| check.note.is_some())),
+                held: Some(
+                    recorded
+                        && checks
+                            .iter()
+                            .any(|check| check.note.as_ref().is_some_and(|note| note.holds())),
+                ),
                 hold_checks: checks,
             });
         }
@@ -1460,25 +1490,35 @@ fn child_waits(
     binding_id: &str,
     waits: impl FnOnce(&ChildPresenceSet, Option<EndMark<'_>>) -> bool,
 ) -> bool {
+    known_child_wait(resolved, binding_id, waits) == Some(true)
+}
+
+fn known_child_wait(
+    resolved: &ResolvedLaunch,
+    binding_id: &str,
+    waits: impl FnOnce(&ChildPresenceSet, Option<EndMark<'_>>) -> bool,
+) -> Option<bool> {
     let identity = resolved.binding(binding_id);
-    let RecordRead::Present(value) =
-        read_record_typed_at(&resolved.root, "child_presence_set", &identity)
-    else {
-        return false;
+    let value = match read_record_typed_at(&resolved.root, "child_presence_set", &identity) {
+        RecordRead::Present(value) => value,
+        RecordRead::Missing => return Some(false),
+        RecordRead::Unavailable(_) | RecordRead::Invalid(_) | RecordRead::Unsupported(_) => {
+            return None;
+        }
     };
     let Ok(set) = ChildPresenceSet::deserialize(&value) else {
-        return false;
+        return None;
     };
     let (Ok(Some(binding)), Ok(end)) = (
         read_record_at(&resolved.root, "binding", &identity),
         read_record_at(&resolved.root, "binding_end", &identity),
     ) else {
-        return false;
+        return None;
     };
     if binding["provider"].as_str() != Some(set.provider.as_str()) {
-        return false;
+        return None;
     }
-    waits(&set, EndMark::of(end.as_ref(), &binding))
+    Some(waits(&set, EndMark::of(end.as_ref(), &binding)))
 }
 
 /// A record of the binding's that a hook is about to replace, as it found it.
@@ -1624,7 +1664,6 @@ fn apply_activity(
     let binding_id = event_binding_id(event, &resolved.launch_id)?;
     let identity = resolved.binding(&binding_id);
     let activity_path = identity.path(&resolved.root, "activity")?;
-    let base = activity_base(resolved, event, &binding_id)?;
     let (mutation, ()) = commit(
         &resolved.root,
         &[&resolved.launch_lock(), &resolved.claim_lock()],
@@ -1658,6 +1697,65 @@ fn apply_activity(
             let clear = read_record_at(&resolved.root, "activity_clear", &identity)?;
             let visible =
                 activity_visible(&resolved.root, &identity, existing.as_ref(), clear.as_ref());
+            // A native replay names the same end, even when its hook receives
+            // a later local timestamp. Keep its stored decision and leave
+            // later activity and children untouched.
+            let replay = event.observation.as_ref().is_some_and(|draft| {
+                event
+                    .provider
+                    .is_some_and(|provider| draft.ends_turn(provider))
+                    && read_record_at(&resolved.root, "lifecycle_snapshot", &identity)
+                        .ok()
+                        .flatten()
+                        .and_then(|value| serde_json::from_value::<LifecycleSnapshot>(value).ok())
+                        .is_some_and(|snapshot| {
+                            snapshot
+                                .pools
+                                .general
+                                .observations
+                                .iter()
+                                .any(|item| item.storage_key() == draft.storage_key())
+                        })
+            });
+            if replay {
+                let mut result = LifecycleResult::new(Disposition::Skipped);
+                result.event_id = existing
+                    .as_ref()
+                    .and_then(|activity| activity["event_id"].as_str())
+                    .map(str::to_owned);
+                return Ok(append_observation(
+                    resolved,
+                    event,
+                    observation,
+                    written_at,
+                    CommitPlan::reporting(Mutation::plain(result)),
+                ));
+            }
+            // Checks ran without native locks. A decision from an older window
+            // cannot suppress a call after a new prompt or permission request.
+            if let Some(evidence) = &resolved.evidence {
+                let mut evidence = evidence.borrow_mut();
+                let unchanged = evidence.quiet_snapshot.as_ref().is_some_and(|expected| {
+                    read_record_at(&resolved.root, "lifecycle_snapshot", &identity)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|snapshot| snapshot["snapshot_id"] == *expected)
+                });
+                let waiting = known_child_wait(resolved, &binding_id, |set, end| {
+                    set.waits_through_stop(end, observation, event.in_flight_task_ids.as_deref())
+                }) != Some(false);
+                for check in &mut evidence.hold_checks {
+                    if check
+                        .note
+                        .as_ref()
+                        .is_some_and(|note| waiting || (!note.holds() && !unchanged))
+                    {
+                        check.note = None;
+                        check.stage = hold_check::Stage::EvidenceChanged;
+                    }
+                }
+            }
+            let base = activity_base(resolved, event, &binding_id)?;
             // A lead that waits on a sub-agent keeps calling tools, and each
             // call is thinking. While a child that asked for permission is
             // still waiting, its notify is what the user needs to see, and
@@ -1689,7 +1787,8 @@ fn apply_activity(
                 a["observed_mono_ns"]
                     .as_str()
                     .is_some_and(|order| order > observation)
-            }) || covered_by_clear(observation, clear.as_ref())
+            }) || newer_lead_observation(&resolved.root, &identity, observation)
+                || covered_by_clear(observation, clear.as_ref())
                 || read_record_at(&resolved.root, "binding_end", &identity)?
                     .as_ref()
                     .is_some_and(|end| {
@@ -2327,7 +2426,7 @@ pub fn acknowledge_activity(
                     && activity
                         .get("hold_notes")
                         .and_then(Value::as_object)
-                        .is_none_or(|notes| notes.is_empty())
+                        .is_none_or(|notes| !notes.values().any(|note| note["hold"] == true))
             });
             if !shown {
                 return Ok(CommitPlan::reporting(Mutation::plain(
@@ -2942,6 +3041,7 @@ fn apply_provider_event_with_request(
         observation_id: None,
         pending_turn_end: None,
         turn_end: None,
+        quiet_snapshot: None,
         hold_checks: request
             .map(|r| {
                 hold_check::bypass(
@@ -3068,7 +3168,7 @@ fn apply_provider_event_inner(
 fn prepare_hold_scope(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
-) -> Result<Option<HookScope>> {
+) -> Result<Option<(HookScope, Option<LifecycleSnapshot>)>> {
     let binding_id = event_binding_id(event, &resolved.launch_id)?;
     let (scope, ()) = commit(
         &resolved.root,
@@ -3100,13 +3200,24 @@ fn prepare_hold_scope(
             {
                 return Ok(CommitPlan::reporting(None));
             }
-            Ok(CommitPlan::reporting(Some(HookScope {
-                address: resolved.address.clone(),
-                launch_id: resolved.launch_id.clone(),
-                target: BindingTarget::Binding {
-                    binding_id: binding_id.clone(),
+            let snapshot = read_record_at(
+                &resolved.root,
+                "lifecycle_snapshot",
+                &resolved.binding(&binding_id),
+            )
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::from_value(value).ok());
+            Ok(CommitPlan::reporting(Some((
+                HookScope {
+                    address: resolved.address.clone(),
+                    launch_id: resolved.launch_id.clone(),
+                    target: BindingTarget::Binding {
+                        binding_id: binding_id.clone(),
+                    },
                 },
-            })))
+                snapshot,
+            ))))
         },
         |_| Ok(()),
     )?;
@@ -3119,59 +3230,130 @@ fn obtain_hold_notes(
     observation: &str,
     request: &hold_check::Request<'_>,
 ) -> Vec<HoldCheckOutcome> {
-    let skip = |reason| hold_check::bypass(request.registrations, reason);
+    let mut outcomes = hold_check::bypass(request.registrations, Bypass::NotApplicable);
     if !hold_check_applies(event, request) {
-        return skip(Bypass::NotApplicable);
+        return outcomes;
     }
-    if !matches!(
-        request.reply,
-        crate::hook_content::HookContent::Available { .. }
-    ) {
-        return skip(Bypass::ReplyUnavailable);
-    }
-    let Ok(Some(scope)) = prepare_hold_scope(resolved, event) else {
-        return skip(Bypass::NoCurrentScope);
+    let Ok(Some((scope, snapshot))) = prepare_hold_scope(resolved, event) else {
+        return hold_check::bypass(request.registrations, Bypass::NoCurrentScope);
     };
-    // A sub-agent waiting on a permission prompt cannot finish without the
-    // user, so the lead is not waiting on its own work, whatever its reply
-    // says. Only one this Stop keeps counts: one it no longer lists has ended.
     let BindingTarget::Binding { binding_id } = &scope.target;
     if child_waits(resolved, binding_id, |set, end| {
         set.waits_through_stop(end, observation, event.in_flight_task_ids.as_deref())
     }) {
-        return skip(Bypass::ChildWaiting);
+        return hold_check::bypass(request.registrations, Bypass::ChildWaiting);
     }
-    let Some(tasks) = request.background_tasks else {
-        return skip(Bypass::NotApplicable);
-    };
-    hold_check::run(request.registrations, |registration, id| {
+    let lifecycle = snapshot.as_ref().map(|snapshot| {
+        crate::observations::LifecycleView::assemble(Some(snapshot), None, None, vec![])
+    });
+    // A draft is not yet a persisted observation. Its eventual write time is
+    // not known, and a replay or newer event makes it unsuitable for a check.
+    let prospective = event.observation.as_ref().and_then(|draft| {
+        let snapshot = snapshot.as_ref()?;
+        if snapshot
+            .pools
+            .general
+            .observations
+            .iter()
+            .chain(&snapshot.pools.requests.observations)
+            .any(|item| {
+                item.observed_mono_ns.as_str() >= observation
+                    || item.storage_key() == draft.storage_key()
+            })
+        {
+            return None;
+        }
+        let mut value = serde_json::to_value(draft).ok()?;
+        let fields = value.as_object_mut()?;
+        fields.remove("written_at_unix_ns");
+        fields.remove("turn_end");
+        fields.insert("observed_mono_ns".into(), json!(observation));
+        Some(value)
+    });
+    if prospective.is_some()
+        && let Some(evidence) = &resolved.evidence
+    {
+        evidence.borrow_mut().quiet_snapshot = snapshot.as_ref().map(|s| s.snapshot_id.clone());
+    }
+    let eligible: Vec<_> = request
+        .registrations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, registration)| {
+            let reason = match registration.purpose {
+                hold_check::Purpose::Hold if !hold_applies(event, request) => {
+                    Some(Bypass::NotApplicable)
+                }
+                hold_check::Purpose::Hold
+                    if !matches!(
+                        request.reply,
+                        crate::hook_content::HookContent::Available { .. }
+                    ) =>
+                {
+                    Some(Bypass::ReplyUnavailable)
+                }
+                hold_check::Purpose::Quiet if prospective.is_none() => {
+                    Some(Bypass::HistoryUnavailable)
+                }
+                hold_check::Purpose::Hold | hold_check::Purpose::Quiet => None,
+            };
+            if let Some(reason) = reason {
+                outcomes[index].reason = Some(reason);
+                None
+            } else {
+                Some(registration.clone())
+            }
+        })
+        .collect();
+    let completed = hold_check::run(&eligible, |registration, id| {
+        let quiet = registration.purpose == hold_check::Purpose::Quiet;
         let input = HoldCheckInput {
             schema: 1,
             phase: "before_turn_end",
             check_id: id,
             check_name: &registration.name,
             scope: &scope,
-            provider: "claude",
+            provider: event.provider?.as_str(),
             provider_session_id: event.provider_session_id.as_deref()?,
             source_event: &event.source_event,
             actor: crate::observations::Actor::Lead,
             observed_mono_ns: observation,
             reply: request.reply,
-            background_tasks: tasks,
+            background_tasks: request.background_tasks.unwrap_or(&[]),
+            lifecycle: quiet.then_some(lifecycle.as_ref()).flatten(),
+            prospective_observation: quiet.then_some(prospective.as_ref()).flatten(),
         };
         let mut bytes = serde_json::to_vec(&input).ok()?;
         bytes.push(b'\n');
         (bytes.len() <= manifest().ok()?.limits.max_json_bytes).then_some(bytes)
-    })
+    });
+    for completed in completed {
+        if let Some(outcome) = outcomes
+            .iter_mut()
+            .find(|outcome| outcome.name == completed.name)
+        {
+            *outcome = completed;
+        }
+    }
+    outcomes
 }
 
-fn hold_check_applies(event: &ProviderEvent, request: &hold_check::Request<'_>) -> bool {
+fn hold_applies(event: &ProviderEvent, request: &hold_check::Request<'_>) -> bool {
     event.provider == Some(Provider::Claude)
         && event.source_event == "Stop"
         && event.agent_id.is_none()
         && request
             .background_tasks
             .is_some_and(|tasks| !tasks.is_empty())
+}
+
+fn hold_check_applies(event: &ProviderEvent, request: &hold_check::Request<'_>) -> bool {
+    event.agent_id.is_none()
+        && event.source_event == "Stop"
+        && matches!(event.provider, Some(Provider::Claude | Provider::Codex))
+        && request.registrations.iter().any(|registration| {
+            registration.purpose == hold_check::Purpose::Quiet || hold_applies(event, request)
+        })
 }
 
 #[cfg(test)]
@@ -3211,14 +3393,15 @@ mod lifecycle_write_tests {
                     check_id: Some("22222222-2222-4222-8222-222222222222".into()),
                     exit_code: Some(0),
                     reason: None,
-                    note: Some(hold_check::HoldNote {
+                    note: Some(hold_check::TurnEndNote::Hold(hold_check::HoldNote {
                         hold: true,
                         answer: "waiting_on_own_work".into(),
-                    }),
+                    })),
                 }],
             }),
             turn_end: None,
             hold_checks: Vec::new(),
+            quiet_snapshot: None,
             persistence: HookPersistence {
                 native_state: Persistence::Unconfirmed,
                 activity: Persistence::Unconfirmed,
