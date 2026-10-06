@@ -233,6 +233,16 @@ Hook commands never exit 2, because Claude Code and Codex read exit 2 as "block"
 - A usage error of `hooks describe`, `hooks claim` or `hooks publish`, or an unknown `hooks` subcommand, exits 1. With `--json`, the envelope's `command` names the subcommand.
 - `bin/attention` without the binary exits 0 for any `hooks …` command, or 1 with `--strict`.
 
+### Compatibility
+
+**What changes a schema number.** Within CLI envelope schema 1, a release may add a field to any object, and may add values to the open sets: a diagnostic's `code`, an observation's `kind`, and a check audit entry's `stage` and `reason`. A consumer ignores a field it does not know and treats an unknown value in an open set as unrecognized. Every other enumerated value in this guide is a closed set, such as `status`, `scope_relation`, `pane_presence`, `binding_phase`, `binding_health`, `reader_confidence`, `availability`, `provider` and `actor.kind`. A new value in a closed set raises the schema number. So does a removed or renamed field, or a field whose meaning changes.
+
+**The product version.** `attention --version` and `hooks describe`'s `writer_version` follow semantic versioning from 1.0.0. A release that adds to a public contract raises the minor version, and one that raises any schema number or wire version raises the major version. A release with only fixes raises the patch. Untagged builds report the last release's version and their own commit, so a consumer that needs an unreleased change pins the commit.
+
+**Socket identity.** The `realm_id` and `incarnation_id` in a `bindings` answer's `result.scope`, and in every pane address, can be computed without a subprocess. Both are lowercase hexadecimal SHA-256. `realm_id` is the digest of the socket's canonical path as UTF-8. `incarnation_id` is the digest, over the realm id, the socket file's device number, its inode number and its change time in nanoseconds (`st_ctime` × 10⁹ + `st_ctime_nsec`), each written in decimal except the realm id, of each part as its 8-byte big-endian length followed by its UTF-8 bytes. Attention refuses a socket that is not a socket, is owned by another user, or has a negative change time. A change to this recipe raises the wire version.
+
+**Observation kinds.** As of 1.0.0, Attention writes these `kind` values: `prompt_submitted`, `tool_preflight`, `tool_result`, `approval_requested`, `automatic_denial`, `response_finished`, `run_settled`, `attempt_outcome`, `user_interrupt`, `elicitation_requested`, `elicitation_action_selected`, `notice`, `compaction_attempted` and `compaction_succeeded`. The set is open; a release that adds one lists it in the changelog.
+
 ### Registration description
 
 ```sh

@@ -37,7 +37,7 @@ Upgrading from 0.6? Follow [the upgrade steps in the changelog](CHANGELOG.md#upg
 
 ### 1. Load the plugin
 
-This needs WezTerm `20230320-124340-559cb7b0` or newer, the first release with `wezterm.plugin.require`. Add the plugin before any other `format-tab-title` handler:
+This needs WezTerm `20230320-124340-559cb7b0` or newer, the first release with `wezterm.plugin.require`. A stock release is enough; Attention depends on no patched build ([ADR 0007](docs/adr/0007-stock-wezterm-only.md)). Add the plugin before any other `format-tab-title` handler:
 
 ```lua
 local attention = wezterm.plugin.require("https://github.com/pro-vi/wezterm-attention")
@@ -181,6 +181,7 @@ attention.apply_to_config(config, {
   colors = {
     thinking = "#1c1730",  -- violet tint
     stop     = "#12271c",  -- mint tint
+    quiet    = "#122033",  -- blue tint
     notify   = "#240f16",  -- rose tint
     review   = "#1a1a0c",  -- gold tint
   },
@@ -190,6 +191,7 @@ attention.apply_to_config(config, {
     thinking_frames = { "◌ ", "◔ ", "◑ ", "◕ " },
     stop   = "✓ ",
     held   = "⏾ ",
+    quiet  = "↪ ",
     notify = "! ",
     review = "◆ ",
   },
@@ -454,6 +456,9 @@ WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude Stop \
 ```
 
 Only a non-empty native `background_tasks` array with available reply text runs the check. Its input contains the checked scope, reply and unchanged array; neither content is stored by Attention. A validated hold shows fixed `⏾` with thinking color and is not automatically acknowledged. While a sub-agent waits for permission, no check runs, the turn end is recorded unheld, and the tab shows `notify` until the wait ends. Timeout or failure supplies no hold. The checks share a 2000 ms outer budget; ordinary consumer and native-work time are additional. See [the exact input, output and record contract](docs/consumer-guide.md#pre-write-hold-checks) and [ADR 0005](docs/adr/0005-application-hold-notes-on-recorded-turn-ends.md). Update matching readers and writers before activation; this repository does not register or install the check for you.
+
+`--quiet-check NAME=/absolute/executable` runs the same way on a lead Claude or Codex `Stop`, for an application that can prove nobody needs to be called, such as a controller that submitted the prompt itself. A validated quiet note shows `↪` with a blue tint and records `turn_end.held` false; a waiting permission or a held turn end takes precedence, and a failure, timeout or missing lifecycle history leaves the ordinary turn end. See [quiet checks in the consumer guide](docs/consumer-guide.md#pre-write-hold-checks).
+
 ## Codex hooks
 
 Codex reads lifecycle hooks from `~/.codex/hooks.json`, and asks you to approve each new or edited hook once (`/hooks` in Codex). `attention hooks describe --provider codex --json` lists the rows; the same rule and command form apply as for Claude Code, for the same reasons, and so does the advice to register the link on your PATH.
@@ -592,6 +597,11 @@ The Lua implementation is split by responsibility under `plugin/`: protocol vali
 - It works on a pane an agent is running in: the flag is a record of its own. If the tab still shows `✓` or `!` after a press, that activity outranks the flag; the ◆ appears once you have seen it.
 - On a pane no launch has claimed, such as a shell without the integration, a press that would flag it is refused and logged once, because no reader would show the flag. A press there on a tab that carries your flag still clears it. A mux-attached pane that has not published its identity refuses every press, since its tab cannot be found.
 - A press runs the `attention` command. When it refuses, the reason is logged once for each kind of refusal on that pane (`attention plugin set-review failed for pane N: ...`) and the tab does not change: `claim_stale` means the pane's launch claim is not the launch the pane last published, which the next prompt republishes. `probe_unavailable` means a hook held the pane's records at that moment; press again. A command built before the plugin was updated answers nothing: the focused tab shows `⚠ rebuild attention` and the log says the command may predate the plugin. Run `scripts/install-cli.sh` again; the warning goes once a command answers.
+
+**Typing lag or high GUI CPU with many tabs?**
+- WezTerm rebuilds the whole tab bar whenever any pane sets its title, and each rebuild runs the plugin's `format-tab-title` once for every tab (upstream WezTerm `cab251610`). Agent titles rarely reach the screen, because a tab title or the pane's directory is drawn first (see [Custom tab titles](#custom-tab-titles)), so turning them off removes rebuilds you never see the result of.
+- Claude Code (checked on 2.1.291): set `"env": { "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1" }` in `~/.claude/settings.json`. The cost: a tab with no tab title and no known directory then shows the shell's title instead of the session topic.
+- Codex (checked against its source at `985cf47a4`): in `$CODEX_HOME/config.toml`, give `[tui]` a `terminal_title` list without `"activity"`, for example `terminal_title = ["project-name"]`. The `"activity"` item is a spinner, so it rewrites the title while Codex works.
 
 ## Type annotations
 
