@@ -646,8 +646,10 @@ Three more bounds, from reading the code and not from runs:
   the activity as three separate writes. If a later write fails, the replaced
   conversation stays active. Only Cursor's own bindings are ended this way; one
   of another provider in the same launch is left as it was.
-- The `sessionEnd` after a `/new` ends two bindings in two writes. A consumer
-  executable (`--consumer`) is told of neither, and Cursor registers none.
+- The `sessionEnd` after a `/new` ends two bindings in two writes. The hook
+  reports the named session's write; the current binding's write is reported
+  only when the named session has no binding. A consumer executable
+  (`--consumer`) is told of neither, and Cursor registers none.
 
 ## Pressing Esc in Claude Code leaves `thinking` on the tab
 

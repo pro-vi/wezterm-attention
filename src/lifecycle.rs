@@ -3164,8 +3164,18 @@ fn apply_provider_event_inner(
         }
         ProviderAction::End => {
             let ended = apply_end(&resolved, event, observation, &written_at)?;
-            end_current_conversation(&resolved, event, observation, &written_at)?;
-            Ok(ended)
+            // The session the hook names may have no binding while the launch's
+            // current conversation ends with the process; the event then
+            // reports that end, not the named session's `ignored`.
+            match end_current_conversation(&resolved, event, observation, &written_at)? {
+                Some(current)
+                    if ended.disposition == Disposition::Ignored
+                        && current.disposition != Disposition::Ignored =>
+                {
+                    Ok(current)
+                }
+                _ => Ok(ended),
+            }
         }
         ProviderAction::Review => apply_review_event(&resolved, event, false),
         ProviderAction::Clear => apply_clear_event(&resolved, event, observation, &written_at),
@@ -3196,20 +3206,21 @@ fn current_binding(resolved: &ResolvedLaunch) -> Result<Option<Value>> {
     )
 }
 
-/// Ends the Cursor binding `record`. A binding of another provider in the same
-/// launch is left as it is: Cursor's hooks cannot speak for it.
+/// Ends the Cursor binding `record` and returns what that end reported. A
+/// binding of another provider in the same launch is left as it is and reports
+/// `None`: Cursor's hooks cannot speak for it.
 fn end_cursor_binding(
     resolved: &ResolvedLaunch,
     record: &Value,
     observation: &str,
     written_at: &str,
-) -> Result<()> {
+) -> Result<Option<LifecycleResult>> {
     if record["provider"].as_str() == Some(Provider::Cursor.as_str())
         && let Some(binding_id) = record["binding_id"].as_str()
     {
-        end_binding(resolved, binding_id, observation, written_at)?;
+        return end_binding(resolved, binding_id, observation, written_at).map(Some);
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Binds the session of an event that can open a conversation its provider
@@ -3257,19 +3268,20 @@ fn bind_unannounced_conversation(
 /// was bound in this launch: a `cursor-agent` the launch's agent started has the
 /// launch's id, its own start was refused as a second agent in the launch, and
 /// its end is not the agent's. An agent's own claim is proven against the process
-/// that sent the hook, so no such nested agent reaches it.
+/// that sent the hook, so no such nested agent reaches it. Returns what ending
+/// the current binding reported, or `None` when it ended nothing.
 fn end_current_conversation(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
     observation: &str,
     written_at: &str,
-) -> Result<()> {
+) -> Result<Option<LifecycleResult>> {
     if event.provider != Some(Provider::Cursor) {
-        return Ok(());
+        return Ok(None);
     }
     let own = event_binding_id(event, &resolved.launch_id)?;
     let Some(current) = current_binding(resolved)? else {
-        return Ok(());
+        return Ok(None);
     };
     let self_owned = matches!(
         crate::launch::ClaimMode::of(&resolved.claim),
@@ -3279,7 +3291,7 @@ fn end_current_conversation(
         || (!self_owned
             && read_record_at(&resolved.root, "binding", &resolved.binding(&own))?.is_none())
     {
-        return Ok(());
+        return Ok(None);
     }
     end_cursor_binding(resolved, &current, observation, written_at)
 }

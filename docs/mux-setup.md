@@ -97,7 +97,7 @@ held only the claim keeps the ID for the next one.
 
 The danger is a wrapper that calls the helper and launches the agent regardless of its status. There
 the agent runs with no launch id, and nothing in the agent's own output says so. On macOS, in a pane
-no shell has claimed, the agent then claims the pane for itself at its first session start, and its
+no shell has claimed, the agent then claims the pane for itself at its first session start (a resumed Cursor session's first prompt), and its
 callbacks are recorded as they would be under the claim. With
 self-claim switched off, on Linux, or in a pane that already holds a shell claim, every callback
 from that run is discarded.

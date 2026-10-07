@@ -243,6 +243,64 @@ fn either_order_of_the_two_stops_an_esc_sends_leaves_the_pane_clear() {
     }
 }
 
+// Whatever its status, a Cursor `stop` ends the turn, so the consumer gets the
+// turn-end record the consumer guide promises, in the kind its status names:
+// `aborted` is the user's interrupt, `error` a failed attempt. A stop stamped
+// older than a later tool hook of the same turn is superseded and leaves the
+// pane thinking, as an older Codex interrupt does.
+#[test]
+fn a_cursor_stop_ends_the_turn_as_its_status_says_and_an_older_one_is_superseded() {
+    use wezterm_attention::observations::TurnEndStatus;
+    let apply_with_outcome = |setup: &Setup, parsed: &ProviderEvent, observed: &str| {
+        wezterm_attention::lifecycle::apply_provider_event_with_outcome(
+            parsed,
+            &setup.env,
+            observed,
+            &setup.ports(),
+        )
+    };
+    for (status, kind) in [
+        ("completed", "response_finished"),
+        ("aborted", "user_interrupt"),
+        ("error", "attempt_outcome"),
+    ] {
+        let setup = started("lead");
+        let prompt = event("cursor", "beforeSubmitPrompt", "lead", json!({}));
+        setup.apply(&prompt, "00000000000000000300");
+        let stop = event("cursor", "stop", "lead", json!({"status":status}));
+        let outcome = apply_with_outcome(&setup, &stop, "00000000000000000400");
+        assert_eq!(
+            outcome.turn_end.as_ref().unwrap().status,
+            TurnEndStatus::Recorded,
+            "{status}"
+        );
+        let snapshot = read(setup.binding_dir("cursor", "lead").join("lifecycle.json"));
+        let observations = snapshot["pools"]["general"]["observations"].as_array();
+        let last = observations.unwrap().last().unwrap();
+        assert_eq!(last["kind"], kind, "{status}");
+        assert_eq!(last["source_event"], "stop", "{status}");
+    }
+
+    let setup = started("lead");
+    let prompt = event("cursor", "beforeSubmitPrompt", "lead", json!({}));
+    setup.apply(&prompt, "00000000000000000300");
+    let tool = event(
+        "cursor",
+        "preToolUse",
+        "lead",
+        json!({"tool_name":"Shell","tool_use_id":"call-x-0\nfc_x_0"}),
+    );
+    setup.apply(&tool, "00000000000000000500");
+    let older = event("cursor", "stop", "lead", json!({"status":"completed"}));
+    let outcome = apply_with_outcome(&setup, &older, "00000000000000000400");
+    assert_eq!(
+        outcome.turn_end.as_ref().unwrap().status,
+        TurnEndStatus::Superseded
+    );
+    let activity = read(setup.binding_dir("cursor", "lead").join("activity.json"));
+    assert_eq!(activity["type"], "thinking");
+}
+
 // With a prompt on the command line, cursor-agent 2026.10.01 sent the first
 // `beforeSubmitPrompt` 0.07 s before `sessionStart` and did not wait for it. In
 // a pane a shell claimed, the prompt binds the session, and a start that comes
