@@ -141,8 +141,9 @@ pub struct ProviderEvent {
     pub provider_session_id: Option<String>,
     pub start_source: Option<String>,
     /// For an event that can open a conversation the provider never announced
-    /// with a session start: the source to bind with when the event's session
-    /// is not the launch's current binding.
+    /// with a session start (a resumed Cursor session sends none): the source
+    /// to bind with when the event's session is not the launch's current
+    /// binding. Such an event may also claim the pane for its agent.
     pub ensure_binding_source: Option<String>,
     pub activity_type: Option<String>,
     pub label: Option<String>,

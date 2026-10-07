@@ -71,6 +71,57 @@ fn a_cursor_turn_thinks_from_the_prompt_and_stops_when_it_completes() {
     }
 }
 
+// `postToolUseFailure` and `preCompact` write no pane state, so nothing but
+// their lifecycle records shows that the mapping took: a failed tool result
+// that reads as a success, or a compaction recorded as another kind.
+#[test]
+fn the_observation_only_hooks_record_their_kinds_and_leave_the_pane_alone() {
+    let setup = started("lead");
+    let directory = setup.binding_dir("cursor", "lead");
+    let prompt = event("cursor", "beforeSubmitPrompt", "lead", json!({}));
+    setup.apply(&prompt, "00000000000000000300");
+    let activity = fs::read(directory.join("activity.json")).unwrap();
+    for (name, patch, observed) in [
+        (
+            "postToolUseFailure",
+            json!({"tool_name":"Shell","tool_use_id":"call-x-0\nfc_x_0","failure_type":"error","is_interrupt":false}),
+            "00000000000000000400",
+        ),
+        (
+            "preCompact",
+            json!({"trigger":"auto"}),
+            "00000000000000000500",
+        ),
+    ] {
+        let hook = event("cursor", name, "lead", patch);
+        assert_eq!(hook.action, ProviderAction::Observation, "{name}");
+        assert_eq!(
+            setup.apply(&hook, observed).disposition,
+            "applied",
+            "{name}"
+        );
+    }
+    assert_eq!(fs::read(directory.join("activity.json")).unwrap(), activity);
+
+    let snapshot = read(directory.join("lifecycle.json"));
+    let general = snapshot["pools"]["general"]["observations"]
+        .as_array()
+        .unwrap();
+    let of = |source: &str| {
+        general
+            .iter()
+            .find(|item| item["source_event"] == source)
+            .unwrap_or_else(|| panic!("no {source} observation in {general:?}"))
+    };
+    let failure = of("postToolUseFailure");
+    assert_eq!(failure["kind"], "tool_result");
+    assert_eq!(failure["is_error"], true);
+    assert_eq!(failure["correlation"]["tool_call_id"], "call-x-0");
+    let compaction = of("preCompact");
+    assert_eq!(compaction["kind"], "compaction_attempted");
+    assert_eq!(compaction["trigger"], "auto");
+}
+
 // Cursor's `/new` starts another conversation in the same process and sends no
 // `sessionEnd` for the old one and no `sessionStart` for the new one, so the
 // new conversation's first prompt is where its session is first seen.

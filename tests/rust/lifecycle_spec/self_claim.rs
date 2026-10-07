@@ -861,6 +861,53 @@ fn start_agent(setup: &Setup, agent: i32, hook: i32) -> BTreeMap<String, String>
     env
 }
 
+// A resumed Cursor session sends no `sessionStart` (cursor-agent 2026.10.01
+// sends it only when no session is being resumed), so its first hook is the
+// prompt. That prompt claims the pane for its agent as a start does; a prompt
+// of any other provider still cannot, and the agent's later prompts take the
+// claim it already holds without publishing it again.
+#[test]
+fn a_resumed_cursor_sessions_first_prompt_claims_the_pane_and_no_other_prompt_does() {
+    let setup = Setup::new();
+    let env = setup.agent_env();
+    let first = event("cursor", "beforeSubmitPrompt", "resumed", json!({}));
+    assert_eq!(
+        apply_as(&setup, &env, &first, "00000000000000000200").disposition,
+        "applied"
+    );
+    let claim = stored_claim(&setup).expect("the prompt claimed the pane");
+    assert_eq!(claim["owner_pid"], json!(AGENT_PID.to_string()));
+    let launch = launch_of(&claim);
+    let directory = setup_launch_dir(&setup, &launch)
+        .join("bindings")
+        .join(binding_id("cursor", "resumed", &launch));
+    assert_eq!(
+        super::turn_endings::read(directory.join("activity.json"))["type"],
+        "thinking"
+    );
+    let published = setup.tty.writes.lock().unwrap().len();
+    assert!(published >= 1, "the claim was published");
+    let second = event("cursor", "beforeSubmitPrompt", "resumed", json!({}));
+    apply_as(&setup, &env, &second, "00000000000000000300");
+    assert_eq!(
+        setup.tty.writes.lock().unwrap().len(),
+        published,
+        "a prompt that finds the agent's own claim publishes nothing"
+    );
+
+    let other = Setup::new();
+    let env = other.agent_env();
+    let prompt = event("claude", "UserPromptSubmit", "resumed", json!({}));
+    assert_ne!(
+        apply_as(&other, &env, &prompt, "00000000000000000200").disposition,
+        "applied"
+    );
+    assert!(
+        stored_claim(&other).is_none(),
+        "only a Cursor prompt may claim"
+    );
+}
+
 #[test]
 fn an_agent_s_first_session_start_claims_the_pane_for_its_own_process() {
     for provider in ["claude", "codex", "cursor", "pi"] {

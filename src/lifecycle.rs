@@ -435,6 +435,7 @@ fn resolve_launch<'a>(
         &address,
         claim,
         event.action == ProviderAction::Binding,
+        event.ensure_binding_source.is_some(),
     )?;
     let launch_id = crate::launch::claim_launch_id(&resolved.claim)?;
     Ok(ResolvedLaunch {

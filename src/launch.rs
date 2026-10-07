@@ -1188,18 +1188,35 @@ pub(crate) fn self_claim_refusal(
     }
 }
 
+/// Whether the pane's claim is a self-owned one that the agent process the hook
+/// names holds. A hint that spares a claim attempt: [`HostProof::of_claim`]
+/// still proves the claim when it is used.
+fn held_by_host(env: &BTreeMap<String, String>, claim: Option<&Value>) -> bool {
+    let (Some(claim), Ok(host)) = (claim, asserted_host(env)) else {
+        return false;
+    };
+    matches!(ClaimMode::of(claim), Ok(ClaimMode::SelfOwned(owner)) if owner.pid == host)
+}
+
 /// Resolve an agent event that carries no launch id against a claim its own
 /// agent process holds.
 ///
 /// Only where [`self_claim_refusal`] allows it. A pane holding a shell claim
 /// refuses every such event: that claim belongs to the commands its shell
 /// starts, which carry its launch id.
+///
+/// A session start makes the claim. So does an event that can open a
+/// conversation its provider never announced (`opens_unannounced_session`),
+/// which a resumed Cursor session's first prompt is; it makes one only where
+/// the agent does not already hold the pane's claim, so a prompt that finds it
+/// takes the cheap path a later hook takes.
 pub(crate) fn self_owned_launch(
     env: &BTreeMap<String, String>,
     ports: &RuntimePorts<'_>,
     address: &PaneAddress,
     claim: Option<Value>,
     starts_session: bool,
+    opens_unannounced_session: bool,
 ) -> Result<SelfOwnedLaunch> {
     if let Some(refusal) = self_claim_refusal(env, ports.processes) {
         return Err(refusal);
@@ -1210,7 +1227,7 @@ pub(crate) fn self_owned_launch(
     {
         return Err(shell_claim_refusal());
     }
-    if starts_session {
+    if starts_session || (opens_unannounced_session && !held_by_host(env, claim.as_ref())) {
         let proof = HostProof::establish(env, ports, address)?;
         let (claim, publication_diagnostic) = claim_for_host(env, ports, address, &proof)?;
         return Ok(SelfOwnedLaunch {
@@ -1219,8 +1236,9 @@ pub(crate) fn self_owned_launch(
             publication_diagnostic,
         });
     }
-    // Nothing but a session start can make a claim, so there is nothing to
-    // prove this against.
+    // Nothing but a session start, or an event that opens a session its provider
+    // never announced, can make a claim, so there is nothing to prove this
+    // against.
     let Some(claim) = claim else {
         return Err(AttentionError::new(
             DiagnosticCode::ClaimStale,

@@ -1113,6 +1113,29 @@ mod consumer_manifest_tests {
         assert!(parse_manifest(&invalid.to_string()).is_err());
     }
 
+    // The child-identity rule is manifest membership, so it must follow the
+    // manifest's `subagent_providers` for every provider, and the rows Cursor
+    // and Claude had when it was written stay pinned: Cursor sends no
+    // sub-agent hook, Claude does.
+    #[test]
+    fn child_identity_follows_the_manifest_for_every_provider() {
+        let listed = &manifest().unwrap().enums.subagent_providers;
+        for provider in [
+            Provider::Claude,
+            Provider::Codex,
+            Provider::Cursor,
+            Provider::Pi,
+        ] {
+            assert_eq!(
+                provider.has_child_identity(),
+                listed.contains(provider.as_str()),
+                "{provider:?}"
+            );
+        }
+        assert!(Provider::Claude.has_child_identity());
+        assert!(!Provider::Cursor.has_child_identity());
+    }
+
     #[test]
     fn manifest_subagent_providers_must_be_providers() {
         let mut manifest: Value = serde_json::from_str(EMBEDDED_MANIFEST).unwrap();

@@ -235,19 +235,21 @@ A headless `cursor-agent -p` run sends no `stop`, so its `thinking` stays too; s
 
 As of cursor-agent 2026.10.01-e373342, Cursor's hooks have their own names and send less.
 `sessionStart` binds the session with source `startup`, the only source a Cursor `sessionStart`
-can carry, since Cursor sends none. A lead `beforeSubmitPrompt` starts the turn's
+can carry, since Cursor sends none. A resumed session sends no `sessionStart` at all. A lead
+`beforeSubmitPrompt` starts the turn's
 `thinking` as `UserPromptSubmit` does, and first binds its session with source `clear` when that
-session is not the launch's current binding: `/new` starts a conversation with no `sessionStart`, so
-its first prompt is where the session is first seen, and the conversation it replaces ends there,
-since no hook ends it. A `preToolUse` of another session than the current
+session is not the launch's current binding: `/new` and a resumed session start a conversation with
+no `sessionStart`, so its first prompt is where the session is first seen. That prompt claims the
+pane for its agent, under the proof a start uses, when the agent does not already hold the pane's
+claim, and the conversation it replaces ends there, since no hook ends it. A `preToolUse` of another session than the current
 binding, which is what a sub-agent's tool call is, is ignored with `claim_stale` and binds nothing.
 A `stop` with status `completed` publishes `stop`. One with status `aborted` or `error` writes an
 activity clear and keeps its observation, `user_interrupt` or `attempt_outcome`: Cursor sends both
 for one Esc, run at the same time, so neither alone may write `notify`. `sessionEnd` names the
 conversation the process started with, so it ends the launch's current binding as well when that is
 another, provided the session it names was bound in this launch: a `cursor-agent` that an agent of
-the launch started has the launch's id, its own start is refused, and its end ends nothing. Cursor
-has no permission, notification or sub-agent hook, so it never publishes `notify` and has no
+the launch started has the launch's id, its own start is refused, and its end ends nothing. cursor-agent 2026.10.01-e373342 sends no hook for a permission prompt or a question, and a `Task`
+sub-agent sent no `subagentStart` or `subagentStop`, so Cursor never publishes `notify` and has no
 `subagent_providers` entry. A `tool_use_id` can have two lines; the first, which a tool's
 pre and post hooks share, is the observation's `tool_call_id`. See
 [accepted limitations](accepted-limitations.md#cursor-agent-sends-fewer-hooks-than-claude-code-and-codex).

@@ -330,7 +330,7 @@ A review is withdrawn only by its owner. A review another source published —
 `◆`, and `Alt+B` leaves it; `attention mark clear --source NAME` withdraws it.
 
 
-For an agent session (Cursor Agent never carries it: it sends no start source),
+For an agent session (Cursor Agent never carries it: it binds a resumed session at its first prompt, with no start source),
 Attention carries your flag when the session registers with `resume` in a new pane after its old socket is removed or replaced, or
 after its GUI is proven gone. Closing a pane on a live server does not carry
 it. Only your `user` flag moves; other review owners and activity stay behind.
@@ -531,9 +531,9 @@ Cursor sends less than Claude Code and Codex do, so:
 - **A pane waiting for you shows `thinking`, never `notify`.** Cursor runs no hook for a command-approval prompt or for the `AskQuestion` tool.
 - **Sub-agents are not counted.** A `Task` sub-agent sends no start or stop hook, and its tool hooks carry a `session_id` of their own, which Attention ignores (`claim_stale`).
 - **Esc and a failed turn both clear the pane.** Cursor sends two `stop` hooks for one Esc, `error` and `aborted`, in no fixed order, and a turn that ends on a real error looks the same as an Esc.
-- **After `/new` the pane follows the new conversation.** Cursor sends no `sessionStart` or `sessionEnd` for it; its first prompt binds it and ends the old one.
+- **After `/new`, and for a resumed session, the pane follows the conversation.** Cursor sends no `sessionStart` for either (for a resumed one, `--resume`, `--continue`, `resume` and `ls`, from cursor-agent's code and not from a run), and no `sessionEnd` for the old conversation after `/new`. The conversation's first prompt binds it, claims the pane when nothing has, and ends the conversation it replaced.
 
-A headless `cursor-agent -p` run sends no `beforeSubmitPrompt` and no `stop`: its pane shows `thinking` from the first tool call, and ending the run does not clear it. The next prompt of a shell with the integration does, as for [any agent that leaves its last activity behind](docs/accepted-limitations.md#an-agent-that-claimed-its-own-pane-can-leave-its-last-activity-behind). With a prompt on the command line, `cursor-agent "…"`, in a pane no shell claimed, that first prompt records nothing, because only a start claims a pane. The review flag is not carried across a resumed session, because Cursor sends no start source. `--hold-check`, `--quiet-check`, `--include-reply` and `--include-prompt` do not apply to Cursor. Evidence and the rest: [accepted limitations](docs/accepted-limitations.md#cursor-agent-sends-fewer-hooks-than-claude-code-and-codex).
+A headless `cursor-agent -p` run sends no `beforeSubmitPrompt` and no `stop`: its pane shows `thinking` from the first tool call, and ending the run does not clear it ([details](docs/accepted-limitations.md#cursor-agent-sends-fewer-hooks-than-claude-code-and-codex)). The review flag is not carried across a resumed session: its first prompt binds it with source `clear`, not `resume`. `--hold-check`, `--quiet-check`, `--include-reply` and `--include-prompt` do not apply to Cursor. Evidence and the rest: [accepted limitations](docs/accepted-limitations.md#cursor-agent-sends-fewer-hooks-than-claude-code-and-codex).
 
 In bash, if you start it as `agent`, set `WEZTERM_ATTENTION_COMMANDS='claude codex cursor-agent agent pi'`: the variable replaces the built-in list.
 

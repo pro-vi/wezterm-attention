@@ -600,16 +600,30 @@ error shows nothing. No genuine mid-turn error was observed. From cursor-agent
 `transcript_path` says `error`, where an Esc's says `aborted`. Attention does
 not read that file.
 
+In print mode (`cursor-agent -p`), cursor-agent 2026.10.01-e373342 sent
+`sessionStart`, the tool hooks and `sessionEnd`, and no `beforeSubmitPrompt` and
+no `stop` (one run, 2026-10-06, with an extra `afterAgentThought` hook
+registered). The pane shows `thinking` from the first tool call, and nothing
+clears it when the run ends: the next prompt of a shell with the integration
+does, and with none it stays until the next agent claims the pane.
+
 After `/new` the new conversation's hooks carry another `session_id`,
 `sessionStart` is not sent again, and the `sessionEnd` at exit names the first
-(without `/new`, every hook carried the same one).
+(without `/new`, every hook of the lead carried the same one; a sub-agent's tool
+hooks carry their own, as above).
 
 With a prompt on the command line, `cursor-agent "…"`, Cursor sent the first
 `beforeSubmitPrompt` 0.07 s before `sessionStart`, and did not wait for a
-`sessionStart` hook that took 3 s (one run, 2026-10-06). In a pane no shell
-claimed, only a start claims, so that first prompt records nothing. In a pane a
-shell claimed, the prompt binds the session first and the binding's start
+`sessionStart` hook that took 3 s (one run, 2026-10-06). The prompt binds the
+session first, and claims the pane when nothing has, so the binding's start
 source reads `clear`, not `startup`.
+
+A resumed session sends no `sessionStart`. In cursor-agent 2026.10.01-e373342's
+code the hook runs only while no session id is being resumed, and a session id
+is set by `--resume`, `--continue`, `resume` and `ls` (read in the bundle, not
+run: Cursor was logged out). `sessionEnd` is still sent. The first prompt of
+such a session binds it with source `clear` and claims the pane when nothing
+has, under the proof a start uses. A prompt of any other provider cannot claim.
 
 Cursor builds a hook's environment partly from somewhere other than the pane:
 in one run the hook process saw `WEZTERM_ATTENTION_DIR` and

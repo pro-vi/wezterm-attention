@@ -70,9 +70,9 @@ Pi's `attempt_outcome` is not a turn end. It comes from a `message_end` whose as
 
 A `Stop` hook can block the stop, and the agent then keeps working in the same turn without a new prompt; its next `response_finished` carries `stop_hook_active: true`. Take the latest turn-end observation, not the first.
 
-`source_event` is `stop` for all three Cursor rows, so read `kind`. As of cursor-agent 2026.10.01-e373342, one Esc sends both an `error` and an `aborted` `stop`, in either order, so a turn can end with both observations.
+`source_event` is `stop` for all three Cursor rows, so read `kind`. As of cursor-agent 2026.10.01-e373342, one Esc sends both an `error` and an `aborted` `stop`, in either order, so a turn can end with both observations and "the latest" does not tell them apart. A Cursor turn whose turn-end observations include a `user_interrupt` was stopped by the user, whichever is newest. An `attempt_outcome` with no `user_interrupt` is a failed turn: that is read from cursor-agent's code, which sends `error` alone for a failure, and not observed in a run.
 
-Some turns end with no observation. A headless `cursor-agent -p` run sends no `stop`. A Claude turn the user stops with Esc sends no event (see [accepted limitations](accepted-limitations.md#pressing-esc-in-claude-code-leaves-thinking-on-the-tab)). A Codex turn that ends on an API error runs neither `Stop` nor `Interrupt` (see [accepted limitations](accepted-limitations.md#a-codex-turn-that-ends-on-an-api-error-leaves-thinking-on-the-tab)).
+Some turns end with no observation. A headless `cursor-agent -p` run sends no `stop` ([accepted limitations](accepted-limitations.md#cursor-agent-sends-fewer-hooks-than-claude-code-and-codex)). A Claude turn the user stops with Esc sends no event (see [accepted limitations](accepted-limitations.md#pressing-esc-in-claude-code-leaves-thinking-on-the-tab)). A Codex turn that ends on an API error runs neither `Stop` nor `Interrupt` (see [accepted limitations](accepted-limitations.md#a-codex-turn-that-ends-on-an-api-error-leaves-thinking-on-the-tab)).
 
 ## Requests are evidence, not a pending-state service
 
