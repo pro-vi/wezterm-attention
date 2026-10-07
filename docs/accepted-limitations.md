@@ -565,9 +565,9 @@ claims the pane or the pane closes.
 
 ## Cursor Agent sends fewer hooks than Claude Code and Codex
 
-Everything below was checked on `cursor-agent` 2026.10.01-e373342 unless a
-paragraph names another version, and what rests on its code and not on a run
-says so.
+Everything in this section was checked on `cursor-agent` 2026.10.01-e373342
+unless a paragraph names another version, and what rests on its code and not on
+a run says so.
 
 A Cursor pane that waits for you shows `thinking`, not `notify`. Checked on
 2026-10-06, interactive, with a logging hook registered for every hook the CLI
@@ -598,8 +598,8 @@ Both statuses clear the pane's activity, because mapping `error` to `notify`
 would leave a stale `notify` after an Esc whenever the `error` hook happened to
 read its clock after the `aborted` one: each hook stamps its observation when
 it starts, and the two start together. The cost: a turn that ends on a real
-error shows nothing. No genuine mid-turn error was observed. From cursor-agent
-2026.10.01's code, not from a run: a failed turn sends one `error` stop and no
+error shows nothing. No genuine mid-turn error was observed. From cursor-agent's
+code, not from a run: a failed turn sends one `error` stop and no
 `aborted`, and the last `turn_ended` line of the transcript file named in
 `transcript_path` says `error`, where an Esc's says `aborted`. Attention does
 not read that file.
@@ -634,7 +634,7 @@ A prompt of any other provider cannot claim.
 Cursor builds a hook's environment partly from somewhere other than the pane:
 in one run the hook process saw `WEZTERM_ATTENTION_DIR` and
 `WEZTERM_ATTENTION_ROOT` values the pane did not have, while `WEZTERM_PANE` and
-`WEZTERM_UNIX_SOCKET` came through (cursor-agent 2026.10.01, 2026-10-06; the
+`WEZTERM_UNIX_SOCKET` came through (2026-10-06; the
 mechanism was not read). If your pane's state directory differs from the one
 your shell startup files give Cursor, a Cursor hook writes to the second and
 the plugin reads the first: set `WEZTERM_ATTENTION_DIR` in the hook command.
