@@ -973,6 +973,11 @@ fn a_session_end_naming_a_session_never_bound_still_ends_a_self_claimed_launch()
         "an end that ended a conversation is not reported as ignored"
     );
     assert!(ended.exists(), "the conversation the launch is on ends");
+    assert_eq!(
+        apply_as(&setup, &env, &end, "00000000000000000400").disposition,
+        "skipped",
+        "a repeated end reports as it does when the named session was bound"
+    );
 }
 
 #[test]

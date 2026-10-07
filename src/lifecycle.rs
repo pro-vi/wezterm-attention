@@ -3164,13 +3164,20 @@ fn apply_provider_event_inner(
         }
         ProviderAction::End => {
             let ended = apply_end(&resolved, event, observation, &written_at)?;
-            // The session the hook names may have no binding while the launch's
-            // current conversation ends with the process; the event then
-            // reports that end, not the named session's `ignored`.
+            // The session the hook names may have no binding, or an end a prompt
+            // after `/new` already wrote, while the launch's current
+            // conversation ends with the process. The event then reports the
+            // more complete of the two ends: applied over skipped over
+            // ignored. A conflict on the named session stays reported.
             match end_current_conversation(&resolved, event, observation, &written_at)? {
                 Some(current)
-                    if ended.disposition == Disposition::Ignored
-                        && current.disposition != Disposition::Ignored =>
+                    if matches!(
+                        (ended.disposition, current.disposition),
+                        (
+                            Disposition::Ignored,
+                            Disposition::Applied | Disposition::Skipped
+                        ) | (Disposition::Skipped, Disposition::Applied)
+                    ) =>
                 {
                     Ok(current)
                 }
@@ -3269,7 +3276,8 @@ fn bind_unannounced_conversation(
 /// launch's id, its own start was refused as a second agent in the launch, and
 /// its end is not the agent's. An agent's own claim is proven against the process
 /// that sent the hook, so no such nested agent reaches it. Returns what ending
-/// the current binding reported, or `None` when it ended nothing.
+/// the current binding reported (`applied` only when this call wrote the end),
+/// or `None` when it did not try.
 fn end_current_conversation(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,

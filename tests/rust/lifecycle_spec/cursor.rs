@@ -344,7 +344,11 @@ fn a_session_end_after_two_new_conversations_ends_all_three_bindings() {
         "first",
         json!({"reason":"completed"}),
     );
-    setup.apply(&end, "00000000000000000500");
+    assert_eq!(
+        setup.apply(&end, "00000000000000000500").disposition,
+        "applied",
+        "the end the hook wrote is the one it reports, not the earlier end of the session it names"
+    );
     for session in ["first", "second", "third"] {
         assert!(
             setup

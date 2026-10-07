@@ -247,9 +247,8 @@ A `stop` with status `completed` publishes `stop`. One with status `aborted` or 
 activity clear and keeps its observation, `user_interrupt` or `attempt_outcome`: Cursor sends both
 for one Esc, run at the same time, so neither alone may write `notify`. `sessionEnd` names the
 conversation the process started with, so it ends the launch's current binding as well when that is
-another; when the session it names has no binding, the hook reports the end of the current binding.
-In a launch a shell claimed, that needs the session it names to have been bound in this
-launch: a `cursor-agent` that an agent of the launch started has the launch's id, its own start is
+another. The hook reports the more complete of the two ends: written, then skipped, then ignored. In a launch a shell claimed, ending the
+current binding needs the session it names to have been bound in this launch: a `cursor-agent` that an agent of the launch started has the launch's id, its own start is
 refused, and its end ends nothing. An agent's own claim is proven against the process that sent the
 hook, so no such nested agent reaches it. cursor-agent 2026.10.01-e373342 sends no hook for a permission prompt or a question, and a `Task`
 sub-agent sent no `subagentStart` or `subagentStop`, so Cursor never publishes `notify` and has no
