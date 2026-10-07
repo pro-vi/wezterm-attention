@@ -53,7 +53,7 @@ Sourcing the file a second time installs nothing new, so `source ~/.bashrc` afte
 ## Zsh launch claims
 
 On macOS, zsh needs no claim step. Start `claude`, `codex`, `cursor-agent` or `pi` as you would anywhere: the agent's
-first session start claims the pane for the agent's own process (a resumed Cursor session sends none, so its first prompt does), through the hook command in the
+first session start claims the pane for the agent's own process (a resumed Cursor session sends none, as far as cursor-agent 2026.10.01-e373342's code shows, so its first prompt does), through the hook command in the
 README ([Claude Code](../README.md#claude-code-hooks), [Codex](../README.md#codex-hooks) or [Cursor Agent](../README.md#cursor-agent-hooks)) or, for Pi, through the extension. Sourcing the zsh
 integration is optional there. It republishes the pane's claim at every prompt, and there it clears
 the activity an agent left behind once the agent's process has exited; without it, that activity

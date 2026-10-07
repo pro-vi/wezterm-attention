@@ -1071,7 +1071,8 @@ fn self_owned_claim_record(
     Ok(record)
 }
 
-/// Claim the pane for the agent process `proof` names, at a session start.
+/// Claim the pane for the agent process `proof` names, at a session start or at
+/// an event that opens a session its provider never announced.
 ///
 /// Under the pane's claim lock, and no other lock: the same host is read
 /// again and must still prove itself, then the claim is decided. No claim
@@ -1188,16 +1189,6 @@ pub(crate) fn self_claim_refusal(
     }
 }
 
-/// Whether the pane's claim is a self-owned one that the agent process the hook
-/// names holds. A hint that spares a claim attempt: [`HostProof::of_claim`]
-/// still proves the claim when it is used.
-fn held_by_host(env: &BTreeMap<String, String>, claim: Option<&Value>) -> bool {
-    let (Some(claim), Ok(host)) = (claim, asserted_host(env)) else {
-        return false;
-    };
-    matches!(ClaimMode::of(claim), Ok(ClaimMode::SelfOwned(owner)) if owner.pid == host)
-}
-
 /// Resolve an agent event that carries no launch id against a claim its own
 /// agent process holds.
 ///
@@ -1207,9 +1198,10 @@ fn held_by_host(env: &BTreeMap<String, String>, claim: Option<&Value>) -> bool {
 ///
 /// A session start makes the claim. So does an event that can open a
 /// conversation its provider never announced (`opens_unannounced_session`),
-/// which a resumed Cursor session's first prompt is; it makes one only where
-/// the agent does not already hold the pane's claim, so a prompt that finds it
-/// takes the cheap path a later hook takes.
+/// which a resumed Cursor session's first prompt is, once the agent's own
+/// claim does not prove it: a prompt that finds that claim takes the cheap path
+/// a later hook takes, and one that finds another process's claim replaces it
+/// only as a session start would.
 pub(crate) fn self_owned_launch(
     env: &BTreeMap<String, String>,
     ports: &RuntimePorts<'_>,
@@ -1227,28 +1219,34 @@ pub(crate) fn self_owned_launch(
     {
         return Err(shell_claim_refusal());
     }
-    if starts_session || (opens_unannounced_session && !held_by_host(env, claim.as_ref())) {
-        let proof = HostProof::establish(env, ports, address)?;
-        let (claim, publication_diagnostic) = claim_for_host(env, ports, address, &proof)?;
-        return Ok(SelfOwnedLaunch {
-            claim,
-            proof,
-            publication_diagnostic,
-        });
-    }
     // Nothing but a session start, or an event that opens a session its provider
-    // never announced, can make a claim, so there is nothing to prove this
-    // against.
-    let Some(claim) = claim else {
-        return Err(AttentionError::new(
-            DiagnosticCode::ClaimStale,
-            "provider event has no matching pane claim",
-        ));
-    };
-    let proof = HostProof::of_claim(env, ports, address, &claim)?;
+    // never announced, can make a claim; every other event needs one to prove.
+    if !starts_session {
+        let refusal = match claim {
+            Some(claim) => match HostProof::of_claim(env, ports, address, &claim) {
+                Ok(proof) => {
+                    return Ok(SelfOwnedLaunch {
+                        claim,
+                        proof,
+                        publication_diagnostic: None,
+                    });
+                }
+                Err(refusal) => refusal,
+            },
+            None => AttentionError::new(
+                DiagnosticCode::ClaimStale,
+                "provider event has no matching pane claim",
+            ),
+        };
+        if !opens_unannounced_session {
+            return Err(refusal);
+        }
+    }
+    let proof = HostProof::establish(env, ports, address)?;
+    let (claim, publication_diagnostic) = claim_for_host(env, ports, address, &proof)?;
     Ok(SelfOwnedLaunch {
         claim,
         proof,
-        publication_diagnostic: None,
+        publication_diagnostic,
     })
 }

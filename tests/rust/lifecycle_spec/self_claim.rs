@@ -887,8 +887,18 @@ fn a_resumed_cursor_sessions_first_prompt_claims_the_pane_and_no_other_prompt_do
     );
     let published = setup.tty.writes.lock().unwrap().len();
     assert!(published >= 1, "the claim was published");
+    let stop = event("cursor", "stop", "resumed", json!({"status":"completed"}));
+    apply_as(&setup, &env, &stop, "00000000000000000250");
     let second = event("cursor", "beforeSubmitPrompt", "resumed", json!({}));
-    apply_as(&setup, &env, &second, "00000000000000000300");
+    assert_eq!(
+        apply_as(&setup, &env, &second, "00000000000000000300").disposition,
+        "applied",
+        "a later prompt in the pane its agent claimed applies"
+    );
+    assert_eq!(
+        super::turn_endings::read(directory.join("activity.json"))["type"],
+        "thinking"
+    );
     assert_eq!(
         setup.tty.writes.lock().unwrap().len(),
         published,
@@ -906,6 +916,59 @@ fn a_resumed_cursor_sessions_first_prompt_claims_the_pane_and_no_other_prompt_do
         stored_claim(&other).is_none(),
         "only a Cursor prompt may claim"
     );
+}
+
+// A claim names its owner by pid, start time and boot, so a new process that
+// has the pid of the pane's earlier agent does not hold that agent's claim, and
+// a resumed Cursor session replaces it as a session start would.
+#[test]
+fn a_resumed_cursor_session_on_a_reused_pid_replaces_the_claim_that_pid_once_held() {
+    let setup = Setup::new();
+    let env = setup.agent_env();
+    apply_as(
+        &setup,
+        &env,
+        &start("claude", "old"),
+        "00000000000000000200",
+    );
+    let first = launch_of(&stored_claim(&setup).expect("first claim"));
+    setup
+        .processes
+        .change(AGENT_PID, |agent| agent.start.microseconds += 1);
+    let prompt = event("cursor", "beforeSubmitPrompt", "resumed", json!({}));
+    assert_eq!(
+        apply_as(&setup, &env, &prompt, "00000000000000000300").disposition,
+        "applied"
+    );
+    assert_ne!(launch_of(&stored_claim(&setup).expect("a claim")), first);
+}
+
+// `sessionEnd` names the conversation the process started with. When that one
+// was resumed and the user then ran `/new` before any prompt, no hook ever bound
+// it, and the conversation the launch is on still ends with the process.
+#[test]
+fn a_session_end_naming_a_session_never_bound_still_ends_a_self_claimed_launch() {
+    let setup = Setup::new();
+    let env = setup.agent_env();
+    let prompt = event("cursor", "beforeSubmitPrompt", "later", json!({}));
+    assert_eq!(
+        apply_as(&setup, &env, &prompt, "00000000000000000200").disposition,
+        "applied"
+    );
+    let launch = launch_of(&stored_claim(&setup).expect("the prompt claimed the pane"));
+    let ended = setup_launch_dir(&setup, &launch)
+        .join("bindings")
+        .join(binding_id("cursor", "later", &launch))
+        .join("end.json");
+    assert!(!ended.exists());
+    let end = event(
+        "cursor",
+        "sessionEnd",
+        "started-with",
+        json!({"reason":"completed"}),
+    );
+    apply_as(&setup, &env, &end, "00000000000000000300");
+    assert!(ended.exists(), "the conversation the launch is on ends");
 }
 
 #[test]

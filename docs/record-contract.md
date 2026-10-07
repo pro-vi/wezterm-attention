@@ -123,8 +123,8 @@ A provider event finds its launch in this order, and stops at the first rule tha
    (`WEZTERM_ATTENTION_ENABLE_SELF_CLAIM` set to anything but `1`) or the platform is not macOS
    (`claim_stale`); when `WEZTERM_ATTENTION_HOST_PID` is missing or is not a positive decimal pid
    (`self_claim_parent_unverified`); when the pane holds a shell claim, for every event
-   (`claim_stale`); and, for any event but a session start, when the pane holds no claim
-   (`claim_stale`), before anything is proved or the mux is asked.
+   (`claim_stale`); and, for any event but a session start or a Cursor prompt, when the pane holds no
+   claim (`claim_stale`), before anything is proved or the mux is asked.
 3. Otherwise the writer proves its host. Its direct parent, as the kernel reports it, must be the
    process `WEZTERM_ATTENTION_HOST_PID` names, alive, this user's and not replaced while it is
    read, and the writer must not be traced (`self_claim_parent_unverified`). The host's terminal
@@ -135,8 +135,8 @@ A provider event finds its launch in this order, and stops at the first rule tha
    pane started it, to every session's hooks. A session start
    asks the mux: the host's terminal must be the device of the terminal the mux lists for
    `WEZTERM_PANE` on the current socket, and the listing must succeed and name the pane exactly
-   once (`unsafe_tty` otherwise). Any other event asks the mux nothing and proves itself against
-   the pane's self-owned claim instead: the parent must be the claim's owner, the same pid started
+   once (`unsafe_tty` otherwise). Any other event, and a Cursor prompt while its own claim proves it, asks the mux nothing and
+   proves itself against the pane's self-owned claim instead: the parent must be the claim's owner, the same pid started
    at the same time on the same boot (`claim_stale` otherwise); the host's terminal must be the
    device at the claim's `tty_path`, with the claim's `tty_fingerprint` (`unsafe_tty`); and the
    socket must still be the incarnation the claim was made on (`incarnation_changed`). The listing
@@ -144,7 +144,7 @@ A provider event finds its launch in this order, and stops at the first rule tha
    the one thing a listing would add is whether the pane is still open: an agent that outlives its
    closed pane keeps writing to that pane's records until its terminal goes away, and nothing
    displays them.
-4. A session start then claims, under the pane's claim lock and no other lock, after reading the
+4. A session start, or a Cursor prompt whose own claim did not prove it, then claims, under the pane's claim lock and no other lock, after reading the
    same host again. No claim: a new self-owned claim with a new launch id. The same process's own
    claim: kept as it is, not rewritten. Another process's claim: replaced with a new launch id only
    when that process is proven gone, meaning the boot session differs, no process has its pid, or
@@ -235,20 +235,22 @@ A headless `cursor-agent -p` run sends no `stop`, so its `thinking` stays too; s
 
 As of cursor-agent 2026.10.01-e373342, Cursor's hooks have their own names and send less.
 `sessionStart` binds the session with source `startup`, the only source a Cursor `sessionStart`
-can carry, since Cursor sends none. A resumed session sends no `sessionStart` at all. A lead
+can carry, since Cursor sends none. A resumed session sends no `sessionStart` at all (read in its code, not run). A lead
 `beforeSubmitPrompt` starts the turn's
 `thinking` as `UserPromptSubmit` does, and first binds its session with source `clear` when that
 session is not the launch's current binding: `/new` and a resumed session start a conversation with
 no `sessionStart`, so its first prompt is where the session is first seen. That prompt claims the
-pane for its agent, under the proof a start uses, when the agent does not already hold the pane's
-claim, and the conversation it replaces ends there, since no hook ends it. A `preToolUse` of another session than the current
+pane for its agent, under the proof a start uses (a pane nobody claimed, or one whose earlier agent
+is gone; never a live agent's or a shell's), and the conversation it replaces ends there, since no hook ends it. A `preToolUse` of another session than the current
 binding, which is what a sub-agent's tool call is, is ignored with `claim_stale` and binds nothing.
 A `stop` with status `completed` publishes `stop`. One with status `aborted` or `error` writes an
 activity clear and keeps its observation, `user_interrupt` or `attempt_outcome`: Cursor sends both
 for one Esc, run at the same time, so neither alone may write `notify`. `sessionEnd` names the
 conversation the process started with, so it ends the launch's current binding as well when that is
-another, provided the session it names was bound in this launch: a `cursor-agent` that an agent of
-the launch started has the launch's id, its own start is refused, and its end ends nothing. cursor-agent 2026.10.01-e373342 sends no hook for a permission prompt or a question, and a `Task`
+another. In a launch a shell claimed, that needs the session it names to have been bound in this
+launch: a `cursor-agent` that an agent of the launch started has the launch's id, its own start is
+refused, and its end ends nothing. An agent's own claim is proven against the process that sent the
+hook, so no such nested agent reaches it. cursor-agent 2026.10.01-e373342 sends no hook for a permission prompt or a question, and a `Task`
 sub-agent sent no `subagentStart` or `subagentStop`, so Cursor never publishes `notify` and has no
 `subagent_providers` entry. A `tool_use_id` can have two lines; the first, which a tool's
 pre and post hooks share, is the observation's `tool_call_id`. See

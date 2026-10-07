@@ -615,15 +615,17 @@ hooks carry their own, as above).
 With a prompt on the command line, `cursor-agent "…"`, Cursor sent the first
 `beforeSubmitPrompt` 0.07 s before `sessionStart`, and did not wait for a
 `sessionStart` hook that took 3 s (one run, 2026-10-06). The prompt binds the
-session first, and claims the pane when nothing has, so the binding's start
+session first, and claims the pane under the proof a start uses, so the binding's start
 source reads `clear`, not `startup`.
 
 A resumed session sends no `sessionStart`. In cursor-agent 2026.10.01-e373342's
 code the hook runs only while no session id is being resumed, and a session id
 is set by `--resume`, `--continue`, `resume` and `ls` (read in the bundle, not
 run: Cursor was logged out). `sessionEnd` is still sent. The first prompt of
-such a session binds it with source `clear` and claims the pane when nothing
-has, under the proof a start uses. A prompt of any other provider cannot claim.
+such a session binds it with source `clear` and claims the pane under the proof a
+start uses: on macOS, a pane nobody claimed or one whose earlier agent is gone,
+never a live agent's or a shell's, and not at all on Linux or with self-claim off.
+A prompt of any other provider cannot claim.
 
 Cursor builds a hook's environment partly from somewhere other than the pane:
 in one run the hook process saw `WEZTERM_ATTENTION_DIR` and

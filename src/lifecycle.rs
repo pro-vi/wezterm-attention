@@ -3253,9 +3253,11 @@ fn bind_unannounced_conversation(
 /// Cursor's `sessionEnd` ends the process's session, and names the session the
 /// process started with (cursor-agent 2026.10.01). After a `/new` the launch's
 /// current binding is a later conversation, which no hook ends, so it ends with
-/// the process too. Only when the session named was bound in this launch: a
-/// `cursor-agent` the launch's agent started has the launch's id, its own start
-/// was refused as a second agent in the launch, and its end is not the agent's.
+/// the process too. In a launch a shell claimed, only when the session named
+/// was bound in this launch: a `cursor-agent` the launch's agent started has the
+/// launch's id, its own start was refused as a second agent in the launch, and
+/// its end is not the agent's. An agent's own claim is proven against the process
+/// that sent the hook, so no such nested agent reaches it.
 fn end_current_conversation(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
@@ -3269,8 +3271,13 @@ fn end_current_conversation(
     let Some(current) = current_binding(resolved)? else {
         return Ok(());
     };
+    let self_owned = matches!(
+        crate::launch::ClaimMode::of(&resolved.claim),
+        Ok(crate::launch::ClaimMode::SelfOwned(_))
+    );
     if current["binding_id"].as_str() == Some(own.as_str())
-        || read_record_at(&resolved.root, "binding", &resolved.binding(&own))?.is_none()
+        || (!self_owned
+            && read_record_at(&resolved.root, "binding", &resolved.binding(&own))?.is_none())
     {
         return Ok(());
     }
