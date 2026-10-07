@@ -626,7 +626,7 @@ A resumed session sends no `sessionStart`. A run with `--continue` on 2026-10-07
 sent `beforeSubmitPrompt`, `stop` and `sessionEnd` and no `sessionStart`. In the
 code the hook runs only while no session id is being resumed, and a session id
 is set by `--resume`, `--continue`, `resume` and `ls`; the other three were read
-in the bundle, not run. `sessionEnd` is still sent. The first prompt of
+in the bundle, not run. The first prompt of
 such a session binds it with source `clear` and claims the pane under the proof a
 start uses: on macOS, a pane nobody claimed or one whose earlier agent is gone,
 never a live agent's or a shell's, and not at all on Linux or with self-claim off.
@@ -642,15 +642,16 @@ state directory differs from the one
 your shell startup files give Cursor, a Cursor hook writes to the second and
 the plugin reads the first: set `WEZTERM_ATTENTION_DIR` in the hook command.
 
-A `sessionEnd` hook that is slow to reach `attention` is lost. On 2026-10-07 the
-hook shell's parent, the process named `cursor-agent`, was alive 1 s after the hook
-started and gone 2 s after, while the hook shell itself ran on, and the shell
-prompt came back about 4 s after the second Ctrl-C whatever the hook took. A hook
-that reached `attention` after 2, 4, 6 or 8 s was ignored as
-`self_claim_parent_unverified`. The binding stayed `active`, and the shell's next
-prompt cleared the activity. The command in the README reaches `attention` in
-milliseconds and was applied in every other run, so this matters only to a hook
-command that does other work first.
+A `sessionEnd` hook that reaches `attention` 2 s or more after it starts is
+ignored. On 2026-10-07, in the run with a 6 s delay, the hook shell's parent, the
+process named `cursor-agent`, was alive 1 s after the hook started and gone 2 s
+after, while the hook shell itself ran on. A hook that reached `attention` after
+2, 4, 6 or 8 s (one run each) was ignored as `self_claim_parent_unverified`,
+because the writer needs the hook's parent to be alive. The binding stayed
+`active`, and the shell's next prompt cleared the activity. The command in the
+README reaches `attention` in milliseconds and was applied in every other run;
+nothing between milliseconds and 2 s was tried, and a delay before `attention`
+(a hook command that does other work first) is what this matters to.
 
 Three more bounds, from reading the code and not from runs:
 - A second `cursor-agent` that inherits the launch and sends a prompt takes
