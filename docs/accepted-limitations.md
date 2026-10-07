@@ -622,10 +622,11 @@ With a prompt on the command line, `cursor-agent "…"`, Cursor sent the first
 session first, and claims the pane under the proof a start uses, so the binding's start
 source reads `clear`, not `startup`.
 
-A resumed session sends no `sessionStart`. In cursor-agent 2026.10.01-e373342's
+A resumed session sends no `sessionStart`. A run with `--continue` on 2026-10-07
+sent `beforeSubmitPrompt`, `stop` and `sessionEnd` and no `sessionStart`. In the
 code the hook runs only while no session id is being resumed, and a session id
-is set by `--resume`, `--continue`, `resume` and `ls` (read in the bundle, not
-run: Cursor was logged out). `sessionEnd` is still sent. The first prompt of
+is set by `--resume`, `--continue`, `resume` and `ls`; the other three were read
+in the bundle, not run. `sessionEnd` is still sent. The first prompt of
 such a session binds it with source `clear` and claims the pane under the proof a
 start uses: on macOS, a pane nobody claimed or one whose earlier agent is gone,
 never a live agent's or a shell's, and not at all on Linux or with self-claim off.
@@ -635,9 +636,21 @@ Cursor builds a hook's environment partly from somewhere other than the pane:
 in one run the hook process saw `WEZTERM_ATTENTION_DIR` and
 `WEZTERM_ATTENTION_ROOT` values the pane did not have, while `WEZTERM_PANE` and
 `WEZTERM_UNIX_SOCKET` came through (2026-10-06; the
-mechanism was not read). If your pane's state directory differs from the one
+mechanism was not read). The launch id a bash claim exports did reach every hook
+of a run (2026-10-07, macOS, bash with the integration loaded). If your pane's
+state directory differs from the one
 your shell startup files give Cursor, a Cursor hook writes to the second and
 the plugin reads the first: set `WEZTERM_ATTENTION_DIR` in the hook command.
+
+A `sessionEnd` hook that is slow to reach `attention` is lost. On 2026-10-07 the
+hook shell's parent, the process named `cursor-agent`, was alive 1 s after the hook
+started and gone 2 s after, while the hook shell itself ran on, and the shell
+prompt came back about 4 s after the second Ctrl-C whatever the hook took. A hook
+that reached `attention` after 2, 4, 6 or 8 s was ignored as
+`self_claim_parent_unverified`. The binding stayed `active`, and the shell's next
+prompt cleared the activity. The command in the README reaches `attention` in
+milliseconds and was applied in every other run, so this matters only to a hook
+command that does other work first.
 
 Three more bounds, from reading the code and not from runs:
 - A second `cursor-agent` that inherits the launch and sends a prompt takes

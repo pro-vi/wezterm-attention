@@ -235,7 +235,7 @@ A headless `cursor-agent -p` run sends no `stop`, so its `thinking` stays too; s
 
 As of cursor-agent 2026.10.01-e373342, Cursor's hooks have their own names and send less.
 `sessionStart` binds the session with source `startup`, the only source a Cursor `sessionStart`
-can carry, since Cursor sends none. A resumed session sends no `sessionStart` at all (read in its code, not run). A lead
+can carry, since Cursor sends none. A resumed session sends no `sessionStart` at all (observed with `--continue`; the other resume forms read in its code). A lead
 `beforeSubmitPrompt` starts the turn's
 `thinking` as `UserPromptSubmit` does, and first binds its session with source `clear` when that
 session is not the launch's current binding, or is but a `sessionEnd` already ended it (a second
