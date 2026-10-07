@@ -26,8 +26,8 @@ use crate::protocol::{
 use crate::providers::{ProviderAction, ProviderEvent};
 use crate::records::{
     CommitPlan, LOCK_TIMEOUT, PLUGIN_LOCK_TIMEOUT, PreparedRecordWrite, RecordIdentity, RecordRead,
-    Replacement, atomic_replace, claim_lock, collect_binding_files, commit, commit_waiting,
-    ends_binding, launch_lock, pane_dir, read_claim, read_record, read_record_at,
+    Replacement, atomic_replace, binding_ended, claim_lock, collect_binding_files, commit,
+    commit_waiting, ends_binding, launch_lock, pane_dir, read_claim, read_record, read_record_at,
     read_record_typed, read_record_typed_at, removal_confined, remove_file_durable, review_lock,
     session_binding_files, session_entry, session_entry_path, session_registration_lock,
     state_root, with_lock, within_read_bound,
@@ -3232,10 +3232,13 @@ fn end_cursor_binding(
 
 /// Binds the session of an event that can open a conversation its provider
 /// never announced with a session start, when that session is not the
-/// launch's current binding; see `ProviderEvent::ensure_binding_source`.
-/// Whether the binding took shows in the activity that follows: if the session
-/// is still not current, `apply_activity` ignores the event. The conversation
-/// it replaces is over, and no hook says so, so it ends here.
+/// launch's current binding, or is the current one but an end has ended it (a
+/// second run resumed it in the same launch); see
+/// `ProviderEvent::ensure_binding_source`. A session that is current and not
+/// ended is left as it is. Whether a new binding took shows in the activity
+/// that follows: if the session is still not current, `apply_activity` ignores
+/// the event. A different conversation it replaces is over, and no hook says
+/// so, so it ends here; binding the same session again replaces nothing.
 fn bind_unannounced_conversation(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
@@ -3246,13 +3249,15 @@ fn bind_unannounced_conversation(
         return Ok(());
     };
     let binding_id = event_binding_id(event, &resolved.launch_id)?;
-    let replaced = current_binding(resolved)?;
-    if replaced
-        .as_ref()
-        .is_some_and(|record| record["binding_id"].as_str() == Some(binding_id.as_str()))
-    {
-        return Ok(());
-    }
+    let replaced = match current_binding(resolved)? {
+        Some(record) if record["binding_id"].as_str() == Some(binding_id.as_str()) => {
+            if !binding_ended(&resolved.root, &record, &resolved.binding(&binding_id)) {
+                return Ok(());
+            }
+            None
+        }
+        other => other,
+    };
     let mut binding = event.clone();
     binding.action = ProviderAction::Binding;
     binding.start_source = Some(source.to_owned());

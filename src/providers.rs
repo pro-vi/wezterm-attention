@@ -143,7 +143,8 @@ pub struct ProviderEvent {
     /// For an event that can open a conversation the provider never announced
     /// with a session start (a resumed Cursor session sends none): the source
     /// to bind with when the event's session is not the launch's current
-    /// binding. Such an event may also claim the pane for its agent.
+    /// binding, or is but its binding has ended. Such an event may also claim
+    /// the pane for its agent.
     pub ensure_binding_source: Option<String>,
     pub activity_type: Option<String>,
     pub label: Option<String>,
@@ -649,7 +650,8 @@ fn parse_claude_or_codex(
 /// hooks carry a session id other than the lead's, which the lifecycle ignores
 /// as not the current binding. Its `/new` starts a conversation without a
 /// `sessionEnd` or a `sessionStart`, so a prompt binds a session it has not
-/// seen and ends the one it replaces. An Esc sends two `stop` hooks for one
+/// seen, or one its launch already ended, and ends the different one it
+/// replaces. An Esc sends two `stop` hooks for one
 /// turn, `error` and `aborted`, run at the same time and in no fixed order;
 /// both clear, so either order leaves the pane clear.
 fn parse_cursor(

@@ -238,8 +238,9 @@ As of cursor-agent 2026.10.01-e373342, Cursor's hooks have their own names and s
 can carry, since Cursor sends none. A resumed session sends no `sessionStart` at all (read in its code, not run). A lead
 `beforeSubmitPrompt` starts the turn's
 `thinking` as `UserPromptSubmit` does, and first binds its session with source `clear` when that
-session is not the launch's current binding: `/new` and a resumed session start a conversation with
-no `sessionStart`, so its first prompt is where the session is first seen. That prompt claims the
+session is not the launch's current binding, or is but a `sessionEnd` already ended it (a second
+`cursor-agent` run in the same launch resumed it): `/new` and a resumed session start a conversation
+with no `sessionStart`, so its first prompt is where the pane learns the session is running. That prompt claims the
 pane for its agent, under the proof a start uses (a pane nobody claimed, or one whose earlier agent
 is gone; never a live agent's or a shell's), and the conversation it replaces ends there, since no hook ends it. A `preToolUse` of another session than the current
 binding, which is what a sub-agent's tool call is, is ignored with `claim_stale` and binds nothing.

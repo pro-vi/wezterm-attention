@@ -637,8 +637,10 @@ the plugin reads the first: set `WEZTERM_ATTENTION_DIR` in the hook command.
 
 Three more bounds, from reading the code and not from runs:
 - A second `cursor-agent` that inherits the launch and sends a prompt takes
-  the launch's binding and ends the lead's, where [a second agent started
-  after the first died](#a-second-agent-in-one-launch-after-the-first-died-without-ending)
+  the launch's binding and ends the lead's when its session differs; when it
+  resumed the lead's own session, the prompt keeps that binding, or binds it
+  again if the first run's `sessionEnd` ended it, and ends nothing. [A second
+  agent started after the first died](#a-second-agent-in-one-launch-after-the-first-died-without-ending)
   is refused. A `-p` run sends no prompt hook. In
   the one spawn path of Cursor's shell tool that was read, commands run over
   pipes, which would leave an interactive nested agent without a terminal.

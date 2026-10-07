@@ -360,6 +360,56 @@ fn a_session_end_after_two_new_conversations_ends_all_three_bindings() {
     }
 }
 
+// A shell can run `cursor-agent` twice in one launch, for example
+// `cursor-agent; cursor-agent --continue` on one line. The second run resumes
+// the first run's session and sends no `sessionStart` (read in cursor-agent
+// 2026.10.01-e373342's code, not run), so its first prompt is the only hook
+// that says the session is back, and the end the first run wrote must stop
+// ending it.
+#[test]
+fn a_resumed_session_the_launch_already_ended_is_active_again_at_its_first_prompt() {
+    let setup = started("lead");
+    let directory = setup.binding_dir("cursor", "lead");
+    let hook = |name: &str, patch: Value| event("cursor", name, "lead", patch);
+    setup.apply(
+        &hook("beforeSubmitPrompt", json!({})),
+        "00000000000000000300",
+    );
+    setup.apply(
+        &hook("stop", json!({"status":"completed"})),
+        "00000000000000000400",
+    );
+    let first_end = setup.apply(
+        &hook("sessionEnd", json!({"reason":"completed"})),
+        "00000000000000000500",
+    );
+    assert_eq!(first_end.disposition, "applied");
+
+    let resumed = setup.apply(
+        &hook("beforeSubmitPrompt", json!({})),
+        "00000000000000000600",
+    );
+    assert_eq!(resumed.disposition, "applied");
+    assert_eq!(read(directory.join("activity.json"))["type"], "thinking");
+    let stop = setup.apply(
+        &hook("stop", json!({"status":"completed"})),
+        "00000000000000000700",
+    );
+    assert_eq!(
+        stop.disposition, "applied",
+        "a turn end of the resumed run is not superseded by the first run's end"
+    );
+    assert_eq!(read(directory.join("activity.json"))["type"], "stop");
+    let end = setup.apply(
+        &hook("sessionEnd", json!({"reason":"completed"})),
+        "00000000000000000800",
+    );
+    assert_eq!(
+        end.disposition, "applied",
+        "the resumed run's own end is written, not skipped as the first run's"
+    );
+}
+
 // A `cursor-agent` the launch's agent starts inherits the launch. Its own
 // session was refused as a second agent, so its `sessionEnd` is not the
 // agent's end and must not end the agent's conversation.
