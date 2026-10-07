@@ -565,9 +565,13 @@ claims the pane or the pane closes.
 
 ## Cursor Agent sends fewer hooks than Claude Code and Codex
 
+Everything below was checked on `cursor-agent` 2026.10.01-e373342 unless a
+paragraph names another version, and what rests on its code and not on a run
+says so.
+
 A Cursor pane that waits for you shows `thinking`, not `notify`. Checked on
-2026-10-06 with `cursor-agent` 2026.10.01-e373342, interactive, with a logging
-hook registered for every hook the CLI documents:
+2026-10-06, interactive, with a logging hook registered for every hook the CLI
+documents:
 
 - A shell command outside the allowlist stopped at "Run this command?". The
   hooks sent by then were `sessionStart`, `beforeSubmitPrompt`, `preToolUse` and
@@ -645,12 +649,13 @@ Three more bounds, from reading the code and not from runs:
   the one spawn path of Cursor's shell tool that was read, commands run over
   pipes, which would leave an interactive nested agent without a terminal.
 - The prompt binds the new conversation, ends the one it replaced, and writes
-  the activity as three separate writes. If a later write fails, the replaced
-  conversation stays active. Only Cursor's own bindings are ended this way; one
+  the activity as three separate writes. If one write fails, the ones after it
+  do not happen: a failed end leaves the replaced conversation active and the
+  prompt without `thinking` until its first tool hook. Only Cursor's own bindings are ended this way; one
   of another provider in the same launch is left as it was.
 - The `sessionEnd` after a `/new` ends two bindings in two writes. The hook
-  reports the more complete of the two ends (written, then skipped, then
-  ignored); a conflict on the named session stays reported. A consumer executable
+  reports the more complete of the two ends (`applied`, then `skipped`, then
+  `ignored`); a conflict on the named session stays reported. A consumer executable
   (`--consumer`) is told of neither, and Cursor registers none.
 
 ## Pressing Esc in Claude Code leaves `thinking` on the tab
