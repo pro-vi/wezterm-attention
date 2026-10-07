@@ -853,7 +853,7 @@ fn binding_mutation_for_session(
                     .as_ref()
                     .is_some_and(|end| ends_binding(end, current));
                 let replace = match provider {
-                    Provider::Claude | Provider::Codex => {
+                    Provider::Claude | Provider::Codex | Provider::Cursor => {
                         matches!(source, "resume" | "clear" | "fork")
                     }
                     Provider::Pi => matches!(source, "new" | "resume" | "fork"),
@@ -876,6 +876,11 @@ fn binding_mutation_for_session(
                 "launch_id": resolved.launch_id,
                 "binding_id": binding_id,
             });
+            let pointer_names_binding = pointer
+                .as_ref()
+                .and_then(|value| value.get("binding_id"))
+                .and_then(Value::as_str)
+                == Some(binding_id.as_str());
             let mut replacements = Vec::new();
             let result = if let Some(mut existing) = existing {
                 let existing_order = existing["observed_mono_ns"].as_str().unwrap_or("");
@@ -896,12 +901,7 @@ fn binding_mutation_for_session(
                             "equal binding order has different facts",
                         )
                     } else {
-                        if pointer
-                            .as_ref()
-                            .and_then(|value| value.get("binding_id"))
-                            .and_then(Value::as_str)
-                            != Some(binding_id.as_str())
-                        {
+                        if !pointer_names_binding {
                             replacements
                                 .push(Replacement::always(pointer_path.clone(), pointer_record));
                         }
@@ -915,10 +915,14 @@ fn binding_mutation_for_session(
                     existing["observed_mono_ns"] = json!(observation);
                     existing["written_at_unix_ns"] = json!(written_at);
                     replacements.push(Replacement::always(binding_path.clone(), existing));
-                    replacements.push(Replacement::if_different(
-                        pointer_path.clone(),
-                        pointer_record,
-                    ));
+                    // Returning to a session of this launch that another one
+                    // replaced moves the pointer to another binding, which an
+                    // only-if-different write refuses to validate.
+                    replacements.push(if pointer_names_binding {
+                        Replacement::if_different(pointer_path.clone(), pointer_record)
+                    } else {
+                        Replacement::always(pointer_path.clone(), pointer_record)
+                    });
                     let mut result = LifecycleResult::new(Disposition::Confirmed);
                     result.event_id = Some(event_id);
                     result
@@ -2611,7 +2615,16 @@ fn apply_end(
     written_at: &str,
 ) -> Result<LifecycleResult> {
     let binding_id = event_binding_id(event, &resolved.launch_id)?;
-    let identity = resolved.binding(&binding_id);
+    end_binding(resolved, &binding_id, observation, written_at)
+}
+
+fn end_binding(
+    resolved: &ResolvedLaunch,
+    binding_id: &str,
+    observation: &str,
+    written_at: &str,
+) -> Result<LifecycleResult> {
+    let identity = resolved.binding(binding_id);
     let end_path = identity.path(&resolved.root, "binding_end")?;
     let (mutation, ()) = commit(
         &resolved.root,
@@ -2679,7 +2692,7 @@ fn apply_end(
             })
         },
         |mutation| {
-            confirm_native(resolved, &binding_id, mutation);
+            confirm_native(resolved, binding_id, mutation);
             Ok(())
         },
     )?;
@@ -2782,7 +2795,8 @@ fn activity_clear_plan(
 }
 
 // Pi's bus `clear` withdraws both its activity and its review. A Codex
-// interrupt withdraws only the activity: the review belongs to another writer.
+// interrupt and a Cursor aborted or errored stop withdraw only the activity:
+// the review belongs to another writer.
 fn apply_clear_event(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
@@ -3138,6 +3152,7 @@ fn apply_provider_event_inner(
             Ok(binding_mutation(&resolved, event, observation, &written_at)?.result)
         }
         ProviderAction::Activity => {
+            bind_unannounced_conversation(&resolved, event, observation, &written_at)?;
             apply_activity(&resolved, event, observation, &written_at, false)
         }
         ProviderAction::ParentStop => {
@@ -3146,7 +3161,11 @@ fn apply_provider_event_inner(
         ProviderAction::ChildActive | ProviderAction::ChildStopped => {
             apply_child(&resolved, event, observation, &written_at)
         }
-        ProviderAction::End => apply_end(&resolved, event, observation, &written_at),
+        ProviderAction::End => {
+            let ended = apply_end(&resolved, event, observation, &written_at)?;
+            end_current_conversation(&resolved, event, observation, &written_at)?;
+            Ok(ended)
+        }
         ProviderAction::Review => apply_review_event(&resolved, event, false),
         ProviderAction::Clear => apply_clear_event(&resolved, event, observation, &written_at),
         ProviderAction::Ignored => unreachable!(),
@@ -3163,6 +3182,98 @@ fn apply_provider_event_inner(
         }
         result
     })
+}
+
+/// The binding record the launch's pointer names.
+fn current_binding(resolved: &ResolvedLaunch) -> Result<Option<Value>> {
+    let pointer = read_record_at(&resolved.root, "current_binding", &resolved.launch())?;
+    read_current(
+        &resolved.root,
+        pointer,
+        &resolved.address,
+        &resolved.launch_id,
+    )
+}
+
+/// Ends the Cursor binding `record`. A binding of another provider in the same
+/// launch is left as it is: Cursor's hooks cannot speak for it.
+fn end_cursor_binding(
+    resolved: &ResolvedLaunch,
+    record: &Value,
+    observation: &str,
+    written_at: &str,
+) -> Result<()> {
+    if record["provider"].as_str() == Some(Provider::Cursor.as_str())
+        && let Some(binding_id) = record["binding_id"].as_str()
+    {
+        end_binding(resolved, binding_id, observation, written_at)?;
+    }
+    Ok(())
+}
+
+/// Binds the session of an event that can open a conversation its provider
+/// never announced with a session start, when that session is not the
+/// launch's current binding; see `ProviderEvent::ensure_binding_source`.
+/// Whether the binding took shows in the activity that follows: if the session
+/// is still not current, `apply_activity` ignores the event. The conversation
+/// it replaces is over, and no hook says so, so it ends here.
+fn bind_unannounced_conversation(
+    resolved: &ResolvedLaunch,
+    event: &ProviderEvent,
+    observation: &str,
+    written_at: &str,
+) -> Result<()> {
+    let Some(source) = event.ensure_binding_source.as_deref() else {
+        return Ok(());
+    };
+    let binding_id = event_binding_id(event, &resolved.launch_id)?;
+    let replaced = current_binding(resolved)?;
+    if replaced
+        .as_ref()
+        .is_some_and(|record| record["binding_id"].as_str() == Some(binding_id.as_str()))
+    {
+        return Ok(());
+    }
+    let mut binding = event.clone();
+    binding.action = ProviderAction::Binding;
+    binding.start_source = Some(source.to_owned());
+    let taken = binding_mutation(resolved, &binding, observation, written_at)?;
+    if let Some(record) = &replaced
+        && matches!(
+            taken.result.disposition,
+            Disposition::Applied | Disposition::Replaced | Disposition::Confirmed
+        )
+    {
+        end_cursor_binding(resolved, record, observation, written_at)?;
+    }
+    Ok(())
+}
+
+/// Cursor's `sessionEnd` ends the process's session, and names the session the
+/// process started with (cursor-agent 2026.10.01). After a `/new` the launch's
+/// current binding is a later conversation, which no hook ends, so it ends with
+/// the process too. Only when the session named was bound in this launch: a
+/// `cursor-agent` the launch's agent started has the launch's id, its own start
+/// was refused as a second agent in the launch, and its end is not the agent's.
+fn end_current_conversation(
+    resolved: &ResolvedLaunch,
+    event: &ProviderEvent,
+    observation: &str,
+    written_at: &str,
+) -> Result<()> {
+    if event.provider != Some(Provider::Cursor) {
+        return Ok(());
+    }
+    let own = event_binding_id(event, &resolved.launch_id)?;
+    let Some(current) = current_binding(resolved)? else {
+        return Ok(());
+    };
+    if current["binding_id"].as_str() == Some(own.as_str())
+        || read_record_at(&resolved.root, "binding", &resolved.binding(&own))?.is_none()
+    {
+        return Ok(());
+    }
+    end_cursor_binding(resolved, &current, observation, written_at)
 }
 
 fn prepare_hold_scope(

@@ -19,7 +19,7 @@ fn bound(provider: &str, session: &str) -> Setup {
     setup
 }
 
-fn read(path: PathBuf) -> Value {
+pub(super) fn read(path: PathBuf) -> Value {
     serde_json::from_slice(&fs::read(path).expect("record exists")).expect("record JSON")
 }
 

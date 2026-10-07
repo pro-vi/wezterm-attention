@@ -818,7 +818,7 @@ impl LifecycleSnapshot {
                     agent_id,
                     agent_key,
                 } = &item.actor
-                    && (self.provider == Provider::Pi
+                    && (!self.provider.has_child_identity()
                         || crate::protocol::sha256_hex(agent_id.as_bytes()) != *agent_key)
                 {
                     return Err(invalid());

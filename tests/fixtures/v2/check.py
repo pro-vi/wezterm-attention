@@ -455,7 +455,7 @@ def validate_lifecycle(value: dict[str, Any], manifest: dict[str, Any]) -> None:
                 raise InvalidRecord("observation below pool floor")
             if value["kind"] == "child_lifecycle_snapshot" and actor["kind"] != "child":
                 raise InvalidRecord("the children's snapshot holds only children's observations")
-            if actor["kind"] == "child" and (value["provider"] == "pi" or hashlib.sha256(actor["agent_id"].encode("utf-8")).hexdigest() != actor["agent_key"]):
+            if actor["kind"] == "child" and (value["provider"] not in enum_set(manifest, "subagent_providers") or hashlib.sha256(actor["agent_id"].encode("utf-8")).hexdigest() != actor["agent_key"]):
                 raise InvalidRecord("child identity mismatch")
     size = compact_size(value) + 1
     envelope = size - sum(compact_size(pool) for pool in value["pools"].values())

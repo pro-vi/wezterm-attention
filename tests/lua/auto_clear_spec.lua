@@ -5417,6 +5417,8 @@ test("consumer manifest classification agrees with Rust and rejects incompatible
     { "codex", "request_user_input_async", "question", "nonblocking" },
     { "codex", "request_permissions", "permission" },
     { "pi", "AskUserQuestion", "generic" },
+    -- cursor-agent 2026.10.01 sends no hook for its question tool, so it has nothing to classify.
+    { "cursor", "AskQuestion", "generic" },
     { "unknown", "request_permissions", "generic" },
     { "codex", "request_user_input_async_extra", "generic" },
   }) do

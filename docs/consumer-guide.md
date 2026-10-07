@@ -61,13 +61,18 @@ No one kind marks the end of a turn. Read it per provider, from observations who
 | Claude | `attempt_outcome` | `StopFailure`, which Claude Code 2.1.284 sends instead of `Stop` when an API error ended the turn |
 | Codex | `response_finished` | `Stop` |
 | Codex | `user_interrupt` | `Interrupt`; Codex (source at commit `985cf47a4`) runs no `Stop` after one |
+| Cursor | `response_finished` | `stop` with status `completed` |
+| Cursor | `user_interrupt` | `stop` with status `aborted` |
+| Cursor | `attempt_outcome` | `stop` with status `error` |
 | Pi | `run_settled` | `agent_settled`, which Pi 0.85.1 sends once no automatic retry, compaction or queued message will continue the run |
 
 Pi's `attempt_outcome` is not a turn end. It comes from a `message_end` whose assistant message errored or was aborted. Pi still sends `agent_settled` when the run ends, and after an error it can retry first; the turn ends at that `run_settled`. The two `attempt_outcome` producers differ in `source_event`, `StopFailure` or `message_end`.
 
 A `Stop` hook can block the stop, and the agent then keeps working in the same turn without a new prompt; its next `response_finished` carries `stop_hook_active: true`. Take the latest turn-end observation, not the first.
 
-Some turns end with no observation. A Claude turn the user stops with Esc sends no event (see [accepted limitations](accepted-limitations.md#pressing-esc-in-claude-code-leaves-thinking-on-the-tab)). A Codex turn that ends on an API error runs neither `Stop` nor `Interrupt` (see [accepted limitations](accepted-limitations.md#a-codex-turn-that-ends-on-an-api-error-leaves-thinking-on-the-tab)).
+`source_event` is `stop` for all three Cursor rows, so read `kind`. As of cursor-agent 2026.10.01-e373342, one Esc sends both an `error` and an `aborted` `stop`, in either order, so a turn can end with both observations.
+
+Some turns end with no observation. A headless `cursor-agent -p` run sends no `stop`. A Claude turn the user stops with Esc sends no event (see [accepted limitations](accepted-limitations.md#pressing-esc-in-claude-code-leaves-thinking-on-the-tab)). A Codex turn that ends on an API error runs neither `Stop` nor `Interrupt` (see [accepted limitations](accepted-limitations.md#a-codex-turn-that-ends-on-an-api-error-leaves-thinking-on-the-tab)).
 
 ## Requests are evidence, not a pending-state service
 
@@ -110,7 +115,7 @@ You can choose a different policy for approval, review, or outcome facts. Keep a
 
 ## A marker records an event, not a session
 
-Attention writes a pane's activity when a provider callback arrives: a prompt submitted, a tool about to run, a turn stopped, a notification raised. Nothing writes one because an agent is running. `SessionStart` for Claude and Codex, and `session_start` for Pi, write a binding record and no activity at all.
+Attention writes a pane's activity when a provider callback arrives: a prompt submitted, a tool about to run, a turn stopped, a notification raised. Nothing writes one because an agent is running. `SessionStart` for Claude and Codex, `sessionStart` for Cursor, and `session_start` for Pi, write a binding record and no activity at all.
 
 So a pane can run an agent and have no activity record: its turn ended and prompt return cleared the watermark, the human looked at the tab and acknowledged it, the record aged past its TTL, or the agent has produced nothing since it started. The absence of a marker means "no standing event here". It never means "no agent here", and a consumer that reads it as an inventory will undercount.
 
@@ -140,7 +145,7 @@ The v2 records are the only format the plugin reads. 0.6 read one small JSON fil
 
 A realm-wide `bindings` applies `--realm` and `--provider` before it asks any socket, and asks the remaining sockets in parallel. A row outside the filter that shares a provider session with a returned row is still assessed, so a conflict across realms still shows. `result.timing_ms` says where the call's wall time went, in whole milliseconds: `pane_list` inside `wezterm cli list` (for a realm-wide call, the wall time of the parallel batch), `process_list` inside the process probe, `records` in finding and reading the records. It is on every `bindings` and `inspect` answer that carries a `result`; log it next to a slow call and the phase is named. An envelope printed for an error has an empty `result` object, so it has no timing.
 
-Live Claude/Codex registration, shell setup, activation of any application that consumes these facts, and provider-paid contact remain separate operator work. Rich admission (lifecycle observations and consumer delivery) needs a claimed launch: a shell's claim the agent inherited, or on macOS the agent's own claim, which its process proves again under the writer's locks at every event. A terminal match alone admits nothing.
+Live Claude/Codex/Cursor registration, shell setup, activation of any application that consumes these facts, and provider-paid contact remain separate operator work. Rich admission (lifecycle observations and consumer delivery) needs a claimed launch: a shell's claim the agent inherited, or on macOS the agent's own claim, which its process proves again under the writer's locks at every event. A terminal match alone admits nothing.
 
 ## Discover bindings for an existing socket
 
@@ -248,10 +253,11 @@ Hook commands never exit 2, because Claude Code and Codex read exit 2 as "block"
 ```sh
 attention hooks describe --provider claude --json
 attention hooks describe --provider codex --json
+attention hooks describe --provider cursor --json
 attention hooks describe --provider pi --json
 ```
 
-`result` contains `manifest_schema`, `wire_version`, `record_schema`, `writer_version`, `provider` and `native_hooks`. Each hook has `native_event`, `arguments` and `registration` (`register` or `ignored`). Register a Claude Code or Codex row as one shell command that sets `WEZTERM_ATTENTION_HOST_PID=$PPID` and then `exec`s the resolved executable with the row's `arguments`, as the README's blocks do: a Stop row supplies `["hooks","event","claude","Stop"]`, registered as `WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude Stop`. A hook registered as the executable and its arguments alone carries no host pid, so on macOS every session start of an agent that no shell claimed for is refused (`self_claim_parent_unverified`) and the agent never claims its pane. Forward original callback JSON unchanged.
+`result` contains `manifest_schema`, `wire_version`, `record_schema`, `writer_version`, `provider` and `native_hooks`. Each hook has `native_event`, `arguments` and `registration` (`register` or `ignored`). Register a Claude Code, Codex or Cursor row as one shell command that sets `WEZTERM_ATTENTION_HOST_PID=$PPID` and then `exec`s the resolved executable with the row's `arguments`, as the README's blocks do: a Stop row supplies `["hooks","event","claude","Stop"]`, registered as `WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude Stop`. A hook registered as the executable and its arguments alone carries no host pid, so on macOS every session start of an agent that no shell claimed for is refused (`self_claim_parent_unverified`) and the agent never claims its pane. Forward original callback JSON unchanged.
 
 Ignored rows are not installation registrations. Pi additionally supplies `extension_entrypoint="pi/index.ts"`; its custom native bus name is `wezterm-attention:mark`, forwarded as the `bus` writer argument. Non-Pi results omit `extension_entrypoint`. A row says what to register, not that it is registered or active on this machine.
 
@@ -284,7 +290,7 @@ Each field is `not_requested`, `confirmed`, `rejected` or `unconfirmed`. Confirm
 
 - `--include-reply`: admitted lead Claude/Codex `Stop`, from `last_assistant_message`.
 - `--include-prompt`: admitted lead Claude/Codex `UserPromptSubmit`, from `prompt`.
-- Other events, child actors and Pi return unsupported for requested content. Pi's bundled extension does not register executable consumers or forward input text.
+- Other events, child actors, Cursor and Pi return unsupported for requested content. Pi's bundled extension does not register executable consumers or forward input text.
 
 For a submit callback carrying `"prompt":"Check 中文\n"`, these are the exact content fields when both flags are set:
 
@@ -450,7 +456,7 @@ The children facet contains `availability`, `count`, `waiting`, `coverage` and d
 | `coverage` | When | `count` |
 |---|---|---|
 | `ended` | The binding's end record ends the binding | 0 |
-| `none` | The provider records no sub-agents (Pi) | 0 |
+| `none` | The provider records no sub-agents (Cursor, Pi) | 0 |
 | `invalid` | The binding's end record, or the set, fails validation, or the set names another provider than its binding | 0 |
 | `unsupported` | The end record or the set declares a future schema | 0 |
 | `unavailable` | The end record or the set could not be read | 0 |

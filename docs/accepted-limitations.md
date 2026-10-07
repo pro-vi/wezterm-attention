@@ -563,6 +563,76 @@ without a hook of its own ending that activity, because it was killed, crashed
 or cut its turn short, leaves its last activity on the tab until the next agent
 claims the pane or the pane closes.
 
+## Cursor Agent sends fewer hooks than Claude Code and Codex
+
+A Cursor pane that waits for you shows `thinking`, not `notify`. Checked on
+2026-10-06 with `cursor-agent` 2026.10.01-e373342, interactive, with a logging
+hook registered for every hook the CLI documents:
+
+- A shell command outside the allowlist stopped at "Run this command?". The
+  hooks sent by then were `sessionStart`, `beforeSubmitPrompt`, `preToolUse` and
+  `beforeShellExecution`; the prompt itself sent none. `preToolUse` and
+  `beforeShellExecution` run before the prompt appears, so they cannot say it
+  is there.
+- The `AskQuestion` tool showed its question dialog and sent no hook, not even
+  `preToolUse`.
+- The terminal output at the approval prompt held no bell and no notification
+  escape sequence, only terminal title changes.
+
+A `Task` sub-agent sent no `subagentStart` or `subagentStop`, on two models
+(Grok 4.7 and Claude Sonnet 5), and the `Task` call itself got no `postToolUse`.
+The sub-agent's own tool hooks arrived with a `session_id` that is not the
+lead's. The lifecycle ignores them as not the current binding: a `preToolUse`
+answers `ignored` and a `postToolUse` answers `partial`, each with `claim_stale`
+in the hook's own output, and nothing is written. So Cursor has no sub-agent
+count, and the lead's `thinking` stays until its `stop`.
+
+Cursor sends `stop` twice for one Esc, with status `error` and `aborted`.
+Cursor ran the two at the same time: with a hook that waited a second before
+logging, both were logged 30 ms apart, in the opposite order to an earlier run.
+Both statuses clear the pane's activity, because mapping `error` to `notify`
+would leave a stale `notify` after an Esc whenever the `error` hook happened to
+read its clock after the `aborted` one: each hook stamps its observation when
+it starts, and the two start together. The cost: a turn that ends on a real
+error shows nothing. No genuine mid-turn error was observed. From cursor-agent
+2026.10.01's code, not from a run: a failed turn sends one `error` stop and no
+`aborted`, and the last `turn_ended` line of the transcript file named in
+`transcript_path` says `error`, where an Esc's says `aborted`. Attention does
+not read that file.
+
+After `/new` the new conversation's hooks carry another `session_id`,
+`sessionStart` is not sent again, and the `sessionEnd` at exit names the first
+(without `/new`, every hook carried the same one).
+
+With a prompt on the command line, `cursor-agent "…"`, Cursor sent the first
+`beforeSubmitPrompt` 0.07 s before `sessionStart`, and did not wait for a
+`sessionStart` hook that took 3 s (one run, 2026-10-06). In a pane no shell
+claimed, only a start claims, so that first prompt records nothing. In a pane a
+shell claimed, the prompt binds the session first and the binding's start
+source reads `clear`, not `startup`.
+
+Cursor builds a hook's environment partly from somewhere other than the pane:
+in one run the hook process saw `WEZTERM_ATTENTION_DIR` and
+`WEZTERM_ATTENTION_ROOT` values the pane did not have, while `WEZTERM_PANE` and
+`WEZTERM_UNIX_SOCKET` came through (cursor-agent 2026.10.01, 2026-10-06; the
+mechanism was not read). If your pane's state directory differs from the one
+your shell startup files give Cursor, a Cursor hook writes to the second and
+the plugin reads the first: set `WEZTERM_ATTENTION_DIR` in the hook command.
+
+Three more bounds, from reading the code and not from runs:
+- A second `cursor-agent` that inherits the launch and sends a prompt takes
+  the launch's binding and ends the lead's, where [a second agent started
+  after the first died](#a-second-agent-in-one-launch-after-the-first-died-without-ending)
+  is refused. A `-p` run sends no prompt hook. In
+  the one spawn path of Cursor's shell tool that was read, commands run over
+  pipes, which would leave an interactive nested agent without a terminal.
+- The prompt binds the new conversation, ends the one it replaced, and writes
+  the activity as three separate writes. If a later write fails, the replaced
+  conversation stays active. Only Cursor's own bindings are ended this way; one
+  of another provider in the same launch is left as it was.
+- The `sessionEnd` after a `/new` ends two bindings in two writes. A consumer
+  executable (`--consumer`) is told of neither, and Cursor registers none.
+
 ## Pressing Esc in Claude Code leaves `thinking` on the tab
 
 Claude Code runs no hook when the user presses Esc to stop a turn: `Stop` does

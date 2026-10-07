@@ -256,7 +256,7 @@ words_status=0
 env -i HOME="$scratch/home" PATH=/usr/bin:/bin "$bash_under_test" --noprofile --norc -c '
   source "$1"
   for command in "claude" "M=stub claude" "MODEL=\"one two\" claude --resume" \
-    "/opt/tools/claude -p x" "\"codex\" exec" "  pi" "A=a\\ b B= pi" "\"\" claude"; do
+    "/opt/tools/claude -p x" "\"codex\" exec" "cursor-agent -p x" "  pi" "A=a\\ b B= pi" "\"\" claude"; do
     _wezterm_attention_supported_command "$command" || { echo "rejected: $command"; exit 1; }
   done
   # A backslash, or the other kind of quote, keeps a quote in the word: bash

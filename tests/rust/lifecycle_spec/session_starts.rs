@@ -75,3 +75,38 @@ fn a_pi_session_replaces_the_active_binding_on_new_resume_and_fork_only() {
         );
     }
 }
+
+// Going from one session to another and back inside one launch, as a resume
+// does, finds the first session's binding record still there. Taking it
+// current again has to move the launch's pointer off the second session.
+#[test]
+fn returning_to_an_earlier_session_of_the_launch_makes_it_current_again() {
+    for provider in ["claude", "codex"] {
+        let setup = Setup::new();
+        setup.claim();
+        let start =
+            |session, source| event(provider, "SessionStart", session, json!({"source":source}));
+        assert_eq!(
+            setup
+                .apply(&start("a", "startup"), "00000000000000000200")
+                .disposition,
+            "applied",
+            "{provider}"
+        );
+        assert_eq!(
+            setup
+                .apply(&start("b", "resume"), "00000000000000000300")
+                .disposition,
+            "replaced",
+            "{provider}"
+        );
+        assert_eq!(
+            setup
+                .apply(&start("a", "resume"), "00000000000000000400")
+                .disposition,
+            "confirmed",
+            "{provider}"
+        );
+        assert_eq!(setup.current_session(), "a", "{provider}");
+    }
+}

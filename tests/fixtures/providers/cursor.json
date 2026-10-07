@@ -1,0 +1,32 @@
+{
+  "provider": "cursor",
+  "base": {
+    "session_id": "cursor-session-a",
+    "conversation_id": "cursor-session-a",
+    "generation_id": "cursor-generation-a",
+    "transcript_path": "/tmp/cursor-session-a.txt",
+    "workspace_roots": ["/tmp/project"],
+    "cwd": "/tmp/project",
+    "hook_event_name": "sessionStart",
+    "model": "grok-4.7-xhigh"
+  },
+  "cases": [
+    { "id": "startup_binding", "event": "sessionStart", "patch": { "is_background_agent": false }, "expected": "binding" },
+    { "id": "session_end", "event": "sessionEnd", "patch": { "reason": "completed" }, "expected": "end" },
+    { "id": "prompt_activity", "event": "beforeSubmitPrompt", "patch": { "prompt": "hello", "attachments": [] }, "expected": "activity", "activity_type": "thinking" },
+    { "id": "tool_activity", "event": "preToolUse", "patch": { "tool_name": "Shell", "tool_use_id": "call-a-0\nfc_a_0" }, "expected": "activity", "activity_type": "thinking" },
+    { "id": "empty_cwd_and_model_are_no_value", "event": "preToolUse", "patch": { "tool_name": "Task", "cwd": "", "model": "" }, "expected": "activity", "activity_type": "thinking" },
+    { "id": "tool_result_observation", "event": "postToolUse", "patch": { "tool_name": "Read", "tool_use_id": "call-a-0\nfc_a_0", "duration": 12.5 }, "expected": "observation" },
+    { "id": "tool_failure_observation", "event": "postToolUseFailure", "patch": { "tool_name": "Shell", "failure_type": "error", "is_interrupt": false }, "expected": "observation" },
+    { "id": "compaction_observation", "event": "preCompact", "patch": { "trigger": "auto" }, "expected": "observation" },
+    { "id": "completed_stop_activity", "event": "stop", "patch": { "status": "completed", "loop_count": 0 }, "expected": "activity", "activity_type": "stop" },
+    { "id": "aborted_stop_clears", "event": "stop", "patch": { "status": "aborted", "loop_count": 0 }, "expected": "clear" },
+    { "id": "error_stop_clears", "event": "stop", "patch": { "status": "error", "loop_count": 0 }, "expected": "clear" },
+    { "id": "unknown_stop_status_is_inert", "event": "stop", "patch": { "status": "mystery" }, "expected": "ignored", "diagnostic": "integration_version_mismatch" },
+    { "id": "missing_stop_status_is_inert", "event": "stop", "patch": {}, "expected": "ignored", "diagnostic": "integration_version_mismatch" },
+    { "id": "child_identity_is_inert", "event": "preToolUse", "patch": { "tool_name": "Shell", "agent_id": "child-a" }, "expected": "ignored", "diagnostic": "record_invalid" },
+    { "id": "undeclared_event_is_inert", "event": "afterAgentThought", "patch": { "text": "thinking" }, "expected": "ignored", "diagnostic": "integration_version_mismatch" },
+    { "id": "mismatched_event_name_is_inert", "event": "stop", "patch": { "status": "completed", "hook_event_name": "preToolUse" }, "expected": "ignored", "diagnostic": "record_invalid" },
+    { "id": "missing_session_is_inert", "event": "stop", "patch": { "status": "completed", "session_id": null }, "expected": "ignored", "diagnostic": "record_invalid" }
+  ]
+}

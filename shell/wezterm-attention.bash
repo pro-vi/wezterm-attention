@@ -12,7 +12,7 @@ if [ -n "${_WEZTERM_ATTENTION_LOADED:-}" ]; then
 fi
 _WEZTERM_ATTENTION_LOADED=1
 
-: "${WEZTERM_ATTENTION_COMMANDS:=claude codex pi}"
+: "${WEZTERM_ATTENTION_COMMANDS:=claude codex cursor-agent pi}"
 # 1 while a hook runs the writer. The hooks set it only as a local, which bash
 # puts back however the function ends: Ctrl-C during a slow claim must not
 # leave it at 1 and switch the hooks off for the rest of the shell.

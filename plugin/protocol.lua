@@ -613,7 +613,7 @@ return function(context)
         -- lifecycle.json may hold both, from before children had their own
         -- file, so it is not checked the other way.
         if value.kind == "child_lifecycle_snapshot" and item.actor.kind ~= "child" then return false end
-        if item.actor.kind == "child" and (value.provider == "pi" or agent_key_of(item.actor.agent_id) ~= item.actor.agent_key) then return false end
+        if item.actor.kind == "child" and (not list_contains(protocol.enums.subagent_providers, value.provider) or agent_key_of(item.actor.agent_id) ~= item.actor.agent_key) then return false end
         if item.kind == "tool_preflight" or item.kind == "tool_result" then
           local class, mode = classify_lifecycle_tool(value.provider, item.tool_name)
           if item.tool_class ~= class or item.question_mode ~= mode then return false end

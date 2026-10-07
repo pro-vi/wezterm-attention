@@ -124,7 +124,7 @@ return function(context)
     indicator = with_count(indicator)
 
     local show_provider = M._active_show_provider == true
-    local provider_display = { claude = "Claude", codex = "Codex", pi = "Pi" }
+    local provider_display = { claude = "Claude", codex = "Codex", cursor = "Cursor", pi = "Pi" }
     return {
       indicator = indicator,
       still_indicator = still_indicator or indicator,

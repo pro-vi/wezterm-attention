@@ -182,7 +182,7 @@ Exact TTL equality remains eligible. The first ineligible instant is one nanosec
 malformed, unavailable, or negative wall age fails closed: TTL-bearing state is omitted, retention
 does not prune it, and diagnostics report `record_invalid`, `probe_unavailable`, or `clock_skew`.
 
-A lead `UserPromptSubmit` starts the turn's `thinking` activity for Claude and Codex, the way
+A lead `UserPromptSubmit` starts the turn's `thinking` activity for Claude and Codex (Cursor's `beforeSubmitPrompt` does too), the way
 Pi's `agent_start` does, so the pane is tinted from the prompt rather than from the turn's first
 tool call and a turn that calls no tool still shows activity. The first `PreToolUse` of that turn
 repeats the same `thinking` and is skipped. A child actor cannot write lead state, so its prompt
@@ -230,6 +230,27 @@ reports nothing, so its `thinking` stays; see
 [Accepted limitations](accepted-limitations.md#pressing-esc-in-claude-code-leaves-thinking-on-the-tab).
 A Codex turn that ends on an API error reports nothing either; see
 [Accepted limitations](accepted-limitations.md#a-codex-turn-that-ends-on-an-api-error-leaves-thinking-on-the-tab).
+A headless `cursor-agent -p` run sends no `stop`, so its `thinking` stays too; see
+[Accepted limitations](accepted-limitations.md#cursor-agent-sends-fewer-hooks-than-claude-code-and-codex).
+
+As of cursor-agent 2026.10.01-e373342, Cursor's hooks have their own names and send less.
+`sessionStart` binds the session with source `startup`, the only source a Cursor `sessionStart`
+can carry, since Cursor sends none. A lead `beforeSubmitPrompt` starts the turn's
+`thinking` as `UserPromptSubmit` does, and first binds its session with source `clear` when that
+session is not the launch's current binding: `/new` starts a conversation with no `sessionStart`, so
+its first prompt is where the session is first seen, and the conversation it replaces ends there,
+since no hook ends it. A `preToolUse` of another session than the current
+binding, which is what a sub-agent's tool call is, is ignored with `claim_stale` and binds nothing.
+A `stop` with status `completed` publishes `stop`. One with status `aborted` or `error` writes an
+activity clear and keeps its observation, `user_interrupt` or `attempt_outcome`: Cursor sends both
+for one Esc, run at the same time, so neither alone may write `notify`. `sessionEnd` names the
+conversation the process started with, so it ends the launch's current binding as well when that is
+another, provided the session it names was bound in this launch: a `cursor-agent` that an agent of
+the launch started has the launch's id, its own start is refused, and its end ends nothing. Cursor
+has no permission, notification or sub-agent hook, so it never publishes `notify` and has no
+`subagent_providers` entry. A `tool_use_id` can have two lines; the first, which a tool's
+pre and post hooks share, is the observation's `tool_call_id`. See
+[accepted limitations](accepted-limitations.md#cursor-agent-sends-fewer-hooks-than-claude-code-and-codex).
 
 `SessionStart` with source `fork` binds the forked session for Claude and Codex, replacing the
 active binding as `resume` and `clear` do. A Pi `session_start` with source `new`, `resume` or
@@ -237,10 +258,11 @@ active binding as `resume` and `clear` do. A Pi `session_start` with source `new
 
 A provider event with a malformed optional field keeps its action and loses only that field. The
 fields are `agent_type`, `transcript_path` or `session_file`, `cwd`, `CLAUDE_CONFIG_DIR`,
-`CODEX_HOME`, `PI_CODING_AGENT_DIR`, `model`, and the Pi bus `label`. One `record_invalid`
+`CODEX_HOME`, `CURSOR_CONFIG_DIR`, `PI_CODING_AGENT_DIR`, `model`, and the Pi bus `label`. One `record_invalid`
 diagnostic names them, with message `optional fields were dropped: …` and the list in
 `context.dropped_fields`. An empty `agent_type` is not malformed: it says the agent has no type, as
-Claude Code 2.1.283 sends for the agents it runs for itself. A malformed `session_id` still
+Claude Code 2.1.283 sends for the agents it runs for itself. Nor is an empty `cwd` or `model` from
+Cursor (cursor-agent 2026.10.01-e373342), which sends one for a value it has none for. A malformed `session_id` still
 ignores the event, because it is identity, not metadata. A native enum value this version does
 not know keeps the observation: an unknown `error_category` becomes `unknown`, and an unknown
 `input_source` or compaction trigger is omitted.
@@ -254,7 +276,7 @@ Prompt return is `hooks publish` from a bound pane. It republishes the pane iden
 
 A binding's `children.json`, kind `child_presence_set`, holds the sub-agents of that binding that
 are running now, and nothing else. Only the providers in `subagent_providers`, Claude and Codex,
-have one; a Pi binding never does. Besides `kind`, `schema`, `address`, `launch_id`, `binding_id`
+have one; a Cursor or Pi binding never does. Besides `kind`, `schema`, `address`, `launch_id`, `binding_id`
 and `provider`, it carries a `revision` UUID replaced on every write, `written_at_unix_ns`, and:
 
 - `live`: one entry per running child, `{agent_id, agent_type?, last_event, status,

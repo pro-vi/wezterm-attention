@@ -35,6 +35,9 @@ mod hook_consumer;
 #[path = "lifecycle_spec/hold_check.rs"]
 mod hold_check;
 
+#[path = "lifecycle_spec/cursor.rs"]
+mod cursor;
+
 #[path = "lifecycle_spec/pane_facts.rs"]
 mod pane_facts;
 
@@ -410,6 +413,15 @@ impl Setup {
         observation: &str,
     ) -> wezterm_attention::lifecycle::LifecycleResult {
         apply_provider_event(event, &self.env, observation, &self.ports()).expect("event applies")
+    }
+
+    /// The session of the one binding the pane's launch has current.
+    fn current_session(&self) -> String {
+        let (rows, _) = read_bindings(&state_root(&self.env).unwrap()).unwrap();
+        let mut current = rows.iter().filter(|row| row.current);
+        let row = current.next().expect("one current binding");
+        assert!(current.next().is_none(), "only one binding is current");
+        row.provider_session_id.clone()
     }
 
     fn binding_dir(&self, provider: &str, session: &str) -> PathBuf {
@@ -899,18 +911,10 @@ fn async_post_only_publication_requires_exact_success_receipt() {
 
 #[test]
 fn attempt_failure_retry_and_settling_do_not_end_a_binding() {
-    for provider in ["claude", "codex", "pi"] {
+    for provider in ["claude", "codex", "cursor", "pi"] {
         let setup = Setup::new();
         setup.claim();
-        let (start, start_patch) = if provider == "pi" {
-            ("session_start", json!({"start_source":"startup"}))
-        } else {
-            ("SessionStart", json!({"source":"startup"}))
-        };
-        setup.apply(
-            &event(provider, start, "run", start_patch),
-            "00000000000000000200",
-        );
+        setup.apply(&self_claim::start(provider, "run"), "00000000000000000200");
         let cases = match provider {
             "claude" => vec![
                 (
@@ -938,6 +942,18 @@ fn attempt_failure_retry_and_settling_do_not_end_a_binding() {
                     json!({"tool_name":"shell","tool_use_id":"retry","turn_id":"turn-2"}),
                 ),
                 ("Stop", json!({"stop_hook_active":false,"turn_id":"turn-2"})),
+            ],
+            "cursor" => vec![
+                (
+                    "beforeSubmitPrompt",
+                    json!({"prompt":"SYNTHETIC-PRIVATE-SENTINEL"}),
+                ),
+                ("stop", json!({"status":"error"})),
+                (
+                    "preToolUse",
+                    json!({"tool_name":"Read","tool_use_id":"retry"}),
+                ),
+                ("stop", json!({"status":"completed"})),
             ],
             _ => vec![
                 ("input", json!({"source":"extension"})),
@@ -1649,7 +1665,7 @@ fn load_fixture(name: &str) -> Value {
 #[test]
 fn provider_fixtures_equal_the_closed_action_vocabulary() {
     let mut seen = BTreeSet::new();
-    for provider in ["claude", "codex", "pi"] {
+    for provider in ["claude", "codex", "cursor", "pi"] {
         let fixture = load_fixture(provider);
         for case in fixture["cases"].as_array().expect("fixture cases") {
             let mut payload = fixture["base"].clone();
@@ -1718,7 +1734,7 @@ fn hook_description_is_exhaustive_read_only_and_pins_public_fields() {
     use wezterm_attention::providers::{HookRegistration, describe_hooks};
     let contact: Value =
         serde_json::from_str(include_str!("../fixtures/lifecycle/contact-cases.json")).unwrap();
-    for provider in ["claude", "codex", "pi"] {
+    for provider in ["claude", "codex", "cursor", "pi"] {
         let fixture = load_fixture(provider);
         let description = describe_hooks(provider).unwrap();
         for hook in &description.native_hooks {
@@ -1835,7 +1851,26 @@ fn readme_json_block(heading: &str) -> Value {
         .unwrap_or_else(|error| panic!("README section {heading:?}: {error}"))
 }
 
-// The README's hook blocks are what users paste into their agent's settings,
+/// The command each native event of `provider` is registered with, as the
+/// README spells it.
+fn described_hook_commands(provider: &str) -> BTreeMap<String, String> {
+    use wezterm_attention::providers::{HookRegistration, describe_hooks};
+    describe_hooks(provider)
+        .unwrap()
+        .native_hooks
+        .into_iter()
+        .filter(|row| row.registration == HookRegistration::Register)
+        .map(|row| {
+            let command = format!(
+                "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention {}",
+                row.arguments.join(" ")
+            );
+            (row.native_event, command)
+        })
+        .collect()
+}
+
+// The README's Claude Code and Codex hook blocks are what users paste into their settings,
 // so each registers exactly the rows `hooks describe` marks `register`, each
 // as one command hook in the documented form. The block holds nothing else;
 // `async` in particular would let a hook run after the agent has gone on
@@ -1843,21 +1878,8 @@ fn readme_json_block(heading: &str) -> Value {
 // could then reach the writer out of order.
 #[test]
 fn readme_hook_blocks_register_exactly_the_described_rows() {
-    use wezterm_attention::providers::{HookRegistration, describe_hooks};
     for (provider, heading) in [("claude", "Claude Code hooks"), ("codex", "Codex hooks")] {
-        let described: BTreeMap<String, String> = describe_hooks(provider)
-            .unwrap()
-            .native_hooks
-            .into_iter()
-            .filter(|row| row.registration == HookRegistration::Register)
-            .map(|row| {
-                let command = format!(
-                    "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention {}",
-                    row.arguments.join(" ")
-                );
-                (row.native_event, command)
-            })
-            .collect();
+        let described = described_hook_commands(provider);
         let block = readme_json_block(heading);
         let registered: BTreeMap<String, String> = block["hooks"]
             .as_object()
@@ -1888,6 +1910,37 @@ fn readme_hook_blocks_register_exactly_the_described_rows() {
             .collect();
         assert_eq!(registered, described, "{heading}");
     }
+}
+
+// Cursor's `hooks.json` lists each event's commands directly, with no matcher
+// group around them, under a `version`. The block holds nothing else:
+// cursor-agent 2026.10.01 reads a `timeout`, a `failClosed` and a `matcher`
+// there, and none belongs in a block that is pasted whole.
+#[test]
+fn readme_cursor_hook_block_registers_exactly_the_described_rows() {
+    let block = readme_json_block("Cursor Agent hooks");
+    assert_eq!(
+        block.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["hooks", "version"]
+    );
+    assert_eq!(block["version"], 1);
+    let registered: BTreeMap<String, String> = block["hooks"]
+        .as_object()
+        .expect("a hooks object")
+        .iter()
+        .map(|(event, entries)| {
+            let [entry] = entries.as_array().map(Vec::as_slice).unwrap_or_default() else {
+                panic!("{event}: expected one entry");
+            };
+            assert_eq!(
+                entry.as_object().unwrap().keys().collect::<Vec<_>>(),
+                ["command"],
+                "{event}"
+            );
+            (event.clone(), entry["command"].as_str().unwrap().to_owned())
+        })
+        .collect();
+    assert_eq!(registered, described_hook_commands("cursor"));
 }
 
 #[test]

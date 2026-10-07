@@ -815,6 +815,7 @@ pub(super) fn start(provider: &str, session: &str) -> ProviderEvent {
             session,
             json!({"start_source":"startup"}),
         ),
+        "cursor" => event("cursor", "sessionStart", session, json!({})),
         _ => event(
             provider,
             "SessionStart",
@@ -862,7 +863,7 @@ fn start_agent(setup: &Setup, agent: i32, hook: i32) -> BTreeMap<String, String>
 
 #[test]
 fn an_agent_s_first_session_start_claims_the_pane_for_its_own_process() {
-    for provider in ["claude", "codex", "pi"] {
+    for provider in ["claude", "codex", "cursor", "pi"] {
         let setup = Setup::new();
         let env = setup.agent_env();
         assert_eq!(

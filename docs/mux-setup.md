@@ -41,20 +41,20 @@ Source the Bash integration from `~/.bashrc`. The variable is set only inside We
 [ -n "${WEZTERM_ATTENTION_ROOT:-}" ] && . "$WEZTERM_ATTENTION_ROOT/shell/wezterm-attention.bash"
 ```
 
-Bash automatically gives each top-level `claude`, `codex`, or `pi` command a new launch ID. The
+Bash automatically gives each top-level `claude`, `codex`, `cursor-agent`, or `pi` command a new launch ID. The
 supported command set can be changed before sourcing:
 
 ```bash
-export WEZTERM_ATTENTION_COMMANDS='claude codex pi'
+export WEZTERM_ATTENTION_COMMANDS='claude codex cursor-agent pi'
 ```
 
 Sourcing the file a second time installs nothing new, so `source ~/.bashrc` after an edit is safe; if your rc file assigned `PROMPT_COMMAND` in the meantime, the second source puts the prompt hook back. When [bash-preexec](https://github.com/rcaloras/bash-preexec) is loaded (atuin and some prompt tools load it), the claim runs through its `preexec_functions`, once per command line, so `claude && codex` share one launch ID there; without it, each simple command gets its own. The integration keeps `$?` and `$_` intact for your later prompt commands and commands. After an agent returns to the prompt, the prompt hook records the return and unsets `WEZTERM_ATTENTION_LAUNCH_ID`.
 
 ## Zsh launch claims
 
-On macOS, zsh needs no claim step. Start `claude`, `codex` or `pi` as you would anywhere: the agent's
+On macOS, zsh needs no claim step. Start `claude`, `codex`, `cursor-agent` or `pi` as you would anywhere: the agent's
 first session start claims the pane for the agent's own process, through the hook command in the
-[README](../README.md#claude-code-hooks) or, for Pi, through the extension. Sourcing the zsh
+README ([Claude Code](../README.md#claude-code-hooks), [Codex](../README.md#codex-hooks) or [Cursor Agent](../README.md#cursor-agent-hooks)) or, for Pi, through the extension. Sourcing the zsh
 integration is optional there. It republishes the pane's claim at every prompt, and there it clears
 the activity an agent left behind once the agent's process has exited; without it, that activity
 stays until the next agent claims the pane.
@@ -126,11 +126,12 @@ A claim belongs to the pane's own terminal. A program started inside the pane, s
 
 ## Provider hooks
 
-Registration is yours; this repository does not edit Claude or Codex settings. The README has complete, copyable blocks for [Claude Code](../README.md#claude-code-hooks) and [Codex](../README.md#codex-hooks). They come from the package's own description:
+Registration is yours; this repository does not edit Claude, Codex or Cursor settings. The README has complete, copyable blocks for [Claude Code](../README.md#claude-code-hooks), [Codex](../README.md#codex-hooks) and [Cursor Agent](../README.md#cursor-agent-hooks). They come from the package's own description:
 
 ```sh
 attention hooks describe --provider claude --json
 attention hooks describe --provider codex --json
+attention hooks describe --provider cursor --json
 ```
 
 For each `registration=register` row, run the `attention` link on your PATH with that row's `arguments` and pass the original callback JSON on stdin, as one command that first sets `WEZTERM_ATTENTION_HOST_PID=$PPID` and then `exec`s it; the README says why. Ignored rows are not registrations.

@@ -179,6 +179,7 @@ vocabulary!(QuestionMode {
 pub enum Provider {
     Claude,
     Codex,
+    Cursor,
     Pi,
 }
 
@@ -187,6 +188,7 @@ impl Provider {
         match value {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
+            "cursor" => Some(Self::Cursor),
             "pi" => Some(Self::Pi),
             _ => None,
         }
@@ -196,8 +198,16 @@ impl Provider {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Cursor => "cursor",
             Self::Pi => "pi",
         }
+    }
+
+    /// Whether the provider's hooks name a child agent: the manifest's
+    /// `subagent_providers`. A payload of any other provider that carries a
+    /// child identity is not one that provider sends.
+    pub fn has_child_identity(self) -> bool {
+        manifest().is_ok_and(|protocol| protocol.enums.subagent_providers.contains(self.as_str()))
     }
 }
 
@@ -1087,6 +1097,7 @@ mod consumer_manifest_tests {
         );
         for (provider, name) in [
             ("pi", "AskUserQuestion"),
+            ("cursor", "AskQuestion"),
             ("codex", "request_user_input_async_extra"),
             ("unknown", "request_permissions"),
         ] {

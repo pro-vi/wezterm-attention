@@ -140,6 +140,10 @@ pub struct ProviderEvent {
     pub provider: Option<Provider>,
     pub provider_session_id: Option<String>,
     pub start_source: Option<String>,
+    /// For an event that can open a conversation the provider never announced
+    /// with a session start: the source to bind with when the event's session
+    /// is not the launch's current binding.
+    pub ensure_binding_source: Option<String>,
     pub activity_type: Option<String>,
     pub label: Option<String>,
     pub agent_id: Option<String>,
@@ -313,6 +317,7 @@ fn parse_provider_common(
     let config_field = match provider {
         Provider::Claude => "CLAUDE_CONFIG_DIR",
         Provider::Codex => "CODEX_HOME",
+        Provider::Cursor => "CURSOR_CONFIG_DIR",
         Provider::Pi => "PI_CODING_AGENT_DIR",
     };
     let mut dropped = DroppedFields::default();
@@ -323,9 +328,24 @@ fn parse_provider_common(
         _ => dropped.keep("agent_type", optional_label(payload, "agent_type")),
     };
     let transcript_path = dropped.keep(transcript_field, optional_path(payload, transcript_field));
-    let cwd = dropped.keep("cwd", optional_path(payload, "cwd"));
+    // Cursor sends `""` for a path or model it has none for: as of cursor-agent
+    // 2026.10.01 the tool hooks of a shell command carry an empty `cwd`, and the
+    // `preToolUse` for a `Task` an empty `model`. That says no value; it is not
+    // malformed.
+    let no_value = |field: &str| {
+        provider == Provider::Cursor && payload.get(field).and_then(Value::as_str) == Some("")
+    };
+    let cwd = if no_value("cwd") {
+        None
+    } else {
+        dropped.keep("cwd", optional_path(payload, "cwd"))
+    };
     let config_dir = dropped.keep(config_field, environment_path(env, config_field));
-    let model = dropped.keep("model", optional_label(payload, "model"));
+    let model = if no_value("model") {
+        None
+    } else {
+        dropped.keep("model", optional_label(payload, "model"))
+    };
     // Only Pi's bus carries a badge label.
     let label = if provider == Provider::Pi && event_name == "bus" {
         dropped.keep("label", optional_label(payload, "label"))
@@ -408,12 +428,7 @@ fn parse_claude_or_codex(
     }
     let mut event = match parse_provider_common(provider, event_name, payload, env) {
         Ok(event) => event,
-        Err(diagnostic) => {
-            let mut event =
-                ProviderEvent::ignored(Some(provider), diagnostic.code, &diagnostic.message);
-            event.diagnostic = Some(diagnostic);
-            return event;
-        }
+        Err(diagnostic) => return ignored_for(provider, diagnostic),
     };
     if provider == Provider::Codex
         && let Some(inherited) = env.get("CODEX_THREAD_ID").filter(|value| !value.is_empty())
@@ -626,6 +641,89 @@ fn parse_claude_or_codex(
     event
 }
 
+/// Cursor's hooks, as cursor-agent 2026.10.01 sends them.
+///
+/// It sends no hook for a permission prompt or a question, so nothing here
+/// produces `notify`. It sends no sub-agent hooks, and a sub-agent's own tool
+/// hooks carry a session id other than the lead's, which the lifecycle ignores
+/// as not the current binding. Its `/new` starts a conversation without a
+/// `sessionEnd` or a `sessionStart`, so a prompt binds a session it has not
+/// seen and ends the one it replaces. An Esc sends two `stop` hooks for one
+/// turn, `error` and `aborted`, run at the same time and in no fixed order;
+/// both clear, so either order leaves the pane clear.
+fn parse_cursor(
+    event_name: &str,
+    payload: &Value,
+    env: &BTreeMap<String, String>,
+) -> ProviderEvent {
+    let provider = Provider::Cursor;
+    if !declared_hook(provider, event_name) {
+        return ProviderEvent::ignored(
+            Some(provider),
+            DiagnosticCode::IntegrationVersionMismatch,
+            "provider event is not supported",
+        );
+    }
+    if payload.get("hook_event_name").and_then(Value::as_str) != Some(event_name) {
+        return ProviderEvent::ignored(
+            Some(provider),
+            DiagnosticCode::RecordInvalid,
+            "hook event name does not match the callback",
+        );
+    }
+    let mut event = match parse_provider_common(provider, event_name, payload, env) {
+        Ok(event) => event,
+        Err(diagnostic) => return ignored_for(provider, diagnostic),
+    };
+    match event_name {
+        "sessionStart" => {
+            event.action = ProviderAction::Binding;
+            event.start_source = Some("startup".to_owned());
+        }
+        "sessionEnd" => event.action = ProviderAction::End,
+        "beforeSubmitPrompt" => {
+            event.action = ProviderAction::Activity;
+            event.activity_type = Some("thinking".to_owned());
+            event.ensure_binding_source = Some("clear".to_owned());
+        }
+        "preToolUse" => {
+            event.action = ProviderAction::Activity;
+            event.activity_type = Some("thinking".to_owned());
+        }
+        "postToolUse" | "postToolUseFailure" | "preCompact" => {
+            event.action = ProviderAction::Observation;
+        }
+        "stop" => match payload.get("status").and_then(Value::as_str) {
+            Some("completed") => {
+                event.action = ProviderAction::Activity;
+                event.activity_type = Some("stop".to_owned());
+            }
+            Some("aborted" | "error") => event.action = ProviderAction::Clear,
+            _ => {
+                return ProviderEvent::ignored(
+                    Some(provider),
+                    DiagnosticCode::IntegrationVersionMismatch,
+                    "stop status is not supported",
+                );
+            }
+        },
+        _ => {
+            return ProviderEvent::ignored(
+                Some(provider),
+                DiagnosticCode::IntegrationVersionMismatch,
+                "provider event has no transition",
+            );
+        }
+    }
+    event
+}
+
+fn ignored_for(provider: Provider, diagnostic: Diagnostic) -> ProviderEvent {
+    let mut event = ProviderEvent::ignored(Some(provider), diagnostic.code, &diagnostic.message);
+    event.diagnostic = Some(diagnostic);
+    event
+}
+
 fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -> ProviderEvent {
     if !declared_hook(Provider::Pi, event_name) {
         return ProviderEvent::ignored(
@@ -636,12 +734,7 @@ fn parse_pi(event_name: &str, payload: &Value, env: &BTreeMap<String, String>) -
     }
     let mut event = match parse_provider_common(Provider::Pi, event_name, payload, env) {
         Ok(event) => event,
-        Err(diagnostic) => {
-            let mut event =
-                ProviderEvent::ignored(Some(Provider::Pi), diagnostic.code, &diagnostic.message);
-            event.diagnostic = Some(diagnostic);
-            return event;
-        }
+        Err(diagnostic) => return ignored_for(Provider::Pi, diagnostic),
     };
     match event_name {
         "input" | "session_before_compact" | "session_compact" => {
@@ -768,11 +861,11 @@ pub fn parse_provider_event(
             "child identity is invalid",
         );
     }
-    if provider == Provider::Pi && payload.get("agent_id").is_some() {
+    if payload.get("agent_id").is_some() && !provider.has_child_identity() {
         return ProviderEvent::ignored(
             Some(provider),
             DiagnosticCode::RecordInvalid,
-            "Pi has no native child identity contract",
+            "provider has no native child identity contract",
         );
     }
     let mut event = match provider {
@@ -780,6 +873,7 @@ pub fn parse_provider_event(
         Provider::Claude | Provider::Codex => {
             parse_claude_or_codex(provider, event_name, payload, env)
         }
+        Provider::Cursor => parse_cursor(event_name, payload, env),
     };
     event.source_event = event_name.to_owned();
     if event.action != ProviderAction::Ignored {
@@ -787,17 +881,24 @@ pub fn parse_provider_event(
             "PreToolUse"
             | "PostToolUse"
             | "PostToolUseFailure"
+            | "preToolUse"
+            | "postToolUse"
+            | "postToolUseFailure"
             | "tool_execution_start"
             | "tool_execution_end" => {
                 parse_tool_observation(provider, event_name, payload, &event).map(Some)
             }
             "PermissionRequest" | "PermissionDenied" | "Elicitation" | "ElicitationResult"
             | "Notification" => parse_request_observation(provider, event_name, payload, &event),
-            "UserPromptSubmit" | "Stop" | "StopFailure" | "Interrupt" | "input" | "message_end"
-            | "agent_settled" => {
+            "UserPromptSubmit" | "Stop" | "StopFailure" | "Interrupt" | "beforeSubmitPrompt"
+            | "stop" | "input" | "message_end" | "agent_settled" => {
                 parse_run_observation(provider, event_name, payload, &event).map(Some)
             }
-            "PreCompact" | "PostCompact" | "session_before_compact" | "session_compact" => {
+            "PreCompact"
+            | "PostCompact"
+            | "preCompact"
+            | "session_before_compact"
+            | "session_compact" => {
                 parse_compaction_observation(provider, event_name, payload, &event).map(Some)
             }
             _ => Ok(None),
@@ -883,7 +984,10 @@ fn parse_tool_observation(
 ) -> std::result::Result<LifecycleObservation, Diagnostic> {
     let tool_name = safe_label(&payload["tool_name"], "tool_name")?;
     let (tool_class, question_mode) = classify_tool(provider.as_str(), &tool_name);
-    let body = if matches!(event_name, "PreToolUse" | "tool_execution_start") {
+    let body = if matches!(
+        event_name,
+        "PreToolUse" | "preToolUse" | "tool_execution_start"
+    ) {
         ObservationBody::ToolPreflight {
             tool_name,
             tool_class,
@@ -902,7 +1006,7 @@ fn parse_tool_observation(
                         )
                     })?,
             )
-        } else if event_name == "PostToolUseFailure" {
+        } else if matches!(event_name, "PostToolUseFailure" | "postToolUseFailure") {
             Some(true)
         } else {
             None
@@ -949,6 +1053,26 @@ fn parse_tool_observation(
     observation_for_body(provider, event_name, payload, event, body)
 }
 
+/// Cursor's `tool_use_id` has two lines, `call-<uuid>-<n>` and then the model
+/// provider's own id for the call (cursor-agent 2026.10.01). The first line
+/// names the call, and the same text on its pre and post hooks pairs them.
+fn native_tool_call_id(
+    provider: Provider,
+    payload: &Value,
+) -> std::result::Result<Option<String>, Diagnostic> {
+    let Some(value) = payload.get("tool_use_id") else {
+        return Ok(None);
+    };
+    match (provider, value.as_str()) {
+        (Provider::Cursor, Some(text)) => safe_label(
+            &Value::from(text.lines().next().unwrap_or("")),
+            "tool_use_id",
+        )
+        .map(Some),
+        _ => safe_label(value, "tool_use_id").map(Some),
+    }
+}
+
 fn observation_for_body(
     provider: Provider,
     event_name: &str,
@@ -962,13 +1086,16 @@ fn observation_for_body(
             | "PostToolUse"
             | "PostToolUseFailure"
             | "PermissionDenied"
+            | "preToolUse"
+            | "postToolUse"
+            | "postToolUseFailure"
             | "tool_execution_start"
             | "tool_execution_end"
     );
     let elicitation = matches!(event_name, "Elicitation" | "ElicitationResult");
     let correlation = NativeCorrelation {
         tool_call_id: if tool_event {
-            strict_optional_label(payload, "tool_use_id")?
+            native_tool_call_id(provider, payload)?
         } else {
             None
         },
@@ -1125,7 +1252,26 @@ fn parse_run_observation(
     event: &ProviderEvent,
 ) -> std::result::Result<LifecycleObservation, Diagnostic> {
     let body = match name {
-        "UserPromptSubmit" => ObservationBody::PromptSubmitted { input_source: None },
+        "UserPromptSubmit" | "beforeSubmitPrompt" => {
+            ObservationBody::PromptSubmitted { input_source: None }
+        }
+        // Cursor's one `stop` event carries the turn's outcome in `status`.
+        "stop" => match payload["status"].as_str() {
+            Some("completed") => ObservationBody::ResponseFinished {
+                stop_hook_active: None,
+            },
+            Some("aborted") => ObservationBody::UserInterrupt,
+            Some("error") => ObservationBody::AttemptOutcome {
+                outcome: AttemptOutcome::Failed,
+                error_category: None,
+            },
+            _ => {
+                return Err(Diagnostic::new(
+                    DiagnosticCode::IntegrationVersionMismatch,
+                    "stop status is not supported",
+                ));
+            }
+        },
         "input" => ObservationBody::PromptSubmitted {
             input_source: optional_observation_enum(payload, "source", "input_source")?,
         },
@@ -1193,7 +1339,7 @@ fn parse_compaction_observation(
             "provider compaction trigger is unsupported",
         ));
     }
-    let body = if matches!(name, "PreCompact" | "session_before_compact") {
+    let body = if matches!(name, "PreCompact" | "preCompact" | "session_before_compact") {
         ObservationBody::CompactionAttempted { trigger }
     } else {
         ObservationBody::CompactionSucceeded { trigger }

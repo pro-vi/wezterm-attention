@@ -124,6 +124,40 @@
         "native_event": "PostToolUse"
       }
     },
+    "cursor": {
+      "sessionStart": {
+        "registration": "register",
+        "native_event": "sessionStart"
+      },
+      "sessionEnd": {
+        "registration": "register",
+        "native_event": "sessionEnd"
+      },
+      "beforeSubmitPrompt": {
+        "registration": "register",
+        "native_event": "beforeSubmitPrompt"
+      },
+      "preToolUse": {
+        "registration": "register",
+        "native_event": "preToolUse"
+      },
+      "postToolUse": {
+        "registration": "register",
+        "native_event": "postToolUse"
+      },
+      "postToolUseFailure": {
+        "registration": "register",
+        "native_event": "postToolUseFailure"
+      },
+      "preCompact": {
+        "registration": "register",
+        "native_event": "preCompact"
+      },
+      "stop": {
+        "registration": "register",
+        "native_event": "stop"
+      }
+    },
     "pi": {
       "session_start": {
         "registration": "register",
@@ -182,6 +216,7 @@
       "request_user_input_async": {"tool_class": "question", "question_mode": "nonblocking"},
       "request_permissions": {"tool_class": "permission"}
     },
+    "cursor": {},
     "pi": {}
   },
   "digests": {
@@ -244,7 +279,7 @@
     ],
     "end_reasons": ["session_end", "sweep_absent"],
     "pane_presence": ["present", "verified_absent", "unavailable"],
-    "providers": ["claude", "codex", "pi"],
+    "providers": ["claude", "codex", "cursor", "pi"],
     "reader_confidence": ["confirmed", "unconfirmed"],
     "subagent_providers": ["claude", "codex"],
     "subagent_statuses": ["active", "stopped"]
@@ -313,6 +348,30 @@
       ],
       "compaction_succeeded": [
         "PostCompact"
+      ]
+    },
+    "cursor": {
+      "prompt_submitted": [
+        "beforeSubmitPrompt"
+      ],
+      "tool_preflight": [
+        "preToolUse"
+      ],
+      "tool_result": [
+        "postToolUse",
+        "postToolUseFailure"
+      ],
+      "response_finished": [
+        "stop"
+      ],
+      "user_interrupt": [
+        "stop"
+      ],
+      "attempt_outcome": [
+        "stop"
+      ],
+      "compaction_attempted": [
+        "preCompact"
       ]
     },
     "pi": {
@@ -1224,6 +1283,17 @@
       ],
       "user_interrupt": [
         "Interrupt"
+      ]
+    },
+    "cursor": {
+      "response_finished": [
+        "stop"
+      ],
+      "user_interrupt": [
+        "stop"
+      ],
+      "attempt_outcome": [
+        "stop"
       ]
     },
     "pi": {
