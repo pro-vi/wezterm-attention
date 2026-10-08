@@ -134,19 +134,13 @@ fn always_hold_keeps_running_claude_stop_out_of_checkmark() {
     let record_text = snapshot.to_string() + &activity.to_string();
     assert!(!record_text.contains("SYNTHETIC-REPLY-ONLY"));
     assert!(!record_text.contains("SYNTHETIC-TASK-DESCRIPTION"));
-    let clear = wezterm_attention::lifecycle::clear_shown_activity(
-        &root,
-        &address,
-        &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"],
-        activity["event_id"].as_str().unwrap(),
+    setup.apply(
+        &event("claude", "UserPromptSubmit", "hold-session", json!({})),
         "99999999999999999999",
-    )
-    .unwrap();
-    assert_eq!(clear.disposition, "applied");
-    assert_eq!(
-        super::mark_clear::plugin_reader_answer(&setup, "activity"),
-        "activity=none source=none"
     );
+    let (activity, _) = records(&setup, "claude");
+    assert_eq!(activity["type"], "thinking");
+    assert!(activity.get("hold_notes").is_none());
 }
 
 /// A sub-agent waiting on a permission prompt cannot finish without the user,

@@ -327,8 +327,6 @@ enum PluginCommand {
     ClearReview(PluginPaneArgs),
     /// Acknowledge the activity the user saw, if it is still the one shown.
     Acknowledge(ActivityEventArgs),
-    /// Explicitly clear the named current activity, including a held turn end.
-    ClearActivity(ActivityEventArgs),
 }
 
 #[derive(Clone, Debug, Args)]
@@ -357,7 +355,6 @@ impl PluginCommand {
             Self::SetReview(_) => "plugin set-review",
             Self::ClearReview(_) => "plugin clear-review",
             Self::Acknowledge(_) => "plugin acknowledge",
-            Self::ClearActivity(_) => "plugin clear-activity",
         }
     }
 }
@@ -1087,7 +1084,7 @@ fn run_plugin(
 ) -> Result<ExitCode, AttentionError> {
     let pane = match command {
         PluginCommand::SetReview(pane) | PluginCommand::ClearReview(pane) => pane,
-        PluginCommand::Acknowledge(args) | PluginCommand::ClearActivity(args) => &args.pane,
+        PluginCommand::Acknowledge(args) => &args.pane,
     };
     let scope = pane.scope()?;
     let root = wezterm_attention::records::state_root(environment)?;
@@ -1109,21 +1106,6 @@ fn run_plugin(
                 scope.address(),
                 scope.launch_id(),
                 &activity_event_id,
-            )
-        }
-        PluginCommand::ClearActivity(args) => {
-            let activity_event_id = wezterm_attention::identity::canonical_uuid(
-                Some(&args.activity_event_id),
-                "--activity-event-id",
-            )
-            .map_err(|error| AttentionError::usage(error.diagnostic.message))?;
-            let observation = system_ports().clock.monotonic_ns20()?;
-            wezterm_attention::lifecycle::clear_shown_activity(
-                &root,
-                scope.address(),
-                scope.launch_id(),
-                &activity_event_id,
-                &observation,
             )
         }
     }?;

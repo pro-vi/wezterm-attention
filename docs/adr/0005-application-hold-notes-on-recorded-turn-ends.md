@@ -4,6 +4,7 @@
 - **Date:** 2026-10-04
 - **Amended:** 2026-10-04 — a child waiting on a permission prompt overrides the held presentation
 - **Amended:** 2026-10-05 — no check runs while a child waits on a permission prompt; the default held indicator is `⏾`
+- **Amended:** 2026-10-08 — no explicit clear command, since nothing called it; any newer activity, such as the next prompt's, ends a hold
 
 ## Context
 
@@ -25,7 +26,7 @@ Run programs in declaration order, with a shared 2000 ms monotonic transport dea
 
 Retain native `type=stop` and `kind=response_finished`. Accepted notes become activity `hold_notes`; the corresponding lifecycle observation carries an Attention-written `turn_end` with applicability (`recorded`, `superseded` or `unconfirmed`; unconfirmed has no held claim), held state and execution audit. Confirm native effects before publishing recorded lifecycle metadata. Preserve child reconciliation and exclude the Attention-owned annotation from native replay equality. Native observations displaced by newer activity or clear carry no sound-eligible recorded decision.
 
-Derive held GUI presentation from validated activity notes: raw `activity_type=stop`, effective thinking priority/color, fixed `indicators.held` (default `⏾`, which is no thinking frame, and which the JetBrains Mono that WezTerm bundles draws from `20230320-124340-559cb7b0` on), and `turn_end_held=true`. Use the same held indicator in published tab text. Automatic acknowledgement refuses held activity even under custom auto-clear settings. Review and multi-pane priority continue to apply. A later applicable unheld Stop restores ordinary `✓`; an explicit scoped clear of the current activity remains available, including for an agent-owned claim. There is no automatic hold-release timer.
+Derive held GUI presentation from validated activity notes: raw `activity_type=stop`, effective thinking priority/color, fixed `indicators.held` (default `⏾`, which is no thinking frame, and which the JetBrains Mono that WezTerm bundles draws from `20230320-124340-559cb7b0` on), and `turn_end_held=true`. Use the same held indicator in published tab text. Automatic acknowledgement refuses held activity even under custom auto-clear settings. Review and multi-pane priority continue to apply. A later applicable unheld Stop restores ordinary `✓`, and any newer activity, such as the next prompt's, replaces a held one. There is no automatic hold-release timer and no explicit clear command.
 
 A hold assumes the lead's own work will wake it. A child with `status=waiting` in the binding's `children.json` is blocked on a permission prompt and cannot finish without the user, yet Claude Code lists it as `running` in `background_tasks` (observed 2026-10-04 with Claude Code 2.1.289), so the hold check cannot see it. The held Stop also replaces the `notify` the child published. While the child set holds a waiting child, the reader therefore shows any lead `stop`, held or not, as `notify`, with its indicator, color and priority, and `turn_end_held` is false. Focusing the pane acknowledges nothing, because the plugin acknowledges only a shown type equal to the stored one; the writer also refuses held activity. When the wait ends, the stop shows as stored again.
 
