@@ -86,7 +86,16 @@ local attention = loadfile(clone .. "/plugin/init.lua")("wezterm-attention", clo
 attention.apply_to_config(config)
 ```
 
-With this form, update with `git pull` and rerun `install-cli.sh` in the clone. If you keep `wezterm.plugin.require` and build the command in your own clone, pass `integration_root = "/absolute/path/to/wezterm-attention"` to `apply_to_config`; the Lua then updates through `update_all` and the command through your clone, separately.
+With this form, update with `git pull` and rerun `install-cli.sh` in the clone.
+
+This form is also how to stay on a release. `wezterm.plugin.require` cannot name a tag, and `update_all()` moves its copy to the newest commit on the default branch (WezTerm source `4fbd6b8e9`). Clone a release's tag instead:
+
+```sh
+git clone --branch v1.0.0 https://github.com/pro-vi/wezterm-attention /absolute/path/to/wezterm-attention
+sh /absolute/path/to/wezterm-attention/scripts/install-cli.sh
+```
+
+To move to a later release, run `git fetch --tags` and `git checkout` with the new tag in the clone, then rerun `install-cli.sh`. If you keep `wezterm.plugin.require` and build the command in your own clone, pass `integration_root = "/absolute/path/to/wezterm-attention"` to `apply_to_config`; the Lua then updates through `update_all` and the command through your clone, separately.
 
 Then register the [Claude Code](#claude-code-hooks) and [Codex](#codex-hooks) hooks. On macOS that is enough: an agent's first session start claims its pane by itself, so zsh needs no claim step. Bash still claims each agent command it starts, and on Linux a shell claim is the only way to claim; [Mux setup](docs/mux-setup.md) covers both shells. See [Record contract](docs/record-contract.md) for precedence and [Mux pane moves](docs/mux-pane-moves.md) before moving the final pane out of a server tab.
 
