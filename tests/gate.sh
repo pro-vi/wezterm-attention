@@ -3,6 +3,11 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
+# `doctor` looks for protocol/v2.json among the ancestors of its own executable,
+# so the test binaries must sit under this checkout, as libexec/attention-rs
+# does in an install. Cargo's default is already $root/target; this overrides a
+# CARGO_TARGET_DIR or build.target-dir set elsewhere.
+export CARGO_TARGET_DIR="$root/target"
 
 # External programs are found on PATH. Override any of them with
 # ATTENTION_TEST_NODE, ATTENTION_TEST_WEZTERM, ATTENTION_TEST_PYTHON3 or

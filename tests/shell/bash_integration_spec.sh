@@ -272,4 +272,17 @@ else
   fail "the command word skips assignments and quoting"
 fi
 
+commands_status=0
+env -i HOME="$scratch/home" PATH=/usr/bin:/bin WEZTERM_ATTENTION_COMMANDS='aider claude' \
+  "$bash_under_test" --noprofile --norc -c '
+  source "$1"
+  _wezterm_attention_supported_command "aider --model x" || { echo "rejected: aider"; exit 1; }
+  ! _wezterm_attention_supported_command "codex" || { echo "accepted: codex"; exit 1; }
+' _ "$integration" > "$scratch/session.out" 2>&1 || commands_status=$?
+if [ "$commands_status" -eq 0 ]; then
+  pass "WEZTERM_ATTENTION_COMMANDS replaces the agent commands"
+else
+  fail "WEZTERM_ATTENTION_COMMANDS replaces the agent commands"
+fi
+
 [ "$failures" -eq 0 ]

@@ -2716,13 +2716,15 @@ end)
 test("all rendered view fields participate in redraw equality", function()
   local baseline = {
     type = "notify", frame = 0, activity_type = "notify", event_id = "a",
+    turn_end_held = false, turn_end_quiet = false,
     source = "claude", provider = "claude", subagents = 1, subagents_uncertain = false,
     review = false, binding_phase = "active", pane_presence = "present",
     reader_confidence = "confirmed", binding_health = "valid",
     base_title = "base", settled_title = "settled",
   }
   for _, field in ipairs({
-    "type", "frame", "activity_type", "event_id", "source", "provider",
+    "type", "frame", "activity_type", "turn_end_held", "turn_end_quiet", "event_id",
+    "source", "provider",
     "subagents", "subagents_uncertain", "review", "binding_phase", "pane_presence",
     "reader_confidence", "binding_health", "base_title", "settled_title",
   }) do
