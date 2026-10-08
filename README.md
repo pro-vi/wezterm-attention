@@ -61,7 +61,7 @@ sh "$checkout/scripts/install-cli.sh"
 
 If the plugin cannot find the command, it logs once per config load, naming the path it checked: `.../libexec/attention-rs is missing, so panes get no WEZTERM_ATTENTION_ROOT and agents record nothing ...`. Open the WezTerm debug overlay (`Ctrl+Shift+L`) to read it.
 
-Reload the config afterwards. New panes then get `WEZTERM_ATTENTION_ROOT`, the checkout path. The plugin exports it only once the command is built: a producer that sees it runs that checkout's command, which would fail in every callback before the build. It exports `WEZTERM_ATTENTION_DIR`, the state directory, whether or not the command is built, unless `integration_root` is not an absolute path: then it exports neither variable and logs `v2 integration root is unavailable`.
+Reload the config afterwards. New panes then get `WEZTERM_ATTENTION_ROOT`, the checkout path. The plugin exports it only once the command is built: a producer that sees it runs that checkout's command, which would fail in every callback before the build. It exports `WEZTERM_ATTENTION_DIR`, the state directory, whether or not the command is built, unless `integration_root` is not an absolute path: then it exports neither variable and logs `v2 integration root is unavailable`. Panes of a `wezterm-mux-server` get both variables from the server's own run of the config, which a GUI reload does not repeat; see [Mux setup](docs/mux-setup.md#the-mux-server-runs-the-config-too).
 
 `"$checkout/bin/attention" --version` prints the commit the command was built from, with `-dirty` if `src`, `protocol`, `build.rs`, `Cargo.toml` or `Cargo.lock` had uncommitted changes, new files included, when it was built. Compare it with `git -C "$checkout" rev-parse --short=12 HEAD` to see whether the build is current.
 
@@ -314,8 +314,10 @@ repaints the tab bar on the next poll like any other.
 record owned by `user`, which the plugin writes through the `attention` command
 under the same locks as every other review writer. A press on a tab that carries
 your flag on any of its panes clears it from all of them; a press on a tab that
-does not flags the focused pane. The pane needs a launch claim, which the shell
-integration provides; a pane no launch has claimed cannot be flagged.
+does not flags the focused pane. The pane needs a launch claim, which an agent or
+a claiming shell makes when a command starts there (see
+[Recording attention from your own tools](#recording-attention-from-your-own-tools));
+a pane no launch has claimed cannot be flagged.
 
 The flag is a record of its own, so it coexists with whatever the pane's agent
 records:
@@ -604,7 +606,7 @@ The Lua implementation is split by responsibility under `plugin/`: protocol vali
 **Alt+B not working?**
 - Check for keybind conflicts. Move the binding by setting `review_key = { key = "...", mods = "..." }`. The default, `Alt+B`, also moves back one word in bash 3.2 and in zsh 5.9's emacs mode, so choose another key if you use that.
 - It works on a pane an agent is running in: the flag is a record of its own. If the tab still shows `✓` or `!` after a press, that activity outranks the flag; the ◆ appears once you have seen it.
-- On a pane no launch has claimed, such as a shell without the integration, a press that would flag it is refused and logged once, because no reader would show the flag. A press there on a tab that carries your flag still clears it. A mux-attached pane that has not published its identity refuses every press, since its tab cannot be found.
+- On a pane no launch has claimed, such as a plain shell where no agent has started, a press that would flag it is refused and logged once (`cannot toggle review: this pane has published no agent launch`), because no reader would show the flag. A press there on a tab that carries your flag still clears it. A mux-attached pane that has not published its identity refuses every press, since its tab cannot be found.
 - A press runs the `attention` command. When it refuses, the reason is logged once for each kind of refusal on that pane (`attention plugin set-review failed for pane N: ...`) and the tab does not change: `claim_stale` means the pane's launch claim is not the launch the pane last published, which the next prompt republishes. `probe_unavailable` means a hook held the pane's records at that moment; press again. A command built before the plugin was updated answers nothing: the focused tab shows `⚠ rebuild attention` and the log says the command may predate the plugin. Run `scripts/install-cli.sh` again; the warning goes once a command answers.
 
 **Typing lag or high GUI CPU with many tabs?**

@@ -118,12 +118,14 @@ trees under the retention rules in the
 [record contract](record-contract.md#trust-boundary), with their session index
 entries; and exited GUIs' tab-order files the record contract lists as collected.
 Those rules keep sweep from removing state it cannot prove abandoned, and they
-mean four kinds of leftover stay on disk:
+mean six kinds of leftover stay on disk:
 
 - **An exited GUI's tab-order files that name mux panes.** A file is removed
   only when it names no tab, or when every pane it names is verified absent.
   The GUI's own local panes are, once it has exited (see the next section), so
-  a file naming only those goes. A window attached to a mux server names that
+  a file naming only claimed local panes goes. A pane no launch has claimed is
+  named by a bare decimal id, which names no realm to ask, so a window with one
+  plain shell pane keeps its file. A window attached to a mux server names that
   server's panes, which are usually still running, or gone together with their
   socket with nothing to show the server gone, which a reader reports as
   unavailable rather than absent. So that file stays until you remove it. So
@@ -147,6 +149,15 @@ mean four kinds of leftover stay on disk:
   into each binding. Nothing reads them now. Sweep removes them only with their
   binding, under the same retention rules, so a binding that is still current
   keeps them.
+- **Panes with no binding, and server folders.** Sweep finds its work through
+  bindings. A pane folder holding only a claim or a mark, with no binding, is
+  never visited, and nothing removes a realm or incarnation folder, empty or
+  not. A GUI's realm comes from its `gui-sock-<pid>` path, so each GUI launch
+  adds one.
+- **A binding a new claim replaced before it ended.** Sweep ends only a pane's
+  current binding. A binding whose pane was claimed again while it was still
+  active is no longer current, so it never ends, and `attention bindings` lists
+  it as `active` with `current: false` for good.
 
 Collecting any of these would be a new deletion, and would need the same
 evidence rule the others have.

@@ -1,6 +1,6 @@
 # Mux setup
 
-This setup keeps attention on the right pane across local and attached WezTerm GUIs. Writing v2 records needs macOS or Linux (glibc, including aarch64), the two tested platforms, and the `attention` command built by `scripts/install-cli.sh` (see [Install](../README.md#install)). Without the command nothing is recorded, and the plugin has nothing to show.
+This setup keeps attention on the right pane across local and attached WezTerm GUIs. Writing v2 records needs macOS or Linux (glibc, including aarch64), the two tested platforms, and the `attention` command built by `scripts/install-cli.sh` (see [Install](../README.md#install)). Without the command nothing is recorded, and the plugin has nothing to show. Attention reads only this machine's state directory, so a pane whose shell runs on another host (an SSH or TLS domain, or a `proxy_command` that reaches one) shows nothing here.
 
 ## WezTerm configuration
 
@@ -21,13 +21,22 @@ attention.apply_to_config(config, {
 
 The plugin exports `WEZTERM_ATTENTION_DIR` to new panes unless `integration_root` is not an absolute path: then it exports neither variable and logs `v2 integration root is unavailable`. It exports `WEZTERM_ATTENTION_ROOT` only when `libexec/attention-rs` exists under the integration root, which is the plugin's own checkout unless `integration_root` names another; otherwise it logs once that the command is missing.
 
+### The mux server runs the config too
+
+A `wezterm-mux-server` loads your WezTerm config itself, plugin included, and the panes it spawns get `WEZTERM_ATTENTION_DIR` and `WEZTERM_ATTENTION_ROOT` from that run, not from the GUI's (WezTerm source at commit `4fbd6b8e9`). Three things follow:
+
+- Reloading the GUI's config does not reach the server. The server reloads when the config file changes, unless `automatically_reload_config` is `false`. After building the command, save the config file once, or restart the server, before opening new mux panes.
+- The GUI's debug overlay does not show the server's log lines, the plugin's "command is missing" line included. A server started with `--daemonize` writes them to `log` beside WezTerm's default socket (`~/.local/share/wezterm/log` on macOS), unless `daemon_options` sets `stdout` or `stderr`; a server in the foreground writes them to its terminal.
+- Without the `dir` option, the plugin picks the state directory from the environment of the process running it. A server started from a shell whose `WEZTERM_ATTENTION_DIR` or `XDG_STATE_HOME` differs from the GUI's records into one directory while the GUI reads another. Set `dir` to an absolute path when the two can start from different environments.
+
 After a GUI attaches to an existing mux, it waits for two polls with the same pane count, republishes valid claims, and retries after 2, 5, 10, and 30 seconds while any pane remains unpublished. One schedule is shared per socket. The child PATH includes WezTerm's executable directory. A timer rechecks GUI-window inventory before retrying. If inventory is unavailable, another pane poll must renew the unpublished observation; otherwise that retry is retired. Fresh polls can restart publication. This retires retry evidence, not pane state.
 
 Republication needs the socket of the mux behind the domain:
 
 - A unix domain with an absolute `socket_path` uses that path.
 - A unix domain with no `socket_path`, including WezTerm's implicit `unix` domain, uses WezTerm's default socket: `$XDG_RUNTIME_DIR/wezterm/sock` on Linux when `XDG_RUNTIME_DIR` is set, else `~/.local/share/wezterm/sock`.
-- A domain with a `proxy_command` or a relative `socket_path` has no socket on this machine to republish through. The plugin logs once for panes on such a domain; they show attention again after their shell's next prompt republishes.
+- A domain with a `proxy_command` or a relative `socket_path` has no socket on this machine to republish through. The plugin logs once for panes on such a domain; when their shell runs on this machine, they show attention again after its next prompt republishes.
+- A server whose config lists several `unix_domains` listens on all of them, but gives its panes only the last one's `socket_path` (WezTerm source at commit `4fbd6b8e9`). A GUI attached through another of them finds no claims to republish, and its panes show attention again only after their shell's next prompt.
 
 The domain lists are read when a poll needs them, so `unix_domains` set after `apply_to_config` still counts. The `local` domain, every exec domain, every serial port and every WSL domain are this GUI's own panes and need no republication.
 
