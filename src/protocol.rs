@@ -15,9 +15,10 @@ pub const EMBEDDED_MANIFEST: &str = include_str!("../protocol/v2.json");
 /// enum's variants on its own, and the manifest test needs that list.
 macro_rules! diagnostic_codes {
     ($($variant:ident => $spelling:literal),+ $(,)?) => {
-        /// Every code a diagnostic can carry. Closed vocabulary: consumers
-        /// switch on these, and the manifest's `enums.diagnostic_codes` must
-        /// declare each one.
+        /// Every code a diagnostic can carry. The manifest's
+        /// `enums.diagnostic_codes` must declare each one. To consumers the set
+        /// is open: the consumer guide's Compatibility section lets a release
+        /// add a code.
         #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
         pub enum DiagnosticCode {
             $($variant),+
@@ -240,10 +241,10 @@ pub struct NativeHookDeclaration {
 
 /// What a hook event did to the state it was given.
 ///
-/// Closed vocabulary: consumers switch on these values, so adding one is a
-/// protocol change rather than a local choice. It is an enum because the writer
-/// names it at roughly eighty sites, and a misspelling there used to be a
-/// silently valid string that no consumer would ever match.
+/// Consumers switch on these values. The set is open to them: the consumer
+/// guide's Compatibility section lets a release add one. It is an enum
+/// because the writer names it at roughly eighty sites, and a misspelling
+/// there used to be a silently valid string that no consumer would ever match.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Disposition {
     Applied,

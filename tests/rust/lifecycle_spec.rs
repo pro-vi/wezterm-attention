@@ -1835,6 +1835,33 @@ fn readme_json_block(heading: &str) -> Value {
         .unwrap_or_else(|error| panic!("README section {heading:?}: {error}"))
 }
 
+// A consumer switches on the codes the consumer guide lists, so the list holds
+// every code the manifest defines and no other.
+#[test]
+fn consumer_guide_lists_every_diagnostic_code() {
+    let guide = include_str!("../../docs/consumer-guide.md");
+    let list = guide
+        .lines()
+        .find_map(|line| line.strip_prefix("**Diagnostic codes.**"))
+        .and_then(|paragraph| paragraph.split_once(" emits these `code` values: "))
+        .and_then(|(_, rest)| rest.split_once(". The set is open"))
+        .map(|(list, _)| list)
+        .expect("consumer guide has a Diagnostic codes paragraph");
+    let listed: BTreeSet<String> = list
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        listed,
+        wezterm_attention::protocol::manifest()
+            .unwrap()
+            .enums
+            .diagnostic_codes
+    );
+}
+
 // The README's hook blocks are what users paste into their agent's settings,
 // so each registers exactly the rows `hooks describe` marks `register`, each
 // as one command hook in the documented form. The block holds nothing else;

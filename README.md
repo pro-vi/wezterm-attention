@@ -379,7 +379,7 @@ local marker_id = attention.pane_marker_id(pane)
 -- than one full pane address; get_attention_view tells them apart.
 local state, frame = attention.get_attention(marker_id)
 
--- Read seventeen cached base fields plus independent lifecycle evidence, without
+-- Read the cached base fields plus independent lifecycle evidence, without
 -- I/O: type and frame as above, the activity's source, the subagent count and
 -- whether it could be read, the review flag, the provider binding and more; see
 -- docs/consumer-guide.md. Nested returned values do not share mutable state with

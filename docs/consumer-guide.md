@@ -19,6 +19,7 @@ Use the full pane object. A server pane ID alone is not globally unique across m
 | `type` | Existing display winner after activity/review priority |
 | `frame` | The frame of the pane's activity, which `get_attention` returns second: the one its writer stored, as `attention mark --frame` does, or, for a `thinking` pane whose writer stored none, one from the clock, a new one each second. `nil` when the review flag outranks the activity |
 | `activity_type`, `event_id`, `source` | Eligible lead activity, independently of review |
+| `turn_end_held`, `turn_end_quiet` | Whether the shown turn end is held by a [hold check](#pre-write-hold-checks), or carries a quiet note; both false when neither applies |
 | `review` | Owner-scoped review presence |
 | `subagents`, `subagents_uncertain` | How many of the pane's sub-agents are running, and whether that count could not be read; `subagents` is 0 when it could not |
 | `provider`, `binding_id`, `binding_phase` | Validated provider binding; a quiet binding can still identify its provider |
@@ -26,7 +27,7 @@ Use the full pane object. A server pane ID alone is not globally unique across m
 | `pane_presence`, `reader_confidence`, `binding_health` | Read assessment; preserve uncertainty instead of treating it as absence |
 | `lifecycle` | Optional bounded observations and derived request evidence |
 
-These are seventeen base fields plus the lifecycle facet. Nil remains nil and false remains false. Internal records, cache keys, formatter state, deadlines, and root diagnostics are private. The scalar `get_attention` returns `type` and `frame` alone; read the other fields from the view.
+Nil remains nil and false remains false. Internal records, cache keys, formatter state, deadlines, and root diagnostics are private. The scalar `get_attention` returns `type` and `frame` alone; read the other fields from the view.
 
 The view's `binding_health` comes from the plugin's own read of the pane's records, not from the rule `bindings` and `inspect` share, and it can differ from theirs for the same binding. It never says `conflicted`, since the plugin does not look for the session at other pane addresses. Any diagnostic from its read, an unreadable review file included, makes it `invalid`, or `future_schema` when one of them is.
 
@@ -120,7 +121,7 @@ A consumer that needs to know which panes are running an agent must inspect proc
 
 ## Storage and retention
 
-A binding keeps the lead's observations in `lifecycle.json` and its children's in `children-lifecycle.json`, each with separate request/general pools. Each pool has at most 64 observations, 122,880 compact UTF-8 bytes, and its own monotonic retention floor. One observation is at most 2,048 bytes; each raw file is capped at 262,144 bytes and eight container levels.
+A binding keeps the lead's observations in `lifecycle.json` and its children's in `children-lifecycle.json`, each with separate request/general pools. Each pool has at most 64 observations, 122,880 compact UTF-8 bytes, and its own monotonic retention floor. One observation's native fields are at most 2,048 bytes, and the whole observation, with the `turn_end` that Attention adds to a turn end, at most 18,432 bytes; each raw file is capped at 262,144 bytes and nine container levels.
 
 Children's traffic cannot evict the lead's evidence, however much there is: the lead's observations leave only when later lead observations displace them. That is isolation, not freshness. The newest lead observation shown can still be older than the lead's last hook, because the writer refuses, for example, an observation that repeats one it holds, one at or below its pool's floor, one older than everything its full pool keeps, or one it cannot write before the lock times out. Children share their file's pools, so a busy child can evict another child's evidence.
 
@@ -171,7 +172,7 @@ nested paths and wildcards are usage errors.
 attention tabs
 ```
 
-A GUI window attached to a mux server mirrors the server's tabs under its own numbers, and those are the numbers the tab bar prints. They are not the order of `wezterm cli list`, and no derivation from it recovers them. The tab bar therefore publishes what it drew, one file per identified GUI source and window at `<state root>/tabs/<incarnation id>-<window id>.json`, and `attention tabs` returns them in the ordinary envelope: `result.windows` holds one entry per window with `window_id`, `source`, `published_at_ms` and `tabs`, and each tab carries `number`, the whole `text` the bar drew, and `marker_ids` — the IDs the plugin already uses for those panes, already translated out of the window's local numbering. The `text` leaves out two things the bar draws: a spinner is published at its first frame, so the file is not rewritten every second, and the plugin.s `⚠ rebuild attention` warning, which names no tab, is left out. A pane a launch has claimed is `v2:<realm_id>:<incarnation_id>:<pane_id>`; a pane no launch has claimed is its canonical decimal pane id. A pane appears once a poll has identified it.
+A GUI window attached to a mux server mirrors the server's tabs under its own numbers, and those are the numbers the tab bar prints. They are not the order of `wezterm cli list`, and no derivation from it recovers them. The tab bar therefore publishes what it drew, one file per identified GUI source and window at `<state root>/tabs/<incarnation id>-<window id>.json`, and `attention tabs` returns them in the ordinary envelope: `result.windows` holds one entry per window with `window_id`, `source`, `published_at_ms` and `tabs`, and each tab carries `number`, the whole `text` the bar drew, and `marker_ids` — the IDs the plugin already uses for those panes, already translated out of the window's local numbering. The `text` leaves out two things the bar draws: a spinner is published at its first frame, so the file is not rewritten every second, and the plugin's `⚠ rebuild attention` warning, which names no tab, is left out. A pane a launch has claimed is `v2:<realm_id>:<incarnation_id>:<pane_id>`; a pane no launch has claimed is its canonical decimal pane id. A pane appears once a poll has identified it.
 
 The window entries are sorted by window ID and then source identity (legacy first on a tie); the tabs inside one are in the order the bar draws them, which is the point of the file. Every tab is listed, including tabs holding no agent, which is why this is a separate command from `bindings`.
 
@@ -242,6 +243,8 @@ Hook commands never exit 2, because Claude Code and Codex read exit 2 as "block"
 **Socket identity.** The `realm_id` and `incarnation_id` in every pane address, and in the `result.scope` of a `bindings --socket` answer, can be computed without a subprocess. Both are lowercase hexadecimal SHA-256 digests. `realm_id` is the digest of the socket's canonical path (symlinks resolved) as UTF-8. `incarnation_id` is the digest of four parts, in order: the `realm_id` text, and the socket file's device number, inode number and change time in nanoseconds (`st_ctime` × 10⁹ + `st_ctime_nsec`), those three written in decimal. Each part is fed as its byte length, an 8-byte big-endian integer, followed by its UTF-8 bytes. Attention refuses a socket path that is not absolute or not UTF-8, a file that is not a socket or is not owned by the effective user, and a negative change time. A change to this recipe raises the wire version.
 
 **Observation kinds.** As of 1.0.0, Attention writes these `kind` values: `prompt_submitted`, `tool_preflight`, `tool_result`, `approval_requested`, `automatic_denial`, `response_finished`, `run_settled`, `attempt_outcome`, `user_interrupt`, `elicitation_requested`, `elicitation_action_selected`, `notice`, `compaction_attempted` and `compaction_succeeded`. The set is open; a release that adds one lists it in the changelog.
+
+**Diagnostic codes.** As of 1.0.0, Attention emits these `code` values: `bad_usage`, `binding_conflict`, `child_active_after_parent_clear`, `claim_stale`, `clock_skew`, `future_schema`, `identity_unpublished`, `incarnation_changed`, `integration_version_mismatch`, `outside_pane`, `probe_unavailable`, `realm_unavailable`, `record_invalid`, `self_claim_parent_unverified`, `session_detached`, `socket_gone`, `socket_refused`, `state_permissions` and `unsafe_tty`. The set is open, like the observation kinds. A build lists the codes it knows in `attention doctor`'s `result.diagnostic_codes`; they are the `enums.diagnostic_codes` of the `protocol/v2.json` it was built from.
 
 ### Registration description
 
