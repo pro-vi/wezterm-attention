@@ -504,6 +504,11 @@ fn print_err(text: &str) {
     let _ = writeln!(std::io::stderr().lock(), "{text}");
 }
 
+fn print_diagnostic(diagnostic: &Diagnostic) {
+    let message = wezterm_attention::protocol::terminal_safe(&diagnostic.message);
+    print_err(&format!("attention: {}: {message}", diagnostic.code));
+}
+
 fn emit<T: Serialize>(response: &Response<T>, as_json: bool, quiet: bool) {
     if quiet {
         return;
@@ -514,10 +519,7 @@ fn emit<T: Serialize>(response: &Response<T>, as_json: bool, quiet: bool) {
         // The status word alone cannot say what to fix. Its reasons go to
         // stderr, so a script that reads stdout reads only the word.
         print_out(&response.status);
-        for diagnostic in &response.diagnostics {
-            let message = wezterm_attention::protocol::terminal_safe(&diagnostic.message);
-            print_err(&format!("attention: {}: {message}", diagnostic.code));
-        }
+        response.diagnostics.iter().for_each(print_diagnostic);
     }
 }
 
@@ -538,10 +540,7 @@ fn emit_error(error: &AttentionError, as_json: bool, command: &str) -> ExitCode 
         print_out(&printable_json(&response));
     } else {
         for diagnostic in &response.diagnostics {
-            print_err(&format!(
-                "attention: {}: {}",
-                diagnostic.code, diagnostic.message
-            ));
+            print_diagnostic(diagnostic);
             if let Some(help) = &diagnostic.help {
                 print_err(&format!("help: {help}"));
             }
@@ -567,10 +566,7 @@ fn emit_hook_error(error: &AttentionError, debug: bool, strict: bool, command: &
     if debug {
         print_err(&printable_json(&error_response(error, command)));
     } else {
-        print_err(&format!(
-            "attention: {}: {}",
-            error.diagnostic.code, error.diagnostic.message
-        ));
+        print_diagnostic(&error.diagnostic);
     }
     if strict {
         ExitCode::from(1)
@@ -881,12 +877,13 @@ fn run_hooks_event(
         // An event skipped on purpose admits no scope, so it owes its
         // consumers no delivery.
         let skipped_on_purpose = event.skip_reason.is_some();
+        let check_failed = wezterm_attention::hold_check::failed(&outcome.hold_checks);
         let failed = outcome.result.as_ref().map_or(true, |result| {
             matches!(
                 result.disposition,
                 Disposition::Ignored | Disposition::Conflict | Disposition::Partial
             )
-        }) || wezterm_attention::hold_check::failed(&outcome.hold_checks)
+        }) || check_failed
             || (!skipped_on_purpose
                 && consumers
                     .iter()
@@ -895,15 +892,21 @@ fn run_hooks_event(
             Ok(result) => result.diagnostic.iter().cloned().collect(),
             Err(error) => vec![error.diagnostic.clone()],
         };
-        let result = serde_json::json!({"native": outcome.result.as_ref().ok(), "admission": outcome.admission, "persistence": outcome.persistence, "consumers": consumers, "hold_checks": outcome.hold_checks, "turn_end": outcome.turn_end});
-        // Prompt/reply bodies and child output never enter this diagnostic projection.
-        print_err(&printable_json(&Response::new(
-            name,
-            if failed { "findings" } else { "ok" },
-            !failed,
-            diagnostics,
-            result,
-        )));
+        // A failed check carries no diagnostic, so only the envelope can say
+        // which stage it stopped at.
+        if args.debug || !args.consumer.is_empty() || check_failed {
+            let result = serde_json::json!({"native": outcome.result.as_ref().ok(), "admission": outcome.admission, "persistence": outcome.persistence, "consumers": consumers, "hold_checks": outcome.hold_checks, "turn_end": outcome.turn_end});
+            // Prompt/reply bodies and child output never enter this diagnostic projection.
+            print_err(&printable_json(&Response::new(
+                name,
+                if failed { "findings" } else { "ok" },
+                !failed,
+                diagnostics,
+                result,
+            )));
+        } else {
+            diagnostics.iter().for_each(print_diagnostic);
+        }
         return Ok(if args.strict && failed {
             ExitCode::from(1)
         } else {
@@ -935,10 +938,7 @@ fn run_hooks_event(
         );
         print_err(&printable_json(&response));
     } else if let Some(diagnostic) = &result.diagnostic {
-        print_err(&format!(
-            "attention: {}: {}",
-            diagnostic.code, diagnostic.message
-        ));
+        print_diagnostic(diagnostic);
     }
     Ok(if args.strict && failed {
         ExitCode::from(1)

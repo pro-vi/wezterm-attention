@@ -46,32 +46,21 @@ fn hook(
     check: &std::path::Path,
     extra: &[&str],
 ) -> std::process::Output {
-    let mut command = rust_command(setup);
-    command
-        .args([
-            "hooks",
-            "event",
-            payload
-                .get("provider")
-                .and_then(Value::as_str)
-                .unwrap_or("claude"),
-            payload["hook_event_name"].as_str().unwrap(),
-            "--debug",
-            "--hold-check",
-        ])
-        .arg(format!("jev={}", check.display()))
-        .args(extra)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(&serde_json::to_vec(payload).unwrap())
-        .unwrap();
-    child.wait_with_output().unwrap()
+    let check = format!("jev={}", check.display());
+    let mut arguments = vec![
+        "hooks",
+        "event",
+        payload
+            .get("provider")
+            .and_then(Value::as_str)
+            .unwrap_or("claude"),
+        payload["hook_event_name"].as_str().unwrap(),
+        "--debug",
+        "--hold-check",
+        &check,
+    ];
+    arguments.extend_from_slice(extra);
+    run_hook(setup, &arguments, payload)
 }
 
 fn records(setup: &Setup, provider: &str) -> (Value, Value) {
@@ -900,6 +889,83 @@ fn quiet_checks_receive_frozen_history_without_reply_or_background_tasks() {
             assert_eq!(records(&setup, provider).0["type"], "thinking");
         }
     }
+}
+
+#[test]
+fn a_quiet_check_on_the_command_line_attaches_its_note_and_prints_nothing() {
+    let setup = Setup::new();
+    bind(&setup, "claude");
+    // A quiet check reads the turn's history, so the turn needs one observation.
+    setup.apply(
+        &event("claude", "UserPromptSubmit", "hold-session", json!({})),
+        "00000000000000000300",
+    );
+    let check = executable(
+        &setup,
+        &format!("/bin/cat >/dev/null\nprintf '%s' '{QUIET_LINE}'"),
+    );
+    let mut input = payload();
+    input.as_object_mut().unwrap().remove("background_tasks");
+    let quiet = format!("wezpup={}", check.display());
+    let output = run_hook(
+        &setup,
+        &["hooks", "event", "claude", "Stop", "--quiet-check", &quiet],
+        &input,
+    );
+    assert!(output.status.success());
+    // Without --debug or --consumer, a hook prints only its diagnostics, and
+    // this event has none.
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    assert_eq!(
+        records(&setup, "claude").0["hold_notes"]["wezpup"]["quiet"],
+        true
+    );
+}
+
+#[test]
+fn a_malformed_quiet_check_is_reported_under_its_own_flag() {
+    let setup = Setup::new();
+    let output = run_hook(
+        &setup,
+        &[
+            "hooks",
+            "event",
+            "claude",
+            "Stop",
+            "--quiet-check",
+            "wezpup",
+        ],
+        &payload(),
+    );
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "attention: bad_usage: --quiet-check requires NAME=/absolute/executable\n"
+    );
+}
+
+#[test]
+fn a_failed_check_without_debug_still_names_its_stage() {
+    let setup = Setup::new();
+    bind(&setup, "claude");
+    let check = executable(&setup, "/bin/cat >/dev/null\nexit 99");
+    let hold = format!("jev={}", check.display());
+    let output = run_hook(
+        &setup,
+        &[
+            "hooks",
+            "event",
+            "claude",
+            "Stop",
+            "--strict",
+            "--hold-check",
+            &hold,
+        ],
+        &payload(),
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let report: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(report["result"]["hold_checks"][0]["stage"], "failed");
 }
 
 #[test]

@@ -239,10 +239,14 @@ pub fn validate_checks(holds: &[String], quiets: &[String]) -> Result<Vec<Regist
         .map(|v| (v, Purpose::Hold))
         .chain(quiets.iter().map(|v| (v, Purpose::Quiet)))
     {
+        let flag = match purpose {
+            Purpose::Hold => "--hold-check",
+            Purpose::Quiet => "--quiet-check",
+        };
         let Some((name, executable)) = value.split_once('=') else {
-            return Err(AttentionError::usage(
-                "--hold-check requires NAME=/absolute/executable",
-            ));
+            return Err(AttentionError::usage(format!(
+                "{flag} requires NAME=/absolute/executable"
+            )));
         };
         if !token(name, true)
             || name.len() > limits.safe_label_max_bytes
@@ -251,9 +255,9 @@ pub fn validate_checks(holds: &[String], quiets: &[String]) -> Result<Vec<Regist
             || executable.len() > limits.path_max_bytes
             || !free_of_control(executable)
         {
-            return Err(AttentionError::usage(
-                "--hold-check requires a unique lowercase name and absolute executable path",
-            ));
+            return Err(AttentionError::usage(format!(
+                "{flag} requires a unique lowercase name and absolute executable path"
+            )));
         }
         registrations.push(Registration {
             name: name.into(),
@@ -285,7 +289,7 @@ pub fn validate_checks(holds: &[String], quiets: &[String]) -> Result<Vec<Regist
     .map_err(AttentionError::record_json)?;
     if bytes.len() + b",\"turn_end\":".len() > limits.lifecycle_envelope_max_bytes {
         return Err(AttentionError::usage(
-            "--hold-check registrations exceed the turn-end audit budget",
+            "--hold-check and --quiet-check registrations exceed the turn-end audit budget",
         ));
     }
     Ok(registrations)
