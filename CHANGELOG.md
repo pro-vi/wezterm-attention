@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0
+## 1.0.0 — 2026-10-09
 
 This release adds the `attention` command, a Rust program that agent hooks and scripts call to record what a pane's agent is doing, and a plugin that reads those records across local panes and mux-attached GUIs. The plugin shows only what the command records, so the two are installed together.
 
