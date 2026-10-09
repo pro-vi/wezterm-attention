@@ -407,6 +407,8 @@ wezterm.on("format-tab-title", attention.wrap_title_formatter(function(tab, ctx)
 end))
 ```
 
+Which removals need a new major version, and what is private: [Compatibility](docs/consumer-guide.md#compatibility).
+
 ## Pi extension
 
 Install this repository as a Pi package:
