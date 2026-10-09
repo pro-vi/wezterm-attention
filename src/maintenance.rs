@@ -743,12 +743,13 @@ fn fold_kept_history(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
 
 /// A tab order whose writer has exited stays on disk for good: the writer
 /// withdraws its own files when a window closes, but nothing runs after the
-/// last window of a WezTerm process. It is collected here once every pane it
-/// names is verified absent, or once it names no tab at all: WezTerm closes a
-/// window whose last tab closes, so an empty order is the bar's final draw. A
-/// file naming a bare decimal pane id is kept, because it has no realm to
-/// ask; so is one naming a pane whose realm or incarnation is not recorded,
-/// and one whose panes could not be probed. A GUI source is not the pane realm
+/// last window of a WezTerm process. It is collected here once it names at
+/// least one pane and every pane it names is verified absent, or once it names
+/// no tab at all: WezTerm closes a window whose last tab closes, so an empty
+/// order is the bar's final draw. A file naming a bare decimal pane id is
+/// kept, because it has no realm to ask; so is one naming a pane whose realm
+/// or incarnation is not recorded, one whose panes could not be probed, and
+/// one whose tabs name no pane, as in a remote domain that publishes no id. A GUI source is not the pane realm
 /// a sweep selects, so a realm-filtered sweep leaves these files alone.
 /// Returns how many steps failed.
 fn collect_tab_orders(
@@ -781,7 +782,10 @@ fn collect_tab_orders(
                 None => without_address = true,
             }
         }
-        let mut keep = without_address.then_some("no_address");
+        // A file whose tabs name no pane has nothing to probe.
+        let mut keep = without_address
+            .then_some("no_address")
+            .or((addresses.is_empty() && !window.tabs.is_empty()).then_some("no_pane_named"));
         if keep.is_none() {
             for address in &addresses {
                 let presence = match presence_cache.get(address) {

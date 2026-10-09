@@ -1160,15 +1160,19 @@ fn sweep_leaves_files_at_the_top_of_the_root_alone() {
 }
 
 fn write_tab_order(root: &Path, window_id: u64, marker_ids: &[&str]) -> PathBuf {
-    let tabs = root.join("tabs");
-    fs::create_dir_all(&tabs).expect("create tabs directory");
-    let path = tabs.join(format!("{window_id}.json"));
     let ids: Vec<Value> = marker_ids.iter().map(|id| json!(id)).collect();
     let listed: Vec<Value> = if ids.is_empty() {
         Vec::new()
     } else {
         vec![json!({"marker_ids": ids, "number": 1, "text": "tab"})]
     };
+    write_tab_order_tabs(root, window_id, listed)
+}
+
+fn write_tab_order_tabs(root: &Path, window_id: u64, listed: Vec<Value>) -> PathBuf {
+    let tabs = root.join("tabs");
+    fs::create_dir_all(&tabs).expect("create tabs directory");
+    let path = tabs.join(format!("{window_id}.json"));
     fs::write(
         &path,
         serde_json::to_vec(&json!({
@@ -1458,6 +1462,25 @@ fn sweep_collects_a_tab_order_only_when_every_pane_it_names_is_verified_absent()
         "the dead windows' orders are collected"
     );
     assert!(live.exists() && unclaimed.exists(), "everything else stays");
+}
+
+#[test]
+fn sweep_keeps_a_tab_order_whose_tabs_name_no_pane() {
+    let setup = Setup::new();
+    let root = setup.root();
+    // A window holding only remote-domain panes that publish no id draws its
+    // tabs with empty pane lists; nothing in the file can show it closed.
+    let unnamed = write_tab_order_tabs(
+        &root,
+        11,
+        vec![json!({"marker_ids": [], "number": 1, "text": "remote"})],
+    );
+
+    let (applied, _) = setup.run_sweep(true);
+    let detail = tab_order_detail(&applied.details, 11);
+    assert_eq!(detail["action"], "keep");
+    assert_eq!(detail["reason"], "no_pane_named");
+    assert!(unnamed.exists());
 }
 
 #[test]

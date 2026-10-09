@@ -120,15 +120,17 @@ entries; and exited GUIs' tab-order files the record contract lists as collected
 Those rules keep sweep from removing state it cannot prove abandoned, and they
 mean six kinds of leftover stay on disk:
 
-- **An exited GUI's tab-order files that name mux panes.** A file is removed
-  only when it names no tab, or when every pane it names is verified absent.
-  The GUI's own local panes are, once it has exited (see the next section), so
-  a file naming only claimed local panes goes. A pane no launch has claimed is
-  named by a bare decimal id, which names no realm to ask, so a window with one
-  plain shell pane keeps its file. A window attached to a mux server names that
-  server's panes, which are usually still running, or gone together with their
-  socket with nothing to show the server gone, which a reader reports as
-  unavailable rather than absent. So that file stays until you remove it. So
+- **An exited GUI's tab-order files that name mux panes, or no pane.** A file
+  is removed only when it names no tab, or when it names at least one pane and
+  every pane it names is verified absent. The GUI's own local panes are, once
+  it has exited (see the next section), so a file naming only claimed local
+  panes goes. A pane no launch has claimed is named by a bare decimal id,
+  which names no realm to ask, so a window with one plain shell pane keeps its
+  file. So does a window holding only remote-domain panes that publish no id.
+  A window attached to a mux server names that server's panes, which are
+  usually still running, or gone together with their socket with nothing to
+  show the server gone, which a reader reports as unavailable rather than
+  absent. So that file stays until you remove it. So
   does a file naming a pane whose realm or incarnation records are gone, as
   after you remove a server's records by hand; with no socket to ask, it
   leaves sweep complete. It is safe to delete
