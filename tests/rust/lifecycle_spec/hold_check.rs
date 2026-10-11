@@ -1,10 +1,24 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::time::Instant;
 use wezterm_attention::hold_check::{self, Request};
 use wezterm_attention::lifecycle::apply_provider_event_with_checks;
 
 const HOLD_LINE: &str = "{\"hold\": true, \"answer\": \"waiting_on_own_work\"}\n";
+
+/// The chain budget for tests that hold a check open on purpose. The command's
+/// own `TOTAL_BUDGET` is 2 s, which a loaded machine can spend before a shell
+/// script has started, and then the check never runs.
+const CHECK_BUDGET: Duration = Duration::from_secs(30);
+
+fn wait_for_check_start(ready: &Path) {
+    let until = Instant::now() + CHECK_BUDGET;
+    while !ready.exists() {
+        assert!(Instant::now() < until, "check never began");
+        thread::sleep(Duration::from_millis(2));
+    }
+}
 
 fn bind(setup: &Setup, provider: &str) {
     setup.claim();
@@ -333,11 +347,7 @@ fn assert_newer_prompt_supersedes_stop(already_thinking: bool) {
     let reply = wezterm_attention::providers::reply_content(&stop, &payload, true);
     thread::scope(|scope| {
         let writer = scope.spawn(|| {
-            let until = Instant::now() + Duration::from_secs(5);
-            while !ready.exists() {
-                assert!(Instant::now() < until, "check never began");
-                thread::sleep(Duration::from_millis(2));
-            }
+            wait_for_check_start(&ready);
             let prompt = event("claude", "UserPromptSubmit", "hold-session", json!({}));
             let result = setup.apply(&prompt, "00000000000000000500");
             assert_ne!(result.disposition, "ignored");
@@ -352,6 +362,7 @@ fn assert_newer_prompt_supersedes_stop(already_thinking: bool) {
                 registrations: &registrations,
                 reply: &reply,
                 background_tasks: payload["background_tasks"].as_array().map(Vec::as_slice),
+                budget: CHECK_BUDGET,
             },
         );
         writer.join().unwrap();
@@ -387,11 +398,7 @@ fn binding_rotation_during_hold_check_cannot_follow_new_occupant() {
     let reply = wezterm_attention::providers::reply_content(&stop, &payload, true);
     thread::scope(|scope| {
         let writer = scope.spawn(|| {
-            let until = Instant::now() + Duration::from_secs(5);
-            while !ready.exists() {
-                assert!(Instant::now() < until, "check never began");
-                thread::sleep(Duration::from_millis(2));
-            }
+            wait_for_check_start(&ready);
             let changed = setup.apply(
                 &event(
                     "claude",
@@ -413,6 +420,7 @@ fn binding_rotation_during_hold_check_cannot_follow_new_occupant() {
                 registrations: &registrations,
                 reply: &reply,
                 background_tasks: payload["background_tasks"].as_array().map(Vec::as_slice),
+                budget: CHECK_BUDGET,
             },
         );
         writer.join().unwrap();
@@ -472,11 +480,7 @@ fn inherited_host_changed_during_hold_check_writes_no_turn_end() {
         let before = super::self_claim::records(&setup);
         thread::scope(|scope| {
             let change = scope.spawn(|| {
-                let until = Instant::now() + Duration::from_secs(5);
-                while !ready.exists() {
-                    assert!(Instant::now() < until, "check never began");
-                    thread::sleep(Duration::from_millis(2));
-                }
+                wait_for_check_start(&ready);
                 setup.processes.set(AGENT_PID, state);
                 fs::write(&released, "").unwrap();
             });
@@ -489,6 +493,7 @@ fn inherited_host_changed_during_hold_check_writes_no_turn_end() {
                     registrations: &registrations,
                     reply: &reply,
                     background_tasks: payload["background_tasks"].as_array().map(Vec::as_slice),
+                    budget: CHECK_BUDGET,
                 },
             );
             change.join().unwrap();
@@ -768,6 +773,7 @@ fn hold_audit_reservation_preserves_large_native_observation() {
             registrations: &registrations,
             reply: &reply,
             background_tasks: payload["background_tasks"].as_array().map(Vec::as_slice),
+            budget: CHECK_BUDGET,
         },
     );
     assert_eq!(
@@ -814,6 +820,7 @@ fn quiet_stop(
             registrations: &registrations,
             reply: &wezterm_attention::hook_content::HookContent::NotRequested,
             background_tasks: None,
+            budget: CHECK_BUDGET,
         },
     )
 }
@@ -1054,11 +1061,7 @@ fn a_prompt_committed_during_quiet_check_discards_its_note() {
         );
         thread::scope(|scope| {
             let writer = scope.spawn(|| {
-                let until = Instant::now() + Duration::from_secs(5);
-                while !ready.exists() {
-                    assert!(Instant::now() < until, "check never began");
-                    thread::sleep(Duration::from_millis(2));
-                }
+                wait_for_check_start(&ready);
                 setup.apply(
                     &event("claude", "UserPromptSubmit", "hold-session", json!({})),
                     prompt_order,
@@ -1132,11 +1135,7 @@ fn permission_during_check(hold: bool) {
     let reply = wezterm_attention::providers::reply_content(&stop, &payload, true);
     thread::scope(|scope| {
         let writer = scope.spawn(|| {
-            let until = Instant::now() + Duration::from_secs(5);
-            while !ready.exists() {
-                assert!(Instant::now() < until, "check never began");
-                thread::sleep(Duration::from_millis(2));
-            }
+            wait_for_check_start(&ready);
             setup.apply(
                 &event(
                     "claude",
@@ -1157,6 +1156,7 @@ fn permission_during_check(hold: bool) {
                 registrations: &registrations,
                 reply: &reply,
                 background_tasks: payload["background_tasks"].as_array().map(Vec::as_slice),
+                budget: CHECK_BUDGET,
             },
         );
         writer.join().unwrap();

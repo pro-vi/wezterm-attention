@@ -319,15 +319,18 @@ pub struct Request<'a> {
     pub registrations: &'a [Registration],
     pub reply: &'a HookContent,
     pub background_tasks: Option<&'a [Value]>,
+    /// How long the whole chain may run. The command passes `TOTAL_BUDGET`.
+    pub budget: Duration,
 }
 
 /// Runs a chain against one checked prospective event. No input or raw output
 /// is included in the returned execution facts.
 pub fn run(
     registrations: &[Registration],
+    budget: Duration,
     mut input: impl FnMut(&Registration, &str) -> Option<Vec<u8>>,
 ) -> Vec<HoldCheckOutcome> {
-    let deadline = Instant::now() + TOTAL_BUDGET;
+    let deadline = Instant::now() + budget;
     registrations
         .iter()
         .map(|registration| {
@@ -595,7 +598,7 @@ mod tests {
         ] {
             let (root, r) = check(body);
             let began = Instant::now();
-            let result = run(&[r], |_, _| Some(vec![b'a'; 500_000])).remove(0);
+            let result = run(&[r], TOTAL_BUDGET, |_, _| Some(vec![b'a'; 500_000])).remove(0);
             assert_eq!(result.stage, Stage::TimedOut);
             assert!(result.note.is_none());
             assert!(began.elapsed() < Duration::from_millis(3000));
@@ -655,7 +658,7 @@ mod tests {
         second.name = "second".into();
         third.name = "third".into();
         fourth.name = "fourth".into();
-        let outcomes = run(&[first, second, third, fourth], |_, _| {
+        let outcomes = run(&[first, second, third, fourth], TOTAL_BUDGET, |_, _| {
             Some(b"{}\n".to_vec())
         });
         assert_eq!(
@@ -706,7 +709,7 @@ mod tests {
         }
         let (root, r) = check("exit 0");
         fs::write(&r.executable, "not an executable format").unwrap();
-        let outcome = run(&[r], |_, _| Some(b"{}\n".to_vec())).remove(0);
+        let outcome = run(&[r], TOTAL_BUDGET, |_, _| Some(b"{}\n".to_vec())).remove(0);
         assert_eq!(outcome.stage, Stage::NotStarted);
         assert!(outcome.note.is_none());
         fs::remove_dir_all(root).unwrap();

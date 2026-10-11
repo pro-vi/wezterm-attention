@@ -842,6 +842,7 @@ fn run_hooks_event(
             registrations: &hold_checks,
             reply: &check_reply,
             background_tasks,
+            budget: wezterm_attention::hold_check::TOTAL_BUDGET,
         };
         let outcome = wezterm_attention::lifecycle::apply_provider_event_with_checks(
             &event,

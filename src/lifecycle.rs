@@ -3334,7 +3334,7 @@ fn obtain_hold_notes(
             }
         })
         .collect();
-    let completed = hold_check::run(&eligible, |registration, id| {
+    let completed = hold_check::run(&eligible, request.budget, |registration, id| {
         let quiet = registration.purpose == hold_check::Purpose::Quiet;
         let input = HoldCheckInput {
             schema: 1,
