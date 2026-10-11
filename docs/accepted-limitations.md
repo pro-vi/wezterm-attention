@@ -297,10 +297,10 @@ sub-agents still running one long command. A count that can stay too high was
 chosen over one that drops a sub-agent that is still working. There is no
 command to remove such a sub-agent by hand.
 
-## An invalid child set or lifecycle file is started again, and loses what it held
+## An invalid child set, lifecycle file or prompt record is started again, and loses what it held
 
-A hook that finds `children.json`, `lifecycle.json` or `children-lifecycle.json`
-invalid, or naming another provider than its binding, renames it to
+A hook that finds `children.json`, `lifecycle.json`, `children-lifecycle.json`
+or `prompts.json` invalid, or naming another provider than its binding, renames it to
 `.<file name>.invalid.<uuid>`, applies its event to a new file, and reports
 `record_invalid`. The rename moves the file as it stands: a link to a file that
 is not valid is moved aside as a link, and sweep then keeps that binding, as it
@@ -355,6 +355,10 @@ directory.
 
 Overwriting a file a newer version wrote would lose what that version
 recorded, and a file that cannot be read cannot be shown to be invalid.
+
+A `prompts.json` that cannot be read or that a newer version wrote is left as
+it is too, but nothing is refused for it: the hook writes its lifecycle
+observation, runs its consumer, and reports the prompt record.
 
 ## A plugin and a command from either side of the child set show no sub-agents
 

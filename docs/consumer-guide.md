@@ -25,7 +25,7 @@ Use the full pane object. A server pane ID alone is not globally unique across m
 | `provider`, `binding_id`, `binding_phase` | Validated provider binding; a quiet binding can still identify its provider |
 | `address`, `launch_id`, `marker_id` | Full realm/incarnation/pane address, launch, and the scalar pane id `pane_marker_id` returns |
 | `pane_presence`, `reader_confidence`, `binding_health` | Read assessment; preserve uncertainty instead of treating it as absence |
-| `lifecycle` | Optional bounded observations and derived request evidence |
+| `lifecycle` | Optional bounded observations, derived request evidence and the lead's latest prompt |
 
 Nil remains nil and false remains false. Internal records, cache keys, formatter state, deadlines, and root diagnostics are private. The scalar `get_attention` returns `type` and `frame` alone; read the other fields from the view.
 
@@ -46,11 +46,11 @@ Controller ownership and permissions belong to consumers. Key application-owned 
 
 Missing, invalid, unsupported, and unavailable data are not an empty pending-request list. A successfully read invalid/future file never falls back to older cached facts. Optional lifecycle failure does not invalidate an otherwise valid activity badge. The next hook that adds an observation moves an invalid file aside and starts a new one, whose retention floors sit just below that observation: what the old file held then reads as evicted.
 
-The facet contains `snapshot_id`, a flat `observations` array, `requests`, `retention_floors`, at most eight diagnostics, and an exact `badge_acknowledgement` when one matches the stored activity. Its observations are the lead's that the pools of `lifecycle.json` still hold and the children's that the pools of `children-lifecycle.json` still hold, not the binding's whole history. Each observation names its pool: `requests` or `general` for a lead observation from `lifecycle.json`, `child_requests` or `child_general` for one from `children-lifecycle.json`.
+The facet contains `snapshot_id`, a flat `observations` array, `requests`, `latest_prompt` when a lead prompt is known, `retention_floors`, at most eight diagnostics, and an exact `badge_acknowledgement` when one matches the stored activity. Its observations are the lead's that the pools of `lifecycle.json` still hold and the children's that the pools of `children-lifecycle.json` still hold, not the binding's whole history. Each observation names its pool: `requests` or `general` for a lead observation from `lifecycle.json`, `child_requests` or `child_general` for one from `children-lifecycle.json`.
 
 `retention_floors` has one key per file and pool: `lead_requests` and `lead_general` for `lifecycle.json`, `child_requests` and `child_general` for the children's file. A key is present once that file's pool has evicted evidence, and no key covers both files: check both keys of a pool to ask whether either file evicted some of it. In a `lifecycle.json` that still holds children's observations from before children had their own file, a lead floor may mark the eviction of children's observations, whether it was set before that change or by a later lead observation. `snapshot_id` identifies `lifecycle.json` only: a change to the children's file keeps it, so it is not a revision of the whole facet.
 
-The facet is built from both files, and `lifecycle.json` decides first. While it is `unavailable`, `invalid` or `unsupported`, `availability` says so and no children's evidence is shown. Otherwise `availability` is its status, and a children's file that cannot be used is left out and reported in the diagnostics. Without a `lifecycle.json`, the children's file's status is the facet's, so a binding whose only lifecycle evidence is its children's is `available`. The plugin shows a file it could not read again as the copy it read last, with a diagnostic, which makes `availability` `cached` when that file is `lifecycle.json`; `attention inspect` reads once and has no such copy.
+The facet's evidence is built from both lifecycle files, and `lifecycle.json` decides first. While it is `unavailable`, `invalid` or `unsupported`, `availability` says so and no children's evidence is shown. Otherwise `availability` is its status, and a children's file that cannot be used is left out and reported in the diagnostics. Without a `lifecycle.json`, the children's file's status is the facet's, so a binding whose only lifecycle evidence is its children's is `available`. The plugin shows a file it could not read again as the copy it read last, with a diagnostic, which makes `availability` `cached` when that file is `lifecycle.json`; `attention inspect` reads once and has no such copy.
 
 ## Which observations end a turn
 
@@ -68,7 +68,7 @@ Pi's `attempt_outcome` is not a turn end. It comes from a `message_end` whose as
 
 A `Stop` hook can block the stop, and the agent then keeps working in the same turn without a new prompt; its next `response_finished` carries `stop_hook_active: true`. Take the latest turn-end observation, not the first.
 
-Some turns end with no observation. A Claude turn the user stops with Esc sends no event (see [accepted limitations](accepted-limitations.md#pressing-esc-in-claude-code-leaves-thinking-on-the-tab)). A Codex turn that ends on an API error runs neither `Stop` nor `Interrupt` (see [accepted limitations](accepted-limitations.md#a-codex-turn-that-ends-on-an-api-error-leaves-thinking-on-the-tab)).
+Some turns end with no observation. A Claude turn the user stops with Esc sends no event (see [accepted limitations](accepted-limitations.md#pressing-esc-in-claude-code-leaves-thinking-on-the-tab)). A Codex turn that ends on an API error runs neither `Stop` nor `Interrupt` (see [accepted limitations](accepted-limitations.md#a-codex-turn-that-ends-on-an-api-error-leaves-thinking-on-the-tab)). Attention cannot tell such a turn from one still running. The newest lead observation's `written_at_unix_ns` is the last time Attention recorded the lead, with the limits [Storage and retention](#storage-and-retention) gives; a consumer that must act on a turn that never recorded its end decides from that time and its own look at the pane.
 
 ## Requests are evidence, not a pending-state service
 
@@ -81,9 +81,15 @@ Question groups additionally expose:
 - `question_mode="blocking"`: Claude `AskUserQuestion` or Codex `request_user_input`. A matched result means the tool returned, not necessarily that a human answered.
 - `question_mode="nonblocking"`: Codex `request_user_input_async`. Its admitted successful PostToolUse means the provider accepted the question for publication. `publication_observation_ids` records that event separately from blocking tool-return relations.
 
-A publication can stand alone when PreToolUse is missing, delayed, evicted, or lacks correlation. Preflight alone is only an attempt. A call may contain several questions; publication IDs are not an unanswered-question count. Codex's free-form async message tool and Pi addon names are not automatically questions.
+Every question group carries `answer_observation_ids`, the prompts that answered its call (below), empty when nothing did; only a nonblocking question can be answered this way. A publication can stand alone when PreToolUse is missing, delayed, evicted, or lacks correlation. Preflight alone is only an attempt. A call may contain several questions; publication IDs are not an unanswered-question count. Codex's free-form async message tool and Pi addon names are not automatically questions.
 
-The verified Codex 0.154.0 hook receipt is a JSON string containing `{"accepted":true}`. Attention validates that receipt and discards the output. Stop, focus, ordinary input, and elapsed time do not turn publication into answered. The reply path supplies no original call ID to the native submission hook. Attention does not parse quoted titles, terminal headings, or conversation order to guess an answer.
+The verified Codex 0.154.0 hook receipt is a JSON string containing `{"accepted":true}`. Attention validates that receipt and discards the output. Stop, focus, ordinary input, and elapsed time do not turn publication into answered.
+
+How an answer arrives depends on the Codex version. Codex 0.154.0 supplied no original call ID to the native submission hook. Codex 0.162.0 submits each answered question as its own prompt, ending in a `<send_user_message_question_reply>` wrapper whose `questionItemId` is `["request_user_input_async", <call ID>, <question index>]`; IDE context may come before the wrapper. For a lead Codex prompt that ends in that wrapper, Attention keeps the call ID and question index, never the text, in [the binding's prompt record](#storage-and-retention), and every question group whose `correlation.tool_call_id` equals that call ID lists the prompt's observation ID in `answer_observation_ids`, whatever turn the answer came in. That holds for an answer typed while the turn runs too, although the pools never hold that prompt: Codex gives every prompt of a turn the turn's `turn_id`, and the general pool keeps one prompt per `turn_id`. So an answer's observation ID can name a prompt that no pool shows. A question keeps its first answer; the same answer delivered again adds nothing. A `questionItemId` that holds only the call ID, as older Codex desktop builds send, answers nothing.
+
+An answer ID says a person submitted an answer to that call. It does not say no question is waiting: a call with several questions can be partly answered, and Attention does not record how many a call asked. A typed prompt that ends in a copy of the wrapper is read the same way. Attention does not parse quoted titles, terminal headings, or conversation order to guess an answer.
+
+A question that no prompt answered may still have been passed over. The facet's `latest_prompt` names the lead's latest prompt, whether or not a pool holds it; like an answer, it can be a prompt typed while a Codex turn ran, which no pool shows. A publication ordered before it, by `observed_mono_ns` and then observation ID, was followed by a later prompt. Codex accepts other prompts while a nonblocking question stays queued, so followed is not answered; `examples/follow-up.lua` treats an answered or followed question as needing no follow-up.
 
 `badge_acknowledgement` identifies one activity event and target that was dismissed. It does not mark every request seen, read, answered, or resolved. Facts remain available after badge acknowledgement, activity clear/expiry, and lead Stop.
 
@@ -91,7 +97,7 @@ The verified Codex 0.154.0 hook receipt is a JSON string containing `{"accepted"
 
 The runnable [consumer example](../examples/follow-up.lua) chooses a symbolic appearance:
 
-- `follow_up`: an available nonblocking publication has not been dismissed by this consumer.
+- `follow_up`: an available nonblocking publication that no prompt answered, published after the latest prompt, has not been dismissed by this consumer.
 - `base`: no retained publication calls for a new appearance under this policy; this is not a verified all-clear.
 - `unknown`: missing/uncertain data, an inactive binding, or lost evidence prevents that decision.
 
@@ -125,11 +131,13 @@ A binding keeps the lead's observations in `lifecycle.json` and its children's i
 
 Children's traffic cannot evict the lead's evidence, however much there is: the lead's observations leave only when later lead observations displace them. That is isolation, not freshness. The newest lead observation shown can still be older than the lead's last hook, because the writer refuses, for example, an observation that repeats one it holds, one at or below its pool's floor, one older than everything its full pool keeps, or one it cannot write before the lock times out. Children share their file's pools, so a busy child can evict another child's evidence.
 
+A third file, `prompts.json`, keeps what the general pool can lose to generic tool traffic about the lead's prompts: the latest prompt, and for Codex up to 64 answers, oldest dropped first. It holds no prompt text. The facet's `latest_prompt` is the later of the record's and the newest lead prompt the pools still hold, so a binding from before the record existed, or a plugin newer than its command, still has one. A prompt record that cannot be used adds one diagnostic to the facet and nothing else; the facet's `availability` does not change.
+
 Children's observations that a writer put in `lifecycle.json` before children had their own file stay there, and the file stays valid, until lead observations displace them. Readers leave them out of the facet with no diagnostic, so until then such a file shows fewer lead observations than its pool holds. An observation id is unique within its file; readers do not compare ids across the two files.
 
 An observation that its own insertion would evict is reported `rejected`, not `confirmed`, and a pool already holding 64 observations at one timestamp refuses another at that timestamp. Generic tool traffic cannot evict request evidence. Request traffic can still evict older requests or their outcomes. Whole equal-timestamp groups are removed with that pool's floor in one atomic snapshot replacement. There is no replay cursor, complete history promise, lifecycle TTL, or universal `pending_count`.
 
-Activity and the two lifecycle files are separate files, not a multi-file transaction. A crash may leave newer activity with older facts, and a poll can read the two lifecycle files at different moments. Failures report incomplete work; retries re-read actual records. Do not join files by timestamp or assume a shared snapshot ID.
+Activity, the two lifecycle files and the prompt record are separate files, not a multi-file transaction. A crash may leave newer activity with older facts, and a poll can read the lifecycle files and the prompt record at different moments. Failures report incomplete work; retries re-read actual records. Do not join files by timestamp or assume a shared snapshot ID.
 
 The v2 records are the only format the plugin reads. 0.6 read one small JSON file per pane id at the top of the state directory, `<id>`, with an `<id>.ack` beside it, and untagged builds also wrote `<id>.agents` and `<id>.review`; nothing reads or collects those files now. Use matching current Attention writers and readers; intermediate development builds are not supported compatibility targets.
 
@@ -283,7 +291,7 @@ Persistence reports three independent fields:
 | `activity` | The lead activity or activity-clear subset, when selected |
 | `lifecycle` | This callback's requested lifecycle observation |
 
-Each field is `not_requested`, `confirmed`, `rejected` or `unconfirmed`. Confirmed does not require new bytes when the required state already matches. Unconfirmed does not establish that no writes happened. A rejected or unconfirmed requested effect suppresses delivery. Lifecycle preparation/write failure can coexist with confirmed native effects. `observation_id` appears only when the native application confirms writing that observation; it is never a provider request ID or controller token. Optional correlation is omitted when absent.
+A failed write of the binding's prompt record is reported only in the diagnostic, as `prompts_write: unconfirmed`; `lifecycle` stays `confirmed`. Each field is `not_requested`, `confirmed`, `rejected` or `unconfirmed`. Confirmed does not require new bytes when the required state already matches. Unconfirmed does not establish that no writes happened. A rejected or unconfirmed requested effect suppresses delivery. Lifecycle preparation/write failure can coexist with confirmed native effects. `observation_id` appears only when the native application confirms writing that observation; it is never a provider request ID or controller token. Optional correlation is omitted when absent.
 
 `reply` and `prompt` always appear. Both use `HookContent`: `availability` is `not_requested`, `available`, `absent`, `unsupported`, `invalid` or `too_large`. **Only available has `text`.** Each flag is independent: omitting `--include-prompt` yields `prompt={"availability":"not_requested"}`, even when `--include-reply` is set. A missing native field means absent. A Codex `last_assistant_message` of `null` also means absent: Codex sends null when a turn has no final text. Any other null, including a null `prompt`, or another JSON type means invalid. An empty string is available, and Unicode/newlines are preserved exactly.
 
@@ -419,7 +427,7 @@ not call the human. It is not pane ownership, acceptance proof, or proof that
 a controller has read the reply. The application supplies its own evidence.
 
 Before applying a quiet note, Attention rechecks the same lifecycle snapshot
-ID under the writer locks. A changed or unreadable snapshot discards the note
+ID under the writer locks; the prompt record is not part of that ID. A changed or unreadable snapshot discards the note
 and records `stage=evidence_changed`. Before applying either note, it also
 rechecks retained child permission waits. A waiting child or unreadable child
 state discards the note. The audit retains execution timing and exit facts,
@@ -463,7 +471,7 @@ The children facet contains `availability`, `count`, `waiting`, `coverage` and d
 
 Only `ended`, `none` and `known` give a count to rely on. Under the other three a zero means unknown, not none; the plugin draws those as `+?`. When the binding record itself, or the pane's current-binding pointer, cannot be read, `inspect` reports every facet `unavailable`. When the file cannot be opened, the plugin reuses a binding record it read before and goes on counting; otherwise it shows no count and reports `binding_health` `invalid`, or `future_schema` when the record declares a newer schema. `inspect` has no earlier read to fall back on, where the plugin keeps counting its last successful read of the same file. A scope with no selected binding reads `known` with availability absent. `known` is what the command recorded, not what runs: a sub-agent whose end was never reported stays counted, and a Codex sub-agent still working after its parent's stop is not counted until its next event ([accepted limitations](accepted-limitations.md#the-sub-agent-count-depends-on-how-claude-code-and-codex-send-hooks)).
 
-Lifecycle uses the existing GUI observation/request/relation/floor names. Headless availability is available, absent, unavailable, invalid or unsupported; there is no cached fallback. Missing snapshot IDs, correlations, optional native fields and floors are omitted. Arrays remain arrays when empty. Each file's two pool floors are preserved when present. Optional badge acknowledgement is separate from raw activity and native relations.
+Lifecycle uses the existing GUI observation/request/relation/floor names, and the same `latest_prompt` and `answer_observation_ids`. Headless availability is available, absent, unavailable, invalid or unsupported; there is no cached fallback. Missing snapshot IDs, correlations, optional native fields, floors and a `latest_prompt` with no prompt behind it are omitted. Arrays remain arrays when empty. Each file's two pool floors are preserved when present. Optional badge acknowledgement is separate from raw activity and native relations.
 
 The reader checks claim/current pointer before and after assembly and rechecks socket identity. Rotation discards the assembled facts and answers `scope_relation` `unavailable`, unless the scope's server is shown to have exited, which reads the pane `verified_absent`. A stable binding does not make independently written files one atomic snapshot. Inspection does not create directories, write acknowledgements, prune records or start WezTerm. `result.timing_ms` has the same `pane_list`, `process_list` and `records` fields as `bindings`. Complete valid reads, including explicit absence, exit 0; changed/degraded evidence exits 1; invalid scope/arguments exit 2. Complete means this requested response was represented, not complete history or task success.
 
@@ -487,7 +495,7 @@ Registration is once per module. A repeated `apply_to_config` is named once in t
 ### Executable application recipes
 
 - `examples/reply-sink.mjs` stores exact supplied content and its full source scope in an application-owned file. It does not prove the last received delivery is the newest/current reply; a resolver must check identity and own its ordering/idempotency policy.
-- `examples/follow-up.lua` consumes normalized publication facts and per-window callbacks. Local dismissal updates presentation immediately and does not answer a provider question. It is optional: `examples/wezterm.lua` loads it only when the file exists beside it.
+- `examples/follow-up.lua` consumes normalized publication facts, answer IDs, the latest prompt and per-window callbacks. Local dismissal updates presentation immediately and does not answer a provider question. It is optional: `examples/wezterm.lua` loads it only when the file exists beside it.
 - `node examples/checkpoint.mjs /absolute/attention /absolute/socket /absolute/wezterm /absolute/checkpoint.json [LIMIT]` brackets topology with two complete socket binding queries. Failure, incomplete evidence, duplicate current associations or socket rotation preserves the old checkpoint. Missing association stays null/unknown. Topology uses explicit `--no-auto-start`; no identity hashing or private record paths are copied. The two query durations are reported in milliseconds.
 - `node examples/inspect.mjs /absolute/attention /absolute/socket [LIMIT]` performs bounded discovery followed by exact-scope inspections. Incomplete discovery stops before inspection; degraded or changed scope fails rather than following another occupant.
 
