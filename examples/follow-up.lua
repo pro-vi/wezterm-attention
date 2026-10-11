@@ -25,17 +25,31 @@ function M.new()
       or view.binding_health ~= "valid" or view.pane_presence ~= "present"
       or not lifecycle or lifecycle.availability ~= "available" then return "unknown" end
 
-    local present = {}
+    -- A question still waits unless a prompt answered it, or the lead's
+    -- latest prompt came after it was published.
+    local observed = {}
+    for _, item in ipairs(lifecycle.observations) do observed[item.observation_id] = item end
+    local latest = lifecycle.latest_prompt
+    -- Observation order: the monotonic stamp, then the id.
+    local function before_latest(id)
+      local item = observed[id]
+      return latest and item and item.observed_mono_ns .. id < latest.observed_mono_ns .. latest.observation_id
+    end
+    local present, waiting = {}, {}
     for _, request in ipairs(lifecycle.requests) do
       if request.kind == "question" and request.question_mode == "nonblocking" then
-        for _, id in ipairs(request.publication_observation_ids) do present[id] = true end
+        local answered = request.answer_observation_ids and #request.answer_observation_ids > 0
+        for _, id in ipairs(request.publication_observation_ids) do
+          present[id] = true
+          if not answered and not before_latest(id) then waiting[id] = true end
+        end
       end
     end
     for id in pairs(previous) do if not present[id] then evidence_lost = true end end
     for id in pairs(dismissed) do if not present[id] then dismissed[id] = nil end end
     previous = present
     local attention_needed = false
-    for id in pairs(present) do
+    for id in pairs(waiting) do
       if not dismissed[id] then displayed[id], attention_needed = true, true end
     end
     if attention_needed then return "follow_up" end

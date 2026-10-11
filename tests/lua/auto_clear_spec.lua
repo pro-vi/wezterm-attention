@@ -5122,13 +5122,44 @@ test("question publication, tool return, and badge dismissal stay independent", 
   assert(view._records == nil and view.cache_key == nil and view.next_wakeup_unix_ns == nil)
 end)
 
+test("an answered question, or one a later prompt followed, needs no follow-up", function()
+  local module = dofile(repo_root .. "/examples/follow-up.lua")
+  local function view()
+    return {
+      address = { realm_id = string.rep("a", 64), incarnation_id = string.rep("b", 64), pane_id = "42" },
+      launch_id = "00000000-0000-4000-8000-000000000001", binding_id = string.rep("c", 64),
+      binding_phase = "active", binding_health = "valid", reader_confidence = "confirmed", pane_presence = "present",
+      lifecycle = { availability = "available", retention_floors = {},
+        observations = { { observation_id = "publication-1", observed_mono_ns = "00000000000000000300" } },
+        requests = { { kind = "question", question_mode = "nonblocking", publication_observation_ids = { "publication-1" },
+          answer_observation_ids = {} } } },
+    }
+  end
+  local waiting = view()
+  assert(module.new().appearance(waiting) == "follow_up")
+  local answered = view()
+  answered.lifecycle.requests[1].answer_observation_ids = { "answer-1" }
+  assert(module.new().appearance(answered) == "base", "an answer settles the question")
+  local followed = view()
+  followed.lifecycle.latest_prompt = { observation_id = "prompt-1", observed_mono_ns = "00000000000000000400" }
+  assert(module.new().appearance(followed) == "base", "a later prompt moved on from the question")
+  local earlier = view()
+  earlier.lifecycle.latest_prompt = { observation_id = "prompt-1", observed_mono_ns = "00000000000000000200" }
+  assert(module.new().appearance(earlier) == "follow_up", "a prompt before the question does not answer it")
+  local consumer = module.new()
+  assert(consumer.appearance(waiting) == "follow_up")
+  assert(consumer.appearance(answered) == "base", "an answered question is still present, not lost")
+  waiting.lifecycle.requests[1].publication_observation_ids = {}
+  assert(consumer.appearance(waiting) == "unknown", "a question that vanished is still evidence lost")
+end)
+
 test("consumer dismissal is scoped to displayed publications and never implies an answer", function()
   local module = dofile(repo_root .. "/examples/follow-up.lua")
   local view = {
     address = { realm_id = string.rep("a", 64), incarnation_id = string.rep("b", 64), pane_id = "42" },
     launch_id = "00000000-0000-4000-8000-000000000001", binding_id = string.rep("c", 64),
     binding_phase = "active", binding_health = "valid", reader_confidence = "confirmed", pane_presence = "present", activity_type = "thinking",
-    lifecycle = { availability = "available", retention_floors = {}, requests = { { kind = "question", question_mode = "nonblocking", publication_observation_ids = { "publication-1" } } } },
+    lifecycle = { availability = "available", observations = {}, retention_floors = {}, requests = { { kind = "question", question_mode = "nonblocking", publication_observation_ids = { "publication-1" } } } },
   }
   local first, second = module.new(), module.new()
   assert(first.appearance(view) == "follow_up" and second.appearance(view) == "follow_up")
