@@ -885,6 +885,76 @@ fn quiet_checks_receive_frozen_history_without_reply_or_background_tasks() {
     }
 }
 
+// A quiet check reads the public lifecycle view, so a question answered while
+// the turn ran reaches it as answered.
+#[test]
+fn a_quiet_check_sees_a_question_answered_during_its_turn() {
+    let setup = Setup::new();
+    bind(&setup, "codex");
+    let prompt = |text: &str, at: &str| {
+        setup.apply(
+            &event(
+                "codex",
+                "UserPromptSubmit",
+                "hold-session",
+                json!({"turn_id":"answered-turn","prompt":text}),
+            ),
+            at,
+        );
+    };
+    prompt("start the work", "00000000000000000300");
+    for (name, at, patch) in [
+        ("PreToolUse", "00000000000000000310", json!({})),
+        (
+            "PostToolUse",
+            "00000000000000000311",
+            json!({"tool_response":"{\"accepted\":true}"}),
+        ),
+    ] {
+        let mut payload = json!({"tool_name":"request_user_input_async",
+            "tool_use_id":"call_quiet","turn_id":"answered-turn"});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(patch.as_object().unwrap().clone());
+        setup.apply(&event("codex", name, "hold-session", payload), at);
+    }
+    let id = json!(["request_user_input_async", "call_quiet", 0]).to_string();
+    prompt(
+        &format!(
+            "<send_user_message_question_reply>{}</send_user_message_question_reply>",
+            json!([{"answer":"yes","question":"Q","questionItemId":id}])
+        ),
+        "00000000000000000320",
+    );
+    let captured = setup._scratch.0.join("quiet-input.json");
+    let check = executable(
+        &setup,
+        &format!(
+            "/bin/cat > '{}'\nprintf '%s' '{}'",
+            captured.display(),
+            QUIET_LINE
+        ),
+    );
+    quiet_stop(&setup, "codex", &check, "00000000000000000400");
+    let input: Value = serde_json::from_slice(&fs::read(captured).unwrap()).unwrap();
+    let question = input["lifecycle"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|group| group["correlation"]["tool_call_id"] == "call_quiet")
+        .expect("question group")
+        .clone();
+    assert_eq!(
+        question["answer_observation_ids"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        input["lifecycle"]["latest_prompt"]["observed_mono_ns"],
+        "00000000000000000320"
+    );
+}
+
 #[test]
 fn a_quiet_check_on_the_command_line_attaches_its_note_and_prints_nothing() {
     let setup = Setup::new();

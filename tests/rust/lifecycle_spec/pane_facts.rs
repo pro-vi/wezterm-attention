@@ -3,7 +3,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use wezterm_attention::observations::{
-    Actor, LifecycleAvailability, LifecycleView, NativeCorrelation,
+    Actor, LeadPrompts, LifecycleAvailability, LifecycleView, NativeCorrelation, PromptAnswer,
+    PromptReference,
 };
 use wezterm_attention::query::{
     PaneFacts, PanePresence, PaneScope, ReaderConfidence, RecordAvailability as A, ScopeRelation,
@@ -563,6 +564,91 @@ fn rust_and_installed_lua_share_relation_cases_and_retention_floors() {
         }
         cases.push(case);
     }
+    // prompts.json against the newest prompt the pools hold: the later wins,
+    // and a record alone still names the latest prompt.
+    let pooled: LifecycleSnapshot = serde_json::from_value(
+        fixtures["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "prompt_submitted")
+            .unwrap()["value"]
+            .clone(),
+    )
+    .unwrap();
+    let mut unprompted = pooled.clone();
+    unprompted.pools = Default::default();
+    for (id, snapshot, latest) in [
+        ("prompts-record-newer", &pooled, "99999999999999999998"),
+        ("prompts-record-older", &pooled, "00000000000000000000"),
+        ("prompts-record-alone", &unprompted, "00000000000000000700"),
+    ] {
+        let prompts = lead_prompts(snapshot, latest, vec![]);
+        let expected =
+            LifecycleView::assemble(Some(snapshot), None, Some("99999999999999999999"), vec![])
+                .with_prompts(Some(&prompts));
+        cases.push(json!({"id":id,"snapshot":snapshot,"prompts":prompts,"now":"99999999999999999999","expected":expected}));
+    }
+    // A question's answers come from prompts.json by call id: two answer this
+    // call's questions 0 and 1, one answers another call.
+    let mut asked: LifecycleSnapshot = serde_json::from_value(
+        fixtures["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "nonblocking-tool_result")
+            .unwrap()["value"]
+            .clone(),
+    )
+    .unwrap();
+    for item in &mut asked.pools.requests.observations {
+        item.correlation = Some(NativeCorrelation {
+            tool_call_id: Some("call_asked".into()),
+            turn_id: Some("turn-a".into()),
+            ..Default::default()
+        });
+    }
+    let answer = |call: &str, index: u64, mono: &str| PromptAnswer {
+        tool_call_id: call.into(),
+        question_index: index,
+        observation_id: Uuid::new_v4().to_string(),
+        observed_mono_ns: mono.into(),
+    };
+    let prompts = lead_prompts(
+        &asked,
+        "00000000000000000900",
+        vec![
+            answer("call_asked", 0, "00000000000000000800"),
+            answer("call_other", 0, "00000000000000000850"),
+            answer("call_asked", 1, "00000000000000000900"),
+        ],
+    );
+    let expected =
+        LifecycleView::assemble(Some(&asked), None, Some("99999999999999999999"), vec![])
+            .with_prompts(Some(&prompts));
+    assert_eq!(
+        expected.requests[0]
+            .answer_observation_ids
+            .as_ref()
+            .map(Vec::len),
+        Some(2)
+    );
+    cases.push(json!({"id":"prompts-answers","snapshot":asked,"prompts":prompts,"now":"99999999999999999999","expected":expected}));
+    // A prompt record that cannot be used is reported after the lifecycle
+    // files' own problems, and only in a facet that shows evidence.
+    let problem = wezterm_attention::protocol::Diagnostic::new(
+        wezterm_attention::protocol::DiagnosticCode::RecordInvalid,
+        "prompt record is invalid",
+    );
+    let expected = LifecycleView::assemble(
+        Some(&pooled),
+        None,
+        Some("99999999999999999999"),
+        vec![problem.clone()],
+    );
+    cases.push(json!({"id":"prompts-problem-with-evidence","snapshot":pooled,"prompts_problem":problem,"now":"99999999999999999999","expected":expected}));
+    cases.push(json!({"id":"prompts-problem-without-evidence","prompts_problem":problem,"now":"99999999999999999999",
+        "expected":LifecycleView::empty(LifecycleAvailability::Absent)}));
     for case in relations["cases"].as_array().unwrap() {
         let find = |key: &str| {
             fixtures["cases"]
@@ -820,4 +906,32 @@ fn inspect_and_installed_lua_count_every_shared_child_row_alike() {
         result.contains(&format!("({} compared with Rust)", answers.len())),
         "{result}"
     );
+}
+
+/// A valid `prompts.json` for `snapshot`'s binding whose latest prompt was
+/// observed at `latest`.
+fn lead_prompts(
+    snapshot: &LifecycleSnapshot,
+    latest: &str,
+    answers: Vec<PromptAnswer>,
+) -> LeadPrompts {
+    let prompts = LeadPrompts {
+        kind: "lead_prompts".into(),
+        schema: 3,
+        address: snapshot.address.clone(),
+        launch_id: snapshot.launch_id.clone(),
+        binding_id: snapshot.binding_id.clone(),
+        latest: Some(PromptReference {
+            observation_id: Uuid::new_v4().to_string(),
+            observed_mono_ns: latest.into(),
+            written_at_unix_ns: "00000000000000000001".into(),
+        }),
+        answers,
+    };
+    let protocol = wezterm_attention::protocol::manifest().unwrap();
+    assert_eq!(
+        wezterm_attention::protocol::parse_record_value(&json!(prompts), protocol),
+        wezterm_attention::protocol::Verdict::Valid
+    );
+    prompts
 }

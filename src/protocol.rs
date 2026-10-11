@@ -449,6 +449,8 @@ pub enum FieldType {
     ChildAgentIds,
     ChildPresenceEvent,
     ChildPresenceStatus,
+    PromptReference,
+    PromptAnswers,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -848,6 +850,13 @@ fn validate_field(
         FieldType::ChildPresenceStatus => value
             .as_str()
             .is_some_and(|item| protocol.enums.child_presence_statuses.contains(item)),
+        FieldType::PromptReference => fits_lifecycle_shape("prompt_reference", value, protocol),
+        FieldType::PromptAnswers => value.as_array().is_some_and(|items| {
+            items.len() <= limits.lifecycle_pool_max_count
+                && items
+                    .iter()
+                    .all(|item| fits_lifecycle_shape("prompt_answer", item, protocol))
+        }),
     }
 }
 

@@ -18,7 +18,10 @@ use crate::identity::{PaneAddress, canonical_uuid, pane_address};
 use crate::lifecycle::outcome::{
     AdmittedHook, BindingTarget, HookPersistence, HookScope, Persistence,
 };
-use crate::observations::{LifecycleSnapshot, ObservationPools, TurnEnd, TurnEndStatus};
+use crate::observations::{
+    AnsweredQuestion, LeadPrompts, LifecycleSnapshot, ObservationPools, PromptReference, TurnEnd,
+    TurnEndStatus,
+};
 use crate::protocol::{
     AttentionError, Diagnostic, DiagnosticCode, Disposition, Provider, Result, free_of_control,
     manifest,
@@ -258,6 +261,8 @@ impl ResolvedLaunch<'_> {
 struct Mutation {
     result: LifecycleResult,
     lifecycle_replacement: Option<PreparedRecordWrite>,
+    /// The lead's prompt record, written after the lifecycle file it follows.
+    prompts_replacement: Option<PreparedRecordWrite>,
 }
 
 impl Mutation {
@@ -265,6 +270,7 @@ impl Mutation {
         Self {
             result,
             lifecycle_replacement: None,
+            prompts_replacement: None,
         }
     }
 }
@@ -1287,7 +1293,7 @@ fn reported_instead(replaced: Option<Diagnostic>, mut diagnostic: Diagnostic) ->
 // Called inside the selected launch's lock, after `ResolvedLaunch::lapsed`
 // passed there, so the claim is still the one the event was resolved against.
 // Rich rejection does not discard an independently valid legacy mutation, and
-// the sidecar is always written last.
+// the sidecars are written last, the prompt record after the lifecycle file.
 fn append_observation(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
@@ -1299,6 +1305,8 @@ fn append_observation(
         evidence.borrow_mut().planned_native = Some(accepted(&plan.result.result));
     }
     let mut moved_aside = None;
+    let mut prompts_problem = None;
+    let mut prompts_replacement = None;
     let prepared = (|| -> Result<Option<PreparedRecordWrite>> {
         if let Some(diagnostic) = &event.observation_diagnostic {
             return Err(AttentionError {
@@ -1335,7 +1343,7 @@ fn append_observation(
         };
         let path = identity.path(&resolved.root, kind)?;
         let provider = event_provider(event)?;
-        let found = read_or_move_aside(&path, kind, &identity, provider)?;
+        let found = read_or_move_aside(&path, kind, &identity, Some(provider))?;
         let mut pools = ObservationPools::default();
         if let Replacing::MovedAside = found {
             moved_aside = Some(kind);
@@ -1363,7 +1371,7 @@ fn append_observation(
                 schema: manifest()?.record_schema,
                 address: resolved.address.clone(),
                 launch_id: resolved.launch_id.clone(),
-                binding_id,
+                binding_id: binding_id.clone(),
                 provider,
                 snapshot_id: Uuid::new_v4().to_string(),
                 written_at_unix_ns: written_at.to_owned(),
@@ -1397,6 +1405,29 @@ fn append_observation(
         }
         let key = candidate.storage_key();
         let pending_end = candidate.turn_end.clone();
+        let lead_prompt = candidate
+            .is_lead_prompt()
+            .then(|| PromptReference::of(&candidate));
+        // Every lead prompt reaches the prompt record, the ones this file
+        // will not store too: the general pool keeps one prompt per turn id,
+        // and an answer typed while a turn runs carries that turn's id (see
+        // `PromptAnswer`). A record that cannot be prepared is reported and
+        // left as it is; the lifecycle evidence is written without it.
+        if let Some(prompt) = &lead_prompt {
+            match prepare_prompts(
+                resolved,
+                &identity,
+                &binding_id,
+                prompt,
+                &event.answered_questions,
+            ) {
+                Ok((write, restarted)) => {
+                    prompts_replacement = write;
+                    prompts_problem = restarted.then(|| started_again_diagnostic("prompt_record"));
+                }
+                Err(error) => prompts_problem = Some(error.diagnostic),
+            }
+        }
         if !snapshot.reduce(candidate)? {
             let stored = snapshot
                 .pools
@@ -1434,9 +1465,14 @@ fn append_observation(
             started_again_diagnostic(kind),
         );
     }
+    if let Some(diagnostic) = prompts_problem {
+        report_instead(&mut plan.result.result.diagnostic, diagnostic);
+    }
     match prepared {
-        Ok(Some(replacement)) => plan.result.lifecycle_replacement = Some(replacement),
-        Ok(None) => {}
+        Ok(replacement) => {
+            plan.result.lifecycle_replacement = replacement;
+            plan.result.prompts_replacement = prompts_replacement;
+        }
         Err(error) => {
             if let Some(evidence) = &resolved.evidence {
                 evidence.borrow_mut().persistence.lifecycle = Persistence::Rejected;
@@ -1540,10 +1576,13 @@ fn read_or_move_aside(
     path: &Path,
     kind: &str,
     identity: &RecordIdentity,
-    provider: Provider,
+    provider: Option<Provider>,
 ) -> Result<Replacing> {
     match read_record_typed(path, Some(kind), identity) {
-        RecordRead::Present(value) if value["provider"].as_str() == Some(provider.as_str()) => {
+        RecordRead::Present(value)
+            if provider
+                .is_none_or(|provider| value["provider"].as_str() == Some(provider.as_str())) =>
+        {
             Ok(Replacing::Present(value))
         }
         RecordRead::Missing => Ok(Replacing::Missing),
@@ -1568,6 +1607,42 @@ fn read_or_move_aside(
         }
         RecordRead::Unavailable(error) | RecordRead::Unsupported(error) => Err(error),
     }
+}
+
+/// The lead's prompt record with `prompt` and the questions it answered
+/// added, prepared for writing unless nothing changed, and whether an invalid
+/// record was moved aside first. Runs inside the locks of the lifecycle write
+/// it goes with.
+fn prepare_prompts(
+    resolved: &ResolvedLaunch,
+    identity: &RecordIdentity,
+    binding_id: &str,
+    prompt: &PromptReference,
+    answered: &[AnsweredQuestion],
+) -> Result<(Option<PreparedRecordWrite>, bool)> {
+    let path = identity.path(&resolved.root, "lead_prompts")?;
+    let found = read_or_move_aside(&path, "lead_prompts", identity, None)?;
+    let protocol = manifest()?;
+    let restarted = matches!(found, Replacing::MovedAside);
+    let mut prompts = match found {
+        Replacing::Present(value) => {
+            serde_json::from_value(value).map_err(AttentionError::record_json)?
+        }
+        Replacing::Missing | Replacing::MovedAside => LeadPrompts::empty(
+            resolved.address.clone(),
+            &resolved.launch_id,
+            binding_id,
+            protocol.record_schema,
+        ),
+    };
+    let moved = prompts.record_prompt(prompt);
+    let answered =
+        prompts.record_answers(prompt, answered, protocol.limits.lifecycle_pool_max_count);
+    if !(moved || answered || restarted) {
+        return Ok((None, restarted));
+    }
+    let value = serde_json::to_value(&prompts).map_err(AttentionError::record_json)?;
+    Ok((Some(PreparedRecordWrite::new(path, &value)?), restarted))
 }
 
 /// What a hook reports when it moved an invalid record of `kind` aside:
@@ -1616,7 +1691,7 @@ fn plan_children(
             provider,
         )
     };
-    let found = read_or_move_aside(&path, kind, &identity, provider)?;
+    let found = read_or_move_aside(&path, kind, &identity, Some(provider))?;
     let started_again = matches!(found, Replacing::MovedAside);
     let mut set = match found {
         Replacing::Present(value) => ChildPresenceSet::deserialize(&value).map_err(|_| {
@@ -1972,23 +2047,32 @@ fn apply_observed_outputs_with(
     resolved: &ResolvedLaunch,
     binding_id: &str,
     mutation: &Mutation,
-    replace: impl FnOnce(&PreparedRecordWrite) -> Result<()>,
+    mut replace: impl FnMut(&PreparedRecordWrite) -> Result<()>,
 ) -> Result<()> {
     confirm_native(resolved, binding_id, mutation);
-    if let Some(replacement) = &mutation.lifecycle_replacement {
-        replace(replacement).map_err(|mut error| {
-            error.diagnostic.set("lifecycle_write", "unconfirmed");
-            // What the hook planned to report is kept under the write error.
+    // A failed write is reported as that file's, with what the hook planned
+    // to report kept under it.
+    let unconfirmed = |key: &'static str| {
+        move |mut error: AttentionError| {
+            error.diagnostic.set(key, "unconfirmed");
             error.diagnostic =
                 reported_instead(mutation.result.diagnostic.clone(), error.diagnostic);
             error
-        })?;
+        }
+    };
+    if let Some(replacement) = &mutation.lifecycle_replacement {
+        replace(replacement).map_err(unconfirmed("lifecycle_write"))?;
         if let Some(cell) = &resolved.evidence {
             let mut evidence = cell.borrow_mut();
             evidence.persistence.lifecycle = Persistence::Confirmed;
             evidence.observation_id = evidence.pending_observation_id.clone();
             evidence.turn_end = evidence.pending_turn_end.clone();
         }
+    }
+    // After the lifecycle file. A failed write of the prompt record is a
+    // failed sidecar write: reported, and fatal only under `--strict`.
+    if let Some(prompts) = &mutation.prompts_replacement {
+        replace(prompts).map_err(unconfirmed("prompts_write"))?;
     }
     Ok(())
 }
@@ -3094,10 +3178,18 @@ fn apply_provider_event_inner(
     })
 }
 
+/// What a hold check reads of the hook's binding under its locks: the scope,
+/// and the lead's lifecycle file and prompt record when they can be read.
+struct HoldScope {
+    scope: HookScope,
+    snapshot: Option<LifecycleSnapshot>,
+    prompts: Option<LeadPrompts>,
+}
+
 fn prepare_hold_scope(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
-) -> Result<Option<(HookScope, Option<LifecycleSnapshot>)>> {
+) -> Result<Option<HoldScope>> {
     let binding_id = event_binding_id(event, &resolved.launch_id)?;
     let (scope, ()) = commit(
         &resolved.root,
@@ -3129,16 +3221,17 @@ fn prepare_hold_scope(
             {
                 return Ok(CommitPlan::reporting(None));
             }
-            let snapshot = read_record_at(
-                &resolved.root,
-                "lifecycle_snapshot",
-                &resolved.binding(&binding_id),
-            )
-            .ok()
-            .flatten()
-            .and_then(|value| serde_json::from_value(value).ok());
-            Ok(CommitPlan::reporting(Some((
-                HookScope {
+            // A record that cannot be read gives the check none of its history.
+            let read = |kind| {
+                read_record_at(&resolved.root, kind, &resolved.binding(&binding_id))
+                    .ok()
+                    .flatten()
+            };
+            let snapshot =
+                read("lifecycle_snapshot").and_then(|value| serde_json::from_value(value).ok());
+            let prompts = read("lead_prompts").and_then(|value| serde_json::from_value(value).ok());
+            Ok(CommitPlan::reporting(Some(HoldScope {
+                scope: HookScope {
                     address: resolved.address.clone(),
                     launch_id: resolved.launch_id.clone(),
                     target: BindingTarget::Binding {
@@ -3146,7 +3239,8 @@ fn prepare_hold_scope(
                     },
                 },
                 snapshot,
-            ))))
+                prompts,
+            })))
         },
         |_| Ok(()),
     )?;
@@ -3163,7 +3257,12 @@ fn obtain_hold_notes(
     if !hold_check_applies(event, request) {
         return outcomes;
     }
-    let Ok(Some((scope, snapshot))) = prepare_hold_scope(resolved, event) else {
+    let Ok(Some(HoldScope {
+        scope,
+        snapshot,
+        prompts,
+    })) = prepare_hold_scope(resolved, event)
+    else {
         return hold_check::bypass(request.registrations, Bypass::NoCurrentScope);
     };
     let BindingTarget::Binding { binding_id } = &scope.target;
@@ -3174,6 +3273,7 @@ fn obtain_hold_notes(
     }
     let lifecycle = snapshot.as_ref().map(|snapshot| {
         crate::observations::LifecycleView::assemble(Some(snapshot), None, None, vec![])
+            .with_prompts(prompts.as_ref())
     });
     // A draft is not yet a persisted observation. Its eventual write time is
     // not known, and a replay or newer event makes it unsuitable for a check.
@@ -3377,6 +3477,7 @@ mod lifecycle_write_tests {
         let mutation = Mutation {
             result: planned,
             lifecycle_replacement: Some(PreparedRecordWrite::new(path.clone(), &snapshot).unwrap()),
+            prompts_replacement: None,
         };
         let error = crate::records::with_lock(
             &launch_lock(&root, &address, &launch_id),
@@ -3400,6 +3501,45 @@ mod lifecycle_write_tests {
         assert_eq!(evidence.persistence.lifecycle, Persistence::Unconfirmed);
         assert!(evidence.observation_id.is_none());
         assert!(evidence.turn_end.is_none());
+        drop(evidence);
+
+        // A prompt record that fails to be written after the lifecycle file
+        // was is reported as its own write, over what the hook planned, and
+        // leaves the lifecycle evidence confirmed.
+        let prompts_path = binding.path(&root, "lead_prompts").unwrap();
+        let mutation = Mutation {
+            prompts_replacement: Some(
+                PreparedRecordWrite::new(prompts_path.clone(), &samples["lead_prompts"]).unwrap(),
+            ),
+            ..mutation
+        };
+        let error = crate::records::with_lock(
+            &launch_lock(&root, &address, &launch_id),
+            LOCK_TIMEOUT,
+            || {
+                // The lifecycle file is written first, then the prompt record.
+                let mut writes = 0;
+                apply_observed_outputs_with(&resolved, binding_id, &mutation, |write| {
+                    writes += 1;
+                    if writes == 2 {
+                        return Err(AttentionError::new(
+                            DiagnosticCode::StatePermissions,
+                            "synthetic prompt record write failure",
+                        ));
+                    }
+                    write.apply()
+                })
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.diagnostic.context["prompts_write"], "unconfirmed");
+        assert!(!error.diagnostic.context.contains_key("lifecycle_write"));
+        assert_eq!(error.diagnostic.context["replaced"]["message"], restart);
+        assert!(path.exists());
+        assert!(!prompts_path.exists());
+        let evidence = resolved.evidence.as_ref().unwrap().borrow();
+        assert_eq!(evidence.persistence.lifecycle, Persistence::Confirmed);
+        assert!(evidence.observation_id.is_some());
         drop(evidence);
         std::fs::remove_dir_all(root).unwrap();
     }

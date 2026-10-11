@@ -936,6 +936,43 @@ fn an_old_binding_holding_a_child_set_and_moved_aside_records_is_pruned_whole() 
     assert!(!old_dir.exists(), "{diagnostics:?}");
 }
 
+// The lead's prompt record, and one a writer moved aside, go with their
+// binding once it has aged out.
+#[test]
+fn an_old_binding_holding_a_prompt_record_is_pruned_whole() {
+    let setup = Setup::new();
+    let old_dir = aged_binding_with_a_child_set(&setup);
+    let binding: Value =
+        serde_json::from_slice(&fs::read(old_dir.join("binding.json")).expect("binding"))
+            .expect("binding JSON");
+    let reference = json!({
+        "observation_id": "00000000-0000-4000-8000-000000000002",
+        "observed_mono_ns": "00000000000000000250",
+        "written_at_unix_ns": "00000000000000000001",
+    });
+    fs::write(
+        old_dir.join("prompts.json"),
+        serde_json::to_vec(&json!({
+            "kind": "lead_prompts",
+            "schema": 3,
+            "address": binding["address"],
+            "launch_id": binding["launch_id"],
+            "binding_id": binding["binding_id"],
+            "latest": reference,
+            "answers": [],
+        }))
+        .expect("prompts JSON"),
+    )
+    .expect("prompt record");
+    fs::write(
+        old_dir.join(".prompts.json.invalid.00000000-0000-4000-8000-000000000001"),
+        b"{not json",
+    )
+    .expect("moved-aside prompt record");
+    let (_, diagnostics) = setup.run_sweep(true);
+    assert!(!old_dir.exists(), "{diagnostics:?}");
+}
+
 // A child set a later writer wrote may be one a newer version still needs,
 // so the binding holding it is kept however old.
 #[test]
