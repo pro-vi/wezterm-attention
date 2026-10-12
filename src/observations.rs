@@ -209,9 +209,7 @@ pub struct LeadPrompts {
     pub address: PaneAddress,
     pub launch_id: String,
     pub binding_id: String,
-    /// The latest prompt the lifecycle file stored. Absent while the record
-    /// holds only answers that came with prompts the lifecycle file did not
-    /// store.
+    /// The lead's latest prompt, whether or not the lifecycle file stored it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest: Option<PromptReference>,
     pub answers: Vec<PromptAnswer>,
@@ -299,7 +297,7 @@ impl LeadPrompts {
         answered: &[AnsweredQuestion],
         limit: usize,
     ) -> bool {
-        let before = self.answers.len();
+        let before = self.answers.clone();
         for question in answered {
             if !self.answers.iter().any(|answer| {
                 answer.tool_call_id == question.tool_call_id
@@ -313,7 +311,7 @@ impl LeadPrompts {
                 });
             }
         }
-        if self.answers.len() == before {
+        if self.answers.len() == before.len() {
             return false;
         }
         self.answers.sort_by(|a, b| {
@@ -325,7 +323,7 @@ impl LeadPrompts {
         });
         let excess = self.answers.len().saturating_sub(limit);
         self.answers.drain(..excess);
-        true
+        self.answers != before
     }
 }
 

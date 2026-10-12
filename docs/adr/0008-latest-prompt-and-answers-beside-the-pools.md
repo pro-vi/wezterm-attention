@@ -13,8 +13,9 @@ consumers decide whether a nonblocking question still waits by whether a
 prompt came after it, and both lost that boundary.
 
 Codex 0.162.0 also submits a person's answer to a `request_user_input_async`
-question as an ordinary prompt, ending in a `<send_user_message_question_reply>`
-wrapper whose `questionItemId` names the question call's id. Attention recorded
+question as an ordinary prompt: a `<send_user_message_question_reply>` wrapper,
+after IDE context when there is any, whose `questionItemId` names the question
+call's id. Attention recorded
 that prompt like any other and related nothing to the question, and the prompt
 itself was lost to the same eviction.
 
@@ -26,7 +27,7 @@ prompt (observation id and both times) and up to 64 answers, each a question's
 call id and index with the observation id of the prompt that answered it. The
 lifecycle writer updates it under the same locks for every lead prompt, moves
 the latest prompt only forward, and takes answers only from a lead Codex
-prompt that ends in the wrapper; the prompt's text never enters it. It does so
+prompt that is the wrapper; the prompt's text never enters it. It does so
 whether or not `lifecycle.json` stored that prompt, because Codex gives every
 prompt of a turn the turn's id and the general pool keeps one prompt per id,
 so a prompt typed while the turn runs is never stored there. A question keeps
@@ -57,7 +58,8 @@ were. The manifest gains the record and two shapes.
   evict the question evidence they bound.
 - The same protection for the newest turn end: `activity.json` already keeps
   the latest turn end, and the newest lead observation is never the one
-  evicted, so the lead's quiet time was already readable.
+  evicted, so the last time the lead was recorded is the later of that
+  observation and `latest_prompt`.
 
 ## Consequences
 
@@ -69,7 +71,7 @@ observation id can name a prompt no pool shows, when it came while its turn
 ran. An answer says a
 person answered the call, not that nothing on it waits: a call with several questions
 can be partly answered, and Attention does not record how many a call asked. A
-typed prompt that ends in a copy of the wrapper is read as an answer. An older
+typed prompt that is a copy of the wrapper is read as an answer. An older
 command's `sweep` and `doctor` keep a binding that holds `prompts.json`, as
 they keep any binding with a file they do not know, and report it as
 `record_invalid` ("unknown binding state is preserved"), until a newer command

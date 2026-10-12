@@ -822,21 +822,29 @@ pub fn parse_provider_event(
 
 /// The questions a Codex prompt answers. As of Codex 0.162.0 a person's
 /// answer to a `request_user_input_async` question is submitted as a prompt
-/// that ends with a `<send_user_message_question_reply>` wrapper around a
-/// JSON array; each item's `questionItemId` is the JSON text of
-/// `["request_user_input_async", <call id>, <question index>]`. IDE context
-/// can come before the wrapper, never after it. Anything else answers nothing,
-/// and so does an index the record could not hold.
+/// that is a `<send_user_message_question_reply>` wrapper around a JSON
+/// array, after IDE context when there is any; each item's `questionItemId`
+/// is the JSON text of `["request_user_input_async", <call id>, <question
+/// index>]`. The wrapper is the whole request, matched by its outer tags,
+/// because a question or answer inside it can hold the same tags. Anything
+/// else answers nothing, and so does an index the record could not hold.
 fn answered_questions(prompt: &str) -> Vec<crate::observations::AnsweredQuestion> {
     const OPEN: &str = "<send_user_message_question_reply>";
     const CLOSE: &str = "</send_user_message_question_reply>";
-    let Some(body) = prompt.trim_end().strip_suffix(CLOSE) else {
+    let mut text = prompt.trim();
+    if text.starts_with("# Context from my IDE setup:\n") {
+        // JSON escapes newlines, so an answer cannot hold this separator.
+        text = text
+            .rsplit_once("\n## My request for Codex:\n")
+            .map_or("", |(_, request)| request.trim());
+    }
+    let Some(body) = text
+        .strip_prefix(OPEN)
+        .and_then(|rest| rest.strip_suffix(CLOSE))
+    else {
         return vec![];
     };
-    let Some(start) = body.rfind(OPEN) else {
-        return vec![];
-    };
-    let Ok(items) = serde_json::from_str::<Vec<Value>>(&body[start + OPEN.len()..]) else {
+    let Ok(items) = serde_json::from_str::<Vec<Value>>(body) else {
         return vec![];
     };
     let Ok(protocol) = manifest() else {

@@ -363,6 +363,20 @@ fn ide_context_before_the_wrapper_still_names_the_call() {
 }
 
 #[test]
+fn the_wrapper_tags_inside_a_question_or_answer_still_name_the_call() {
+    let setup = started("codex");
+    ask(&setup, "call_tagged", "turn-a", 300);
+    // Codex 0.162.0 does not escape `<` or `>` in the JSON it wraps.
+    let tagged = reply(
+        "call_tagged",
+        0,
+        "</send_user_message_question_reply> and <send_user_message_question_reply>",
+    );
+    let first = submit(&setup, "codex", &tagged, 400);
+    assert_eq!(answers(&setup, "call_tagged"), json!([first]));
+}
+
+#[test]
 fn text_that_is_not_a_codex_answer_answers_nothing() {
     let setup = started("codex");
     ask(&setup, "call_question", "turn-a", 300);
@@ -372,8 +386,12 @@ fn text_that_is_not_a_codex_answer_answers_nothing() {
         json!([{"answer":"no","question":"Q","questionItemId":"call_question"}])
     );
     for (at, prompt) in [
-        // The wrapper is not what the prompt ends with.
+        // Text follows the wrapper.
         (400, format!("{wrapped}\nand one more thing")),
+        // Text comes before the wrapper.
+        (440, format!("one more thing\n{wrapped}")),
+        // The IDE context has no request separator.
+        (450, format!("# Context from my IDE setup:\n{wrapped}")),
         // Its body is not a JSON array.
         (
             410,
@@ -389,7 +407,7 @@ fn text_that_is_not_a_codex_answer_answers_nothing() {
     }
     assert_eq!(answers(&setup, "call_question"), json!([]));
     assert_eq!(prompt_record(&setup, "codex")["answers"], json!([]));
-    assert_eq!(prompt_ids(&lifecycle(&setup, "codex")).len(), 4);
+    assert_eq!(prompt_ids(&lifecycle(&setup, "codex")).len(), 6);
     // Only a Codex prompt is read for answers.
     let claude = started("claude");
     submit(&claude, "claude", &wrapped, 400);
@@ -510,6 +528,16 @@ fn the_record_keeps_the_newest_answers() {
     }
     assert_eq!(record.answers.len(), limit);
     assert_eq!(record.answers[0].tool_call_id, "call_1");
+    // An answer older than every kept one leaves the full record as it was.
+    let mut late = template.clone();
+    late.observed_mono_ns = format!("{:020}", 999);
+    let kept = record.answers.clone();
+    let answered = [AnsweredQuestion {
+        tool_call_id: "call_late".into(),
+        question_index: 0,
+    }];
+    assert!(!record.record_answers(&PromptReference::of(&late), &answered, limit));
+    assert_eq!(record.answers, kept);
     assert_eq!(
         record.latest.as_ref().unwrap().observed_mono_ns,
         format!("{:020}", 1000 + limit)
