@@ -148,6 +148,9 @@ pub struct ProviderEvent {
     /// stops. `None` when the event carries no list, or one that cannot be
     /// read in full.
     pub in_flight_task_ids: Option<Vec<String>>,
+    /// The questions a Codex lead prompt answers. Only their ids are taken
+    /// from the prompt; its text is never kept.
+    pub answered_questions: Vec<crate::observations::AnsweredQuestion>,
     pub transcript_path: Option<String>,
     pub cwd: Option<String>,
     pub config_dir: Option<String>,
@@ -807,7 +810,64 @@ pub fn parse_provider_event(
             Err(problem) => event.observation_diagnostic = Some(problem),
         }
     }
+    if provider == Provider::Codex
+        && event.observation.is_some()
+        && let crate::hook_content::HookContent::Available { text } =
+            prompt_content(&event, payload, true)
+    {
+        event.answered_questions = answered_questions(&text);
+    }
     event
+}
+
+/// The questions a Codex prompt answers. As of Codex 0.162.0 a person's
+/// answer to a `request_user_input_async` question is submitted as a prompt
+/// that is a `<send_user_message_question_reply>` wrapper around a JSON
+/// array, after IDE context when there is any; each item's `questionItemId`
+/// is the JSON text of `["request_user_input_async", <call id>, <question
+/// index>]`. The wrapper is the whole request, matched by its outer tags,
+/// because a question or answer inside it can hold the same tags. Anything
+/// else answers nothing, and so does an index the record could not hold.
+fn answered_questions(prompt: &str) -> Vec<crate::observations::AnsweredQuestion> {
+    const OPEN: &str = "<send_user_message_question_reply>";
+    const CLOSE: &str = "</send_user_message_question_reply>";
+    let mut text = prompt.trim();
+    if text.starts_with("# Context from my IDE setup:\n") {
+        // JSON escapes newlines, so an answer cannot hold this separator.
+        text = text
+            .rsplit_once("\n## My request for Codex:\n")
+            .map_or("", |(_, request)| request.trim());
+    }
+    let Some(body) = text
+        .strip_prefix(OPEN)
+        .and_then(|rest| rest.strip_suffix(CLOSE))
+    else {
+        return vec![];
+    };
+    let Ok(items) = serde_json::from_str::<Vec<Value>>(body) else {
+        return vec![];
+    };
+    let Ok(protocol) = manifest() else {
+        return vec![];
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let id = item.get("questionItemId")?.as_str()?;
+            let (tool, call, question_index): (String, Value, u64) =
+                serde_json::from_str(id).ok()?;
+            if classify_tool("codex", &tool).1 != Some(QuestionMode::Nonblocking)
+                || question_index > protocol.limits.frame_max
+            {
+                return None;
+            }
+            Some(crate::observations::AnsweredQuestion {
+                tool_call_id: safe_label(&call, "questionItemId").ok()?,
+                question_index,
+            })
+        })
+        .take(protocol.limits.lifecycle_pool_max_count)
+        .collect()
 }
 
 pub fn reply_content(

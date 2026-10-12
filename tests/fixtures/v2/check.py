@@ -239,7 +239,7 @@ def validate_typed_field(
             raise InvalidRecord("live children must be an array")
         for item in value:
             validate_shape(item, manifest["lifecycle_shapes"]["child_presence_entry"], manifest, None)
-    elif field_type in {"child_parent_clear", "child_lifetime_end"}:
+    elif field_type in {"child_parent_clear", "child_lifetime_end", "prompt_reference"}:
         validate_shape(value, manifest["lifecycle_shapes"][field_type], manifest, None)
     elif field_type == "child_agent_ids":
         if not isinstance(value, list) or not all(
@@ -252,6 +252,11 @@ def validate_typed_field(
     elif field_type == "child_presence_status":
         if value not in enum_set(manifest, "child_presence_statuses"):
             raise InvalidRecord("invalid child status")
+    elif field_type == "prompt_answers":
+        if not isinstance(value, list) or len(value) > limits["lifecycle_pool_max_count"]:
+            raise InvalidRecord("invalid prompt answers")
+        for item in value:
+            validate_shape(item, manifest["lifecycle_shapes"]["prompt_answer"], manifest, None)
     else:
         raise InvalidRecord(f"manifest names unsupported field type {field_type!r}")
 

@@ -38,6 +38,9 @@ mod hold_check;
 #[path = "lifecycle_spec/pane_facts.rs"]
 mod pane_facts;
 
+#[path = "lifecycle_spec/latest_prompt.rs"]
+mod latest_prompt;
+
 #[path = "lifecycle_spec/consumer_recipes.rs"]
 mod consumer_recipes;
 

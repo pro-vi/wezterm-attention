@@ -57,7 +57,9 @@ return function(context)
         if not group then
           group = { kind = request_kind, actor = deep_copy(item.actor), correlation = deep_copy(item.correlation), tool_name = item.tool_name,
             request_observation_ids = {}, result_observation_ids = {}, selection_observation_ids = {}, denial_observation_ids = {}, relations = {} }
-          if request_kind == "question" then group.question_mode = question_mode; group.publication_observation_ids = {} end
+          if request_kind == "question" then
+            group.question_mode = question_mode; group.publication_observation_ids = {}; group.answer_observation_ids = {}
+          end
           groups[key] = group; ordered[#ordered + 1] = group
         end
         local names = { request = "request_observation_ids", result = "result_observation_ids", publication = "publication_observation_ids", selection = "selection_observation_ids", denial = "denial_observation_ids" }
@@ -100,6 +102,11 @@ return function(context)
     return lifecycle_availability[status] or "absent"
   end
 
+  --- Observation order, as pools sort: the monotonic stamp, then the id.
+  local function observed_before(a, b)
+    return a.observed_mono_ns .. a.observation_id < b.observed_mono_ns .. b.observation_id
+  end
+
   --- The lifecycle facet from the lead's snapshot and the children's beside
   --- it, as Rust's lifecycle_from_reads and LifecycleView::assemble build it.
   --- The lead's file is read first and decides: while it is unavailable,
@@ -107,8 +114,10 @@ return function(context)
   --- evidence. Otherwise a children's file that cannot be used is reported
   --- and left out. Without a lead's file, the children's decides. A file this
   --- plugin could not read again is used as the copy it read last (`cached`),
-  --- which Rust, reading once, never has.
-  local function lifecycle_facet(snapshot, status, problem, now_unix_ns, children, children_status, children_problem)
+  --- which Rust, reading once, never has. A facet that shows evidence takes
+  --- `latest_prompt` and question answers from the lead's prompt record, or
+  --- reports that record when it cannot be used.
+  local function lifecycle_facet(snapshot, status, problem, now_unix_ns, children, children_status, children_problem, prompts, prompts_problem)
     local lead_availability = source_availability(status, problem)
     local children_availability = source_availability(children_status or "missing", children_problem)
     local facet = { availability = lead_availability, observations = {}, requests = {}, retention_floors = {}, diagnostics = {} }
@@ -120,6 +129,7 @@ return function(context)
       if lead_availability == "absent" then facet.availability = children_availability end
     end
     if not lead_snapshot and not children_snapshot then return facet end
+    if prompts_problem then facet.diagnostics[#facet.diagnostics + 1] = prompts_problem end
     facet.snapshot_id = lead_snapshot and lead_snapshot.snapshot_id or nil
     for _, source in ipairs({ { "lead", lead_snapshot }, { "child", children_snapshot } }) do
       local name_prefix, current = source[1], source[2]
@@ -145,10 +155,38 @@ return function(context)
         facet.diagnostics[#facet.diagnostics + 1] = diagnostic("clock_skew", "lifecycle write time is ahead of UTC")
       end
     end
-    table.sort(facet.observations, function(a,b)
-      return a.observed_mono_ns .. a.observation_id < b.observed_mono_ns .. b.observation_id
-    end)
+    table.sort(facet.observations, observed_before)
     facet.requests = request_evidence(facet.observations, (lead_snapshot or children_snapshot).provider)
+    -- The later of prompts.json's latest prompt and the newest lead prompt the
+    -- pools still hold, as Rust's LifecycleView::with_prompts takes it.
+    local latest = prompts and prompts.latest or nil
+    for index = #facet.observations, 1, -1 do
+      local item = facet.observations[index]
+      if item.kind == "prompt_submitted" and item.actor.kind == "lead" then
+        if not latest or observed_before(latest, item) then latest = item end
+        break
+      end
+    end
+    if latest then
+      facet.latest_prompt = { observation_id = latest.observation_id, observed_mono_ns = latest.observed_mono_ns,
+        written_at_unix_ns = latest.written_at_unix_ns }
+    end
+    -- A question's answers, matched by call id whatever turn they came in.
+    if prompts then
+      for _, group in ipairs(facet.requests) do
+        local call = group.correlation and group.correlation.tool_call_id
+        if call and group.answer_observation_ids then
+          local seen = {}
+          for _, answer in ipairs(prompts.answers) do
+            if answer.tool_call_id == call and not seen[answer.observation_id] then
+              seen[answer.observation_id] = true
+              group.answer_observation_ids[#group.answer_observation_ids + 1] = answer.observation_id
+            end
+          end
+          table.sort(group.answer_observation_ids)
+        end
+      end
+    end
     return facet
   end
 
@@ -662,14 +700,17 @@ return function(context)
     end
     local effective_type = effective_attention_type(shown_type, review)
     local unavailable = diagnostics_have_unavailable_io(diagnostics)
-    -- The lead's lifecycle snapshot, and the one its children write beside it
-    -- when the provider runs sub-agents.
+    -- The lead's lifecycle snapshot, the one its children write beside it
+    -- when the provider runs sub-agents, and the lead's prompt record.
     local snapshot, snapshot_problem, snapshot_status
     local children_snapshot, children_problem, children_status
+    local prompts, prompts_problem, prompts_status
     if binding then
       local identity = { address = address, launch_id = read.launch_id, binding_id = pointer.binding_id }
       snapshot, snapshot_problem, snapshot_status = read_expected_record_cached(
         records_root .. "/lifecycle.json", "lifecycle_snapshot", identity, false, previous_binding_records.lifecycle)
+      prompts, prompts_problem, prompts_status = read_expected_record_cached(
+        records_root .. "/prompts.json", "lead_prompts", identity, false, previous_binding_records.prompts)
       if snapshot and snapshot.provider ~= binding.provider then
         snapshot, snapshot_problem, snapshot_status = nil, invalid("lifecycle provider differs from its binding"), "invalid"
       end
@@ -684,6 +725,7 @@ return function(context)
     end
     records.lifecycle = snapshot
     records.children_lifecycle = children_snapshot
+    records.prompts = prompts
     -- The record reader hands back the previous snapshot table when a file's
     -- bytes have not changed, and then the facet built last poll is still the
     -- facet: copying and grouping every observation again would give the same
@@ -703,6 +745,7 @@ return function(context)
     if (snapshot or children_snapshot) and previous_lifecycle
         and as_before(snapshot, snapshot_status, previous_binding_records.lifecycle)
         and as_before(children_snapshot, children_status or "missing", previous_binding_records.children_lifecycle)
+        and as_before(prompts, prompts_status or "missing", previous_binding_records.prompts)
         and previous_lifecycle.availability == "available"
         and #previous_lifecycle.diagnostics == 0
         and not written_after_now(snapshot) and not written_after_now(children_snapshot) then
@@ -710,7 +753,7 @@ return function(context)
       lifecycle.badge_acknowledgement = nil
     else
       lifecycle = lifecycle_facet(snapshot, snapshot_status, snapshot_problem, now_unix_ns,
-        children_snapshot, children_status, children_problem)
+        children_snapshot, children_status, children_problem, prompts, prompts_problem)
     end
     local raw_activity = records.activity
     if acknowledgement and raw_activity and same_target(acknowledgement.target, current_target)

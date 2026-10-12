@@ -197,6 +197,136 @@ pub struct LifecycleSnapshot {
     pub pools: ObservationPools,
 }
 
+/// The lead's latest prompt and the questions its prompts answered, kept in
+/// `prompts.json` beside `lifecycle.json`. Generic tool traffic evicts a
+/// prompt from the general pool but never touches this record, where only
+/// newer answers push out the oldest; the lifecycle file keeps its shape.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LeadPrompts {
+    pub kind: String,
+    pub schema: u64,
+    pub address: PaneAddress,
+    pub launch_id: String,
+    pub binding_id: String,
+    /// The lead's latest prompt, whether or not the lifecycle file stored it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest: Option<PromptReference>,
+    pub answers: Vec<PromptAnswer>,
+}
+
+/// One question a prompt answered: the question call's native id and the
+/// question's index in that call.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnsweredQuestion {
+    pub tool_call_id: String,
+    pub question_index: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PromptReference {
+    pub observation_id: String,
+    pub observed_mono_ns: String,
+    pub written_at_unix_ns: String,
+}
+
+/// A prompt that answered one question of a call: the call's native id, the
+/// question's index in it, and the prompt's observation id and order. The
+/// lifecycle file may never have held that observation: as of Codex 0.162.0
+/// every prompt of a turn carries the turn's id, and the general pool keeps
+/// one per turn.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PromptAnswer {
+    pub tool_call_id: String,
+    pub question_index: u64,
+    pub observation_id: String,
+    pub observed_mono_ns: String,
+}
+
+impl PromptReference {
+    pub fn of(prompt: &LifecycleObservation) -> Self {
+        Self {
+            observation_id: prompt.observation_id.clone(),
+            observed_mono_ns: prompt.observed_mono_ns.clone(),
+            written_at_unix_ns: prompt.written_at_unix_ns.clone(),
+        }
+    }
+    /// Observation order: the monotonic stamp, then the id, as pools sort.
+    fn order(&self) -> (&str, &str) {
+        (&self.observed_mono_ns, &self.observation_id)
+    }
+}
+
+impl LeadPrompts {
+    /// A record with no prompt and no answers yet.
+    pub fn empty(address: PaneAddress, launch_id: &str, binding_id: &str, schema: u64) -> Self {
+        Self {
+            kind: "lead_prompts".to_owned(),
+            schema,
+            address,
+            launch_id: launch_id.to_owned(),
+            binding_id: binding_id.to_owned(),
+            latest: None,
+            answers: vec![],
+        }
+    }
+
+    /// Makes `prompt` the latest prompt unless the record already names a
+    /// later one, so a hook delivered late cannot move it back. Says whether
+    /// it changed.
+    pub fn record_prompt(&mut self, prompt: &PromptReference) -> bool {
+        let later = self
+            .latest
+            .as_ref()
+            .is_none_or(|latest| latest.order() < prompt.order());
+        if later {
+            self.latest = Some(prompt.clone());
+        }
+        later
+    }
+
+    /// Adds the questions `prompt` answered. A question already answered
+    /// keeps its first answer, so a hook delivered twice adds nothing. The
+    /// answers stay in observation order, and beyond `limit` the oldest go.
+    /// Says whether it changed.
+    pub fn record_answers(
+        &mut self,
+        prompt: &PromptReference,
+        answered: &[AnsweredQuestion],
+        limit: usize,
+    ) -> bool {
+        let before = self.answers.clone();
+        for question in answered {
+            if !self.answers.iter().any(|answer| {
+                answer.tool_call_id == question.tool_call_id
+                    && answer.question_index == question.question_index
+            }) {
+                self.answers.push(PromptAnswer {
+                    tool_call_id: question.tool_call_id.clone(),
+                    question_index: question.question_index,
+                    observation_id: prompt.observation_id.clone(),
+                    observed_mono_ns: prompt.observed_mono_ns.clone(),
+                });
+            }
+        }
+        if self.answers.len() == before.len() {
+            return false;
+        }
+        self.answers.sort_by(|a, b| {
+            (&a.observed_mono_ns, &a.tool_call_id, a.question_index).cmp(&(
+                &b.observed_mono_ns,
+                &b.tool_call_id,
+                b.question_index,
+            ))
+        });
+        let excess = self.answers.len().saturating_sub(limit);
+        self.answers.drain(..excess);
+        self.answers != before
+    }
+}
+
 vocabulary!(LifecycleAvailability {
     Available,
     Absent,
@@ -246,6 +376,10 @@ pub struct RequestEvidence {
     pub denial_observation_ids: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publication_observation_ids: Option<Vec<String>>,
+    /// On a question: the prompts that answered its call, matched by call id
+    /// from `prompts.json`, whatever turn they arrived in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer_observation_ids: Option<Vec<String>>,
     pub relations: Vec<RequestRelation>,
 }
 
@@ -254,6 +388,9 @@ pub struct LifecycleView {
     pub availability: LifecycleAvailability,
     pub observations: Vec<PooledObservation>,
     pub requests: Vec<RequestEvidence>,
+    /// The lead's latest prompt, whether or not the general pool still holds it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_prompt: Option<PromptReference>,
     pub retention_floors: std::collections::BTreeMap<String, String>,
     pub diagnostics: Vec<crate::protocol::Diagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -268,6 +405,7 @@ impl LifecycleView {
             availability,
             observations: vec![],
             requests: vec![],
+            latest_prompt: None,
             retention_floors: Default::default(),
             diagnostics: vec![],
             snapshot_id: None,
@@ -277,7 +415,8 @@ impl LifecycleView {
 
     /// The view of a binding's lifecycle evidence: the lead's `lifecycle.json`
     /// and its children's `children-lifecycle.json`, each already validated by
-    /// its reader, and `problems` from reading them, reported first. The view
+    /// its reader, and `problems` from reading them and the lead's prompt
+    /// record, reported first. The view
     /// can hold both files' pools, so it is not a snapshot and is never
     /// validated as one.
     ///
@@ -346,7 +485,51 @@ impl LifecycleView {
         if let Some(snapshot) = lead.or(children) {
             view.requests = request_evidence(&view.observations, snapshot.provider.as_str());
         }
+        // Sorted, so the last lead prompt is the newest the pools hold.
+        view.latest_prompt = view
+            .observations
+            .iter()
+            .rfind(|pooled| pooled.observation.is_lead_prompt())
+            .map(|pooled| PromptReference::of(&pooled.observation));
         view
+    }
+
+    /// This view with the lead's `prompts.json` applied. The latest prompt is
+    /// the later of the record's and the newest lead prompt the pools still
+    /// hold, which covers a binding from before the record existed and a
+    /// record whose write failed.
+    pub fn with_prompts(mut self, prompts: Option<&LeadPrompts>) -> Self {
+        let Some(prompts) = prompts else { return self };
+        if let Some(latest) = &prompts.latest
+            && self
+                .latest_prompt
+                .as_ref()
+                .is_none_or(|pooled| pooled.order() <= latest.order())
+        {
+            self.latest_prompt = Some(latest.clone());
+        }
+        for group in &mut self.requests {
+            let Some(call) = group
+                .correlation
+                .as_ref()
+                .and_then(|correlation| correlation.tool_call_id.as_deref())
+            else {
+                continue;
+            };
+            let Some(ids) = group.answer_observation_ids.as_mut() else {
+                continue;
+            };
+            ids.extend(
+                prompts
+                    .answers
+                    .iter()
+                    .filter(|answer| answer.tool_call_id == call)
+                    .map(|answer| answer.observation_id.clone()),
+            );
+            ids.sort();
+            ids.dedup();
+        }
+        self
     }
 }
 
@@ -486,6 +669,7 @@ fn request_evidence(observations: &[PooledObservation], provider: &str) -> Vec<R
                 selection_observation_ids: vec![],
                 denial_observation_ids: vec![],
                 publication_observation_ids: (kind == RequestKind::Question).then(Vec::new),
+                answer_observation_ids: (kind == RequestKind::Question).then(Vec::new),
                 relations: vec![],
             });
             index
@@ -615,6 +799,10 @@ impl ObservationBody {
 }
 
 impl LifecycleObservation {
+    pub fn is_lead_prompt(&self) -> bool {
+        self.actor == Actor::Lead && matches!(self.body, ObservationBody::PromptSubmitted { .. })
+    }
+
     pub fn ends_turn(&self, provider: Provider) -> bool {
         self.actor == Actor::Lead
             && manifest().is_ok_and(|m| {

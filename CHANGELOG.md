@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **The lifecycle facet names the lead's latest prompt after tool traffic evicts it.** `latest_prompt` gives its observation id, `observed_mono_ns` and `written_at_unix_ns`, in `attention inspect` and in the GUI view, including a Codex prompt typed while a turn ran, which the pools never held. A new per-binding record, `prompts.json`, keeps it; `lifecycle.json` and every schema number are unchanged. A publication ordered before `latest_prompt` was followed by a prompt.
+- **A Codex 0.162.0 answer names its question.** Every question group has `answer_observation_ids`: the prompts that answered its call, matched by the call id Codex puts in the `<send_user_message_question_reply>` wrapper of the answer prompt, including an answer typed while the turn runs. Only the id and the question's index are kept, never the text. An answer does not say that nothing on the call still waits; a call can hold several questions.
+- **`examples/follow-up.lua` no longer shows an answered question, or one a later prompt followed, as `follow_up`.**
+
+Going back to 1.0.0 after this release, `attention sweep` and `doctor` keep any binding that holds `prompts.json` and report it as `record_invalid` ("unknown binding state is preserved"); nothing is lost.
+
 ## 1.0.0 — 2026-10-09
 
 This release adds the `attention` command, a Rust program that agent hooks and scripts call to record what a pane's agent is doing, and a plugin that reads those records across local panes and mux-attached GUIs. The plugin shows only what the command records, so the two are installed together.

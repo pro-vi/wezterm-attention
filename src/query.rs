@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::children::{ChildPresenceSet, ChildStatus, EndMark};
 use crate::identity::{PaneAddress, marker_address, socket_identity};
-use crate::observations::{LifecycleAvailability, LifecycleSnapshot, LifecycleView};
+use crate::observations::{LeadPrompts, LifecycleAvailability, LifecycleSnapshot, LifecycleView};
 use crate::presence::{
     AssemblyListings, PaneEvidence, RecordedServer, ServerState, SocketChange, SpawnSpend,
     presence_at_socket, reader_presence, realm_socket, recorded_server, server_state,
@@ -754,6 +754,7 @@ fn read_pane_facts_once(
         lifecycle_from_reads(
             RecordFacet::at(reader, root, "lifecycle_snapshot", &identity, "lifecycle"),
             children,
+            RecordFacet::at(reader, root, "lead_prompts", &identity, "lifecycle"),
             provider,
             now.as_deref(),
         )?
@@ -965,10 +966,13 @@ fn lifecycle_source(
 /// it. The lead's file is read first and decides: while it cannot be read,
 /// the facet says so and shows no children's evidence. While it can, a
 /// children's file that cannot is reported and left out. Without a lead's
-/// file, the children's decides.
+/// file, the children's decides. The lead's prompt record is applied to a
+/// facet that shows evidence; one that cannot be used is reported and left
+/// out, as a children's file is.
 fn lifecycle_from_reads(
     lead: RecordFacet,
     children: RecordFacet,
+    prompts: RecordFacet,
     provider: Option<&str>,
     now: Option<&str>,
 ) -> Result<LifecycleView> {
@@ -978,12 +982,19 @@ fn lifecycle_from_reads(
     let mut view = match (lead, children) {
         (L::Available, _) | (L::Absent, L::Available) => {
             problems.extend(children_problems);
+            problems.extend(prompts.diagnostics);
+            let prompts = prompts
+                .record
+                .map(serde_json::from_value::<LeadPrompts>)
+                .transpose()
+                .map_err(AttentionError::record_json)?;
             LifecycleView::assemble(
                 lead_snapshot.as_ref(),
                 children_snapshot.as_ref(),
                 now,
                 problems,
             )
+            .with_prompts(prompts.as_ref())
         }
         (L::Absent, children) => {
             let mut view = LifecycleView::empty(children);

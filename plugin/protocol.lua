@@ -426,8 +426,16 @@ return function(context)
         if not validate_shape(item, protocol.lifecycle_shapes.child_presence_entry) then return false end
       end
       return true
-    elseif field_type == "child_parent_clear" or field_type == "child_lifetime_end" then
+    elseif field_type == "child_parent_clear" or field_type == "child_lifetime_end"
+      or field_type == "prompt_reference" then
       return validate_shape(value, protocol.lifecycle_shapes[field_type]) ~= nil
+    elseif field_type == "prompt_answers" then
+      if not is_array(value) or #value > limits.lifecycle_pool_max_count then return false end
+      container_kinds[value] = "["
+      for _, item in ipairs(value) do
+        if not validate_shape(item, protocol.lifecycle_shapes.prompt_answer) then return false end
+      end
+      return true
     elseif field_type == "child_agent_ids" then
       if not is_array(value) then return false end
       for _, item in ipairs(value) do
