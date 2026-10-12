@@ -326,7 +326,7 @@ def parse_record(value: Any, manifest: dict[str, Any]) -> str:
         "owner_key"
     ]:
         return "record_invalid"
-    if kind == "claim" and not claim_owner_is_whole(value):
+    if kind in ("claim", "host") and not claim_owner_is_whole(value):
         return "record_invalid"
     return "valid"
 
@@ -345,7 +345,7 @@ CLAIM_OWNER_FIELDS = ("owner_pid", "owner_started_sec", "owner_started_usec", "o
 
 
 def claim_owner_is_whole(value: dict[str, Any]) -> bool:
-    """A claim names its owning process with all four owner fields or none."""
+    """A claim or a host record names its owning process with all four owner fields or none."""
     present = [field for field in CLAIM_OWNER_FIELDS if field in value]
     if not present:
         return True

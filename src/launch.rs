@@ -577,6 +577,35 @@ pub(crate) struct ClaimOwner {
     pub(crate) boot_session_id: String,
 }
 
+impl ClaimOwner {
+    /// The owner a claim or host record names in its owner fields; `None`
+    /// when it names none, and an error when it names one only in part.
+    pub(crate) fn of(record: &Value) -> std::result::Result<Option<Self>, ()> {
+        Ok(
+            crate::protocol::claim_owner(record)?.map(|(pid, seconds, microseconds, boot)| Self {
+                pid,
+                start: ProcessStart {
+                    seconds,
+                    microseconds,
+                },
+                boot_session_id: boot.to_owned(),
+            }),
+        )
+    }
+
+    /// Name this owner in `record`'s owner fields.
+    pub(crate) fn write_into(&self, record: &mut Value) {
+        for (field, value) in crate::protocol::CLAIM_OWNER_FIELDS.into_iter().zip([
+            self.pid.to_string(),
+            self.start.seconds.to_string(),
+            self.start.microseconds.to_string(),
+            self.boot_session_id.clone(),
+        ]) {
+            record[field] = json!(value);
+        }
+    }
+}
+
 /// Which kind of claim a pane holds.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ClaimMode {
@@ -589,16 +618,9 @@ pub(crate) enum ClaimMode {
 impl ClaimMode {
     /// The mode of a claim record that has already been validated as one.
     pub(crate) fn of(claim: &Value) -> Result<Self> {
-        match crate::protocol::claim_owner(claim) {
+        match ClaimOwner::of(claim) {
             Ok(None) => Ok(Self::Shell),
-            Ok(Some((pid, seconds, microseconds, boot))) => Ok(Self::SelfOwned(ClaimOwner {
-                pid,
-                start: ProcessStart {
-                    seconds,
-                    microseconds,
-                },
-                boot_session_id: boot.to_owned(),
-            })),
+            Ok(Some(owner)) => Ok(Self::SelfOwned(owner)),
             Err(()) => Err(AttentionError::new(
                 DiagnosticCode::RecordInvalid,
                 "claim owner is invalid",
@@ -933,20 +955,20 @@ impl HostProof {
         Ok(reading.foreground)
     }
 
-    /// Whether `claim` is this host's own: self-owned by the same process, at
-    /// the same terminal.
-    pub(crate) fn owns(&self, claim: &Value) -> Result<bool> {
+    /// Whether `record`, a claim or a host record, names this host: the same
+    /// process, at the same terminal.
+    pub(crate) fn owns(&self, record: &Value) -> Result<bool> {
         Ok(
-            ClaimMode::of(claim)? == ClaimMode::SelfOwned(self.owner.clone())
-                && claim.get("tty_path").and_then(Value::as_str) == Some(self.tty_path.as_str())
-                && claim.get("tty_fingerprint").and_then(Value::as_str)
+            ClaimMode::of(record)? == ClaimMode::SelfOwned(self.owner.clone())
+                && record.get("tty_path").and_then(Value::as_str) == Some(self.tty_path.as_str())
+                && record.get("tty_fingerprint").and_then(Value::as_str)
                     == Some(self.tty_fingerprint.as_str()),
         )
     }
 }
 
-/// The terminal path and fingerprint a claim records.
-fn recorded_terminal(claim: &Value) -> Result<(String, String)> {
+/// The terminal path and fingerprint a claim or host record records.
+pub(crate) fn recorded_terminal(claim: &Value) -> Result<(String, String)> {
     let recorded = |field: &str| {
         claim
             .get(field)
@@ -1008,7 +1030,7 @@ pub(crate) struct SelfOwnedLaunch {
 
 /// Whether the process a self-owned claim names still runs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OwnerState {
+pub(crate) enum OwnerState {
     Alive,
     /// Proven to have exited: the machine rebooted since, or its pid names no
     /// process, or names one that started at another time.
@@ -1021,7 +1043,7 @@ enum OwnerState {
 /// Rests on the kernel fixing a process's start time when it forks: an
 /// `exec` keeps it, so a process that still runs reads the same start at
 /// every check, and a different start at its pid is another process.
-fn owner_state(owner: &ClaimOwner, processes: &dyn ProcessInspector) -> OwnerState {
+pub(crate) fn owner_state(owner: &ClaimOwner, processes: &dyn ProcessInspector) -> OwnerState {
     let Some(boot) = processes.boot_session() else {
         return OwnerState::Unknown;
     };
@@ -1059,15 +1081,7 @@ fn self_owned_claim_record(
         &proof.tty_fingerprint,
         observation,
     )?;
-    let owner = &proof.owner;
-    for (field, value) in crate::protocol::CLAIM_OWNER_FIELDS.into_iter().zip([
-        owner.pid.to_string(),
-        owner.start.seconds.to_string(),
-        owner.start.microseconds.to_string(),
-        owner.boot_session_id.clone(),
-    ]) {
-        record[field] = json!(value);
-    }
+    proof.owner.write_into(&mut record);
     Ok(record)
 }
 

@@ -842,7 +842,7 @@ pub(super) fn launch_of(claim: &Value) -> String {
 
 /// Put another agent in the pane: `agent` started by the shell, running the
 /// hook `hook`, and leading the terminal's foreground job.
-fn start_agent(setup: &Setup, agent: i32, hook: i32) -> BTreeMap<String, String> {
+pub(super) fn start_agent(setup: &Setup, agent: i32, hook: i32) -> BTreeMap<String, String> {
     let mut facts = process_facts(
         agent,
         SHELL_PID,

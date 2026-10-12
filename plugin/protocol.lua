@@ -690,8 +690,8 @@ return function(context)
     return wire, wire_diagnostic
   end
 
-  -- A claim names the process that owns it with all four owner fields or
-  -- none. One with only some is neither a shell claim nor a self-owned one.
+  -- A claim or a host record names the process that owns it with all four
+  -- owner fields or none. One with only some is neither a shell claim nor a self-owned one.
   local claim_owner_fields = { "owner_pid", "owner_started_sec", "owner_started_usec", "owner_boot_session_id" }
 
   local function claim_owner_is_whole(value)
@@ -748,8 +748,8 @@ return function(context)
     if kind == "review" and sha256(parsed.owner_id) ~= parsed.owner_key then
       return nil, invalid("review owner_key does not match owner_id")
     end
-    if kind == "claim" and not claim_owner_is_whole(parsed) then
-      return nil, invalid("claim names only part of its owner")
+    if (kind == "claim" or kind == "host") and not claim_owner_is_whole(parsed) then
+      return nil, invalid(kind .. " names only part of its owner")
     end
     if is_lifecycle_snapshot_kind(kind) and not validate_lifecycle(parsed) then return nil, invalid("lifecycle snapshot violates its contract") end
     if kind == "child_presence_set" then

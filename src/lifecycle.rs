@@ -3167,6 +3167,8 @@ fn apply_provider_event_inner(
     // Metadata the parser dropped is reported unless the lifecycle has a
     // finding of its own, which says more about what happened to the event.
     // A claim this event made and could not publish says less than either.
+    // A host record the event could not keep, or moved aside, is reported
+    // over all of them.
     result.map(|mut result| {
         if result.diagnostic.is_none() {
             result.diagnostic = event
@@ -3174,8 +3176,88 @@ fn apply_provider_event_inner(
                 .clone()
                 .or_else(|| resolved.publication_diagnostic.clone());
         }
+        if accepted(&result)
+            && let Some(problem) = record_host(&resolved, event, &written_at)
+        {
+            report_instead(&mut result.diagnostic, problem);
+        }
         result
     })
+}
+
+/// Keep the host the hook of an accepted lead event proved as its binding's
+/// host, under the launch and claim locks, in a commit of its own after the
+/// event's. Nothing is written for an event whose proof no longer holds, or
+/// whose binding is not the launch's current one; what a record already there
+/// decides is [`crate::host::recorded_host`]'s. Returns what to report beside
+/// the event's result: a failed write, or an invalid record moved aside.
+fn record_host(
+    resolved: &ResolvedLaunch,
+    event: &ProviderEvent,
+    written_at: &str,
+) -> Option<Diagnostic> {
+    let host = resolved.host.as_ref()?;
+    // A sub-agent's event speaks for the sub-agent, not the binding's lead.
+    if event.agent_id.is_some() {
+        return None;
+    }
+    let binding_id = event_binding_id(event, &resolved.launch_id).ok()?;
+    let identity = resolved.binding(&binding_id);
+    // Most hooks prove the host already recorded. That writes nothing, so it
+    // needs no lock.
+    if let RecordRead::Present(stored) = read_record_typed_at(&resolved.root, "host", &identity)
+        && host.proof.owns(&stored).unwrap_or(false)
+    {
+        return None;
+    }
+    let outcome = commit(
+        &resolved.root,
+        &[&resolved.launch_lock(), &resolved.claim_lock()],
+        "current_binding",
+        &resolved.launch(),
+        |pointer| {
+            // The binding id names its provider and session, so the pointer
+            // naming it is the event's binding being current.
+            if pointer
+                .as_ref()
+                .and_then(|pointer| pointer["binding_id"].as_str())
+                != Some(binding_id.as_str())
+                || resolved.lapsed_now()?.is_some()
+            {
+                return Ok(CommitPlan::reporting(None));
+            }
+            let path = identity.path(&resolved.root, "host")?;
+            let found = read_or_move_aside(&path, "host", &identity, None)?;
+            let stored = match &found {
+                Replacing::Present(record) => Some(record),
+                Replacing::Missing | Replacing::MovedAside => None,
+            };
+            let next = crate::host::recorded_host(
+                stored,
+                &host.proof,
+                (&resolved.address, &resolved.launch_id, &binding_id),
+                &event.source_event,
+                written_at,
+                host.processes,
+            )?;
+            Ok(CommitPlan {
+                replacements: next
+                    .map(|record| Replacement::always(path, record))
+                    .into_iter()
+                    .collect(),
+                ..CommitPlan::reporting(
+                    matches!(found, Replacing::MovedAside)
+                        .then(|| started_again_diagnostic("host_record")),
+                )
+            })
+        },
+        |_| Ok(()),
+    );
+    match outcome {
+        Ok((moved_aside, ())) => moved_aside,
+        Err(error) => Some(error.diagnostic),
+    }
+    .map(|diagnostic| diagnostic.with("facet", "host"))
 }
 
 /// What a hold check reads of the hook's binding under its locks: the scope,

@@ -77,6 +77,8 @@ mod claim_fence;
 #[path = "lifecycle_spec/plugin_writes.rs"]
 mod plugin_writes;
 
+#[path = "lifecycle_spec/host_facet.rs"]
+mod host_facet;
 #[path = "lifecycle_spec/inherited_host.rs"]
 mod inherited_host;
 
@@ -400,6 +402,15 @@ impl Setup {
             "WEZTERM_ATTENTION_HOST_PID".to_owned(),
             AGENT_PID.to_string(),
         );
+        env
+    }
+
+    /// The environment of a hook that inherited the pane's launch id and
+    /// names the agent `host`, as a hook registered as
+    /// `WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event ...` does.
+    fn naming(&self, host: i32) -> BTreeMap<String, String> {
+        let mut env = self.env.clone();
+        env.insert("WEZTERM_ATTENTION_HOST_PID".to_owned(), host.to_string());
         env
     }
 

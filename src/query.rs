@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::children::{ChildPresenceSet, ChildStatus, EndMark};
+use crate::host::{HostCheckPorts, HostFacet, HostRefusal, check_host};
 use crate::identity::{PaneAddress, marker_address, socket_identity};
 use crate::observations::{LeadPrompts, LifecycleAvailability, LifecycleSnapshot, LifecycleView};
 use crate::presence::{
@@ -344,6 +345,8 @@ pub struct PaneFacts {
     pub children: ChildrenFacet,
     pub review: EvidenceCollection,
     pub lifecycle: LifecycleView,
+    /// The binding's agent process, checked again while answering.
+    pub host: HostFacet,
     pub diagnostics: Vec<Diagnostic>,
     /// Where the call spent its time, in the shape a bindings answer uses.
     pub timing_ms: BindingTiming,
@@ -427,6 +430,16 @@ impl PaneFacts {
             ),
             review: EvidenceCollection::empty(RecordAvailability::Unavailable),
             lifecycle: LifecycleView::empty(LifecycleAvailability::Unavailable),
+            // A matched scope answered without a row could not read its
+            // binding record, so no host can be vouched for.
+            host: HostFacet::refused(
+                if relation == ScopeRelation::Matched {
+                    HostRefusal::ProbeUnavailable
+                } else {
+                    HostRefusal::ScopeNotMatched
+                },
+                None,
+            ),
             diagnostics,
             timing_ms: BindingTiming::default(),
         }
@@ -448,16 +461,22 @@ impl PaneFacts {
 }
 
 pub fn read_pane_facts(root: &Path, scope: &PaneScope) -> Result<PaneFacts> {
-    read_pane_facts_with_ports(
+    read_pane_facts_checking_host(
         root,
         scope,
         &FileRecords,
         &crate::wezterm::SystemClock,
         Some(&crate::wezterm::WeztermPaneLister),
         Some(&crate::wezterm::SystemProcessProbe),
+        Some(&HostCheckPorts {
+            processes: &crate::wezterm::SystemProcessInspector,
+            tty: &crate::wezterm::SystemTtyWriter,
+        }),
     )
 }
 
+/// [`read_pane_facts_checking_host`] with no way to check a recorded host,
+/// which the `host` facet then refuses as `probe_unavailable`.
 pub fn read_pane_facts_with_ports(
     root: &Path,
     scope: &PaneScope,
@@ -465,6 +484,18 @@ pub fn read_pane_facts_with_ports(
     clock: &dyn Clock,
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
+) -> Result<PaneFacts> {
+    read_pane_facts_checking_host(root, scope, reader, clock, panes, processes, None)
+}
+
+pub fn read_pane_facts_checking_host(
+    root: &Path,
+    scope: &PaneScope,
+    reader: &dyn RecordReader,
+    clock: &dyn Clock,
+    panes: Option<&dyn PaneLister>,
+    processes: Option<&dyn ProcessProbe>,
+    host: Option<&HostCheckPorts<'_>>,
 ) -> Result<PaneFacts> {
     let started = Instant::now();
     let listings = AssemblyListings::new(panes, processes);
@@ -475,6 +506,7 @@ pub fn read_pane_facts_with_ports(
         clock,
         listings.panes(),
         listings.processes(),
+        host,
     )?;
     facts.timing_ms = BindingTiming::from_wall(started, listings.spent());
     Ok(facts)
@@ -489,6 +521,7 @@ fn read_pane_facts_once(
     clock: &dyn Clock,
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
+    host_ports: Option<&HostCheckPorts<'_>>,
 ) -> Result<PaneFacts> {
     use RecordAvailability as A;
     // Scope is constructed/decoded through validation before any record or process I/O.
@@ -815,6 +848,27 @@ fn read_pane_facts_once(
         item.set("facet", "pane_presence");
     }
     let ended = end.availability == A::Present;
+    // Checked inside the reads that bracket the answer: the claim and the
+    // pointer are read again after it, and the socket checked again.
+    let mut host = if selected.is_none() {
+        HostFacet::refused(HostRefusal::NoneRecorded, None)
+    } else if ended {
+        HostFacet::refused(HostRefusal::BindingEnded, None)
+    } else {
+        let read = RecordFacet::at(reader, root, "host", &identity, "host");
+        let stored = match (&read.record, read.availability) {
+            (Some(record), _) => Ok(record),
+            (None, A::Absent) => Err(HostRefusal::NoneRecorded),
+            (None, A::Unavailable) => Err(HostRefusal::ProbeUnavailable),
+            (None, _) => Err(HostRefusal::RecordInvalid),
+        };
+        check_host(
+            stored,
+            presence == PanePresence::VerifiedAbsent,
+            host_ports,
+            now.as_deref(),
+        )
+    };
     // A scope whose records are kept history was answered above, so the one
     // left here is live or shown exited, as `bindings` would say of this row.
     let kept_history = false;
@@ -854,6 +908,9 @@ fn read_pane_facts_once(
     let presence = if exited_during_read {
         // What the listing reported was about the replacement.
         diagnostics.truncate(before_presence);
+        if host.record.is_some() {
+            host = HostFacet::refused(HostRefusal::TerminalChanged, host.checked_at_unix_ns);
+        }
         PanePresence::VerifiedAbsent
     } else {
         presence
@@ -921,6 +978,7 @@ fn read_pane_facts_once(
         children,
         review,
         lifecycle,
+        host,
         diagnostics,
         timing_ms: BindingTiming::default(),
     })

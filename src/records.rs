@@ -365,7 +365,7 @@ const AGENT_KEY: &str = "agent_key";
 /// The records kept one to a directory: each kind, the file that holds it,
 /// and the depths whose directory may hold one. Activity and its
 /// acknowledgement belong to a binding, or to the launch while it has none.
-const FIXED_RECORDS: [(&str, &str, &[Depth]); 16] = [
+const FIXED_RECORDS: [(&str, &str, &[Depth]); 17] = [
     ("realm", "realm.json", &[Depth::Realm]),
     ("incarnation", "incarnation.json", &[Depth::Incarnation]),
     ("claim", "claim.json", &[Depth::Pane]),
@@ -389,6 +389,7 @@ const FIXED_RECORDS: [(&str, &str, &[Depth]); 16] = [
         &[Depth::Binding],
     ),
     ("lead_prompts", "prompts.json", &[Depth::Binding]),
+    ("host", "host.json", &[Depth::Binding]),
     ("activity_clear", "activity-clear.json", &[Depth::Binding]),
     ("binding_end", "end.json", &[Depth::Binding]),
     ("child_presence_set", "children.json", &[Depth::Binding]),

@@ -938,7 +938,9 @@ pub fn parse_record_value(value: &Value, protocol: &Manifest) -> Verdict {
             .and_then(Value::as_str)
             .zip(value.get("owner_key").and_then(Value::as_str))
             .is_some_and(|(id, key)| sha256_hex(id.as_bytes()) == key),
-        "claim" => claim_owner(value).is_ok(),
+        // A host record names its process with the same four fields, all
+        // required by its shape.
+        "claim" | "host" => claim_owner(value).is_ok(),
         _ => true,
     };
     if digest_matches {
@@ -948,7 +950,7 @@ pub fn parse_record_value(value: &Value, protocol: &Manifest) -> Verdict {
     }
 }
 
-/// The fields of a claim that name the process owning it. A claim holds all of
+/// The fields of a claim or a host record that name the process owning it. A claim holds all of
 /// them or none: one with none is a shell claim, made by a shell for the
 /// commands it starts; one with all is self-owned, made by an agent's own hook.
 pub const CLAIM_OWNER_FIELDS: [&str; 4] = [

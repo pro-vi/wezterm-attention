@@ -5,16 +5,8 @@
 use super::self_claim::{every_action, records, start};
 use super::*;
 
-/// The environment of a hook that inherited the pane's launch id and names
-/// its agent, as a hook registered as
-/// `WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event ...` does.
 fn asserting_env(setup: &Setup) -> BTreeMap<String, String> {
-    let mut env = setup.env.clone();
-    env.insert(
-        "WEZTERM_ATTENTION_HOST_PID".to_owned(),
-        AGENT_PID.to_string(),
-    );
-    env
+    setup.naming(AGENT_PID)
 }
 
 fn outcome(
