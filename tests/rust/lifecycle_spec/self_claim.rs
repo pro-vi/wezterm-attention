@@ -808,19 +808,19 @@ fn a_socket_replaced_while_the_agent_is_checked_proves_nothing() {
 }
 
 pub(super) fn start(provider: &str, session: &str) -> ProviderEvent {
+    start_from(provider, session, "startup")
+}
+
+/// A lead session start with source `source`, in the shape `provider` sends.
+pub(super) fn start_from(provider: &str, session: &str, source: &str) -> ProviderEvent {
     match provider {
         "pi" => event(
             "pi",
             "session_start",
             session,
-            json!({"start_source":"startup"}),
+            json!({"start_source":source}),
         ),
-        _ => event(
-            provider,
-            "SessionStart",
-            session,
-            json!({"source":"startup"}),
-        ),
+        _ => event(provider, "SessionStart", session, json!({"source":source})),
     }
 }
 

@@ -6,7 +6,7 @@ use super::self_claim::{apply_as, launch_of, setup_launch_dir, start, start_agen
 use super::*;
 use wezterm_attention::host::{HostCheckPorts, HostFacet};
 use wezterm_attention::query::{
-    PaneScope, read_pane_facts_checking_host, read_pane_facts_with_ports,
+    PaneFacts, PaneScope, read_pane_facts_checking_host, read_pane_facts_with_ports,
 };
 use wezterm_attention::records::FileRecords;
 
@@ -30,7 +30,7 @@ fn shell_session(provider: &str) -> Setup {
     setup
 }
 
-fn launch(setup: &Setup) -> String {
+pub(super) fn launch(setup: &Setup) -> String {
     launch_of(&stored_claim(setup).expect("the pane's claim"))
 }
 
@@ -61,7 +61,7 @@ fn scope(setup: &Setup, binding: &str) -> PaneScope {
 
 /// The `host` facet `inspect` gives for the binding `binding`, checking the
 /// terminal fingerprint with `tty`.
-fn checked_with(setup: &Setup, binding: &str, tty: &dyn TtyWriter) -> HostFacet {
+pub(super) fn facts_with(setup: &Setup, binding: &str, tty: &dyn TtyWriter) -> PaneFacts {
     read_pane_facts_checking_host(
         &state_root(&setup.env).expect("state root"),
         &scope(setup, binding),
@@ -75,7 +75,10 @@ fn checked_with(setup: &Setup, binding: &str, tty: &dyn TtyWriter) -> HostFacet 
         }),
     )
     .expect("inspect answers")
-    .host
+}
+
+fn checked_with(setup: &Setup, binding: &str, tty: &dyn TtyWriter) -> HostFacet {
+    facts_with(setup, binding, tty).host
 }
 
 fn session_binding(setup: &Setup, provider: &str) -> String {
@@ -236,7 +239,7 @@ fn a_sub_agent_s_hook_records_no_host() {
 
 /// Put a second agent in the pane, on its terminal, running the hook that
 /// reads the process table now, and give the environment its hooks run in.
-fn second_agent(setup: &Setup) -> BTreeMap<String, String> {
+pub(super) fn second_agent(setup: &Setup) -> BTreeMap<String, String> {
     let mut env = start_agent(setup, SECOND_AGENT, SECOND_HOOK);
     env.insert(
         "WEZTERM_ATTENTION_LAUNCH_ID".into(),

@@ -60,6 +60,18 @@ pub(crate) fn recorded_host(
     }
 }
 
+/// Whether `stored`, a binding's host record, names the host `proof` proved,
+/// on the same terminal, while no other process contests it.
+pub(crate) fn proves_recorded_host(proof: &HostProof, stored: &Value) -> bool {
+    !is_contested(stored) && proof.owns(stored).unwrap_or(false)
+}
+
+/// Whether a second process was proved for the record's binding while the
+/// recorded one ran.
+fn is_contested(record: &Value) -> bool {
+    record.get("contested_at_unix_ns").is_some()
+}
+
 fn host_record(
     proof: &HostProof,
     (address, launch_id, binding_id): (&PaneAddress, &str, &str),
@@ -291,7 +303,7 @@ fn confirm_recorded(
     {
         return Err(HostRefusal::TerminalChanged);
     }
-    if record.get("contested_at_unix_ns").is_some() {
+    if is_contested(record) {
         return Err(HostRefusal::HostContested);
     }
     Ok(CheckedHost {

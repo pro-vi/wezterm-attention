@@ -545,7 +545,35 @@ binding"), and its later events are ignored (`claim_stale`), so its tab shows no
 indicator for that session. The writer cannot tell a dead first agent from one
 still running beside the second, as in `claude & claude`, and replacing a live
 agent's binding would take over its tab. Nothing is lost: the next command line
-gets a fresh claim and binds normally.
+gets a fresh claim and binds normally. For Codex, a new session the same agent
+process starts with `/new` is told apart from a second agent by the binding's
+host record; see
+[After Codex `/new`, the earlier session's turns are not shown](#after-codex-new-the-earlier-sessions-turns-are-not-shown).
+
+## After Codex `/new`, the earlier session's turns are not shown
+
+As of Codex 0.162.0, `/new` starts a new session inside the same process and
+does not end the earlier one. Input queued to the earlier session by its thread
+id still runs there, out of view, even while a turn of the new session runs.
+Every hook of both sessions comes from the same process on the same terminal,
+and no hook says which session the pane shows.
+
+As of Codex 0.162.0 the new session runs no hook until its first prompt, so
+until then the binding names the earlier session and its host stays
+`available`. The first prompt's `SessionStart` replaces the binding with the new
+session's. After that, the earlier session's hooks are ignored (`claim_stale`):
+its turns do not show on the tab, a turn it began before the replacement keeps
+its last activity in the earlier binding, and input sent to the earlier session
+gets no receipt. Only a resume, clear or fork of the earlier session binds it
+again.
+
+The replacement needs the host the binding recorded. A pane whose binding has
+none keeps the earlier session after `/new`, and the tab stops following the
+pane: a Codex pane opened before host records were written, until its next
+prompt records one; a hook that does not name its agent in
+`WEZTERM_ATTENTION_HOST_PID`; a session run by the shared background server of
+Codex 0.157 and later; and every pane outside macOS. A record another process
+contests refuses the replacement too.
 
 ## On Linux, only a shell claims a pane
 

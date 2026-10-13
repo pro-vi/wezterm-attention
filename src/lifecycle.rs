@@ -774,6 +774,27 @@ mod review_carry_failure_tests {
     }
 }
 
+/// Whether this start came from the process the binding `current_id`
+/// recorded as its host, on the same terminal, while no other process
+/// contests that record.
+///
+/// As of Codex 0.162.0, `/new` starts its new session in the same process with
+/// source `startup` and never ends the one before, so a start is told apart
+/// from a second agent sharing the pane's launch only by its host. The proof
+/// says which process started the session; it does not say that process runs
+/// no other session, or which one the pane shows.
+fn started_by_recorded_host(resolved: &ResolvedLaunch, current_id: &str) -> bool {
+    let Some(host) = &resolved.host else {
+        return false;
+    };
+    let RecordRead::Present(stored) =
+        read_record_typed_at(&resolved.root, "host", &resolved.binding(current_id))
+    else {
+        return false;
+    };
+    crate::host::proves_recorded_host(&host.proof, &stored)
+}
+
 fn binding_mutation_for_session(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
@@ -858,13 +879,18 @@ fn binding_mutation_for_session(
                 let current_ended = current_end
                     .as_ref()
                     .is_some_and(|end| ends_binding(end, current));
-                let replace = match provider {
-                    Provider::Claude | Provider::Codex => {
-                        matches!(source, "resume" | "clear" | "fork")
-                    }
-                    Provider::Pi => matches!(source, "new" | "resume" | "fork"),
-                };
-                if matches!(source, "compact" | "reload") || (!current_ended && !replace) {
+                let resumed = matches!(source, "resume" | "clear" | "fork");
+                let replace = current_ended
+                    || match provider {
+                        Provider::Claude => resumed,
+                        Provider::Codex => {
+                            resumed
+                                || (source == "startup"
+                                    && started_by_recorded_host(resolved, current_id))
+                        }
+                        Provider::Pi => matches!(source, "new" | "resume" | "fork"),
+                    };
+                if matches!(source, "compact" | "reload") || !replace {
                     return Ok(CommitPlan::reporting(Mutation::plain(
                         LifecycleResult::diagnosed(
                             Disposition::Conflict,

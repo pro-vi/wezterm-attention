@@ -9,6 +9,10 @@
 - **`examples/follow-up.lua` no longer shows an answered question, or one a later prompt followed, as `follow_up`.**
 - **`attention inspect` names the binding's agent process.** A new `host` facet gives the pid, start time, boot and terminal of the process whose own hook proved it runs on the pane's terminal, checked again while `inspect` answers, or one of a fixed set of reasons it is refused. A new per-binding record, `host.json`, keeps it; no schema number changes. Only a hook that names its agent in `WEZTERM_ATTENTION_HOST_PID`, on macOS, records one.
 
+### Changed
+
+- **Codex 0.162.0's `/new` replaces the pane's binding with the new session.** Its `SessionStart`, source `startup`, replaces the active binding when the hook proved the same process, on the same terminal, that the active binding's `host.json` records, and no other process contests that record. 1.0.0 refused it, so the tab kept showing the earlier session. Every other `startup`, and every Claude and Pi start, is handled as before. The earlier session can still run turns Codex queued to it; the tab does not show them ([accepted limitations](docs/accepted-limitations.md#after-codex-new-the-earlier-sessions-turns-are-not-shown)).
+
 Going back to 1.0.0 after this release, `attention sweep` and `doctor` keep any binding that holds `prompts.json` or `host.json` and report it as `record_invalid` ("unknown binding state is preserved"); nothing is lost.
 
 ## 1.0.0 — 2026-10-09
