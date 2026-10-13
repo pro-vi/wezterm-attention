@@ -218,6 +218,7 @@ impl Setup {
             tty: &self.tty,
             panes: &self.panes,
             processes: &wezterm_attention::wezterm::SystemProcessInspector,
+            followers: &wezterm_attention::wezterm::NoTurnFollowers,
         }
     }
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **A Codex turn that ends on a model error ends on the tab.** As of Codex 0.162.0 such a turn runs no hook, so its `thinking` stayed. The Codex prompt hook now starts a follower for the turn, which reads the session rollout until the turn ends: when its `task_complete` carries an error, it records a Codex `attempt_outcome` turn end with `source_event` `task_complete` and the code Codex gives the error (`codex_error_info`), kept as `error_code`, and sets `notify` labelled with that code. That the follower survives a real Codex hook runner is shown by a real-process test, not yet by a live Codex turn. What it does not cover is in [accepted limitations](docs/accepted-limitations.md#a-codex-turn-that-ends-on-a-model-error-is-recorded-only-from-its-rollout).
+- **Tab formatters and `get_attention_view` get the shown activity's `label`.**
+
+Going back to 1.1.0 after this release, a binding whose `lifecycle.json` holds such a turn end reads as invalid there, and the next hook starts that file again (`record_invalid`), as for any lifecycle file an older writer cannot read.
+
 ## 1.1.0 — 2026-10-12
 
 ### Added

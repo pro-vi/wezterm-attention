@@ -560,13 +560,13 @@ fn an_invalid_host_record_is_refused_and_recorded_again_by_the_next_proof() {
 /// pseudo-terminal, a mux socket and a `wezterm` that lists that terminal as
 /// pane 42, so the writer and `inspect` read the kernel's own process table.
 #[cfg(target_os = "macos")]
-mod real_processes {
+pub(super) mod real_processes {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::CommandExt;
     use std::time::Instant;
 
-    struct Pane {
+    pub(in super::super) struct Pane {
         scratch: Scratch,
         _socket: UnixListener,
         master: i32,
@@ -603,7 +603,7 @@ mod real_processes {
     }
 
     impl Pane {
-        fn new() -> Self {
+        pub(in super::super) fn new() -> Self {
             let scratch = Scratch::new();
             let socket = UnixListener::bind(scratch.0.join("mux.sock")).expect("bind socket");
             let (mut master, mut slave) = (0, 0);
@@ -666,7 +666,12 @@ mod real_processes {
             }
         }
 
-        fn env(&self) -> Vec<(String, String)> {
+        /// The scratch directory the pane's scripts and records live in.
+        pub(in super::super) fn dir(&self) -> &std::path::Path {
+            &self.scratch.0
+        }
+
+        pub(in super::super) fn env(&self) -> Vec<(String, String)> {
             let dir = self.scratch.0.display().to_string();
             vec![
                 ("HOME".into(), dir.clone()),
@@ -681,7 +686,7 @@ mod real_processes {
 
         /// Start the pane's shell running `script` on the terminal, as its
         /// controlling terminal.
-        fn start_shell(&mut self, script: &str, launch: Option<&str>) {
+        pub(in super::super) fn start_shell(&mut self, script: &str, launch: Option<&str>) {
             let mut command = Command::new("/bin/sh");
             command.args(["-c", script]).env_clear().envs(self.env());
             if let Some(launch) = launch {
@@ -701,7 +706,7 @@ mod real_processes {
         }
 
         /// The agent's pid, once its hook has run.
-        fn agent(&self) -> i32 {
+        pub(in super::super) fn agent(&self) -> i32 {
             let path = self.scratch.0.join("agent.pid");
             let read = |name: &str| {
                 fs::read_to_string(self.scratch.0.join(name))
@@ -757,14 +762,14 @@ mod real_processes {
         }
 
         /// The pane's claim, as the hook that made it stored it.
-        fn claim(&self) -> Value {
+        pub(in super::super) fn claim(&self) -> Value {
             let env: BTreeMap<String, String> = self.env().into_iter().collect();
             let path = pane_dir(&state_root(&env).unwrap(), &pane_address(&env).unwrap().0)
                 .join("claim.json");
             serde_json::from_slice(&fs::read(path).expect("a claim was made")).unwrap()
         }
 
-        fn kill_shell(&mut self) {
+        pub(in super::super) fn kill_shell(&mut self) {
             let mut shell = self.shell.take().expect("a shell runs");
             let group = i32::try_from(shell.id()).expect("pid");
             unsafe { libc::killpg(group, libc::SIGKILL) };

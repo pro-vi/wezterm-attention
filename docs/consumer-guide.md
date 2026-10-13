@@ -19,6 +19,7 @@ Use the full pane object. A server pane ID alone is not globally unique across m
 | `type` | Existing display winner after activity/review priority |
 | `frame` | The frame of the pane's activity, which `get_attention` returns second: the one its writer stored, as `attention mark --frame` does, or, for a `thinking` pane whose writer stored none, one from the clock, a new one each second. `nil` when the review flag outranks the activity |
 | `activity_type`, `event_id`, `source` | Eligible lead activity, independently of review |
+| `label` | The shown activity's label, such as the Codex error code on an errored turn's `notify`; `nil` when the activity has none, or a review outranks it |
 | `turn_end_held`, `turn_end_quiet` | Whether the shown turn end is held by a [hold check](#pre-write-hold-checks), or carries a quiet note; both false when neither applies |
 | `review` | Owner-scoped review presence |
 | `subagents`, `subagents_uncertain` | How many of the pane's sub-agents are running, and whether that count could not be read; `subagents` is 0 when it could not |
@@ -62,13 +63,14 @@ No one kind marks the end of a turn. Read it per provider, from observations who
 | Claude | `attempt_outcome` | `StopFailure`, which Claude Code 2.1.284 sends instead of `Stop` when an API error ended the turn |
 | Codex | `response_finished` | `Stop` |
 | Codex | `user_interrupt` | `Interrupt`; Codex (source at commit `985cf47a4`) runs no `Stop` after one |
+| Codex | `attempt_outcome` | none: `task_complete` from the session rollout, with `error_code`; no hook consumer runs for it (see [accepted limitations](accepted-limitations.md#a-codex-turn-that-ends-on-a-model-error-is-recorded-only-from-its-rollout)) |
 | Pi | `run_settled` | `agent_settled`, which Pi 0.85.1 sends once no automatic retry, compaction or queued message will continue the run |
 
-Pi's `attempt_outcome` is not a turn end. It comes from a `message_end` whose assistant message errored or was aborted. Pi still sends `agent_settled` when the run ends, and after an error it can retry first; the turn ends at that `run_settled`. The two `attempt_outcome` producers differ in `source_event`, `StopFailure` or `message_end`.
+Pi's `attempt_outcome` is not a turn end. It comes from a `message_end` whose assistant message errored or was aborted. Pi still sends `agent_settled` when the run ends, and after an error it can retry first; the turn ends at that `run_settled`. The three `attempt_outcome` producers differ in `source_event`: `StopFailure`, `task_complete` or `message_end`.
 
 A `Stop` hook can block the stop, and the agent then keeps working in the same turn without a new prompt; its next `response_finished` carries `stop_hook_active: true`. Take the latest turn-end observation, not the first.
 
-Some turns end with no observation. A Claude turn the user stops with Esc sends no event (see [accepted limitations](accepted-limitations.md#pressing-esc-in-claude-code-leaves-thinking-on-the-tab)). A Codex turn that ends on an API error runs neither `Stop` nor `Interrupt` (see [accepted limitations](accepted-limitations.md#a-codex-turn-that-ends-on-an-api-error-leaves-thinking-on-the-tab)). Attention cannot tell such a turn from one still running. The later of the newest lead observation's `written_at_unix_ns` and `latest_prompt.written_at_unix_ns` is the last time Attention recorded the lead, with the limits [Storage and retention](#storage-and-retention) gives. A consumer that must act on a turn that never recorded its end decides from that time and its own look at the pane.
+Some turns end with no observation. A Claude turn the user stops with Esc sends no event (see [accepted limitations](accepted-limitations.md#pressing-esc-in-claude-code-leaves-thinking-on-the-tab)). As of Codex 0.162.0 a turn that ends on a model error runs neither `Stop` nor `Interrupt`; its end has no observation unless its prompt hook proved its host, where the turn follower records it (see [accepted limitations](accepted-limitations.md#a-codex-turn-that-ends-on-a-model-error-is-recorded-only-from-its-rollout)). Attention cannot tell such a turn from one still running. The later of the newest lead observation's `written_at_unix_ns` and `latest_prompt.written_at_unix_ns` is the last time Attention recorded the lead, with the limits [Storage and retention](#storage-and-retention) gives. A consumer that must act on a turn that never recorded its end decides from that time and its own look at the pane.
 
 ## Requests are evidence, not a pending-state service
 

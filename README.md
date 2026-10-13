@@ -140,7 +140,7 @@ attention.apply_to_config(config, {
     -- ctx.default_title: the base title from the rule above
     -- ctx.tab_title, ctx.directory, ctx.settled_title: its sources, nil when empty
     -- ctx.attention: { indicator, type, color, subagents, subagents_uncertain,
-    --   source, provider, review, binding_health }
+    --   source, label, provider, review, binding_health }
     local pane = tab.active_pane
     return pane.title  -- just the pane title, no directory
   end,
@@ -149,7 +149,7 @@ attention.apply_to_config(config, {
 
 `ctx.attention[1]`, `[2]` and `[3]` are the indicator, type and color, for formatters written against the positional form.
 
-The tab's `type`, `color`, `source`, `provider` and `binding_health` are those of the pane whose type ranks highest in `priority`. `subagents` is the sum of every pane's count, and `subagents_uncertain` and `review` are true when they are true for any pane of the tab.
+The tab's `type`, `color`, `source`, `label`, `provider` and `binding_health` are those of the pane whose type ranks highest in `priority`. `subagents` is the sum of every pane's count, and `subagents_uncertain` and `review` are true when they are true for any pane of the tab.
 
 ## Configure
 
@@ -233,7 +233,7 @@ attention.apply_to_config(config, {
 
 Write records through the `attention` command; never construct their JSON yourself. Use `attention hooks event PROVIDER EVENT` for provider callbacks, and `attention mark STATE --source NAME` for anything else, where `STATE` is `thinking`, `stop`, `notify`, `review` or `clear`. Both write into the pane's current launch claim. On macOS an agent's registered hooks claim the pane for their agent themselves (see [Claude Code hooks](#claude-code-hooks)). `attention mark`, and every producer on Linux, needs the launch id of a claiming shell, so run it from one: in bash, set `WEZTERM_ATTENTION_COMMANDS` to the space-separated command names to claim, which replaces the built-in `claude codex pi`, so list those too if you still want them claimed; in zsh, start it as `wezterm_attention_claim && <command>`. See [Mux setup](docs/mux-setup.md).
 
-`--source` defaults to `manual`. `--frame`, `--label` and `--ttl-ms` are stored on the activity that `thinking`, `stop` and `notify` write: a fixed spinner frame for `thinking`, a label that `attention inspect` returns, and a time after which the activity expires; `attention mark --help` says what each does. `review` and `clear` write no activity and refuse them. `attention mark clear --source NAME` removes that source's review flag and, when the activity the tab currently shows was published by that source, clears that activity too; it reports `applied` when it did either and `skipped` otherwise. The source name `user` belongs to the plugin's review key, and every `mark` state refuses it.
+`--source` defaults to `manual`. `--frame`, `--label` and `--ttl-ms` are stored on the activity that `thinking`, `stop` and `notify` write: a fixed spinner frame for `thinking`, a label that `attention inspect`, `get_attention_view` and a formatter's `ctx.attention.label` return, which the default tab does not draw, and a time after which the activity expires; `attention mark --help` says what each does. `review` and `clear` write no activity and refuse them. `attention mark clear --source NAME` removes that source's review flag and, when the activity the tab currently shows was published by that source, clears that activity too; it reports `applied` when it did either and `skipped` otherwise. The source name `user` belongs to the plugin's review key, and every `mark` state refuses it.
 
 ### Publishing the pane id
 
@@ -506,7 +506,7 @@ The setting does not keep a session out of a server that is already running, so 
 }
 ```
 
-`SubagentStart` counts a subagent from its start. Child attribution needs matching native `agent_id` values; see [contact evidence](docs/reviews/lifecycle-contact-results.md) for the paths that were exercised. A root `Stop` writes the lead stop and stops counting every subagent whose last event came before it. Codex (source at commit `985cf47a4`) does not make a parent wait for its subagents, but in the sessions recorded with Codex 0.157.1 none worked after its parent's `Stop`; one that does is counted again at its next event (see [accepted limitations](docs/accepted-limitations.md#the-sub-agent-count-depends-on-how-claude-code-and-codex-send-hooks)). An `Interrupt` clears the tab's activity for that session, because Codex runs no `Stop` after one. A child's `PermissionRequest` shows `notify` on the tab, since Codex has no `Notification` hook.
+`SubagentStart` counts a subagent from its start. Child attribution needs matching native `agent_id` values; see [contact evidence](docs/reviews/lifecycle-contact-results.md) for the paths that were exercised. A root `Stop` writes the lead stop and stops counting every subagent whose last event came before it. Codex (source at commit `985cf47a4`) does not make a parent wait for its subagents, but in the sessions recorded with Codex 0.157.1 none worked after its parent's `Stop`; one that does is counted again at its next event (see [accepted limitations](docs/accepted-limitations.md#the-sub-agent-count-depends-on-how-claude-code-and-codex-send-hooks)). An `Interrupt` clears the tab's activity for that session, because Codex runs no `Stop` after one. A turn that ends on a model error runs no hook either, as of Codex 0.162.0; the prompt hook's turn follower records it from the session rollout as `notify` labelled with Codex's error code (see [accepted limitations](docs/accepted-limitations.md#a-codex-turn-that-ends-on-a-model-error-is-recorded-only-from-its-rollout)). A child's `PermissionRequest` shows `notify` on the tab, since Codex has no `Notification` hook.
 
 ## Other use cases
 

@@ -305,6 +305,9 @@
       "response_finished": [
         "Stop"
       ],
+      "attempt_outcome": [
+        "task_complete"
+      ],
       "user_interrupt": [
         "Interrupt"
       ],
@@ -717,6 +720,7 @@
         "source_version",
         "correlation",
         "error_category",
+        "error_code",
         "turn_end"
       ],
       "types": {
@@ -730,6 +734,7 @@
         "correlation": "native_correlation",
         "outcome": "attempt_outcome",
         "error_category": "error_category",
+        "error_code": "safe_label",
         "turn_end": "turn_end"
       }
     },
@@ -1242,6 +1247,9 @@
     "codex": {
       "response_finished": [
         "Stop"
+      ],
+      "attempt_outcome": [
+        "task_complete"
       ],
       "user_interrupt": [
         "Interrupt"

@@ -184,19 +184,64 @@ impl ProviderEvent {
             ..Self::default()
         }
     }
+
+    /// The end of a Codex lead turn whose rollout says it ended on a model
+    /// error, which as of Codex 0.162.0 runs no hook: the turn needs the
+    /// user, and its attempt failed. `error_code` is Codex's name for the
+    /// error; its message is never kept.
+    pub fn codex_turn_failure(
+        session_id: &str,
+        turn_id: &str,
+        error_code: Option<String>,
+        source_version: Option<String>,
+    ) -> Self {
+        Self {
+            source_event: crate::codex_rollout::TASK_COMPLETE.to_owned(),
+            action: ProviderAction::Activity,
+            provider: Some(Provider::Codex),
+            provider_session_id: Some(session_id.to_owned()),
+            activity_type: Some("notify".to_owned()),
+            label: error_code.clone(),
+            observation: Some(LifecycleObservation {
+                turn_end: None,
+                observation_id: uuid::Uuid::new_v4().to_string(),
+                source_event: crate::codex_rollout::TASK_COMPLETE.to_owned(),
+                source_version,
+                observed_mono_ns: "00000000000000000000".to_owned(),
+                written_at_unix_ns: "00000000000000000000".to_owned(),
+                actor: Actor::Lead,
+                correlation: Some(NativeCorrelation {
+                    turn_id: Some(turn_id.to_owned()),
+                    ..NativeCorrelation::default()
+                }),
+                body: ObservationBody::AttemptOutcome {
+                    outcome: AttemptOutcome::Failed,
+                    error_category: None,
+                    error_code,
+                },
+            }),
+            ..Self::default()
+        }
+    }
 }
 
-fn safe_label(value: &Value, field: &str) -> std::result::Result<String, Diagnostic> {
-    let maximum = manifest()
-        .map_err(|error| error.diagnostic)?
-        .limits
-        .safe_label_max_bytes;
+pub(crate) fn safe_label(value: &Value, field: &str) -> std::result::Result<String, Diagnostic> {
     let Some(text) = value.as_str() else {
         return Err(Diagnostic::new(
             DiagnosticCode::RecordInvalid,
             format!("{field} is missing or too long"),
         ));
     };
+    safe_text(text, field)
+}
+
+/// `text` when it is a safe label: non-empty, within the manifest's bound,
+/// and free of control characters.
+pub(crate) fn safe_text(text: &str, field: &str) -> std::result::Result<String, Diagnostic> {
+    let maximum = manifest()
+        .map_err(|error| error.diagnostic)?
+        .limits
+        .safe_label_max_bytes;
     if text.is_empty() || text.len() > maximum || !free_of_control(text) {
         return Err(Diagnostic::new(
             DiagnosticCode::RecordInvalid,
@@ -1202,14 +1247,17 @@ fn parse_run_observation(
                 })
                 .transpose()?,
         },
-        // One kind, two meanings. Claude Code 2.1.284 sends StopFailure instead
-        // of Stop, so for Claude this ends the turn. Pi 0.85.1 still sends
-        // agent_settled after a failed or aborted message_end, and can retry an
-        // error first, so for Pi it does not. The consumer guide lists the
-        // turn-end kinds.
+        // Among hook events, one kind with two meanings. Claude Code 2.1.284
+        // sends StopFailure instead of Stop, so for Claude this ends the turn.
+        // Pi 0.85.1 still sends agent_settled after a failed or aborted
+        // message_end, and can retry an error first, so for Pi it does not. A
+        // Codex errored end read from the rollout
+        // (`ProviderEvent::codex_turn_failure`) also ends the turn. The
+        // consumer guide lists the turn-end kinds.
         "StopFailure" => ObservationBody::AttemptOutcome {
             outcome: AttemptOutcome::Failed,
             error_category: optional_observation_enum(payload, "error", "error_category")?,
+            error_code: None,
         },
         "message_end" => ObservationBody::AttemptOutcome {
             outcome: if payload["stop_reason"] == "error" {
@@ -1218,6 +1266,7 @@ fn parse_run_observation(
                 AttemptOutcome::Aborted
             },
             error_category: None,
+            error_code: None,
         },
         "Interrupt" => ObservationBody::UserInterrupt,
         "agent_settled" => ObservationBody::RunSettled,

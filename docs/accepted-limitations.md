@@ -477,7 +477,8 @@ every binding and is not affected. Nothing is removed on the index's word.
 ## Removing a pane tree removes the lock files it holds
 
 Pane retention removes the pane's whole directory while it holds the pane's
-claim lock and the launch lock, and those lock files are inside that directory. A
+claim lock and the launch lock, and those lock files, with a Codex turn
+follower's `.follower.lock`, are inside that directory. A
 writer that opened the old lock file and is waiting on it takes the lock on the
 removed file once sweep lets go, and a later writer creates a new lock file at
 the same path and takes that one, so both can hold "the" lock at once. This can
@@ -641,23 +642,37 @@ toward a call the user did not need, never toward a missed one. Claude Code
 2.1.289 lists the sub-agent as running in `background_tasks` either way, so
 the Stop cannot tell the two apart.
 
-## A Codex turn that ends on an API error leaves `thinking` on the tab
+## A Codex turn that ends on a model error is recorded only from its rollout
 
-Codex runs no hook when a turn ends on an error. Its turn loop runs `Stop` only
-when the model finished without needing a follow-up, and `Interrupt` only when
-the user interrupted the turn. An error from the model request reports the
-error to the client and leaves the loop, so neither hook runs. The `thinking`
-the prompt wrote stays on the tab until the next turn ends, or until Codex
-quits and prompt return clears it, as with an Esc in Claude Code. The writer
-has no signal to act on. Claude Code sends `StopFailure` for the same case, and
-is not affected.
+That the follower below survives its hook under a real Codex 0.162.0 hook
+runner rests on the Codex source and on a real-process test that runs the hook
+the way Codex registers it, not yet on a live Codex turn.
 
-Read in the Codex source at commit `985cf47a4` (a development commit, not the
-`rust-v0.157.1` tag): `run_turn_stop_hooks` in `core/src/session/turn.rs` and
-`run_turn_interrupt_hooks` in `core/src/tasks/mod.rs`, and the `Err` arms of the
-turn loop that `break` without calling either. The path was read, not traced.
+As of Codex 0.162.0 a turn that ends on a model error runs no hook. Its turn
+loop runs `Stop`, and the legacy `notify`, only when the model finished without
+needing a follow-up, and `Interrupt` only when the user interrupted the turn; an
+error from the model request leaves the loop. As of Codex 0.162.0 it writes the
+end to the session rollout, the file the prompt's `transcript_path` names, as a
+`task_complete` that carries an `error`. Read in the Codex source at tag
+`rust-v0.162.0`: `run_turn_stop_hooks` in `core/src/session/turn.rs`, and the
+`Err` arms of the turn loop that `break` without calling it.
 [openai/codex#22774](https://github.com/openai/codex/issues/22774) asks for a
-hook on this case; it was open, with no pull request, on 2026-09-29.
+hook on this case.
+
+So the Codex prompt hook starts a follower for the turn, `attention hooks
+follow-turn`, which reads that rollout until the turn ends and records an
+errored end. What it cannot do:
+
+- It starts only from a prompt hook that proved its host: one that names its
+  agent in `WEZTERM_ATTENTION_HOST_PID`, on macOS. Elsewhere the `thinking` the
+  prompt wrote stays on the tab until the next turn ends, or until Codex quits
+  and prompt return clears it.
+- No hook-delivered finish sound, reply capture, hold or quiet check runs for
+  this end; a finish-sound reader of the records still accepts it.
+- It is seen within a second of Codex writing it, not at once.
+- It keeps Codex's name for the error, never the message.
+- A rollout record it does not recognise yields no record, so a Codex that
+  changes the shape of `task_complete` brings this limitation back.
 
 ## A pane a shell has claimed refuses agents started without its launch id
 

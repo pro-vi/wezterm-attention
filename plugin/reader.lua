@@ -780,6 +780,9 @@ return function(context)
       turn_end_held = turn_end_held,
       turn_end_quiet = turn_end_quiet,
       frame = effective_type == activity_type and activity and activity.frame or nil,
+      -- The label of the activity the pane shows, so it goes with its frame:
+      -- a review or a hold that shows another state leaves it out.
+      label = effective_type == activity_type and activity and activity.label or nil,
       source = activity and activity.source or nil,
       subagents = children.count,
       subagents_uncertain = children.uncertain,

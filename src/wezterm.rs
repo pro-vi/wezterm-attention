@@ -5,6 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -300,6 +301,69 @@ pub struct RuntimePorts<'a> {
     pub tty: &'a dyn TtyWriter,
     pub panes: &'a dyn PaneLister,
     pub processes: &'a dyn ProcessInspector,
+    pub followers: &'a dyn TurnFollowers,
+}
+
+/// Starts a Codex turn follower without waiting for it.
+pub trait TurnFollowers {
+    fn start(
+        &self,
+        request: &crate::codex_rollout::FollowRequest,
+        env: &BTreeMap<String, String>,
+    ) -> Result<()>;
+}
+
+/// Starts this executable as `attention hooks follow-turn`, in a process
+/// group of its own, with no standard streams and only the variables that
+/// name the state root.
+///
+/// As of Codex 0.162.0 a hook's output is read until it closes, so a follower
+/// that kept the hook's stdout or stderr would hold the hook open; a hook
+/// that has completed may leave such a helper running.
+pub struct SpawnedFollowers;
+
+impl TurnFollowers for SpawnedFollowers {
+    fn start(
+        &self,
+        request: &crate::codex_rollout::FollowRequest,
+        env: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        let failed = || {
+            AttentionError::new(
+                DiagnosticCode::ProbeUnavailable,
+                "the turn follower could not be started",
+            )
+        };
+        let program = env::current_exe().map_err(|_| failed())?;
+        let request = serde_json::to_string(request).map_err(AttentionError::record_json)?;
+        let mut command = Command::new(program);
+        command
+            .args(["hooks", "follow-turn", &request])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        for name in std::iter::once("HOME").chain(crate::records::STATE_ROOT_VARIABLES) {
+            if let Some(value) = env.get(name) {
+                command.env(name, value);
+            }
+        }
+        command.spawn().map(drop).map_err(|_| failed())
+    }
+}
+
+/// Starts nothing: for callers with no turn to follow.
+pub struct NoTurnFollowers;
+
+impl TurnFollowers for NoTurnFollowers {
+    fn start(
+        &self,
+        _: &crate::codex_rollout::FollowRequest,
+        _: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// A process's controlling terminal as the kernel records it.

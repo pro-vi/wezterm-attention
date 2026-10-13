@@ -13,8 +13,10 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::children::{ChildPresenceSet, ChildTransition, EndMark};
+use crate::codex_rollout::FollowRequest;
 use crate::hold_check::{self, Bypass, HoldCheckInput, HoldCheckOutcome};
 use crate::identity::{PaneAddress, canonical_uuid, pane_address};
+use crate::launch::{ClaimOwner, OwnerState, owner_state};
 use crate::lifecycle::outcome::{
     AdmittedHook, BindingTarget, HookPersistence, HookScope, Persistence,
 };
@@ -28,12 +30,12 @@ use crate::protocol::{
 };
 use crate::providers::{ProviderAction, ProviderEvent};
 use crate::records::{
-    CommitPlan, LOCK_TIMEOUT, PLUGIN_LOCK_TIMEOUT, PreparedRecordWrite, RecordIdentity, RecordRead,
-    Replacement, atomic_replace, claim_lock, collect_binding_files, commit, commit_waiting,
-    ends_binding, launch_lock, pane_dir, read_claim, read_record, read_record_at,
-    read_record_typed, read_record_typed_at, removal_confined, remove_file_durable, review_lock,
-    session_binding_files, session_entry, session_entry_path, session_registration_lock,
-    state_root, with_lock, within_read_bound,
+    BindingState, CommitPlan, FileRecords, LOCK_TIMEOUT, PLUGIN_LOCK_TIMEOUT, PreparedRecordWrite,
+    RecordIdentity, RecordRead, Replacement, atomic_replace, claim_lock, collect_binding_files,
+    commit, commit_waiting, ends_binding, launch_lock, pane_dir, read_claim, read_record,
+    read_record_at, read_record_typed, read_record_typed_at, removal_confined, remove_file_durable,
+    review_lock, session_binding_files, session_entry, session_entry_path,
+    session_registration_lock, state_root, with_lock, within_read_bound,
 };
 use crate::wezterm::RuntimePorts;
 
@@ -1198,15 +1200,18 @@ fn newer_lead_observation(root: &Path, identity: &RecordIdentity, observation: &
         return false;
     };
     snapshot
-        .pools
-        .general
-        .observations
-        .iter()
-        .chain(&snapshot.pools.requests.observations)
-        .any(|event| {
-            event.actor == crate::observations::Actor::Lead
-                && event.observed_mono_ns.as_str() > observation
-        })
+        .lead_observations()
+        .any(|event| event.observed_mono_ns.as_str() > observation)
+}
+
+/// What a turn end reports when newer native state already stands: it is
+/// kept as superseded, and the activity is left alone.
+fn turn_end_superseded() -> LifecycleResult {
+    LifecycleResult::diagnosed(
+        Disposition::Ignored,
+        DiagnosticCode::BindingConflict,
+        "turn end was superseded by newer native state",
+    )
 }
 
 /// The one ordering every activity writer applies. An activity with content
@@ -1903,11 +1908,7 @@ fn apply_activity(
                     }))
             {
                 ActivityOutcome {
-                    result: LifecycleResult::diagnosed(
-                        Disposition::Ignored,
-                        DiagnosticCode::BindingConflict,
-                        "turn end was superseded by newer native state",
-                    ),
+                    result: turn_end_superseded(),
                     standing: existing,
                     written: None,
                 }
@@ -3211,8 +3212,210 @@ fn apply_provider_event_inner(
         {
             report_instead(&mut result.diagnostic, problem);
         }
+        // A follower that could not start leaves the prompt as recorded, and
+        // says so only where nothing else is reported.
+        if accepted(&result)
+            && let Some(problem) = start_turn_follower(&resolved, event, env, ports)
+        {
+            result.diagnostic.get_or_insert(problem);
+        }
         result
     })
+}
+
+/// Start the follower of the Codex lead turn an accepted prompt began. As of
+/// Codex 0.162.0 a turn that ends on a model error runs no hook, and only the
+/// session rollout says it ended; the follower reads it from where the rollout
+/// stands now (see [`crate::codex_rollout`]). It needs the hook's proof of its
+/// host, because it lives no longer than that process.
+fn start_turn_follower(
+    resolved: &ResolvedLaunch,
+    event: &ProviderEvent,
+    env: &BTreeMap<String, String>,
+    ports: &RuntimePorts<'_>,
+) -> Option<Diagnostic> {
+    let prompt = event.observation.as_ref()?;
+    if event.provider != Some(Provider::Codex) || !prompt.is_lead_prompt() {
+        return None;
+    }
+    let host = &resolved.host.as_ref()?.proof.owner;
+    let turn_id = prompt.turn_id()?.to_owned();
+    let rollout = event.transcript_path.clone()?;
+    let offset = std::fs::metadata(&rollout).ok()?.len();
+    let request = FollowRequest {
+        address: resolved.address.clone(),
+        launch_id: resolved.launch_id.clone(),
+        session_id: event.provider_session_id.clone()?,
+        turn_id,
+        host_pid: host.pid,
+        host_started_sec: host.start.seconds,
+        host_started_usec: host.start.microseconds,
+        host_boot_session_id: host.boot_session_id.clone(),
+        rollout,
+        offset,
+    };
+    ports
+        .followers
+        .start(&request, env)
+        .err()
+        .map(|error| error.diagnostic)
+}
+
+/// The binding record of `binding_id` while the pane's claim names its
+/// launch, the launch's current binding is it, and it has not ended; `None`
+/// otherwise. A follower reads it without locks; its write reads it again
+/// under them.
+pub(crate) fn followed_binding(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+) -> Option<Value> {
+    let state = BindingState::read(&FileRecords, root, address, launch_id, binding_id);
+    if !state.current(launch_id, binding_id) {
+        return None;
+    }
+    read_record_at(
+        root,
+        "binding",
+        &RecordIdentity::binding(address, launch_id, binding_id),
+    )
+    .ok()
+    .flatten()
+    .filter(|binding| !state.ended(binding))
+}
+
+/// Record the end of a Codex lead turn that ended on a model error, from
+/// `event`, which [`ProviderEvent::codex_turn_failure`] made for it. No hook
+/// reports such an end, so this is not a hook's write: it holds the scope and
+/// the host it was handed and checks both again under the launch and claim
+/// locks, as `apply_activity` takes them.
+///
+/// Nothing is written once [`followed_binding`] finds the binding no longer
+/// current or ended, once the host is gone, nor when a turn end for the turn
+/// is already stored. The `notify` it writes says the turn needs the
+/// user; it is written only while this turn is the newest one the binding
+/// observed, and otherwise the end is kept as superseded.
+pub(crate) fn record_codex_turn_failure(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    host: &ClaimOwner,
+    event: &ProviderEvent,
+    ports: &RuntimePorts<'_>,
+) -> Result<LifecycleResult> {
+    let observation = ports.clock.monotonic_ns20()?;
+    let written_at = ports.clock.unix_ns20()?;
+    let Some(claim) = read_claim(root, address)? else {
+        return Ok(LifecycleResult::diagnosed(
+            Disposition::Ignored,
+            DiagnosticCode::ClaimStale,
+            "the pane has no claim",
+        ));
+    };
+    let resolved = ResolvedLaunch {
+        evidence: None,
+        root: root.to_owned(),
+        address: address.clone(),
+        launch_id: launch_id.to_owned(),
+        claim,
+        host: None,
+        publication_diagnostic: None,
+    };
+    let binding_id = event_binding_id(event, launch_id)?;
+    let identity = resolved.binding(&binding_id);
+    let activity_path = identity.path(root, "activity")?;
+    let turn_id = event
+        .observation
+        .as_ref()
+        .and_then(crate::observations::LifecycleObservation::turn_id);
+    let refused = |message: &str| {
+        Ok(CommitPlan::reporting(Mutation::plain(
+            LifecycleResult::diagnosed(Disposition::Ignored, DiagnosticCode::ClaimStale, message),
+        )))
+    };
+    let (mutation, ()) = commit(
+        root,
+        &[&resolved.launch_lock(), &resolved.claim_lock()],
+        "current_binding",
+        &resolved.launch(),
+        |_| {
+            if followed_binding(root, address, launch_id, &binding_id).is_none() {
+                return refused("the followed turn's binding is no longer current");
+            }
+            if owner_state(host, ports.processes) != OwnerState::Alive {
+                return refused("the turn's agent process is gone");
+            }
+            let snapshot = read_record_at(root, "lifecycle_snapshot", &identity)?
+                .map(serde_json::from_value::<LifecycleSnapshot>)
+                .transpose()
+                .map_err(|_| {
+                    AttentionError::new(
+                        DiagnosticCode::RecordInvalid,
+                        "lifecycle snapshot is invalid",
+                    )
+                })?;
+            let lead_turns = || {
+                snapshot
+                    .iter()
+                    .flat_map(LifecycleSnapshot::lead_observations)
+            };
+            // Whatever ended the turn first, its own hook or an earlier
+            // follower, stays its end.
+            if lead_turns().any(|item| item.ends_turn(Provider::Codex) && item.turn_id() == turn_id)
+            {
+                return Ok(CommitPlan::reporting(Mutation::plain(
+                    LifecycleResult::new(Disposition::Skipped),
+                )));
+            }
+            let newest = lead_turns()
+                .filter(|item| item.turn_id().is_some())
+                .max_by(|left, right| {
+                    (&left.observed_mono_ns, &left.observation_id)
+                        .cmp(&(&right.observed_mono_ns, &right.observation_id))
+                })
+                .and_then(crate::observations::LifecycleObservation::turn_id);
+            if newest != turn_id {
+                return Ok(append_observation(
+                    &resolved,
+                    event,
+                    &observation,
+                    &written_at,
+                    CommitPlan::reporting(Mutation::plain(turn_end_superseded())),
+                ));
+            }
+            let existing = read_record(&activity_path, Some("activity"), &identity)?;
+            let clear = read_record_at(root, "activity_clear", &identity)?;
+            let visible = activity_visible(root, &identity, existing.as_ref(), clear.as_ref());
+            let base = activity_base(&resolved, event, &binding_id)?;
+            let ActivityOutcome {
+                result, written, ..
+            } = plan_activity(
+                existing,
+                clear.as_ref(),
+                visible,
+                false,
+                &base,
+                &observation,
+                &written_at,
+            );
+            Ok(append_observation(
+                &resolved,
+                event,
+                &observation,
+                &written_at,
+                CommitPlan {
+                    replacements: written
+                        .map(|record| Replacement::always(activity_path.clone(), record))
+                        .into_iter()
+                        .collect(),
+                    ..CommitPlan::reporting(Mutation::plain(result))
+                },
+            ))
+        },
+        |mutation| apply_observed_outputs(&resolved, &binding_id, mutation),
+    )?;
+    Ok(mutation.result)
 }
 
 /// Keep the host the hook of an accepted lead event proved as its binding's
