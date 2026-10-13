@@ -644,9 +644,10 @@ the Stop cannot tell the two apart.
 
 ## A Codex turn that ends on a model error is recorded only from its rollout
 
-That the follower below survives its hook under a real Codex 0.162.0 hook
-runner rests on the Codex source and on a real-process test that runs the hook
-the way Codex registers it, not yet on a live Codex turn.
+The follower below was checked once against a live Codex 0.162.0 turn whose
+model server answered HTTP 503 `server_is_overloaded`: one follower ran during
+the turn and none after it, and the end was recorded with `error_code`
+`server_overloaded` and a `notify` labelled with it.
 
 As of Codex 0.162.0 a turn that ends on a model error runs no hook. Its turn
 loop runs `Stop`, and the legacy `notify`, only when the model finished without

@@ -237,7 +237,11 @@ and the code Codex gives the error (`codex_error_info` in its rollout), kept as 
 it is a safe label. While the turn is still the newest one the binding observed it also writes
 `notify` labelled with that code; otherwise the turn end is `superseded` and no `notify` is
 written. It writes under the launch and claim locks, only while the claim, the binding and the
-host it was handed still hold, and never for a turn whose end is stored. One follower runs per
+host it was handed still hold, and never for a turn that has no record left or whose last record
+is already an end; a `Stop` hook that blocks lets Codex continue the turn, and its later records
+then follow that end. The end's `observed_mono_ns` is just after the turn's last record, not when
+the follower read the end, so a hook that began after Codex ended the turn orders after it; a
+`notify` it writes is also stamped after what stands in the activity slot. One follower runs per
 binding, holding `.follower.lock` in the binding's directory, which names the turn it follows. See
 [Accepted limitations](accepted-limitations.md#a-codex-turn-that-ends-on-a-model-error-is-recorded-only-from-its-rollout).
 

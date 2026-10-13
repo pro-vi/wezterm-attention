@@ -17,9 +17,9 @@ Use the full pane object. A server pane ID alone is not globally unique across m
 | Fields | Meaning |
 |---|---|
 | `type` | Existing display winner after activity/review priority |
-| `frame` | The frame of the pane's activity, which `get_attention` returns second: the one its writer stored, as `attention mark --frame` does, or, for a `thinking` pane whose writer stored none, one from the clock, a new one each second. `nil` when the review flag outranks the activity |
+| `frame` | The frame of the pane's activity, which `get_attention` returns second: the one its writer stored, as `attention mark --frame` does, or, for a `thinking` pane whose writer stored none, one from the clock, a new one each second. `nil` when the pane shows another state than the activity's own: a review that outranks it, a hold, or a waiting child's `notify` |
 | `activity_type`, `event_id`, `source` | Eligible lead activity, independently of review |
-| `label` | The shown activity's label, such as the Codex error code on an errored turn's `notify`; `nil` when the activity has none, or a review outranks it |
+| `label` | The shown activity's label, such as the Codex error code on an errored turn's `notify`; `nil` when the activity has none, or when the pane shows another state than the activity's own: a review that outranks it, a hold, or a waiting child's `notify` |
 | `turn_end_held`, `turn_end_quiet` | Whether the shown turn end is held by a [hold check](#pre-write-hold-checks), or carries a quiet note; both false when neither applies |
 | `review` | Owner-scoped review presence |
 | `subagents`, `subagents_uncertain` | How many of the pane's sub-agents are running, and whether that count could not be read; `subagents` is 0 when it could not |

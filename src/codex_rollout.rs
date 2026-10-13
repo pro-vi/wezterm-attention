@@ -119,7 +119,8 @@ impl Rollout {
     pub fn open(path: &Path, session_id: &str, offset: u64) -> std::result::Result<Self, Refusal> {
         let file = OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            // Without O_NONBLOCK a FIFO would hold the open until a writer came.
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
             .open(path)
             .map_err(|_| Refusal::NotOpened)?;
         let metadata = file.metadata().map_err(|_| Refusal::Unreadable)?;

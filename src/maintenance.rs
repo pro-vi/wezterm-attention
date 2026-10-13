@@ -21,9 +21,9 @@ use crate::records::{
     AGENTS, BINDING_FILE, BindingState, CommitPlan, FileRecords, RecordIdentity, RecordRead,
     Replacement, atomic_replace_if_different, binding_record_kind, binding_session_entry,
     claim_lock, collect_binding_files, collect_state_files, commit, directory_confined,
-    ends_binding, incarnation_dir, is_state_lock, launch_lock, name_address, naming_record,
-    pane_dir, read_bounded, read_record, record_address, removal_confined, remove_file_durable,
-    session_index_marker, session_index_path, state_relative,
+    ends_binding, incarnation_dir, is_state_lock, is_turn_follower_lock, launch_lock, name_address,
+    naming_record, pane_dir, read_bounded, read_record, record_address, removal_confined,
+    remove_file_durable, session_index_marker, session_index_path, state_relative,
 };
 use crate::wezterm::{Clock, PaneLister, Presence, ProcessInspector, ProcessListing, ProcessProbe};
 
@@ -538,7 +538,10 @@ fn binding_known_and_prunable(
             }
             continue;
         }
-        if file_type.is_file() && write_leftover(&entry.file_name().to_string_lossy()) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if file_type.is_file()
+            && (write_leftover(&name) || is_turn_follower_lock(binding_dir, &name))
+        {
             continue;
         }
         let kind = path

@@ -485,7 +485,7 @@ end
 --- Publish `activity_type` for the pane, as its agent's hook does, and
 --- return the activity's event id. A pane with no records yet is seeded
 --- first. `review` is the user's flag, which the review key sets.
-local function write_activity(pane_id, activity_type, frame)
+local function write_activity(pane_id, activity_type, frame, label)
   if not path_exists(seeded_pane_root(pane_id) .. "/claim.json") then seed_pane(pane_id) end
   if activity_type == "review" then
     local review = seeded_record(pane_id, "review")
@@ -495,7 +495,7 @@ local function write_activity(pane_id, activity_type, frame)
   end
   local activity = seeded_record(pane_id, "activity")
   activity.type = activity_type
-  activity.label = nil
+  activity.label = label
   activity.frame = frame
   activity.event_id = next_event_id()
   activity.observed_mono_ns = string.format("%020d", 3000000000 + event_counter)
@@ -772,6 +772,15 @@ local function tab(active_pane_id, sibling_pane_id, is_active)
     panes = { active_pane, sibling_pane },
     tab_index = 0,
   }
+end
+
+-- The ctx.attention a title formatter is handed for the tab that
+-- `active_pane_id` leads, beside `sibling_pane_id`.
+local function formatter_attention(active_pane_id, sibling_pane_id)
+  local seen
+  attention.wrap_title_formatter(function(_, ctx) seen = ctx.attention; return "base" end)(
+    tab(active_pane_id, sibling_pane_id, false))
+  return seen
 end
 
 local passed = 0
@@ -2479,6 +2488,7 @@ test("a held turn end yields to a child waiting on a permission prompt", functio
   local file = seeded_records_root(pane_id) .. "/activity.json"
   local activity = decode_json(assert(read_path(file)))
   activity.source = "claude"
+  activity.label = "done"
   activity.hold_notes = { jev = { hold = true, answer = "waiting_on_own_work" } }
   write_json_path(file, activity)
   write_subagents(pane_id, 1)
@@ -2486,11 +2496,13 @@ test("a held turn end yields to a child waiting on a permission prompt", functio
   local view = assert(pane_view(pane_id))
   assert(view.type == "thinking" and view.turn_end_held == true,
     "a running child keeps the hold, got " .. tostring(view.type))
+  assert(view.label == nil, "the hold shows thinking, not the stop's label")
   write_subagents(pane_id, 1, "waiting")
   poll_at({ pane_id })
   view = assert(pane_view(pane_id))
   assert(view.activity_type == "stop" and view.type == "notify" and view.turn_end_held == false,
     "a waiting child must show notify, got " .. tostring(view.type) .. " held=" .. tostring(view.turn_end_held))
+  assert(view.label == nil, "the waiting child's notify does not carry the stop's label")
   local visible = internal.resolve_visible_attention({ seeded_key(pane_id) })
   assert(visible.type == "notify" and visible.indicator:find("^!") ~= nil, "got indicator " .. tostring(visible.indicator))
   local w = window_double({ tabs = { { pane_id } }, focused = true, active_pane_id = pane_id })
@@ -2549,6 +2561,10 @@ test("the shown activity's label reaches the view and the formatter", function()
     "got label " .. tostring(view.label))
   local visible = internal.resolve_visible_attention({ seeded_key(pane_id) })
   assert(visible.label == "server_overloaded", "the tab's winner carries its label")
+  -- A title formatter is handed that label in ctx.attention.
+  poll_at({ 7596, pane_id })
+  local seen = formatter_attention(pane_id, 7596)
+  assert(seen.label == "server_overloaded", "the formatter's context, got " .. tostring(seen.label))
   -- notify outranks a review, so its label stays beside one.
   write_json_path(user_review_path(pane_id), seeded_record(pane_id, "review"))
   poll_at({ pane_id })
@@ -2558,14 +2574,14 @@ test("the shown activity's label reaches the view and the formatter", function()
   os.remove(user_review_path(pane_id))
   -- A review outranks thinking, and then the thinking activity's label is
   -- not shown with it.
-  write_activity(pane_id, "thinking")
-  activity = decode_json(assert(read_path(file)))
-  activity.label = "working"
-  write_json_path(file, activity)
+  write_activity(pane_id, "thinking", nil, "working")
   write_json_path(user_review_path(pane_id), seeded_record(pane_id, "review"))
   poll_at({ pane_id })
   view = assert(pane_view(pane_id))
   assert(view.type == "review" and view.label == nil, "got label " .. tostring(view.label))
+  seen = formatter_attention(pane_id, 7596)
+  assert(seen.type == "review" and seen.label == nil,
+    "a formatter gets no label beside the review, got " .. tostring(seen.label))
   os.remove(user_review_path(pane_id))
   write_activity(pane_id, "notify")
   poll_at({ pane_id })
@@ -2575,12 +2591,13 @@ end)
 
 test("an unheld turn end yields to a child waiting on a permission prompt", function()
   local pane_id = 7591
-  write_activity(pane_id, "stop")
+  write_activity(pane_id, "stop", nil, "done")
   write_subagents(pane_id, 1, "waiting")
   poll_at({ pane_id })
   local view = assert(pane_view(pane_id))
   assert(view.activity_type == "stop" and view.type == "notify" and view.turn_end_held == false,
     "a waiting child must show notify over a finished turn, got " .. tostring(view.type))
+  assert(view.label == nil, "the waiting child's notify does not carry the stop's label")
   local w = window_double({ tabs = { { pane_id } }, focused = true, active_pane_id = pane_id })
   local spawned = with_plugin_command(function() error("a finished turn was acknowledged while its child waits") end, function()
     attention.poll(w, { now_ms = 1000, now_unix_ns = fixture_now })
@@ -2590,6 +2607,7 @@ test("an unheld turn end yields to a child waiting on a permission prompt", func
   poll_at({ pane_id })
   view = assert(pane_view(pane_id))
   assert(view.type == "stop", "the finished turn shows again when the wait ends, got " .. tostring(view.type))
+  assert(view.label == "done", "the finished turn's label shows again with it, got " .. tostring(view.label))
 end)
 
 test("live subagents keep a pane visible with no activity of its own", function()
@@ -2710,7 +2728,7 @@ test("built-in and manual formatter contexts expose identical named attention", 
   built.poll(window_double({ tabs = { { 7601, 7602 } }, focused = false }))
   built._internal.attention_cache["7601"] = {
     type = "notify", activity_type = "notify", frame = nil, source = "claude",
-    provider = "claude", subagents = 2, review = false,
+    label = "server_overloaded", provider = "claude", subagents = 2, review = false,
     binding_health = "valid",
   }
   local built_handler = handlers["format-tab-title"][built_handlers_before + 1]
@@ -2725,7 +2743,7 @@ test("built-in and manual formatter contexts expose identical named attention", 
   manual.poll(window_double({ tabs = { { 7601, 7602 } }, focused = false }))
   manual._internal.attention_cache["7601"] = {
     type = "notify", activity_type = "notify", frame = nil, source = "claude",
-    provider = "claude", subagents = 2, review = false,
+    label = "server_overloaded", provider = "claude", subagents = 2, review = false,
     binding_health = "valid",
   }
   local manual_rendered = manual.wrap_title_formatter(function(_, ctx)
@@ -2739,6 +2757,9 @@ test("built-in and manual formatter contexts expose identical named attention", 
   }) do
     assert(built_ctx[field] == manual_ctx[field], field .. " differs between formatter contexts")
   end
+  assert(built_ctx.attention.label == "server_overloaded"
+      and manual_ctx.attention.label == built_ctx.attention.label,
+    "both renderers hand a formatter the label, got " .. tostring(built_ctx.attention.label))
   assert(built_ctx.attention[1] == built_ctx.attention.indicator
       and built_ctx.attention[2] == built_ctx.attention.type
       and built_ctx.attention[3] == built_ctx.attention.color,

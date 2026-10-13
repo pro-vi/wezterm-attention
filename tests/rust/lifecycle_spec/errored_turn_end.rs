@@ -86,19 +86,46 @@ fn prompt(
         append(&rollout, &[header(SESSION)]);
     }
     append(&rollout, &[started(turn)]);
-    let prompt = event(
-        "codex",
+    hook(
+        setup,
         "UserPromptSubmit",
-        SESSION,
         json!({"prompt":"go","turn_id":turn,"transcript_path":rollout}),
+        observation,
+    )
+}
+
+/// Apply Codex's hook `name` from its agent, observed at `observation`. A
+/// hook that repeats the standing badge, as a prompt after a prompt does, is
+/// skipped.
+fn hook(
+    setup: &Setup,
+    name: &str,
+    payload: Value,
+    observation: &str,
+) -> wezterm_attention::lifecycle::LifecycleResult {
+    let result = apply_as(
+        setup,
+        &setup.naming(AGENT_PID),
+        &event("codex", name, SESSION, payload),
+        observation,
     );
-    let result = apply_as(setup, &setup.naming(AGENT_PID), &prompt, observation);
-    // A prompt after a prompt repeats the badge, which is skipped.
     assert!(
         ["applied", "skipped"].contains(&result.disposition.as_str()),
-        "{result:?}"
+        "{name}: {result:?}"
     );
     result
+}
+
+/// The follower request the latest admitted prompt made.
+fn last_request(setup: &Setup) -> FollowRequest {
+    setup
+        .followers
+        .started
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("the prompt asked for a follower")
 }
 
 /// A pane its shell claimed, where Codex session "s" started and a prompt
@@ -118,14 +145,7 @@ fn prompted(setup: &mut Setup) -> FollowRequest {
         monotonic: "00000000000000000900",
         unix: "00000000099999999900",
     };
-    setup
-        .followers
-        .started
-        .lock()
-        .unwrap()
-        .last()
-        .cloned()
-        .expect("the prompt asked for a follower")
+    last_request(setup)
 }
 
 /// Run the follower to its end. One that would wait for ever, as a follower
@@ -225,7 +245,10 @@ fn errored_task_complete_records_codex_attempt_outcome_turn_end() {
     assert_eq!(activity["type"], "notify");
     assert_eq!(activity["source"], "codex");
     assert_eq!(activity["label"], "server_overloaded");
-    assert_eq!(activity["observed_mono_ns"], "00000000000000000900");
+    // Ordered just after the turn's prompt, its last record, not at the
+    // follower's later reading.
+    assert_eq!(activity["observed_mono_ns"], "00000000000000000301");
+    assert_eq!(end["observed_mono_ns"], "00000000000000000301");
 }
 
 #[test]
@@ -336,6 +359,51 @@ fn stale_task_complete_never_overwrites_newer_turn() {
 }
 
 #[test]
+fn an_end_orders_before_a_prompt_that_began_after_it() {
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    append(
+        &rollout_path(&setup),
+        &[failed(TURN, json!("server_overloaded"))],
+    );
+    assert_eq!(recorded(&follow(&setup, &request)), "applied");
+    // The next prompt's hook took its stamp after Codex ended the turn and
+    // before the follower read the end, and reaches the writer after it.
+    let followers = setup.followers.started.lock().unwrap().len();
+    prompt(&setup, NEXT_TURN, "00000000000000000850");
+    assert_eq!(activity(&setup)["type"], "thinking");
+    assert_eq!(setup.followers.started.lock().unwrap().len(), followers + 1);
+}
+
+#[test]
+fn a_turn_failing_after_a_superseded_failure_is_recorded() {
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    append(
+        &rollout_path(&setup),
+        &[failed(TURN, json!("server_overloaded"))],
+    );
+    prompt(&setup, NEXT_TURN, "00000000000000000400");
+    assert_eq!(recorded(&follow(&setup, &request)), "ignored");
+    let next = last_request(&setup);
+    assert_eq!(next.turn_id, NEXT_TURN);
+    append(
+        &rollout_path(&setup),
+        &[failed(NEXT_TURN, json!("server_overloaded"))],
+    );
+    assert_eq!(recorded(&follow(&setup, &next)), "applied");
+    let ends = attempt_outcomes(&setup);
+    let end = ends
+        .iter()
+        .find(|end| end["correlation"]["turn_id"] == NEXT_TURN)
+        .expect("the next turn's end");
+    assert_eq!(end["turn_end"]["status"], "recorded");
+    let activity = activity(&setup);
+    assert_eq!(activity["type"], "notify");
+    assert_eq!(activity["label"], "server_overloaded");
+}
+
+#[test]
 fn replayed_task_complete_is_idempotent_by_turn_id() {
     let mut setup = Setup::new();
     let request = prompted(&mut setup);
@@ -357,21 +425,11 @@ fn replayed_task_complete_is_idempotent_by_turn_id() {
 fn a_turn_its_own_hook_ended_is_not_recorded_again() {
     let mut setup = Setup::new();
     let request = prompted(&mut setup);
-    let stop = event(
-        "codex",
-        "Stop",
-        SESSION,
-        json!({"stop_hook_active":false,"turn_id":TURN}),
-    );
-    let result = apply_as(
+    hook(
         &setup,
-        &setup.naming(AGENT_PID),
-        &stop,
+        "Stop",
+        json!({"stop_hook_active":false,"turn_id":TURN}),
         "00000000000000000500",
-    );
-    assert!(
-        ["applied", "skipped"].contains(&result.disposition.as_str()),
-        "{result:?}"
     );
     let before = state(&setup);
     append(
@@ -381,6 +439,35 @@ fn a_turn_its_own_hook_ended_is_not_recorded_again() {
     assert_eq!(recorded(&follow(&setup, &request)), "skipped");
     assert!(state(&setup) == before);
     assert!(attempt_outcomes(&setup).is_empty());
+}
+
+#[test]
+fn a_turn_that_went_on_after_its_stop_and_failed_is_recorded() {
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    // A Stop hook that blocks makes Codex continue the same turn.
+    hook(
+        &setup,
+        "Stop",
+        json!({"stop_hook_active":false,"turn_id":TURN}),
+        "00000000000000000500",
+    );
+    hook(
+        &setup,
+        "PreToolUse",
+        json!({"tool_name":"shell","tool_use_id":"call-1","turn_id":TURN}),
+        "00000000000000000600",
+    );
+    append(
+        &rollout_path(&setup),
+        &[failed(TURN, json!("server_overloaded"))],
+    );
+    assert_eq!(recorded(&follow(&setup, &request)), "applied");
+    let ends = attempt_outcomes(&setup);
+    assert_eq!(ends.len(), 1, "{ends:?}");
+    assert_eq!(ends[0]["turn_end"]["status"], "recorded");
+    assert_eq!(ends[0]["observed_mono_ns"], "00000000000000000601");
+    assert_eq!(activity(&setup)["type"], "notify");
 }
 
 #[test]
@@ -479,9 +566,8 @@ fn one_follower_follows_a_turn_and_the_next_turn_waits_for_it() {
         thread::sleep(Duration::from_millis(300));
         drop(held);
     });
-    // The newest turn the binding observed is still the first one, so the
-    // next turn's end is kept as superseded; what matters here is that the
-    // follower waited and then followed.
+    // The binding recorded nothing for the next turn, so its end is skipped;
+    // what matters here is that the follower waited and then followed.
     assert!(matches!(follow(&setup, &next), Followed::Recorded(_)));
     releaser.join().unwrap();
     assert_eq!(fs::read_to_string(&lock).unwrap(), NEXT_TURN);
@@ -517,6 +603,20 @@ fn a_rollout_that_is_not_the_session_s_is_refused() {
             path.display()
         );
     }
+    // A FIFO with no writer is refused at once, not held open until one comes.
+    let fifo = directory.join("rollout-2026-10-12T00-00-05-s.jsonl");
+    let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: `name` is a live NUL-terminated path for the call to read.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let (sent, received) = std::sync::mpsc::channel();
+    let reader = fifo.clone();
+    thread::spawn(move || sent.send(Rollout::open(&reader, SESSION, 0).err()));
+    let refused = received.recv_timeout(Duration::from_secs(5));
+    if refused.is_err() {
+        // Release the blocked open before failing.
+        let _ = fs::OpenOptions::new().write(true).open(&fifo);
+    }
+    assert_eq!(refused.ok().flatten(), Some(Refusal::NotRegularFile));
 }
 
 #[test]

@@ -4,6 +4,7 @@ pub mod outcome;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::iter;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -21,8 +22,8 @@ use crate::lifecycle::outcome::{
     AdmittedHook, BindingTarget, HookPersistence, HookScope, Persistence,
 };
 use crate::observations::{
-    AnsweredQuestion, LeadPrompts, LifecycleSnapshot, ObservationPools, PromptReference, TurnEnd,
-    TurnEndStatus,
+    AnsweredQuestion, LeadPrompts, LifecycleObservation, LifecycleSnapshot, ObservationPools,
+    PromptReference, TurnEnd, TurnEndStatus,
 };
 use crate::protocol::{
     AttentionError, Diagnostic, DiagnosticCode, Disposition, Provider, Result, free_of_control,
@@ -1212,6 +1213,19 @@ fn turn_end_superseded() -> LifecycleResult {
         DiagnosticCode::BindingConflict,
         "turn end was superseded by newer native state",
     )
+}
+
+/// The latest of `items` in observation order: the stamp, then the id.
+fn latest<'a>(
+    items: impl Iterator<Item = &'a LifecycleObservation>,
+) -> Option<&'a LifecycleObservation> {
+    items.max_by_key(|item| (&item.observed_mono_ns, &item.observation_id))
+}
+
+/// One past the latest of the monotonic `stamps`.
+fn just_after<'a>(stamps: impl Iterator<Item = &'a str>) -> Option<String> {
+    let stamp = stamps.max()?.parse::<u128>().ok()?.checked_add(1)?;
+    Some(format!("{stamp:020}"))
 }
 
 /// The one ordering every activity writer applies. An activity with content
@@ -3292,10 +3306,10 @@ pub(crate) fn followed_binding(
 /// locks, as `apply_activity` takes them.
 ///
 /// Nothing is written once [`followed_binding`] finds the binding no longer
-/// current or ended, once the host is gone, nor when a turn end for the turn
-/// is already stored. The `notify` it writes says the turn needs the
-/// user; it is written only while this turn is the newest one the binding
-/// observed, and otherwise the end is kept as superseded.
+/// current or ended, once the host is gone, when the turn has no record left,
+/// nor when its last record is already an end. The `notify` it writes says
+/// the turn needs the user; it is written only while this turn is the newest
+/// one the binding observed, and otherwise the end is kept as superseded.
 pub(crate) fn record_codex_turn_failure(
     root: &Path,
     address: &PaneAddress,
@@ -3304,7 +3318,6 @@ pub(crate) fn record_codex_turn_failure(
     event: &ProviderEvent,
     ports: &RuntimePorts<'_>,
 ) -> Result<LifecycleResult> {
-    let observation = ports.clock.monotonic_ns20()?;
     let written_at = ports.clock.unix_ns20()?;
     let Some(claim) = read_claim(root, address)? else {
         return Ok(LifecycleResult::diagnosed(
@@ -3328,7 +3341,7 @@ pub(crate) fn record_codex_turn_failure(
     let turn_id = event
         .observation
         .as_ref()
-        .and_then(crate::observations::LifecycleObservation::turn_id);
+        .and_then(LifecycleObservation::turn_id);
     let refused = |message: &str| {
         Ok(CommitPlan::reporting(Mutation::plain(
             LifecycleResult::diagnosed(Disposition::Ignored, DiagnosticCode::ClaimStale, message),
@@ -3360,32 +3373,49 @@ pub(crate) fn record_codex_turn_failure(
                     .iter()
                     .flat_map(LifecycleSnapshot::lead_observations)
             };
-            // Whatever ended the turn first, its own hook or an earlier
-            // follower, stays its end.
-            if lead_turns().any(|item| item.ends_turn(Provider::Codex) && item.turn_id() == turn_id)
-            {
+            // The turn's last record decides. When it is an end, its own hook's
+            // or an earlier follower's, that end stays: a Stop hook that blocks
+            // lets Codex go on with the same turn, whose next records then come
+            // after it. Codex wrote this end after that last record and before
+            // any hook that began after the end, so the end is ordered just
+            // after it, not when this follower read it.
+            let Some((last, after_turn)) =
+                latest(lead_turns().filter(|item| item.turn_id() == turn_id))
+                    .filter(|last| !last.ends_turn(Provider::Codex))
+                    .and_then(|last| {
+                        Some((
+                            last,
+                            just_after(iter::once(last.observed_mono_ns.as_str()))?,
+                        ))
+                    })
+            else {
                 return Ok(CommitPlan::reporting(Mutation::plain(
                     LifecycleResult::new(Disposition::Skipped),
                 )));
-            }
-            let newest = lead_turns()
-                .filter(|item| item.turn_id().is_some())
-                .max_by(|left, right| {
-                    (&left.observed_mono_ns, &left.observation_id)
-                        .cmp(&(&right.observed_mono_ns, &right.observation_id))
-                })
-                .and_then(crate::observations::LifecycleObservation::turn_id);
+            };
+            let newest = latest(lead_turns().filter(|item| item.turn_id().is_some()))
+                .and_then(LifecycleObservation::turn_id);
             if newest != turn_id {
                 return Ok(append_observation(
                     &resolved,
                     event,
-                    &observation,
+                    &after_turn,
                     &written_at,
                     CommitPlan::reporting(Mutation::plain(turn_end_superseded())),
                 ));
             }
             let existing = read_record(&activity_path, Some("activity"), &identity)?;
             let clear = read_record_at(root, "activity_clear", &identity)?;
+            // The notify must also take the slot from what stands in it.
+            let observation = just_after(
+                iter::once(last.observed_mono_ns.as_str()).chain(
+                    [existing.as_ref(), clear.as_ref()]
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|record| record["observed_mono_ns"].as_str()),
+                ),
+            )
+            .unwrap_or(after_turn);
             let visible = activity_visible(root, &identity, existing.as_ref(), clear.as_ref());
             let base = activity_base(&resolved, event, &binding_id)?;
             let ActivityOutcome {

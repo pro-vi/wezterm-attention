@@ -673,13 +673,18 @@ const TURN_FOLLOWER_LOCK: &str = ".follower.lock";
 /// `pane`, is named as one of the locks above, which a writer leaves in place.
 pub(crate) fn is_state_lock(pane: &Path, directory: &Path, name: &str) -> bool {
     matches!(name, CLAIM_LOCK | LAUNCH_LOCK)
-        || (name == TURN_FOLLOWER_LOCK
-            && directory.parent().and_then(Path::file_name) == Some(OsStr::new("bindings")))
+        || is_turn_follower_lock(directory, name)
         || (directory == pane.join(REVIEWS)
             && name
                 .strip_prefix('.')
                 .and_then(|name| name.strip_suffix(".lock"))
                 .is_some_and(crate::protocol::hex64_text))
+}
+
+/// Whether the file `name` in `directory` is a binding's turn follower lock.
+pub(crate) fn is_turn_follower_lock(directory: &Path, name: &str) -> bool {
+    name == TURN_FOLLOWER_LOCK
+        && directory.parent().and_then(Path::file_name) == Some(OsStr::new("bindings"))
 }
 
 /// The directory that holds one binding's records.

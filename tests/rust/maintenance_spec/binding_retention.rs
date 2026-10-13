@@ -1,5 +1,6 @@
 //! Retention of a binding the pane has moved on from: what the preview says
-//! is what apply does, and an interrupted write does not pin a binding.
+//! is what apply does, and neither an interrupted write nor a turn follower's
+//! lock pins a binding.
 
 use super::*;
 
@@ -63,6 +64,20 @@ fn an_interrupted_write_does_not_block_retention() {
     )
     .expect("rust leftover");
     fs::write(old_dir.join("ack.json.session.tmp"), "{").expect("plugin leftover");
+    let (preview, _) = setup.run_sweep(false);
+    assert_eq!(retention_actions(&preview.details), [json!("prune")]);
+    let (applied, _) = setup.run_sweep(true);
+    assert_eq!(retention_actions(&applied.details), [json!("prune")]);
+    assert!(!old_dir.exists());
+}
+
+/// The follower of a binding's Codex turns leaves its lock beside the
+/// binding's records. The lock is part of the binding, and goes with it.
+#[test]
+fn a_turn_follower_lock_does_not_block_retention() {
+    let setup = Setup::new();
+    let old_dir = old_history(&setup);
+    fs::write(old_dir.join(".follower.lock"), "turn-1").expect("follower lock");
     let (preview, _) = setup.run_sweep(false);
     assert_eq!(retention_actions(&preview.details), [json!("prune")]);
     let (applied, _) = setup.run_sweep(true);
