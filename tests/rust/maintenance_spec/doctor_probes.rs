@@ -2,7 +2,9 @@
 
 use super::*;
 use std::sync::atomic::AtomicUsize;
-use wezterm_attention::wezterm::{PaneProcessSet, ProcessInspector, ProcessListing, ProcessRead};
+use wezterm_attention::wezterm::{
+    Arg0Locks, PaneProcessSet, ProcessInspector, ProcessListing, ProcessRead, StartHomeVariables,
+};
 
 /// Offers one listing of every process, and counts how it is asked. Like the
 /// system probe, it answers whether it is available by taking a listing.
@@ -153,6 +155,18 @@ impl ProcessInspector for SelfClaimPlatform {
     }
 
     fn terminal_device(&self, _path: &str) -> Option<u64> {
+        None
+    }
+
+    fn start_home_variables(&self, _pid: i32) -> Option<StartHomeVariables> {
+        None
+    }
+
+    fn arg0_locks(&self, _pid: i32) -> Arg0Locks {
+        Arg0Locks::Unavailable
+    }
+
+    fn passwd_home(&self, _pid: i32) -> Option<Vec<u8>> {
         None
     }
 }

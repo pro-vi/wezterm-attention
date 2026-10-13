@@ -150,7 +150,8 @@ pub struct PaneProcessSet {
 pub struct CodexServer {
     /// The `CODEX_HOME` whose hooks it runs: its own `CODEX_HOME`, else
     /// `.codex` under its `HOME`, as Codex 0.157.1 resolves it. `None` when its
-    /// environment names neither.
+    /// environment names neither. The host check in `host.rs` reads a fuller
+    /// rule, as of Codex 0.162.0 and 0.162.1, for verified hosts only.
     pub codex_home: Option<PathBuf>,
 }
 
@@ -349,7 +350,9 @@ pub enum ProcessRead {
 }
 
 /// The kernel's process table and terminal devices, as the claim an agent
-/// makes from its own hook needs them.
+/// makes from its own hook needs them, and what `inspect` reads of a Codex
+/// host: its start-up `CODEX_HOME` and `HOME`, the names of its open arg0
+/// helper locks, and its real user's home.
 pub trait ProcessInspector: Send + Sync {
     /// Whether this platform lets an agent claim a pane from its own hook:
     /// where its process reads answer. The agent of an event that inherited a
@@ -363,6 +366,124 @@ pub trait ProcessInspector: Send + Sync {
     /// The device number of the terminal at `path`, or `None` unless it is a
     /// character device this user owns.
     fn terminal_device(&self, path: &str) -> Option<u64>;
+    /// The first `CODEX_HOME` and the first `HOME` of `pid`'s start-up
+    /// environment, or `None` when it cannot be read. No other variable is
+    /// kept.
+    fn start_home_variables(&self, pid: i32) -> Option<StartHomeVariables>;
+    /// The Codex arg0 helper locks `pid` holds open, found by the names of its
+    /// open files; no file is opened or read.
+    fn arg0_locks(&self, pid: i32) -> Arg0Locks;
+    /// The home directory the user database gives `pid`'s real user, or
+    /// `None` when it cannot be read.
+    fn passwd_home(&self, pid: i32) -> Option<Vec<u8>>;
+}
+
+/// The two variables of a process's start-up environment that name its Codex
+/// home, each the first entry of its name.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StartHomeVariables {
+    pub codex_home: Option<Vec<u8>>,
+    pub home: Option<Vec<u8>>,
+}
+
+/// A `<codex home>/tmp/arg0/codex-arg0<suffix>/.lock` a process holds open,
+/// with the device and inode of the file its descriptor names.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Arg0Lock {
+    pub path: PathBuf,
+    pub device: u64,
+    pub inode: u64,
+}
+
+/// What reading a process's open descriptors found of Codex's arg0 helper
+/// locks.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Arg0Locks {
+    /// Every descriptor the list named was read, but those that closed
+    /// before their read; these are the locks among them.
+    Complete(Vec<Arg0Lock>),
+    /// The list or a descriptor could not be read whole.
+    Unavailable,
+}
+
+/// The Codex home an arg0 helper lock lies in: `path` less
+/// `tmp/arg0/codex-arg0<suffix>/.lock`, or `None` when `path` is not such a
+/// lock.
+///
+/// As of Codex 0.162.0 and 0.162.1, Codex creates that lock in the home it
+/// resolved after loading its `.env`, and holds it while it runs
+/// (`codex-rs/arg0/src/lib.rs`, `prepare_path_entry_for_codex_aliases`).
+pub fn arg0_lock_home(path: &Path) -> Option<&Path> {
+    let named = |path: &Path, name: &str| path.file_name() == Some(OsStr::new(name));
+    let directory = path.parent().filter(|_| named(path, ".lock"))?;
+    let arg0 = directory.parent().filter(|_| {
+        directory
+            .file_name()
+            .is_some_and(|name| name.as_encoded_bytes().starts_with(b"codex-arg0"))
+    })?;
+    let tmp = arg0.parent().filter(|_| named(arg0, "arg0"))?;
+    tmp.parent().filter(|_| named(tmp, "tmp"))
+}
+
+/// How many `entry`-byte entries a descriptor list the kernel filled to
+/// `filled` bytes of `capacity` holds, when it gave the list whole: not empty,
+/// short of the room it was given, which a list cut short fills, and a whole
+/// number of entries.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn whole_list_entries(filled: i32, capacity: i32, entry: usize) -> Option<usize> {
+    let bytes = usize::try_from(filled).ok().filter(|_| filled < capacity)?;
+    (bytes > 0 && bytes % entry == 0).then(|| bytes / entry)
+}
+
+/// What reading one descriptor's vnode gave.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+enum DescriptorRead {
+    Lock(Arg0Lock),
+    /// A file that is not an arg0 helper lock; its name is not kept.
+    Other,
+    /// The descriptor closed between the list and its read.
+    Closed,
+    Failed,
+}
+
+/// The arg0 locks among `descriptors`, the vnode descriptors one whole list
+/// named, each read with `read`.
+///
+/// A descriptor that closed before its read is passed over: as of Codex
+/// 0.162.0 and 0.162.1, Codex holds the lock for as long as it runs, so a
+/// descriptor that closes during the scan is not it, and a host that exits
+/// during the scan fails the start-time check that follows. Any other failed
+/// read leaves the scan unavailable.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn collect_arg0_locks(
+    descriptors: impl IntoIterator<Item = i32>,
+    mut read: impl FnMut(i32) -> DescriptorRead,
+) -> Arg0Locks {
+    let mut locks = Vec::new();
+    for descriptor in descriptors {
+        match read(descriptor) {
+            DescriptorRead::Lock(lock) => locks.push(lock),
+            DescriptorRead::Other | DescriptorRead::Closed => {}
+            DescriptorRead::Failed => return Arg0Locks::Unavailable,
+        }
+    }
+    Arg0Locks::Complete(locks)
+}
+
+/// The first `CODEX_HOME` and `HOME` among the environment strings of a
+/// `KERN_PROCARGS2` buffer, or `None` when its argument count cannot be read.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn start_home_variables(buffer: &[u8]) -> Option<StartHomeVariables> {
+    procargs_count(buffer)?;
+    let mut found = StartHomeVariables::default();
+    for entry in procargs_environment(buffer) {
+        if let Some(value) = entry.strip_prefix(b"CODEX_HOME=") {
+            found.codex_home.get_or_insert_with(|| value.to_vec());
+        } else if let Some(value) = entry.strip_prefix(b"HOME=") {
+            found.home.get_or_insert_with(|| value.to_vec());
+        }
+    }
+    Some(found)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -390,6 +511,18 @@ impl ProcessInspector for SystemProcessInspector {
         let metadata = fs::metadata(path).ok()?;
         (metadata.file_type().is_char_device() && metadata.uid() == effective_uid())
             .then(|| u64::from(metadata.rdev() as u32))
+    }
+
+    fn start_home_variables(&self, pid: i32) -> Option<StartHomeVariables> {
+        read_start_home_variables(pid)
+    }
+
+    fn arg0_locks(&self, pid: i32) -> Arg0Locks {
+        read_arg0_locks(pid)
+    }
+
+    fn passwd_home(&self, pid: i32) -> Option<Vec<u8>> {
+        read_passwd_home(pid)
     }
 }
 
@@ -549,6 +682,251 @@ fn read_boot_session() -> Option<String> {
 #[cfg(not(target_os = "macos"))]
 fn read_boot_session() -> Option<String> {
     None
+}
+
+/// The most bytes a process's arguments and environment take, `kern.argmax`.
+#[cfg(target_os = "macos")]
+fn argument_max() -> Option<usize> {
+    let mut argument_bytes: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    let mut name = [libc::CTL_KERN, libc::KERN_ARGMAX];
+    // SAFETY: `name` holds the 2 integers the call is told of, the output is
+    // `argument_bytes`, whose size is `size`, and no new value is set.
+    if unsafe {
+        libc::sysctl(
+            name.as_mut_ptr(),
+            2,
+            (&mut argument_bytes as *mut libc::c_int).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+    usize::try_from(argument_bytes).ok()
+}
+
+/// Read `pid`'s `KERN_PROCARGS2` arguments and environment into `buffer`,
+/// and give how many bytes they took.
+#[cfg(target_os = "macos")]
+fn read_procargs(pid: i32, buffer: &mut [u8]) -> Option<usize> {
+    let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut size = buffer.len();
+    // SAFETY: `name` holds the 3 integers the call is told of, `buffer` is
+    // writable for the `size` bytes it is told of, and no new value is set.
+    if unsafe {
+        libc::sysctl(
+            name.as_mut_ptr(),
+            3,
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+    Some(size.min(buffer.len()))
+}
+
+#[cfg(target_os = "macos")]
+fn read_start_home_variables(pid: i32) -> Option<StartHomeVariables> {
+    let mut buffer = vec![0_u8; argument_max()?];
+    let size = read_procargs(pid, &mut buffer)?;
+    start_home_variables(&buffer[..size])
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_start_home_variables(_pid: i32) -> Option<StartHomeVariables> {
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_arg0_locks(_pid: i32) -> Arg0Locks {
+    Arg0Locks::Unavailable
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_passwd_home(_pid: i32) -> Option<Vec<u8>> {
+    None
+}
+
+/// `struct vnode_fdinfowithpath` of `<sys/proc_info.h>`, which the `libc`
+/// crate does not define: a `struct proc_fileinfo`, then the vnode and its
+/// path.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct VnodeDescriptor {
+    open_flags: u32,
+    status: u32,
+    offset: i64,
+    kind: i32,
+    guard_flags: u32,
+    vnode: libc::vnode_info_path,
+}
+
+/// `PROC_PIDFDVNODEPATHINFO` of `<sys/proc_info.h>`.
+#[cfg(target_os = "macos")]
+const PROC_PIDFDVNODEPATHINFO: libc::c_int = 2;
+
+#[cfg(target_os = "macos")]
+fn read_arg0_locks(pid: i32) -> Arg0Locks {
+    match vnode_descriptors(pid) {
+        Some(descriptors) => collect_arg0_locks(descriptors, |descriptor| {
+            read_vnode_descriptor(pid, descriptor)
+        }),
+        None => Arg0Locks::Unavailable,
+    }
+}
+
+/// The vnode descriptors `pid` has open, from one list the kernel gave whole,
+/// or `None` when it could not.
+#[cfg(target_os = "macos")]
+fn vnode_descriptors(pid: i32) -> Option<Vec<i32>> {
+    let entry = std::mem::size_of::<libc::proc_fdinfo>();
+    // SAFETY: a null buffer of size 0 asks only for the size needed, and
+    // nothing is written.
+    let needed =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    let needed = usize::try_from(needed).ok().filter(|bytes| *bytes > 0)?;
+    // Room for descriptors opened between the two calls. A list that fills
+    // the room may have been cut short, so it is not taken as whole.
+    let empty = libc::proc_fdinfo {
+        proc_fd: 0,
+        proc_fdtype: 0,
+    };
+    let mut descriptors = vec![empty; needed / entry + 16];
+    let capacity = libc::c_int::try_from(descriptors.len() * entry).ok()?;
+    // SAFETY: `descriptors` is writable for `capacity` bytes, its length in
+    // bytes.
+    let filled = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            descriptors.as_mut_ptr().cast(),
+            capacity,
+        )
+    };
+    descriptors.truncate(whole_list_entries(filled, capacity, entry)?);
+    let vnode = u32::try_from(libc::PROX_FDTYPE_VNODE).ok()?;
+    Some(
+        descriptors
+            .iter()
+            .filter(|descriptor| descriptor.proc_fdtype == vnode)
+            .map(|descriptor| descriptor.proc_fd)
+            .collect(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn read_vnode_descriptor(pid: i32, descriptor: i32) -> DescriptorRead {
+    // SAFETY: every field of the struct is an integer or an array of them,
+    // for which all zero bytes are a valid value.
+    let mut info: VnodeDescriptor = unsafe { std::mem::zeroed() };
+    let Ok(size) = libc::c_int::try_from(std::mem::size_of::<VnodeDescriptor>()) else {
+        return DescriptorRead::Failed;
+    };
+    // SAFETY: `info` is writable for `size` bytes, its size.
+    let read = unsafe {
+        libc::proc_pidfdinfo(
+            pid,
+            descriptor,
+            PROC_PIDFDVNODEPATHINFO,
+            (&mut info as *mut VnodeDescriptor).cast(),
+            size,
+        )
+    };
+    if read != size {
+        let closed =
+            read == 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EBADF);
+        return if closed {
+            DescriptorRead::Closed
+        } else {
+            DescriptorRead::Failed
+        };
+    }
+    // SAFETY: the slice covers `vip_path`, which `info` owns and outlives it,
+    // and every `c_char` is an initialized byte.
+    let path = unsafe {
+        std::slice::from_raw_parts(
+            info.vnode.vip_path.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(&info.vnode.vip_path),
+        )
+    };
+    let Some(end) = path.iter().position(|byte| *byte == 0) else {
+        return DescriptorRead::Failed;
+    };
+    let path = Path::new(<OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(
+        &path[..end],
+    ));
+    if arg0_lock_home(path).is_none() {
+        return DescriptorRead::Other;
+    }
+    let stat = info.vnode.vip_vi.vi_stat;
+    DescriptorRead::Lock(Arg0Lock {
+        path: path.to_path_buf(),
+        device: u64::from(stat.vst_dev),
+        inode: stat.vst_ino,
+    })
+}
+
+/// The home the user database gives `pid`'s real user, looked up as dirs-sys
+/// 0.5.0 does for Codex 0.162.0 and 0.162.1 when `HOME` is empty or unset:
+/// one `getpwuid_r` with a buffer of `_SC_GETPW_R_SIZE_MAX` bytes, or 512.
+#[cfg(target_os = "macos")]
+fn read_passwd_home(pid: i32) -> Option<Vec<u8>> {
+    // SAFETY: every field of the struct is an integer or an array of them,
+    // for which all zero bytes are a valid value.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    // SAFETY: `info` is writable for `size` bytes, its size.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
+    if read != size {
+        return None;
+    }
+    // SAFETY: `sysconf` reads a configuration value and writes nothing.
+    let room = match unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) } {
+        bytes if bytes < 0 => 512,
+        bytes => usize::try_from(bytes).ok()?,
+    };
+    let mut buffer = vec![0 as libc::c_char; room];
+    // SAFETY: every field of `passwd` is an integer or a pointer, for which
+    // all zero bytes are a valid value.
+    let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result = std::ptr::null_mut();
+    // SAFETY: `entry` and `result` are writable, and `buffer` is writable for
+    // the `room` bytes the call is told of.
+    let failed = unsafe {
+        libc::getpwuid_r(
+            info.pbi_ruid,
+            &mut entry,
+            buffer.as_mut_ptr(),
+            room,
+            &mut result,
+        )
+    };
+    if failed != 0 || result.is_null() || entry.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: on success `pw_dir` points to a NUL-terminated string inside
+    // `buffer`, which outlives this read.
+    Some(
+        unsafe { std::ffi::CStr::from_ptr(entry.pw_dir) }
+            .to_bytes()
+            .to_vec(),
+    )
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1278,55 +1656,21 @@ fn own_pane_processes() -> Option<PaneProcessSet> {
     let filled =
         unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, pids.as_mut_ptr().cast(), capacity) };
     pids.truncate(usize::try_from(filled).ok()? / pid_size);
-    let mut argument_bytes: libc::c_int = 0;
-    let mut size = std::mem::size_of::<libc::c_int>();
-    let mut name = [libc::CTL_KERN, libc::KERN_ARGMAX];
-    // SAFETY: `name` holds the 2 integers the call is told of, the output is
-    // `argument_bytes`, whose size is `size`, and no new value is set.
-    if unsafe {
-        libc::sysctl(
-            name.as_mut_ptr(),
-            2,
-            (&mut argument_bytes as *mut libc::c_int).cast(),
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    } != 0
-    {
-        return None;
-    }
-    let mut buffer = vec![0_u8; usize::try_from(argument_bytes).ok()?];
+    let mut buffer = vec![0_u8; argument_max()?];
     let own = libc::pid_t::try_from(std::process::id()).ok()?;
     let mut read_own = false;
     let mut processes = PaneProcessSet::default();
     for pid in pids.into_iter().filter(|pid| *pid > 0) {
-        let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
-        let mut size = buffer.len();
         // A process that exited is not listed. One the kernel will not
         // describe is still running, and whatever it carries is missed.
-        //
-        // SAFETY: `name` holds the 3 integers the call is told of, `buffer`
-        // is writable for the `size` bytes it is told of, and no new value
-        // is set.
-        if unsafe {
-            libc::sysctl(
-                name.as_mut_ptr(),
-                3,
-                buffer.as_mut_ptr().cast(),
-                &mut size,
-                std::ptr::null_mut(),
-                0,
-            )
-        } != 0
-        {
+        let Some(size) = read_procargs(pid, &mut buffer) else {
             if still_running(pid) {
                 processes.missed_one();
             }
             continue;
-        }
+        };
         read_own |= pid == own;
-        let process = &buffer[..size.min(buffer.len())];
+        let process = &buffer[..size];
         let environment = procargs_environment(process).collect::<Vec<_>>();
         if codex_shared_server(procargs_arguments(process)) {
             processes.add_codex_server(environment.iter().copied());
@@ -2267,6 +2611,284 @@ mod tests {
             libc::close(first_slave);
             libc::close(second_master);
             libc::close(second_slave);
+        }
+    }
+}
+
+/// The readers a Codex host's home is found from.
+#[cfg(test)]
+mod home_tests {
+    use std::path::{Path, PathBuf};
+
+    use super::{Arg0Lock, Arg0Locks, DescriptorRead, StartHomeVariables};
+
+    /// A `KERN_PROCARGS2` buffer of `count` arguments.
+    fn buffer(count: i32, strings: &[u8]) -> Vec<u8> {
+        let mut buffer = count.to_ne_bytes().to_vec();
+        buffer.extend_from_slice(strings);
+        buffer
+    }
+
+    #[test]
+    fn only_the_first_codex_home_and_home_of_a_start_environment_are_kept() {
+        let read = super::start_home_variables(&buffer(
+            2,
+            b"/x/codex\0\0\0codex\0HOME=/argument\0PATH=/bin\0XHOME=/no\0HOME=/first\0\
+              MY_CODEX_HOME=/no\0CODEX_HOME=/c1\0HOME=/second\0CODEX_HOME=/c2\0\0",
+        ));
+        assert_eq!(
+            read,
+            Some(StartHomeVariables {
+                codex_home: Some(b"/c1".to_vec()),
+                home: Some(b"/first".to_vec()),
+            })
+        );
+        assert_eq!(
+            super::start_home_variables(&buffer(1, b"/x/codex\0\0codex\0\0")),
+            Some(StartHomeVariables::default())
+        );
+        assert_eq!(super::start_home_variables(&[1, 0]), None);
+    }
+
+    #[test]
+    fn an_arg0_lock_names_the_home_it_lies_in() {
+        let home = |path: &str| super::arg0_lock_home(Path::new(path)).map(Path::to_path_buf);
+        assert_eq!(
+            home("/u/.codex/tmp/arg0/codex-arg0Ab12Cd/.lock"),
+            Some(PathBuf::from("/u/.codex"))
+        );
+        for other in [
+            "/u/.codex/tmp/arg0/codex-arg0Ab12Cd/lock",
+            "/u/.codex/tmp/arg0/other/.lock",
+            "/u/.codex/tmp/args/codex-arg0Ab12Cd/.lock",
+            "/u/.codex/temp/arg0/codex-arg0Ab12Cd/.lock",
+            "/u/.codex/tmp/arg0/codex-arg0Ab12Cd/.lock/x",
+            "/u/.codex/sessions/2026/10/12/rollout.jsonl",
+        ] {
+            assert_eq!(home(other), None, "{other}");
+        }
+    }
+
+    fn lock() -> Arg0Lock {
+        Arg0Lock {
+            path: "/u/.codex/tmp/arg0/codex-arg0Ab12Cd/.lock".into(),
+            device: 1,
+            inode: 2,
+        }
+    }
+
+    #[test]
+    fn a_descriptor_that_closed_before_its_read_is_passed_over() {
+        let found = super::collect_arg0_locks([3, 4, 5], |descriptor| match descriptor {
+            3 => DescriptorRead::Other,
+            4 => DescriptorRead::Closed,
+            _ => DescriptorRead::Lock(lock()),
+        });
+        assert_eq!(found, Arg0Locks::Complete(vec![lock()]));
+        // The lock's own descriptor read as closed names no lock, so no home.
+        let found = super::collect_arg0_locks([3, 4], |descriptor| match descriptor {
+            3 => DescriptorRead::Other,
+            _ => DescriptorRead::Closed,
+        });
+        assert_eq!(found, Arg0Locks::Complete(Vec::new()));
+    }
+
+    #[test]
+    fn only_a_whole_descriptor_list_is_read() {
+        assert_eq!(super::whole_list_entries(64, 128, 8), Some(8));
+        // Filling the room given may mean the list was cut short.
+        assert_eq!(super::whole_list_entries(128, 128, 8), None);
+        assert_eq!(super::whole_list_entries(0, 128, 8), None);
+        assert_eq!(super::whole_list_entries(-1, 128, 8), None);
+        assert_eq!(super::whole_list_entries(60, 128, 8), None);
+    }
+
+    #[test]
+    fn any_other_failed_read_leaves_the_scan_unavailable() {
+        let found = super::collect_arg0_locks([3, 4, 5], |descriptor| match descriptor {
+            3 => DescriptorRead::Lock(lock()),
+            4 => DescriptorRead::Failed,
+            _ => DescriptorRead::Other,
+        });
+        assert_eq!(found, Arg0Locks::Unavailable);
+    }
+
+    /// Run by the real-process tests as a child: holds the file
+    /// `ATTENTION_TEST_LOCK` names open, and with `ATTENTION_TEST_CHURN` set
+    /// opens and closes another file over and over, until its input closes.
+    /// It is this test binary rather than a shell because macOS hands over
+    /// no environment for its own system binaries.
+    #[test]
+    #[ignore = "a child process of the real-process tests"]
+    fn arg0_lock_holder() {
+        let Some(lock) = std::env::var_os("ATTENTION_TEST_LOCK") else {
+            return;
+        };
+        let _held = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(lock)
+            .expect("open the lock");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let churn = std::env::var_os("ATTENTION_TEST_CHURN").map(|path| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    drop(std::fs::File::open(&path).expect("open the churned file"));
+                }
+            })
+        });
+        // libtest prints the test's name without a newline first, so the
+        // marker shares its line.
+        println!("arg0-lock-held");
+        let _ = std::io::stdin().read_line(&mut String::new());
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(churn) = churn {
+            churn.join().expect("churn thread");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    mod real_process {
+        use std::path::PathBuf;
+
+        use super::super::{
+            Arg0Lock, Arg0Locks, DescriptorRead, ProcessInspector, StartHomeVariables,
+        };
+
+        const LOCK: &str = "home/.codex/tmp/arg0/codex-arg0Test/.lock";
+
+        /// A child holding one file open.
+        struct Holder {
+            child: std::process::Child,
+            dir: PathBuf,
+            held: PathBuf,
+        }
+
+        impl Holder {
+            /// A child holding `<dir>/<held>` open, started with `environment`
+            /// alone, and churning another file when `churn` is set.
+            fn start(name: &str, held: &str, environment: &[(&str, &str)], churn: bool) -> Self {
+                use std::io::BufRead;
+                // The kernel names open files by their real path, and the
+                // temporary directory is reached through a symlink.
+                let dir = std::env::temp_dir()
+                    .canonicalize()
+                    .expect("real temporary directory")
+                    .join(format!("wa-arg0-{name}-{}", std::process::id()));
+                let held = dir.join(held);
+                std::fs::create_dir_all(held.parent().expect("held directory")).expect("mkdir");
+                let mut command =
+                    std::process::Command::new(std::env::current_exe().expect("test binary"));
+                command
+                    .args([
+                        "wezterm::home_tests::arg0_lock_holder",
+                        "--exact",
+                        "--ignored",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env_clear()
+                    .env("ATTENTION_TEST_LOCK", &held)
+                    .envs(environment.iter().copied())
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped());
+                if churn {
+                    let churned = dir.join("churned");
+                    std::fs::write(&churned, b"").expect("churned file");
+                    command.env("ATTENTION_TEST_CHURN", churned);
+                }
+                let mut child = command.spawn().expect("spawn the holder");
+                let stdout = child.stdout.take().expect("stdout");
+                let ready = std::io::BufReader::new(stdout)
+                    .lines()
+                    .map_while(Result::ok)
+                    .any(|line| line.contains("arg0-lock-held"));
+                assert!(ready, "the holder never held its file");
+                Self { child, dir, held }
+            }
+
+            fn pid(&self) -> i32 {
+                i32::try_from(self.child.id()).expect("pid")
+            }
+
+            fn lock(&self) -> Arg0Lock {
+                use std::os::unix::fs::MetadataExt;
+                let metadata = std::fs::metadata(&self.held).expect("lock metadata");
+                Arg0Lock {
+                    path: self.held.clone(),
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                }
+            }
+        }
+
+        impl Drop for Holder {
+            fn drop(&mut self) {
+                drop(self.child.stdin.take());
+                let _ = self.child.wait();
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+
+        #[test]
+        fn a_real_process_gives_its_two_home_variables_and_its_lock() {
+            let holder = Holder::start(
+                "real",
+                LOCK,
+                &[
+                    ("HOME", "/generated/home"),
+                    ("CODEX_HOME", "/generated/codex"),
+                    ("UNRELATED", "kept out"),
+                ],
+                false,
+            );
+            let inspector = super::super::SystemProcessInspector;
+            assert_eq!(
+                inspector.start_home_variables(holder.pid()),
+                Some(StartHomeVariables {
+                    codex_home: Some(b"/generated/codex".to_vec()),
+                    home: Some(b"/generated/home".to_vec()),
+                })
+            );
+            assert_eq!(
+                inspector.arg0_locks(holder.pid()),
+                Arg0Locks::Complete(vec![holder.lock()])
+            );
+        }
+
+        #[test]
+        fn a_real_process_without_a_lock_has_none() {
+            let holder = Holder::start("plain", "home/.codex/plain.lock", &[], false);
+            assert_eq!(
+                super::super::SystemProcessInspector.arg0_locks(holder.pid()),
+                Arg0Locks::Complete(Vec::new())
+            );
+        }
+
+        /// A process that opens and closes files while it is scanned: a
+        /// descriptor that closes between the list and its read is passed
+        /// over, and every scan still finds the lock and is whole.
+        #[test]
+        fn a_busy_process_keeps_its_lock_in_every_scan() {
+            let holder = Holder::start("busy", LOCK, &[("HOME", "/generated/home")], true);
+            let expected = Arg0Locks::Complete(vec![holder.lock()]);
+            let mut scans = 0;
+            let mut closed = 0;
+            while scans < 100 || (closed == 0 && scans < 200_000) {
+                let descriptors =
+                    super::super::vnode_descriptors(holder.pid()).expect("a whole list");
+                let found = super::super::collect_arg0_locks(descriptors, |descriptor| {
+                    let read = super::super::read_vnode_descriptor(holder.pid(), descriptor);
+                    if matches!(read, DescriptorRead::Closed) {
+                        closed += 1;
+                    }
+                    read
+                });
+                assert_eq!(found, expected, "scan {scans}");
+                scans += 1;
+            }
+            assert!(closed > 0, "no descriptor closed mid-scan in {scans} scans");
         }
     }
 }

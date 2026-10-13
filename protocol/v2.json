@@ -221,6 +221,19 @@
     "binding_phase": ["active", "ended"],
     "child_presence_events": ["start", "tool", "permission"],
     "child_presence_statuses": ["running", "waiting"],
+    "codex_home_refusals": [
+      "environment_unreadable",
+      "codex_home_relative",
+      "codex_home_unresolvable",
+      "home_not_utf8",
+      "home_relative",
+      "home_unresolvable",
+      "home_unobserved",
+      "home_ambiguous",
+      "home_observation_unavailable",
+      "home_changed_after_start",
+      "host_changed_during_read"
+    ],
     "diagnostic_codes": [
       "identity_unpublished",
       "claim_stale",

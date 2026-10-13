@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`attention inspect` names the Codex home a Codex binding's host uses.** For a Codex binding whose host is available, the `host` facet's `record` holds `config_dir`, the canonical Codex home, or `config_dir_refusal`, one of a fixed set of reasons listed in `protocol/v2.json` as `enums.codex_home_refusals`. It is read from the host while `inspect` answers, and named only when the arg0 helper lock the host holds open lies in the home its start-up environment names, as Codex 0.162.0 and 0.162.1 resolve it; the [consumer guide](docs/consumer-guide.md#scoped-headless-inspection) gives the rule and [accepted limitations](docs/accepted-limitations.md#a-codex-hosts-home-is-named-only-when-two-readings-of-it-agree) the homes it refuses. A binding whose host was recorded before this release gains it with no new hook. `binding.config_dir` is unchanged.
+
 ## 1.1.0 — 2026-10-12
 
 ### Added

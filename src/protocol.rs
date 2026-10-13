@@ -374,6 +374,7 @@ pub struct Enums {
     pub binding_phase: BTreeSet<String>,
     pub child_presence_events: BTreeSet<String>,
     pub child_presence_statuses: BTreeSet<String>,
+    pub codex_home_refusals: BTreeSet<String>,
     pub diagnostic_codes: BTreeSet<String>,
     pub end_reasons: BTreeSet<String>,
     pub pane_presence: BTreeSet<String>,
@@ -543,6 +544,17 @@ pub fn parse_manifest(source: &str) -> Result<Manifest> {
         return Err(AttentionError::new(
             DiagnosticCode::IntegrationVersionMismatch,
             "manifest child presence vocabulary differs from this binary's",
+        ));
+    }
+    if parsed.enums.codex_home_refusals
+        != crate::host::CodexHomeRefusal::ALL
+            .iter()
+            .map(|refusal| refusal.name())
+            .collect()
+    {
+        return Err(AttentionError::new(
+            DiagnosticCode::IntegrationVersionMismatch,
+            "manifest Codex home refusals differ from this binary's",
         ));
     }
     if parsed.digests.algorithm != "sha256" || parsed.digests.encoding != "lowercase_hex" {

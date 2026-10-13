@@ -22,8 +22,8 @@ use wezterm_attention::providers::{ProviderAction, ProviderEvent, parse_provider
 use wezterm_attention::query::read_bindings;
 use wezterm_attention::records::{atomic_replace, launch_dir, pane_dir, state_root, with_lock};
 use wezterm_attention::wezterm::{
-    Clock, ControllingTerminal, PaneLister, PaneRow, ProcessFacts, ProcessInspector, ProcessRead,
-    ProcessStart, RuntimePorts, TtyWriter,
+    Arg0Locks, Clock, ControllingTerminal, PaneLister, PaneRow, ProcessFacts, ProcessInspector,
+    ProcessRead, ProcessStart, RuntimePorts, StartHomeVariables, TtyWriter,
 };
 
 #[path = "support/executables.rs"]
@@ -77,6 +77,8 @@ mod claim_fence;
 #[path = "lifecycle_spec/plugin_writes.rs"]
 mod plugin_writes;
 
+#[path = "lifecycle_spec/codex_home.rs"]
+mod codex_home;
 #[path = "lifecycle_spec/host_facet.rs"]
 mod host_facet;
 #[path = "lifecycle_spec/inherited_host.rs"]
@@ -239,6 +241,15 @@ struct FakeProcesses {
     /// Runs on every process read, with the pid read; an answer it gives
     /// replaces the table's.
     on_read: Mutex<Option<ReadHook>>,
+    /// Each pid's start-up home variables; a pid not here has an unreadable
+    /// environment.
+    start_homes: Mutex<BTreeMap<i32, StartHomeVariables>>,
+    /// Each pid's arg0 helper locks; a pid not here gives no whole scan.
+    arg0_locks: Mutex<BTreeMap<i32, Arg0Locks>>,
+    /// How many scans of open files have been made.
+    scans: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Each pid's user database home, in place of the real user's.
+    passwd_homes: Mutex<BTreeMap<i32, Vec<u8>>>,
 }
 
 impl FakeProcesses {
@@ -276,6 +287,10 @@ impl FakeProcesses {
             boot: Mutex::new(Some(BOOT_SESSION.to_owned())),
             devices: Mutex::new(BTreeMap::from([(tty_path.to_owned(), PANE_TTY_DEVICE)])),
             on_read: Mutex::new(None),
+            start_homes: Mutex::default(),
+            arg0_locks: Mutex::default(),
+            scans: std::sync::Arc::default(),
+            passwd_homes: Mutex::default(),
         }
     }
 
@@ -329,6 +344,32 @@ impl ProcessInspector for FakeProcesses {
             .expect("devices lock")
             .get(path)
             .copied()
+    }
+
+    fn start_home_variables(&self, pid: i32) -> Option<StartHomeVariables> {
+        self.start_homes
+            .lock()
+            .expect("start homes lock")
+            .get(&pid)
+            .cloned()
+    }
+
+    fn arg0_locks(&self, pid: i32) -> Arg0Locks {
+        self.scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.arg0_locks
+            .lock()
+            .expect("locks lock")
+            .get(&pid)
+            .cloned()
+            .unwrap_or(Arg0Locks::Unavailable)
+    }
+
+    fn passwd_home(&self, pid: i32) -> Option<Vec<u8>> {
+        self.passwd_homes
+            .lock()
+            .expect("passwd lock")
+            .get(&pid)
+            .cloned()
     }
 }
 
@@ -1873,6 +1914,29 @@ fn consumer_guide_lists_every_diagnostic_code() {
             .unwrap()
             .enums
             .diagnostic_codes
+    );
+}
+
+#[test]
+fn consumer_guide_lists_every_codex_home_refusal() {
+    let guide = include_str!("../../docs/consumer-guide.md");
+    let table = guide
+        .split_once("| `config_dir_refusal` |")
+        .map(|(_, rest)| rest)
+        .expect("consumer guide has a config_dir_refusal table");
+    let listed: BTreeSet<String> = table
+        .lines()
+        .skip(2)
+        .take_while(|line| line.starts_with("| `"))
+        .filter_map(|line| line.split('`').nth(1))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        listed,
+        wezterm_attention::protocol::manifest()
+            .unwrap()
+            .enums
+            .codex_home_refusals
     );
 }
 

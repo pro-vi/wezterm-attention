@@ -10,14 +10,14 @@ use wezterm_attention::query::{
 };
 use wezterm_attention::records::FileRecords;
 
-const SESSION: &str = "s";
+pub(super) const SESSION: &str = "s";
 /// A second agent in the pane, and the hook it runs.
 const SECOND_AGENT: i32 = 4100;
 const SECOND_HOOK: i32 = 5100;
 
 /// A pane its shell claimed, where `provider` started session "s" from a hook
 /// that names its agent.
-fn shell_session(provider: &str) -> Setup {
+pub(super) fn shell_session(provider: &str) -> Setup {
     let setup = Setup::new();
     setup.claim();
     let result = apply_as(
@@ -86,7 +86,7 @@ fn session_binding(setup: &Setup, provider: &str) -> String {
 }
 
 /// The `host` facet `inspect` gives for session "s" of `provider`.
-fn facet(setup: &Setup, provider: &str) -> Value {
+pub(super) fn facet(setup: &Setup, provider: &str) -> Value {
     let binding = session_binding(setup, provider);
     serde_json::to_value(checked_with(setup, &binding, &setup.tty)).expect("facet JSON")
 }
@@ -123,6 +123,9 @@ fn a_shell_claimed_agent_that_names_itself_is_recorded_and_checked_as_the_host()
                     "written_at_unix_ns": "00000000012345678900",
                 },
                 "foreground": true,
+                // This fake host's environment cannot be read; the codex_home
+                // tests give it one.
+                "config_dir_refusal": "environment_unreadable",
             },
         })
     );

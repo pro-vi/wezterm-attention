@@ -345,7 +345,9 @@ pub struct PaneFacts {
     pub children: ChildrenFacet,
     pub review: EvidenceCollection,
     pub lifecycle: LifecycleView,
-    /// The binding's agent process, checked again while answering.
+    /// The binding's agent process, checked again while answering; for a
+    /// Codex binding it also names the Codex home that process uses, or why
+    /// none is named.
     pub host: HostFacet,
     pub diagnostics: Vec<Diagnostic>,
     /// Where the call spent its time, in the shape a bindings answer uses.
@@ -862,11 +864,17 @@ fn read_pane_facts_once(
             (None, A::Unavailable) => Err(HostRefusal::ProbeUnavailable),
             (None, _) => Err(HostRefusal::RecordInvalid),
         };
+        let provider = binding
+            .record
+            .as_ref()
+            .and_then(|record| record["provider"].as_str())
+            .and_then(crate::protocol::Provider::parse);
         check_host(
             stored,
             presence == PanePresence::VerifiedAbsent,
             host_ports,
             now.as_deref(),
+            provider,
         )
     };
     // A scope whose records are kept history was answered above, so the one

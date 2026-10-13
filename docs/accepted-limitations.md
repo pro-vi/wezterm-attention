@@ -659,6 +659,19 @@ turn loop that `break` without calling either. The path was read, not traced.
 [openai/codex#22774](https://github.com/openai/codex/issues/22774) asks for a
 hook on this case; it was open, with no pull request, on 2026-09-29.
 
+## A Codex host's home is named only when two readings of it agree
+
+`inspect` names a Codex host's home only when the home its start-up environment
+names and the home its arg0 helper lock lies in are one directory
+([consumer guide](consumer-guide.md#scoped-headless-inspection)). As of Codex
+0.162.0 and 0.162.1 that refuses some homes Codex itself uses:
+
+- A relative `CODEX_HOME` or `HOME`, which Codex resolves against its working
+  directory as it was then; the reader cannot know that directory.
+- A `.env` that sets `HOME`, which moves Codex to that home after it starts. The
+  `.env` is never read.
+- A Codex home under `TMPDIR`, where Codex creates no helper lock.
+
 ## A pane a shell has claimed refuses agents started without its launch id
 
 Once a shell has claimed a pane, whether the bash integration for a listed
