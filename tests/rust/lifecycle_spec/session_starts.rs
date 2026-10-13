@@ -197,13 +197,13 @@ fn leaves_the_binding(
     }
 }
 
-// Only a lead Codex "startup" proved by the host the current binding
-// recorded, while no other process contests that record, replaces the
-// binding. A second agent sharing the pane's launch, or a start the hook does
-// not prove, leaves it as it is. Every case runs, so one failure does not hide
-// another's.
+// Only a lead Codex "startup" that names its transcript and is proved by the
+// host the current binding recorded, while no other process contests that
+// record, replaces the binding. A second agent sharing the pane's launch, a
+// start that names no transcript, or one the hook does not prove, leaves it as
+// it is. Every case runs, so one failure does not hide another's.
 #[test]
-fn a_start_the_recorded_host_did_not_prove_leaves_the_binding_as_it_is() {
+fn a_start_that_does_not_qualify_leaves_the_binding_as_it_is() {
     let startup = || start_from("codex", NEW, "startup");
     let mut failed = Vec::new();
     leaves_the_binding(
@@ -278,6 +278,23 @@ fn a_start_the_recorded_host_did_not_prove_leaves_the_binding_as_it_is() {
         |setup| {
             old_session(setup, "codex", false);
             (setup.env.clone(), startup())
+        },
+    );
+    // As of Codex 0.162.0 the memory consolidation worker runs as an ephemeral
+    // session in the same process, and its start names no transcript.
+    leaves_the_binding(
+        &mut failed,
+        "a start that names no transcript",
+        "codex",
+        "conflict",
+        |setup| {
+            let worker = event(
+                "codex",
+                "SessionStart",
+                NEW,
+                json!({"source":"startup","transcript_path":null}),
+            );
+            (old_session(setup, "codex", false), worker)
         },
     );
     for provider in ["claude", "pi"] {

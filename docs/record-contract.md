@@ -238,13 +238,16 @@ active binding as `resume` and `clear` do. A Pi `session_start` with source `new
 `fork` replaces it; one with source `startup` or `reload` does not.
 
 While the active binding has not ended, a lead Codex `SessionStart` with source `startup` for
-another session replaces it only when the hook proved its host, that proof still holds under the
-launch and claim locks, and the active binding's `host.json` names the same process on the same
-terminal (`tty_path` and `tty_fingerprint`) and has no `contested_at_unix_ns`. Otherwise it is
-refused (`binding_conflict`); a Claude `startup` never replaces an active binding. As of Codex
-0.162.0, `/new` makes this start and runs no `SessionEnd` for the session before. The proof says
-which process started the session, not which session the pane shows, so the binding names the
-newest lead session its host started; what that leaves for the earlier session is in
+another session replaces it only when it carries a valid `transcript_path`, the hook proved its
+host, and the active binding's `host.json` names the same process on the same terminal
+(`tty_path` and `tty_fingerprint`) and has no `contested_at_unix_ns`. Any other such start is
+refused (`binding_conflict`), and a Claude `startup` never replaces an active binding; a start
+whose proof no longer holds under the launch and claim locks is ignored with the proof's
+diagnostic, as any event is. As of Codex 0.162.0, `/new` makes this start and runs no `SessionEnd`
+for the session before, and an ephemeral session, such as the memory consolidation worker Codex
+runs in the same process, names no transcript. The proof says which process started the session,
+not which session the pane shows, so the binding names the newest lead session its host started;
+what that leaves for the earlier session is in
 [Accepted limitations](accepted-limitations.md#after-codex-new-the-earlier-sessions-turns-are-not-shown).
 
 A provider event with a malformed optional field keeps its action and loses only that field. The

@@ -883,9 +883,13 @@ fn binding_mutation_for_session(
                 let replace = current_ended
                     || match provider {
                         Provider::Claude => resumed,
+                        // As of Codex 0.162.0 an ephemeral session, such as the
+                        // memory consolidation worker the same process runs,
+                        // names no transcript and is no conversation of the pane.
                         Provider::Codex => {
                             resumed
                                 || (source == "startup"
+                                    && event.transcript_path.is_some()
                                     && started_by_recorded_host(resolved, current_id))
                         }
                         Provider::Pi => matches!(source, "new" | "resume" | "fork"),

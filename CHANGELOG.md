@@ -11,7 +11,7 @@
 
 ### Changed
 
-- **Codex 0.162.0's `/new` replaces the pane's binding with the new session.** Its `SessionStart`, source `startup`, replaces the active binding when the hook proved the same process, on the same terminal, that the active binding's `host.json` records, and no other process contests that record. 1.0.0 refused it, so the tab kept showing the earlier session. Every other `startup`, and every Claude and Pi start, is handled as before. The earlier session can still run turns Codex queued to it; the tab does not show them ([accepted limitations](docs/accepted-limitations.md#after-codex-new-the-earlier-sessions-turns-are-not-shown)).
+- **Codex 0.162.0's `/new` replaces the pane's binding with the new session.** Its `SessionStart`, source `startup`, replaces the active binding when it carries a valid transcript path and the hook proved the same process, on the same terminal, that the active binding's `host.json` records, and no other process contests that record. 1.0.0 refused it, so the tab kept showing the earlier session. Every other `startup`, and every Claude and Pi start, is handled as before. The earlier session can still run turns Codex queued to it; the tab does not show them ([accepted limitations](docs/accepted-limitations.md#after-codex-new-the-earlier-sessions-turns-are-not-shown)).
 
 Going back to 1.0.0 after this release, `attention sweep` and `doctor` keep any binding that holds `prompts.json` or `host.json` and report it as `record_invalid` ("unknown binding state is preserved"); nothing is lost.
 
