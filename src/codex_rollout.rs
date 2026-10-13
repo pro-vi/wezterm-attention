@@ -264,7 +264,9 @@ fn error_code(info: &Value) -> Option<String> {
     let code = match info {
         Value::String(code) => code,
         Value::Object(object) if object.len() == 1 => object.keys().next()?,
-        _ => return None,
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Array(_) | Value::Object(_) => {
+            return None;
+        }
     };
     safe_text(code, "codex_error_info").ok()
 }

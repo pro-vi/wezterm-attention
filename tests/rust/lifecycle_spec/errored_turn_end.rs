@@ -193,10 +193,10 @@ fn follower_lock(setup: &Setup) -> PathBuf {
 }
 
 fn recorded(followed: &Followed) -> &str {
-    match followed {
-        Followed::Recorded(result) => result.disposition.as_str(),
-        other => panic!("the follower recorded nothing: {other:?}"),
-    }
+    let Followed::Recorded(result) = followed else {
+        panic!("the follower recorded nothing: {followed:?}");
+    };
+    result.disposition.as_str()
 }
 
 #[test]
@@ -307,10 +307,11 @@ fn an_end_without_an_error_records_nothing() {
         let request = prompted(&mut setup);
         let before = state(&setup);
         append(&rollout_path(&setup), &lines);
-        match follow(&setup, &request) {
-            Followed::Ended(signal) => assert_eq!(signal, ended, "{name}"),
-            other => panic!("{name}: {other:?}"),
-        }
+        let followed = follow(&setup, &request);
+        let Followed::Ended(signal) = &followed else {
+            panic!("{name}: {followed:?}");
+        };
+        assert_eq!(*signal, ended, "{name}");
         assert!(state(&setup) == before, "{name}");
     }
 }
@@ -385,10 +386,10 @@ fn a_turn_its_own_hook_ended_is_not_recorded_again() {
 #[test]
 fn the_follower_writes_nothing_once_its_host_or_binding_is_gone() {
     type Arrange = Box<dyn Fn(&Setup)>;
-    let host_gone: fn(&Followed) -> bool = |followed| matches!(followed, Followed::HostGone);
-    let binding_changed: fn(&Followed) -> bool =
-        |followed| matches!(followed, Followed::BindingChanged);
-    let cases: Vec<(&str, Arrange, fn(&Followed) -> bool)> = vec![
+    type Expect = fn(&Followed) -> bool;
+    let host_gone: Expect = |followed| matches!(followed, Followed::HostGone);
+    let binding_changed: Expect = |followed| matches!(followed, Followed::BindingChanged);
+    let cases: Vec<(&str, Arrange, Expect)> = vec![
         (
             "the host has exited",
             Box::new(|setup| setup.processes.set(AGENT_PID, ProcessRead::Gone)),
