@@ -579,8 +579,9 @@ panes of a mux server whose socket is gone absent; see
 [accepted limitations](accepted-limitations.md). The `ps` listing used elsewhere cannot tell
 which processes it did not read, and counts as complete. Process environments are never printed
 or persisted. Scoped `inspect` also reads `CODEX_HOME` and `HOME` from one verified Codex host's
-environment, and the names of that host's open arg0 helper locks, and prints only the canonical
-path of the Codex home they agree on ([consumer guide](consumer-guide.md#scoped-headless-inspection)).
+environment, the names of that host's open arg0 helper locks and, when `HOME` is empty or unset,
+its real user's home from the user database, and prints only the canonical path of the Codex home
+they agree on, or why it names none ([consumer guide](consumer-guide.md#scoped-headless-inspection)).
 
 Each `sweep --apply` makes up a fresh operation id, writes it into the absence probes and binding
 ends it records, and reports it in `result.operation_id`. After a run that was interrupted, run

@@ -150,8 +150,9 @@ pub struct PaneProcessSet {
 pub struct CodexServer {
     /// The `CODEX_HOME` whose hooks it runs: its own `CODEX_HOME`, else
     /// `.codex` under its `HOME`, as Codex 0.157.1 resolves it. `None` when its
-    /// environment names neither. The host check in `host.rs` reads a fuller
-    /// rule, as of Codex 0.162.0 and 0.162.1, for verified hosts only.
+    /// environment names neither. The host check's `start_home` in `host.rs`
+    /// reads more of the same rule, as of Codex 0.162.0 and 0.162.1, for
+    /// verified hosts only.
     pub codex_home: Option<PathBuf>,
 }
 
@@ -351,8 +352,7 @@ pub enum ProcessRead {
 
 /// The kernel's process table and terminal devices, as the claim an agent
 /// makes from its own hook needs them, and what `inspect` reads of a Codex
-/// host: its start-up `CODEX_HOME` and `HOME`, the names of its open arg0
-/// helper locks, and its real user's home.
+/// host's home.
 pub trait ProcessInspector: Send + Sync {
     /// Whether this platform lets an agent claim a pane from its own hook:
     /// where its process reads answer. The agent of an event that inherited a
@@ -391,8 +391,27 @@ pub struct StartHomeVariables {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Arg0Lock {
     pub path: PathBuf,
-    pub device: u64,
+    /// The device number as the kernel gives a descriptor's: 32 bits.
+    pub device: u32,
     pub inode: u64,
+}
+
+impl Arg0Lock {
+    /// The lock at `path`, as `metadata` describes the file there.
+    pub fn of(path: PathBuf, metadata: &fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            path,
+            device: metadata.dev() as u32,
+            inode: metadata.ino(),
+        }
+    }
+
+    /// Whether `metadata` describes the file this lock's descriptor names.
+    pub fn names(&self, metadata: &fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        metadata.is_file() && (metadata.dev() as u32, metadata.ino()) == (self.device, self.inode)
+    }
 }
 
 /// What reading a process's open descriptors found of Codex's arg0 helper
@@ -427,8 +446,8 @@ pub fn arg0_lock_home(path: &Path) -> Option<&Path> {
 
 /// How many `entry`-byte entries a descriptor list the kernel filled to
 /// `filled` bytes of `capacity` holds, when it gave the list whole: not empty,
-/// short of the room it was given, which a list cut short fills, and a whole
-/// number of entries.
+/// since `proc_pidinfo` gives 0 when it fails; short of the room it was given,
+/// which a list cut short fills; and a whole number of entries.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn whole_list_entries(filled: i32, capacity: i32, entry: usize) -> Option<usize> {
     let bytes = usize::try_from(filled).ok().filter(|_| filled < capacity)?;
@@ -471,10 +490,18 @@ fn collect_arg0_locks(
 }
 
 /// The first `CODEX_HOME` and `HOME` among the environment strings of a
-/// `KERN_PROCARGS2` buffer, or `None` when its argument count cannot be read.
+/// `KERN_PROCARGS2` buffer, or `None` when its argument count cannot be read
+/// or the kernel withheld the environment.
+///
+/// As of macOS 26.7.1 the kernel withholds the environment of its own system
+/// binaries and then gives nothing after the arguments, while any other
+/// process, even one started with an empty environment, still has the
+/// kernel's own strings after the arguments.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn start_home_variables(buffer: &[u8]) -> Option<StartHomeVariables> {
-    procargs_count(buffer)?;
+    if !procargs_after_arguments(buffer)?.any(|string| !string.is_empty()) {
+        return None;
+    }
     let mut found = StartHomeVariables::default();
     for entry in procargs_environment(buffer) {
         if let Some(value) = entry.strip_prefix(b"CODEX_HOME=") {
@@ -754,9 +781,8 @@ fn read_passwd_home(_pid: i32) -> Option<Vec<u8>> {
     None
 }
 
-/// `struct vnode_fdinfowithpath` of `<sys/proc_info.h>`, which the `libc`
-/// crate does not define: a `struct proc_fileinfo`, then the vnode and its
-/// path.
+/// `struct vnode_fdinfowithpath` of `<sys/proc_info.h>`, which libc 0.2.189
+/// does not define: a `struct proc_fileinfo`, then the vnode and its path.
 #[cfg(target_os = "macos")]
 #[repr(C)]
 struct VnodeDescriptor {
@@ -792,8 +818,7 @@ fn vnode_descriptors(pid: i32) -> Option<Vec<i32>> {
     let needed =
         unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
     let needed = usize::try_from(needed).ok().filter(|bytes| *bytes > 0)?;
-    // Room for descriptors opened between the two calls. A list that fills
-    // the room may have been cut short, so it is not taken as whole.
+    // Room for descriptors opened between the two calls.
     let empty = libc::proc_fdinfo {
         proc_fd: 0,
         proc_fdtype: 0,
@@ -869,7 +894,7 @@ fn read_vnode_descriptor(pid: i32, descriptor: i32) -> DescriptorRead {
     let stat = info.vnode.vip_vi.vi_stat;
     DescriptorRead::Lock(Arg0Lock {
         path: path.to_path_buf(),
-        device: u64::from(stat.vst_dev),
+        device: stat.vst_dev,
         inode: stat.vst_ino,
     })
 }
@@ -1677,8 +1702,9 @@ fn own_pane_processes() -> Option<PaneProcessSet> {
         }
         // macOS hands over the arguments of its own system binaries, /bin/zsh
         // and /bin/sleep among them, with no environment at all. A process
-        // started with an empty environment looks the same, and is counted
-        // the same way: nothing can be read from it.
+        // started with an empty environment is counted the same way, though
+        // `start_home_variables` tells the two apart: there is nothing to read
+        // from either.
         if environment.is_empty() {
             processes.missed_one();
         }
@@ -1751,17 +1777,24 @@ compile_error!(
 ///
 /// The buffer holds `argc`, the executable path, NUL padding, `argc`
 /// argument strings, then the environment strings, ended by an empty string
-/// or by the end of the buffer.
+/// or by the end of the buffer; as of macOS 26.7.1 the kernel's own strings
+/// follow whenever it hands the environment over.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn procargs_environment(buffer: &[u8]) -> impl Iterator<Item = &[u8]> {
-    let count = procargs_count(buffer);
-    let mut strings = buffer.get(4..).unwrap_or_default().split(|byte| *byte == 0);
-    let arguments_known = count.is_some() && strings.next().is_some();
-    let mut rest = strings.skip_while(|string| string.is_empty());
-    for _ in 0..count.unwrap_or(0) {
-        rest.next();
-    }
-    rest.take_while(move |string| arguments_known && !string.is_empty())
+    procargs_after_arguments(buffer)
+        .into_iter()
+        .flatten()
+        .take_while(|string| !string.is_empty())
+}
+
+/// The strings after the arguments in a `KERN_PROCARGS2` buffer, laid out as
+/// [`procargs_environment`] describes, or `None` when `argc` cannot be read.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn procargs_after_arguments(buffer: &[u8]) -> Option<impl Iterator<Item = &[u8]>> {
+    let count = procargs_count(buffer)?;
+    let mut strings = buffer.get(4..)?.split(|byte| *byte == 0);
+    strings.next()?;
+    Some(strings.skip_while(|string| string.is_empty()).skip(count))
 }
 
 /// The argument strings in a `KERN_PROCARGS2` buffer, laid out as
@@ -2643,9 +2676,18 @@ mod home_tests {
                 home: Some(b"/first".to_vec()),
             })
         );
+        // No environment, but the kernel's own strings after it.
         assert_eq!(
-            super::start_home_variables(&buffer(1, b"/x/codex\0\0codex\0\0")),
+            super::start_home_variables(&buffer(
+                1,
+                b"/x/codex\0\0codex\0\0executable_path=/x/codex\0"
+            )),
             Some(StartHomeVariables::default())
+        );
+        // Nothing after the arguments: the kernel withheld the environment.
+        assert_eq!(
+            super::start_home_variables(&buffer(1, b"/bin/sleep\0\0sleep\0\0")),
+            None
         );
         assert_eq!(super::start_home_variables(&[1, 0]), None);
     }
@@ -2716,8 +2758,9 @@ mod home_tests {
     /// Run by the real-process tests as a child: holds the file
     /// `ATTENTION_TEST_LOCK` names open, and with `ATTENTION_TEST_CHURN` set
     /// opens and closes another file over and over, until its input closes.
-    /// It is this test binary rather than a shell because macOS hands over
-    /// no environment for its own system binaries.
+    /// It is this test binary rather than a shell because macOS, as of
+    /// 26.7.1, gives `KERN_PROCARGS2` no environment for its own system
+    /// binaries.
     #[test]
     #[ignore = "a child process of the real-process tests"]
     fn arg0_lock_holder() {
@@ -2738,8 +2781,8 @@ mod home_tests {
                 }
             })
         });
-        // libtest prints the test's name without a newline first, so the
-        // marker shares its line.
+        // As of Rust 1.94.1, libtest prints the test's name without a newline
+        // first, so the marker shares its line.
         println!("arg0-lock-held");
         let _ = std::io::stdin().read_line(&mut String::new());
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2813,13 +2856,8 @@ mod home_tests {
             }
 
             fn lock(&self) -> Arg0Lock {
-                use std::os::unix::fs::MetadataExt;
                 let metadata = std::fs::metadata(&self.held).expect("lock metadata");
-                Arg0Lock {
-                    path: self.held.clone(),
-                    device: metadata.dev(),
-                    inode: metadata.ino(),
-                }
+                Arg0Lock::of(self.held.clone(), &metadata)
             }
         }
 
@@ -2855,6 +2893,31 @@ mod home_tests {
                 inspector.arg0_locks(holder.pid()),
                 Arg0Locks::Complete(vec![holder.lock()])
             );
+        }
+
+        /// macOS withholds the environment of its own system binaries; that
+        /// reads as unreadable, never as one without `HOME`.
+        #[test]
+        fn a_withheld_environment_reads_as_unreadable() {
+            let mut child = std::process::Command::new("/bin/sleep")
+                .arg("30")
+                .env_clear()
+                .env("HOME", "/generated/home")
+                .spawn()
+                .expect("spawn sleep");
+            let pid = i32::try_from(child.id()).expect("pid");
+            // The kernel describes the process once exec has run.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let read = loop {
+                let read = super::super::SystemProcessInspector.start_home_variables(pid);
+                if read.is_none() || std::time::Instant::now() >= deadline {
+                    break read;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            };
+            let _ = child.kill();
+            let _ = child.wait();
+            assert_eq!(read, None);
         }
 
         #[test]

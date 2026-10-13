@@ -194,8 +194,7 @@ impl HostFacet {
     }
 }
 
-/// A host the check found as recorded and, for a Codex binding, the Codex
-/// home it uses or why none is named.
+/// A host the check found as recorded.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct CheckedHost {
     pub pid: i32,
@@ -208,7 +207,7 @@ pub struct CheckedHost {
     pub foreground: bool,
     /// For a Codex binding only: the Codex home the host uses, or why none
     /// is named.
-    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    #[serde(flatten)]
     pub codex_home: Option<CodexHome>,
 }
 
@@ -223,57 +222,69 @@ pub enum CodexHome {
     Refused(CodexHomeRefusal),
 }
 
-/// Why `inspect` names no Codex home for an available Codex host.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CodexHomeRefusal {
-    /// The host's start-up environment could not be read.
-    EnvironmentUnreadable,
-    /// `CODEX_HOME` is a UTF-8 value that is not absolute.
-    CodexHomeRelative,
-    /// `CODEX_HOME` names nothing, or no directory.
-    CodexHomeUnresolvable,
-    /// `CODEX_HOME` counts as unset and `HOME` is not UTF-8.
-    HomeNotUtf8,
-    /// `CODEX_HOME` counts as unset and `HOME` is not absolute.
-    HomeRelative,
-    /// There is no usable `HOME`, or `$HOME/.codex` is no directory.
-    HomeUnresolvable,
-    /// The host holds no Codex arg0 helper lock.
-    HomeUnobserved,
-    /// The host holds arg0 helper locks in more than one home.
-    HomeAmbiguous,
-    /// The host's open files could not all be read.
-    HomeObservationUnavailable,
-    /// The Codex home the host's lock lies in is not the one its start-up
-    /// environment names, or the lock is no longer at its path.
-    HomeChangedAfterStart,
-    /// The host's start time differed when read again after the home.
-    HostChangedDuringRead,
+/// Declares [`CodexHomeRefusal`] from one list, so its variants, their
+/// published spellings and [`CodexHomeRefusal::ALL`] cannot disagree, as
+/// `diagnostic_codes!` does for diagnostic codes.
+macro_rules! codex_home_refusals {
+    ($($(#[doc = $doc:literal])+ $variant:ident => $spelling:literal),+ $(,)?) => {
+        /// Why `inspect` names no Codex home for an available Codex host.
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        pub enum CodexHomeRefusal {
+            $($(#[doc = $doc])+ $variant),+
+        }
+
+        impl CodexHomeRefusal {
+            /// Every refusal; the manifest's `codex_home_refusals` lists the
+            /// same spellings.
+            pub const ALL: &[Self] = &[$(Self::$variant),+];
+
+            /// The published spelling. Serialization goes through this too.
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $spelling),+
+                }
+            }
+        }
+    };
 }
 
-impl CodexHomeRefusal {
-    /// Every refusal; the manifest's `codex_home_refusals` lists their names.
-    pub const ALL: [Self; 11] = [
-        Self::EnvironmentUnreadable,
-        Self::CodexHomeRelative,
-        Self::CodexHomeUnresolvable,
-        Self::HomeNotUtf8,
-        Self::HomeRelative,
-        Self::HomeUnresolvable,
-        Self::HomeUnobserved,
-        Self::HomeAmbiguous,
-        Self::HomeObservationUnavailable,
-        Self::HomeChangedAfterStart,
-        Self::HostChangedDuringRead,
-    ];
+codex_home_refusals! {
+    /// The host's start-up environment could not be read.
+    EnvironmentUnreadable => "environment_unreadable",
+    /// `CODEX_HOME` is a UTF-8 value that is not absolute.
+    CodexHomeRelative => "codex_home_relative",
+    /// `CODEX_HOME` names nothing, no directory, or a directory whose real
+    /// path is not UTF-8.
+    CodexHomeUnresolvable => "codex_home_unresolvable",
+    /// `CODEX_HOME` counts as unset and `HOME` is not UTF-8.
+    HomeNotUtf8 => "home_not_utf8",
+    /// `CODEX_HOME` counts as unset and `HOME` is not absolute.
+    HomeRelative => "home_relative",
+    /// `CODEX_HOME` counts as unset, and `HOME` is empty or unset with no
+    /// absolute UTF-8 home in the user database, or `.codex` under the home
+    /// used is no directory or has a real path that is not UTF-8.
+    HomeUnresolvable => "home_unresolvable",
+    /// The host holds no Codex arg0 helper lock.
+    HomeUnobserved => "home_unobserved",
+    /// The host holds arg0 helper locks in more than one Codex home.
+    HomeAmbiguous => "home_ambiguous",
+    /// The host's open files could not all be read.
+    HomeObservationUnavailable => "home_observation_unavailable",
+    /// The Codex home the host's lock lies in is not the one its start-up
+    /// environment names, the lock is no longer at its path, or that home is
+    /// no longer at the path it would be named by.
+    HomeChangedAfterStart => "home_changed_after_start",
+    /// When read again after its home, the host had exited, could not be
+    /// read, or had another start time.
+    HostChangedDuringRead => "host_changed_during_read",
+}
 
-    /// The name `inspect` writes.
-    pub fn name(self) -> String {
-        serde_json::to_value(self)
-            .ok()
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .unwrap_or_default()
+impl Serialize for CodexHomeRefusal {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -390,10 +401,8 @@ fn confirm_recorded(
     }
     let codex_home = match provider {
         Some(Provider::Codex) => Some(
-            match effective_codex_home(owner.pid, owner.start, processes) {
-                Ok(home) => CodexHome::Named(home),
-                Err(refusal) => CodexHome::Refused(refusal),
-            },
+            effective_codex_home(owner.pid, owner.start, processes)
+                .map_or_else(CodexHome::Refused, CodexHome::Named),
         ),
         Some(Provider::Claude | Provider::Pi) | None => None,
     };
@@ -438,7 +447,8 @@ fn effective_codex_home(
     }
 }
 
-/// A directory by its canonical path, which is UTF-8, and its identity.
+/// A directory by its canonical path, which must be UTF-8 to be written as
+/// `config_dir`, and its identity.
 struct Directory {
     path: String,
     identity: (u64, u64),
@@ -461,7 +471,8 @@ impl Directory {
 /// The home the host's start-up environment names, as `find_codex_home` in
 /// Codex 0.162.0 and 0.162.1 reads it (`codex-rs/utils/home-dir/src/lib.rs`,
 /// with dirs-sys 0.5.0's `home_dir`): `CODEX_HOME` when it is set, not empty
-/// and UTF-8, else `<HOME>/.codex`, else the user database's home.
+/// and UTF-8, else `<HOME>/.codex`, else `.codex` under the user database's
+/// home.
 fn start_home(
     pid: i32,
     processes: &dyn ProcessInspector,
@@ -477,6 +488,9 @@ fn start_home(
         .and_then(|value| String::from_utf8(value).ok());
     if let Some(codex_home) = codex_home {
         let path = PathBuf::from(codex_home);
+        // As of Codex 0.162.0 and 0.162.1 a relative value is resolved against
+        // the working directory Codex started in, which cannot be read back,
+        // so it is refused rather than guessed.
         if !path.is_absolute() {
             return Err(CodexHomeRefusal::CodexHomeRelative);
         }
@@ -484,6 +498,8 @@ fn start_home(
     }
     let home = match variables.home.filter(|value| !value.is_empty()) {
         Some(home) => {
+            // A HOME that is not UTF-8 is used by Codex as it is (dirs-sys
+            // 0.5.0); config_dir is JSON text, so no home under it is named.
             let home = String::from_utf8(home).map_err(|_| CodexHomeRefusal::HomeNotUtf8)?;
             let home = PathBuf::from(home);
             if !home.is_absolute() {
@@ -502,7 +518,7 @@ fn start_home(
 }
 
 /// `home`'s path, when the arg0 helper locks the host holds open all lie in
-/// it and are still at their paths.
+/// it and are still at their paths, and `home` is still at its own.
 fn corroborated(
     home: Directory,
     pid: i32,
@@ -522,15 +538,18 @@ fn corroborated(
         (Some(_), Some(_)) => return Err(CodexHomeRefusal::HomeAmbiguous),
     };
     let in_place = locks.iter().all(|lock| {
-        std::fs::symlink_metadata(&lock.path).is_ok_and(|metadata| {
-            metadata.is_file() && (metadata.dev(), metadata.ino()) == (lock.device, lock.inode)
-        })
+        std::fs::symlink_metadata(&lock.path).is_ok_and(|metadata| lock.names(&metadata))
     });
-    if !in_place {
-        return Err(CodexHomeRefusal::HomeChangedAfterStart);
-    }
-    match Directory::at(observed) {
-        Some(observed) if observed.identity == home.identity => Ok(home.path),
-        Some(_) | None => Err(CodexHomeRefusal::HomeChangedAfterStart),
+    // The lock's home must be the start-up home, and that home must still be
+    // at the path that names it: one moved while it was read is the same
+    // directory at another path.
+    let agreed = in_place
+        && Directory::at(observed).is_some_and(|observed| observed.identity == home.identity)
+        && Directory::at(Path::new(&home.path))
+            .is_some_and(|again| again.path == home.path && again.identity == home.identity);
+    if agreed {
+        Ok(home.path)
+    } else {
+        Err(CodexHomeRefusal::HomeChangedAfterStart)
     }
 }

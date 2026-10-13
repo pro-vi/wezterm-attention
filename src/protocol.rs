@@ -549,7 +549,7 @@ pub fn parse_manifest(source: &str) -> Result<Manifest> {
     if parsed.enums.codex_home_refusals
         != crate::host::CodexHomeRefusal::ALL
             .iter()
-            .map(|refusal| refusal.name())
+            .map(|refusal| refusal.as_str().to_owned())
             .collect()
     {
         return Err(AttentionError::new(

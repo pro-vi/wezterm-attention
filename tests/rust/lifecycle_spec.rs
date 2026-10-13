@@ -248,6 +248,8 @@ struct FakeProcesses {
     arg0_locks: Mutex<BTreeMap<i32, Arg0Locks>>,
     /// How many scans of open files have been made.
     scans: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Runs once, during the next scan of open files.
+    on_scan: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Each pid's user database home, in place of the real user's.
     passwd_homes: Mutex<BTreeMap<i32, Vec<u8>>>,
 }
@@ -290,6 +292,7 @@ impl FakeProcesses {
             start_homes: Mutex::default(),
             arg0_locks: Mutex::default(),
             scans: std::sync::Arc::default(),
+            on_scan: Mutex::new(None),
             passwd_homes: Mutex::default(),
         }
     }
@@ -356,6 +359,9 @@ impl ProcessInspector for FakeProcesses {
 
     fn arg0_locks(&self, pid: i32) -> Arg0Locks {
         self.scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(during) = self.on_scan.lock().expect("scan hook lock").take() {
+            during();
+        }
         self.arg0_locks
             .lock()
             .expect("locks lock")

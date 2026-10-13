@@ -5,7 +5,6 @@
 use super::host_facet::{SESSION, facet, facts_with, launch, shell_session};
 use super::self_claim::records;
 use super::*;
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use wezterm_attention::wezterm::Arg0Lock;
 
@@ -35,11 +34,7 @@ fn lock_in(home: &Path) -> Arg0Lock {
     fs::create_dir_all(path.parent().expect("lock directory")).expect("lock directory");
     fs::write(&path, b"").expect("lock file");
     let metadata = fs::metadata(&path).expect("lock metadata");
-    Arg0Lock {
-        path,
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    }
+    Arg0Lock::of(path, &metadata)
 }
 
 /// What the host's start-up environment and its open files give.
@@ -174,8 +169,9 @@ fn a_symlinked_home_is_named_by_its_real_path() {
     assert_eq!(answer(&setup), named(&real));
 }
 
-/// A `.env` in the default home that sets `HOME` moves Codex to another
-/// home after it starts; its lock then lies in that one.
+/// As of Codex 0.162.0 and 0.162.1, a `.env` in the default home that sets
+/// `HOME`, with `CODEX_HOME` unset, moves Codex to `.codex` under that home
+/// after it starts; its lock then lies there.
 #[test]
 fn a_home_the_host_moved_to_after_start_is_refused() {
     let setup = shell_session("codex");
@@ -223,8 +219,9 @@ fn a_home_that_is_not_utf8_is_refused() {
     assert_eq!(answer(&setup), refused("home_not_utf8"));
 }
 
-/// An empty or unset `HOME` takes the user database's home, read through the
-/// fake here so no test reaches the real user's.
+/// An empty or unset `HOME` takes `.codex` under the user database's home, as
+/// dirs-sys 0.5.0 does for Codex 0.162.0 and 0.162.1, read through the fake
+/// here so no test reaches the real user's.
 #[test]
 fn an_empty_or_unset_home_takes_the_passwd_home() {
     for home in [None, Some(&b""[..])] {
@@ -320,6 +317,34 @@ fn a_lock_no_longer_at_its_path_is_refused() {
         Some(&at(&setup, "a")),
         Arg0Locks::Complete(vec![lock]),
     );
+    assert_eq!(answer(&setup), refused("home_changed_after_start"));
+}
+
+/// A home moved while it is read is still the same directory, but no longer
+/// at the path that would name it.
+#[test]
+fn a_home_moved_while_it_is_read_is_refused() {
+    let setup = shell_session("codex");
+    let home = dir(&setup, "a/.codex");
+    let lock = lock_in(&home);
+    let from = home.parent().expect("a").to_path_buf();
+    let to = from.with_file_name("moved");
+    // As the kernel names the held lock once its directory has moved.
+    let moved = Arg0Lock {
+        path: to
+            .join(".codex")
+            .join(lock.path.strip_prefix(&home).expect("lock in home")),
+        ..lock
+    };
+    host_reads(
+        &setup,
+        None,
+        Some(&at(&setup, "a")),
+        Arg0Locks::Complete(vec![moved]),
+    );
+    *setup.processes.on_scan.lock().expect("scan hook lock") = Some(Box::new(move || {
+        fs::rename(&from, &to).expect("move the home");
+    }));
     assert_eq!(answer(&setup), refused("home_changed_after_start"));
 }
 

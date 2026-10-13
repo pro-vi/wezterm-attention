@@ -668,9 +668,17 @@ names and the home its arg0 helper lock lies in are one directory
 
 - A relative `CODEX_HOME` or `HOME`, which Codex resolves against its working
   directory as it was then; the reader cannot know that directory.
-- A `.env` that sets `HOME`, which moves Codex to that home after it starts. The
-  `.env` is never read.
+- A `.env` that sets `HOME` while `CODEX_HOME` is unset, which moves Codex to
+  `.codex` under that home after it starts; Codex lets no `.env` set a
+  `CODEX_` variable. The `.env` is never read.
 - A Codex home under `TMPDIR`, where Codex creates no helper lock.
+- A `HOME`, or a Codex home's real path, that is not UTF-8, which Codex uses
+  as it is; `config_dir` is JSON text, so no such home is named.
+- A Codex home whose `tmp` directory is a symlink into another directory: the
+  kernel names the lock by its real path, so the home is refused. Where that
+  symlink points into the very home the start-up environment names, and a
+  `.env` moved `HOME` away from it, the two readings agree and the home named
+  is the one the symlink points into, not the one Codex uses.
 
 ## A pane a shell has claimed refuses agents started without its launch id
 
