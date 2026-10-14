@@ -371,6 +371,14 @@ Updating the plugin does not rebuild the command, so run
 `scripts/install-cli.sh` after `wezterm.plugin.update_all()`, as
 [Install](../README.md#install) says.
 
+## A plugin older than the command reads a lifecycle file holding a Codex errored end as invalid
+
+A command that records a Codex turn's errored end writes an `attempt_outcome`
+with `source_event` `task_complete`, which a plugin from 1.1.0 or earlier does
+not list. That plugin reads the binding's `lifecycle.json` as invalid and shows
+its pane with no lifecycle until the end leaves the pool. Update the plugin with
+the command, as [Install](../README.md#install) says.
+
 ## A record write can be reported failed after readers already see it
 
 Every record is written the same way, by `atomic_replace_bytes` in
@@ -652,11 +660,12 @@ the turn and none after it, and the end was recorded with `error_code`
 As of Codex 0.162.0 a turn that ends on a model error runs no hook. Its turn
 loop runs `Stop`, and the legacy `notify`, only when the model finished without
 needing a follow-up, and `Interrupt` only when the user interrupted the turn; an
-error from the model request leaves the loop. As of Codex 0.162.0 it writes the
-end to the session rollout, the file the prompt's `transcript_path` names, as a
-`task_complete` that carries an `error`. Read in the Codex source at tag
-`rust-v0.162.0`: `run_turn_stop_hooks` in `core/src/session/turn.rs`, and the
-`Err` arms of the turn loop that `break` without calling it.
+error from the model request leaves the loop. It writes the end to the session
+rollout, the file the prompt's `transcript_path` names, as a `task_complete`
+that carries an `error`. Read in the Codex source at tag
+`rust-v0.162.0`: `run_turn_stop_hooks` in `core/src/hook_runtime.rs`, called
+from the turn loop in `core/src/session/turn.rs`, whose `Err` arms `break`
+without calling it.
 [openai/codex#22774](https://github.com/openai/codex/issues/22774) asks for a
 hook on this case.
 
@@ -674,6 +683,9 @@ errored end. What it cannot do:
 - It keeps Codex's name for the error, never the message.
 - A rollout record it does not recognise yields no record, so a Codex that
   changes the shape of `task_complete` brings this limitation back.
+- A follower that stops without recording, because its host could not be read,
+  the rollout was refused or its write failed, leaves no record that it
+  stopped.
 
 ## A pane a shell has claimed refuses agents started without its launch id
 

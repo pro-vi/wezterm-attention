@@ -202,11 +202,6 @@ fn activity(setup: &Setup) -> Value {
     activity_in(&setup.binding_dir("codex", SESSION))
 }
 
-/// Every record under the state root; the follower's lock is not one.
-fn state(setup: &Setup) -> BTreeMap<PathBuf, String> {
-    records(setup)
-}
-
 fn follower_lock(setup: &Setup) -> PathBuf {
     let launch = &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"];
     wezterm_attention::records::turn_follower_lock(
@@ -283,6 +278,44 @@ fn the_end_keeps_its_turn_s_order_when_a_later_record_holds_the_slot() {
 }
 
 #[test]
+fn the_end_follows_a_prompt_typed_while_the_turn_ran() {
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    // A second prompt of the same turn, kept only as the latest prompt.
+    hook(
+        &setup,
+        "UserPromptSubmit",
+        json!({"prompt":"also","turn_id":TURN,"transcript_path":rollout_path(&setup)}),
+        "00000000000000000600",
+    );
+    append(
+        &rollout_path(&setup),
+        &[failed(TURN, json!("server_overloaded"))],
+    );
+    assert_eq!(recorded(&follow(&setup, &request)), "applied");
+    assert_eq!(
+        attempt_outcomes(&setup)[0]["observed_mono_ns"],
+        "00000000000000000601"
+    );
+}
+
+#[test]
+fn the_notify_takes_the_slot_after_a_later_clear() {
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    wezterm_attention::lifecycle::apply_mark_clear(&setup.env, "codex", "00000000000000000700")
+        .expect("clear");
+    append(
+        &rollout_path(&setup),
+        &[failed(TURN, json!("server_overloaded"))],
+    );
+    assert_eq!(recorded(&follow(&setup, &request)), "applied");
+    let activity = activity(&setup);
+    assert_eq!(activity["type"], "notify");
+    assert_eq!(activity["observed_mono_ns"], "00000000000000000701");
+}
+
+#[test]
 fn error_message_text_never_persisted() {
     let mut setup = Setup::new();
     let request = prompted(&mut setup);
@@ -291,7 +324,7 @@ fn error_message_text_never_persisted() {
         &[failed(TURN, json!("server_overloaded"))],
     );
     assert_eq!(recorded(&follow(&setup, &request)), "applied");
-    for (path, text) in state(&setup) {
+    for (path, text) in records(&setup) {
         assert!(
             !text.contains("at capacity"),
             "{} holds the error message",
@@ -359,14 +392,14 @@ fn an_end_without_an_error_records_nothing() {
     ] {
         let mut setup = Setup::new();
         let request = prompted(&mut setup);
-        let before = state(&setup);
+        let before = records(&setup);
         append(&rollout_path(&setup), &lines);
         let followed = follow(&setup, &request);
         let Followed::Ended(signal) = &followed else {
             panic!("{name}: {followed:?}");
         };
         assert_eq!(*signal, ended, "{name}");
-        assert!(state(&setup) == before, "{name}");
+        assert!(records(&setup) == before, "{name}");
     }
 }
 
@@ -490,13 +523,13 @@ fn replayed_task_complete_is_idempotent_by_turn_id() {
         &[failed(TURN, json!("server_overloaded"))],
     );
     assert_eq!(recorded(&follow(&setup, &request)), "applied");
-    let before = state(&setup);
+    let before = records(&setup);
     setup.clock = FixedClock {
         monotonic: "00000000000000000950",
         unix: "00000000099999999950",
     };
     assert_eq!(recorded(&follow(&setup, &request)), "skipped");
-    assert!(state(&setup) == before);
+    assert!(records(&setup) == before);
 }
 
 #[test]
@@ -509,13 +542,13 @@ fn a_turn_its_own_hook_ended_is_not_recorded_again() {
         json!({"stop_hook_active":false,"turn_id":TURN}),
         "00000000000000000500",
     );
-    let before = state(&setup);
+    let before = records(&setup);
     append(
         &rollout_path(&setup),
         &[failed(TURN, json!("server_overloaded"))],
     );
     assert_eq!(recorded(&follow(&setup, &request)), "skipped");
-    assert!(state(&setup) == before);
+    assert!(records(&setup) == before);
     assert!(attempt_outcomes(&setup).is_empty());
 }
 
@@ -523,7 +556,8 @@ fn a_turn_its_own_hook_ended_is_not_recorded_again() {
 fn a_turn_that_went_on_after_its_stop_and_failed_is_recorded() {
     let mut setup = Setup::new();
     let request = prompted(&mut setup);
-    // A Stop hook that blocks makes Codex continue the same turn.
+    // As of Codex 0.162.0 a Stop hook that blocks makes Codex continue the
+    // same turn.
     hook(
         &setup,
         "Stop",
@@ -558,6 +592,11 @@ fn the_follower_writes_nothing_once_its_host_or_binding_is_gone() {
         (
             "the host has exited",
             Box::new(|setup| setup.processes.set(AGENT_PID, ProcessRead::Gone)),
+            host_gone,
+        ),
+        (
+            "the host cannot be read",
+            Box::new(|setup| setup.processes.set(AGENT_PID, ProcessRead::Unknown)),
             host_gone,
         ),
         (
@@ -610,14 +649,14 @@ fn the_follower_writes_nothing_once_its_host_or_binding_is_gone() {
         let mut setup = Setup::new();
         let request = prompted(&mut setup);
         arrange(&setup);
-        let before = state(&setup);
+        let before = records(&setup);
         append(
             &rollout_path(&setup),
             &[failed(TURN, json!("server_overloaded"))],
         );
         let followed = follow(&setup, &request);
         assert!(expected(&followed), "{name}: {followed:?}");
-        assert!(state(&setup) == before, "{name}");
+        assert!(records(&setup) == before, "{name}");
     }
 }
 
@@ -736,12 +775,12 @@ fn a_follower_handed_another_session_s_rollout_writes_nothing() {
     .unwrap();
     request.rollout = other.display().to_string();
     request.offset = 0;
-    let before = state(&setup);
+    let before = records(&setup);
     assert!(matches!(
         follow(&setup, &request),
         Followed::Refused(Refusal::OtherSession)
     ));
-    assert!(state(&setup) == before);
+    assert!(records(&setup) == before);
 }
 
 #[test]
@@ -798,8 +837,9 @@ fn a_line_is_read_only_once_complete_and_an_overlong_one_is_skipped() {
     );
 }
 
-// A hook can claim only the events Codex registers, and `task_complete` is
-// none of them, so only the follower records a turn end from that source.
+// The manifest's `native_hooks` do not declare `task_complete`, and a hook
+// event they do not declare is ignored, so only the follower records a turn
+// end from that source.
 #[test]
 fn hook_channel_refuses_task_complete_source_event() {
     let parsed = parse_provider_event(

@@ -27,8 +27,9 @@ use crate::query::PaneScope;
 use crate::records::{open_state_lock, state_root, turn_follower_lock};
 use crate::wezterm::{ProcessStart, RuntimePorts};
 
-/// The `source_event` a turn end read from the rollout carries. No hook has
-/// this name, so a hook cannot claim it.
+/// The `source_event` a turn end read from the rollout carries. The
+/// manifest's `native_hooks` do not declare it, and a hook event they do not
+/// declare is ignored, so a hook cannot claim it.
 pub const TASK_COMPLETE: &str = "task_complete";
 
 /// The longest line read. A longer one is skipped unread. An errored
@@ -213,19 +214,15 @@ impl Rollout {
 
 /// What one complete rollout line says about `turn_id`, if anything.
 fn classify(line: &[u8], turn_id: &str) -> Option<TurnSignal> {
+    let line = std::str::from_utf8(line).ok()?;
     // Most lines are none of the three records; they are not parsed.
-    let names: [&[u8]; 3] = [
-        b"\"task_complete\"",
-        b"\"turn_aborted\"",
-        b"\"task_started\"",
-    ];
-    if !names
+    if !["\"task_complete\"", "\"turn_aborted\"", "\"task_started\""]
         .iter()
-        .any(|name| line.windows(name.len()).any(|window| window == *name))
+        .any(|name| line.contains(name))
     {
         return None;
     }
-    let value: Value = serde_json::from_slice(line).ok()?;
+    let value: Value = serde_json::from_str(line).ok()?;
     if value.get("type").and_then(Value::as_str) != Some("event_msg") {
         return None;
     }

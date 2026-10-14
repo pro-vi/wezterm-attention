@@ -3301,13 +3301,14 @@ pub(crate) fn followed_binding(
 }
 
 /// Record the end of a Codex lead turn that ended on a model error, from
-/// `event`, which [`ProviderEvent::codex_turn_failure`] made for it. No hook
-/// reports such an end, so this is not a hook's write: it holds the scope and
-/// the host it was handed and checks both again under the launch and claim
-/// locks, as `apply_activity` takes them.
+/// `event`, which [`ProviderEvent::codex_turn_failure`] made for it. As of
+/// Codex 0.162.0 no hook reports such an end, so this is not a hook's write:
+/// it holds the scope and the host it was handed and checks both again under
+/// the launch and claim locks, as `apply_activity` takes them.
 ///
 /// Nothing is written once [`followed_binding`] finds the binding no longer
-/// current or ended, once the host is gone, when the turn has no record,
+/// current or ended, once the host is gone or cannot be read, when the turn
+/// has no record,
 /// nor when its last record is already an end. The `notify` it writes says
 /// the turn needs the user; it is written only while this turn is the newest
 /// one the binding observed, and otherwise the end is kept as superseded.
@@ -3375,11 +3376,11 @@ pub(crate) fn record_codex_turn_failure(
                     .flat_map(LifecycleSnapshot::lead_observations)
             };
             // The turn's last record decides. When it is an end, its own hook's
-            // or an earlier follower's, that end stays: a Stop hook that blocks
-            // lets Codex go on with the same turn, whose next records then come
-            // after it. Codex wrote this end after that last record and before
-            // any hook that began after the end, so the end is ordered just
-            // after it, not when this follower read it.
+            // or an earlier follower's, that end stays: as of Codex 0.162.0 a
+            // Stop hook that blocks lets Codex go on with the same turn, whose
+            // next records then come after it. Codex wrote this end after that
+            // last record and before any hook that began after the end, so the
+            // end is ordered just after it, not when this follower read it.
             let Some((last, after_turn)) =
                 latest(lead_turns().filter(|item| item.turn_id() == turn_id))
                     .filter(|last| !last.ends_turn(Provider::Codex))
@@ -3405,19 +3406,35 @@ pub(crate) fn record_codex_turn_failure(
                     CommitPlan::reporting(Mutation::plain(turn_end_superseded())),
                 ));
             }
+            // The pools keep one prompt per turn, so a prompt typed while this
+            // turn ran survives only as the lead's latest prompt, and the end
+            // also comes after that. A prompt record that cannot be read gives
+            // the end none.
+            let prompts = read_record_at(root, "lead_prompts", &identity)
+                .ok()
+                .flatten()
+                .and_then(|value| serde_json::from_value::<LeadPrompts>(value).ok());
+            let turn_stamps = || {
+                iter::once(last.observed_mono_ns.as_str()).chain(
+                    prompts
+                        .as_ref()
+                        .and_then(|prompts| prompts.latest.as_ref())
+                        .map(|latest| latest.observed_mono_ns.as_str()),
+                )
+            };
+            let end_observation = just_after(turn_stamps()).unwrap_or_else(|| after_turn.clone());
             let existing = read_record(&activity_path, Some("activity"), &identity)?;
             let clear = read_record_at(root, "activity_clear", &identity)?;
-            // Only the notify takes the slot from what stands in it; the end
-            // stays just after the turn's last record.
+            // Only the notify takes the slot from what stands in it.
             let notify_observation = just_after(
-                iter::once(last.observed_mono_ns.as_str()).chain(
+                turn_stamps().chain(
                     [existing.as_ref(), clear.as_ref()]
                         .into_iter()
                         .flatten()
                         .filter_map(|record| record["observed_mono_ns"].as_str()),
                 ),
             )
-            .unwrap_or_else(|| after_turn.clone());
+            .unwrap_or_else(|| end_observation.clone());
             let visible = activity_visible(root, &identity, existing.as_ref(), clear.as_ref());
             let base = activity_base(&resolved, event, &binding_id)?;
             let ActivityOutcome {
@@ -3434,7 +3451,7 @@ pub(crate) fn record_codex_turn_failure(
             Ok(append_observation(
                 &resolved,
                 event,
-                &after_turn,
+                &end_observation,
                 &written_at,
                 CommitPlan {
                     replacements: written
