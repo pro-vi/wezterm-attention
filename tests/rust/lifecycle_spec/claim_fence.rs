@@ -158,6 +158,7 @@ fn resolve_then(
                 tty: &setup.tty,
                 panes: &setup.panes,
                 processes: &setup.processes,
+                followers: &setup.followers,
             };
             apply_provider_event_with_outcome(event, env, "00000000000000000900", &ports)
         });
@@ -198,6 +199,7 @@ fn a_claim_replaced_after_resolution_refuses_every_event_before_it_writes() {
                 tty: &setup.tty,
                 panes: &setup.panes,
                 processes: &setup.processes,
+                followers: &setup.followers,
             };
             wezterm_attention::claim_launch(&newer, &ports).expect("newer claim");
         })

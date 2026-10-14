@@ -337,6 +337,7 @@ fn ports<'a>(
         tty,
         panes,
         processes: &SystemProcessInspector,
+        followers: &wezterm_attention::wezterm::NoTurnFollowers,
     }
 }
 

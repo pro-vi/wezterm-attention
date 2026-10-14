@@ -40,6 +40,7 @@ return function(context)
     local best_priority = -1
     local best_frame    = nil
     local best_source   = nil
+    local best_label    = nil
     local best_provider = nil
     local best_health   = nil
     local best_held     = false
@@ -67,6 +68,7 @@ return function(context)
             best_priority = pri
             best_frame    = candidate_type == "thinking" and cached.frame or nil
             best_source   = cached.source
+            best_label    = cached.label
             best_provider = cached.provider
             best_health   = cached.binding_health
             best_held     = cached.turn_end_held == true
@@ -135,6 +137,7 @@ return function(context)
       subagents = subagents,
       subagents_uncertain = subagents_uncertain,
       source = best_source,
+      label = best_label,
       provider = best_provider,
       review = review,
       binding_health = best_health,
@@ -183,6 +186,7 @@ return function(context)
       subagents = visible.subagents or 0,
       subagents_uncertain = visible.subagents_uncertain == true,
       source = visible.source,
+      label = visible.label,
       provider = visible.provider,
       review = visible.review == true,
       binding_health = visible.binding_health,

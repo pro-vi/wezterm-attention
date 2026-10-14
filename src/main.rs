@@ -80,6 +80,15 @@ enum HookCommand {
     Publish(PublishArgs),
     /// Accept one provider callback.
     Event(EventArgs),
+    /// Follow one Codex turn's rollout until it ends; started by a Codex prompt hook.
+    #[command(hide = true)]
+    FollowTurn(FollowTurnArgs),
+}
+
+#[derive(Clone, Debug, Args)]
+struct FollowTurnArgs {
+    /// The follow request, as JSON.
+    request: String,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -393,7 +402,7 @@ struct MarkArgs {
     /// Store a frame number (0..=1000000) on the activity; for thinking the tab holds its spinner on that frame, modulo the frame count, instead of animating. thinking, stop and notify only.
     #[arg(long)]
     frame: Option<u64>,
-    /// Store a label (1..=256 bytes, no control characters) on the activity; inspect returns it, the tab does not show it. thinking, stop and notify only.
+    /// Store a label (1..=256 bytes, no control characters) on the activity; inspect, get_attention_view and a tab formatter's ctx.attention.label return it, the default tab does not draw it. thinking, stop and notify only.
     #[arg(long)]
     label: Option<String>,
     /// The activity expires this many milliseconds after it is written, and the tab stops showing it. thinking, stop and notify only.
@@ -584,6 +593,7 @@ fn invocation(command: &Option<Command>) -> (&'static str, bool) {
             HookCommand::Claim(args) => ("hooks claim", args.json),
             HookCommand::Publish(args) => ("hooks publish", args.json),
             HookCommand::Event(_) => ("hooks event", false),
+            HookCommand::FollowTurn(_) => ("hooks follow-turn", false),
         },
         Some(Command::Bindings(args)) => ("bindings", args.json),
         Some(Command::Tabs(args)) => ("tabs", args.json),
@@ -596,14 +606,33 @@ fn invocation(command: &Option<Command>) -> (&'static str, bool) {
     }
 }
 
-/// The real clock, terminal, WezTerm pane lister and process inspector.
+/// The real clock, terminal, WezTerm pane lister, process inspector and turn
+/// follower.
 fn system_ports() -> RuntimePorts<'static> {
     RuntimePorts {
         clock: &SystemClock,
         tty: &SystemTtyWriter,
         panes: &WeztermPaneLister,
         processes: &SystemProcessInspector,
+        followers: &wezterm_attention::wezterm::SpawnedFollowers,
     }
+}
+
+/// Runs detached from the hook that started it, with no standard streams, so
+/// it reports nothing; what it recorded is in the records.
+fn run_hooks_follow_turn(
+    args: &FollowTurnArgs,
+    environment: &BTreeMap<String, String>,
+) -> Result<ExitCode, AttentionError> {
+    let request = serde_json::from_str(&args.request)
+        .map_err(|_| AttentionError::usage("follow-turn request is invalid"))?;
+    wezterm_attention::codex_rollout::follow_turn(
+        &request,
+        environment,
+        &system_ports(),
+        std::time::Duration::from_secs(1),
+    )?;
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Runs the command `cli` names, whose answer carries the name `name`.
@@ -641,6 +670,9 @@ fn run(cli: &Cli, name: &'static str) -> Result<ExitCode, AttentionError> {
         Some(Command::Hooks {
             command: Some(HookCommand::Event(args)),
         }) => run_hooks_event(args, name, &environment),
+        Some(Command::Hooks {
+            command: Some(HookCommand::FollowTurn(args)),
+        }) => run_hooks_follow_turn(args, &environment),
         Some(Command::Bindings(args)) => run_bindings(args, name, &environment),
         Some(Command::TabSource(args)) => run_tab_source(args, name),
         Some(Command::Plugin { command }) => run_plugin(command, name, &environment),

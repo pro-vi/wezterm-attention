@@ -92,6 +92,7 @@ return function()
       { name = "type", redraw = true, public = true },
       { name = "frame", redraw = true, public = true, animated = true },
       { name = "activity_type", redraw = true, public = true },
+      { name = "label", redraw = true, public = true },
       { name = "turn_end_held", redraw = true, public = true, normal = as_flag },
       { name = "turn_end_quiet", redraw = true, public = true, normal = as_flag },
       { name = "event_id", redraw = true, public = true },

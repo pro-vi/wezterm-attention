@@ -545,6 +545,22 @@ pub fn parse_manifest(source: &str) -> Result<Manifest> {
             "manifest child presence vocabulary differs from this binary's",
         ));
     }
+    // A reader keeps an observation only when its source is listed for its
+    // kind, so a turn end from a source no kind lists could never be stored.
+    if parsed.turn_end_sources.iter().any(|(provider, kinds)| {
+        kinds.iter().any(|(kind, sources)| {
+            !parsed
+                .lifecycle_sources
+                .get(provider)
+                .and_then(|listed| listed.get(kind))
+                .is_some_and(|listed| sources.is_subset(listed))
+        })
+    }) {
+        return Err(AttentionError::new(
+            DiagnosticCode::IntegrationVersionMismatch,
+            "manifest turn-end source is not a lifecycle source",
+        ));
+    }
     if parsed.digests.algorithm != "sha256" || parsed.digests.encoding != "lowercase_hex" {
         return Err(AttentionError::new(
             DiagnosticCode::IntegrationVersionMismatch,

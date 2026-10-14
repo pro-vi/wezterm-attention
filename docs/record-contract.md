@@ -230,8 +230,24 @@ turn and there is nothing to report; it does not touch a Pi review. Both keep th
 observation. A child's `StopFailure` stays observation-only. A Claude turn the user stops with Esc
 reports nothing, so its `thinking` stays; see
 [Accepted limitations](accepted-limitations.md#pressing-esc-in-claude-code-leaves-thinking-on-the-tab).
-A Codex turn that ends on an API error reports nothing either; see
-[Accepted limitations](accepted-limitations.md#a-codex-turn-that-ends-on-an-api-error-leaves-thinking-on-the-tab).
+A Codex turn that ends on a model error runs no hook as of Codex 0.162.0. Where its prompt hook
+proved its host, the turn follower that hook starts reads the session rollout and records the end:
+an `attempt_outcome` with `outcome` `failed`, `source_event` `task_complete`, the turn's `turn_id`,
+and the code Codex gives the error (`codex_error_info` in its rollout), kept as `error_code` when
+it is a safe label. While the turn is still the newest one the binding observed it also writes
+`notify` labelled with that code; otherwise the turn end is `superseded` and no `notify` is
+written. It writes under the launch and claim locks, only while the claim, the binding and the
+host it was handed still hold, and never for a turn that has no record or whose last record is
+already an end; as of Codex 0.162.0 a `Stop` hook that blocks lets Codex continue the turn, and
+its later records then follow that end. The end's `observed_mono_ns` is just after the turn's last
+record, not when the follower read the end, so a hook that began after Codex ended the turn orders
+after it. While the turn is still the newest one the binding observed, the end is also after the
+lead's latest prompt, which can be a prompt typed while the turn ran. A `notify` it writes is
+stamped after both, and after the activity and the activity clear in its slot. One follower at a
+time holds `.follower.lock` in the binding's directory, which
+names the turn it follows; a follower kept out of it for ten seconds reads the rollout once, so an
+end already written is not lost. See
+[Accepted limitations](accepted-limitations.md#a-codex-turn-that-ends-on-a-model-error-is-recorded-only-from-its-rollout).
 
 `SessionStart` with source `fork` binds the forked session for Claude and Codex, replacing the
 active binding as `resume` and `clear` do. A Pi `session_start` with source `new`, `resume` or
@@ -593,9 +609,10 @@ apart; sightings from before that binding ended do not count. A tree holding any
 `first_absence`, `too_soon`, `clear_absence`, `present`, `unavailable`, `prune` or
 `keep`; the preview says `keep` wherever apply would keep. Temporary files left by an interrupted
 write, a review that an earlier plugin build had moved aside to `<review>.json.<session>.<ms>.clear`
-while clearing it and never finished with, and the lock `reviews/.<owner key>.lock` that every
-review writer leaves beside the reviews, do not hold a binding or pane tree back from retention; a
-lock-like file of any other name or place does. Nothing reads a moved-aside review. Every removal sweep makes stays inside the state
+while clearing it and never finished with, the lock `reviews/.<owner key>.lock` that every
+review writer leaves beside the reviews, and the lock `.follower.lock` a Codex turn follower leaves
+in its binding's directory, do not hold a binding or pane tree back from retention; a lock-like
+file of any other name or place does. Nothing reads a moved-aside review. Every removal sweep makes stays inside the state
 root: a target reached through a symlinked directory below the root is kept, with a
 `record_invalid` diagnostic. An absence
 probe kept that way shows as action `keep` in its `absence` or `pane_retention` detail. Every

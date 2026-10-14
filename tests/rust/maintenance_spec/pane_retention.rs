@@ -774,3 +774,35 @@ fn a_lock_like_file_the_review_writer_does_not_leave_keeps_the_pane_tree() {
         );
     }
 }
+
+/// The follower of a binding's Codex turns leaves its lock in the binding's
+/// directory, `.follower.lock`. That lock is the writer's own, and does not
+/// keep an old pane's tree; the same name anywhere else is unknown state.
+#[test]
+fn a_binding_s_turn_follower_lock_does_not_keep_an_old_pane_and_its_name_elsewhere_does() {
+    for (planted_in_binding, prunes) in [(true, true), (false, false)] {
+        let setup = Setup::new();
+        setup.claim_and_bind();
+        let lock = if planted_in_binding {
+            setup.binding_dir().join(".follower.lock")
+        } else {
+            setup_pane_dir(&setup).join(".follower.lock")
+        };
+        fs::write(&lock, "turn-1").expect("plant the follower lock");
+        end_long_ago(&setup);
+        setup.panes.set(Vec::new());
+        setup.processes.set(Presence::Absent);
+        setup.clock.set_monotonic(1_000);
+        setup.run_sweep(true);
+        setup
+            .clock
+            .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
+        let (result, diagnostics) = setup.run_sweep(true);
+        assert_eq!(
+            actions(&result.details, "pane_retention").contains(&&json!("prune")),
+            prunes,
+            "in the binding directory: {planted_in_binding}; {diagnostics:?}"
+        );
+        assert_eq!(setup_pane_dir(&setup).exists(), !prunes);
+    }
+}

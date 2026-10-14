@@ -5,6 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -300,6 +301,81 @@ pub struct RuntimePorts<'a> {
     pub tty: &'a dyn TtyWriter,
     pub panes: &'a dyn PaneLister,
     pub processes: &'a dyn ProcessInspector,
+    pub followers: &'a dyn TurnFollowers,
+}
+
+/// Starts a Codex turn follower without waiting for it.
+pub trait TurnFollowers {
+    fn start(
+        &self,
+        request: &crate::codex_rollout::FollowRequest,
+        env: &BTreeMap<String, String>,
+    ) -> Result<()>;
+}
+
+/// Starts this executable as `attention hooks follow-turn`, in a process
+/// group of its own, with no standard streams and only the variables that
+/// name the state root.
+///
+/// As of Codex 0.162.0 a hook's output is read until it closes, so a follower
+/// that kept the hook's stdout or stderr would hold the hook open; a hook
+/// that has completed may leave such a helper running.
+pub struct SpawnedFollowers;
+
+impl TurnFollowers for SpawnedFollowers {
+    fn start(
+        &self,
+        request: &crate::codex_rollout::FollowRequest,
+        env: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        let request = serde_json::to_string(request).map_err(AttentionError::record_json)?;
+        follower_command(&request, env)
+            .and_then(|mut command| command.spawn())
+            .map(drop)
+            .map_err(|_| {
+                AttentionError::new(
+                    DiagnosticCode::ProbeUnavailable,
+                    "the turn follower could not be started",
+                )
+            })
+    }
+}
+
+/// The command [`SpawnedFollowers`] runs for the encoded `request`. A
+/// state-root variable held as [`crate::records::NOT_UTF8`] is left out: it
+/// cannot have decided the root this hook resolved, and its NUL cannot be put
+/// in an environment.
+fn follower_command(request: &str, env: &BTreeMap<String, String>) -> std::io::Result<Command> {
+    let mut command = Command::new(env::current_exe()?);
+    command
+        .args(["hooks", "follow-turn", request])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    for name in std::iter::once("HOME").chain(crate::records::STATE_ROOT_VARIABLES) {
+        if let Some(value) = env
+            .get(name)
+            .filter(|value| *value != crate::records::NOT_UTF8)
+        {
+            command.env(name, value);
+        }
+    }
+    Ok(command)
+}
+
+/// Starts nothing: for callers with no turn to follow.
+pub struct NoTurnFollowers;
+
+impl TurnFollowers for NoTurnFollowers {
+    fn start(
+        &self,
+        _: &crate::codex_rollout::FollowRequest,
+        _: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// A process's controlling terminal as the kernel records it.
@@ -2268,5 +2344,24 @@ mod tests {
             libc::close(second_master);
             libc::close(second_slave);
         }
+    }
+
+    #[test]
+    fn a_follower_is_not_handed_a_root_variable_that_is_not_utf8() {
+        let env = std::collections::BTreeMap::from([
+            ("WEZTERM_ATTENTION_DIR".to_owned(), "/state".to_owned()),
+            (
+                "XDG_STATE_HOME".to_owned(),
+                crate::records::NOT_UTF8.to_owned(),
+            ),
+        ]);
+        let command = super::follower_command("{}", &env).expect("command");
+        assert_eq!(
+            command.get_envs().collect::<Vec<_>>(),
+            [(
+                std::ffi::OsStr::new("WEZTERM_ATTENTION_DIR"),
+                Some(std::ffi::OsStr::new("/state"))
+            )]
+        );
     }
 }

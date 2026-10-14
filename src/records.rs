@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -653,18 +654,37 @@ pub fn review_lock(root: &Path, address: &PaneAddress, owner_key: &str) -> PathB
     reviews_dir(root, address).join(format!(".{owner_key}.lock"))
 }
 
+/// The lock the follower of one binding's Codex turns holds, beside the
+/// binding's records. Its bytes name the turn it follows.
+pub fn turn_follower_lock(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+) -> PathBuf {
+    binding_dir(root, address, launch_id, binding_id).join(TURN_FOLLOWER_LOCK)
+}
+
 const CLAIM_LOCK: &str = ".claim.lock";
 const LAUNCH_LOCK: &str = ".lock";
+const TURN_FOLLOWER_LOCK: &str = ".follower.lock";
 
 /// Whether the file `name` in `directory`, inside the tree of the pane at
 /// `pane`, is named as one of the locks above, which a writer leaves in place.
 pub(crate) fn is_state_lock(pane: &Path, directory: &Path, name: &str) -> bool {
     matches!(name, CLAIM_LOCK | LAUNCH_LOCK)
+        || is_turn_follower_lock(directory, name)
         || (directory == pane.join(REVIEWS)
             && name
                 .strip_prefix('.')
                 .and_then(|name| name.strip_suffix(".lock"))
                 .is_some_and(crate::protocol::hex64_text))
+}
+
+/// Whether the file `name` in `directory` is a binding's turn follower lock.
+pub(crate) fn is_turn_follower_lock(directory: &Path, name: &str) -> bool {
+    name == TURN_FOLLOWER_LOCK
+        && directory.parent().and_then(Path::file_name) == Some(OsStr::new("bindings"))
 }
 
 /// The directory that holds one binding's records.
@@ -1454,12 +1474,13 @@ impl Drop for HeldLock {
     }
 }
 
-fn acquire(path: &Path, timeout: Duration) -> Result<HeldLock> {
+/// Open the state lock at `path`, creating it, and its directory, private.
+pub(crate) fn open_state_lock(path: &Path) -> Result<File> {
     let parent = path.parent().ok_or_else(|| {
         AttentionError::new(DiagnosticCode::StatePermissions, "lock path has no parent")
     })?;
     mkdir_private(parent)?;
-    let file = OpenOptions::new()
+    OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
@@ -1471,7 +1492,11 @@ fn acquire(path: &Path, timeout: Duration) -> Result<HeldLock> {
                 DiagnosticCode::StatePermissions,
                 "state lock could not be opened",
             )
-        })?;
+        })
+}
+
+fn acquire(path: &Path, timeout: Duration) -> Result<HeldLock> {
+    let file = open_state_lock(path)?;
     let deadline = Instant::now() + timeout;
     loop {
         match file.try_lock() {

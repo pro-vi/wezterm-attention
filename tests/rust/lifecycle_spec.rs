@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use uuid::Uuid;
+use wezterm_attention::codex_rollout::FollowRequest;
 use wezterm_attention::identity::pane_address;
 use wezterm_attention::lifecycle::{
     apply_mark_activity, apply_mark_clear, apply_mark_review, apply_provider_event, binding_id,
@@ -23,7 +24,7 @@ use wezterm_attention::query::read_bindings;
 use wezterm_attention::records::{atomic_replace, launch_dir, pane_dir, state_root, with_lock};
 use wezterm_attention::wezterm::{
     Clock, ControllingTerminal, PaneLister, PaneRow, ProcessFacts, ProcessInspector, ProcessRead,
-    ProcessStart, RuntimePorts, TtyWriter,
+    ProcessStart, RuntimePorts, TtyWriter, TurnFollowers,
 };
 
 #[path = "support/executables.rs"]
@@ -77,6 +78,8 @@ mod claim_fence;
 #[path = "lifecycle_spec/plugin_writes.rs"]
 mod plugin_writes;
 
+#[path = "lifecycle_spec/errored_turn_end.rs"]
+mod errored_turn_end;
 #[path = "lifecycle_spec/host_facet.rs"]
 mod host_facet;
 #[path = "lifecycle_spec/inherited_host.rs"]
@@ -339,7 +342,36 @@ struct Setup {
     tty: FakeTty,
     panes: FakePanes,
     processes: FakeProcesses,
+    followers: FakeFollowers,
     clock: FixedClock,
+}
+
+/// The turn followers a hook asked to start, which this fake never starts.
+#[derive(Default)]
+struct FakeFollowers {
+    started: Mutex<Vec<FollowRequest>>,
+    /// Whether a start fails, as one the system refuses to spawn does.
+    refuses: std::sync::atomic::AtomicBool,
+}
+
+impl TurnFollowers for FakeFollowers {
+    fn start(
+        &self,
+        request: &FollowRequest,
+        _env: &BTreeMap<String, String>,
+    ) -> wezterm_attention::protocol::Result<()> {
+        if self.refuses.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(wezterm_attention::protocol::AttentionError::new(
+                DiagnosticCode::ProbeUnavailable,
+                "synthetic follower start failure",
+            ));
+        }
+        self.started
+            .lock()
+            .expect("followers lock")
+            .push(request.clone());
+        Ok(())
+    }
 }
 
 impl Setup {
@@ -376,6 +408,7 @@ impl Setup {
             tty,
             panes,
             processes,
+            followers: FakeFollowers::default(),
             clock: FixedClock {
                 monotonic: "00000000000000000100",
                 unix: "00000000012345678900",
@@ -389,6 +422,7 @@ impl Setup {
             tty: &self.tty,
             panes: &self.panes,
             processes: &self.processes,
+            followers: &self.followers,
         }
     }
 
@@ -1539,6 +1573,7 @@ fn launch_rotation_after_resolution_cannot_add_old_execution_facts() {
                 tty: &setup.tty,
                 panes: &setup.panes,
                 processes: &setup.processes,
+                followers: &setup.followers,
             };
             apply_provider_event(
                 &event(
@@ -1568,6 +1603,7 @@ fn launch_rotation_after_resolution_cannot_add_old_execution_facts() {
             tty: &setup.tty,
             panes: &setup.panes,
             processes: &setup.processes,
+            followers: &setup.followers,
         };
         let claimed = wezterm_attention::claim_launch(&newer, &ports);
         clock.released.wait();

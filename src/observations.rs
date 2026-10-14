@@ -95,6 +95,10 @@ pub enum ObservationBody {
         outcome: AttemptOutcome,
         #[serde(skip_serializing_if = "Option::is_none")]
         error_category: Option<String>,
+        /// The provider's own name for the error, where it gives one and
+        /// Attention keeps no closed word for it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error_code: Option<String>,
     },
     UserInterrupt,
     ElicitationRequested {
@@ -799,6 +803,12 @@ impl ObservationBody {
 }
 
 impl LifecycleObservation {
+    /// The provider's id of the turn this observation belongs to, when it
+    /// names one.
+    pub fn turn_id(&self) -> Option<&str> {
+        self.correlation.as_ref()?.turn_id.as_deref()
+    }
+
     pub fn is_lead_prompt(&self) -> bool {
         self.actor == Actor::Lead && matches!(self.body, ObservationBody::PromptSubmitted { .. })
     }
@@ -919,6 +929,16 @@ fn invalid() -> AttentionError {
 }
 
 impl LifecycleSnapshot {
+    /// The lead's observations, in both pools.
+    pub fn lead_observations(&self) -> impl Iterator<Item = &LifecycleObservation> {
+        self.pools
+            .general
+            .observations
+            .iter()
+            .chain(&self.pools.requests.observations)
+            .filter(|item| item.actor == Actor::Lead)
+    }
+
     pub fn validate_semantics(&self) -> Result<()> {
         let limits = &manifest()?.limits;
         let mut keys = std::collections::BTreeSet::new();
