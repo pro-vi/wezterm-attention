@@ -35,9 +35,9 @@ pub const TASK_COMPLETE: &str = "task_complete";
 /// `task_complete` is far smaller: its `last_agent_message` is null.
 const MAX_LINE_BYTES: usize = 4 << 20;
 
-/// How long a follower for a new turn waits for the previous turn's follower,
-/// which leaves within one poll of seeing the new turn start.
-const TAKE_OVER_WAIT: Duration = Duration::from_secs(10);
+/// How many polls a follower waits for another turn's follower to leave the
+/// lock; that follower leaves within one poll of seeing its turn end.
+const TAKE_OVER_POLLS: u32 = 10;
 
 /// What a follower is handed: the binding's scope, the turn, the host process
 /// whose hook saw the turn start, and where in which rollout to read from.
@@ -272,8 +272,8 @@ fn error_code(info: &Value) -> Option<String> {
     safe_text(code, "codex_error_info").ok()
 }
 
-/// The one follower of a binding's turns, holding the binding's follower
-/// lock, whose bytes name the turn it follows.
+/// The binding's follower lock, held by the follower of one of its turns and
+/// naming that turn. A follower kept out of it reads without it.
 pub struct FollowerLock(File);
 
 impl Drop for FollowerLock {
@@ -282,12 +282,21 @@ impl Drop for FollowerLock {
     }
 }
 
-/// Take the follower lock at `path` for `turn_id`. `None` when another
-/// follower has this turn, or the previous turn's follower did not leave in
-/// time.
-pub fn take_turn(path: &Path, turn_id: &str) -> Result<Option<FollowerLock>> {
+/// What [`take_turn`] found.
+pub enum TakenTurn {
+    /// The lock, now naming this turn.
+    Taken(FollowerLock),
+    /// Another follower has this turn.
+    AlreadyFollowed,
+    /// Another turn's follower kept the lock for all of the wait.
+    KeptOut,
+}
+
+/// Take the follower lock at `path` for `turn_id`, waiting up to `wait` for
+/// another turn's follower to leave.
+pub fn take_turn(path: &Path, turn_id: &str, wait: Duration) -> Result<TakenTurn> {
     let mut file = open_state_lock(path)?;
-    let deadline = Instant::now() + TAKE_OVER_WAIT;
+    let deadline = Instant::now() + wait;
     loop {
         match file.try_lock() {
             Ok(()) => break,
@@ -295,8 +304,11 @@ pub fn take_turn(path: &Path, turn_id: &str) -> Result<Option<FollowerLock>> {
                 let mut followed = String::new();
                 let _ = file.seek(SeekFrom::Start(0));
                 let _ = file.read_to_string(&mut followed);
-                if followed == turn_id || Instant::now() >= deadline {
-                    return Ok(None);
+                if followed == turn_id {
+                    return Ok(TakenTurn::AlreadyFollowed);
+                }
+                if Instant::now() >= deadline {
+                    return Ok(TakenTurn::KeptOut);
                 }
                 thread::sleep(Duration::from_millis(100));
             }
@@ -318,7 +330,7 @@ pub fn take_turn(path: &Path, turn_id: &str) -> Result<Option<FollowerLock>> {
             "the turn follower's lock could not be written",
         ));
     }
-    Ok(Some(FollowerLock(file)))
+    Ok(TakenTurn::Taken(FollowerLock(file)))
 }
 
 /// How a follower finished.
@@ -332,14 +344,16 @@ pub enum Followed {
     HostGone,
     /// The binding was ended or replaced, or the claim moved on.
     BindingChanged,
-    /// Another follower has this turn, or the previous one did not leave.
+    /// Another follower has this turn, or another turn's follower kept the
+    /// lock and this turn's end was not yet in the rollout.
     AlreadyFollowed,
     Refused(Refusal),
 }
 
 /// Follow `request`'s turn until it ends, its host is gone or its binding
-/// stops being current, reading the rollout every `poll`. Only an errored
-/// end is recorded.
+/// stops being current, reading the rollout every `poll`. A follower that
+/// another turn's follower keeps out of the lock for its wait reads the
+/// rollout once instead. Only an errored end is recorded.
 pub fn follow_turn(
     request: &FollowRequest,
     env: &BTreeMap<String, String>,
@@ -361,8 +375,12 @@ pub fn follow_turn(
         return Ok(Followed::BindingChanged);
     }
     let lock = turn_follower_lock(&root, &request.address, &request.launch_id, &binding);
-    let Some(_lock) = take_turn(&lock, &request.turn_id)? else {
-        return Ok(Followed::AlreadyFollowed);
+    let held = match take_turn(&lock, &request.turn_id, poll * TAKE_OVER_POLLS)? {
+        TakenTurn::Taken(lock) => Some(lock),
+        TakenTurn::AlreadyFollowed => return Ok(Followed::AlreadyFollowed),
+        // A later turn's follower can hold the lock while this turn's end is
+        // already written, so the rollout is read once rather than left.
+        TakenTurn::KeptOut => None,
     };
     let mut rollout = match Rollout::open(
         Path::new(&request.rollout),
@@ -400,6 +418,7 @@ pub fn follow_turn(
                 .map(Followed::Recorded);
             }
             Ok(Some(signal)) => return Ok(Followed::Ended(signal)),
+            Ok(None) if held.is_none() => return Ok(Followed::AlreadyFollowed),
             Ok(None) => thread::sleep(poll),
         }
     }

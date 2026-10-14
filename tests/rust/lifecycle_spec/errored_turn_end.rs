@@ -7,7 +7,7 @@ use super::self_claim::{apply_as, install, records, start};
 use super::*;
 use std::sync::atomic::Ordering;
 use wezterm_attention::codex_rollout::{
-    FollowRequest, Followed, Refusal, Rollout, TurnSignal, follow_turn, take_turn,
+    FollowRequest, Followed, Refusal, Rollout, TakenTurn, TurnSignal, follow_turn, take_turn,
 };
 
 const SESSION: &str = "s";
@@ -148,14 +148,19 @@ fn prompted(setup: &mut Setup) -> FollowRequest {
     last_request(setup)
 }
 
+/// [`follow_every`] at `POLL`.
+fn follow(setup: &Setup, request: &FollowRequest) -> Followed {
+    follow_every(setup, request, POLL)
+}
+
 /// Run the follower to its end. One that would wait for ever, as a follower
 /// that misses its turn's end does, is stopped by its host exiting, and the
 /// test fails.
-fn follow(setup: &Setup, request: &FollowRequest) -> Followed {
+fn follow_every(setup: &Setup, request: &FollowRequest, poll: Duration) -> Followed {
     let (sent, received) = std::sync::mpsc::channel();
     thread::scope(|scope| {
         scope.spawn(|| {
-            let _ = sent.send(follow_turn(request, &setup.env, &setup.ports(), POLL));
+            let _ = sent.send(follow_turn(request, &setup.env, &setup.ports(), poll));
         });
         match received.recv_timeout(Duration::from_secs(5)) {
             Ok(result) => result.expect("the follower runs"),
@@ -249,6 +254,32 @@ fn errored_task_complete_records_codex_attempt_outcome_turn_end() {
     // follower's later reading.
     assert_eq!(activity["observed_mono_ns"], "00000000000000000301");
     assert_eq!(end["observed_mono_ns"], "00000000000000000301");
+}
+
+#[test]
+fn the_end_keeps_its_turn_s_order_when_a_later_record_holds_the_slot() {
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    append(
+        &rollout_path(&setup),
+        &[failed(TURN, json!("server_overloaded"))],
+    );
+    // A child's permission prompt, after the turn's last lead record.
+    hook(
+        &setup,
+        "PermissionRequest",
+        json!({"tool_name":"shell","agent_id":"child-a","agent_type":"worker"}),
+        "00000000000000000860",
+    );
+    assert_eq!(recorded(&follow(&setup, &request)), "applied");
+    assert_eq!(
+        attempt_outcomes(&setup)[0]["observed_mono_ns"],
+        "00000000000000000301"
+    );
+    let activity = activity(&setup);
+    assert_eq!(activity["type"], "notify");
+    assert_eq!(activity["label"], "server_overloaded");
+    assert_eq!(activity["observed_mono_ns"], "00000000000000000861");
 }
 
 #[test]
@@ -548,7 +579,9 @@ fn one_follower_follows_a_turn_and_the_next_turn_waits_for_it() {
     let mut setup = Setup::new();
     let request = prompted(&mut setup);
     let lock = follower_lock(&setup);
-    let held = take_turn(&lock, TURN).expect("lock").expect("taken");
+    let TakenTurn::Taken(held) = take_turn(&lock, TURN, POLL).expect("lock") else {
+        panic!("the lock is free");
+    };
     assert!(matches!(
         follow(&setup, &request),
         Followed::AlreadyFollowed
@@ -567,10 +600,35 @@ fn one_follower_follows_a_turn_and_the_next_turn_waits_for_it() {
         drop(held);
     });
     // The binding recorded nothing for the next turn, so its end is skipped;
-    // what matters here is that the follower waited and then followed.
-    assert!(matches!(follow(&setup, &next), Followed::Recorded(_)));
+    // what matters is that the follower waited and then followed. Its wait,
+    // counted in its 100 ms polls, outlasts the 300 ms the holder stays.
+    assert!(matches!(
+        follow_every(&setup, &next, Duration::from_millis(100)),
+        Followed::Recorded(_)
+    ));
     releaser.join().unwrap();
     assert_eq!(fs::read_to_string(&lock).unwrap(), NEXT_TURN);
+}
+
+#[test]
+fn a_follower_kept_out_by_a_later_turn_s_still_records_its_end() {
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    append(
+        &rollout_path(&setup),
+        &[failed(TURN, json!("server_overloaded"))],
+    );
+    prompt(&setup, NEXT_TURN, "00000000000000000400");
+    // The later turn's follower keeps the lock for all of the wait.
+    let TakenTurn::Taken(_later) =
+        take_turn(&follower_lock(&setup), NEXT_TURN, POLL).expect("lock")
+    else {
+        panic!("the lock is free");
+    };
+    assert_eq!(recorded(&follow(&setup, &request)), "ignored");
+    let end = &attempt_outcomes(&setup)[0];
+    assert_eq!(end["correlation"]["turn_id"], TURN);
+    assert_eq!(end["turn_end"]["status"], "superseded");
 }
 
 #[test]

@@ -241,8 +241,9 @@ host it was handed still hold, and never for a turn that has no record left or w
 is already an end; a `Stop` hook that blocks lets Codex continue the turn, and its later records
 then follow that end. The end's `observed_mono_ns` is just after the turn's last record, not when
 the follower read the end, so a hook that began after Codex ended the turn orders after it; a
-`notify` it writes is also stamped after what stands in the activity slot. One follower runs per
-binding, holding `.follower.lock` in the binding's directory, which names the turn it follows. See
+`notify` it writes is also stamped after what stands in the activity slot. One follower at a time
+holds `.follower.lock` in the binding's directory, which names the turn it follows; a follower kept
+out of it for ten seconds reads the rollout once, so an end already written is not lost. See
 [Accepted limitations](accepted-limitations.md#a-codex-turn-that-ends-on-a-model-error-is-recorded-only-from-its-rollout).
 
 `SessionStart` with source `fork` binds the forked session for Claude and Codex, replacing the

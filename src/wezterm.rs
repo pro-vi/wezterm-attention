@@ -328,29 +328,41 @@ impl TurnFollowers for SpawnedFollowers {
         request: &crate::codex_rollout::FollowRequest,
         env: &BTreeMap<String, String>,
     ) -> Result<()> {
-        let failed = || {
-            AttentionError::new(
-                DiagnosticCode::ProbeUnavailable,
-                "the turn follower could not be started",
-            )
-        };
-        let program = env::current_exe().map_err(|_| failed())?;
         let request = serde_json::to_string(request).map_err(AttentionError::record_json)?;
-        let mut command = Command::new(program);
-        command
-            .args(["hooks", "follow-turn", &request])
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0);
-        for name in std::iter::once("HOME").chain(crate::records::STATE_ROOT_VARIABLES) {
-            if let Some(value) = env.get(name) {
-                command.env(name, value);
-            }
-        }
-        command.spawn().map(drop).map_err(|_| failed())
+        follower_command(&request, env)
+            .and_then(|mut command| command.spawn())
+            .map(drop)
+            .map_err(|_| {
+                AttentionError::new(
+                    DiagnosticCode::ProbeUnavailable,
+                    "the turn follower could not be started",
+                )
+            })
     }
+}
+
+/// The command [`SpawnedFollowers`] runs for the encoded `request`. A
+/// state-root variable held as [`crate::records::NOT_UTF8`] is left out: it
+/// cannot have decided the root this hook resolved, and its NUL cannot be put
+/// in an environment.
+fn follower_command(request: &str, env: &BTreeMap<String, String>) -> std::io::Result<Command> {
+    let mut command = Command::new(env::current_exe()?);
+    command
+        .args(["hooks", "follow-turn", request])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    for name in std::iter::once("HOME").chain(crate::records::STATE_ROOT_VARIABLES) {
+        if let Some(value) = env
+            .get(name)
+            .filter(|value| *value != crate::records::NOT_UTF8)
+        {
+            command.env(name, value);
+        }
+    }
+    Ok(command)
 }
 
 /// Starts nothing: for callers with no turn to follow.
@@ -2332,5 +2344,24 @@ mod tests {
             libc::close(second_master);
             libc::close(second_slave);
         }
+    }
+
+    #[test]
+    fn a_follower_is_not_handed_a_root_variable_that_is_not_utf8() {
+        let env = std::collections::BTreeMap::from([
+            ("WEZTERM_ATTENTION_DIR".to_owned(), "/state".to_owned()),
+            (
+                "XDG_STATE_HOME".to_owned(),
+                crate::records::NOT_UTF8.to_owned(),
+            ),
+        ]);
+        let command = super::follower_command("{}", &env).expect("command");
+        assert_eq!(
+            command.get_envs().collect::<Vec<_>>(),
+            [(
+                std::ffi::OsStr::new("WEZTERM_ATTENTION_DIR"),
+                Some(std::ffi::OsStr::new("/state"))
+            )]
+        );
     }
 }

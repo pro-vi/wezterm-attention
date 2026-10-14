@@ -3406,8 +3406,9 @@ pub(crate) fn record_codex_turn_failure(
             }
             let existing = read_record(&activity_path, Some("activity"), &identity)?;
             let clear = read_record_at(root, "activity_clear", &identity)?;
-            // The notify must also take the slot from what stands in it.
-            let observation = just_after(
+            // Only the notify takes the slot from what stands in it; the end
+            // stays just after the turn's last record.
+            let notify_observation = just_after(
                 iter::once(last.observed_mono_ns.as_str()).chain(
                     [existing.as_ref(), clear.as_ref()]
                         .into_iter()
@@ -3415,7 +3416,7 @@ pub(crate) fn record_codex_turn_failure(
                         .filter_map(|record| record["observed_mono_ns"].as_str()),
                 ),
             )
-            .unwrap_or(after_turn);
+            .unwrap_or_else(|| after_turn.clone());
             let visible = activity_visible(root, &identity, existing.as_ref(), clear.as_ref());
             let base = activity_base(&resolved, event, &binding_id)?;
             let ActivityOutcome {
@@ -3426,13 +3427,13 @@ pub(crate) fn record_codex_turn_failure(
                 visible,
                 false,
                 &base,
-                &observation,
+                &notify_observation,
                 &written_at,
             );
             Ok(append_observation(
                 &resolved,
                 event,
-                &observation,
+                &after_turn,
                 &written_at,
                 CommitPlan {
                     replacements: written
