@@ -648,6 +648,12 @@ pub fn ns20_text(text: &str) -> bool {
     text.len() == 20 && text.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+/// `nanoseconds` written as the stamp `ns20_text` accepts. Any monotonic
+/// reading fits: 20 digits of nanoseconds is over 3,000 years.
+pub fn format_ns20(nanoseconds: u128) -> String {
+    format!("{nanoseconds:020}")
+}
+
 fn canonical_decimal(value: &Value, maximum: usize) -> bool {
     value
         .as_str()

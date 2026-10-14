@@ -5,6 +5,7 @@
 - **Amended:** 2026-10-04 — a child waiting on a permission prompt overrides the held presentation
 - **Amended:** 2026-10-05 — no check runs while a child waits on a permission prompt; the default held indicator is `⏾`
 - **Amended:** 2026-10-08 — no explicit clear command, since nothing called it; any newer activity, such as the next prompt's, ends a hold
+- **Amended:** 2026-10-14 — each program is stopped 500 ms early for every eligible program after it, and its input names that moment
 
 ## Context
 
@@ -18,11 +19,11 @@ Source contact was against `1233695f0a6732e60ba09f8827b97f6c944b57d8`. The imple
 
 Add repeatable named `--hold-check NAME=/absolute/executable` registrations to `attention hooks event`. Only a lead Claude Stop with a non-empty native task array and available reply, and with no counted child waiting on a permission prompt, runs them. Array presence is independent of the stricter task-id reduction used for child reconciliation. The program's classifier uses the reply only; array presence is only an eligibility gate. Forward the native background_tasks array unchanged to the program's stdin for application-owned logging/evaluation; Attention does not persist it. No transcript is read.
 
-Give each program a separate `HoldCheckInput`: checked scope, native lead Stop facts, original observation order, available reply and unchanged native task array, marked `phase=before_turn_end`. It carries no persistence claim. Run outside writer locks, then revalidate the original claim, host, current provider binding, ordering and clear fences before applying the original event. Never follow a replacement occupant.
+Give each program a separate `HoldCheckInput`: checked scope, native lead Stop facts, original observation order, available reply and unchanged native task array, marked `phase=before_turn_end`, with the program's own `deadline_mono_ns`. It carries no persistence claim. Run outside writer locks, then revalidate the original claim, host, current provider binding, ordering and clear fences before applying the original event. Never follow a replacement occupant.
 
 Accept empty stdout as no note. Accept one strict `{"hold": true, "answer": "waiting_on_own_work"}` object with an optional terminal newline as a hold; JSON whitespace between tokens is accepted; the answer is a bounded application token, not an Attention classifier enum. Attention attaches at most one note under the configured program name. Unknown fields, duplicate keys, multiple objects, incomplete I/O, nonzero exit and timeout attach no note. Raw program output and message text enter no Attention record or diagnostic.
 
-Run programs in declaration order, with a shared 2000 ms monotonic transport deadline covering launch, stdin, stdout EOF and direct-child exit. Each receives the remaining budget. The agreed Jev request budget is 1500 ms and stays separate; other applications own their internal deadlines; the outer allowance includes process overhead. A later failure cannot cancel an earlier successful hold. Record every configured program's name, invoked path, stage, elapsed time, observed exit code and validated note, including programs not dispatched. No retry queue is added.
+Run programs in declaration order, with a shared 2000 ms monotonic transport deadline covering launch, stdin, stdout EOF and direct-child exit. Each program is stopped 500 ms early for every eligible program after it, so a slow program cannot spend a later one's time, and its input names that moment as `deadline_mono_ns`, on the clock of `observed_mono_ns`. 500 ms is about 2.7 times the longest retained run of the one quiet check registered on 2026-10-12 (185 ms over 483 runs); a quiet check stopped or skipped after a hold check in live use would show it is too short. Applications fit their internal deadlines inside their own `deadline_mono_ns`; the outer allowance includes process overhead. A later failure cannot cancel an earlier successful hold. Record every configured program's name, invoked path, stage, elapsed time, observed exit code and validated note, including programs not dispatched. No retry queue is added.
 
 Retain native `type=stop` and `kind=response_finished`. Accepted notes become activity `hold_notes`; the corresponding lifecycle observation carries an Attention-written `turn_end` with applicability (`recorded`, `superseded` or `unconfirmed`; unconfirmed has no held claim), held state and execution audit. Confirm native effects before publishing recorded lifecycle metadata. Preserve child reconciliation and exclude the Attention-owned annotation from native replay equality. Native observations displaced by newer activity or clear carry no sound-eligible recorded decision.
 
@@ -50,7 +51,8 @@ child permission state for both note kinds under the final locks. Changed or
 unreadable evidence removes the note with `evidence_changed`. Native replay
 retains its original decision and cannot overwrite later activity. The
 existing hold-only executable contract remains in use; each registration
-accepts only its own note kind and both share the same transport budget.
+accepts only its own note kind and both share the same transport budget, each
+within its own deadline.
 ## Rationale
 
 A pre-write application check keeps message judgment with the application while Attention owns native facts and final state. Post-write consumers are too late. Keeping the preceding activity can keep an earlier checkmark. An internal question-matching heuristic duplicates application policy and gives Attention responsibility for message interpretation.

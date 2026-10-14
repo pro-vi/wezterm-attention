@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Hold and quiet checks are told when they will be stopped.** Each check's input carries `deadline_mono_ns`, on the clock of `observed_mono_ns`. See the consumer guide's "Pre-write hold checks".
+
+### Changed
+
+- **A check is stopped 500 ms early for every eligible check after it**, so a slow hold check no longer leaves the quiet check after it no time. A hold check followed by a quiet check, which could run 2000 ms, now stops at 1500 ms.
+
 ## 1.2.0 — 2026-10-13
 
 ### Added

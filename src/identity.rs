@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::protocol::{AttentionError, DiagnosticCode, Result, manifest};
+use crate::protocol::{AttentionError, DiagnosticCode, Result, format_ns20, manifest};
 
 /// Ordered by realm, then incarnation, then pane id, as its fields are.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -213,7 +213,9 @@ pub fn tty_fingerprint(path: &str) -> Result<String> {
     tty_fingerprint_from_metadata(&metadata)
 }
 
-pub fn monotonic_ns20() -> Result<String> {
+/// `CLOCK_MONOTONIC_RAW` in nanoseconds, the clock every `_mono_ns` stamp
+/// reads.
+pub fn monotonic_raw_ns() -> Result<u128> {
     let mut value = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -226,6 +228,9 @@ pub fn monotonic_ns20() -> Result<String> {
             "monotonic clock is unavailable",
         ));
     }
-    let nanoseconds = (value.tv_sec as u128) * 1_000_000_000_u128 + value.tv_nsec as u128;
-    Ok(format!("{nanoseconds:020}"))
+    Ok((value.tv_sec as u128) * 1_000_000_000_u128 + value.tv_nsec as u128)
+}
+
+pub fn monotonic_ns20() -> Result<String> {
+    monotonic_raw_ns().map(format_ns20)
 }

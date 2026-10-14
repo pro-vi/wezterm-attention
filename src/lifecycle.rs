@@ -3698,7 +3698,7 @@ fn obtain_hold_notes(
             }
         })
         .collect();
-    let completed = hold_check::run(&eligible, request.budget, |registration, id| {
+    let completed = hold_check::run(&eligible, request.budget, |registration, id, deadline| {
         let quiet = registration.purpose == hold_check::Purpose::Quiet;
         let input = HoldCheckInput {
             schema: 1,
@@ -3711,6 +3711,7 @@ fn obtain_hold_notes(
             source_event: &event.source_event,
             actor: crate::observations::Actor::Lead,
             observed_mono_ns: observation,
+            deadline_mono_ns: deadline,
             reply: request.reply,
             background_tasks: request.background_tasks.unwrap_or(&[]),
             lifecycle: quiet.then_some(lifecycle.as_ref()).flatten(),

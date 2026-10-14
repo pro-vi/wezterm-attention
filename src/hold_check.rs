@@ -16,9 +16,12 @@ use uuid::Uuid;
 use crate::hook_content::HookContent;
 use crate::lifecycle::outcome::HookScope;
 use crate::observations::Actor;
-use crate::protocol::{AttentionError, Result, free_of_control, manifest};
+use crate::protocol::{AttentionError, Result, format_ns20, free_of_control, manifest};
 
 pub const TOTAL_BUDGET: Duration = Duration::from_millis(2000);
+/// The chain stops each check this much earlier for every eligible check
+/// after it, so a slow check cannot spend a later check's time.
+pub const LATER_CHECK_RESERVE: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug)]
 pub struct Registration {
@@ -307,6 +310,9 @@ pub struct HoldCheckInput<'a> {
     pub source_event: &'a str,
     pub actor: Actor,
     pub observed_mono_ns: &'a str,
+    /// The earliest moment this check is stopped, on the clock of
+    /// `observed_mono_ns`.
+    pub deadline_mono_ns: &'a str,
     pub reply: &'a HookContent,
     pub background_tasks: &'a [Value],
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -323,26 +329,53 @@ pub struct Request<'a> {
     pub budget: Duration,
 }
 
-/// Runs a chain against one checked prospective event. No input or raw output
-/// is included in the returned execution facts.
+/// Runs a chain against one checked prospective event. Each check's input is
+/// given its check id and its `deadline_mono_ns`. No input or raw output is
+/// included in the returned execution facts.
 pub fn run(
     registrations: &[Registration],
     budget: Duration,
-    mut input: impl FnMut(&Registration, &str) -> Option<Vec<u8>>,
+    input: impl FnMut(&Registration, &str, &str) -> Option<Vec<u8>>,
 ) -> Vec<HoldCheckOutcome> {
-    let deadline = Instant::now() + budget;
+    // `observed_mono_ns` reads this clock too, through `SystemClock`.
+    let published_start = crate::identity::monotonic_raw_ns().ok();
+    run_from(registrations, budget, published_start, input)
+}
+
+/// Each check is allowed the budget less a reserve for every check after it.
+/// `Instant` enforces that allowance; the published deadline is the same
+/// allowance added to `published_start`, a `CLOCK_MONOTONIC_RAW` reading. While
+/// the machine sleeps `Instant` may pause where the raw clock does not, so a
+/// check can be stopped later than published, never earlier. With no reading
+/// there is no deadline to publish, and no check runs.
+fn run_from(
+    registrations: &[Registration],
+    budget: Duration,
+    published_start: Option<u128>,
+    mut input: impl FnMut(&Registration, &str, &str) -> Option<Vec<u8>>,
+) -> Vec<HoldCheckOutcome> {
+    let start = Instant::now();
     registrations
         .iter()
-        .map(|registration| {
+        .enumerate()
+        .map(|(index, registration)| {
+            let skip = |reason| bypass(std::slice::from_ref(registration), reason).remove(0);
+            let later = u32::try_from(registrations.len() - 1 - index).unwrap_or(u32::MAX);
+            let allowed = budget.saturating_sub(LATER_CHECK_RESERVE.saturating_mul(later));
+            let Some(published) = published_start.map(|raw| format_ns20(raw + allowed.as_nanos()))
+            else {
+                return skip(Bypass::TotalDeadline);
+            };
+            let deadline = start + allowed;
             if Instant::now() >= deadline {
-                return bypass(std::slice::from_ref(registration), Bypass::TotalDeadline).remove(0);
+                return skip(Bypass::TotalDeadline);
             }
             let id = Uuid::new_v4().to_string();
-            let Some(bytes) = input(registration, &id) else {
-                return bypass(std::slice::from_ref(registration), Bypass::InputTooLarge).remove(0);
+            let Some(bytes) = input(registration, &id, &published) else {
+                return skip(Bypass::InputTooLarge);
             };
             if Instant::now() >= deadline {
-                return bypass(std::slice::from_ref(registration), Bypass::TotalDeadline).remove(0);
+                return skip(Bypass::TotalDeadline);
             }
             dispatch(registration, &id, &bytes, deadline)
         })
@@ -598,7 +631,7 @@ mod tests {
         ] {
             let (root, r) = check(body);
             let began = Instant::now();
-            let result = run(&[r], TOTAL_BUDGET, |_, _| Some(vec![b'a'; 500_000])).remove(0);
+            let result = run(&[r], TOTAL_BUDGET, |_, _, _| Some(vec![b'a'; 500_000])).remove(0);
             assert_eq!(result.stage, Stage::TimedOut);
             assert!(result.note.is_none());
             assert!(began.elapsed() < Duration::from_millis(3000));
@@ -653,29 +686,150 @@ mod tests {
         );
         let (second_root, mut second) = check("/bin/cat >/dev/null\nexit 7");
         let (third_root, mut third) = check("/bin/cat >/dev/null\n/bin/sleep 3");
-        let (fourth_root, mut fourth) = check("exit 99");
+        let (fourth_root, mut fourth) = check("/bin/cat >/dev/null\nexit 99");
         first.name = "first".into();
         second.name = "second".into();
         third.name = "third".into();
         fourth.name = "fourth".into();
-        let outcomes = run(&[first, second, third, fourth], TOTAL_BUDGET, |_, _| {
+        warm(&[&first, &second, &fourth]);
+        let outcomes = run(&[first, second, third, fourth], TOTAL_BUDGET, |_, _, _| {
             Some(b"{}\n".to_vec())
         });
+        // The third check is stopped while the fourth's reserve remains, so
+        // the fourth still runs.
         assert_eq!(
             outcomes.iter().map(|o| o.stage).collect::<Vec<_>>(),
             [
                 Stage::Completed,
                 Stage::Failed,
                 Stage::TimedOut,
-                Stage::NotDispatched
+                Stage::Failed
             ]
         );
-        assert_eq!(outcomes[3].reason, Some(Bypass::TotalDeadline));
         assert_eq!(notes(&outcomes).len(), 1);
         assert!(outcomes.iter().all(HoldCheckOutcome::valid));
         for root in [first_root, second_root, third_root, fourth_root] {
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    /// Runs a quick check once. As of macOS 26.7.1 the first launch of a
+    /// freshly written file takes about 200 ms, and concurrent first launches
+    /// queue behind each other. Installed checks are not fresh files, so a
+    /// test that times a check within one reserve launches it once first.
+    fn warm(registrations: &[&Registration]) {
+        for registration in registrations {
+            let _ = Command::new(&registration.executable)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .status();
+        }
+    }
+
+    const START_NS: u128 = 5_000_000_000;
+
+    fn deadlines(
+        registrations: &[Registration],
+        budget: Duration,
+        first_input_delay: Duration,
+    ) -> (Vec<HoldCheckOutcome>, Vec<(String, String)>) {
+        let mut told = Vec::new();
+        let outcomes = run_from(registrations, budget, Some(START_NS), |r, _, deadline| {
+            told.push((r.name.clone(), deadline.to_owned()));
+            if told.len() == 1 {
+                std::thread::sleep(first_input_delay);
+            }
+            Some(b"{}\n".to_vec())
+        });
+        (outcomes, told)
+    }
+
+    fn after_start(offset: Duration) -> String {
+        format_ns20(START_NS + offset.as_nanos())
+    }
+
+    #[test]
+    fn each_check_is_told_its_deadline_less_the_reserve_of_later_checks() {
+        let (first_root, mut first) = check("/bin/cat >/dev/null");
+        let (second_root, mut second) = check("/bin/cat >/dev/null");
+        first.name = "first".into();
+        second.name = "second".into();
+        let (_, told) = deadlines(&[first, second], TOTAL_BUDGET, Duration::ZERO);
+        assert_eq!(
+            told,
+            [
+                ("first".into(), after_start(Duration::from_millis(1500))),
+                ("second".into(), after_start(Duration::from_millis(2000))),
+            ]
+        );
+        for root in [first_root, second_root] {
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_hung_check_leaves_the_next_check_its_reserve() {
+        let (hung_root, mut hung) = check("/bin/sleep 5");
+        let (quiet_root, mut quiet) = check(
+            "/bin/cat >/dev/null\nprintf '%s' '{\"quiet\": true, \"answer\": \"controller_submitted\"}'",
+        );
+        hung.name = "hung".into();
+        quiet.name = "quiet".into();
+        quiet.purpose = Purpose::Quiet;
+        warm(&[&quiet]);
+        let budget = Duration::from_millis(1000);
+        let outcomes = run(&[hung, quiet], budget, |_, _, _| Some(b"{}\n".to_vec()));
+        assert_eq!(outcomes[0].stage, Stage::TimedOut);
+        // Stopped at its own deadline, well before the chain's.
+        assert!(
+            Duration::from_millis(outcomes[0].elapsed_ms) < budget - LATER_CHECK_RESERVE / 2,
+            "{:?}",
+            outcomes[0]
+        );
+        assert_eq!(outcomes[1].stage, Stage::Completed);
+        assert!(outcomes[1].note.is_some());
+        for root in [hung_root, quiet_root] {
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn input_built_after_its_deadline_is_not_dispatched_and_later_checks_keep_theirs() {
+        let (first_root, mut first) = check("/bin/cat >/dev/null");
+        let (second_root, mut second) = check("/bin/cat >/dev/null");
+        first.name = "first".into();
+        second.name = "second".into();
+        warm(&[&second]);
+        // The first check is allowed 100 ms; building its input takes 150.
+        let budget = Duration::from_millis(600);
+        let (outcomes, told) = deadlines(&[first, second], budget, Duration::from_millis(150));
+        assert_eq!(outcomes[0].stage, Stage::NotDispatched);
+        assert_eq!(outcomes[0].reason, Some(Bypass::TotalDeadline));
+        assert_eq!(outcomes[1].stage, Stage::Completed);
+        assert_eq!(told[1], ("second".into(), after_start(budget)));
+        assert!(outcomes.iter().all(HoldCheckOutcome::valid));
+        for root in [first_root, second_root] {
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_spent_budget_or_an_unreadable_clock_dispatches_nothing() {
+        let (root, r) = check("/bin/cat >/dev/null");
+        let mut built = 0;
+        let mut input = |_: &Registration, _: &str, _: &str| {
+            built += 1;
+            Some(b"{}\n".to_vec())
+        };
+        let checks = [r.clone(), r];
+        let spent = run_from(&checks, Duration::ZERO, Some(START_NS), &mut input);
+        let unreadable = run_from(&checks, TOTAL_BUDGET, None, &mut input);
+        for outcome in spent.iter().chain(&unreadable) {
+            assert_eq!(outcome.stage, Stage::NotDispatched);
+            assert_eq!(outcome.reason, Some(Bypass::TotalDeadline));
+        }
+        assert_eq!(built, 0);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -709,7 +863,7 @@ mod tests {
         }
         let (root, r) = check("exit 0");
         fs::write(&r.executable, "not an executable format").unwrap();
-        let outcome = run(&[r], TOTAL_BUDGET, |_, _| Some(b"{}\n".to_vec())).remove(0);
+        let outcome = run(&[r], TOTAL_BUDGET, |_, _, _| Some(b"{}\n".to_vec())).remove(0);
         assert_eq!(outcome.stage, Stage::NotStarted);
         assert!(outcome.note.is_none());
         fs::remove_dir_all(root).unwrap();

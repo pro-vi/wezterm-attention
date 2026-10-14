@@ -362,10 +362,13 @@ Stdin is one JSON object, newline and EOF:
   "source_event": "Stop",
   "actor": {"kind": "lead"},
   "observed_mono_ns": "00000000000100000000",
+  "deadline_mono_ns": "00000000002150000000",
   "reply": {"availability": "available", "text": "The build is running."},
   "background_tasks": [{"id": "job-1", "type": "shell", "status": "running", "description": "Run the build"}]
 }
 ```
+
+`deadline_mono_ns` is when Attention stops this program, as a 20-digit count of `CLOCK_MONOTONIC_RAW` nanoseconds: the clock and encoding of `observed_mono_ns`. Read the same clock to compare: `clock_gettime(CLOCK_MONOTONIC_RAW)`, or `time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)` in Python, whose `time.monotonic()` is a different clock on macOS. A reading below `observed_mono_ns` means the program reads the wrong clock. The deadline already leaves time for later programs (below), so a program subtracts only the time it needs to finish, such as writing its own record. Attention never stops a program before this moment; if the machine sleeps during the chain it can stop it later. Attention 1.2.0 and earlier omit the field. A program that finds it missing, unparsable or already past has no time it can count on.
 
 The array's JSON elements and fields are forwarded unchanged. There is no persistence claim: the scope was checked before execution and is checked again before writing. Input must fit the existing hook byte bound; oversized input supplies no hold. Replies and task arrays remain transient in Attention. Applications own any logging they perform.
 
@@ -377,7 +380,7 @@ An unheld program prints nothing (whitespace-only output is also accepted) and e
 
 Spaces between JSON tokens and a terminal newline are accepted. Only `hold=true` and an `answer` token matching `[a-z][a-z0-9_]*`, within the safe-label byte limit, are accepted. The token is application-owned. Unknown or duplicate keys, extra documents, false hold, wrong types, malformed/oversized output, incomplete input/output, nonzero exit or timeout supply no note. A line printed before a hang or failed exit does not count. Raw stdout/stderr are never recorded or included in diagnostics.
 
-Programs share a 2000 ms monotonic budget covering launch, stdin, stdout EOF and direct-child exit. Each gets the remaining budget. Attention terminates its invocation-owned process group and reaps its direct child on failure/timeout. Descendants that escape that group are not contained. Later failures cannot cancel an earlier accepted note; later programs still run while budget remains. No retry or queue is provided.
+Programs share a 2000 ms budget from the start of the chain, covering input serialization, launch, stdin, stdout EOF and direct-child exit. Each program is stopped 500 ms before the end of that budget for every eligible program after it, so a slow program leaves later ones their time; the last eligible program may use the whole budget. A program whose deadline passes before it is launched is not dispatched, with reason `total_deadline`, even while time remains for later programs; so is every program when Attention cannot read the clock, since it has no deadline to give. Attention terminates its invocation-owned process group and reaps its direct child on failure/timeout. Descendants that escape that group are not contained. Later failures cannot cancel an earlier accepted note; later programs still run while budget remains. No retry or queue is provided.
 
 The budget does not bound the entire hook. Preparation and final application each take launch and claim locks with up to 2 s per lock; ordinary filesystem/process work and cleanup have no whole-hook deadline. Each configured consumer adds its own deadline. With a 2000 ms check budget and one 1000 ms consumer, up to 3000 ms is reserved for executable work, before Attention's work. A provider hook timeout of 5 s can therefore expire before the complete hook finishes, including under lock contention.
 
@@ -445,7 +448,8 @@ exposes `turn_end_quiet=true` and uses `indicators.quiet` (default `↪`) with
 quiet completion. Held presentation and waiting permissions take precedence.
 Quiet completion can be acknowledged like an ordinary Stop. A later human
 prompt and completion receive ordinary presentation unless independently
-proved quiet. All checks share the existing 2000 ms budget.
+proved quiet. All checks share the 2000 ms budget, each with its own deadline as
+described above.
 ### Scoped headless inspection
 
 ```sh

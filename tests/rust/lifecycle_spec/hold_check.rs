@@ -1169,3 +1169,85 @@ fn permission_during_check(hold: bool) {
         assert!(records(&setup, "claude").0.get("hold_notes").is_none());
     });
 }
+
+// A check compares its deadline with its own reading of the same clock, so the
+// clock must be one another process can read. Python reads it through
+// `time.clock_gettime_ns`, as jev's check would.
+#[test]
+fn a_check_in_another_language_reads_its_deadline_on_the_same_clock() {
+    let setup = Setup::new();
+    bind(&setup, "codex");
+    setup.apply(
+        &event(
+            "codex",
+            "UserPromptSubmit",
+            "hold-session",
+            json!({"turn_id":"driven-turn"}),
+        ),
+        "00000000000000000300",
+    );
+    let captured = setup._scratch.0.join("clock.json");
+    let check = executable(
+        &setup,
+        &format!(
+            "exec '{}' -c 'import json, sys, time\n\
+             deadline = json.load(sys.stdin)[\"deadline_mono_ns\"]\n\
+             reading = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)\n\
+             open(\"{}\", \"w\").write(json.dumps([deadline, str(reading)]))'",
+            super::executables::resolve("python3").display(),
+            captured.display()
+        ),
+    );
+    let ns = |text: &str| text.parse::<u128>().unwrap();
+    let now = || wezterm_attention::identity::monotonic_raw_ns().unwrap();
+    let before = now();
+    let outcome = quiet_stop(&setup, "codex", &check, "00000000000000000400");
+    let after = now();
+    let stages = &outcome.hold_checks;
+    let (deadline, reading): (String, String) =
+        serde_json::from_slice(&fs::read(&captured).unwrap_or_else(|_| {
+            panic!("the check wrote nothing: {stages:?}");
+        }))
+        .unwrap();
+    assert!(
+        wezterm_attention::protocol::ns20_text(&deadline),
+        "{deadline}"
+    );
+    assert!(before <= ns(&reading) && ns(&reading) < ns(&deadline));
+    // The only eligible check keeps the whole budget: no reserve is taken.
+    let budget = CHECK_BUDGET.as_nanos();
+    assert!(before + budget <= ns(&deadline) && ns(&deadline) <= after + budget);
+}
+
+// The guide's example input is what consumers copy, so it names exactly the
+// fields a hold check receives.
+#[test]
+fn the_guide_example_input_has_the_fields_a_hold_check_receives() {
+    let guide = include_str!("../../../docs/consumer-guide.md");
+    let example: Value = guide
+        .split_once("Stdin is one JSON object, newline and EOF:")
+        .and_then(|(_, rest)| rest.split_once("```json\n"))
+        .and_then(|(_, rest)| rest.split_once("\n```"))
+        .map(|(block, _)| serde_json::from_str(block).unwrap())
+        .expect("consumer guide shows a hold-check input");
+    let setup = Setup::new();
+    bind(&setup, "claude");
+    let captured = setup._scratch.0.join("input.json");
+    let check = executable(&setup, &format!("/bin/cat > '{}'", captured.display()));
+    let output = hook(&setup, &payload(), &check, &[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let delivered: Value = serde_json::from_slice(&fs::read(captured).unwrap()).unwrap();
+    let keys = |value: &Value| {
+        value
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(keys(&example), keys(&delivered));
+}
