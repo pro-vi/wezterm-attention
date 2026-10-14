@@ -32,8 +32,7 @@ use crate::wezterm::{ProcessStart, RuntimePorts};
 /// declare is ignored, so a hook cannot claim it.
 pub const TASK_COMPLETE: &str = "task_complete";
 
-/// The longest line read. A longer one is skipped unread. An errored
-/// `task_complete` is far smaller: its `last_agent_message` is null.
+/// The longest line read. A longer one is skipped unread.
 const MAX_LINE_BYTES: usize = 4 << 20;
 
 /// How many polls a follower waits for another turn's follower to leave the
@@ -77,7 +76,8 @@ pub enum TurnSignal {
     Failed { error_code: Option<String> },
     /// Its `task_complete` carries none; `Stop` records that end.
     Finished,
-    /// It was interrupted; `Interrupt` records that end.
+    /// It was aborted. As of Codex 0.162.0 `Interrupt` records that end only
+    /// when the turn was interrupted; for another reason nothing does.
     Aborted,
     /// Another turn started, so this one is over.
     OtherTurnStarted,
@@ -329,7 +329,8 @@ pub fn take_turn(path: &Path, turn_id: &str, wait: Duration) -> Result<TakenTurn
 pub enum Followed {
     /// The turn ended on an error, and this is what recording it did.
     Recorded(LifecycleResult),
-    /// The turn ended some other way; its own hooks record that.
+    /// The turn ended some other way; its own hook records that, or nothing
+    /// does.
     Ended(TurnSignal),
     /// The host process is gone, or could not be read.
     HostGone,

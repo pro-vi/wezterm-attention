@@ -297,6 +297,7 @@ fn the_end_follows_a_prompt_typed_while_the_turn_ran() {
         attempt_outcomes(&setup)[0]["observed_mono_ns"],
         "00000000000000000601"
     );
+    assert_eq!(activity(&setup)["observed_mono_ns"], "00000000000000000601");
 }
 
 #[test]
@@ -417,6 +418,8 @@ fn stale_task_complete_never_overwrites_newer_turn() {
     let end = &attempt_outcomes(&setup)[0];
     assert_eq!(end["turn_end"]["status"], "superseded");
     assert_eq!(end["correlation"]["turn_id"], TURN);
+    // Before the next turn's prompt, after its own.
+    assert_eq!(end["observed_mono_ns"], "00000000000000000301");
     let activity = activity(&setup);
     assert_eq!(activity["type"], "thinking");
     assert!(activity.get("label").is_none(), "{activity}");
