@@ -3228,20 +3228,21 @@ fn apply_provider_event_inner(
         }
         // A follower that could not start leaves the prompt as recorded, and
         // says so only where nothing else is reported.
-        if accepted(&result)
-            && let Some(problem) = start_turn_follower(&resolved, event, env, ports)
-        {
+        if let Some(problem) = start_turn_follower(&resolved, event, env, ports) {
             result.diagnostic.get_or_insert(problem);
         }
         result
     })
 }
 
-/// Start the follower of the Codex lead turn an accepted prompt began. As of
-/// Codex 0.162.0 a turn that ends on a model error runs no hook, and only the
-/// session rollout says it ended; the follower reads it from where the rollout
-/// stands now (see [`crate::codex_rollout`]). It needs the hook's proof of its
-/// host, because it lives no longer than that process.
+/// Start the follower of the Codex lead turn a prompt began. As of Codex
+/// 0.162.0 a turn that ends on a model error runs no hook, and only the session
+/// rollout says it ended; the follower reads it from where the rollout stands
+/// now (see [`crate::codex_rollout`]). It needs the hook's proof of its host,
+/// because it lives no longer than that process. It starts whatever the
+/// prompt's disposition: a prompt whose thinking lost the activity slot still
+/// began its turn, and the follower writes only for a turn the binding
+/// recorded.
 fn start_turn_follower(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
@@ -3306,7 +3307,7 @@ pub(crate) fn followed_binding(
 /// locks, as `apply_activity` takes them.
 ///
 /// Nothing is written once [`followed_binding`] finds the binding no longer
-/// current or ended, once the host is gone, when the turn has no record left,
+/// current or ended, once the host is gone, when the turn has no record,
 /// nor when its last record is already an end. The `notify` it writes says
 /// the turn needs the user; it is written only while this turn is the newest
 /// one the binding observed, and otherwise the end is kept as superseded.

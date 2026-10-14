@@ -238,7 +238,7 @@ fn errored_task_complete_records_codex_attempt_outcome_turn_end() {
     assert_eq!(outcomes.len(), 1, "{outcomes:?}");
     let end = &outcomes[0];
     assert_eq!(end["source_event"], "task_complete");
-    assert_eq!(end["source_version"], "0.162.0");
+    assert!(end.get("source_version").is_none(), "{end}");
     assert_eq!(end["outcome"], "failed");
     assert_eq!(end["error_code"], "server_overloaded");
     assert!(end.get("error_category").is_none(), "{end}");
@@ -404,6 +404,53 @@ fn an_end_orders_before_a_prompt_that_began_after_it() {
     prompt(&setup, NEXT_TURN, "00000000000000000850");
     assert_eq!(activity(&setup)["type"], "thinking");
     assert_eq!(setup.followers.started.lock().unwrap().len(), followers + 1);
+}
+
+#[test]
+fn a_prompt_whose_thinking_loses_the_slot_is_still_followed() {
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    append(
+        &rollout_path(&setup),
+        &[failed(TURN, json!("server_overloaded"))],
+    );
+    // A child's permission prompt stands in the slot when the follower
+    // writes, so the turn's notify is stamped after it.
+    hook(
+        &setup,
+        "PermissionRequest",
+        json!({"tool_name":"shell","agent_id":"child-a","agent_type":"worker"}),
+        "00000000000000000860",
+    );
+    assert_eq!(recorded(&follow(&setup, &request)), "applied");
+    // The next prompt's hook took its stamp before that notify and writes
+    // after it: its thinking loses the slot, and its turn is still followed.
+    let rollout = rollout_path(&setup);
+    append(&rollout, &[started(NEXT_TURN)]);
+    let result = apply_as(
+        &setup,
+        &setup.naming(AGENT_PID),
+        &event(
+            "codex",
+            "UserPromptSubmit",
+            SESSION,
+            json!({"prompt":"go","turn_id":NEXT_TURN,"transcript_path":rollout}),
+        ),
+        "00000000000000000850",
+    );
+    assert_eq!(result.disposition, "ignored", "{result:?}");
+    let next = last_request(&setup);
+    assert_eq!(next.turn_id, NEXT_TURN);
+    append(&rollout, &[failed(NEXT_TURN, json!("server_overloaded"))]);
+    // The same notify already stands, so writing it again is skipped.
+    assert_eq!(recorded(&follow(&setup, &next)), "skipped");
+    let ends = attempt_outcomes(&setup);
+    let end = ends
+        .iter()
+        .find(|end| end["correlation"]["turn_id"] == NEXT_TURN)
+        .expect("the next turn's end");
+    assert_eq!(end["turn_end"]["status"], "recorded");
+    assert_eq!(activity(&setup)["type"], "notify");
 }
 
 #[test]

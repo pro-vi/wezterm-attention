@@ -22,7 +22,7 @@ use crate::identity::PaneAddress;
 use crate::launch::{ClaimOwner, OwnerState, owner_state};
 use crate::lifecycle::{LifecycleResult, binding_id};
 use crate::protocol::{AttentionError, DiagnosticCode, Result};
-use crate::providers::{ProviderEvent, safe_label, safe_text};
+use crate::providers::{ProviderEvent, safe_text};
 use crate::query::PaneScope;
 use crate::records::{open_state_lock, state_root, turn_follower_lock};
 use crate::wezterm::{ProcessStart, RuntimePorts};
@@ -110,8 +110,6 @@ pub struct Rollout {
     offset: u64,
     /// Whether the read stopped inside an overlong line, skipped to its end.
     skipping: bool,
-    /// The Codex version the rollout's header names, when it is a safe label.
-    pub source_version: Option<String>,
 }
 
 impl Rollout {
@@ -154,9 +152,6 @@ impl Rollout {
         if offset > metadata.len() {
             return Err(Refusal::Shrunk);
         }
-        let source_version = header
-            .pointer("/payload/cli_version")
-            .and_then(|version| safe_label(version, "cli_version").ok());
         Ok(Self {
             path: path.to_owned(),
             file,
@@ -164,7 +159,6 @@ impl Rollout {
             inode: metadata.ino(),
             offset,
             skipping: false,
-            source_version,
         })
     }
 
@@ -342,7 +336,8 @@ pub enum Followed {
     Ended(TurnSignal),
     /// The host process is gone, or could not be read.
     HostGone,
-    /// The binding was ended or replaced, or the claim moved on.
+    /// The binding is not the launch's current one or has ended, or the claim
+    /// moved on.
     BindingChanged,
     /// Another follower has this turn, or another turn's follower kept the
     /// lock and this turn's end was not yet in the rollout.
@@ -405,7 +400,6 @@ pub fn follow_turn(
                     &request.session_id,
                     &request.turn_id,
                     error_code,
-                    rollout.source_version.clone(),
                 );
                 return crate::lifecycle::record_codex_turn_failure(
                     &root,

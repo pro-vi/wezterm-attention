@@ -189,12 +189,7 @@ impl ProviderEvent {
     /// error, which as of Codex 0.162.0 runs no hook: the turn needs the
     /// user, and its attempt failed. `error_code` is Codex's name for the
     /// error; its message is never kept.
-    pub fn codex_turn_failure(
-        session_id: &str,
-        turn_id: &str,
-        error_code: Option<String>,
-        source_version: Option<String>,
-    ) -> Self {
+    pub fn codex_turn_failure(session_id: &str, turn_id: &str, error_code: Option<String>) -> Self {
         Self {
             source_event: crate::codex_rollout::TASK_COMPLETE.to_owned(),
             action: ProviderAction::Activity,
@@ -206,7 +201,10 @@ impl ProviderEvent {
                 turn_end: None,
                 observation_id: uuid::Uuid::new_v4().to_string(),
                 source_event: crate::codex_rollout::TASK_COMPLETE.to_owned(),
-                source_version,
+                // As of Codex 0.162.0 a resumed rollout's header names the
+                // Codex that created the session, not the one that wrote
+                // this end.
+                source_version: None,
                 observed_mono_ns: "00000000000000000000".to_owned(),
                 written_at_unix_ns: "00000000000000000000".to_owned(),
                 actor: Actor::Lead,
@@ -225,7 +223,7 @@ impl ProviderEvent {
     }
 }
 
-pub(crate) fn safe_label(value: &Value, field: &str) -> std::result::Result<String, Diagnostic> {
+fn safe_label(value: &Value, field: &str) -> std::result::Result<String, Diagnostic> {
     let Some(text) = value.as_str() else {
         return Err(Diagnostic::new(
             DiagnosticCode::RecordInvalid,
