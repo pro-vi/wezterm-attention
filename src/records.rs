@@ -654,8 +654,8 @@ pub fn review_lock(root: &Path, address: &PaneAddress, owner_key: &str) -> PathB
     reviews_dir(root, address).join(format!(".{owner_key}.lock"))
 }
 
-/// The lock the follower of one binding's Codex turns holds, beside the
-/// binding's records. Its bytes name the turn it follows.
+/// The lock the follower of one binding's turns holds, beside the binding's
+/// records. Its bytes name the turn it follows.
 pub fn turn_follower_lock(
     root: &Path,
     address: &PaneAddress,

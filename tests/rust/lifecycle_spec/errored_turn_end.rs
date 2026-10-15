@@ -6,8 +6,9 @@
 use super::self_claim::{apply_as, install, records, start};
 use super::*;
 use std::sync::atomic::Ordering;
-use wezterm_attention::codex_rollout::{
-    FollowRequest, Followed, Refusal, Rollout, TakenTurn, TurnSignal, follow_turn, take_turn,
+use wezterm_attention::codex_rollout::{Refusal, Rollout, TurnSignal};
+use wezterm_attention::turn_follower::{
+    CodexTurn, FollowRequest, Followed, FollowedTurn, TakenTurn, follow_turn, take_turn,
 };
 
 const SESSION: &str = "s";
@@ -126,6 +127,13 @@ fn last_request(setup: &Setup) -> FollowRequest {
         .last()
         .cloned()
         .expect("the prompt asked for a follower")
+}
+
+/// The Codex turn `request` follows.
+fn codex_turn(request: &mut FollowRequest) -> &mut CodexTurn {
+    match &mut request.turn {
+        FollowedTurn::Codex(turn) => turn,
+    }
 }
 
 /// A pane its shell claimed, where Codex session "s" started and a prompt
@@ -475,8 +483,8 @@ fn a_prompt_whose_thinking_loses_the_slot_is_still_followed() {
         "00000000000000000850",
     );
     assert_eq!(result.disposition, "ignored", "{result:?}");
-    let next = last_request(&setup);
-    assert_eq!(next.turn_id, NEXT_TURN);
+    let mut next = last_request(&setup);
+    assert_eq!(codex_turn(&mut next).turn_id, NEXT_TURN);
     append(&rollout, &[failed(NEXT_TURN, json!("server_overloaded"))]);
     // The same notify already stands, so writing it again is skipped.
     assert_eq!(recorded(&follow(&setup, &next)), "skipped");
@@ -499,8 +507,8 @@ fn a_turn_failing_after_a_superseded_failure_is_recorded() {
     );
     prompt(&setup, NEXT_TURN, "00000000000000000400");
     assert_eq!(recorded(&follow(&setup, &request)), "ignored");
-    let next = last_request(&setup);
-    assert_eq!(next.turn_id, NEXT_TURN);
+    let mut next = last_request(&setup);
+    assert_eq!(codex_turn(&mut next).turn_id, NEXT_TURN);
     append(
         &rollout_path(&setup),
         &[failed(NEXT_TURN, json!("server_overloaded"))],
@@ -678,8 +686,8 @@ fn one_follower_follows_a_turn_and_the_next_turn_waits_for_it() {
 
     // A follower for the next turn waits for the one that holds the lock.
     let mut next = request.clone();
-    next.turn_id = NEXT_TURN.to_owned();
-    next.offset = fs::metadata(rollout_path(&setup)).unwrap().len();
+    codex_turn(&mut next).turn_id = NEXT_TURN.to_owned();
+    codex_turn(&mut next).offset = fs::metadata(rollout_path(&setup)).unwrap().len();
     append(
         &rollout_path(&setup),
         &[started(NEXT_TURN), failed(NEXT_TURN, json!("other"))],
@@ -776,8 +784,8 @@ fn a_follower_handed_another_session_s_rollout_writes_nothing() {
         format!("{}{}", header("other"), failed(TURN, json!("other"))),
     )
     .unwrap();
-    request.rollout = other.display().to_string();
-    request.offset = 0;
+    codex_turn(&mut request).rollout = other.display().to_string();
+    codex_turn(&mut request).offset = 0;
     let before = records(&setup);
     assert!(matches!(
         follow(&setup, &request),
@@ -873,13 +881,15 @@ fn an_admitted_codex_prompt_asks_for_one_follower_of_its_turn() {
             address,
             launch_id: setup.env["WEZTERM_ATTENTION_LAUNCH_ID"].clone(),
             session_id: SESSION.to_owned(),
-            turn_id: TURN.to_owned(),
             host_pid: AGENT_PID,
             host_started_sec: agent.start.seconds,
             host_started_usec: agent.start.microseconds,
             host_boot_session_id: BOOT_SESSION.to_owned(),
-            rollout: rollout_path(&setup).display().to_string(),
-            offset: fs::metadata(rollout_path(&setup)).unwrap().len(),
+            turn: FollowedTurn::Codex(CodexTurn {
+                turn_id: TURN.to_owned(),
+                rollout: rollout_path(&setup).display().to_string(),
+                offset: fs::metadata(rollout_path(&setup)).unwrap().len(),
+            }),
         }
     );
 }

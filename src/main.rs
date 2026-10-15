@@ -80,7 +80,7 @@ enum HookCommand {
     Publish(PublishArgs),
     /// Accept one provider callback.
     Event(EventArgs),
-    /// Follow one Codex turn's rollout until it ends; started by a Codex prompt hook.
+    /// Follow one lead turn until it ends; started by a prompt hook.
     #[command(hide = true)]
     FollowTurn(FollowTurnArgs),
 }
@@ -626,7 +626,7 @@ fn run_hooks_follow_turn(
 ) -> Result<ExitCode, AttentionError> {
     let request = serde_json::from_str(&args.request)
         .map_err(|_| AttentionError::usage("follow-turn request is invalid"))?;
-    wezterm_attention::codex_rollout::follow_turn(
+    wezterm_attention::turn_follower::follow_turn(
         &request,
         environment,
         &system_ports(),

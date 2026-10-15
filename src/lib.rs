@@ -44,6 +44,7 @@ pub mod protocol;
 pub mod providers;
 pub mod query;
 pub mod records;
+pub mod turn_follower;
 pub mod wezterm;
 
 pub use launch::{

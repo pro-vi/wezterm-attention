@@ -7,67 +7,21 @@
 //! complete lines of three shapes, as Codex 0.162.0 writes them, are acted on;
 //! any other shape yields nothing, never a record.
 
-use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::identity::PaneAddress;
-use crate::launch::{ClaimOwner, OwnerState, owner_state};
-use crate::lifecycle::{LifecycleResult, binding_id};
-use crate::protocol::{AttentionError, DiagnosticCode, Result};
-use crate::providers::{ProviderEvent, safe_text};
-use crate::query::PaneScope;
-use crate::records::{open_state_lock, state_root, turn_follower_lock};
-use crate::wezterm::{ProcessStart, RuntimePorts};
+use crate::providers::safe_text;
 
-/// The `source_event` a turn end read from the rollout carries. The
-/// manifest's `native_hooks` do not declare it, and a hook event they do not
-/// declare is ignored, so a hook cannot claim it.
+/// The `source_event` a turn end read from the rollout carries; see
+/// [`crate::turn_follower::FOLLOWER_SOURCES`].
 pub const TASK_COMPLETE: &str = "task_complete";
 
 /// The longest line read. A longer one is skipped unread.
 const MAX_LINE_BYTES: usize = 4 << 20;
-
-/// How many polls a follower waits for another turn's follower to leave the
-/// lock; that follower leaves within one poll of seeing its turn end.
-const TAKE_OVER_POLLS: u32 = 10;
-
-/// What a follower is handed: the binding's scope, the turn, the host process
-/// whose hook saw the turn start, and where in which rollout to read from.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct FollowRequest {
-    pub address: PaneAddress,
-    pub launch_id: String,
-    pub session_id: String,
-    pub turn_id: String,
-    pub host_pid: i32,
-    pub host_started_sec: u64,
-    pub host_started_usec: u32,
-    pub host_boot_session_id: String,
-    pub rollout: String,
-    pub offset: u64,
-}
-
-impl FollowRequest {
-    fn host(&self) -> ClaimOwner {
-        ClaimOwner {
-            pid: self.host_pid,
-            start: ProcessStart {
-                seconds: self.host_started_sec,
-                microseconds: self.host_started_usec,
-            },
-            boot_session_id: self.host_boot_session_id.clone(),
-        }
-    }
-}
 
 /// How the followed turn came to its end, as the rollout says.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -261,157 +215,4 @@ fn error_code(info: &Value) -> Option<String> {
         }
     };
     safe_text(code, "codex_error_info").ok()
-}
-
-/// The binding's follower lock, held by the follower of one of its turns and
-/// naming that turn. A follower kept out of it reads without it.
-pub struct FollowerLock(File);
-
-impl Drop for FollowerLock {
-    fn drop(&mut self) {
-        let _ = self.0.unlock();
-    }
-}
-
-/// What [`take_turn`] found.
-pub enum TakenTurn {
-    /// The lock, now naming this turn.
-    Taken(FollowerLock),
-    /// Another follower has this turn.
-    AlreadyFollowed,
-    /// Another turn's follower kept the lock for all of the wait.
-    KeptOut,
-}
-
-/// Take the follower lock at `path` for `turn_id`, waiting up to `wait` for
-/// another turn's follower to leave.
-pub fn take_turn(path: &Path, turn_id: &str, wait: Duration) -> Result<TakenTurn> {
-    let mut file = open_state_lock(path)?;
-    let deadline = Instant::now() + wait;
-    loop {
-        match file.try_lock() {
-            Ok(()) => break,
-            Err(std::fs::TryLockError::WouldBlock) => {
-                let mut followed = String::new();
-                let _ = file.seek(SeekFrom::Start(0));
-                let _ = file.read_to_string(&mut followed);
-                if followed == turn_id {
-                    return Ok(TakenTurn::AlreadyFollowed);
-                }
-                if Instant::now() >= deadline {
-                    return Ok(TakenTurn::KeptOut);
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
-            Err(std::fs::TryLockError::Error(_)) => {
-                return Err(AttentionError::new(
-                    DiagnosticCode::ProbeUnavailable,
-                    "the turn follower's lock is unavailable",
-                ));
-            }
-        }
-    }
-    let named = file
-        .set_len(0)
-        .and_then(|()| file.seek(SeekFrom::Start(0)))
-        .and_then(|_| file.write_all(turn_id.as_bytes()));
-    if named.is_err() {
-        return Err(AttentionError::new(
-            DiagnosticCode::StatePermissions,
-            "the turn follower's lock could not be written",
-        ));
-    }
-    Ok(TakenTurn::Taken(FollowerLock(file)))
-}
-
-/// How a follower finished.
-#[derive(Clone, Debug)]
-pub enum Followed {
-    /// The turn ended on an error, and this is what recording it did.
-    Recorded(LifecycleResult),
-    /// The turn ended some other way; its own hook records that, or nothing
-    /// does.
-    Ended(TurnSignal),
-    /// The host process is gone, or could not be read.
-    HostGone,
-    /// The binding is not the launch's current one or has ended, or the claim
-    /// moved on.
-    BindingChanged,
-    /// Another follower has this turn, or another turn's follower kept the
-    /// lock and this turn's end was not yet in the rollout.
-    AlreadyFollowed,
-    Refused(Refusal),
-}
-
-/// Follow `request`'s turn until it ends, its host is gone or its binding
-/// stops being current, reading the rollout every `poll`. A follower that
-/// another turn's follower keeps out of the lock for its wait reads the
-/// rollout once instead. Only an errored end is recorded.
-pub fn follow_turn(
-    request: &FollowRequest,
-    env: &BTreeMap<String, String>,
-    ports: &RuntimePorts<'_>,
-    poll: Duration,
-) -> Result<Followed> {
-    let invalid = || AttentionError::usage("follow-turn request is invalid");
-    PaneScope::new(request.address.clone(), request.launch_id.clone(), None)
-        .map_err(|_| invalid())?;
-    safe_text(&request.session_id, "session_id").map_err(|_| invalid())?;
-    safe_text(&request.turn_id, "turn_id").map_err(|_| invalid())?;
-    let root = state_root(env)?;
-    let binding = binding_id("codex", &request.session_id, &request.launch_id);
-    let current = || {
-        crate::lifecycle::followed_binding(&root, &request.address, &request.launch_id, &binding)
-            .is_some()
-    };
-    if !current() {
-        return Ok(Followed::BindingChanged);
-    }
-    let lock = turn_follower_lock(&root, &request.address, &request.launch_id, &binding);
-    let held = match take_turn(&lock, &request.turn_id, poll * TAKE_OVER_POLLS)? {
-        TakenTurn::Taken(lock) => Some(lock),
-        TakenTurn::AlreadyFollowed => return Ok(Followed::AlreadyFollowed),
-        // A later turn's follower can hold the lock while this turn's end is
-        // already written, so the rollout is read once rather than left.
-        TakenTurn::KeptOut => None,
-    };
-    let mut rollout = match Rollout::open(
-        Path::new(&request.rollout),
-        &request.session_id,
-        request.offset,
-    ) {
-        Ok(rollout) => rollout,
-        Err(refusal) => return Ok(Followed::Refused(refusal)),
-    };
-    let host = request.host();
-    loop {
-        if owner_state(&host, ports.processes) != OwnerState::Alive {
-            return Ok(Followed::HostGone);
-        }
-        if !current() {
-            return Ok(Followed::BindingChanged);
-        }
-        match rollout.next_signal(&request.turn_id) {
-            Err(refusal) => return Ok(Followed::Refused(refusal)),
-            Ok(Some(TurnSignal::Failed { error_code })) => {
-                let event = ProviderEvent::codex_turn_failure(
-                    &request.session_id,
-                    &request.turn_id,
-                    error_code,
-                );
-                return crate::lifecycle::record_codex_turn_failure(
-                    &root,
-                    &request.address,
-                    &request.launch_id,
-                    &host,
-                    &event,
-                    ports,
-                )
-                .map(Followed::Recorded);
-            }
-            Ok(Some(signal)) => return Ok(Followed::Ended(signal)),
-            Ok(None) if held.is_none() => return Ok(Followed::AlreadyFollowed),
-            Ok(None) => thread::sleep(poll),
-        }
-    }
 }

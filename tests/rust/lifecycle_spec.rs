@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use uuid::Uuid;
-use wezterm_attention::codex_rollout::FollowRequest;
 use wezterm_attention::identity::pane_address;
 use wezterm_attention::lifecycle::{
     apply_mark_activity, apply_mark_clear, apply_mark_review, apply_provider_event, binding_id,
@@ -22,6 +21,7 @@ use wezterm_attention::protocol::DiagnosticCode;
 use wezterm_attention::providers::{ProviderAction, ProviderEvent, parse_provider_event};
 use wezterm_attention::query::read_bindings;
 use wezterm_attention::records::{atomic_replace, launch_dir, pane_dir, state_root, with_lock};
+use wezterm_attention::turn_follower::FollowRequest;
 use wezterm_attention::wezterm::{
     Clock, ControllingTerminal, PaneLister, PaneRow, ProcessFacts, ProcessInspector, ProcessRead,
     ProcessStart, RuntimePorts, TtyWriter, TurnFollowers,
@@ -84,6 +84,8 @@ mod errored_turn_end;
 mod host_facet;
 #[path = "lifecycle_spec/inherited_host.rs"]
 mod inherited_host;
+#[path = "lifecycle_spec/turn_follower.rs"]
+mod turn_follower;
 
 struct Scratch(PathBuf);
 

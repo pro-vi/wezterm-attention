@@ -304,11 +304,11 @@ pub struct RuntimePorts<'a> {
     pub followers: &'a dyn TurnFollowers,
 }
 
-/// Starts a Codex turn follower without waiting for it.
+/// Starts a turn follower without waiting for it.
 pub trait TurnFollowers {
     fn start(
         &self,
-        request: &crate::codex_rollout::FollowRequest,
+        request: &crate::turn_follower::FollowRequest,
         env: &BTreeMap<String, String>,
     ) -> Result<()>;
 }
@@ -325,7 +325,7 @@ pub struct SpawnedFollowers;
 impl TurnFollowers for SpawnedFollowers {
     fn start(
         &self,
-        request: &crate::codex_rollout::FollowRequest,
+        request: &crate::turn_follower::FollowRequest,
         env: &BTreeMap<String, String>,
     ) -> Result<()> {
         let request = serde_json::to_string(request).map_err(AttentionError::record_json)?;
@@ -371,7 +371,7 @@ pub struct NoTurnFollowers;
 impl TurnFollowers for NoTurnFollowers {
     fn start(
         &self,
-        _: &crate::codex_rollout::FollowRequest,
+        _: &crate::turn_follower::FollowRequest,
         _: &BTreeMap<String, String>,
     ) -> Result<()> {
         Ok(())

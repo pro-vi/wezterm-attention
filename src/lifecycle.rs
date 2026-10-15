@@ -14,7 +14,6 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::children::{ChildPresenceSet, ChildTransition, EndMark};
-use crate::codex_rollout::FollowRequest;
 use crate::hold_check::{self, Bypass, HoldCheckInput, HoldCheckOutcome};
 use crate::identity::{PaneAddress, canonical_uuid, pane_address};
 use crate::launch::{ClaimOwner, OwnerState, owner_state};
@@ -38,6 +37,7 @@ use crate::records::{
     review_lock, session_binding_files, session_entry, session_entry_path,
     session_registration_lock, state_root, with_lock, within_read_bound,
 };
+use crate::turn_follower::{CodexTurn, FollowRequest, FollowedTurn};
 use crate::wezterm::RuntimePorts;
 
 #[derive(Debug)]
@@ -3238,7 +3238,7 @@ fn apply_provider_event_inner(
 /// Start the follower of the Codex lead turn a prompt began. As of Codex
 /// 0.162.0 a turn that ends on a model error runs no hook, and only the session
 /// rollout says it ended; the follower reads it from where the rollout stands
-/// now (see [`crate::codex_rollout`]). It needs the hook's proof of its host,
+/// now (see [`crate::turn_follower`]). It needs the hook's proof of its host,
 /// because it lives no longer than that process. It starts whatever the
 /// prompt's disposition: a prompt whose thinking lost the activity slot still
 /// began its turn, and the follower writes only for a turn the binding
@@ -3261,13 +3261,15 @@ fn start_turn_follower(
         address: resolved.address.clone(),
         launch_id: resolved.launch_id.clone(),
         session_id: event.provider_session_id.clone()?,
-        turn_id,
         host_pid: host.pid,
         host_started_sec: host.start.seconds,
         host_started_usec: host.start.microseconds,
         host_boot_session_id: host.boot_session_id.clone(),
-        rollout,
-        offset,
+        turn: FollowedTurn::Codex(CodexTurn {
+            turn_id,
+            rollout,
+            offset,
+        }),
     };
     ports
         .followers
@@ -3300,6 +3302,61 @@ pub(crate) fn followed_binding(
     .filter(|binding| !state.ended(binding))
 }
 
+/// The launch a turn follower writes in, as the pane's claim names it now;
+/// otherwise what the follower reports. A follower carries no hook's proof,
+/// so its write checks its scope and host again under the locks
+/// ([`follower_refusal`]).
+fn follower_launch(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+) -> Result<std::result::Result<ResolvedLaunch<'static>, LifecycleResult>> {
+    let Some(claim) = read_claim(root, address)? else {
+        return Ok(Err(LifecycleResult::diagnosed(
+            Disposition::Ignored,
+            DiagnosticCode::ClaimStale,
+            "the pane has no claim",
+        )));
+    };
+    Ok(Ok(ResolvedLaunch {
+        evidence: None,
+        root: root.to_owned(),
+        address: address.clone(),
+        launch_id: launch_id.to_owned(),
+        claim,
+        host: None,
+        publication_diagnostic: None,
+    }))
+}
+
+/// What a turn follower's write reports instead of writing, read under the
+/// launch and claim locks: its binding is no longer current or has ended, or
+/// the agent process `host` is gone or cannot be read.
+fn follower_refusal(
+    resolved: &ResolvedLaunch,
+    binding_id: &str,
+    host: &ClaimOwner,
+    ports: &RuntimePorts<'_>,
+) -> Option<CommitPlan<Mutation>> {
+    let message = if followed_binding(
+        &resolved.root,
+        &resolved.address,
+        &resolved.launch_id,
+        binding_id,
+    )
+    .is_none()
+    {
+        "the followed turn's binding is no longer current"
+    } else if owner_state(host, ports.processes) != OwnerState::Alive {
+        "the turn's agent process is gone"
+    } else {
+        return None;
+    };
+    Some(CommitPlan::reporting(Mutation::plain(
+        LifecycleResult::diagnosed(Disposition::Ignored, DiagnosticCode::ClaimStale, message),
+    )))
+}
+
 /// Record the end of a Codex lead turn that ended on a model error, from
 /// `event`, which [`ProviderEvent::codex_turn_failure`] made for it. As of
 /// Codex 0.162.0 no hook reports such an end, so this is not a hook's write:
@@ -3321,22 +3378,11 @@ pub(crate) fn record_codex_turn_failure(
     ports: &RuntimePorts<'_>,
 ) -> Result<LifecycleResult> {
     let written_at = ports.clock.unix_ns20()?;
-    let Some(claim) = read_claim(root, address)? else {
-        return Ok(LifecycleResult::diagnosed(
-            Disposition::Ignored,
-            DiagnosticCode::ClaimStale,
-            "the pane has no claim",
-        ));
+    let resolved = match follower_launch(root, address, launch_id)? {
+        Ok(resolved) => resolved,
+        Err(refused) => return Ok(refused),
     };
-    let resolved = ResolvedLaunch {
-        evidence: None,
-        root: root.to_owned(),
-        address: address.clone(),
-        launch_id: launch_id.to_owned(),
-        claim,
-        host: None,
-        publication_diagnostic: None,
-    };
+    let provider = event_provider(event)?;
     let binding_id = event_binding_id(event, launch_id)?;
     let identity = resolved.binding(&binding_id);
     let activity_path = identity.path(root, "activity")?;
@@ -3344,22 +3390,14 @@ pub(crate) fn record_codex_turn_failure(
         .observation
         .as_ref()
         .and_then(LifecycleObservation::turn_id);
-    let refused = |message: &str| {
-        Ok(CommitPlan::reporting(Mutation::plain(
-            LifecycleResult::diagnosed(Disposition::Ignored, DiagnosticCode::ClaimStale, message),
-        )))
-    };
     let (mutation, ()) = commit(
         root,
         &[&resolved.launch_lock(), &resolved.claim_lock()],
         "current_binding",
         &resolved.launch(),
         |_| {
-            if followed_binding(root, address, launch_id, &binding_id).is_none() {
-                return refused("the followed turn's binding is no longer current");
-            }
-            if owner_state(host, ports.processes) != OwnerState::Alive {
-                return refused("the turn's agent process is gone");
+            if let Some(refused) = follower_refusal(&resolved, &binding_id, host, ports) {
+                return Ok(refused);
             }
             let snapshot = read_record_at(root, "lifecycle_snapshot", &identity)?
                 .map(serde_json::from_value::<LifecycleSnapshot>)
@@ -3383,7 +3421,7 @@ pub(crate) fn record_codex_turn_failure(
             // end is ordered just after it, not when this follower read it.
             let Some((last, after_turn)) =
                 latest(lead_turns().filter(|item| item.turn_id() == turn_id))
-                    .filter(|last| !last.ends_turn(Provider::Codex))
+                    .filter(|last| !last.ends_turn(provider))
                     .and_then(|last| {
                         Some((
                             last,
