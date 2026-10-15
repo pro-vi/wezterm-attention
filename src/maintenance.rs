@@ -7,7 +7,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::claude_status::{self, Reading};
 use crate::identity::{PaneAddress, marker_address, socket_identity};
+use crate::launch::{ClaimOwner, OwnerState, owner_state};
 use crate::presence::{
     FailedListingOncePerSocket, ListOncePerSocket, PaneEvidence, PanePresence,
     ProbeOncePerAssembly, kept_history_code, pane_evidence, reader_presence, recorded_socket,
@@ -170,7 +172,7 @@ fn runtime_manifest_bytes() -> Result<Option<Vec<u8>>> {
 }
 
 /// `attention doctor` as run from a process with `environment`. Only
-/// `WEZTERM_UNIX_SOCKET` and `WEZTERM_PANE` are read from it.
+/// `WEZTERM_UNIX_SOCKET`, `WEZTERM_PANE` and `HOME` are read from it.
 ///
 /// A probe that found nothing to check says `unobserved`, never `healthy`: a
 /// setup with no state, no claims and no pane passes every check vacuously,
@@ -323,6 +325,14 @@ pub fn doctor_with_environment(
     probes.push(json!({"name":"environment","status":environment_status}));
     let codex_status = codex_server_probe(processes, &mut diagnostics);
     probes.push(json!({"name":"codex_server","status":codex_status}));
+    let claude_status = claude_status_probe(
+        root,
+        &audited_records,
+        environment,
+        inspector,
+        &mut diagnostics,
+    );
+    probes.push(json!({"name":"claude_status","status":claude_status}));
     diagnostics.extend(state_diagnostics);
     let diagnostics = fold_kept_history(diagnostics);
     let unobserved: Vec<Value> = probes
@@ -332,7 +342,7 @@ pub fn doctor_with_environment(
         .collect();
     Ok((
         json!({
-            "scope": ["state_files","socket","processes","permissions","versions","environment","codex_server"],
+            "scope": ["state_files","socket","processes","permissions","versions","environment","codex_server","claude_status"],
             "unobserved": unobserved,
             "probes": probes,
             "bindings_scanned": rows.len(),
@@ -383,6 +393,81 @@ fn codex_server_probe(
         );
         if let Some(home) = &server.codex_home {
             item.set("codex_home", home.display().to_string());
+        }
+        diagnostics.push(item);
+        status = "finding";
+    }
+    status
+}
+
+/// Whether the status file of each Claude Code session running now reads as
+/// one Attention understands: that file is how a turn stopped with Esc
+/// reaches the tab (see [`crate::claude_status`]). A session counts when its
+/// binding is current and its recorded host still runs. Each file it does not
+/// understand, or that is missing, is reported with the reason and the Claude
+/// Code version the file names, where it names one, since Esc no longer clears
+/// that session's tab. A file not understood is read once more first, so a
+/// read during a rewrite is not reported.
+fn claude_status_probe(
+    root: &Path,
+    records: &[Value],
+    environment: &BTreeMap<String, String>,
+    inspector: &dyn ProcessInspector,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> &'static str {
+    let mut status = "unobserved";
+    for host in records.iter().filter(|record| record["kind"] == "host") {
+        let (Some(address), Some(launch_id), Some(binding_id)) = (
+            record_address(host),
+            host["launch_id"].as_str(),
+            host["binding_id"].as_str(),
+        ) else {
+            continue;
+        };
+        let Some(binding) =
+            crate::lifecycle::followed_binding(root, &address, launch_id, binding_id)
+        else {
+            continue;
+        };
+        let (Some("claude"), Some(session), Ok(Some(owner))) = (
+            binding["provider"].as_str(),
+            binding["provider_session_id"].as_str(),
+            ClaimOwner::of(host),
+        ) else {
+            continue;
+        };
+        if owner_state(&owner, inspector) != OwnerState::Alive {
+            continue;
+        }
+        let Some(home) = environment.get("HOME") else {
+            continue;
+        };
+        let path = claude_status::status_path(binding["config_dir"].as_str(), home, owner.pid);
+        let mut reading = claude_status::read(&path, session, owner.pid);
+        if matches!(reading, Reading::Unreadable { .. }) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            reading = claude_status::read(&path, session, owner.pid);
+        }
+        let (reason, version) = match reading {
+            Reading::Working { .. } | Reading::Ended { .. } => {
+                if status == "unobserved" {
+                    status = "healthy";
+                }
+                continue;
+            }
+            Reading::Unreadable { reason, version } => (reason.as_str(), version),
+            Reading::Foreign(reason) => (reason.as_str(), None),
+            Reading::Gone => ("missing", None),
+        };
+        let mut item = Diagnostic::new(
+            DiagnosticCode::IntegrationVersionMismatch,
+            "a running Claude Code session's status file is not one Attention understands, \
+             so pressing Esc in it leaves its tab as it was",
+        );
+        item.set("reason", reason);
+        item.set("provider_session_id", session);
+        if let Some(version) = version {
+            item.set("claude_code_version", version);
         }
         diagnostics.push(item);
         status = "finding";

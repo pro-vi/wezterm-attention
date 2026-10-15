@@ -78,6 +78,8 @@ mod claim_fence;
 #[path = "lifecycle_spec/plugin_writes.rs"]
 mod plugin_writes;
 
+#[path = "lifecycle_spec/claude_status.rs"]
+mod claude_status;
 #[path = "lifecycle_spec/errored_turn_end.rs"]
 mod errored_turn_end;
 #[path = "lifecycle_spec/host_facet.rs"]

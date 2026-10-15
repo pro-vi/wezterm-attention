@@ -29,6 +29,7 @@
 )]
 
 pub mod children;
+pub mod claude_status;
 pub mod codex_rollout;
 pub mod consumer;
 pub mod hold_check;

@@ -2,7 +2,10 @@
 
 use super::*;
 use std::sync::atomic::AtomicUsize;
-use wezterm_attention::wezterm::{PaneProcessSet, ProcessInspector, ProcessListing, ProcessRead};
+use wezterm_attention::wezterm::{
+    ControllingTerminal, PaneProcessSet, ProcessFacts, ProcessInspector, ProcessListing,
+    ProcessRead, ProcessStart,
+};
 
 /// Offers one listing of every process, and counts how it is asked. Like the
 /// system probe, it answers whether it is available by taking a listing.
@@ -368,4 +371,240 @@ impl ProcessProbe for FailedListing {
     fn pane_processes(&self) -> ProcessListing {
         ProcessListing::Failed
     }
+}
+
+/// The pid, start and boot of the Claude Code process [`OneHost`] runs.
+const HOST_PID: i32 = 4321;
+const HOST_STARTED_USEC: u32 = 7;
+const BOOT: &str = "0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b";
+
+/// A process table where only the host at `HOST_PID` can run.
+struct OneHost {
+    running: bool,
+}
+
+impl ProcessInspector for OneHost {
+    fn self_claim_supported(&self) -> bool {
+        true
+    }
+
+    fn own_pid(&self) -> i32 {
+        0
+    }
+
+    fn process(&self, pid: i32) -> ProcessRead {
+        if pid != HOST_PID || !self.running {
+            return ProcessRead::Gone;
+        }
+        ProcessRead::Found(ProcessFacts {
+            parent_pid: 1,
+            process_group: HOST_PID,
+            terminal: ControllingTerminal::Absent,
+            terminal_foreground_group: HOST_PID,
+            uid: 501,
+            start: ProcessStart {
+                seconds: 1_700_000_000,
+                microseconds: HOST_STARTED_USEC,
+            },
+            traced: false,
+            zombie: false,
+        })
+    }
+
+    fn boot_session(&self) -> Option<String> {
+        Some(BOOT.to_owned())
+    }
+
+    fn terminal_device(&self, _path: &str) -> Option<u64> {
+        None
+    }
+}
+
+/// Records `HOST_PID` as the host of the binding of session-a, as a prompt
+/// hook that proved it would.
+fn record_claude_host(setup: &Setup) {
+    let (address, _) = pane_address(&setup.env).expect("address");
+    let launch = &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"];
+    atomic_replace(
+        &setup.binding_dir().join("host.json"),
+        &json!({
+            "kind":"host","schema":3,"address":address,"launch_id":launch,
+            "binding_id":binding_id("claude", "session-a", launch),
+            "owner_pid":HOST_PID.to_string(),"owner_started_sec":"1700000000",
+            "owner_started_usec":HOST_STARTED_USEC.to_string(),
+            "owner_boot_session_id":BOOT,"tty_path":"/dev/ttys888",
+            "tty_fingerprint":"f".repeat(64),"source_event":"UserPromptSubmit",
+            "written_at_unix_ns":"00000000001000000000"
+        }),
+    )
+    .expect("host record");
+}
+
+/// The status file fixture `name`, as the host's file for session-a.
+fn status_file(name: &str) -> Value {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/claude_status")
+        .join(format!("{name}.json"));
+    let mut file: Value =
+        serde_json::from_slice(&fs::read(path).expect("fixture")).expect("fixture JSON");
+    file["sessionId"] = json!("session-a");
+    file["pid"] = json!(HOST_PID);
+    file
+}
+
+fn write_status(directory: &Path, file: &Value) {
+    let sessions = directory.join("sessions");
+    fs::create_dir_all(&sessions).expect("sessions directory");
+    fs::write(
+        sessions.join(format!("{HOST_PID}.json")),
+        serde_json::to_vec(file).expect("status JSON"),
+    )
+    .expect("status file");
+}
+
+/// Esc reaches the tab only through the status file of a running Claude Code
+/// session, so doctor reads each one and names the Claude Code version of a
+/// file it does not understand.
+#[test]
+fn doctor_reports_whether_running_claude_sessions_status_files_are_understood() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let doctor = |running: bool| {
+        wezterm_attention::maintenance::doctor_with_environment(
+            &setup.root(),
+            &setup.env,
+            Some(&setup.panes),
+            Some(&setup.processes),
+            &OneHost { running },
+        )
+        .expect("doctor")
+    };
+    let mismatches = |diagnostics: &[wezterm_attention::protocol::Diagnostic]| {
+        diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IntegrationVersionMismatch)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let (result, _) = doctor(true);
+    assert_eq!(
+        probe_status(&result, "claude_status"),
+        "unobserved",
+        "no host is recorded: {result}"
+    );
+    assert!(
+        result["scope"]
+            .as_array()
+            .expect("scope")
+            .contains(&json!("claude_status")),
+        "{result}"
+    );
+    record_claude_host(&setup);
+    let (result, _) = doctor(false);
+    assert_eq!(
+        probe_status(&result, "claude_status"),
+        "unobserved",
+        "the host has exited: {result}"
+    );
+
+    let (result, diagnostics) = doctor(true);
+    assert_eq!(
+        probe_status(&result, "claude_status"),
+        "finding",
+        "{result}"
+    );
+    let found = mismatches(&diagnostics);
+    assert_eq!(found.len(), 1, "{diagnostics:?}");
+    assert_eq!(found[0].context.get("reason"), Some(&json!("missing")));
+
+    let claude = setup._scratch.0.join(".claude");
+    for name in ["busy", "waiting-permission", "idle", "shell"] {
+        write_status(&claude, &status_file(name));
+        let (result, diagnostics) = doctor(true);
+        assert_eq!(
+            probe_status(&result, "claude_status"),
+            "healthy",
+            "{name}: {result}"
+        );
+        assert!(
+            mismatches(&diagnostics).is_empty(),
+            "{name}: {diagnostics:?}"
+        );
+    }
+
+    let mut paused = status_file("busy");
+    paused["status"] = json!("paused");
+    write_status(&claude, &paused);
+    let (result, diagnostics) = doctor(true);
+    assert_eq!(
+        probe_status(&result, "claude_status"),
+        "finding",
+        "{result}"
+    );
+    let found = mismatches(&diagnostics);
+    assert_eq!(found.len(), 1, "{diagnostics:?}");
+    assert_eq!(
+        found[0].context.get("reason"),
+        Some(&json!("unknown_state"))
+    );
+    assert_eq!(
+        found[0].context.get("claude_code_version"),
+        Some(&json!("2.1.300"))
+    );
+    assert_eq!(
+        found[0].context.get("provider_session_id"),
+        Some(&json!("session-a"))
+    );
+    assert!(
+        !serde_json::to_string(&diagnostics)
+            .unwrap()
+            .contains("paused"),
+        "the file's own words stay out of the report: {diagnostics:?}"
+    );
+
+    let mut other = status_file("busy");
+    other["sessionId"] = json!("session-b");
+    write_status(&claude, &other);
+    let (result, diagnostics) = doctor(true);
+    assert_eq!(
+        probe_status(&result, "claude_status"),
+        "finding",
+        "{result}"
+    );
+    assert_eq!(
+        mismatches(&diagnostics)[0].context.get("reason"),
+        Some(&json!("other_session"))
+    );
+}
+
+/// A session started with `CLAUDE_CONFIG_DIR` keeps its status file there,
+/// and its binding records that directory.
+#[test]
+fn doctor_reads_a_claude_session_s_file_in_its_configuration_directory() {
+    let setup = Setup::new();
+    wezterm_attention::claim_launch(&setup.env, &setup.ports()).expect("claim");
+    let config = setup._scratch.0.join("claude-config");
+    let event = parse_provider_event(
+        "claude",
+        "SessionStart",
+        &json!({"session_id":"session-a","cwd":"/tmp/project",
+                "hook_event_name":"SessionStart","source":"startup"}),
+        &BTreeMap::from([("CLAUDE_CONFIG_DIR".to_owned(), config.display().to_string())]),
+    );
+    apply_provider_event(&event, &setup.env, "00000000000000000200", &setup.ports()).expect("bind");
+    record_claude_host(&setup);
+    write_status(&config, &status_file("idle"));
+    let (result, _) = wezterm_attention::maintenance::doctor_with_environment(
+        &setup.root(),
+        &setup.env,
+        Some(&setup.panes),
+        Some(&setup.processes),
+        &OneHost { running: true },
+    )
+    .expect("doctor");
+    assert_eq!(
+        probe_status(&result, "claude_status"),
+        "healthy",
+        "{result}"
+    );
 }
