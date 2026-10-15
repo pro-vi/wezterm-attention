@@ -37,7 +37,7 @@ use crate::records::{
     review_lock, session_binding_files, session_entry, session_entry_path,
     session_registration_lock, state_root, with_lock, within_read_bound,
 };
-use crate::turn_follower::{CodexTurn, FollowRequest, FollowedTurn};
+use crate::turn_follower::{ClaudeTurn, CodexTurn, FollowRequest, FollowedTurn};
 use crate::wezterm::RuntimePorts;
 
 #[derive(Debug)]
@@ -3496,6 +3496,139 @@ pub(crate) fn record_codex_turn_failure(
                         .map(|record| Replacement::always(activity_path.clone(), record))
                         .into_iter()
                         .collect(),
+                    ..CommitPlan::reporting(Mutation::plain(result))
+                },
+            ))
+        },
+        |mutation| apply_observed_outputs(&resolved, &binding_id, mutation),
+    )?;
+    Ok(mutation.result)
+}
+
+/// Whether the lead's latest prompt in the binding `binding_id` is the
+/// prompt `turn` follows. A prompt record that cannot be read names no
+/// prompt. A follower reads it without locks; its write reads it again under
+/// them.
+pub(crate) fn latest_prompt_is(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+    turn: &ClaudeTurn,
+) -> bool {
+    latest_prompt(
+        root,
+        &RecordIdentity::binding(address, launch_id, binding_id),
+    )
+    .is_some_and(|latest| follows(turn, &latest))
+}
+
+/// Whether `prompt` is the one `turn` follows.
+fn follows(turn: &ClaudeTurn, prompt: &PromptReference) -> bool {
+    prompt.observation_id == turn.prompt_observation_id
+        && prompt.observed_mono_ns == turn.prompt_observed_mono_ns
+}
+
+/// The lead's latest prompt, from the binding's prompt record; `None` when
+/// the record names none or cannot be read.
+fn latest_prompt(root: &Path, identity: &RecordIdentity) -> Option<PromptReference> {
+    read_record_at(root, "lead_prompts", identity)
+        .ok()
+        .flatten()
+        .and_then(|value| serde_json::from_value::<LeadPrompts>(value).ok())
+        .and_then(|prompts| prompts.latest)
+}
+
+/// Record that the user stopped the Claude Code lead turn `turn` follows, from `event`, which [`ProviderEvent::claude_status_interrupt`]
+/// made for it, and clear the activity. As of Claude Code 2.1.300 pressing Esc
+/// runs no hook; the follower saw the session's status file go from working to
+/// no turn (see [`crate::claude_status`]). It holds the scope and the host it
+/// was handed and checks both again under the launch and claim locks, as
+/// `apply_activity` takes them.
+///
+/// The turn must still be open: its prompt is the lead's latest prompt, and no
+/// lead observation after it ends the turn, its `Stop`, its `StopFailure` or
+/// another follower's interrupt. The prompt's own observation may have left
+/// the pools; only stamps are compared. The end and the clear are ordered just
+/// after the latest of the prompt, the lead's observations and the activity,
+/// not when the follower read the file, so a prompt whose hook began before
+/// this write and is recorded after it still shows.
+pub(crate) fn record_claude_interrupt(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    host: &ClaimOwner,
+    turn: &ClaudeTurn,
+    event: &ProviderEvent,
+    ports: &RuntimePorts<'_>,
+) -> Result<LifecycleResult> {
+    let written_at = ports.clock.unix_ns20()?;
+    let resolved = match follower_launch(root, address, launch_id)? {
+        Ok(resolved) => resolved,
+        Err(refused) => return Ok(refused),
+    };
+    let provider = event_provider(event)?;
+    let binding_id = event_binding_id(event, launch_id)?;
+    let identity = resolved.binding(&binding_id);
+    let (mutation, ()) = commit(
+        root,
+        &[&resolved.launch_lock(), &resolved.claim_lock()],
+        "current_binding",
+        &resolved.launch(),
+        |_| {
+            if let Some(refused) = follower_refusal(&resolved, &binding_id, host, ports) {
+                return Ok(refused);
+            }
+            let skipped = || {
+                Ok(CommitPlan::reporting(Mutation::plain(
+                    LifecycleResult::new(Disposition::Skipped),
+                )))
+            };
+            let Some(latest) =
+                latest_prompt(root, &identity).filter(|latest| follows(turn, latest))
+            else {
+                return skipped();
+            };
+            let snapshot = read_record_at(root, "lifecycle_snapshot", &identity)?
+                .map(serde_json::from_value::<LifecycleSnapshot>)
+                .transpose()
+                .map_err(|_| {
+                    AttentionError::new(
+                        DiagnosticCode::RecordInvalid,
+                        "lifecycle snapshot is invalid",
+                    )
+                })?;
+            let lead = || {
+                snapshot
+                    .iter()
+                    .flat_map(LifecycleSnapshot::lead_observations)
+            };
+            if lead().any(|item| {
+                item.observed_mono_ns > latest.observed_mono_ns && item.ends_turn(provider)
+            }) {
+                return skipped();
+            }
+            let activity = read_record_at(root, "activity", &identity)?;
+            let Some(observation) = just_after(
+                iter::once(latest.observed_mono_ns.as_str())
+                    .chain(lead().map(|item| item.observed_mono_ns.as_str()))
+                    .chain(
+                        activity
+                            .as_ref()
+                            .and_then(|record| record["observed_mono_ns"].as_str()),
+                    ),
+            ) else {
+                return skipped();
+            };
+            let (result, clear) =
+                activity_clear_plan(root, address, launch_id, &binding_id, &observation)?;
+            Ok(append_observation(
+                &resolved,
+                event,
+                &observation,
+                &written_at,
+                CommitPlan {
+                    replacements: clear.into_iter().collect(),
                     ..CommitPlan::reporting(Mutation::plain(result))
                 },
             ))

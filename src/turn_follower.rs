@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::claude_status::{Foreign, Reading, SESSION_STATUS};
 use crate::codex_rollout::{Refusal, Rollout, TASK_COMPLETE, TurnSignal};
 use crate::identity::PaneAddress;
 use crate::launch::{ClaimOwner, OwnerState, owner_state};
@@ -29,7 +30,10 @@ use crate::wezterm::{ProcessStart, RuntimePorts};
 /// Each provider's `source_event` for the turn ends its follower records.
 /// The manifest's `native_hooks` do not declare them, and a hook event they do
 /// not declare is ignored, so a hook cannot claim one.
-pub const FOLLOWER_SOURCES: [(Provider, &str); 1] = [(Provider::Codex, TASK_COMPLETE)];
+pub const FOLLOWER_SOURCES: [(Provider, &str); 2] = [
+    (Provider::Codex, TASK_COMPLETE),
+    (Provider::Claude, SESSION_STATUS),
+];
 
 /// How many polls a follower waits for another turn's follower to leave the
 /// lock; that follower leaves within one poll of seeing its turn end.
@@ -55,6 +59,7 @@ pub struct FollowRequest {
 #[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FollowedTurn {
     Codex(CodexTurn),
+    Claude(ClaudeTurn),
 }
 
 /// A Codex turn, and where in which rollout to read from.
@@ -66,10 +71,22 @@ pub struct CodexTurn {
     pub offset: u64,
 }
 
+/// A Claude Code turn, named by the prompt that began it, since a Claude
+/// prompt carries no turn id: that prompt as the writer stored it, and the
+/// status file of the host process.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaudeTurn {
+    pub prompt_observation_id: String,
+    pub prompt_observed_mono_ns: String,
+    pub status_file: String,
+}
+
 impl FollowedTurn {
     pub fn provider(&self) -> Provider {
         match self {
             Self::Codex(_) => Provider::Codex,
+            Self::Claude(_) => Provider::Claude,
         }
     }
 
@@ -78,6 +95,7 @@ impl FollowedTurn {
     pub fn key(&self) -> &str {
         match self {
             Self::Codex(turn) => &turn.turn_id,
+            Self::Claude(turn) => &turn.prompt_observation_id,
         }
     }
 }
@@ -184,6 +202,13 @@ pub enum Followed {
     AlreadyFollowed,
     /// The Codex rollout could not be read for this turn.
     Refused(Refusal),
+    /// A newer prompt replaced the followed Claude prompt, or the prompt
+    /// record no longer names it.
+    PromptReplaced,
+    /// The Claude Code status file is gone: its process has exited.
+    StatusGone,
+    /// The file at the status file's path is not the one to read.
+    StatusForeign(Foreign),
 }
 
 /// What one provider's follower reads its turn's end from.
@@ -191,6 +216,12 @@ enum Reader<'a> {
     Codex {
         turn: &'a CodexTurn,
         rollout: Rollout,
+    },
+    /// Read whole at every poll. `working` is when the latest reading that
+    /// showed the turn working says it changed.
+    Claude {
+        turn: &'a ClaudeTurn,
+        working: Option<u64>,
     },
 }
 
@@ -201,6 +232,10 @@ impl<'a> Reader<'a> {
                 Rollout::open(Path::new(&turn.rollout), &request.session_id, turn.offset)
                     .map(|rollout| Self::Codex { turn, rollout })
             }
+            FollowedTurn::Claude(turn) => Ok(Self::Claude {
+                turn,
+                working: None,
+            }),
         }
     }
 
@@ -235,6 +270,52 @@ impl<'a> Reader<'a> {
                 Ok(Some(signal)) => Ok(Some(Followed::Ended(signal))),
                 Ok(None) => Ok(None),
             },
+            Self::Claude { turn, working } => {
+                if !crate::lifecycle::latest_prompt_is(
+                    root,
+                    &request.address,
+                    &request.launch_id,
+                    &request.binding_id(),
+                    turn,
+                ) {
+                    return Ok(Some(Followed::PromptReplaced));
+                }
+                match crate::claude_status::read(
+                    Path::new(&turn.status_file),
+                    &request.session_id,
+                    request.host_pid,
+                ) {
+                    Reading::Gone => Ok(Some(Followed::StatusGone)),
+                    Reading::Foreign(reason) => Ok(Some(Followed::StatusForeign(reason))),
+                    // Neither working nor ended: a later reading decides.
+                    Reading::Unreadable { .. } => Ok(None),
+                    Reading::Working { updated_at } => {
+                        *working = Some(updated_at);
+                        Ok(None)
+                    }
+                    // Only a change from working that this follower saw, by
+                    // the file's own clock; an ended reading alone may be from
+                    // before the turn began.
+                    Reading::Ended {
+                        updated_at,
+                        version,
+                    } if working.is_some_and(|working| updated_at > working) => {
+                        let event =
+                            ProviderEvent::claude_status_interrupt(&request.session_id, version);
+                        crate::lifecycle::record_claude_interrupt(
+                            root,
+                            &request.address,
+                            &request.launch_id,
+                            host,
+                            turn,
+                            &event,
+                            ports,
+                        )
+                        .map(|result| Some(Followed::Recorded(result)))
+                    }
+                    Reading::Ended { .. } => Ok(None),
+                }
+            }
         }
     }
 }

@@ -221,6 +221,32 @@ impl ProviderEvent {
             ..Self::default()
         }
     }
+
+    /// The end of a Claude Code lead turn the user stopped with Esc, which
+    /// as of Claude Code 2.1.300 runs no hook: the session's status file went
+    /// from a working turn to none. Nothing is left to report, so the
+    /// activity is cleared, as a Codex `Interrupt` clears it. `version` is
+    /// the Claude Code version the file names.
+    pub fn claude_status_interrupt(session_id: &str, version: Option<String>) -> Self {
+        Self {
+            source_event: crate::claude_status::SESSION_STATUS.to_owned(),
+            action: ProviderAction::Clear,
+            provider: Some(Provider::Claude),
+            provider_session_id: Some(session_id.to_owned()),
+            observation: Some(LifecycleObservation {
+                turn_end: None,
+                observation_id: uuid::Uuid::new_v4().to_string(),
+                source_event: crate::claude_status::SESSION_STATUS.to_owned(),
+                source_version: version,
+                observed_mono_ns: "00000000000000000000".to_owned(),
+                written_at_unix_ns: "00000000000000000000".to_owned(),
+                actor: Actor::Lead,
+                correlation: None,
+                body: ObservationBody::UserInterrupt,
+            }),
+            ..Self::default()
+        }
+    }
 }
 
 fn safe_label(value: &Value, field: &str) -> std::result::Result<String, Diagnostic> {

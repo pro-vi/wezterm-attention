@@ -133,6 +133,7 @@ fn last_request(setup: &Setup) -> FollowRequest {
 fn codex_turn(request: &mut FollowRequest) -> &mut CodexTurn {
     match &mut request.turn {
         FollowedTurn::Codex(turn) => turn,
+        other @ FollowedTurn::Claude(_) => panic!("not a Codex turn: {other:?}"),
     }
 }
 

@@ -227,9 +227,21 @@ A turn that ends without `Stop` still ends the activity when the provider report
 lead Claude `StopFailure` (an API error ended the turn) publishes `notify`, because the user must
 act. A Codex `Interrupt` writes an activity clear for that session, because the user stopped the
 turn and there is nothing to report; it does not touch a Pi review. Both keep their lifecycle
-observation. A child's `StopFailure` stays observation-only. A Claude turn the user stops with Esc
-reports nothing, so its `thinking` stays; see
-[Accepted limitations](accepted-limitations.md#pressing-esc-in-claude-code-leaves-thinking-on-the-tab).
+observation. A child's `StopFailure` stays observation-only.
+A Claude turn the user stops with Esc runs no hook as of Claude Code 2.1.300. Where its prompt hook
+proved its host, the turn follower that hook starts reads the host's status file, which Claude Code
+keeps in its configuration directory, and once the file goes from a working turn to none it
+records a lead `user_interrupt` with `source_event` `session_status`, no `correlation`, and the
+Claude Code version the file names as `source_version` when that is a safe label, and writes an
+activity clear, as a Codex `Interrupt` does; Esc at an approval prompt clears its `notify` the same
+way. It writes only while the prompt it follows is the lead's latest prompt and no lead observation
+after that prompt ends the turn, so a turn whose `Stop` or `StopFailure` was recorded first keeps
+that end and nothing is written. The end and the clear are stamped just after the latest of that
+prompt, the lead's observations and the activity, so a prompt whose hook began before the follower
+wrote and is recorded after it still shows. The file says only that no turn is working: a turn that
+ended normally but whose `Stop` Attention did not record, because the hook failed or timed out, is
+recorded as such an interrupt too. See
+[Accepted limitations](accepted-limitations.md#a-claude-turn-stopped-with-esc-is-recorded-only-from-its-status-file).
 A Codex turn that ends on a model error runs no hook as of Codex 0.162.0. Where its prompt hook
 proved its host, the turn follower that hook starts reads the session rollout and records the end:
 an `attempt_outcome` with `outcome` `failed`, `source_event` `task_complete`, the turn's `turn_id`,

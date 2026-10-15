@@ -273,6 +273,9 @@
       "attempt_outcome": [
         "StopFailure"
       ],
+      "user_interrupt": [
+        "session_status"
+      ],
       "elicitation_requested": [
         "Elicitation"
       ],
@@ -1242,6 +1245,9 @@
       ],
       "attempt_outcome": [
         "StopFailure"
+      ],
+      "user_interrupt": [
+        "session_status"
       ]
     },
     "codex": {

@@ -61,6 +61,7 @@ No one kind marks the end of a turn. Read it per provider, from observations who
 |---|---|---|
 | Claude | `response_finished` | `Stop` |
 | Claude | `attempt_outcome` | `StopFailure`, which Claude Code 2.1.284 sends instead of `Stop` when an API error ended the turn |
+| Claude | `user_interrupt` | none: `session_status`, from the status file Claude Code 2.1.300 keeps for its process, when the user stopped the turn with Esc; no hook consumer runs for it (see [accepted limitations](accepted-limitations.md#a-claude-turn-stopped-with-esc-is-recorded-only-from-its-status-file)) |
 | Codex | `response_finished` | `Stop` |
 | Codex | `user_interrupt` | `Interrupt`; Codex (source at commit `985cf47a4`) runs no `Stop` after one |
 | Codex | `attempt_outcome` | none: `task_complete` from the session rollout, with `error_code`; no hook consumer runs for it (see [accepted limitations](accepted-limitations.md#a-codex-turn-that-ends-on-a-model-error-is-recorded-only-from-its-rollout)) |
