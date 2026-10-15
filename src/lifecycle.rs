@@ -3564,12 +3564,13 @@ fn latest_prompt(root: &Path, identity: &RecordIdentity) -> Option<PromptReferen
         .and_then(|prompts| prompts.latest)
 }
 
-/// Record that the user stopped the Claude Code lead turn `turn` follows, from `event`, which [`ProviderEvent::claude_status_interrupt`]
-/// made for it, and clear the activity. As of Claude Code 2.1.300 pressing Esc
-/// runs no hook; the follower saw the session's status file go from working to
-/// no turn (see [`crate::claude_status`]). It holds the scope and the host it
-/// was handed and checks both again under the launch and claim locks, as
-/// `apply_activity` takes them.
+/// Record that the user stopped the Claude Code lead turn `turn` follows, from
+/// `event`, which [`ProviderEvent::claude_status_interrupt`] made for it, and
+/// clear the activity. As of Claude Code 2.1.300 pressing Esc runs no hook;
+/// the follower saw the session's status file go from working to no turn (see
+/// [`crate::claude_status`]). It holds the scope and the host it was handed and
+/// checks both again under the launch and claim locks, as `apply_activity`
+/// takes them.
 ///
 /// The turn must still be open: its prompt is the lead's latest prompt, and no
 /// lead observation after it ends the turn, its `Stop`, its `StopFailure` or
