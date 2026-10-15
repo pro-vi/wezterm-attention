@@ -677,6 +677,13 @@ errored end. What it cannot do:
   agent in `WEZTERM_ATTENTION_HOST_PID`, on macOS. Elsewhere the `thinking` the
   prompt wrote stays on the tab until the next turn ends, or until Codex quits
   and prompt return clears it.
+- A turn Codex starts by itself to continue a goal (`turn_trigger` `goal` in
+  the rollout's `task_started`) runs no prompt hook, so no follower starts for
+  it and an errored end of that turn is not recorded. Read in the Codex source
+  at tag `rust-v0.162.0`, not seen on a live turn: the goal runtime
+  (`ext/goal/src/runtime.rs`) starts the turn from a model input item, and
+  `inspect_pending_input` in `core/src/hook_runtime.rs` runs `UserPromptSubmit`
+  only for a user message.
 - No hook-delivered finish sound, reply capture, hold or quiet check runs for
   this end; a finish-sound reader of the records still accepts it.
 - It is seen within a second of Codex writing it, not at once.
