@@ -28,12 +28,16 @@ const MAX_BYTES: u64 = 64 << 10;
 
 /// Where Claude Code keeps the status file of its process `pid`. As of Claude
 /// Code 2.1.300 its configuration directory, `CLAUDE_CONFIG_DIR` when that is
-/// set and `~/.claude` otherwise, holds one for each process it runs.
-pub fn status_path(config_dir: Option<&str>, home: &str, pid: i32) -> PathBuf {
-    config_dir
-        .map_or_else(|| Path::new(home).join(".claude"), PathBuf::from)
-        .join("sessions")
-        .join(format!("{pid}.json"))
+/// set and `~/.claude` otherwise, holds one for each process it runs. `None`
+/// when neither directory is known as an absolute path.
+pub fn status_path(config_dir: Option<&str>, home: Option<&str>, pid: i32) -> Option<PathBuf> {
+    let directory = match config_dir {
+        Some(directory) => PathBuf::from(directory),
+        None => Path::new(home?).join(".claude"),
+    };
+    directory
+        .is_absolute()
+        .then(|| directory.join("sessions").join(format!("{pid}.json")))
 }
 
 /// What one read of the file says. `updated_at` is when Claude Code last

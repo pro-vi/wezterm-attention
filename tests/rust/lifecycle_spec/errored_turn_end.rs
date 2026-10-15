@@ -909,21 +909,6 @@ fn a_prompt_with_nothing_to_follow_asks_for_no_follower() {
     };
     let cases: Vec<(&str, &str, Arrange)> = vec![
         (
-            "a Claude prompt",
-            "claude",
-            Box::new(|setup| {
-                let rollout = rollout_path(setup);
-                append(&rollout, &[header(SESSION)]);
-                let prompt = event(
-                    "claude",
-                    "UserPromptSubmit",
-                    SESSION,
-                    json!({"prompt":"go","transcript_path":rollout}),
-                );
-                (setup.naming(AGENT_PID), prompt)
-            }),
-        ),
-        (
             "a hook that names no agent",
             "codex",
             Box::new(move |setup| (setup.env.clone(), codex_prompt(setup, json!({})))),

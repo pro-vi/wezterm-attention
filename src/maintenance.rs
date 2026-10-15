@@ -439,10 +439,13 @@ fn claude_status_probe(
         if owner_state(&owner, inspector) != OwnerState::Alive {
             continue;
         }
-        let Some(home) = environment.get("HOME") else {
+        let Some(path) = claude_status::status_path(
+            binding["config_dir"].as_str(),
+            environment.get("HOME").map(String::as_str),
+            owner.pid,
+        ) else {
             continue;
         };
-        let path = claude_status::status_path(binding["config_dir"].as_str(), home, owner.pid);
         let mut reading = claude_status::read(&path, session, owner.pid);
         if matches!(reading, Reading::Unreadable { .. }) {
             std::thread::sleep(std::time::Duration::from_millis(100));

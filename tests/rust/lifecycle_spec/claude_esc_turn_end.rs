@@ -546,3 +546,331 @@ fn follow_request_binding_id_derives_from_provider() {
     assert_eq!(request.binding_id(), binding_id("claude", SESSION, launch));
     assert_ne!(request.binding_id(), binding_id("codex", SESSION, launch));
 }
+
+/// The follower request the latest admitted prompt made.
+fn last_request(setup: &Setup) -> FollowRequest {
+    setup
+        .followers
+        .started
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("the prompt asked for a follower")
+}
+
+#[test]
+fn an_admitted_claude_prompt_asks_for_one_follower_of_it() {
+    let mut setup = Setup::new();
+    let expected = prompted(&mut setup);
+    assert_eq!(setup.followers.started.lock().unwrap().len(), 1);
+    // The prompt as the writer stored it, not the hook's draft of it.
+    let request = last_request(&setup);
+    assert_eq!(request, expected);
+    let FollowedTurn::Claude(turn) = &request.turn else {
+        panic!("not a Claude turn: {request:?}");
+    };
+    assert_eq!(turn.prompt_observed_mono_ns, "00000000000000000300");
+    assert_eq!(
+        PathBuf::from(&turn.status_file),
+        setup._scratch.0.join(".claude/sessions/4000.json")
+    );
+}
+
+/// With `CLAUDE_CONFIG_DIR` set, the status file is in that directory.
+#[test]
+fn a_claude_prompt_follows_the_status_file_in_its_configuration_directory() {
+    let setup = Setup::new();
+    setup.claim();
+    apply_as(
+        &setup,
+        &setup.naming(AGENT_PID),
+        &start("claude", SESSION),
+        "00000000000000000200",
+    );
+    let config = setup._scratch.0.join("claude-config");
+    let prompt = parse_provider_event(
+        "claude",
+        "UserPromptSubmit",
+        &payload(
+            "claude",
+            "UserPromptSubmit",
+            SESSION,
+            json!({"prompt":"go"}),
+        ),
+        &BTreeMap::from([("CLAUDE_CONFIG_DIR".to_owned(), config.display().to_string())]),
+    );
+    let result = apply_as(
+        &setup,
+        &setup.naming(AGENT_PID),
+        &prompt,
+        "00000000000000000300",
+    );
+    assert_eq!(result.disposition, "applied", "{result:?}");
+    let FollowedTurn::Claude(turn) = last_request(&setup).turn else {
+        panic!("not a Claude turn");
+    };
+    assert_eq!(
+        PathBuf::from(turn.status_file),
+        config.join("sessions/4000.json")
+    );
+}
+
+#[test]
+fn a_claude_prompt_with_nothing_to_follow_asks_for_no_follower() {
+    type Arrange = Box<dyn Fn(&Setup) -> (BTreeMap<String, String>, ProviderEvent)>;
+    let cases: Vec<(&str, Arrange)> = vec![
+        (
+            "a hook that names no agent",
+            Box::new(|setup| {
+                (
+                    setup.env.clone(),
+                    event(
+                        "claude",
+                        "UserPromptSubmit",
+                        SESSION,
+                        json!({"prompt":"go"}),
+                    ),
+                )
+            }),
+        ),
+        (
+            "a sub-agent's prompt",
+            Box::new(|setup| {
+                (
+                    setup.naming(AGENT_PID),
+                    event(
+                        "claude",
+                        "UserPromptSubmit",
+                        SESSION,
+                        json!({"prompt":"go","agent_id":"child-a","agent_type":"worker"}),
+                    ),
+                )
+            }),
+        ),
+        (
+            "a hook with no home and no configuration directory",
+            Box::new(|setup| {
+                let mut env = setup.naming(AGENT_PID);
+                env.remove("HOME");
+                (
+                    env,
+                    event(
+                        "claude",
+                        "UserPromptSubmit",
+                        SESSION,
+                        json!({"prompt":"go"}),
+                    ),
+                )
+            }),
+        ),
+    ];
+    for (name, arrange) in cases {
+        let setup = Setup::new();
+        setup.claim();
+        apply_as(
+            &setup,
+            &setup.naming(AGENT_PID),
+            &start("claude", SESSION),
+            "00000000000000000200",
+        );
+        let (env, prompt) = arrange(&setup);
+        let result = apply_as(&setup, &env, &prompt, "00000000000000000300");
+        assert!(
+            ["applied", "skipped"].contains(&result.disposition.as_str()),
+            "{name}: {result:?}"
+        );
+        assert!(setup.followers.started.lock().unwrap().is_empty(), "{name}");
+    }
+}
+
+#[test]
+fn a_claude_follower_that_cannot_start_leaves_the_prompt_recorded() {
+    let setup = Setup::new();
+    setup.claim();
+    apply_as(
+        &setup,
+        &setup.naming(AGENT_PID),
+        &start("claude", SESSION),
+        "00000000000000000200",
+    );
+    setup
+        .followers
+        .refuses
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let result = apply_as(
+        &setup,
+        &setup.naming(AGENT_PID),
+        &event(
+            "claude",
+            "UserPromptSubmit",
+            SESSION,
+            json!({"prompt":"go"}),
+        ),
+        "00000000000000000300",
+    );
+    assert_eq!(result.disposition, "applied", "{result:?}");
+    assert_eq!(
+        result.diagnostic.as_ref().map(|found| found.code),
+        Some(DiagnosticCode::ProbeUnavailable),
+        "{result:?}"
+    );
+    assert_eq!(shown_activity(&setup).as_deref(), Some("thinking"));
+}
+
+/// A real agent in a real pseudo-terminal runs Claude Code's session-start
+/// and prompt hooks as Attention registers them, so the follower the prompt
+/// hook leaves is a real process reading a real status file.
+#[cfg(target_os = "macos")]
+mod real_follower {
+    use super::super::host_facet::real_processes::Pane;
+    use super::*;
+    use std::time::Instant;
+
+    /// The followers of the pane in `directory`: pid and process group.
+    fn followers(directory: &std::path::Path) -> Vec<(i32, i32)> {
+        let output = Command::new("/bin/ps")
+            .args(["-axo", "pid=,pgid=,command="])
+            .output()
+            .expect("run ps");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|row| {
+                row.contains("hooks follow-turn") && row.contains(&*directory.to_string_lossy())
+            })
+            .filter_map(|row| {
+                let mut fields = row.split_whitespace();
+                Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+            })
+            .collect()
+    }
+
+    fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn a_real_prompt_hook_leaves_a_follower_that_records_the_interrupt() {
+        let mut pane = Pane::new();
+        let directory = pane.dir().to_owned();
+        for (name, event, patch) in [
+            (
+                "claude-start.json",
+                "SessionStart",
+                json!({"source":"startup"}),
+            ),
+            (
+                "claude-prompt.json",
+                "UserPromptSubmit",
+                json!({"prompt":"go"}),
+            ),
+        ] {
+            fs::write(
+                directory.join(name),
+                serde_json::to_vec(&payload("claude", event, "real", patch)).unwrap(),
+            )
+            .unwrap();
+        }
+        // Claude Code writes its status file before it runs a prompt's hooks.
+        // The prompt hook's output goes through a pipe, so the agent goes on
+        // only once every writer of that pipe has closed it.
+        fs::write(
+            directory.join("agent.sh"),
+            concat!(
+                "mkdir -p \"$HOME/.claude/sessions\"\n",
+                "printf '{\"pid\":%s,\"sessionId\":\"real\",\"status\":\"busy\",",
+                "\"statusUpdatedAt\":100,\"version\":\"2.1.300\"}' $$ ",
+                "> \"$HOME/.claude/sessions/$$.json\"\n",
+                "sh -c 'WEZTERM_ATTENTION_HOST_PID=$PPID exec \"$ATTENTION\" ",
+                "hooks event claude SessionStart --strict --debug' ",
+                "< \"$OUT/claude-start.json\" > \"$OUT/start.out\" 2> \"$OUT/start.err\"\n",
+                "echo $? > \"$OUT/start.status\"\n",
+                "sh -c 'WEZTERM_ATTENTION_HOST_PID=$PPID exec \"$ATTENTION\" ",
+                "hooks event claude UserPromptSubmit --strict --debug' ",
+                "< \"$OUT/claude-prompt.json\" 2>&1 | cat > \"$OUT/prompt.out\"\n",
+                "echo $$ > \"$OUT/agent.tmp\" && mv \"$OUT/agent.tmp\" \"$OUT/agent.pid\"\n",
+                "sleep 60\n",
+            ),
+        )
+        .unwrap();
+        pane.start_shell("sh \"$OUT/agent.sh\"", None);
+        let agent = pane.agent();
+
+        // The hook has returned and closed its output; its follower runs on,
+        // leading a process group of its own.
+        let running = followers(&directory);
+        assert_eq!(
+            running.len(),
+            1,
+            "{running:?}; prompt hook: {}",
+            fs::read_to_string(directory.join("prompt.out")).unwrap_or_default()
+        );
+        let (pid, group) = running[0];
+        assert_eq!(pid, group, "the follower leads its own process group");
+
+        let claim = pane.claim();
+        let launch = claim["launch_id"].as_str().unwrap().to_owned();
+        let env: BTreeMap<String, String> = pane.env().into_iter().collect();
+        let binding = wezterm_attention::records::binding_dir(
+            &state_root(&env).unwrap(),
+            &pane_address(&env).unwrap().0,
+            &launch,
+            &binding_id("claude", "real", &launch),
+        );
+        // Esc: Claude Code rewrites the file to say no turn is working.
+        let status = directory.join(format!(".claude/sessions/{agent}.json"));
+        let next = status.with_extension("tmp");
+        fs::write(
+            &next,
+            format!(
+                "{{\"pid\":{agent},\"sessionId\":\"real\",\"status\":\"idle\",\
+                 \"statusUpdatedAt\":200,\"version\":\"2.1.300\"}}"
+            ),
+        )
+        .unwrap();
+        let written = Instant::now();
+        fs::rename(&next, &status).unwrap();
+        let interrupts = || {
+            fs::read(binding.join("lifecycle.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .map(|snapshot| {
+                    snapshot["pools"]["general"]["observations"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|item| item["kind"] == "user_interrupt")
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        wait_for("the follower to record the interrupt", || {
+            !interrupts().is_empty()
+        });
+        // Within two of its one-second polls.
+        assert!(
+            written.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            written.elapsed()
+        );
+        let end = &interrupts()[0];
+        assert_eq!(end["source_event"], "session_status");
+        assert_eq!(end["turn_end"]["status"], "recorded");
+        let activity: Value =
+            serde_json::from_slice(&fs::read(binding.join("activity.json")).unwrap()).unwrap();
+        let clear: Value =
+            serde_json::from_slice(&fs::read(binding.join("activity-clear.json")).unwrap())
+                .unwrap();
+        assert!(
+            activity["observed_mono_ns"].as_str() <= clear["observed_mono_ns"].as_str(),
+            "{activity} {clear}"
+        );
+        wait_for("the follower to leave", || followers(&directory).is_empty());
+        pane.kill_shell();
+    }
+}

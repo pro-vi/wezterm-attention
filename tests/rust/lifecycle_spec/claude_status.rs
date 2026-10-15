@@ -255,11 +255,17 @@ fn no_file_is_gone() {
 #[test]
 fn the_file_is_the_process_s_in_the_configuration_directory() {
     assert_eq!(
-        status_path(None, "/Users/u", 4000),
-        PathBuf::from("/Users/u/.claude/sessions/4000.json")
+        status_path(None, Some("/Users/u"), 4000),
+        Some(PathBuf::from("/Users/u/.claude/sessions/4000.json"))
     );
     assert_eq!(
-        status_path(Some("/Users/u/.claude2"), "/Users/u", 4000),
-        PathBuf::from("/Users/u/.claude2/sessions/4000.json")
+        status_path(Some("/Users/u/.claude2"), Some("/Users/u"), 4000),
+        Some(PathBuf::from("/Users/u/.claude2/sessions/4000.json"))
     );
+    assert_eq!(
+        status_path(Some("/Users/u/.claude2"), None, 4000),
+        Some(PathBuf::from("/Users/u/.claude2/sessions/4000.json"))
+    );
+    assert_eq!(status_path(None, None, 4000), None);
+    assert_eq!(status_path(None, Some("relative"), 4000), None);
 }

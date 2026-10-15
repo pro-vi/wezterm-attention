@@ -371,13 +371,17 @@ Updating the plugin does not rebuild the command, so run
 `scripts/install-cli.sh` after `wezterm.plugin.update_all()`, as
 [Install](../README.md#install) says.
 
-## A plugin older than the command reads a lifecycle file holding a Codex errored end as invalid
+## A plugin older than the command reads a lifecycle file holding a follower's turn end as invalid
 
 A command that records a Codex turn's errored end writes an `attempt_outcome`
 with `source_event` `task_complete`, which a plugin from 1.1.0 or earlier does
-not list. That plugin reads the binding's `lifecycle.json` as invalid and shows
-its pane with no lifecycle until the end leaves the pool. Update the plugin with
-the command, as [Install](../README.md#install) says.
+not list. One that records a Claude turn stopped with Esc writes a
+`user_interrupt` with `source_event` `session_status`, which a plugin from 1.3.0
+or earlier does not list. Such a plugin reads the binding's `lifecycle.json` as
+invalid and shows its pane with no lifecycle until the end leaves the pool. A
+plugin reads the manifest once, when WezTerm loads its configuration, so one
+updated on disk still reads that way until the configuration is reloaded.
+Update the plugin with the command, as [Install](../README.md#install) says.
 
 ## A record write can be reported failed after readers already see it
 
@@ -619,23 +623,63 @@ without a hook of its own ending that activity, because it was killed, crashed
 or cut its turn short, leaves its last activity on the tab until the next agent
 claims the pane or the pane closes.
 
-## Pressing Esc in Claude Code leaves `thinking` on the tab
+## A Claude turn stopped with Esc is recorded only from its status file
 
 Claude Code runs no hook when the user presses Esc to stop a turn: `Stop` does
 not run, it has no interrupt event, and the `idle_prompt` notification that
-follows a finished turn after a minute without input is not sent either. The
-`thinking` the prompt wrote stays on the tab until the next turn ends with
-`Stop`, or until Claude Code quits and the shell integration's prompt return
-clears it. Focusing the pane does not clear it, since acknowledgement covers
-only `stop` and `notify`, and a hook's `thinking` carries no TTL. The writer
-has no signal to act on. The only trace is a `[Request interrupted by user]`
-line in the session transcript, and an Esc before any output leaves not even
-that: Claude Code undoes the turn and puts the prompt back in the input box.
-Codex sends `Interrupt`, and is not affected.
-
-Checked against Claude Code 2.1.283. In one session, an Esc before any output
+follows a finished turn after a minute without input is not sent either.
+Checked against Claude Code 2.1.283: in one session, an Esc before any output
 and an Esc after a tool call had run each ran no hook within 90 seconds, while
-a normal turn ran `Stop` and then `idle_prompt` 63 seconds later.
+a normal turn ran `Stop` and then `idle_prompt` 63 seconds later. As of Claude
+Code 2.1.300 an Esc at an approval prompt runs none either, measured once on
+2026-10-14. Codex sends `Interrupt`, and is not affected.
+
+Claude Code keeps a status file for each process it runs,
+`sessions/<pid>.json` in its configuration directory (`CLAUDE_CONFIG_DIR`, or
+`~/.claude`). It is private and undocumented. As of Claude Code 2.1.300 its
+`status` reads `busy` while a turn works and `waiting` while the turn waits on
+the user, and within 0.1 s of an Esc it reads `idle`, or `shell` when a
+background command still runs. A turn that ends normally reads `idle` only
+after every `Stop` hook has finished. Measured on 2026-10-14, each case once.
+
+So the Claude prompt hook starts a follower for the prompt, `attention hooks
+follow-turn`, which reads that file once a second. When the file goes from a
+working turn to none, it records the end as a `user_interrupt` and clears the
+activity, which also clears the `notify` of an Esc at an approval prompt. A
+turn whose `Stop` or `StopFailure` was recorded first keeps that end. What it
+cannot do:
+
+- It starts only from a prompt hook that proved its host: one that names its
+  agent in `WEZTERM_ATTENTION_HOST_PID`, on macOS, since the file is named by
+  that process. Elsewhere the `thinking` the prompt wrote stays on the tab
+  until the next turn ends with `Stop`, or until Claude Code quits and the
+  shell integration's prompt return clears it. Focusing the pane does not clear
+  it, since acknowledgement covers only `stop` and `notify`, and a hook's
+  `thinking` carries no TTL.
+- It records an end only after it has read the turn working. An Esc that lands
+  before its first read, a few milliseconds after the prompt hook, leaves the
+  `thinking` as above. In every case measured the file read `busy` before the
+  prompt hook wrote.
+- Esc while a background sub-agent still runs was not measured. The file is
+  expected to read `busy` until that sub-agent's work ends, and the `thinking`
+  to stay until then.
+- The file says only that no turn is working. A turn that ended normally but
+  whose `Stop` Attention did not record, because the hook failed or timed out,
+  is recorded as stopped with Esc; before, it showed `thinking` until the next
+  turn ended.
+- A file it does not understand yields no record: a Claude Code that moves the
+  file, or changes its fields or their values, brings back the behaviour
+  above. A file that names another session or process, or is a link, is not
+  read. `attention doctor`'s `claude_status` probe reads the file of each
+  running Claude session with a recorded host and reports one it does not
+  understand, with the Claude Code version the file names.
+- No hook-delivered finish sound, reply capture, hold or quiet check runs for
+  this end; a finish-sound reader of the records still accepts it.
+- It is seen within about a second of the Esc, not at once.
+- A follower that stops without recording, because its host could not be read
+  or its write failed, leaves no record that it stopped.
+- After an approval the tab keeps `notify` until the turn's `Stop`. The file
+  then reads `busy` again within 0.03 s, and Attention does not act on that.
 
 ## A sub-agent whose permission was granted reads as waiting until its next tool call
 

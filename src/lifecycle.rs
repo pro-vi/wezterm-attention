@@ -3235,14 +3235,20 @@ fn apply_provider_event_inner(
     })
 }
 
-/// Start the follower of the Codex lead turn a prompt began. As of Codex
-/// 0.162.0 a turn that ends on a model error runs no hook, and only the session
-/// rollout says it ended; the follower reads it from where the rollout stands
-/// now (see [`crate::turn_follower`]). It needs the hook's proof of its host,
-/// because it lives no longer than that process. It starts whatever the
-/// prompt's disposition: a prompt whose thinking lost the activity slot still
-/// began its turn, and the follower writes only for a turn the binding
-/// recorded.
+/// Start the follower of the lead turn a prompt began, for an end its
+/// provider runs no hook for (see [`crate::turn_follower`]). As of Codex
+/// 0.162.0 a turn that ends on a model error runs no hook, and only the
+/// session rollout says it ended; the follower reads it from where the rollout
+/// stands now. As of Claude Code 2.1.300 a turn the user stops with Esc runs
+/// no hook, and only the host's status file shows it. A follower needs the
+/// hook's proof of its host, because it lives no longer than that process.
+///
+/// A Codex follower starts whatever the prompt's disposition: a prompt whose
+/// thinking lost the activity slot still began its turn, and the follower
+/// writes only for a turn the binding recorded. A Claude prompt carries no
+/// turn id, so its follower follows the prompt, and starts only once the
+/// prompt record names it as the lead's latest prompt: it ends the turn only
+/// while that holds.
 fn start_turn_follower(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
@@ -3250,13 +3256,36 @@ fn start_turn_follower(
     ports: &RuntimePorts<'_>,
 ) -> Option<Diagnostic> {
     let prompt = event.observation.as_ref()?;
-    if event.provider != Some(Provider::Codex) || !prompt.is_lead_prompt() {
+    if !prompt.is_lead_prompt() {
         return None;
     }
     let host = &resolved.host.as_ref()?.proof.owner;
-    let turn_id = prompt.turn_id()?.to_owned();
-    let rollout = event.transcript_path.clone()?;
-    let offset = std::fs::metadata(&rollout).ok()?.len();
+    let turn = match event.provider? {
+        Provider::Codex => {
+            let rollout = event.transcript_path.clone()?;
+            FollowedTurn::Codex(CodexTurn {
+                turn_id: prompt.turn_id()?.to_owned(),
+                offset: std::fs::metadata(&rollout).ok()?.len(),
+                rollout,
+            })
+        }
+        Provider::Claude => {
+            let binding_id = event_binding_id(event, &resolved.launch_id).ok()?;
+            let latest = latest_prompt(&resolved.root, &resolved.binding(&binding_id))
+                .filter(|latest| latest.observation_id == prompt.observation_id)?;
+            let status_file = crate::claude_status::status_path(
+                event.config_dir.as_deref(),
+                env.get("HOME").map(String::as_str),
+                host.pid,
+            )?;
+            FollowedTurn::Claude(ClaudeTurn {
+                prompt_observation_id: latest.observation_id,
+                prompt_observed_mono_ns: latest.observed_mono_ns,
+                status_file: status_file.display().to_string(),
+            })
+        }
+        Provider::Pi => return None,
+    };
     let request = FollowRequest {
         address: resolved.address.clone(),
         launch_id: resolved.launch_id.clone(),
@@ -3265,11 +3294,7 @@ fn start_turn_follower(
         host_started_sec: host.start.seconds,
         host_started_usec: host.start.microseconds,
         host_boot_session_id: host.boot_session_id.clone(),
-        turn: FollowedTurn::Codex(CodexTurn {
-            turn_id,
-            rollout,
-            offset,
-        }),
+        turn,
     };
     ports
         .followers
