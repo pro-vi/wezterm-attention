@@ -3580,10 +3580,13 @@ fn latest_prompt(root: &Path, identity: &RecordIdentity) -> Option<PromptReferen
 /// checks both again under the launch and claim locks, as `apply_activity`
 /// takes them.
 ///
-/// The turn must still be open: its prompt is the lead's latest prompt, and no
-/// lead observation after it ends the turn, its `Stop`, its `StopFailure` or
-/// another follower's interrupt. The prompt's own observation may have left
-/// the pools; only stamps are compared. The end and the clear are ordered just
+/// The turn must still be open: its prompt is the lead's latest prompt, and
+/// the lead's last record after it is not a turn end, its `Stop`, its
+/// `StopFailure` or another follower's interrupt. A `Stop` hook that blocks
+/// lets Claude Code go on with the same turn, whose next records then come
+/// after that `Stop`, so the last record decides, as it does for a Codex turn.
+/// The prompt's own observation may have left the pools; only stamps are
+/// compared. The end and the clear are ordered just
 /// after the latest of the prompt, the lead's observations and the activity,
 /// not when the follower read the file, so a prompt whose hook began before
 /// this write and is recorded after it still shows.
@@ -3628,9 +3631,9 @@ pub(crate) fn record_claude_turn_interrupt(
                     .iter()
                     .flat_map(LifecycleSnapshot::lead_observations)
             };
-            if lead().any(|item| {
-                item.observed_mono_ns.as_str() > prompt_stamp && item.ends_turn(provider)
-            }) {
+            if latest(lead().filter(|item| item.observed_mono_ns.as_str() > prompt_stamp))
+                .is_some_and(|last| last.ends_turn(provider))
+            {
                 return skipped();
             }
             let activity = read_record_at(root, "activity", &identity)?;

@@ -32,8 +32,8 @@ rollout by a follower process the prompt hook starts.
   records a lead `user_interrupt` with `source_event` `session_status` and
   clears the activity, through `record_claude_turn_interrupt` under the launch
   and claim locks, only after it read the turn working and then a newer reading
-  of no turn, and only while the prompt is the lead's latest and no lead turn
-  end came after it.
+  of no turn, and only while the prompt is the lead's latest and the lead's
+  last record after it is not a turn end.
 - **Doubt writes nothing.** A file the reader does not understand, or that is
   not this session's and process's, ends in today's behaviour, never in a
   record. `attention doctor`'s `claude_status` probe reports such a file with

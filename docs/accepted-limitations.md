@@ -654,7 +654,8 @@ So the Claude prompt hook starts a follower for the prompt, `attention hooks
 follow-turn`, which reads that file once a second. When the file goes from a
 working turn to none, it records the end as a `user_interrupt` and clears the
 activity, which also clears the `notify` of an Esc at an approval prompt. A
-turn whose `Stop` or `StopFailure` was recorded first keeps that end. What it
+turn whose last record is its `Stop` or `StopFailure` keeps that end; a turn
+that went on after a `Stop` hook blocked its stop is still open. What it
 cannot do:
 
 - It starts only from a prompt hook that proved its host: one that names its
@@ -668,9 +669,6 @@ cannot do:
   before its first read, just after the prompt hook, leaves the `thinking` as
   above. In every case measured the file read `busy` before the prompt hook
   wrote.
-- A turn that goes on after a `Stop` hook blocked its stop, without a new
-  prompt, already has that `Stop` recorded, so an Esc later in that turn is
-  not recorded and the `thinking` stays as above.
 - Esc while a background sub-agent still runs was not measured. The file is
   expected to read `busy` until that sub-agent's work ends, and the `thinking`
   to stay until then.

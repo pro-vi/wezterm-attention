@@ -417,6 +417,39 @@ fn a_claude_turn_its_stop_ended_is_not_interrupted() {
     }
 }
 
+/// A `Stop` hook that blocks lets Claude Code go on with the same turn, so an
+/// Esc later in it ends the turn there.
+#[test]
+fn an_esc_after_a_blocked_stop_is_recorded() {
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    hook(
+        &setup,
+        "Stop",
+        json!({"stop_hook_active":false}),
+        "00000000000000000500",
+    );
+    hook(
+        &setup,
+        "PreToolUse",
+        json!({"tool_name":"Bash","tool_use_id":"call-1"}),
+        "00000000000000000600",
+    );
+    assert_eq!(shown_activity(&setup).as_deref(), Some("thinking"));
+    assert_eq!(
+        recorded(&follow_script(
+            &setup,
+            &request,
+            &[status("busy", 100), status("idle", 200)]
+        )),
+        "applied"
+    );
+    let ends = interrupts(&setup);
+    assert_eq!(ends.len(), 1, "{ends:?}");
+    assert_eq!(ends[0]["observed_mono_ns"], "00000000000000000601");
+    assert_eq!(shown_activity(&setup), None);
+}
+
 /// The next prompt's hook took its stamp before the follower wrote, and
 /// reaches the writer after it.
 #[test]
