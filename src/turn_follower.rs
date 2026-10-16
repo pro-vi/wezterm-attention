@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::claude_status::{Foreign, Reading, SESSION_STATUS};
+use crate::claude_status::{self, Foreign, SESSION_STATUS};
 use crate::codex_rollout::{Refusal, Rollout, TASK_COMPLETE, TurnSignal};
 use crate::identity::PaneAddress;
 use crate::launch::{ClaimOwner, OwnerState, owner_state};
@@ -191,7 +191,7 @@ pub enum Followed {
     Recorded(LifecycleResult),
     /// The Codex turn ended some other way; its own hook records that, or
     /// nothing does.
-    Ended(TurnSignal),
+    RolloutEnded(TurnSignal),
     /// The host process is gone, or could not be read.
     HostGone,
     /// The binding is not the launch's current one or has ended, or the claim
@@ -201,11 +201,12 @@ pub enum Followed {
     /// lock and this turn's end was not there to read.
     AlreadyFollowed,
     /// The Codex rollout could not be read for this turn.
-    Refused(Refusal),
+    RolloutRefused(Refusal),
     /// A newer prompt replaced the followed Claude prompt, or the prompt
     /// record no longer names it.
     PromptReplaced,
-    /// The Claude Code status file is gone: its process has exited.
+    /// The Claude Code status file is not there: its process is exiting, or
+    /// never wrote one at that path.
     StatusGone,
     /// The file at the status file's path is not the one to read.
     StatusForeign(Foreign),
@@ -217,11 +218,11 @@ enum Reader<'a> {
         turn: &'a CodexTurn,
         rollout: Rollout,
     },
-    /// Read whole at every poll. `working` is when the latest reading that
-    /// showed the turn working says it changed.
+    /// Read whole at every poll. `last_working_at` is when the latest
+    /// reading that showed the turn working says it changed.
     Claude {
         turn: &'a ClaudeTurn,
-        working: Option<u64>,
+        last_working_at: Option<u64>,
     },
 }
 
@@ -234,7 +235,7 @@ impl<'a> Reader<'a> {
             }
             FollowedTurn::Claude(turn) => Ok(Self::Claude {
                 turn,
-                working: None,
+                last_working_at: None,
             }),
         }
     }
@@ -250,7 +251,7 @@ impl<'a> Reader<'a> {
     ) -> Result<Option<Followed>> {
         match self {
             Self::Codex { turn, rollout } => match rollout.next_signal(&turn.turn_id) {
-                Err(refusal) => Ok(Some(Followed::Refused(refusal))),
+                Err(refusal) => Ok(Some(Followed::RolloutRefused(refusal))),
                 Ok(Some(TurnSignal::Failed { error_code })) => {
                     let event = ProviderEvent::codex_turn_failure(
                         &request.session_id,
@@ -267,10 +268,13 @@ impl<'a> Reader<'a> {
                     )
                     .map(|result| Some(Followed::Recorded(result)))
                 }
-                Ok(Some(signal)) => Ok(Some(Followed::Ended(signal))),
+                Ok(Some(signal)) => Ok(Some(Followed::RolloutEnded(signal))),
                 Ok(None) => Ok(None),
             },
-            Self::Claude { turn, working } => {
+            Self::Claude {
+                turn,
+                last_working_at,
+            } => {
                 if !crate::lifecycle::latest_prompt_is(
                     root,
                     &request.address,
@@ -280,29 +284,31 @@ impl<'a> Reader<'a> {
                 ) {
                     return Ok(Some(Followed::PromptReplaced));
                 }
-                match crate::claude_status::read(
+                match claude_status::read(
                     Path::new(&turn.status_file),
                     &request.session_id,
                     request.host_pid,
                 ) {
-                    Reading::Gone => Ok(Some(Followed::StatusGone)),
-                    Reading::Foreign(reason) => Ok(Some(Followed::StatusForeign(reason))),
+                    claude_status::Reading::Gone => Ok(Some(Followed::StatusGone)),
+                    claude_status::Reading::Foreign(reason) => {
+                        Ok(Some(Followed::StatusForeign(reason)))
+                    }
                     // Neither working nor ended: a later reading decides.
-                    Reading::Unreadable { .. } => Ok(None),
-                    Reading::Working { updated_at } => {
-                        *working = Some(updated_at);
+                    claude_status::Reading::Unreadable { .. } => Ok(None),
+                    claude_status::Reading::Working { updated_at } => {
+                        *last_working_at = Some(updated_at);
                         Ok(None)
                     }
                     // Only a change from working that this follower saw, by
                     // the file's own clock; an ended reading alone may be from
                     // before the turn began.
-                    Reading::Ended {
+                    claude_status::Reading::Ended {
                         updated_at,
                         version,
-                    } if working.is_some_and(|working| updated_at > working) => {
+                    } if last_working_at.is_some_and(|working| updated_at > working) => {
                         let event =
-                            ProviderEvent::claude_status_interrupt(&request.session_id, version);
-                        crate::lifecycle::record_claude_interrupt(
+                            ProviderEvent::claude_turn_interrupt(&request.session_id, version);
+                        crate::lifecycle::record_claude_turn_interrupt(
                             root,
                             &request.address,
                             &request.launch_id,
@@ -313,7 +319,7 @@ impl<'a> Reader<'a> {
                         )
                         .map(|result| Some(Followed::Recorded(result)))
                     }
-                    Reading::Ended { .. } => Ok(None),
+                    claude_status::Reading::Ended { .. } => Ok(None),
                 }
             }
         }
@@ -348,12 +354,13 @@ pub fn follow_turn(
         TakenTurn::Taken(lock) => Some(lock),
         TakenTurn::AlreadyFollowed => return Ok(Followed::AlreadyFollowed),
         // A later turn's follower can hold the lock while this turn's end is
-        // already written, so the end is read once rather than left.
+        // already written, so the end is read once rather than left. A Claude
+        // end needs two readings, so a Claude follower kept out writes nothing.
         TakenTurn::KeptOut => None,
     };
     let mut reader = match Reader::open(request) {
         Ok(reader) => reader,
-        Err(refusal) => return Ok(Followed::Refused(refusal)),
+        Err(refusal) => return Ok(Followed::RolloutRefused(refusal)),
     };
     let host = request.host();
     loop {

@@ -3,11 +3,47 @@
 
 use super::*;
 use wezterm_attention::protocol::manifest;
-use wezterm_attention::turn_follower::FOLLOWER_SOURCES;
+use wezterm_attention::turn_follower::{FOLLOWER_SOURCES, FollowRequest, Followed, follow_turn};
 
-// The manifest's `native_hooks` do not declare a follower's source, and a hook
-// event they do not declare is ignored, so only the follower records a turn
-// end from it.
+/// The follower request the latest admitted prompt made.
+pub(super) fn last_request(setup: &Setup) -> FollowRequest {
+    setup
+        .followers
+        .started
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("the prompt asked for a follower")
+}
+
+/// Run the follower to its end. One that would wait for ever, as a follower
+/// that misses its turn's end does, is stopped by its host exiting, and the
+/// test fails.
+pub(super) fn follow_every(setup: &Setup, request: &FollowRequest, poll: Duration) -> Followed {
+    let (sent, received) = std::sync::mpsc::channel();
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            let _ = sent.send(follow_turn(request, &setup.env, &setup.ports(), poll));
+        });
+        match received.recv_timeout(Duration::from_secs(5)) {
+            Ok(result) => result.expect("the follower runs"),
+            Err(_) => {
+                setup.processes.set(AGENT_PID, ProcessRead::Gone);
+                let _ = received.recv();
+                panic!("the follower did not finish within 5 s");
+            }
+        }
+    })
+}
+
+pub(super) fn recorded(followed: &Followed) -> &str {
+    let Followed::Recorded(result) = followed else {
+        panic!("the follower recorded nothing: {followed:?}");
+    };
+    result.disposition.as_str()
+}
+
 #[test]
 fn follower_sources_are_not_native_hooks() {
     let protocol = manifest().expect("manifest");

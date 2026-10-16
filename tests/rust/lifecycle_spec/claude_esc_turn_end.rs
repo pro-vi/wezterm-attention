@@ -1,14 +1,15 @@
-//! As of Claude Code 2.1.300 a turn the user stops with Esc runs no hook; its
-//! end shows only in the session's status file, which goes from working to no
-//! turn. The turn follower reads that file and records the end.
+//! As of Claude Code 2.1.300 a turn the user stops with Esc runs no hook; the
+//! session's status file shows its end, going from working to no turn. The
+//! turn follower reads that file and records the end.
 
 use super::self_claim::{apply_as, records, start};
+use super::turn_follower::{follow_every, last_request, recorded};
 use super::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use wezterm_attention::claude_status::Foreign;
 use wezterm_attention::turn_follower::{
-    ClaudeTurn, FollowRequest, Followed, FollowedTurn, follow_turn,
+    ClaudeTurn, FollowRequest, Followed, FollowedTurn, TakenTurn, take_turn,
 };
 
 const SESSION: &str = "s";
@@ -137,6 +138,17 @@ fn prompted(setup: &mut Setup) -> FollowRequest {
 /// begins. Once the script has run out the agent exits, so a follower still
 /// following then leaves as `HostGone`.
 fn follow_script(setup: &Setup, request: &FollowRequest, script: &[Status]) -> Followed {
+    follow_script_then(setup, request, script, Arc::new(|| None))
+}
+
+/// [`follow_script`], where `at_write` answers the agent's process read that
+/// follows the last poll of the script: the one a write takes under the locks.
+fn follow_script_then(
+    setup: &Setup,
+    request: &FollowRequest,
+    script: &[Status],
+    at_write: Arc<dyn Fn() -> Option<ProcessRead> + Send + Sync>,
+) -> Followed {
     let path = status_path(setup);
     if let Some(first) = script.first() {
         set_status(&path, first);
@@ -154,46 +166,36 @@ fn follow_script(setup: &Setup, request: &FollowRequest, script: &[Status]) -> F
                 set_status(&hook_path, status);
                 None
             }
-            // One poll past the script reads its last state; the next finds
-            // the agent gone.
-            None if poll == script.len() => None,
+            // The read after the script's last poll is a write's, under its
+            // locks, or the next poll's, which reads the last state again;
+            // the read after that finds the agent gone.
+            None if poll == script.len() => at_write(),
             None => Some(ProcessRead::Gone),
         }
     }));
-    let (sent, received) = std::sync::mpsc::channel();
-    let followed = thread::scope(|scope| {
-        scope.spawn(|| {
-            let _ = sent.send(follow_turn(request, &setup.env, &setup.ports(), POLL));
-        });
-        match received.recv_timeout(Duration::from_secs(5)) {
-            Ok(result) => result.expect("the follower runs"),
-            Err(_) => {
-                setup.processes.set(AGENT_PID, ProcessRead::Gone);
-                let _ = received.recv();
-                panic!("the follower did not finish within 5 s");
-            }
-        }
-    });
+    let followed = follow_every(setup, request, POLL);
     *setup.processes.on_read.lock().unwrap() = None;
     followed
 }
 
-fn general_observations(setup: &Setup) -> Vec<Value> {
-    let Ok(bytes) = fs::read(setup.binding_dir("claude", SESSION).join("lifecycle.json")) else {
+/// The interrupts the lifecycle file in `binding` holds; none when there is
+/// no file yet.
+fn interrupts_in(binding: &std::path::Path) -> Vec<Value> {
+    let Ok(bytes) = fs::read(binding.join("lifecycle.json")) else {
         return Vec::new();
     };
     let snapshot: Value = serde_json::from_slice(&bytes).expect("lifecycle JSON");
     snapshot["pools"]["general"]["observations"]
         .as_array()
         .expect("observations")
-        .clone()
+        .iter()
+        .filter(|item| item["kind"] == "user_interrupt")
+        .cloned()
+        .collect()
 }
 
 fn interrupts(setup: &Setup) -> Vec<Value> {
-    general_observations(setup)
-        .into_iter()
-        .filter(|item| item["kind"] == "user_interrupt")
-        .collect()
+    interrupts_in(&setup.binding_dir("claude", SESSION))
 }
 
 fn read_json(path: PathBuf) -> Option<Value> {
@@ -215,14 +217,6 @@ fn shown_activity(setup: &Setup) -> Option<String> {
     activity["type"].as_str().map(str::to_owned)
 }
 
-fn recorded(followed: &Followed) -> &str {
-    let Followed::Recorded(result) = followed else {
-        panic!("the follower recorded nothing: {followed:?}");
-    };
-    result.disposition.as_str()
-}
-
-/// Shared scenario "Esc after working".
 #[test]
 fn claude_idle_after_busy_records_user_interrupt_clear() {
     let mut setup = Setup::new();
@@ -308,10 +302,12 @@ fn esc_at_an_approval_prompt_clears_its_notify() {
     assert_eq!(shown_activity(&setup), None);
 }
 
-/// A follower that has not seen the turn working records nothing, and keeps
-/// following until its agent exits.
+/// A follower that never reads an end newer than a working reading records
+/// nothing, and keeps following until its agent exits: an end with no working
+/// reading before it, an end no newer than it, a dialog, or a status it does
+/// not know.
 #[test]
-fn no_turn_without_an_earlier_working_reading_records_nothing() {
+fn no_end_newer_than_a_working_reading_records_nothing() {
     let cases: Vec<(&str, Vec<Status>)> = vec![
         (
             "idle from the start",
@@ -396,7 +392,7 @@ fn a_status_file_that_is_gone_or_another_s_ends_the_follow_with_no_write() {
     }
 }
 
-/// Shared scenario "Stop came first", and the same for `StopFailure`.
+/// A turn whose `Stop` or `StopFailure` was recorded first keeps that end.
 #[test]
 fn a_claude_turn_its_stop_ended_is_not_interrupted() {
     for (name, payload) in [
@@ -421,8 +417,8 @@ fn a_claude_turn_its_stop_ended_is_not_interrupted() {
     }
 }
 
-/// Shared scenario "Next prompt right after Esc": the next prompt's hook took
-/// its stamp before the follower wrote, and reaches the writer after it.
+/// The next prompt's hook took its stamp before the follower wrote, and
+/// reaches the writer after it.
 #[test]
 fn next_prompt_after_esc_still_shows() {
     let mut setup = Setup::new();
@@ -547,18 +543,6 @@ fn follow_request_binding_id_derives_from_provider() {
     assert_ne!(request.binding_id(), binding_id("codex", SESSION, launch));
 }
 
-/// The follower request the latest admitted prompt made.
-fn last_request(setup: &Setup) -> FollowRequest {
-    setup
-        .followers
-        .started
-        .lock()
-        .unwrap()
-        .last()
-        .cloned()
-        .expect("the prompt asked for a follower")
-}
-
 #[test]
 fn an_admitted_claude_prompt_asks_for_one_follower_of_it() {
     let mut setup = Setup::new();
@@ -649,6 +633,25 @@ fn a_claude_prompt_with_nothing_to_follow_asks_for_no_follower() {
             }),
         ),
         (
+            "a CLAUDE_CONFIG_DIR the hook could not keep",
+            Box::new(|setup| {
+                let mut env = setup.naming(AGENT_PID);
+                env.insert("CLAUDE_CONFIG_DIR".to_owned(), "relative/claude".to_owned());
+                let prompt = parse_provider_event(
+                    "claude",
+                    "UserPromptSubmit",
+                    &payload(
+                        "claude",
+                        "UserPromptSubmit",
+                        SESSION,
+                        json!({"prompt":"go"}),
+                    ),
+                    &env,
+                );
+                (env, prompt)
+            }),
+        ),
+        (
             "a hook with no home and no configuration directory",
             Box::new(|setup| {
                 let mut env = setup.naming(AGENT_PID);
@@ -718,40 +721,141 @@ fn a_claude_follower_that_cannot_start_leaves_the_prompt_recorded() {
     assert_eq!(shown_activity(&setup).as_deref(), Some("thinking"));
 }
 
+/// The write checks again under the launch and claim locks that the prompt
+/// it follows is still the lead's latest, so a prompt recorded after the
+/// follower's last reading leaves nothing written. The newer prompt is put in
+/// place at the host read the write makes under its locks, before that check.
+#[test]
+fn the_write_checks_the_prompt_again_under_its_locks() {
+    let script = [status("busy", 100), status("idle", 200)];
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    let prompts = setup.binding_dir("claude", SESSION).join("prompts.json");
+    let mut record: Value = serde_json::from_slice(&fs::read(&prompts).unwrap()).unwrap();
+    record["latest"]["observation_id"] = json!(Uuid::new_v4().to_string());
+    record["latest"]["observed_mono_ns"] = json!("00000000000000000400");
+    let newer = serde_json::to_vec(&record).unwrap();
+    let followed = follow_script_then(
+        &setup,
+        &request,
+        &script,
+        Arc::new(move || {
+            fs::write(&prompts, &newer).expect("a newer prompt");
+            None
+        }),
+    );
+    assert_eq!(recorded(&followed), "skipped");
+    assert!(interrupts(&setup).is_empty());
+    assert_eq!(shown_activity(&setup).as_deref(), Some("thinking"));
+}
+
+/// The write checks again under its locks that the follower's host still
+/// runs, so a host that exited after the follower's last reading leaves
+/// nothing written.
+#[test]
+fn the_write_checks_the_host_again_under_its_locks() {
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    let before = records(&setup);
+    let followed = follow_script_then(
+        &setup,
+        &request,
+        &[status("busy", 100), status("idle", 200)],
+        Arc::new(|| Some(ProcessRead::Gone)),
+    );
+    let Followed::Recorded(result) = &followed else {
+        panic!("{followed:?}");
+    };
+    assert_eq!(result.disposition.as_str(), "ignored", "{result:?}");
+    assert_eq!(
+        result
+            .diagnostic
+            .as_ref()
+            .map(|found| found.message.as_str()),
+        Some("the turn's agent process is gone")
+    );
+    assert!(records(&setup) == before);
+}
+
+/// Tool traffic can evict the prompt's own observation from the pool while
+/// its turn runs; the prompt record's stamp still says the turn is open.
+#[test]
+fn a_turn_whose_prompt_left_the_pool_is_still_interrupted() {
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    for call in 0..65 {
+        hook(
+            &setup,
+            "PreToolUse",
+            json!({"tool_name":"Bash","tool_use_id":format!("call-{call}")}),
+            &format!("{:020}", 400 + call),
+        );
+    }
+    let snapshot: Value = serde_json::from_slice(
+        &fs::read(setup.binding_dir("claude", SESSION).join("lifecycle.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !snapshot["pools"]["general"]["observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["kind"] == "prompt_submitted"),
+        "the prompt is still in the pool"
+    );
+    assert_eq!(
+        recorded(&follow_script(
+            &setup,
+            &request,
+            &[status("busy", 100), status("idle", 200)]
+        )),
+        "applied"
+    );
+    // Just after the turn's newest record.
+    assert_eq!(
+        interrupts(&setup)[0]["observed_mono_ns"],
+        "00000000000000000465"
+    );
+    assert_eq!(shown_activity(&setup), None);
+}
+
+/// A Claude end needs two readings, so a follower that another prompt's
+/// follower keeps out of the lock reads once and writes nothing.
+#[test]
+fn a_claude_follower_kept_out_of_the_lock_writes_nothing() {
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    let launch = &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"];
+    let lock = wezterm_attention::records::turn_follower_lock(
+        &state_root(&setup.env).expect("state root"),
+        &pane_address(&setup.env).expect("address").0,
+        launch,
+        &binding_id("claude", SESSION, launch),
+    );
+    let TakenTurn::Taken(_other) = take_turn(&lock, "another-prompt", POLL).expect("lock") else {
+        panic!("the lock is free");
+    };
+    let before = records(&setup);
+    let followed = follow_script(
+        &setup,
+        &request,
+        &[status("busy", 100), status("idle", 200)],
+    );
+    assert!(
+        matches!(followed, Followed::AlreadyFollowed),
+        "{followed:?}"
+    );
+    assert!(records(&setup) == before);
+}
+
 /// A real agent in a real pseudo-terminal runs Claude Code's session-start
 /// and prompt hooks as Attention registers them, so the follower the prompt
 /// hook leaves is a real process reading a real status file.
 #[cfg(target_os = "macos")]
 mod real_follower {
-    use super::super::host_facet::real_processes::Pane;
+    use super::super::host_facet::real_processes::{Pane, followers, wait_for};
     use super::*;
     use std::time::Instant;
-
-    /// The followers of the pane in `directory`: pid and process group.
-    fn followers(directory: &std::path::Path) -> Vec<(i32, i32)> {
-        let output = Command::new("/bin/ps")
-            .args(["-axo", "pid=,pgid=,command="])
-            .output()
-            .expect("run ps");
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|row| {
-                row.contains("hooks follow-turn") && row.contains(&*directory.to_string_lossy())
-            })
-            .filter_map(|row| {
-                let mut fields = row.split_whitespace();
-                Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
-            })
-            .collect()
-    }
-
-    fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !done() {
-            assert!(Instant::now() < deadline, "timed out waiting for {what}");
-            thread::sleep(Duration::from_millis(50));
-        }
-    }
 
     #[test]
     fn a_real_prompt_hook_leaves_a_follower_that_records_the_interrupt() {
@@ -775,7 +879,8 @@ mod real_follower {
             )
             .unwrap();
         }
-        // Claude Code writes its status file before it runs a prompt's hooks.
+        // As of Claude Code 2.1.300 the status file reads busy before a
+        // prompt's hooks run.
         // The prompt hook's output goes through a pipe, so the agent goes on
         // only once every writer of that pipe has closed it.
         fs::write(
@@ -834,21 +939,7 @@ mod real_follower {
         .unwrap();
         let written = Instant::now();
         fs::rename(&next, &status).unwrap();
-        let interrupts = || {
-            fs::read(binding.join("lifecycle.json"))
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                .map(|snapshot| {
-                    snapshot["pools"]["general"]["observations"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|item| item["kind"] == "user_interrupt")
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        };
+        let interrupts = || interrupts_in(&binding);
         wait_for("the follower to record the interrupt", || {
             !interrupts().is_empty()
         });

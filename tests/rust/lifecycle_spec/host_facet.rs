@@ -777,6 +777,32 @@ pub(super) mod real_processes {
         }
     }
 
+    /// The followers of the pane in `directory`: pid and process group.
+    pub(in super::super) fn followers(directory: &std::path::Path) -> Vec<(i32, i32)> {
+        let output = Command::new("/bin/ps")
+            .args(["-axo", "pid=,pgid=,command="])
+            .output()
+            .expect("run ps");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|row| {
+                row.contains("hooks follow-turn") && row.contains(&*directory.to_string_lossy())
+            })
+            .filter_map(|row| {
+                let mut fields = row.split_whitespace();
+                Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+            })
+            .collect()
+    }
+
+    pub(in super::super) fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     /// What `ps` says of `pid`, independently of the reads under test.
     fn ps(pid: i32, field: &str) -> String {
         let output = Command::new("/bin/ps")

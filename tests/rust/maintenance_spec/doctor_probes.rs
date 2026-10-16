@@ -545,7 +545,7 @@ fn doctor_reports_whether_running_claude_sessions_status_files_are_understood() 
     assert_eq!(found.len(), 1, "{diagnostics:?}");
     assert_eq!(
         found[0].context.get("reason"),
-        Some(&json!("unknown_state"))
+        Some(&json!("unknown_status"))
     );
     assert_eq!(
         found[0].context.get("claude_code_version"),
@@ -577,8 +577,8 @@ fn doctor_reports_whether_running_claude_sessions_status_files_are_understood() 
     );
 }
 
-/// A session started with `CLAUDE_CONFIG_DIR` keeps its status file there,
-/// and its binding records that directory.
+/// As of Claude Code 2.1.300 a session started with `CLAUDE_CONFIG_DIR` keeps
+/// its status file there, and its binding records that directory.
 #[test]
 fn doctor_reads_a_claude_session_s_file_in_its_configuration_directory() {
     let setup = Setup::new();

@@ -108,7 +108,7 @@ fn unknown_claude_status_is_unreadable() {
     assert_eq!(
         read_value(&busy_with("status", Some(json!("paused")))),
         Reading::Unreadable {
-            reason: Unreadable::UnknownState,
+            reason: Unreadable::UnknownStatus,
             version: Some("2.1.300".to_owned()),
         }
     );
@@ -121,22 +121,22 @@ fn a_file_the_reader_cannot_understand_is_unreadable() {
         (
             "status missing",
             busy_with("status", None),
-            Unreadable::MissingField,
+            Unreadable::InvalidField,
         ),
         (
             "statusUpdatedAt a string",
             busy_with("statusUpdatedAt", Some(json!("1792023000100"))),
-            Unreadable::MissingField,
+            Unreadable::InvalidField,
         ),
         (
             "pid not an integer",
             busy_with("pid", Some(json!(4000.5))),
-            Unreadable::MissingField,
+            Unreadable::InvalidField,
         ),
         (
             "sessionId missing",
             busy_with("sessionId", None),
-            Unreadable::MissingField,
+            Unreadable::InvalidField,
         ),
     ] {
         assert!(
@@ -147,7 +147,7 @@ fn a_file_the_reader_cannot_understand_is_unreadable() {
     assert_eq!(
         read_text(&full[..full.len() / 2]),
         Reading::Unreadable {
-            reason: Unreadable::NotJson,
+            reason: Unreadable::NotJsonObject,
             version: None,
         },
         "a truncated file"
@@ -155,7 +155,7 @@ fn a_file_the_reader_cannot_understand_is_unreadable() {
     assert!(matches!(
         read_text(b"[1,2]"),
         Reading::Unreadable {
-            reason: Unreadable::NotJson,
+            reason: Unreadable::NotJsonObject,
             ..
         }
     ));
@@ -203,7 +203,7 @@ fn another_session_s_or_process_s_file_is_foreign() {
     std::os::unix::fs::symlink(&real, &link).unwrap();
     assert_eq!(
         read(&link, SESSION, AGENT_PID),
-        Reading::Foreign(Foreign::NotOpened)
+        Reading::Foreign(Foreign::Link)
     );
     let directory = scratch.0.join("directory.json");
     fs::create_dir(&directory).unwrap();
@@ -268,4 +268,22 @@ fn the_file_is_the_process_s_in_the_configuration_directory() {
     );
     assert_eq!(status_path(None, None, 4000), None);
     assert_eq!(status_path(None, Some("relative"), 4000), None);
+}
+
+/// An open that fails for another reason than a link or no file, as one
+/// that runs out of descriptors does, may succeed at the next read.
+#[test]
+fn a_file_that_cannot_be_opened_is_unreadable_not_foreign() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new();
+    let path = scratch.0.join(format!("{AGENT_PID}.json"));
+    fs::write(&path, serde_json::to_vec(&fixture("busy")).unwrap()).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    assert_eq!(
+        read(&path, SESSION, AGENT_PID),
+        Reading::Unreadable {
+            reason: Unreadable::ReadFailed,
+            version: None,
+        }
+    );
 }

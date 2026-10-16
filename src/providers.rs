@@ -227,7 +227,7 @@ impl ProviderEvent {
     /// from a working turn to none. Nothing is left to report, so the
     /// activity is cleared, as a Codex `Interrupt` clears it. `version` is
     /// the Claude Code version the file names.
-    pub fn claude_status_interrupt(session_id: &str, version: Option<String>) -> Self {
+    pub fn claude_turn_interrupt(session_id: &str, version: Option<String>) -> Self {
         Self {
             source_event: crate::claude_status::SESSION_STATUS.to_owned(),
             action: ProviderAction::Clear,

@@ -325,6 +325,8 @@ pub fn doctor_with_environment(
     probes.push(json!({"name":"environment","status":environment_status}));
     let codex_status = codex_server_probe(processes, &mut diagnostics);
     probes.push(json!({"name":"codex_server","status":codex_status}));
+    // After `versions`, which counts each integration_version_mismatch reported
+    // before it: a status file Claude Code changed says nothing of this build.
     let claude_status = claude_status_probe(
         root,
         &audited_records,
@@ -403,11 +405,13 @@ fn codex_server_probe(
 /// Whether the status file of each Claude Code session running now reads as
 /// one Attention understands: that file is how a turn stopped with Esc
 /// reaches the tab (see [`crate::claude_status`]). A session counts when its
-/// binding is current and its recorded host still runs. Each file it does not
+/// recorded host still runs and its binding is current. Each file it does not
 /// understand, or that is missing, is reported with the reason and the Claude
 /// Code version the file names, where it names one, since Esc no longer clears
-/// that session's tab. A file not understood is read once more first, so a
-/// read during a rewrite is not reported.
+/// that session's tab. A read during a rewrite, or of the file a session that
+/// is exiting has just removed, looks the same, so those files are read once
+/// more after one short wait, and a missing one whose host has exited by then
+/// is left out.
 fn claude_status_probe(
     root: &Path,
     records: &[Value],
@@ -415,8 +419,15 @@ fn claude_status_probe(
     inspector: &dyn ProcessInspector,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> &'static str {
-    let mut status = "unobserved";
+    let mut sessions = Vec::new();
     for host in records.iter().filter(|record| record["kind"] == "host") {
+        // Most recorded hosts have exited, and that is told without a file.
+        let Ok(Some(owner)) = ClaimOwner::of(host) else {
+            continue;
+        };
+        if owner_state(&owner, inspector) != OwnerState::Alive {
+            continue;
+        }
         let (Some(address), Some(launch_id), Some(binding_id)) = (
             record_address(host),
             host["launch_id"].as_str(),
@@ -429,16 +440,12 @@ fn claude_status_probe(
         else {
             continue;
         };
-        let (Some("claude"), Some(session), Ok(Some(owner))) = (
+        let (Some("claude"), Some(session)) = (
             binding["provider"].as_str(),
             binding["provider_session_id"].as_str(),
-            ClaimOwner::of(host),
         ) else {
             continue;
         };
-        if owner_state(&owner, inspector) != OwnerState::Alive {
-            continue;
-        }
         let Some(path) = claude_status::status_path(
             binding["config_dir"].as_str(),
             environment.get("HOME").map(String::as_str),
@@ -446,26 +453,37 @@ fn claude_status_probe(
         ) else {
             continue;
         };
-        let mut reading = claude_status::read(&path, session, owner.pid);
-        if matches!(reading, Reading::Unreadable { .. }) {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            reading = claude_status::read(&path, session, owner.pid);
-        }
-        let (reason, version) = match reading {
-            Reading::Working { .. } | Reading::Ended { .. } => {
-                if status == "unobserved" {
-                    status = "healthy";
-                }
-                continue;
+        let reading = claude_status::read(&path, session, owner.pid);
+        sessions.push((path, session.to_owned(), owner, reading));
+    }
+    let doubtful =
+        |reading: &Reading| matches!(reading, Reading::Unreadable { .. } | Reading::Gone);
+    if sessions.iter().any(|(.., reading)| doubtful(reading)) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        for (path, session, owner, reading) in &mut sessions {
+            if doubtful(reading) {
+                *reading = claude_status::read(path, session, owner.pid);
             }
+        }
+        sessions.retain(|(_, _, owner, reading)| {
+            *reading != Reading::Gone || owner_state(owner, inspector) == OwnerState::Alive
+        });
+    }
+    if sessions.is_empty() {
+        return "unobserved";
+    }
+    let mut status = "healthy";
+    for (_, session, _, reading) in sessions {
+        let (reason, version) = match reading {
+            Reading::Working { .. } | Reading::Ended { .. } => continue,
             Reading::Unreadable { reason, version } => (reason.as_str(), version),
             Reading::Foreign(reason) => (reason.as_str(), None),
             Reading::Gone => ("missing", None),
         };
         let mut item = Diagnostic::new(
             DiagnosticCode::IntegrationVersionMismatch,
-            "a running Claude Code session's status file is not one Attention understands, \
-             so pressing Esc in it leaves its tab as it was",
+            "a running Claude Code session's status file is missing or is not one Attention \
+             understands, so pressing Esc in it leaves its tab as it was",
         );
         item.set("reason", reason);
         item.set("provider_session_id", session);

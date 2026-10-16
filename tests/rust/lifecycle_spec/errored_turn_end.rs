@@ -4,11 +4,12 @@
 //! records that end.
 
 use super::self_claim::{apply_as, install, records, start};
+use super::turn_follower::{follow_every, last_request, recorded};
 use super::*;
 use std::sync::atomic::Ordering;
 use wezterm_attention::codex_rollout::{Refusal, Rollout, TurnSignal};
 use wezterm_attention::turn_follower::{
-    CodexTurn, FollowRequest, Followed, FollowedTurn, TakenTurn, follow_turn, take_turn,
+    CodexTurn, FollowRequest, Followed, FollowedTurn, TakenTurn, take_turn,
 };
 
 const SESSION: &str = "s";
@@ -117,18 +118,6 @@ fn hook(
     result
 }
 
-/// The follower request the latest admitted prompt made.
-fn last_request(setup: &Setup) -> FollowRequest {
-    setup
-        .followers
-        .started
-        .lock()
-        .unwrap()
-        .last()
-        .cloned()
-        .expect("the prompt asked for a follower")
-}
-
 /// The Codex turn `request` follows.
 fn codex_turn(request: &mut FollowRequest) -> &mut CodexTurn {
     match &mut request.turn {
@@ -160,26 +149,6 @@ fn prompted(setup: &mut Setup) -> FollowRequest {
 /// [`follow_every`] at `POLL`.
 fn follow(setup: &Setup, request: &FollowRequest) -> Followed {
     follow_every(setup, request, POLL)
-}
-
-/// Run the follower to its end. One that would wait for ever, as a follower
-/// that misses its turn's end does, is stopped by its host exiting, and the
-/// test fails.
-fn follow_every(setup: &Setup, request: &FollowRequest, poll: Duration) -> Followed {
-    let (sent, received) = std::sync::mpsc::channel();
-    thread::scope(|scope| {
-        scope.spawn(|| {
-            let _ = sent.send(follow_turn(request, &setup.env, &setup.ports(), poll));
-        });
-        match received.recv_timeout(Duration::from_secs(5)) {
-            Ok(result) => result.expect("the follower runs"),
-            Err(_) => {
-                setup.processes.set(AGENT_PID, ProcessRead::Gone);
-                let _ = received.recv();
-                panic!("the follower did not finish within 5 s");
-            }
-        }
-    })
 }
 
 /// The attempt outcomes the lifecycle file in `binding` holds; none when
@@ -219,13 +188,6 @@ fn follower_lock(setup: &Setup) -> PathBuf {
         launch,
         &binding_id("codex", SESSION, launch),
     )
-}
-
-fn recorded(followed: &Followed) -> &str {
-    let Followed::Recorded(result) = followed else {
-        panic!("the follower recorded nothing: {followed:?}");
-    };
-    result.disposition.as_str()
 }
 
 #[test]
@@ -405,7 +367,7 @@ fn an_end_without_an_error_records_nothing() {
         let before = records(&setup);
         append(&rollout_path(&setup), &lines);
         let followed = follow(&setup, &request);
-        let Followed::Ended(signal) = &followed else {
+        let Followed::RolloutEnded(signal) = &followed else {
             panic!("{name}: {followed:?}");
         };
         assert_eq!(*signal, ended, "{name}");
@@ -790,7 +752,7 @@ fn a_follower_handed_another_session_s_rollout_writes_nothing() {
     let before = records(&setup);
     assert!(matches!(
         follow(&setup, &request),
-        Followed::Refused(Refusal::OtherSession)
+        Followed::RolloutRefused(Refusal::OtherSession)
     ));
     assert!(records(&setup) == before);
 }
@@ -990,35 +952,8 @@ fn a_follower_that_cannot_start_leaves_the_prompt_recorded() {
 /// hook leaves is a real process reading the kernel's process table.
 #[cfg(target_os = "macos")]
 mod real_follower {
-    use super::super::host_facet::real_processes::Pane;
+    use super::super::host_facet::real_processes::{Pane, followers, wait_for};
     use super::*;
-    use std::time::Instant;
-
-    /// The followers of the pane in `directory`: pid and process group.
-    fn followers(directory: &std::path::Path) -> Vec<(i32, i32)> {
-        let output = Command::new("/bin/ps")
-            .args(["-axo", "pid=,pgid=,command="])
-            .output()
-            .expect("run ps");
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|row| {
-                row.contains("hooks follow-turn") && row.contains(&*directory.to_string_lossy())
-            })
-            .filter_map(|row| {
-                let mut fields = row.split_whitespace();
-                Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
-            })
-            .collect()
-    }
-
-    fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !done() {
-            assert!(Instant::now() < deadline, "timed out waiting for {what}");
-            thread::sleep(Duration::from_millis(50));
-        }
-    }
 
     #[test]
     fn a_real_prompt_hook_leaves_a_follower_that_records_the_errored_end() {

@@ -630,16 +630,18 @@ not run, it has no interrupt event, and the `idle_prompt` notification that
 follows a finished turn after a minute without input is not sent either.
 Checked against Claude Code 2.1.283: in one session, an Esc before any output
 and an Esc after a tool call had run each ran no hook within 90 seconds, while
-a normal turn ran `Stop` and then `idle_prompt` 63 seconds later. As of Claude
-Code 2.1.300 an Esc at an approval prompt runs none either, measured once on
-2026-10-14. Codex sends `Interrupt`, and is not affected.
+a normal turn ran `Stop` and then `idle_prompt` 63 seconds later. Rechecked
+against Claude Code 2.1.300 on 2026-10-14, once each: an Esc during a command,
+before any output, and at an approval prompt ran no hook within 10 seconds.
+Codex sends `Interrupt`, and is not affected.
 
 Claude Code keeps a status file for each process it runs,
 `sessions/<pid>.json` in its configuration directory (`CLAUDE_CONFIG_DIR`, or
 `~/.claude`). It is private and undocumented. As of Claude Code 2.1.300 its
-`status` reads `busy` while a turn works and `waiting` while the turn waits on
-the user, and within 0.1 s of an Esc it reads `idle`, or `shell` when a
-background command still runs. A turn that ends normally reads `idle` only
+`status` reads `busy` while a turn works and `waiting` while Claude Code waits
+on the user, at an approval or in a dialog such as the one `/exit` opens, and
+within 0.1 s of an Esc it reads `idle`, or `shell` when a background command
+still runs. A turn that ends normally reads `idle` only
 after every `Stop` hook has finished. Measured on 2026-10-14, each case once.
 
 So the Claude prompt hook starts a follower for the prompt, `attention hooks
@@ -657,16 +659,20 @@ cannot do:
   it, since acknowledgement covers only `stop` and `notify`, and a hook's
   `thinking` carries no TTL.
 - It records an end only after it has read the turn working. An Esc that lands
-  before its first read, a few milliseconds after the prompt hook, leaves the
-  `thinking` as above. In every case measured the file read `busy` before the
-  prompt hook wrote.
+  before its first read, just after the prompt hook, leaves the `thinking` as
+  above. In every case measured the file read `busy` before the prompt hook
+  wrote.
+- A turn that goes on after a `Stop` hook blocked its stop, without a new
+  prompt, already has that `Stop` recorded, so an Esc later in that turn is
+  not recorded and the `thinking` stays as above.
 - Esc while a background sub-agent still runs was not measured. The file is
   expected to read `busy` until that sub-agent's work ends, and the `thinking`
   to stay until then.
 - The file says only that no turn is working. A turn that ended normally but
   whose `Stop` Attention did not record, because the hook failed or timed out,
   is recorded as stopped with Esc; before, it showed `thinking` until the next
-  turn ended.
+  turn ended. So would a prompt that another `UserPromptSubmit` hook blocked,
+  if the file reads `busy` for it; that case was not seen.
 - A file it does not understand yields no record: a Claude Code that moves the
   file, or changes its fields or their values, brings back the behaviour
   above. A file that names another session or process, or is a link, is not

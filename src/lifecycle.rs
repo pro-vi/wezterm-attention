@@ -3240,15 +3240,16 @@ fn apply_provider_event_inner(
 /// 0.162.0 a turn that ends on a model error runs no hook, and only the
 /// session rollout says it ended; the follower reads it from where the rollout
 /// stands now. As of Claude Code 2.1.300 a turn the user stops with Esc runs
-/// no hook, and only the host's status file shows it. A follower needs the
-/// hook's proof of its host, because it lives no longer than that process.
+/// no hook, and the host's status file shows it. A follower needs the hook's
+/// proof of its host, because it lives no longer than that process.
 ///
 /// A Codex follower starts whatever the prompt's disposition: a prompt whose
 /// thinking lost the activity slot still began its turn, and the follower
 /// writes only for a turn the binding recorded. A Claude prompt carries no
 /// turn id, so its follower follows the prompt, and starts only once the
 /// prompt record names it as the lead's latest prompt: it ends the turn only
-/// while that holds.
+/// while that holds. A `CLAUDE_CONFIG_DIR` the hook could not keep starts none,
+/// since the status file is in that directory, not in `~/.claude`.
 fn start_turn_follower(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
@@ -3270,6 +3271,13 @@ fn start_turn_follower(
             })
         }
         Provider::Claude => {
+            if event.config_dir.is_none()
+                && env
+                    .get("CLAUDE_CONFIG_DIR")
+                    .is_some_and(|directory| !directory.is_empty())
+            {
+                return None;
+            }
             let binding_id = event_binding_id(event, &resolved.launch_id).ok()?;
             let latest = latest_prompt(&resolved.root, &resolved.binding(&binding_id))
                 .filter(|latest| latest.observation_id == prompt.observation_id)?;
@@ -3327,9 +3335,10 @@ pub(crate) fn followed_binding(
     .filter(|binding| !state.ended(binding))
 }
 
-/// The launch a turn follower writes in, as the pane's claim names it now;
-/// otherwise what the follower reports. A follower carries no hook's proof,
-/// so its write checks its scope and host again under the locks
+/// The pane's claim as it stands now, around the launch a turn follower was
+/// handed; when the pane has no claim, what the follower reports instead. A
+/// follower carries no hook's proof, so its write checks again under the locks
+/// that the claim still names this launch and that the host still runs
 /// ([`follower_refusal`]).
 fn follower_launch(
     root: &Path,
@@ -3382,6 +3391,20 @@ fn follower_refusal(
     )))
 }
 
+/// The lead's lifecycle snapshot of the binding `identity` names, as a
+/// follower's write reads it under the locks: an invalid one fails the write.
+fn followed_snapshot(root: &Path, identity: &RecordIdentity) -> Result<Option<LifecycleSnapshot>> {
+    read_record_at(root, "lifecycle_snapshot", identity)?
+        .map(serde_json::from_value::<LifecycleSnapshot>)
+        .transpose()
+        .map_err(|_| {
+            AttentionError::new(
+                DiagnosticCode::RecordInvalid,
+                "lifecycle snapshot is invalid",
+            )
+        })
+}
+
 /// Record the end of a Codex lead turn that ended on a model error, from
 /// `event`, which [`ProviderEvent::codex_turn_failure`] made for it. As of
 /// Codex 0.162.0 no hook reports such an end, so this is not a hook's write:
@@ -3424,15 +3447,7 @@ pub(crate) fn record_codex_turn_failure(
             if let Some(refused) = follower_refusal(&resolved, &binding_id, host, ports) {
                 return Ok(refused);
             }
-            let snapshot = read_record_at(root, "lifecycle_snapshot", &identity)?
-                .map(serde_json::from_value::<LifecycleSnapshot>)
-                .transpose()
-                .map_err(|_| {
-                    AttentionError::new(
-                        DiagnosticCode::RecordInvalid,
-                        "lifecycle snapshot is invalid",
-                    )
-                })?;
+            let snapshot = followed_snapshot(root, &identity)?;
             let lead_turns = || {
                 snapshot
                     .iter()
@@ -3473,15 +3488,11 @@ pub(crate) fn record_codex_turn_failure(
             // turn ran survives only as the lead's latest prompt, and the end
             // also comes after that. A prompt record that cannot be read gives
             // the end none.
-            let prompts = read_record_at(root, "lead_prompts", &identity)
-                .ok()
-                .flatten()
-                .and_then(|value| serde_json::from_value::<LeadPrompts>(value).ok());
+            let prompt = latest_prompt(root, &identity);
             let turn_stamps = || {
                 iter::once(last.observed_mono_ns.as_str()).chain(
-                    prompts
+                    prompt
                         .as_ref()
-                        .and_then(|prompts| prompts.latest.as_ref())
                         .map(|latest| latest.observed_mono_ns.as_str()),
                 )
             };
@@ -3545,13 +3556,10 @@ pub(crate) fn latest_prompt_is(
         root,
         &RecordIdentity::binding(address, launch_id, binding_id),
     )
-    .is_some_and(|latest| follows(turn, &latest))
-}
-
-/// Whether `prompt` is the one `turn` follows.
-fn follows(turn: &ClaudeTurn, prompt: &PromptReference) -> bool {
-    prompt.observation_id == turn.prompt_observation_id
-        && prompt.observed_mono_ns == turn.prompt_observed_mono_ns
+    .is_some_and(|latest| {
+        latest.observation_id == turn.prompt_observation_id
+            && latest.observed_mono_ns == turn.prompt_observed_mono_ns
+    })
 }
 
 /// The lead's latest prompt, from the binding's prompt record; `None` when
@@ -3565,7 +3573,7 @@ fn latest_prompt(root: &Path, identity: &RecordIdentity) -> Option<PromptReferen
 }
 
 /// Record that the user stopped the Claude Code lead turn `turn` follows, from
-/// `event`, which [`ProviderEvent::claude_status_interrupt`] made for it, and
+/// `event`, which [`ProviderEvent::claude_turn_interrupt`] made for it, and
 /// clear the activity. As of Claude Code 2.1.300 pressing Esc runs no hook;
 /// the follower saw the session's status file go from working to no turn (see
 /// [`crate::claude_status`]). It holds the scope and the host it was handed and
@@ -3579,7 +3587,7 @@ fn latest_prompt(root: &Path, identity: &RecordIdentity) -> Option<PromptReferen
 /// after the latest of the prompt, the lead's observations and the activity,
 /// not when the follower read the file, so a prompt whose hook began before
 /// this write and is recorded after it still shows.
-pub(crate) fn record_claude_interrupt(
+pub(crate) fn record_claude_turn_interrupt(
     root: &Path,
     address: &PaneAddress,
     launch_id: &str,
@@ -3610,33 +3618,24 @@ pub(crate) fn record_claude_interrupt(
                     LifecycleResult::new(Disposition::Skipped),
                 )))
             };
-            let Some(latest) =
-                latest_prompt(root, &identity).filter(|latest| follows(turn, latest))
-            else {
+            if !latest_prompt_is(root, address, launch_id, &binding_id, turn) {
                 return skipped();
-            };
-            let snapshot = read_record_at(root, "lifecycle_snapshot", &identity)?
-                .map(serde_json::from_value::<LifecycleSnapshot>)
-                .transpose()
-                .map_err(|_| {
-                    AttentionError::new(
-                        DiagnosticCode::RecordInvalid,
-                        "lifecycle snapshot is invalid",
-                    )
-                })?;
+            }
+            let prompt_stamp = turn.prompt_observed_mono_ns.as_str();
+            let snapshot = followed_snapshot(root, &identity)?;
             let lead = || {
                 snapshot
                     .iter()
                     .flat_map(LifecycleSnapshot::lead_observations)
             };
             if lead().any(|item| {
-                item.observed_mono_ns > latest.observed_mono_ns && item.ends_turn(provider)
+                item.observed_mono_ns.as_str() > prompt_stamp && item.ends_turn(provider)
             }) {
                 return skipped();
             }
             let activity = read_record_at(root, "activity", &identity)?;
             let Some(observation) = just_after(
-                iter::once(latest.observed_mono_ns.as_str())
+                iter::once(prompt_stamp)
                     .chain(lead().map(|item| item.observed_mono_ns.as_str()))
                     .chain(
                         activity
