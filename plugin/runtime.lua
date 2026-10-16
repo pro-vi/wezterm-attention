@@ -111,6 +111,8 @@ return function()
       -- Which pane, launch and binding the view describes, and the lifecycle
       -- facts behind it; the bar draws none of them.
       { name = "binding_id", public = true },
+      { name = "provider_session_id", public = true },
+      { name = "transcript_path", public = true },
       { name = "address", public = true, nested = true },
       { name = "launch_id", public = true },
       { name = "marker_id", public = true },

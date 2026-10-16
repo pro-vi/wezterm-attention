@@ -24,6 +24,7 @@ Use the full pane object. A server pane ID alone is not globally unique across m
 | `review` | Owner-scoped review presence |
 | `subagents`, `subagents_uncertain` | How many of the pane's sub-agents are running, and whether that count could not be read; `subagents` is 0 when it could not |
 | `provider`, `binding_id`, `binding_phase` | Validated provider binding; a quiet binding can still identify its provider |
+| `provider_session_id`, `transcript_path` | The binding's provider session id and session file ([what that is](#discover-bindings-for-an-existing-socket)), also after the binding ended; nil when the plugin has no binding record for the pane |
 | `address`, `launch_id`, `marker_id` | Full realm/incarnation/pane address, launch, and the scalar pane id `pane_marker_id` returns |
 | `pane_presence`, `reader_confidence`, `binding_health` | Read assessment; preserve uncertainty instead of treating it as absence |
 | `lifecycle` | Optional bounded observations, derived request evidence and the lead's latest prompt |
@@ -176,6 +177,11 @@ whole object. Optional fields that were absent stay absent, so a selected row ca
 be `{}`. Without `--fields`, rows are unchanged.
 See `bindings --help` for accepted names. Unknown names, empty comma components,
 nested paths and wildcards are usage errors.
+
+A row's `transcript_path` is the provider's own session file, as the session start
+that wrote the binding record named it. It is absent when that start named none or a
+malformed one, and Attention does not check that the file exists. It is not a path
+under the state root.
 
 ## Read the drawn tab order
 

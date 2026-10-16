@@ -4979,8 +4979,12 @@ test("get_attention_view returns cached provider facts without exposing the cach
     call_after = function() end,
   })
   local view = assert(reloaded.get_attention_view(pane), "cached view must be available")
-  assert(view.provider == "claude" and view.binding_id == protocol_fixture.record_samples.binding.binding_id,
+  local binding = protocol_fixture.record_samples.binding
+  assert(view.provider == "claude" and view.binding_id == binding.binding_id,
     "the full view must retain provider and binding identity")
+  assert(view.provider_session_id == binding.provider_session_id
+      and view.transcript_path == binding.transcript_path,
+    "the view must name the binding's provider session and its session file")
   assert(view.binding_phase == "ended" and view.type == "notify"
       and view.subagents == 0 and view.subagents_uncertain == false and view.review == true
       and view.reader_confidence == "confirmed",
@@ -5673,7 +5677,8 @@ test("GUI callback preserves binding targets through unavailable reads and repla
   local pointer=decode_json(encode_json(samples.current_binding));pointer.address=wire.address;pointer.binding_id=string.rep("b",64)
   local count=#messages;write_json_path(launch.."/current-binding.json",pointer);instance.poll(window,options)
   assert(#messages==count+2 and messages[count+1].kind=="scope_lost" and messages[count+2].kind=="initial")
-  assert(messages[count+2].scope.target.binding_id==pointer.binding_id and messages[count+2].view.provider==nil,"new unreadable binding cannot inherit old facts")
+  assert(messages[count+2].scope.target.binding_id==pointer.binding_id and messages[count+2].view.provider==nil
+    and messages[count+2].view.provider_session_id==nil and messages[count+2].view.transcript_path==nil,"new unreadable binding cannot inherit old facts")
   os.remove(launch.."/current-binding.json");instance.poll(window,options)
   assert(messages[#messages].kind=="initial" and messages[#messages].scope.target.kind=="launch")
   pointer.binding_id=samples.binding.binding_id;write_json_path(launch.."/current-binding.json",pointer);instance.poll(window,options)
@@ -5681,6 +5686,8 @@ test("GUI callback preserves binding targets through unavailable reads and repla
   local ended=decode_json(encode_json(samples.binding_end));ended.address=wire.address;ended.observed_mono_ns="00000000009000000000"
   write_json_path(launch.."/bindings/"..pointer.binding_id.."/end.json",ended);instance.poll(window,options)
   assert(messages[#messages].kind=="updated" and messages[#messages].view.binding_phase=="ended")
+  assert(messages[#messages].view.provider_session_id==samples.binding.provider_session_id
+    and messages[#messages].view.transcript_path==samples.binding.transcript_path,"an ended binding's delivered view still names its session file")
   local unclaimed=window_double({window_id=13020,tabs={{13020}},focused=false})
   instance.poll(unclaimed,options);assert(messages[#messages].kind=="scope_lost")
   count=#messages;instance.poll(unclaimed,options);assert(#messages==count,"an unclaimed pane cannot fabricate a scope")

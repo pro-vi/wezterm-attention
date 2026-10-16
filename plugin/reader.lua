@@ -773,6 +773,8 @@ return function(context)
       cache_key = read.cache_key,
       binding_id = pointer and pointer.binding_id or nil,
       provider = binding and binding.provider or nil,
+      provider_session_id = binding and binding.provider_session_id or nil,
+      transcript_path = binding and binding.transcript_path or nil,
       event_id = activity and activity.event_id or nil,
       lifecycle = lifecycle,
       type = effective_type,
