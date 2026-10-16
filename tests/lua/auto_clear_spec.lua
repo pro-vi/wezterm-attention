@@ -5030,6 +5030,8 @@ test("lifecycle facts reach the cached reader without changing the badge", funct
   assert(view.provider == samples.binding.provider and view.binding_id == snapshot.binding_id)
   assert(view.activity_type == "notify")
   for _, item in ipairs(view.lifecycle.observations) do
+    assert(type(item.kind) == "string" and item.kind ~= "",
+      "an observation's kind must stay a string: bootstrap's prompt-cache countdown and idle compactor branch on it")
     assert(item.actor.kind == "lead" or item.actor.kind == "child")
     assert(type(item.written_at_unix_ns) == "string" and item.written_at_unix_ns:match("^%d+$"),
       "written_at_unix_ns must stay a decimal string: nanoseconds do not fit a Lua number")
