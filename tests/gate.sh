@@ -20,6 +20,11 @@ export CARGO_TARGET_DIR="$root/target"
 # ATTENTION_CLAUDE_CONTACT to run it against the claude on PATH, or against
 # ATTENTION_TEST_CLAUDE when the one you want is not the first there.
 #
+# Another runs Claude Code (Sonnet) for six turns in a new tab of the WezTerm
+# window the gate runs in, presses Esc in five of them, and spends API calls.
+# Set ATTENTION_CLAUDE_ESC_PROBE to run it, with the same ATTENTION_TEST_CLAUDE;
+# tests/python/claude_esc_probe.py says what it creates and deletes.
+#
 # Two integration tests drive a real Codex checkout, which this repository
 # cannot supply. Set ATTENTION_CODEX_SOURCE to one to run them; without it they
 # print SKIPPED and the rest of the gate is unaffected. With it, and without
@@ -89,9 +94,16 @@ else
 fi
 printf 'gate: GUI tab-source test SKIPPED (disposable_gui_publishes_its_own_source opens a WezTerm window; run it with cargo test --test cli_shell_spec -- --ignored disposable_gui_publishes_its_own_source)\n'
 WEZTERM_ATTENTION_TTY_INPUT_GUARD="$root/tests/python/tty_input_guard.py" cargo test -- --test-threads=1
+# After the tests, which build the attention it copies.
+if [ -n "${ATTENTION_CLAUDE_ESC_PROBE:-}" ]; then
+  printf 'gate: Claude Esc probe ENABLED\n'
+  python3 tests/python/claude_esc_probe.py
+else
+  printf 'gate: Claude Esc probe SKIPPED (set ATTENTION_CLAUDE_ESC_PROBE to run Claude Code for six turns in a new WezTerm tab)\n'
+fi
 python3 -m py_compile tests/fixtures/v2/check.py \
   tests/fixtures/consumer-migration/check.py tests/python/provider_contact_hook.py \
-  tests/python/claude_contact_check.py \
+  tests/python/claude_contact_check.py tests/python/claude_esc_probe.py \
   tests/python/measure.py tests/python/measure_spec.py tests/python/interactive_shell.py
 python3 -m unittest tests/python/measure_spec.py
 python3 tests/fixtures/v2/check.py

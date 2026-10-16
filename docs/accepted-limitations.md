@@ -643,6 +643,12 @@ on the user, at an approval or in a dialog such as the one `/exit` opens, and
 within 0.1 s of an Esc it reads `idle`, or `shell` when a background command
 still runs. A turn that ends normally reads `idle` only
 after every `Stop` hook has finished. Measured on 2026-10-14, each case once.
+Checked end to end against Claude Code 2.1.301 on 2026-10-15, once each: an
+Esc during a command, before any output, at an approval prompt and while a
+background command ran each cleared the tab within 1.1 s of the key and
+recorded one `user_interrupt` from `session_status`. An Esc while a foreground
+sub-agent worked left the file reading `busy` for at least 30 s and the tab
+showing `stop`, and recorded no interrupt.
 
 So the Claude prompt hook starts a follower for the prompt, `attention hooks
 follow-turn`, which reads that file once a second. When the file goes from a
