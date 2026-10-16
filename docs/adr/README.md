@@ -8,3 +8,4 @@
 - [0006: Carry the user review during session resume](0006-user-review-carries-on-session-resume.md) — Accepted.
 - [0007: Attention depends only on stock WezTerm](0007-stock-wezterm-only.md) — Accepted.
 - [0008: The lead's latest prompt and Codex question answers are kept beside the lifecycle pools](0008-latest-prompt-and-answers-beside-the-pools.md) — Accepted.
+- [0009: A Claude turn stopped with Esc is read from Claude Code's status file, by the turn follower](0009-claude-esc-from-the-status-file.md) — Accepted.
