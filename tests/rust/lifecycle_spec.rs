@@ -88,6 +88,8 @@ mod errored_turn_end;
 mod host_facet;
 #[path = "lifecycle_spec/inherited_host.rs"]
 mod inherited_host;
+#[path = "lifecycle_spec/observe.rs"]
+mod observe;
 #[path = "lifecycle_spec/turn_follower.rs"]
 mod turn_follower;
 

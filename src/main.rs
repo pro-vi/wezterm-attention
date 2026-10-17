@@ -33,7 +33,7 @@ use wezterm_attention::wezterm::{
     bin_name = "attention",
     version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("ATTENTION_BUILD_COMMIT"), ")"),
     about = "Publish and maintain mux-native WezTerm attention state.",
-    after_help = "Example: attention bindings --socket /absolute/mux.sock\nQueries (bindings, tabs, inspect, doctor, sweep) and hooks describe return JSON by default.\nCheck status and complete before using query results.\nRegistration requirements: attention hooks describe --provider claude"
+    after_help = "Example: attention bindings --socket /absolute/mux.sock\nQueries (bindings, tabs, inspect, observe, doctor, sweep) and hooks describe return JSON by default.\nCheck status and complete before using query results.\nRegistration requirements: attention hooks describe --provider claude"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -62,6 +62,8 @@ enum Command {
     },
     /// Read one exact canonical scope from JSON stdin without changing state.
     Inspect(InspectArgs),
+    /// Report one binding's lifecycle events since a cursor, or wait for them.
+    Observe(ObserveArgs),
     /// Set current activity or a source-owned review.
     Mark(MarkArgs),
     /// Inspect CLI integration health.
@@ -175,6 +177,31 @@ struct InspectArgs {
     /// Read the exact expected scope from JSON stdin; '-' is the only accepted value.
     #[arg(long, value_parser=["-"])]
     scope: String,
+    /// Return the JSON envelope (also the default).
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Clone, Debug, Args)]
+#[command(
+    after_help = "Example: attention observe --scope - < scope.json\nScope: as for inspect; binding_id may be omitted, and the baseline pins the binding then selected.\nWithout --since and without --timeout-ms the answer is a baseline: no events, and result.cursor is the position to resume from; with --timeout-ms a first call waits from that baseline. With --since CURSOR the answer is what happened since that position, or gap when retention moved past it, binding_replaced when the scope no longer names the current binding, and unavailable when a record could not be read. --timeout-ms N polls inside the command until the deadline; 0 (the default) reads once. A timed-out answer returns an advanced cursor. Events carry no prompt or reply text.\nExit 0: baseline, events or timeout; 1: gap, binding_replaced or unavailable; 2: invalid input."
+)]
+struct ObserveArgs {
+    /// Read the exact expected scope from JSON stdin; '-' is the only accepted value.
+    #[arg(long, value_parser=["-"])]
+    scope: String,
+    /// Wait only for these lead happenings (repeatable); the default is all three.
+    #[arg(long, value_parser = ["prompt", "answer", "turn_end"])]
+    r#for: Vec<String>,
+    /// With answer: only answers to this native tool call id.
+    #[arg(long)]
+    call: Option<String>,
+    /// Resume from a cursor a previous observe printed; it must belong to this scope and filter set.
+    #[arg(long)]
+    since: Option<String>,
+    /// How long to wait inside this call for a waited-for event, in milliseconds (0..=86400000); 0 reads once.
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u64).range(0..=86400000))]
+    timeout_ms: u64,
     /// Return the JSON envelope (also the default).
     #[arg(long)]
     json: bool,
@@ -476,7 +503,14 @@ fn error_response(error: &AttentionError, command: &str) -> Response<serde_json:
 fn query_json(command: &str) -> bool {
     matches!(
         command,
-        "bindings" | "tabs" | "tab-source" | "inspect" | "doctor" | "sweep" | "hooks describe"
+        "bindings"
+            | "tabs"
+            | "tab-source"
+            | "inspect"
+            | "observe"
+            | "doctor"
+            | "sweep"
+            | "hooks describe"
     ) || command == "plugin"
         || command.starts_with("plugin ")
 }
@@ -600,6 +634,7 @@ fn invocation(command: &Option<Command>) -> (&'static str, bool) {
         Some(Command::TabSource(_)) => ("tab-source", true),
         Some(Command::Plugin { command }) => (command.name(), true),
         Some(Command::Inspect(args)) => ("inspect", args.json),
+        Some(Command::Observe(args)) => ("observe", args.json),
         Some(Command::Mark(args)) => ("mark", args.json),
         Some(Command::Doctor(args)) => ("doctor", args.json),
         Some(Command::Sweep(args)) => ("sweep", args.json),
@@ -678,6 +713,7 @@ fn run(cli: &Cli, name: &'static str) -> Result<ExitCode, AttentionError> {
         Some(Command::Plugin { command }) => run_plugin(command, name, &environment),
         Some(Command::Tabs(args)) => run_tabs(args, name, &environment),
         Some(Command::Inspect(args)) => run_inspect(args, name, &environment),
+        Some(Command::Observe(args)) => run_observe(args, name, &environment),
         Some(Command::Mark(args)) => run_mark(args, name, &environment),
         Some(Command::Doctor(args)) => run_doctor(args, name, &environment),
         Some(Command::Sweep(args)) => run_sweep(args, name, &environment),
@@ -1178,31 +1214,36 @@ fn run_tabs(
     Ok(query_exit(complete))
 }
 
+/// The exact scope `inspect` and `observe` read from stdin; `command`
+/// names the reader in its first error.
+fn read_scope(command: &str) -> Result<wezterm_attention::query::PaneScope, AttentionError> {
+    let maximum = wezterm_attention::protocol::manifest()?
+        .limits
+        .max_json_bytes;
+    let bytes = read_bounded(std::io::stdin(), maximum)
+        .map_err(|_| AttentionError::usage(format!("{command} could not read scope stdin")))?;
+    if bytes.len() > maximum {
+        return Err(AttentionError::usage("scope exceeds its byte bound"));
+    }
+    serde_json::from_slice(&bytes).map_err(|error| {
+        AttentionError::usage(match error.classify() {
+            serde_json::error::Category::Eof if bytes.is_empty() =>
+                "scope stdin is empty; pipe a scope JSON object or use < scope.json".to_owned(),
+            serde_json::error::Category::Syntax | serde_json::error::Category::Eof =>
+                format!("scope JSON syntax is invalid at line {}, column {}", error.line(), error.column()),
+            // `bytes` is already in memory, so `Io` (serde_json 1.0.151: a failed
+            // stream read or write) cannot arrive here.
+            serde_json::error::Category::Io | serde_json::error::Category::Data => "scope requires address (realm_id and incarnation_id: 64 lowercase hex; pane_id: canonical decimal string), launch_id (UUID), and optional binding_id (64 lowercase hex); no extra fields".to_owned(),
+        })
+    })
+}
+
 fn run_inspect(
     args: &InspectArgs,
     name: &str,
     environment: &BTreeMap<String, String>,
 ) -> Result<ExitCode, AttentionError> {
-    let maximum = wezterm_attention::protocol::manifest()?
-        .limits
-        .max_json_bytes;
-    let bytes = read_bounded(std::io::stdin(), maximum)
-        .map_err(|_| AttentionError::usage("inspect could not read scope stdin"))?;
-    if bytes.len() > maximum {
-        return Err(AttentionError::usage("scope exceeds its byte bound"));
-    }
-    let scope: wezterm_attention::query::PaneScope = serde_json::from_slice(&bytes)
-        .map_err(|error| {
-            AttentionError::usage(match error.classify() {
-                serde_json::error::Category::Eof if bytes.is_empty() =>
-                    "scope stdin is empty; pipe a scope JSON object or use < scope.json".to_owned(),
-                serde_json::error::Category::Syntax | serde_json::error::Category::Eof =>
-                    format!("scope JSON syntax is invalid at line {}, column {}", error.line(), error.column()),
-                // `bytes` is already in memory, so `Io` (serde_json 1.0.151: a failed
-                // stream read or write) cannot arrive here.
-                serde_json::error::Category::Io | serde_json::error::Category::Data => "scope requires address (realm_id and incarnation_id: 64 lowercase hex; pane_id: canonical decimal string), launch_id (UUID), and optional binding_id (64 lowercase hex); no extra fields".to_owned(),
-            })
-        })?;
+    let scope = read_scope("inspect")?;
     let read = wezterm_attention::records::state_root(environment)
         .and_then(|root| wezterm_attention::query::read_pane_facts(&root, &scope));
     // The scope was read, so what failed is the answer, not the
@@ -1219,6 +1260,51 @@ fn run_inspect(
             complete,
             facts.diagnostics.clone(),
             facts,
+        ),
+        args.json,
+        false,
+    );
+    Ok(query_exit(complete))
+}
+
+fn run_observe(
+    args: &ObserveArgs,
+    name: &str,
+    environment: &BTreeMap<String, String>,
+) -> Result<ExitCode, AttentionError> {
+    if args.call.is_some() && !args.r#for.is_empty() && !args.r#for.iter().any(|f| f == "answer") {
+        return Err(AttentionError::usage(
+            "--call names a question's call, so it needs answer among --for",
+        ));
+    }
+    let filters = wezterm_attention::observe::ObserveFilters {
+        prompt: args.r#for.is_empty() || args.r#for.iter().any(|f| f == "prompt"),
+        answer: args.r#for.is_empty() || args.r#for.iter().any(|f| f == "answer"),
+        turn_end: args.r#for.is_empty() || args.r#for.iter().any(|f| f == "turn_end"),
+        call: args.call.clone(),
+    };
+    let scope = read_scope("observe")?;
+    let since = args
+        .since
+        .as_deref()
+        .map(|text| wezterm_attention::observe::ObserveCursor::parse(text, &scope, &filters))
+        .transpose()?;
+    let root = wezterm_attention::records::state_root(environment)?;
+    let result = wezterm_attention::observe::observe(
+        &root,
+        &scope,
+        &filters,
+        since.as_ref(),
+        std::time::Duration::from_millis(args.timeout_ms),
+    )?;
+    let complete = result.outcome.complete();
+    emit(
+        &Response::new(
+            name,
+            if complete { "ok" } else { "findings" },
+            complete,
+            result.diagnostics.clone(),
+            result,
         ),
         args.json,
         false,

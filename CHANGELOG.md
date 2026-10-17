@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`attention observe` reports one binding's lifecycle events since a cursor.** A first call without `--timeout-ms` answers a baseline cursor; later calls with `--since` answer the lead prompt, answer and turn-end events recorded since it — including a follower-produced Codex or Claude turn end — or an explicit `gap` when retention moved past the cursor, `binding_replaced` when the scope no longer names the current binding, and `unavailable` when a record could not be read. `--timeout-ms` waits inside the call. Events carry no prompt or reply text. See the consumer guide's "Wait on one binding's events".
+
 ## 1.5.0 — 2026-10-17
 
 ### Added

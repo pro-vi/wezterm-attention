@@ -40,6 +40,7 @@ mod launch;
 pub mod lifecycle;
 pub mod maintenance;
 pub mod observations;
+pub mod observe;
 mod presence;
 pub mod protocol;
 pub mod providers;

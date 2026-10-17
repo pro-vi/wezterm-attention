@@ -250,6 +250,22 @@ pub struct PromptAnswer {
 }
 
 impl PromptReference {
+    /// The later of the prompt record's latest and the newest the pools
+    /// hold, in observation order; the record's wins a tie, as it is the
+    /// one generic traffic cannot evict.
+    pub fn later_of(recorded: Option<Self>, pooled: Option<Self>) -> Option<Self> {
+        match (recorded, pooled) {
+            (Some(recorded), Some(pooled)) => {
+                if recorded.order() >= pooled.order() {
+                    Some(recorded)
+                } else {
+                    Some(pooled)
+                }
+            }
+            (recorded, pooled) => recorded.or(pooled),
+        }
+    }
+
     pub fn of(prompt: &LifecycleObservation) -> Self {
         Self {
             observation_id: prompt.observation_id.clone(),
@@ -504,14 +520,8 @@ impl LifecycleView {
     /// record whose write failed.
     pub fn with_prompts(mut self, prompts: Option<&LeadPrompts>) -> Self {
         let Some(prompts) = prompts else { return self };
-        if let Some(latest) = &prompts.latest
-            && self
-                .latest_prompt
-                .as_ref()
-                .is_none_or(|pooled| pooled.order() <= latest.order())
-        {
-            self.latest_prompt = Some(latest.clone());
-        }
+        self.latest_prompt =
+            PromptReference::later_of(prompts.latest.clone(), self.latest_prompt.take());
         for group in &mut self.requests {
             let Some(call) = group
                 .correlation
