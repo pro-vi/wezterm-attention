@@ -1368,6 +1368,61 @@ fn a_running_or_unreadable_owner_keeps_the_pane() {
     assert_eq!(stored_claim(&setup).as_ref(), Some(&claim));
 }
 
+// A session whose own start never claimed the pane, because it was refused
+// or stopped first, keeps finding the claim of the agent that ran there
+// before. Only a session start claims, so its other events are refused even
+// once that agent has exited; the next start it sends takes the pane, from
+// whichever source.
+#[test]
+fn any_session_start_takes_the_pane_from_an_exited_agent_and_no_other_event_does() {
+    let tool = event("claude", "PreToolUse", "b", json!({"tool_name":"Bash"}));
+    for source in ["startup", "compact", "clear", "resume"] {
+        let setup = Setup::new();
+        apply_as(
+            &setup,
+            &setup.agent_env(),
+            &start("claude", "a"),
+            "00000000000000000200",
+        );
+        let first = launch_of(&stored_claim(&setup).expect("first claim"));
+        let second_env = start_agent(&setup, 4100, 5100);
+        let before = records(&setup);
+        assert_eq!(
+            refused(&setup, &second_env, &start_from("claude", "b", source)).code,
+            DiagnosticCode::ClaimStale,
+            "{source} while the first agent runs"
+        );
+        setup.processes.set(AGENT_PID, ProcessRead::Gone);
+        assert_eq!(
+            refused(&setup, &second_env, &tool).code,
+            DiagnosticCode::ClaimStale,
+            "a tool event before the {source}"
+        );
+        assert_eq!(records(&setup), before, "{source}");
+        assert_eq!(
+            apply_as(
+                &setup,
+                &second_env,
+                &start_from("claude", "b", source),
+                "00000000000000000300"
+            )
+            .disposition,
+            "applied",
+            "{source}"
+        );
+        assert_ne!(
+            launch_of(&stored_claim(&setup).expect("second claim")),
+            first,
+            "{source}"
+        );
+        assert_eq!(
+            apply_as(&setup, &second_env, &tool, "00000000000000000400").disposition,
+            "applied",
+            "a tool event after the {source}"
+        );
+    }
+}
+
 #[test]
 fn two_racing_first_hooks_of_one_agent_end_with_one_claim_both_resolve_to() {
     let setup = Setup::new();
