@@ -16,11 +16,14 @@ use uuid::Uuid;
 use crate::hook_content::HookContent;
 use crate::lifecycle::outcome::HookScope;
 use crate::observations::Actor;
-use crate::protocol::{AttentionError, Result, format_ns20, free_of_control, manifest};
+use crate::protocol::{
+    AttentionError, Result, canonical_decimal_text, format_ns20, free_of_control, manifest,
+};
 
 pub const TOTAL_BUDGET: Duration = Duration::from_millis(2000);
 /// The chain stops each check this much earlier for every eligible check
-/// after it, so a slow check cannot spend a later check's time.
+/// after it that declares no time of its own, so a slow check cannot spend a
+/// later check's time.
 pub const LATER_CHECK_RESERVE: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug)]
@@ -28,6 +31,18 @@ pub struct Registration {
     pub name: String,
     pub executable: String,
     pub purpose: Purpose,
+    /// The time the check declared it needs, as `NAME:100ms`. The chain stops
+    /// the check once it has had that long, and earlier checks leave it that
+    /// much of the budget instead of `LATER_CHECK_RESERVE`.
+    pub declared: Option<Duration>,
+}
+
+/// What the checks before `later` leave of the budget for them.
+fn reserved(later: &[Registration]) -> Duration {
+    later
+        .iter()
+        .map(|r| r.declared.unwrap_or(LATER_CHECK_RESERVE))
+        .sum()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -246,10 +261,15 @@ pub fn validate_checks(holds: &[String], quiets: &[String]) -> Result<Vec<Regist
             Purpose::Hold => "--hold-check",
             Purpose::Quiet => "--quiet-check",
         };
-        let Some((name, executable)) = value.split_once('=') else {
+        let Some((label, executable)) = value.split_once('=') else {
             return Err(AttentionError::usage(format!(
                 "{flag} requires NAME=/absolute/executable"
             )));
+        };
+        // A name has no colon, so a colon before the `=` starts a declared time.
+        let (name, declared) = match label.split_once(':') {
+            None => (label, None),
+            Some((name, time)) => (name, Some(declared_time(flag, time)?)),
         };
         if !token(name, true)
             || name.len() > limits.safe_label_max_bytes
@@ -266,7 +286,33 @@ pub fn validate_checks(holds: &[String], quiets: &[String]) -> Result<Vec<Regist
             name: name.into(),
             executable: executable.into(),
             purpose,
+            declared,
         });
+    }
+    // Every later check starts with at least what it reserves still left, so
+    // only the first can be short of its time. A line without a declaration
+    // keeps its earlier behavior: a first check left nothing is not dispatched.
+    if registrations.iter().any(|r| r.declared.is_some())
+        && let Some((first, later)) = registrations.split_first()
+    {
+        let reserved = reserved(later);
+        let (short, needs) = match first.declared {
+            Some(declared) => (
+                reserved + declared > TOTAL_BUDGET,
+                format!("declares {}ms", declared.as_millis()),
+            ),
+            None => (reserved >= TOTAL_BUDGET, "needs more than 0ms".to_owned()),
+        };
+        if short {
+            return Err(AttentionError::usage(format!(
+                "--hold-check and --quiet-check registrations exceed the {}ms check budget: the checks after {} reserve {}ms, {}ms for each that declares no time, and {} {needs}; declare shorter times, such as wezpup:100ms, or register fewer",
+                TOTAL_BUDGET.as_millis(),
+                first.name,
+                reserved.as_millis(),
+                LATER_CHECK_RESERVE.as_millis(),
+                first.name
+            )));
+        }
     }
     // Reserve the longest typed outcome, including worst JSON escaping for
     // supplied paths, before native state can be touched. Other stages omit
@@ -296,6 +342,22 @@ pub fn validate_checks(holds: &[String], quiets: &[String]) -> Result<Vec<Regist
         ));
     }
     Ok(registrations)
+}
+
+/// Reads a declared time such as `100ms`: whole milliseconds, from one to the
+/// chain's budget.
+fn declared_time(flag: &str, text: &str) -> Result<Duration> {
+    text.strip_suffix("ms")
+        .filter(|digits| canonical_decimal_text(digits, 4))
+        .and_then(|digits| digits.parse().ok())
+        .map(Duration::from_millis)
+        .filter(|time| !time.is_zero() && *time <= TOTAL_BUDGET)
+        .ok_or_else(|| {
+            AttentionError::usage(format!(
+                "{flag} requires a declared time of whole milliseconds from 1ms to {}ms, as NAME:100ms=/absolute/executable",
+                TOTAL_BUDGET.as_millis()
+            ))
+        })
 }
 
 #[derive(Serialize)]
@@ -342,8 +404,10 @@ pub fn run(
     run_from(registrations, budget, published_start, input)
 }
 
-/// Each check is allowed the budget less a reserve for every check after it.
-/// `Instant` enforces that allowance; the published deadline is the same
+/// Each check is allowed the budget less what the checks after it reserve; a
+/// check that declared a time is also stopped once it has had that long,
+/// counted from when its input starts to be built. `Instant` enforces that
+/// allowance; the published deadline is the same
 /// allowance added to `published_start`, a `CLOCK_MONOTONIC_RAW` reading. While
 /// the machine sleeps `Instant` may pause where the raw clock does not, so a
 /// check can be stopped later than published, never earlier. With no reading
@@ -360,8 +424,10 @@ fn run_from(
         .enumerate()
         .map(|(index, registration)| {
             let skip = |reason| bypass(std::slice::from_ref(registration), reason).remove(0);
-            let later = u32::try_from(registrations.len() - 1 - index).unwrap_or(u32::MAX);
-            let allowed = budget.saturating_sub(LATER_CHECK_RESERVE.saturating_mul(later));
+            let mut allowed = budget.saturating_sub(reserved(&registrations[index + 1..]));
+            if let Some(declared) = registration.declared {
+                allowed = allowed.min(start.elapsed() + declared);
+            }
             let Some(published) = published_start.map(|raw| format_ns20(raw + allowed.as_nanos()))
             else {
                 return skip(Bypass::TotalDeadline);
@@ -575,6 +641,7 @@ mod tests {
             name: "jev".into(),
             executable: executable.to_str().unwrap().into(),
             purpose: Purpose::Hold,
+            declared: None,
         };
         (root, r)
     }
@@ -768,6 +835,30 @@ mod tests {
     }
 
     #[test]
+    fn a_declared_time_is_its_own_limit_and_what_earlier_checks_leave_it() {
+        let (first_root, mut first) = check("/bin/cat >/dev/null");
+        let (hung_root, mut hung) = check("/bin/cat >/dev/null\n/bin/sleep 5");
+        first.name = "first".into();
+        hung.name = "hung".into();
+        let declared = Duration::from_millis(300);
+        hung.declared = Some(declared);
+        // The chain could run the hung check to its end; only its declared
+        // time stops it.
+        let budget = Duration::from_secs(10);
+        let (outcomes, told) = deadlines(&[first, hung], budget, Duration::ZERO);
+        assert_eq!(told[0], ("first".into(), after_start(budget - declared)));
+        assert!(
+            after_start(declared) <= told[1].1 && told[1].1 < after_start(budget),
+            "{told:?}"
+        );
+        assert_eq!(outcomes[1].stage, Stage::TimedOut, "{:?}", outcomes[1]);
+        assert!(outcomes.iter().all(HoldCheckOutcome::valid));
+        for root in [first_root, hung_root] {
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
     fn a_hung_check_leaves_the_next_check_its_reserve() {
         let (hung_root, mut hung) = check("/bin/sleep 5");
         let (quiet_root, mut quiet) = check(
@@ -882,5 +973,60 @@ mod tests {
         ] {
             assert!(validate_registrations(&values).is_err());
         }
+    }
+
+    #[test]
+    fn a_registration_declares_its_time_after_its_name() {
+        let line = validate_checks(
+            &["jev=/opt/example/a:b".into()],
+            &["wezpup:100ms=/opt/example/quiet".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            line.iter()
+                .map(|r| (r.name.as_str(), r.executable.as_str(), r.declared))
+                .collect::<Vec<_>>(),
+            [
+                ("jev", "/opt/example/a:b", None),
+                (
+                    "wezpup",
+                    "/opt/example/quiet",
+                    Some(Duration::from_millis(100))
+                ),
+            ]
+        );
+        for time in [
+            "0ms", "2001ms", "0100ms", "100", "ms", "+100ms", "1.5ms", "100s", "",
+        ] {
+            let line = [format!("wezpup:{time}=/opt/example/quiet")];
+            assert!(validate_checks(&[], &line).is_err(), "{time}");
+        }
+        assert!(validate_checks(&[], &["wezpup:2000ms=/opt/example/quiet".into()]).is_ok());
+    }
+
+    #[test]
+    fn a_line_that_declares_a_time_must_leave_each_check_its_time() {
+        let line = |first: &str, later: &str| {
+            validate_checks(
+                &[format!("{first}=/opt/example/check")],
+                &[format!("{later}=/opt/example/quiet")],
+            )
+        };
+        assert!(line("jev", "wezpup:1999ms").is_ok());
+        assert!(line("jev:1900ms", "wezpup:100ms").is_ok());
+        assert_eq!(
+            line("jev", "wezpup:2000ms").unwrap_err().to_string(),
+            "bad_usage: --hold-check and --quiet-check registrations exceed the 2000ms check budget: the checks after jev reserve 2000ms, 500ms for each that declares no time, and jev needs more than 0ms; declare shorter times, such as wezpup:100ms, or register fewer"
+        );
+        assert!(line("jev:1900ms", "wezpup:101ms").is_err());
+        assert!(line("jev:1600ms", "wezpup").is_err());
+        // Five checks that declare nothing leave the first none of the budget,
+        // and it is not dispatched, as before declarations existed.
+        let mut five: Vec<String> = (0..5)
+            .map(|n| format!("check{n}=/opt/example/check"))
+            .collect();
+        assert!(validate_registrations(&five).is_ok());
+        five[4] = "check4:500ms=/opt/example/check".into();
+        assert!(validate_registrations(&five).is_err());
     }
 }

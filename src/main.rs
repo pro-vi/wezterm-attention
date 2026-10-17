@@ -114,10 +114,10 @@ struct EventArgs {
     /// Include supported submit text only in transient consumer stdin, never records.
     #[arg(long)]
     include_prompt: bool,
-    /// Named executable returning an optional hold note before a lead Claude Stop; repeatable.
+    /// NAME=/absolute/executable returning an optional hold note before a lead Claude Stop; NAME:100ms=… declares its time; repeatable.
     #[arg(long)]
     hold_check: Vec<String>,
-    /// Named executable proving a quiet lead Stop from frozen lifecycle evidence; repeatable.
+    /// NAME=/absolute/executable proving a quiet lead Stop from frozen lifecycle evidence; NAME:100ms=… declares its time; repeatable.
     #[arg(long)]
     quiet_check: Vec<String>,
 }
