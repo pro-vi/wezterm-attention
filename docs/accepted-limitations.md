@@ -614,6 +614,28 @@ proven gone. Telling one invocation from the next inside a process would need
 evidence the kernel does not keep, and a guess would let one run take over
 another's pane.
 
+## A session whose start did not claim its pane records nothing until its next start
+
+An agent that claims its own pane claims it only at a session start. When that
+hook does not finish, because the agent stopped it at its timeout (on a heavily
+loaded machine Claude Code 2.1.301 cancelled one after 53 s against a 5 s
+timeout), or the start was refused, the pane keeps the claim it had: none, or
+the claim of the agent that ran there before. Every later event of the session
+is then refused (`claim_stale`): its tab shows nothing, and no finish sound,
+reply record, hold or quiet check runs for it. The refusal goes to the hook's
+stderr, which Claude Code 2.1.301 keeps in the session's transcript; its hooks
+documentation (read 2026-10-16) says the stderr of a hook that exits 0, as this
+one does, is not shown.
+
+The session's next start claims the pane once the earlier agent has exited,
+whatever its source: `/clear`, `/compact`, `/resume`, or the agent started
+again. A tool or turn event does not claim it. A binding is made from a
+session start: `start_source` is a required field of the binding record, and a
+tool event has no start source to give it, nor the start's model. A claim taken
+from a tool event would need a binding without one, which the record contract
+does not have. `attention doctor`'s `claude_sessions` probe names each running
+interactive Claude Code session in a listed pane that has no current binding.
+
 ## An agent that claimed its own pane can leave its last activity behind
 
 In a pane an agent claimed for itself, the shell integration's prompt hook

@@ -3,7 +3,8 @@
 //! values replaced; each keeps fields the reader does not read.
 
 use super::*;
-use wezterm_attention::claude_status::{Foreign, Reading, Unreadable, read, status_path};
+use wezterm_attention::claude_status::{Foreign, Reading, Unreadable, read, sessions, status_path};
+use wezterm_attention::wezterm::ProcessStart;
 
 const SESSION: &str = "s";
 
@@ -268,6 +269,48 @@ fn the_file_is_the_process_s_in_the_configuration_directory() {
     );
     assert_eq!(status_path(None, None, 4000), None);
     assert_eq!(status_path(None, Some("relative"), 4000), None);
+}
+
+/// Doctor takes each session a status file names, but only from a file named
+/// for the process it names, whose process is interactive.
+#[test]
+fn a_file_names_a_session_only_for_its_own_interactive_process() {
+    let scratch = Scratch::new();
+    let directory = scratch.0.join("sessions");
+    fs::create_dir_all(&directory).expect("sessions directory");
+    let write = |name: &str, file: &Value| {
+        fs::write(
+            directory.join(name),
+            serde_json::to_vec(file).expect("status JSON"),
+        )
+        .expect("status file");
+    };
+    let with_pid = |mut file: Value, pid: i32| {
+        file["pid"] = json!(pid);
+        file
+    };
+    write(&format!("{AGENT_PID}.json"), &fixture("busy"));
+    write("4001.json", &fixture("busy"));
+    write(
+        "4002.json",
+        &with_pid(busy_with("kind", Some(json!("print"))), 4002),
+    );
+    write("4003.json", &with_pid(busy_with("startedAt", None), 4003));
+    write("4004.json", &with_pid(busy_with("sessionId", None), 4004));
+    write("notes.json", &fixture("busy"));
+    let found = sessions(&scratch.0);
+    assert_eq!(found.len(), 1, "{found:?}");
+    let (pid, session) = &found[0];
+    assert_eq!((*pid, session.session_id.as_str()), (AGENT_PID, SESSION));
+    // The fixture's `startedAt` is 1792022948000 ms.
+    let started = |seconds, microseconds| ProcessStart {
+        seconds,
+        microseconds,
+    };
+    assert!(session.written_by(started(1_792_022_947, 999_999)));
+    assert!(session.written_by(started(1_792_022_948, 999)));
+    assert!(!session.written_by(started(1_792_022_948, 1_000)));
+    assert!(sessions(&scratch.0.join("missing")).is_empty());
 }
 
 /// An open that fails for another reason than a link or no file, as one

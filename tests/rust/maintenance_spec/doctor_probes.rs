@@ -378,9 +378,32 @@ const HOST_PID: i32 = 4321;
 const HOST_STARTED_USEC: u32 = 7;
 const BOOT: &str = "0f9a7c3e-51b2-4d6e-8a1b-2c3d4e5f6a7b";
 
-/// A process table where only the host at `HOST_PID` can run.
+/// The device numbers of the terminals of panes 42 (`/dev/ttys888`) and 43
+/// (`/dev/ttys889`) in [`OneHost`].
+const PANE_DEVICE: u64 = 0x1000_0378;
+const OTHER_PANE_DEVICE: u64 = 0x1000_0379;
+
+/// The host at `HOST_PID`, on pane 42's terminal.
+fn host_facts() -> ProcessFacts {
+    ProcessFacts {
+        parent_pid: 1,
+        process_group: HOST_PID,
+        terminal: ControllingTerminal::Device(PANE_DEVICE),
+        terminal_foreground_group: HOST_PID,
+        uid: 501,
+        start: ProcessStart {
+            seconds: 1_700_000_000,
+            microseconds: HOST_STARTED_USEC,
+        },
+        traced: false,
+        zombie: false,
+    }
+}
+
+/// A process table where only the host at `HOST_PID` can run, with `facts`
+/// while it does.
 struct OneHost {
-    running: bool,
+    facts: Option<ProcessFacts>,
 }
 
 impl ProcessInspector for OneHost {
@@ -393,30 +416,22 @@ impl ProcessInspector for OneHost {
     }
 
     fn process(&self, pid: i32) -> ProcessRead {
-        if pid != HOST_PID || !self.running {
-            return ProcessRead::Gone;
+        match &self.facts {
+            Some(facts) if pid == HOST_PID => ProcessRead::Found(facts.clone()),
+            _ => ProcessRead::Gone,
         }
-        ProcessRead::Found(ProcessFacts {
-            parent_pid: 1,
-            process_group: HOST_PID,
-            terminal: ControllingTerminal::Absent,
-            terminal_foreground_group: HOST_PID,
-            uid: 501,
-            start: ProcessStart {
-                seconds: 1_700_000_000,
-                microseconds: HOST_STARTED_USEC,
-            },
-            traced: false,
-            zombie: false,
-        })
     }
 
     fn boot_session(&self) -> Option<String> {
         Some(BOOT.to_owned())
     }
 
-    fn terminal_device(&self, _path: &str) -> Option<u64> {
-        None
+    fn terminal_device(&self, path: &str) -> Option<u64> {
+        match path {
+            "/dev/ttys888" => Some(PANE_DEVICE),
+            "/dev/ttys889" => Some(OTHER_PANE_DEVICE),
+            _ => None,
+        }
     }
 }
 
@@ -475,7 +490,9 @@ fn doctor_reports_whether_running_claude_sessions_status_files_are_understood() 
             &setup.env,
             Some(&setup.panes),
             Some(&setup.processes),
-            &OneHost { running },
+            &OneHost {
+                facts: running.then(host_facts),
+            },
         )
         .expect("doctor")
     };
@@ -599,7 +616,9 @@ fn doctor_reads_a_claude_session_s_file_in_its_configuration_directory() {
         &setup.env,
         Some(&setup.panes),
         Some(&setup.processes),
-        &OneHost { running: true },
+        &OneHost {
+            facts: Some(host_facts()),
+        },
     )
     .expect("doctor");
     assert_eq!(
@@ -607,4 +626,131 @@ fn doctor_reads_a_claude_session_s_file_in_its_configuration_directory() {
         "healthy",
         "{result}"
     );
+}
+
+/// A Claude Code session whose start never claimed its pane has each later
+/// event refused, and nothing on screen says so; doctor names it. Only an
+/// interactive session, in the process that wrote its status file, on a listed
+/// pane's terminal, under settings that call Attention, is one whose events
+/// reach Attention there, and only a binding in that pane binds it.
+#[test]
+fn doctor_names_a_running_claude_session_in_a_pane_with_no_current_binding() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let claude = setup._scratch.0.join(".claude");
+    let settings = claude.join("settings.json");
+    let calling = r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude SessionStart"}]}]}}"#;
+    fs::create_dir_all(&claude).expect("configuration directory");
+    fs::write(&settings, calling).expect("settings");
+    let doctor = |facts: ProcessFacts| {
+        let (result, diagnostics) = wezterm_attention::maintenance::doctor_with_environment(
+            &setup.root(),
+            &setup.env,
+            Some(&setup.panes),
+            Some(&setup.processes),
+            &OneHost { facts: Some(facts) },
+        )
+        .expect("doctor");
+        let refused: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::ClaimStale)
+            .collect();
+        (probe_status(&result, "claude_sessions"), result, refused)
+    };
+    let unobserved = |label: &str, facts: ProcessFacts| {
+        let (status, result, refused) = doctor(facts);
+        assert_eq!(status, "unobserved", "{label}: {result}");
+        assert!(refused.is_empty(), "{label}: {refused:?}");
+    };
+    unobserved("no status file", host_facts());
+    let (_, result, _) = doctor(host_facts());
+    assert!(
+        result["scope"]
+            .as_array()
+            .expect("scope")
+            .contains(&json!("claude_sessions")),
+        "{result}"
+    );
+
+    write_status(&claude, &status_file("idle"));
+    let (status, result, refused) = doctor(host_facts());
+    assert_eq!(status, "healthy", "session-a is bound in pane 42: {result}");
+    assert!(refused.is_empty(), "{refused:?}");
+    // Resumed in another pane, whose start was refused.
+    setup.panes.set(vec![
+        PaneRow {
+            pane_id: "42".to_owned(),
+            tty_name: Some("/dev/ttys888".to_owned()),
+        },
+        PaneRow {
+            pane_id: "43".to_owned(),
+            tty_name: Some("/dev/ttys889".to_owned()),
+        },
+    ]);
+    let (status, result, refused) = doctor(ProcessFacts {
+        terminal: ControllingTerminal::Device(OTHER_PANE_DEVICE),
+        ..host_facts()
+    });
+    assert_eq!(status, "finding", "session-a in pane 43: {result}");
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(refused[0].context.get("pane_id"), Some(&json!("43")));
+
+    let mut unbound = status_file("idle");
+    unbound["sessionId"] = json!("session-b");
+    write_status(&claude, &unbound);
+    let (status, result, refused) = doctor(host_facts());
+    assert_eq!(status, "finding", "{result}");
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(
+        refused[0].context.get("provider_session_id"),
+        Some(&json!("session-b"))
+    );
+    assert_eq!(refused[0].context.get("pane_id"), Some(&json!("42")));
+
+    let cases = [
+        (
+            "a process started after the file was written",
+            ProcessFacts {
+                start: ProcessStart {
+                    seconds: 1_800_000_000,
+                    microseconds: HOST_STARTED_USEC,
+                },
+                ..host_facts()
+            },
+        ),
+        (
+            "a process that exited and is not yet reaped",
+            ProcessFacts {
+                zombie: true,
+                ..host_facts()
+            },
+        ),
+        (
+            "a process on a terminal no listed pane has",
+            ProcessFacts {
+                terminal: ControllingTerminal::Device(OTHER_PANE_DEVICE + 1),
+                ..host_facts()
+            },
+        ),
+        (
+            "a process with no terminal",
+            ProcessFacts {
+                terminal: ControllingTerminal::Absent,
+                ..host_facts()
+            },
+        ),
+    ];
+    for (label, facts) in cases {
+        unobserved(label, facts);
+    }
+    let mut printed = unbound.clone();
+    printed["kind"] = json!("print");
+    write_status(&claude, &printed);
+    unobserved("a session that is not interactive", host_facts());
+
+    write_status(&claude, &unbound);
+    fs::write(&settings, "{}").expect("settings");
+    unobserved("settings that do not call Attention", host_facts());
+    fs::remove_file(&settings).expect("settings removed");
+    unobserved("no settings", host_facts());
 }

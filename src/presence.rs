@@ -445,14 +445,20 @@ impl PaneLister for ListOncePerSocket<'_> {
     fn list(&self, socket_path: &str) -> Result<Vec<crate::wezterm::PaneRow>> {
         // A poisoned lock would mean a panic inside `list`; fall back to the
         // uncached path rather than propagating a panic through a read command.
-        let Ok(mut listed) = self.listed.lock() else {
+        let Ok(listed) = self.listed.lock() else {
             return record_spent(&self.spent, || self.inner.list(socket_path));
         };
         if let Some(cached) = listed.get(socket_path) {
             return cached.clone();
         }
+        // Not held while listing: an assembly's `list_together` asks a cache
+        // doctor shares across its checks from one thread per socket, and the
+        // sockets must be listed together, not one after another.
+        drop(listed);
         let answer = record_spent(&self.spent, || self.inner.list(socket_path));
-        listed.insert(socket_path.to_owned(), answer.clone());
+        if let Ok(mut listed) = self.listed.lock() {
+            listed.insert(socket_path.to_owned(), answer.clone());
+        }
         answer
     }
 }
@@ -813,6 +819,39 @@ mod pane_listing_tests {
         // A second socket is a different question and is asked once more.
         assert_eq!(once.list("/s/two").unwrap()[0].pane_id, "/s/two");
         assert_eq!(counting.calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// Doctor shares one cache across its checks, and the bindings read wraps
+    /// it in its own; the sockets that read lists together still overlap.
+    #[test]
+    fn sockets_listed_together_through_a_shared_cache_overlap() {
+        struct Overlapping {
+            calls: AtomicUsize,
+            listing: AtomicUsize,
+            most: AtomicUsize,
+        }
+        impl PaneLister for Overlapping {
+            fn list(&self, _socket_path: &str) -> Result<Vec<PaneRow>> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let now = self.listing.fetch_add(1, Ordering::SeqCst) + 1;
+                self.most.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(50));
+                self.listing.fetch_sub(1, Ordering::SeqCst);
+                Ok(Vec::new())
+            }
+        }
+        let inner = Overlapping {
+            calls: AtomicUsize::new(0),
+            listing: AtomicUsize::new(0),
+            most: AtomicUsize::new(0),
+        };
+        let shared = ListOncePerSocket::new(&inner);
+        let assembly = ListOncePerSocket::new(&shared);
+        assembly.list_together(["/s/one".to_owned(), "/s/two".to_owned()].into());
+        assert_eq!(inner.most.load(Ordering::SeqCst), 2);
+        // The shared cache keeps both answers for the checks after it.
+        assert!(shared.list("/s/one").is_ok() && shared.list("/s/two").is_ok());
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

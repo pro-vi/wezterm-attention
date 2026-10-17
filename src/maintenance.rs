@@ -18,7 +18,7 @@ use crate::protocol::{
     AttentionError, Diagnostic, DiagnosticCode, EMBEDDED_MANIFEST, Result, elapsed_beyond,
     hex64_text, manifest, ns20_text, sha256_hex,
 };
-use crate::query::{FileStamp, read_bindings_with_ports, read_tab_publications};
+use crate::query::{BindingRow, FileStamp, read_bindings_with_ports, read_tab_publications};
 use crate::records::{
     AGENTS, BINDING_FILE, BindingState, CommitPlan, FileRecords, RecordIdentity, RecordRead,
     Replacement, atomic_replace_if_different, binding_record_kind, binding_session_entry,
@@ -27,7 +27,10 @@ use crate::records::{
     naming_record, pane_dir, read_bounded, read_record, record_address, removal_confined,
     remove_file_durable, session_index_marker, session_index_path, state_relative,
 };
-use crate::wezterm::{Clock, PaneLister, Presence, ProcessInspector, ProcessListing, ProcessProbe};
+use crate::wezterm::{
+    Clock, ControllingTerminal, PaneLister, Presence, ProcessInspector, ProcessListing,
+    ProcessProbe, ProcessRead,
+};
 
 pub const ABSENCE_INTERVAL_NS: u128 = 60_000_000_000;
 pub const RETENTION_AGE_NS: u128 = 30 * 24 * 60 * 60 * 1_000_000_000;
@@ -186,6 +189,8 @@ pub fn doctor_with_environment(
 ) -> Result<(Value, Vec<Diagnostic>)> {
     let probed_once = processes.map(ProbeOncePerAssembly::new);
     let processes = probed_once.as_ref().map(|probe| probe as &dyn ProcessProbe);
+    let listed_once = panes.map(ListOncePerSocket::new);
+    let panes = listed_once.as_ref().map(|panes| panes as &dyn PaneLister);
     let mut diagnostics = Vec::new();
     let mut probes = Vec::new();
     let (audited_records, audit_diagnostics) = audit_state(root);
@@ -335,6 +340,15 @@ pub fn doctor_with_environment(
         &mut diagnostics,
     );
     probes.push(json!({"name":"claude_status","status":claude_status}));
+    let claude_sessions = claude_sessions_probe(
+        &rows,
+        &realm_sockets,
+        environment,
+        listed_once.as_ref(),
+        inspector,
+        &mut diagnostics,
+    );
+    probes.push(json!({"name":"claude_sessions","status":claude_sessions}));
     diagnostics.extend(state_diagnostics);
     let diagnostics = fold_kept_history(diagnostics);
     let unobserved: Vec<Value> = probes
@@ -344,7 +358,7 @@ pub fn doctor_with_environment(
         .collect();
     Ok((
         json!({
-            "scope": ["state_files","socket","processes","permissions","versions","environment","codex_server","claude_status"],
+            "scope": ["state_files","socket","processes","permissions","versions","environment","codex_server","claude_status","claude_sessions"],
             "unobserved": unobserved,
             "probes": probes,
             "bindings_scanned": rows.len(),
@@ -379,11 +393,7 @@ fn codex_server_probe(
     let mut status = "healthy";
     for server in listing.codex_servers() {
         let calls_attention = server.codex_home.as_ref().is_none_or(|home| {
-            match fs::read_to_string(home.join("hooks.json")) {
-                Ok(hooks) => hooks.contains("hooks event codex"),
-                // Hooks that cannot be read may still call Attention.
-                Err(error) => error.kind() != std::io::ErrorKind::NotFound,
-            }
+            settings_call_attention(&home.join("hooks.json"), "hooks event codex")
         });
         if !calls_attention {
             continue;
@@ -494,6 +504,123 @@ fn claude_status_probe(
         status = "finding";
     }
     status
+}
+
+/// Whether each interactive Claude Code session running in a pane a recorded
+/// mux lists has a current binding in that pane. A session whose start was
+/// refused, or that Claude Code stopped before it claimed the pane, has each
+/// later event refused (`claim_stale`) and its tab shows nothing. The refusal
+/// goes to the hook's stderr, which Claude Code 2.1.301 keeps in the session's
+/// transcript and which, by its hooks documentation (read 2026-10-16), it does
+/// not show for a hook that exits 0. A session counts when its status file says
+/// it is interactive, the process that wrote the file runs on the terminal of a
+/// listed pane, and its configuration directory's settings may call
+/// Attention. A mux whose listing fails is left to the `socket` probe, which
+/// reports it.
+fn claude_sessions_probe(
+    rows: &[BindingRow],
+    realm_sockets: &BTreeMap<String, String>,
+    environment: &BTreeMap<String, String>,
+    panes: Option<&ListOncePerSocket<'_>>,
+    inspector: &dyn ProcessInspector,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> &'static str {
+    let Some(panes) = panes else {
+        return "unavailable";
+    };
+    let home = environment.get("HOME").map(String::as_str);
+    // The configuration directories Claude Code runs from here: the default,
+    // and each one a binding names.
+    let directories: BTreeSet<PathBuf> = rows
+        .iter()
+        .filter(|row| row.provider == "claude")
+        .filter_map(|row| claude_status::config_directory(row.config_dir.as_deref(), home))
+        .chain(claude_status::config_directory(None, home))
+        .collect();
+    let running: Vec<(String, u64)> = directories
+        .iter()
+        .filter(|directory| {
+            settings_call_attention(&directory.join("settings.json"), "hooks event claude")
+        })
+        .flat_map(|directory| claude_status::sessions(directory))
+        .filter_map(|(pid, file)| {
+            let ProcessRead::Found(facts) = inspector.process(pid) else {
+                return None;
+            };
+            let ControllingTerminal::Device(device) = facts.terminal else {
+                return None;
+            };
+            (!facts.zombie && file.written_by(facts.start)).then_some((file.session_id, device))
+        })
+        .collect();
+    if running.is_empty() {
+        return "unobserved";
+    }
+    // The realms recorded for each socket that is still there.
+    let mut realms_at: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (realm, socket) in realm_sockets {
+        if fs::symlink_metadata(socket).is_ok() {
+            realms_at.entry(socket).or_default().push(realm);
+        }
+    }
+    panes.list_together(
+        realms_at
+            .keys()
+            .map(|socket| (*socket).to_owned())
+            .collect(),
+    );
+    let mut pane_on = BTreeMap::new();
+    for (socket, realms) in &realms_at {
+        for row in panes.list(socket).unwrap_or_default() {
+            if let Some(device) = row
+                .tty_name
+                .as_deref()
+                .and_then(|tty| inspector.terminal_device(tty))
+            {
+                pane_on.insert(device, (realms, row.pane_id));
+            }
+        }
+    }
+    let mut status = "unobserved";
+    for (session, device) in running {
+        let Some((realms, pane)) = pane_on.get(&device) else {
+            continue;
+        };
+        if rows.iter().any(|row| {
+            row.current
+                && row.provider == "claude"
+                && row.provider_session_id == session
+                && row.address.pane_id == *pane
+                && realms.contains(&row.address.realm_id.as_str())
+        }) {
+            if status == "unobserved" {
+                status = "healthy";
+            }
+            continue;
+        }
+        let mut item = Diagnostic::new(
+            DiagnosticCode::ClaimStale,
+            "a Claude Code session running in a pane has no current binding, so its events \
+             are refused and its tab shows nothing; once no other running agent holds the \
+             pane, /clear or /compact in it, or quitting it and running \
+             `claude --resume <provider_session_id>`, binds it again",
+        );
+        item.set("provider_session_id", session);
+        item.set("pane_id", pane.clone());
+        diagnostics.push(item);
+        status = "finding";
+    }
+    status
+}
+
+/// Whether the agent settings file at `path` may register Attention's hooks:
+/// it names `command`, or it exists and cannot be read. A missing file
+/// registers none.
+fn settings_call_attention(path: &Path, command: &str) -> bool {
+    match fs::read_to_string(path) {
+        Ok(settings) => settings.contains(command),
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
 }
 
 /// Whether the pane doctor runs in has a server identity anything can find.

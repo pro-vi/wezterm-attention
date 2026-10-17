@@ -1,16 +1,18 @@
-//! Claude Code's per-process status file, read for one thing: whether the lead
-//! turn of the process that writes it is still working. As of Claude Code
-//! 2.1.300 a turn the user stops with Esc runs no hook, and this file shows the
-//! stop.
+//! Claude Code's per-process status file, read for two things: whether the
+//! lead turn of the process that writes it is still working, and, for
+//! `attention doctor`, which session an interactive process runs. As of Claude
+//! Code 2.1.300 a turn the user stops with Esc runs no hook, and this file
+//! shows the stop.
 //!
 //! The file is Claude Code's own, private and undocumented, and all of it is
 //! untrusted. This module is the only code that knows where it is, which of
-//! its fields are read and what their values mean; what leaves it is a
+//! its fields are read and what their values mean. What leaves it is a
 //! [`Reading`], which carries none of the file's field names or state values,
-//! only the Claude Code version it names when that is a safe label. A file it
-//! does not understand is never read as a working or an ended turn.
+//! only the Claude Code version it names when that is a safe label, or a
+//! [`Session`], which carries the session id. A file it does not understand is
+//! never read as a working or an ended turn, and gives no [`Session`].
 
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -18,6 +20,7 @@ use serde_json::Value;
 
 use crate::providers::safe_text;
 use crate::records::read_bounded;
+use crate::wezterm::ProcessStart;
 
 /// The `source_event` of a turn end read from the status file; see
 /// [`crate::turn_follower::FOLLOWER_SOURCES`].
@@ -32,13 +35,21 @@ const MAX_BYTES: usize = 64 << 10;
 /// set and `~/.claude` otherwise, holds one for each process it runs. `None`
 /// when the directory that applies is not an absolute path.
 pub fn status_path(config_dir: Option<&str>, home: Option<&str>, pid: i32) -> Option<PathBuf> {
+    Some(
+        config_directory(config_dir, home)?
+            .join("sessions")
+            .join(format!("{pid}.json")),
+    )
+}
+
+/// The configuration directory of a Claude Code session whose
+/// `CLAUDE_CONFIG_DIR` is `config_dir`, as [`status_path`] finds it.
+pub fn config_directory(config_dir: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
     let directory = match config_dir {
         Some(directory) => PathBuf::from(directory),
         None => Path::new(home?).join(".claude"),
     };
-    directory
-        .is_absolute()
-        .then(|| directory.join("sessions").join(format!("{pid}.json")))
+    directory.is_absolute().then_some(directory)
 }
 
 /// What one read of the file says. `updated_at` is when Claude Code last
@@ -117,6 +128,78 @@ impl Foreign {
 /// Read the status file at `path` once, for Claude Code session `session_id`
 /// in process `pid`.
 pub fn read(path: &Path, session_id: &str, pid: i32) -> Reading {
+    match file_bytes(path) {
+        Ok(bytes) => understand(&bytes, session_id, pid),
+        Err(reading) => reading,
+    }
+}
+
+/// The session an interactive Claude Code process runs now, as its status
+/// file names it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Session {
+    pub session_id: String,
+    /// When the process wrote the file first, in milliseconds since the epoch.
+    started_at: u64,
+}
+
+impl Session {
+    /// Whether a process that started at `start` can have written the file.
+    /// As of Claude Code 2.1.301 the file's `startedAt` is one to eleven
+    /// seconds after its process starts (29 files read), so a process that
+    /// started after it, at a pid an exited process left, did not write it.
+    pub fn written_by(&self, start: ProcessStart) -> bool {
+        start
+            .seconds
+            .saturating_mul(1000)
+            .saturating_add(u64::from(start.microseconds) / 1000)
+            <= self.started_at
+    }
+}
+
+/// The sessions the status files in Claude Code configuration directory
+/// `directory` name, each with the pid of the process its file is named for.
+/// A file is left out when it cannot be read or is not understood, when it
+/// names another process, or when its process is not an interactive session:
+/// as of Claude Code 2.1.301 `kind` reads `interactive` for one run in a
+/// terminal.
+pub fn sessions(directory: &Path) -> Vec<(i32, Session)> {
+    let Ok(entries) = fs::read_dir(directory.join("sessions")) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let pid = name
+                .to_str()?
+                .strip_suffix(".json")?
+                .parse::<i32>()
+                .ok()
+                .filter(|pid| *pid > 0)?;
+            Some((pid, session(&entry.path(), pid)?))
+        })
+        .collect()
+}
+
+fn session(path: &Path, pid: i32) -> Option<Session> {
+    let bytes = file_bytes(path).ok()?;
+    let file: serde_json::Map<String, Value> = serde_json::from_slice(&bytes).ok()?;
+    if file.get("pid").and_then(Value::as_i64) != Some(i64::from(pid))
+        || file.get("kind").and_then(Value::as_str) != Some("interactive")
+    {
+        return None;
+    }
+    Some(Session {
+        session_id: safe_text(file.get("sessionId")?.as_str()?, "sessionId").ok()?,
+        started_at: file.get("startedAt").and_then(Value::as_u64)?,
+    })
+}
+
+/// The bytes of the file at `path`, or the reading that says why they are not
+/// read: it is missing, a link, not a regular file, not this user's, too
+/// large, or could not be read.
+fn file_bytes(path: &Path) -> Result<Vec<u8>, Reading> {
     let unreadable = |reason| Reading::Unreadable {
         reason,
         version: None,
@@ -128,28 +211,28 @@ pub fn read(path: &Path, session_id: &str, pid: i32) -> Reading {
         .open(path)
     {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Reading::Gone,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(Reading::Gone),
         Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
-            return Reading::Foreign(Foreign::Link);
+            return Err(Reading::Foreign(Foreign::Link));
         }
-        Err(_) => return unreadable(Unreadable::ReadFailed),
+        Err(_) => return Err(unreadable(Unreadable::ReadFailed)),
     };
     let Ok(metadata) = file.metadata() else {
-        return unreadable(Unreadable::ReadFailed);
+        return Err(unreadable(Unreadable::ReadFailed));
     };
     if !metadata.file_type().is_file() {
-        return Reading::Foreign(Foreign::NotRegularFile);
+        return Err(Reading::Foreign(Foreign::NotRegularFile));
     }
     if metadata.uid() != crate::identity::effective_uid() {
-        return Reading::Foreign(Foreign::NotOwned);
+        return Err(Reading::Foreign(Foreign::NotOwned));
     }
     let Ok(bytes) = read_bounded(&file, MAX_BYTES) else {
-        return unreadable(Unreadable::ReadFailed);
+        return Err(unreadable(Unreadable::ReadFailed));
     };
     if bytes.len() > MAX_BYTES {
-        return unreadable(Unreadable::TooLarge);
+        return Err(unreadable(Unreadable::TooLarge));
     }
-    understand(&bytes, session_id, pid)
+    Ok(bytes)
 }
 
 /// What the file's bytes say. As of Claude Code 2.1.300 `busy` is a working
