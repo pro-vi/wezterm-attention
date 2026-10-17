@@ -121,6 +121,7 @@ fn always_hold_keeps_running_claude_stop_out_of_checkmark() {
     assert_eq!(delivered["reply"]["text"], input["last_assistant_message"]);
     assert_eq!(delivered["phase"], "before_turn_end");
     assert!(delivered.get("persistence").is_none());
+    assert!(delivered.get("transcript_path").is_none());
     let (activity, snapshot) = records(&setup, "claude");
     assert_eq!(activity["type"], "stop");
     let shown = super::mark_clear::plugin_reader_answer(&setup, "held_render");
@@ -1234,13 +1235,16 @@ fn the_guide_example_input_has_the_fields_a_hold_check_receives() {
     bind(&setup, "claude");
     let captured = setup._scratch.0.join("input.json");
     let check = executable(&setup, &format!("/bin/cat > '{}'", captured.display()));
-    let output = hook(&setup, &payload(), &check, &[]);
+    let mut input = payload();
+    input["transcript_path"] = json!("/tmp/hold-session.jsonl");
+    let output = hook(&setup, &input, &check, &[]);
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
     let delivered: Value = serde_json::from_slice(&fs::read(captured).unwrap()).unwrap();
+    assert_eq!(delivered["transcript_path"], "/tmp/hold-session.jsonl");
     let keys = |value: &Value| {
         value
             .as_object()

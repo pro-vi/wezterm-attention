@@ -47,6 +47,8 @@ pub struct AdmittedHook {
     pub scope: HookScope,
     pub provider: String,
     pub provider_session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
     pub source_event: String,
     pub actor: Actor,
     #[serde(skip_serializing_if = "Option::is_none")]

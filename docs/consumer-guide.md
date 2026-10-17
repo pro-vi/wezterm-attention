@@ -288,7 +288,7 @@ WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event claude Stop \
 
 Repeat `--consumer` for multiple executables. Each gets the explicit positive, representable deadline, covering stdin writing and process completion. Total hook time includes each consumer's budget. Paths are absolute executable paths, with no shell command syntax or executable arguments. Normal process environment inheritance remains available to application-owned executables; the delivery JSON contains no environment dump. The sample sink uses Node through its shebang, so Node must be on the configured PATH.
 
-`HookDelivery` contains `schema`, a fresh `delivery_id`, `scope`, `action`, `provider`, `provider_session_id`, `source_event`, `actor`, optional `correlation` and `observation_id`, `persistence`, `reply`, and `prompt`. Scope contains the admitted `address`, `launch_id`, and a binding `target` (`kind="binding"`, `binding_id`). `action` uses the existing provider-action vocabulary and distinguishes binding, activity, parent Stop, child presence, end, review, clear and observation-only operations. It is not a controller command or permission.
+`HookDelivery` contains `schema`, a fresh `delivery_id`, `scope`, `action`, `provider`, `provider_session_id`, optional `transcript_path`, `source_event`, `actor`, optional `correlation`, `observation_id` and `turn_end`, `persistence`, `reply`, and `prompt`. `transcript_path` is the session file this callback named: its `transcript_path`, or Pi's `session_file`. It is the absolute path the provider sent, and Attention has not checked that the file exists. It is omitted when the callback names none or a malformed one: not an absolute path, longer than 4096 bytes, or holding a control character. Attention 1.4.0 and earlier omit it. Scope contains the admitted `address`, `launch_id`, and a binding `target` (`kind="binding"`, `binding_id`). `action` uses the existing provider-action vocabulary and distinguishes binding, activity, parent Stop, child presence, end, review, clear and observation-only operations. It is not a controller command or permission.
 
 Identity is captured inside the same native application path. Delivery requires a claimed launch, as for lifecycle observations above, and a matching current provider binding. A consumer run for an event admitted through the agent's own pane claim inherits no `WEZTERM_ATTENTION_LAUNCH_ID`, so `attention mark` called from it is refused. The label remains that admitted source even if a newer occupant appears before a consumer acts. No executable runs inside an Attention writer lock.
 
@@ -366,6 +366,7 @@ Stdin is one JSON object, newline and EOF:
   },
   "provider": "claude",
   "provider_session_id": "synthetic-session",
+  "transcript_path": "/tmp/synthetic-session.jsonl",
   "source_event": "Stop",
   "actor": {"kind": "lead"},
   "observed_mono_ns": "00000000000100000000",
@@ -376,6 +377,8 @@ Stdin is one JSON object, newline and EOF:
 ```
 
 `deadline_mono_ns` is when Attention stops this program, as a 20-digit count of `CLOCK_MONOTONIC_RAW` nanoseconds: the clock and encoding of `observed_mono_ns`. Read the same clock to compare: `clock_gettime(CLOCK_MONOTONIC_RAW)`, or `time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)` in Python, whose `time.monotonic()` is a different clock on macOS. A reading below `observed_mono_ns` means the program reads the wrong clock. The deadline already leaves time for later programs (below), so a program subtracts only the time it needs to finish, such as writing its own record. Attention never stops a program before this moment; if the machine sleeps during the chain it can stop it later. Attention 1.2.0 and earlier omit the field. A program that finds it missing, unparsable or already past has no time it can count on.
+
+`transcript_path` is the session file this Stop's callback named, by the same rule as in `HookDelivery`, and is omitted when the callback names none or a malformed one. Attention 1.4.0 and earlier omit it.
 
 The array's JSON elements and fields are forwarded unchanged. There is no persistence claim: the scope was checked before execution and is checked again before writing. Input must fit the existing hook byte bound; oversized input supplies no hold. Replies and task arrays remain transient in Attention. Applications own any logging they perform.
 

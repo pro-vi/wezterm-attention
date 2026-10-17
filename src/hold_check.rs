@@ -369,6 +369,8 @@ pub struct HoldCheckInput<'a> {
     pub scope: &'a HookScope,
     pub provider: &'a str,
     pub provider_session_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<&'a str>,
     pub source_event: &'a str,
     pub actor: Actor,
     pub observed_mono_ns: &'a str,

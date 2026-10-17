@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Hook deliveries and hold and quiet check input name the session file.** Each carries `transcript_path`, the session file the provider's callback named (Pi's `session_file`), so a consumer that reads the session opens it directly instead of searching the provider's folders for it. It is omitted when the callback names none or a malformed one. See the consumer guide's "Transient hook delivery" and "Pre-write hold checks".
+
 ## 1.4.0 — 2026-10-16
 
 ### Added

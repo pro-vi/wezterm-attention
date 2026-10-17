@@ -145,6 +145,7 @@ fn confirm_native(resolved: &ResolvedLaunch, binding_id: &str, mutation: &Mutati
             },
             provider: provider_name(event)?.into(),
             provider_session_id: event.provider_session_id.clone().unwrap_or_default(),
+            transcript_path: event.transcript_path.clone(),
             source_event: event.source_event.clone(),
             actor,
             correlation: event
@@ -3907,6 +3908,7 @@ fn obtain_hold_notes(
             scope: &scope,
             provider: event.provider?.as_str(),
             provider_session_id: event.provider_session_id.as_deref()?,
+            transcript_path: event.transcript_path.as_deref(),
             source_event: &event.source_event,
             actor: crate::observations::Actor::Lead,
             observed_mono_ns: observation,

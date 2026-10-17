@@ -786,6 +786,37 @@ fn delivery_retains_admitted_identity_after_rotation_and_duplicates_are_distinct
 }
 
 #[test]
+fn delivery_names_the_session_file_the_callback_named() {
+    for (provider, name, patch, expected) in [
+        ("claude", "Stop", json!({}), Some("/tmp/session.jsonl")),
+        // As of Codex 0.162.0, Stop's `transcript_path` is nullable.
+        ("codex", "Stop", json!({"transcript_path":null}), None),
+        (
+            "pi",
+            "bus",
+            json!({"state":"review"}),
+            Some("/tmp/pi.jsonl"),
+        ),
+    ] {
+        let setup = Setup::new();
+        bind(&setup, provider);
+        let event = event(provider, name, "consumer-session", patch);
+        let outcome = apply_provider_event_with_outcome(
+            &event,
+            &setup.env,
+            "00000000000000000300",
+            &setup.ports(),
+        );
+        let delivery = super::self_claim::delivered(&outcome).expect("the event is delivered");
+        assert_eq!(
+            delivery.get("transcript_path").and_then(Value::as_str),
+            expected,
+            "{provider} {name}"
+        );
+    }
+}
+
+#[test]
 fn malformed_consumer_arguments_fail_before_native_application() {
     let setup = Setup::new();
     bind(&setup, "claude");
