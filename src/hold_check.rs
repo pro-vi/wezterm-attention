@@ -20,7 +20,7 @@ use crate::protocol::{
     AttentionError, Result, canonical_decimal_text, format_ns20, free_of_control, manifest,
 };
 
-pub const TOTAL_BUDGET: Duration = Duration::from_millis(2000);
+pub const TOTAL_BUDGET: Duration = Duration::from_millis(2500);
 /// The chain stops each check this much earlier for every eligible check
 /// after it that declares no time of its own, so a slow check cannot spend a
 /// later check's time.
@@ -825,8 +825,8 @@ mod tests {
         assert_eq!(
             told,
             [
-                ("first".into(), after_start(Duration::from_millis(1500))),
-                ("second".into(), after_start(Duration::from_millis(2000))),
+                ("first".into(), after_start(Duration::from_millis(2000))),
+                ("second".into(), after_start(Duration::from_millis(2500))),
             ]
         );
         for root in [first_root, second_root] {
@@ -996,12 +996,12 @@ mod tests {
             ]
         );
         for time in [
-            "0ms", "2001ms", "0100ms", "100", "ms", "+100ms", "1.5ms", "100s", "",
+            "0ms", "2501ms", "0100ms", "100", "ms", "+100ms", "1.5ms", "100s", "",
         ] {
             let line = [format!("wezpup:{time}=/opt/example/quiet")];
             assert!(validate_checks(&[], &line).is_err(), "{time}");
         }
-        assert!(validate_checks(&[], &["wezpup:2000ms=/opt/example/quiet".into()]).is_ok());
+        assert!(validate_checks(&[], &["wezpup:2500ms=/opt/example/quiet".into()]).is_ok());
     }
 
     #[test]
@@ -1012,21 +1012,21 @@ mod tests {
                 &[format!("{later}=/opt/example/quiet")],
             )
         };
-        assert!(line("jev", "wezpup:1999ms").is_ok());
-        assert!(line("jev:1900ms", "wezpup:100ms").is_ok());
+        assert!(line("jev", "wezpup:2499ms").is_ok());
+        assert!(line("jev:2400ms", "wezpup:100ms").is_ok());
         assert_eq!(
-            line("jev", "wezpup:2000ms").unwrap_err().to_string(),
-            "bad_usage: --hold-check and --quiet-check registrations exceed the 2000ms check budget: the checks after jev reserve 2000ms, 500ms for each that declares no time, and jev needs more than 0ms; declare shorter times, such as wezpup:100ms, or register fewer"
+            line("jev", "wezpup:2500ms").unwrap_err().to_string(),
+            "bad_usage: --hold-check and --quiet-check registrations exceed the 2500ms check budget: the checks after jev reserve 2500ms, 500ms for each that declares no time, and jev needs more than 0ms; declare shorter times, such as wezpup:100ms, or register fewer"
         );
-        assert!(line("jev:1900ms", "wezpup:101ms").is_err());
-        assert!(line("jev:1600ms", "wezpup").is_err());
-        // Five checks that declare nothing leave the first none of the budget,
+        assert!(line("jev:2400ms", "wezpup:101ms").is_err());
+        assert!(line("jev:2001ms", "wezpup").is_err());
+        // Six checks that declare nothing leave the first none of the budget,
         // and it is not dispatched, as before declarations existed.
-        let mut five: Vec<String> = (0..5)
+        let mut six: Vec<String> = (0..6)
             .map(|n| format!("check{n}=/opt/example/check"))
             .collect();
-        assert!(validate_registrations(&five).is_ok());
-        five[4] = "check4:500ms=/opt/example/check".into();
-        assert!(validate_registrations(&five).is_err());
+        assert!(validate_registrations(&six).is_ok());
+        six[5] = "check5:500ms=/opt/example/check".into();
+        assert!(validate_registrations(&six).is_err());
     }
 }

@@ -8,8 +8,8 @@ use wezterm_attention::lifecycle::apply_provider_event_with_checks;
 const HOLD_LINE: &str = "{\"hold\": true, \"answer\": \"waiting_on_own_work\"}\n";
 
 /// The chain budget for tests that hold a check open on purpose. The command's
-/// own `TOTAL_BUDGET` is 2 s, which a loaded machine can spend before a shell
-/// script has started, and then the check never runs.
+/// own `TOTAL_BUDGET` is 2.5 s, which a loaded machine can spend before a
+/// shell script has started, and then the check never runs.
 const CHECK_BUDGET: Duration = Duration::from_secs(30);
 
 fn wait_for_check_start(ready: &Path) {
