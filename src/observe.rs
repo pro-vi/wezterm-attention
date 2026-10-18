@@ -157,6 +157,9 @@ pub struct ObserveCursor {
     call: Option<String>,
     pools: BTreeMap<String, PoolCursor>,
     lead_present: bool,
+    /// Whether a prompt record existed at the cursor's read, so its later
+    /// absence is told from its never having existed.
+    prompts_present: bool,
     latest_prompt: Option<PromptReference>,
     /// The answer observation ids then known, sorted.
     answers: Vec<String>,
@@ -498,6 +501,7 @@ fn cursor_of(state: &State, scope: &PaneScope, filters: &ObserveFilters) -> Obse
         call: filters.call.clone(),
         pools: pool_map,
         lead_present: state.lead.is_some(),
+        prompts_present: state.prompts.is_some(),
         latest_prompt: latest_prompt(state),
         answers,
         answers_high,
@@ -506,21 +510,22 @@ fn cursor_of(state: &State, scope: &PaneScope, filters: &ObserveFilters) -> Obse
 
 /// Whether retention moved past what `cursor` can account for in `state`.
 ///
-/// With `strict` (a cursor handed back across calls), any movement of a
-/// pool's floor ends the chain: an observation that arrived after the
-/// cursor, was stamped below its newest stamp, and was evicted moved
-/// that floor, and no stamp comparison can tell it from an eviction of
-/// what the cursor saw. Without it (between two reads of one blocking
-/// call, where every intermediate state was itself diffed), only a
-/// floor above the newest stamp the pool held — a full turnover inside
-/// one poll interval — can have taken something unseen. The prompt
-/// record keeps no floor; a full record that has drained an answer the
-/// cursor knew is the same shape in both readings.
-fn gap_between(cursor: &ObserveCursor, state: &State, strict: bool) -> bool {
+/// Any movement of a pool's floor ends the chain, between two reads of
+/// one blocking call as much as across calls: an observation that
+/// arrived after the cursor, was stamped below its newest stamp, and
+/// was evicted moved that floor, and no stamp comparison can tell it
+/// from an eviction of what the cursor saw — so a wait that crosses an
+/// eviction answers `gap`, and the caller re-baselines and waits again,
+/// rather than the survivors being read as the whole story. The prompt
+/// record keeps no floor; a record that was there at the cursor and is
+/// gone, or one that no longer holds an answer the cursor knew — at any
+/// size, since answers only leave a record by being drained at its cap
+/// or by the record being replaced — is the same shape.
+fn gap_between(cursor: &ObserveCursor, state: &State) -> bool {
     if cursor.lead_present && state.lead.is_none() {
         return true;
     }
-    if state.prompts.is_none() && (cursor.latest_prompt.is_some() || !cursor.answers.is_empty()) {
+    if cursor.prompts_present && state.prompts.is_none() {
         return true;
     }
     for (name, pool) in pools(state) {
@@ -531,15 +536,11 @@ fn gap_between(cursor: &ObserveCursor, state: &State, strict: bool) -> bool {
         let Some(known) = cursor.pools.get(name) else {
             continue;
         };
-        if known.floor.as_ref() == Some(floor) {
-            continue;
-        }
-        if strict || floor.as_str() > known.high.as_deref().unwrap_or("") {
+        if known.floor.as_ref() != Some(floor) {
             return true;
         }
     }
     if let Some(prompts) = &state.prompts
-        && prompts.answers.len() >= 64
         && (!cursor.answers.is_empty()
             && cursor.answers.iter().any(|id| {
                 !prompts
@@ -547,12 +548,13 @@ fn gap_between(cursor: &ObserveCursor, state: &State, strict: bool) -> bool {
                     .iter()
                     .any(|answer| &answer.observation_id == id)
             })
-            || prompts
-                .answers
-                .iter()
-                .map(|answer| answer.observed_mono_ns.as_str())
-                .min()
-                .is_some_and(|oldest| oldest > cursor.answers_high.as_deref().unwrap_or("")))
+            || (prompts.answers.len() >= 64
+                && prompts
+                    .answers
+                    .iter()
+                    .map(|answer| answer.observed_mono_ns.as_str())
+                    .min()
+                    .is_some_and(|oldest| oldest > cursor.answers_high.as_deref().unwrap_or(""))))
     {
         return true;
     }
@@ -733,12 +735,20 @@ pub fn observe(
     };
     let started = Instant::now();
     let mut working: Option<ObserveCursor> = since.cloned();
-    // The first comparison of a resumed chain is strict: the cursor was
-    // taken by another call, and nothing diffed the states in between.
-    // Comparisons inside one blocking call diffed every read themselves.
-    let mut strict = since.is_some();
+    // The reads name the cursor's binding, not whatever the launch now
+    // selects: a replacement is then reported from the pointer alone,
+    // before the replacement's own records are read and can mask it as
+    // an unavailable read. A baseline pins this from its first state.
+    let mut read_scope = match since {
+        Some(cursor) => PaneScope::new(
+            scope.address().clone(),
+            scope.launch_id().to_owned(),
+            Some(cursor.binding_id.clone()),
+        )?,
+        None => scope.clone(),
+    };
     loop {
-        match read_state(root, scope) {
+        match read_state(root, &read_scope) {
             Read::Replaced {
                 relation,
                 current_binding_id,
@@ -803,6 +813,7 @@ pub fn observe(
                     result.current_binding_id = Some(state.binding_id.clone());
                     return Ok(result);
                 }
+                read_scope = pinned(&state)?;
                 let current = cursor_of(&state, scope, filters);
                 match &working {
                     None => {
@@ -819,7 +830,7 @@ pub fn observe(
                         working = Some(current);
                     }
                     Some(cursor) => {
-                        if gap_between(cursor, &state, strict) {
+                        if gap_between(cursor, &state) {
                             return Ok(answer(
                                 ObserveOutcome::Gap,
                                 pinned(&state)?,
@@ -849,7 +860,6 @@ pub fn observe(
                         working = Some(current);
                     }
                 }
-                strict = false;
             }
         }
         let elapsed = started.elapsed();

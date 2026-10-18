@@ -427,6 +427,126 @@ fn observe_cli_baseline_events_and_usage_errors() {
 }
 
 #[test]
+fn triage_p1_a_floor_moving_between_polls_is_a_gap_not_a_timeout() {
+    let setup = setup();
+    setup.apply(
+        &event("codex", "UserPromptSubmit", SESSION, json!({"prompt":"go"})),
+        "00000000000000000300",
+    );
+    let (scope, cursor, _) = baseline(&setup);
+    let root = state_root(&setup.env).unwrap();
+    let dir = setup.binding_dir("codex", SESSION);
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        let mut snapshot: LifecycleSnapshot =
+            serde_json::from_slice(&fs::read(dir.join("lifecycle.json")).unwrap()).unwrap();
+        snapshot.pools.general.retention_floor_mono_ns = Some("00000000000000000200".into());
+        atomic_replace(&dir.join("lifecycle.json"), &json!(snapshot)).unwrap();
+    });
+    let answer = observe(
+        &root,
+        &scope,
+        &filters(),
+        Some(&cursor),
+        Duration::from_secs(3),
+    )
+    .unwrap();
+    writer.join().unwrap();
+    assert_eq!(answer.outcome, ObserveOutcome::Gap);
+}
+
+#[test]
+fn triage_p2_an_absent_prompt_record_is_not_a_gap_when_it_never_existed() {
+    let setup = setup();
+    setup.apply(
+        &event("codex", "UserPromptSubmit", SESSION, json!({"prompt":"go"})),
+        "00000000000000000300",
+    );
+    let dir = setup.binding_dir("codex", SESSION);
+    fs::remove_file(dir.join("prompts.json")).unwrap();
+    let (scope, cursor, _) = baseline(&setup);
+    let root = state_root(&setup.env).unwrap();
+    let answer = observe(&root, &scope, &filters(), Some(&cursor), Duration::ZERO).unwrap();
+    assert_eq!(answer.outcome, ObserveOutcome::Timeout);
+}
+
+#[test]
+fn triage_p2_answers_missing_from_a_small_replacement_record_are_a_gap() {
+    let setup = setup();
+    let (scope, cursor, _) = baseline(&setup);
+    let root = state_root(&setup.env).unwrap();
+    for (name, at, patch) in [
+        (
+            "PreToolUse",
+            "00000000000000000300",
+            json!({"tool_name":"request_user_input_async","tool_use_id":"call_q","turn_id":"turn-a"}),
+        ),
+        (
+            "PostToolUse",
+            "00000000000000000301",
+            json!({"tool_name":"request_user_input_async","tool_use_id":"call_q","turn_id":"turn-a","tool_response":"{\"accepted\":true}"}),
+        ),
+    ] {
+        setup.apply(&event("codex", name, SESSION, patch), at);
+    }
+    let id = json!(["request_user_input_async", "call_q", 0]).to_string();
+    let items = json!([{"answer":"yes","question":"Which one?","questionItemId":id}]);
+    setup.apply(
+        &event(
+            "codex",
+            "UserPromptSubmit",
+            SESSION,
+            json!({"prompt":format!("<send_user_message_question_reply>\n{items}\n</send_user_message_question_reply>"),"turn_id":"turn-a"}),
+        ),
+        "00000000000000000400",
+    );
+    let answered = observe(&root, &scope, &filters(), Some(&cursor), Duration::ZERO).unwrap();
+    assert_eq!(answered.outcome, ObserveOutcome::Events);
+    let next =
+        ObserveCursor::parse(answered.cursor.as_deref().unwrap(), &scope, &filters()).unwrap();
+    // The prompt record is replaced by one that no longer holds the
+    // answer the chain already reported, at well under 64 answers.
+    let dir = setup.binding_dir("codex", SESSION);
+    let mut prompts: wezterm_attention::observations::LeadPrompts =
+        serde_json::from_slice(&fs::read(dir.join("prompts.json")).unwrap()).unwrap();
+    prompts.answers.clear();
+    atomic_replace(&dir.join("prompts.json"), &json!(prompts)).unwrap();
+    let answer = observe(&root, &scope, &filters(), Some(&next), Duration::ZERO).unwrap();
+    assert_eq!(answer.outcome, ObserveOutcome::Gap);
+}
+
+#[test]
+fn triage_p2_a_replacement_is_named_even_when_its_records_are_unreadable() {
+    let setup = setup();
+    let (_, cursor, _) = baseline(&setup);
+    // The caller resumes with the scope it originally asked with —
+    // unpinned — plus the cursor; the binding comes from the cursor.
+    let scope = scope(&setup, false);
+    let root = state_root(&setup.env).unwrap();
+    // The launch's pointer now selects another binding, whose records
+    // cannot be read: that must not hide the replacement.
+    let dir = setup.binding_dir("codex", SESSION);
+    let pointer_path = dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("current-binding.json");
+    let mut pointer: Value = serde_json::from_slice(&fs::read(&pointer_path).unwrap()).unwrap();
+    pointer["binding_id"] = json!("d".repeat(64));
+    atomic_replace(&pointer_path, &pointer).unwrap();
+    let other = dir.parent().unwrap().join("d".repeat(64));
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("lifecycle.json"), "invalid").unwrap();
+    let answer = observe(&root, &scope, &filters(), Some(&cursor), Duration::ZERO).unwrap();
+    assert_eq!(answer.outcome, ObserveOutcome::BindingReplaced);
+    assert_eq!(
+        answer.current_binding_id.as_deref(),
+        Some("d".repeat(64).as_str())
+    );
+}
+
+#[test]
 fn a_blocking_observe_returns_the_event_it_waited_for() {
     let setup = setup();
     let (scope, cursor, _) = baseline(&setup);
