@@ -52,6 +52,23 @@ fn baseline(setup: &Setup) -> (PaneScope, ObserveCursor, String) {
     (answer.scope, cursor, encoded)
 }
 
+fn run_cli(setup: &Setup, args: &[&str], scope: &Value) -> std::process::Output {
+    let mut child = rust_command(setup)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(scope.to_string().as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
 #[test]
 fn baseline_then_prompt_and_turn_end_arrive_once_in_a_chain() {
     let setup = setup();
@@ -95,7 +112,7 @@ fn baseline_then_prompt_and_turn_end_arrive_once_in_a_chain() {
         "a cursor reused under other filters must be refused"
     );
     assert!(
-        ObserveCursor::parse("v1.!!!", &scope, &filters()).is_err(),
+        ObserveCursor::parse("!!!", &scope, &filters()).is_err(),
         "a malformed cursor must be refused"
     );
 }
@@ -359,22 +376,7 @@ fn a_replaced_binding_and_an_unreadable_lifecycle_are_their_own_outcomes() {
 fn observe_cli_baseline_events_and_usage_errors() {
     let setup = setup();
     let scope = serde_json::to_value(scope(&setup, false)).unwrap();
-    let run = |args: &[&str], scope: &Value| {
-        let mut child = rust_command(&setup)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(scope.to_string().as_bytes())
-            .unwrap();
-        child.wait_with_output().unwrap()
-    };
+    let run = |args: &[&str], scope: &Value| run_cli(&setup, args, scope);
     let output = run(&["observe", "--scope", "-", "--for", "turn_end"], &scope);
     assert!(
         output.status.success(),
@@ -405,7 +407,7 @@ fn observe_cli_baseline_events_and_usage_errors() {
     assert_eq!(output.status.code(), Some(2));
     let output = run(
         &[
-            "observe", "--scope", "-", "--for", "turn_end", "--since", "v1.!!!",
+            "observe", "--scope", "-", "--for", "turn_end", "--since", "!!!",
         ],
         &scope,
     );
@@ -427,7 +429,58 @@ fn observe_cli_baseline_events_and_usage_errors() {
 }
 
 #[test]
-fn triage_p1_a_floor_moving_between_polls_is_a_gap_not_a_timeout() {
+fn an_unavailable_resume_keeps_its_cursor_pinned_scope() {
+    let setup = setup();
+    let scope = serde_json::to_value(scope(&setup, false)).unwrap();
+    let output = run_cli(&setup, &["observe", "--scope", "-"], &scope);
+    assert!(output.status.success());
+    let baseline: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let cursor = baseline["result"]["cursor"].as_str().unwrap();
+    let dir = setup.binding_dir("codex", SESSION);
+    fs::write(dir.join("lifecycle.json"), "invalid").unwrap();
+
+    let output = run_cli(
+        &setup,
+        &["observe", "--scope", "-", "--since", cursor],
+        &scope,
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let answer: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(answer["result"]["outcome"], "unavailable");
+    assert_eq!(answer["result"]["cursor"], cursor);
+    assert_eq!(answer["result"]["provider"], "codex");
+    assert_eq!(answer["result"]["scope"], baseline["result"]["scope"]);
+}
+
+#[test]
+fn an_unavailable_blocking_call_keeps_its_baseline_scope() {
+    let setup = setup();
+    let scope = serde_json::to_value(scope(&setup, false)).unwrap();
+    let output = run_cli(&setup, &["observe", "--scope", "-"], &scope);
+    assert!(output.status.success());
+    let baseline: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let dir = setup.binding_dir("codex", SESSION);
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        fs::write(dir.join("lifecycle.json"), "invalid").unwrap();
+    });
+
+    let output = run_cli(
+        &setup,
+        &["observe", "--scope", "-", "--timeout-ms", "5000"],
+        &scope,
+    );
+    writer.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let answer: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(answer["result"]["outcome"], "unavailable");
+    assert_eq!(answer["result"]["cursor"], baseline["result"]["cursor"]);
+    assert_eq!(answer["result"]["provider"], "codex");
+    assert_eq!(answer["result"]["scope"], baseline["result"]["scope"]);
+}
+
+#[test]
+fn a_floor_moving_between_polls_is_a_gap_not_a_timeout() {
     let setup = setup();
     setup.apply(
         &event("codex", "UserPromptSubmit", SESSION, json!({"prompt":"go"})),
@@ -456,7 +509,7 @@ fn triage_p1_a_floor_moving_between_polls_is_a_gap_not_a_timeout() {
 }
 
 #[test]
-fn triage_p2_an_absent_prompt_record_is_not_a_gap_when_it_never_existed() {
+fn an_absent_prompt_record_is_not_a_gap_when_it_never_existed() {
     let setup = setup();
     setup.apply(
         &event("codex", "UserPromptSubmit", SESSION, json!({"prompt":"go"})),
@@ -471,7 +524,7 @@ fn triage_p2_an_absent_prompt_record_is_not_a_gap_when_it_never_existed() {
 }
 
 #[test]
-fn triage_p2_answers_missing_from_a_small_replacement_record_are_a_gap() {
+fn answers_missing_from_a_small_replacement_record_are_a_gap() {
     let setup = setup();
     let (scope, cursor, _) = baseline(&setup);
     let root = state_root(&setup.env).unwrap();
@@ -516,7 +569,7 @@ fn triage_p2_answers_missing_from_a_small_replacement_record_are_a_gap() {
 }
 
 #[test]
-fn triage_p2_a_replacement_is_named_even_when_its_records_are_unreadable() {
+fn a_replacement_is_named_even_when_its_records_are_unreadable() {
     let setup = setup();
     let (_, cursor, _) = baseline(&setup);
     // The caller resumes with the scope it originally asked with —

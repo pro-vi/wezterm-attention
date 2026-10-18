@@ -4,14 +4,14 @@
 //! its own cadence or let one invocation poll until its own deadline.
 //!
 //! The cursor is the caller's only state. It names what one read saw —
-//! the observation ids in each pool, each pool's retention floor and
-//! newest stamp, the latest prompt and the known answers — so the next
+//! the observation ids in each pool, each pool's retention floor, the
+//! latest prompt and the known answers — so the next
 //! read can diff by identity rather than by timestamp: an observation a
 //! follower stamped just after its turn's last record, or one a hook
 //! delivered late below the cursor's newest stamp, is still reported
 //! while its pool retains it. What retention took between two reads is
-//! not reconstructed: when a pool's floor moves past everything the
-//! cursor saw in that pool, the answer is a gap, not the survivors.
+//! not reconstructed: any movement of a pool's floor ends the chain
+//! with a gap, since unseen observations may have been evicted.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -138,17 +138,12 @@ struct PoolCursor {
     /// The ids of the observations the pool then held, sorted.
     seen: Vec<String>,
     floor: Option<String>,
-    /// The newest `observed_mono_ns` the pool then held.
-    high: Option<String>,
 }
 
-/// The decoded cursor. Callers treat the string as opaque; this shape is
-/// versioned (`v` and the `v1.` prefix) so a later shape can refuse an
-/// older one by name rather than misread it.
+/// The decoded cursor. Callers treat the string as opaque.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObserveCursor {
-    v: u8,
     address: crate::identity::PaneAddress,
     launch_id: String,
     binding_id: String,
@@ -178,14 +173,10 @@ impl ObserveCursor {
         if text.len() > 128 * 1024 {
             return Err(usage("cursor is too large"));
         }
-        let Some(encoded) = text.strip_prefix("v1.") else {
-            return Err(usage("cursor is not recognized"));
-        };
-        let bytes = decode_base64url(encoded).ok_or_else(|| usage("cursor is not recognized"))?;
+        let bytes = decode_base64url(text).ok_or_else(|| usage("cursor is not recognized"))?;
         let cursor: Self =
             serde_json::from_slice(&bytes).map_err(|_| usage("cursor is not recognized"))?;
-        if cursor.v != 1
-            || &cursor.address != scope.address()
+        if &cursor.address != scope.address()
             || cursor.launch_id != scope.launch_id()
             || scope
                 .binding_id()
@@ -210,9 +201,7 @@ impl ObserveCursor {
                 .map(String::as_str)
                 .eq(["lead_general", "lead_requests"])
             && cursor.pools.values().all(|pool| {
-                pool.seen.iter().all(|seen| id(seen))
-                    && pool.floor.as_deref().is_none_or(stamp)
-                    && pool.high.as_deref().is_none_or(stamp)
+                pool.seen.iter().all(|seen| id(seen)) && pool.floor.as_deref().is_none_or(stamp)
             })
             && cursor.answers.iter().all(|answer| id(answer))
             && cursor.answers_high.as_deref().is_none_or(stamp)
@@ -228,7 +217,7 @@ impl ObserveCursor {
 
     fn encode(&self) -> Result<String> {
         let bytes = serde_json::to_vec(self).map_err(AttentionError::record_json)?;
-        Ok(format!("v1.{}", encode_base64url(&bytes)))
+        Ok(encode_base64url(&bytes))
     }
 }
 
@@ -451,7 +440,7 @@ fn latest_prompt(state: &State) -> Option<PromptReference> {
 fn cursor_of(state: &State, scope: &PaneScope, filters: &ObserveFilters) -> ObserveCursor {
     let mut pool_map = BTreeMap::new();
     for (name, pool) in pools(state) {
-        let (seen, floor, high) = match pool {
+        let (seen, floor) = match pool {
             Some(pool) => {
                 let mut seen: Vec<String> = pool
                     .observations
@@ -459,18 +448,11 @@ fn cursor_of(state: &State, scope: &PaneScope, filters: &ObserveFilters) -> Obse
                     .map(|item| item.observation_id.clone())
                     .collect();
                 seen.sort();
-                (
-                    seen,
-                    pool.retention_floor_mono_ns.clone(),
-                    pool.observations
-                        .iter()
-                        .map(|item| item.observed_mono_ns.clone())
-                        .max(),
-                )
+                (seen, pool.retention_floor_mono_ns.clone())
             }
-            None => (vec![], None, None),
+            None => (vec![], None),
         };
-        pool_map.insert(name.to_owned(), PoolCursor { seen, floor, high });
+        pool_map.insert(name.to_owned(), PoolCursor { seen, floor });
     }
     let (answers, answers_high) = match &state.prompts {
         Some(prompts) => {
@@ -492,7 +474,6 @@ fn cursor_of(state: &State, scope: &PaneScope, filters: &ObserveFilters) -> Obse
         None => (vec![], None),
     };
     ObserveCursor {
-        v: 1,
         address: scope.address().clone(),
         launch_id: scope.launch_id().to_owned(),
         binding_id: state.binding_id.clone(),
@@ -781,7 +762,7 @@ pub fn observe(
                 };
                 return Ok(answer(
                     ObserveOutcome::Unavailable,
-                    scope.clone(),
+                    read_scope.clone(),
                     working.as_ref().map(|cursor| cursor.provider.clone()),
                     vec![],
                     cursor,
@@ -789,30 +770,6 @@ pub fn observe(
                 ));
             }
             Read::State(state) => {
-                if let Some(cursor) = &working
-                    && cursor.binding_id != state.binding_id
-                {
-                    // The pointer moved between the cursor and this read:
-                    // the scope argument may not name the cursor's binding,
-                    // so the replacement is named from the state itself.
-                    let mut result = answer(
-                        ObserveOutcome::BindingReplaced,
-                        pinned(&state).unwrap_or_else(|_| scope.clone()),
-                        Some(state.provider.as_str().to_owned()),
-                        vec![],
-                        None,
-                        vec![
-                            Diagnostic::new(
-                                DiagnosticCode::ClaimStale,
-                                "requested binding is no longer current",
-                            )
-                            .with("facet", "binding_selection"),
-                        ],
-                    );
-                    result.scope_relation = Some("binding_changed".to_owned());
-                    result.current_binding_id = Some(state.binding_id.clone());
-                    return Ok(result);
-                }
                 read_scope = pinned(&state)?;
                 let current = cursor_of(&state, scope, filters);
                 match &working {
@@ -889,9 +846,7 @@ pub fn observe(
     }
 }
 
-/// The `v1.` cursor payload encoding: base64url of the cursor JSON, no
-/// padding. It is a transport spelling, nothing more; the JSON is the
-/// contract a later version can refuse.
+/// The cursor payload encoding: base64url of the cursor JSON, no padding.
 fn encode_base64url(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
