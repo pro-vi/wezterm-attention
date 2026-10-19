@@ -83,7 +83,7 @@ Enforced by `a_quiet_running_child_stays_counted`,
 `a_claude_stop_without_a_usable_list_ends_nothing`,
 `a_claude_stop_keeps_a_child_that_worked_after_it`,
 `a_claude_stop_applies_beside_a_child_set_it_cannot_change` and
-`readme_hook_blocks_register_exactly_the_described_rows` in the Rust
+`setup_guide_hook_blocks_register_exactly_the_described_rows` in the Rust
 integration suites, and the shared children coverage cases in
 `tests/fixtures/v2/protocol-cases.json`, which the Rust reader, the Lua reader
 and `tests/fixtures/v2/check.py` all run.

@@ -63,7 +63,7 @@ binary.parent.mkdir()
 shutil.copy2(built, binary)
 log("attention", run(str(binary), "--version").strip(), "| claude", run(claude, "--version").strip())
 
-# Every hook Attention registers, as the README gives them, plus a Stop hook that
+# Every hook Attention registers, as docs/setup.md gives them, plus a Stop hook that
 # sleeps, so the file reads no turn only well after Attention recorded Stop.
 described = json.loads(run(str(binary), "hooks", "describe", "--provider", "claude"))["result"]
 hooks = {}

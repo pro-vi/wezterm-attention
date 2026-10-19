@@ -63,7 +63,7 @@ Sourcing the file a second time installs nothing new, so `source ~/.bashrc` afte
 
 On macOS, zsh needs no claim step. Start `claude`, `codex` or `pi` as you would anywhere: the agent's
 first session start claims the pane for the agent's own process, through the hook command in the
-[README](../README.md#claude-code-hooks) or, for Pi, through the extension. Sourcing the zsh
+[setup guide](setup.md#claude-code-hooks) or, for Pi, through the extension. Sourcing the zsh
 integration is optional there. It republishes the pane's claim at every prompt, and there it clears
 the activity an agent left behind once the agent's process has exited; without it, that activity
 stays until the next agent claims the pane.
@@ -135,14 +135,14 @@ A claim belongs to the pane's own terminal. A program started inside the pane, s
 
 ## Provider hooks
 
-Registration is yours; this repository does not edit Claude or Codex settings. The README has complete, copyable blocks for [Claude Code](../README.md#claude-code-hooks) and [Codex](../README.md#codex-hooks). They come from the package's own description:
+Registration is yours; this repository does not edit Claude or Codex settings. The setup guide has complete, copyable blocks for [Claude Code](setup.md#claude-code-hooks) and [Codex](setup.md#codex-hooks). They come from the package's own description:
 
 ```sh
 attention hooks describe --provider claude --json
 attention hooks describe --provider codex --json
 ```
 
-For each `registration=register` row, run the `attention` link on your PATH with that row's `arguments` and pass the original callback JSON on stdin, as one command that first sets `WEZTERM_ATTENTION_HOST_PID=$PPID` and then `exec`s it; the README says why. Ignored rows are not registrations.
+For each `registration=register` row, run the `attention` link on your PATH with that row's `arguments` and pass the original callback JSON on stdin, as one command that first sets `WEZTERM_ATTENTION_HOST_PID=$PPID` and then `exec`s it; the [setup guide](setup.md#claude-code-hooks) says why. Ignored rows are not registrations.
 
 `SubagentStart` is a `register` row for Claude Code and Codex: a child is counted from its start,
 and in Claude Code 2.1.283 a resumed child from its new start. Codex at source commit `985cf47a4`
@@ -154,7 +154,7 @@ command hook unless it sets `async: true`; an asynchronous hook can deliver one 
 of order, and a child can then stay counted after it stopped (see
 [accepted limitations](accepted-limitations.md#the-sub-agent-count-depends-on-how-claude-code-and-codex-send-hooks)).
 
-The bundled Pi extension is installed with `pi install` rather than registered here; see [Pi extension](../README.md#pi-extension). Its handlers enqueue without awaiting filesystem work and drain the queue during shutdown.
+The bundled Pi extension is installed with `pi install` rather than registered here; see [Pi extension](setup.md#pi-extension). Its handlers enqueue without awaiting filesystem work and drain the queue during shutdown.
 
 ## How attention finds the wezterm command
 

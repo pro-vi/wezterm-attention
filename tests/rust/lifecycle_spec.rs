@@ -1877,20 +1877,20 @@ fn hook_description_is_exhaustive_read_only_and_pins_public_fields() {
     }
 }
 
-/// The first JSON code block in the README section headed `heading`.
-fn readme_json_block(heading: &str) -> Value {
-    let readme = include_str!("../../README.md");
-    let section = readme
+/// The first JSON code block in the setup guide's section headed `heading`.
+fn setup_json_block(heading: &str) -> Value {
+    let guide = include_str!("../../docs/setup.md");
+    let section = guide
         .split("\n## ")
         .find(|section| section.starts_with(&format!("{heading}\n")))
-        .unwrap_or_else(|| panic!("README has no section headed {heading:?}"));
+        .unwrap_or_else(|| panic!("docs/setup.md has no section headed {heading:?}"));
     let block = section
         .split_once("```json\n")
         .and_then(|(_, rest)| rest.split_once("\n```"))
         .map(|(block, _)| block)
-        .unwrap_or_else(|| panic!("README section {heading:?} has no JSON block"));
+        .unwrap_or_else(|| panic!("docs/setup.md section {heading:?} has no JSON block"));
     serde_json::from_str(block)
-        .unwrap_or_else(|error| panic!("README section {heading:?}: {error}"))
+        .unwrap_or_else(|error| panic!("docs/setup.md section {heading:?}: {error}"))
 }
 
 // A consumer switches on the codes the consumer guide lists, so the list holds
@@ -1920,14 +1920,14 @@ fn consumer_guide_lists_every_diagnostic_code() {
     );
 }
 
-// The README's hook blocks are what users paste into their agent's settings,
+// The setup guide's hook blocks are what users paste into their agent's settings,
 // so each registers exactly the rows `hooks describe` marks `register`, each
 // as one command hook in the documented form. The block holds nothing else;
 // `async` in particular would let a hook run after the agent has gone on
 // (Claude Code 2.1.283, Codex at source `985cf47a4`), and one child's events
 // could then reach the writer out of order.
 #[test]
-fn readme_hook_blocks_register_exactly_the_described_rows() {
+fn setup_guide_hook_blocks_register_exactly_the_described_rows() {
     use wezterm_attention::providers::{HookRegistration, describe_hooks};
     for (provider, heading) in [("claude", "Claude Code hooks"), ("codex", "Codex hooks")] {
         let described: BTreeMap<String, String> = describe_hooks(provider)
@@ -1943,7 +1943,7 @@ fn readme_hook_blocks_register_exactly_the_described_rows() {
                 (row.native_event, command)
             })
             .collect();
-        let block = readme_json_block(heading);
+        let block = setup_json_block(heading);
         let registered: BTreeMap<String, String> = block["hooks"]
             .as_object()
             .unwrap_or_else(|| panic!("{heading}: no hooks object"))

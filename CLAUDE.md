@@ -23,7 +23,7 @@ so `tests/gate.sh` is the only check, and nothing runs it for you.
    its heading, so the tagged `CHANGELOG.md` has no date.
 5. Publish the GitHub release, with the body taken from the `CHANGELOG.md`
    section for that version.
-6. Check the real tag. Run the README's "stay on a release" steps against it
+6. Check the real tag. Run the "stay on a release" steps in `docs/setup.md` against it
    (`git clone --branch vX.Y.Z`, `scripts/install-cli.sh`, load the plugin by
    path), then confirm that `attention --version` and `hooks describe`'s
    `writer_version` both report the new version.

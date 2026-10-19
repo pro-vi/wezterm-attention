@@ -584,7 +584,7 @@ test("env: a configured writer is never started with a root that is not UTF-8", 
 	expect(readdirSync(scratch)).toEqual([]);
 });
 
-// The states README.md lists for other extensions to emit. It is a public
+// The states docs/setup.md lists for other extensions to emit. It is a public
 // cross-extension contract, so every one is locked here rather than left to the
 // lifecycle path, which emits none of them over the bus.
 const BUS_STATES = ["thinking", "stop", "notify", "review"];

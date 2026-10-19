@@ -1121,7 +1121,7 @@ fn a_claude_stop_applies_beside_a_child_set_it_cannot_change() {
     assert_eq!(fs::read(&path).unwrap(), before);
 }
 
-// The real binary, registered as the README shows, from a child's start to
+// The real binary, registered as docs/setup.md shows, from a child's start to
 // its stop.
 #[test]
 fn the_hook_binary_records_a_child_from_start_to_stop() {

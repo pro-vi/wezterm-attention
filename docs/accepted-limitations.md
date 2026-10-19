@@ -6,7 +6,7 @@ fixed or by being reclassified as intended behaviour, not by being forgotten.
 
 Most working notes — plans, review write-ups, triage records — stay on the
 author's machine and are not in this repository. A few are tracked because
-something still points at them: the README and the consumer guide link to
+something still points at them: the setup guide and the consumer guide link to
 `docs/reviews/lifecycle-contact-results.md`, for one. This
 file is the maintained public account, and it is the one to read first.
 
@@ -182,7 +182,7 @@ stops holding.
   Codex. Both let a command hook opt out with `async: true`, and Claude Code
   also with `asyncRewake: true`, which its hooks reference, read on
   2026-10-01 with Claude Code 2.1.287 installed, says "runs in the
-  background"; the README's blocks set neither. Under an asynchronous hook, a sub-agent's older tool
+  background"; the blocks in [Setup](setup.md#claude-code-hooks) set neither. Under an asynchronous hook, a sub-agent's older tool
   call can arrive after its `SubagentStop` and add it again, and it then stays
   counted until its session ends.
 - **A Codex parent stops only after its sub-agents have.** A Codex parent
