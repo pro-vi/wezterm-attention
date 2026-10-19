@@ -9,6 +9,9 @@
 --   ok activity=<type or none> source=<source or none>
 -- or `user_review` for whether the review key finds the user's flag,
 --   ok user_review=<true or false>
+-- or `muted` for whether the mute key finds the user's mute and the view
+-- carries it,
+--   ok user_mute=<true or false> muted=<true or false>
 -- and a failure is `not ok - <error>`.
 
 local wezterm = require("wezterm")
@@ -36,6 +39,10 @@ local function run()
     return "user_review=" .. tostring(internal.user_review_present(read, dir))
   end
   local view = internal.read_attention_view(read, now, { dir = dir, glob = wezterm.glob })
+  if os.getenv("WEZTERM_ATTENTION_VIEW_QUESTION") == "muted" then
+    return "user_mute=" .. tostring(internal.user_mute_present(read, dir))
+      .. " muted=" .. tostring(view.muted)
+  end
   if os.getenv("WEZTERM_ATTENTION_VIEW_QUESTION") == "held_render" then
     internal.attention_cache[read.cache_key] = view
     local visible = internal.resolve_visible_attention({ read.cache_key })

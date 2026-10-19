@@ -366,11 +366,12 @@ const AGENT_KEY: &str = "agent_key";
 /// The records kept one to a directory: each kind, the file that holds it,
 /// and the depths whose directory may hold one. Activity and its
 /// acknowledgement belong to a binding, or to the launch while it has none.
-const FIXED_RECORDS: [(&str, &str, &[Depth]); 17] = [
+const FIXED_RECORDS: [(&str, &str, &[Depth]); 18] = [
     ("realm", "realm.json", &[Depth::Realm]),
     ("incarnation", "incarnation.json", &[Depth::Incarnation]),
     ("claim", "claim.json", &[Depth::Pane]),
     ("absence_probe", "absence-probe.json", &[Depth::Pane]),
+    ("mute", "mute.json", &[Depth::Pane]),
     ("current_binding", "current-binding.json", &[Depth::Launch]),
     (
         "activity",
@@ -1726,6 +1727,7 @@ mod tests {
             ("incarnation", format!("{incarnation}/incarnation.json")),
             ("claim", format!("{pane}/claim.json")),
             ("absence_probe", format!("{pane}/absence-probe.json")),
+            ("mute", format!("{pane}/mute.json")),
             ("review", format!("{pane}/reviews/{key}.json")),
             ("current_binding", format!("{launch}/current-binding.json")),
             ("activity", format!("{launch}/activity.json")),
@@ -1750,6 +1752,8 @@ mod tests {
             ("claim", format!("{incarnation}/claim.json")),
             ("claim", format!("{launch}/claim.json")),
             ("absence_probe", format!("{binding}/absence-probe.json")),
+            ("mute", format!("{launch}/mute.json")),
+            ("mute", format!("{pane}/reviews/mute.json")),
             ("review", format!("{pane}/{key}.json")),
             ("review", format!("{launch}/reviews/{key}.json")),
             ("review", format!("{pane}/reviews/{key}.txt")),

@@ -20,8 +20,8 @@ if follow_up_file then
   follow_up = dofile(follow_up_path).for_windows()
 end
 
--- Adds the Alt+B review toggle to config.keys, so a config that assigns
--- config.keys does so before this call.
+-- Adds the Alt+B review toggle and the Alt+M mute toggle to config.keys, so a
+-- config that assigns config.keys does so before this call.
 attention.apply_to_config(config, {
   -- This config polls from its own update-status handler below.
   auto_poll = false,

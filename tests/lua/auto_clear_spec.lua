@@ -535,6 +535,14 @@ local function applied_answer(argv)
     .. '"event_id":"00000000-0000-4000-a000-999999999999"},"diagnostics":[]}'
 end
 
+--- The entry the plugin added to `config.keys` for `key`, or nil.
+local function key_entry(config, key)
+  for _, entry in ipairs(config.keys or {}) do
+    if entry.key == key then return entry end
+  end
+  return nil
+end
+
 local function with_plugin_command(answer, callback)
   local spawned = {}
   local previous = wezterm.run_child_process
@@ -559,23 +567,30 @@ local function plugin_arguments(argv)
   return nil
 end
 
---- What the attention command does for `plugin set-review` and
---- `plugin clear-review` on a seeded pane, answered as it answers.
-local function reviewing_answer(argv)
+--- Where the attention command keeps each flag the plugin sets, below a
+--- pane's directory, and the fixture sample it writes there.
+local flag_files = {
+  review = { file = "/reviews/" .. internal.sha256("user") .. ".json", sample = "review" },
+  mute = { file = "/mute.json", sample = "mute" },
+}
+
+--- What the attention command does for `plugin set-review`, `clear-review`,
+--- `set-mute` and `clear-mute` on a seeded pane, answered as it answers.
+local function flag_answer(argv)
   local arguments = assert(plugin_arguments(argv), "not an attention command line")
   local action = assert(arguments:match("^plugin (%S+)"))
-  local function flag(name) return assert(arguments:match("%-%-" .. name .. " (%S+)"), name) end
+  local change, flag = assert(action:match("^(%a+)%-(%a+)$"))
+  local function value(name) return assert(arguments:match("%-%-" .. name .. " (%S+)"), name) end
   local address = {
-    realm_id = flag("realm%-id"), incarnation_id = flag("incarnation%-id"), pane_id = flag("pane%-id"),
+    realm_id = value("realm%-id"), incarnation_id = value("incarnation%-id"), pane_id = value("pane%-id"),
   }
   local path = test_dir .. "/v2/realms/" .. address.realm_id .. "/incarnations/"
-    .. address.incarnation_id .. "/panes/" .. address.pane_id .. "/reviews/"
-    .. internal.sha256("user") .. ".json"
+    .. address.incarnation_id .. "/panes/" .. address.pane_id .. flag_files[flag].file
   local disposition = "applied"
-  if action == "set-review" then
-    local review = copy_json(protocol_fixture.record_samples.review)
-    review.address, review.event_id = address, next_event_id()
-    write_json_path(path, review)
+  if change == "set" then
+    local record = copy_json(protocol_fixture.record_samples[flag_files[flag].sample])
+    record.address, record.event_id = address, next_event_id()
+    write_json_path(path, record)
   elseif path_exists(path) then
     os.remove(path)
   else
@@ -2184,7 +2199,7 @@ test("the review key redraws after the command it runs succeeds, and only then",
   write_activity(972, "review")
   local masked = window_double({ tabs = { { 971, 972 } }, focused = true, active_pane_id = 972 })
   review.poll(window_double({ tabs = { { 971, 972 } }, focused = false }), { now_unix_ns = fixture_now })
-  local spawned = with_plugin_command(reviewing_answer, function()
+  local spawned = with_plugin_command(flag_answer, function()
     toggle(masked, pane_from_entry(972))
   end)
   assert(#spawned == 1 and plugin_arguments(spawned[1]):find("^plugin clear%-review .*%-%-pane%-id 972"),
@@ -2193,7 +2208,7 @@ test("the review key redraws after the command it runs succeeds, and only then",
 
   write_activity(974, "notify")
   local unflagged = window_double({ tabs = { { 974 } }, focused = true, active_pane_id = 974 })
-  spawned = with_plugin_command(reviewing_answer, function()
+  spawned = with_plugin_command(flag_answer, function()
     toggle(unflagged, pane_from_entry(974))
   end)
   local wire = seeded_wire(974)
@@ -2514,6 +2529,157 @@ test("a held turn end yields to a child waiting on a permission prompt", functio
   poll_at({ pane_id })
   view = assert(pane_view(pane_id))
   assert(view.type == "thinking" and view.turn_end_held == true, "the hold returns when the wait ends")
+end)
+
+-- The default mute mark: Font Awesome's bell with a slash, U+F1F6.
+local MUTE_MARK = "\239\135\182 "
+
+local function mute_path(pane_id)
+  return seeded_pane_root(pane_id) .. "/mute.json"
+end
+
+--- Mute the seeded pane, as `attention plugin set-mute` does.
+local function write_mute(pane_id)
+  if not path_exists(seeded_pane_root(pane_id) .. "/claim.json") then seed_pane(pane_id) end
+  local mute = seeded_record(pane_id, "mute")
+  mute.event_id = next_event_id()
+  write_json_path(mute_path(pane_id), mute)
+end
+
+test("a muted tab shows its bell and nothing of its agent until the agent waits on the user", function()
+  local cases = {
+    { name = "nothing running" },
+    { name = "thinking", activity = "thinking" },
+    { name = "finished", activity = "stop" },
+    { name = "finished with two sub-agents", activity = "stop", subagents = 2 },
+    { name = "only sub-agents", subagents = 2 },
+    { name = "needs the user", activity = "notify", indicator = MUTE_MARK .. "! ",
+      type = "notify", color = "#240f16" },
+    { name = "a child waits on a permission", activity = "stop", subagents = 1, waiting = true,
+      indicator = MUTE_MARK .. "!+1 ", type = "notify", color = "#240f16" },
+    { name = "the user's own flag", activity = "stop", review = true, indicator = MUTE_MARK .. "◆ ",
+      type = "review", color = "#1a1a0c" },
+  }
+  for index, case in ipairs(cases) do
+    local pane_id = 8600 + index
+    seed_pane(pane_id)
+    if case.activity then write_activity(pane_id, case.activity) end
+    if case.subagents then write_subagents(pane_id, case.subagents, case.waiting and "waiting" or nil) end
+    if case.review then write_activity(pane_id, "review") end
+    write_mute(pane_id)
+    poll_at({ pane_id })
+    local view = assert(pane_view(pane_id), case.name .. ": no view")
+    assert(view.muted == true, case.name .. ": the view carries the mute")
+    local visible = internal.resolve_visible_attention({ seeded_key(pane_id) })
+    local expected = case.indicator or MUTE_MARK
+    assert(visible.indicator == expected and visible.muted == true,
+      case.name .. ": expected " .. expected .. ", got " .. tostring(visible.indicator))
+    assert(visible.type == case.type and visible.color == case.color,
+      case.name .. ": got type " .. tostring(visible.type) .. " color " .. tostring(visible.color))
+    if not case.type then
+      assert(visible.subagents == 0, case.name .. ": a muted pane's sub-agents are not counted")
+    end
+  end
+
+  -- Unmuted, the finished pane shows its turn end again: nothing was lost.
+  local finished = 8600 + 3
+  os.remove(mute_path(finished))
+  poll_at({ finished })
+  local visible = internal.resolve_visible_attention({ seeded_key(finished) })
+  assert(visible.indicator == "✓ " and visible.type == "stop" and visible.muted == false,
+    "unmuted, the turn end shows, got " .. tostring(visible.indicator))
+end)
+
+test("a muted tab that shows the user's flag names no label of the agent's", function()
+  local pane_id = 8611
+  seed_pane(pane_id)
+  write_activity(pane_id, "stop", nil, "built")
+  write_activity(pane_id, "review")
+  write_mute(pane_id)
+  poll_at({ pane_id })
+  local visible = internal.resolve_visible_attention({ seeded_key(pane_id) })
+  assert(visible.type == "review" and visible.label == nil,
+    "the hidden turn end's label stays hidden, got " .. tostring(visible.label))
+end)
+
+test("a pane that is not muted lights a tab beside a muted one", function()
+  local muted, other = 8621, 8622
+  seed_pane(muted)
+  write_activity(muted, "stop")
+  write_mute(muted)
+  seed_pane(other)
+  write_activity(other, "thinking", 2)
+  poll_at({ muted, other })
+  local visible = internal.resolve_visible_attention({ seeded_key(muted), seeded_key(other) })
+  assert(visible.indicator == MUTE_MARK .. "◑ " and visible.type == "thinking"
+    and visible.color == "#1c1730" and visible.muted == true,
+    "the other pane's thinking shows after the mark, got " .. tostring(visible.indicator))
+end)
+
+test("the mute reaches a title formatter and the default tab title", function()
+  local pane_id = 8631
+  seed_pane(pane_id)
+  write_activity(pane_id, "stop")
+  write_mute(pane_id)
+  poll({ pane_id })
+  local seen = formatter_attention(pane_id, pane_id)
+  assert(seen.muted == true and seen.type == nil and seen.indicator == MUTE_MARK,
+    "ctx.attention says the tab is muted, got " .. tostring(seen.indicator))
+  local rendered = format_tab_title(tab(pane_id, pane_id, false), {}, {}, {}, false, 200)
+  local text = rendered_text(rendered)
+  assert(text:find(MUTE_MARK, 1, true) and type(rendered) == "string",
+    "the drawn tab has the mark and no tint, got " .. tostring(text))
+end)
+
+test("Alt+M mutes every claimed pane of the tab, and a second press unmutes them", function()
+  local first, second = 8641, 8642
+  seed_pane(first)
+  seed_pane(second)
+  write_activity(first, "stop")
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  local config = {}
+  instance.apply_to_config(config, { auto_poll = false, dir = test_dir, integration_root = writer_root })
+  local key = assert(key_entry(config, "m"), "Alt+M was not registered")
+  assert(key.mods == "ALT", "the mute key is Alt+M")
+  local window = window_double({ tabs = { { first, second } }, focused = true, active_pane_id = first })
+
+  local spawned = with_plugin_command(flag_answer, function() key.action(window, pane_from_entry(first)) end)
+  assert(#spawned == 2, "one set-mute for each pane, got " .. #spawned)
+  for _, argv in ipairs(spawned) do
+    assert(plugin_arguments(argv):find("^plugin set%-mute "), "got " .. plugin_arguments(argv))
+  end
+  assert(path_exists(mute_path(first)) and path_exists(mute_path(second)), "both panes are muted")
+  local visible = instance._internal.resolve_visible_attention({ seeded_key(first), seeded_key(second) })
+  assert(visible.indicator == MUTE_MARK and visible.type == nil,
+    "the press shows at once, got " .. tostring(visible.indicator))
+
+  -- Only one pane muted is still a muted tab: the press unmutes it.
+  os.remove(mute_path(second))
+  instance.poll(window_double({ tabs = { { first, second } }, focused = false }),
+    { now_unix_ns = fixture_now, call_after = function() end })
+  spawned = with_plugin_command(flag_answer, function() key.action(window, pane_from_entry(second)) end)
+  assert(#spawned == 1 and plugin_arguments(spawned[1]):find("^plugin clear%-mute "),
+    "one clear-mute, for the muted pane")
+  assert(not path_exists(mute_path(first)), "the tab is unmuted")
+  visible = instance._internal.resolve_visible_attention({ seeded_key(first), seeded_key(second) })
+  assert(visible.indicator == "✓ " and visible.muted == false, "got " .. tostring(visible.indicator))
+end)
+
+test("Alt+M on a tab no launch has claimed writes nothing and says why", function()
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  local config = {}
+  instance.apply_to_config(config, { auto_poll = false, dir = test_dir, integration_root = writer_root })
+  local window = window_double({ tabs = { { 8651 } }, focused = true, active_pane_id = 8651 })
+  local spawned = with_plugin_command(flag_answer, function()
+    key_entry(config, "m").action(window, mux_pane(8651))
+  end)
+  assert(#spawned == 0, "no command runs")
+  local errors = table.concat(drain_errors(), "\n")
+  assert(errors:find("cannot toggle mute", 1, true), "the log says why: " .. errors)
+  local off = {}
+  instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config(off, { auto_poll = false, dir = test_dir, mute_key = false })
+  assert(key_entry(off, "m") == nil, "mute_key = false adds no key")
 end)
 
 test("quiet completion has its own color and yields to human attention", function()
@@ -3243,7 +3409,7 @@ test("Alt+B flags a pane with an activity, and one press clears the user's flags
   review.poll(window_double({ tabs = tabs, focused = false }), { now_unix_ns = fixture_now })
 
   local w = window_double({ tabs = tabs, focused = true, active_pane_id = 7621 })
-  with_plugin_command(reviewing_answer, function() toggle(w, pane_from_entry(7621)) end)
+  with_plugin_command(flag_answer, function() toggle(w, pane_from_entry(7621)) end)
 
   assert(path_exists(user_review_path(7621)), "Alt+B flags a pane an agent is working in")
   assert(review.get_attention(7621) == "review",
@@ -3258,7 +3424,7 @@ test("Alt+B flags a pane with an activity, and one press clears the user's flags
   other.event_id = next_event_id()
   local other_path = seeded_pane_root(7622) .. "/reviews/" .. other.owner_key .. ".json"
   write_json_path(other_path, other)
-  local spawned = with_plugin_command(reviewing_answer, function() toggle(w, pane_from_entry(7621)) end)
+  local spawned = with_plugin_command(flag_answer, function() toggle(w, pane_from_entry(7621)) end)
 
   assert(#spawned == 2, "one press clears the user's flag from every pane of the tab")
   assert(not path_exists(user_review_path(7621)) and not path_exists(user_review_path(7622)),
@@ -3283,14 +3449,14 @@ test("Alt+B on an unclaimed pane clears the user's flag from its tab, and flags 
   write_activity(7640, "review")
   local tabs = { { 7640, 7641 } }
   local w = window_double({ tabs = tabs, focused = true, active_pane_id = 7641 })
-  local spawned = with_plugin_command(reviewing_answer, function() toggle(w, pane_from_entry(7641)) end)
+  local spawned = with_plugin_command(flag_answer, function() toggle(w, pane_from_entry(7641)) end)
 
   assert(#spawned == 1 and plugin_arguments(spawned[1]):match("^plugin clear%-review"),
     "the press clears the sibling's flag")
   assert(not path_exists(user_review_path(7640)), "the user's flag is gone from the tab")
   assert(w.action_calls == 1, "a clear redraws once, got " .. w.action_calls)
 
-  spawned = with_plugin_command(reviewing_answer, function() toggle(w, pane_from_entry(7641)) end)
+  spawned = with_plugin_command(flag_answer, function() toggle(w, pane_from_entry(7641)) end)
   assert(#spawned == 0, "an unclaimed pane cannot be flagged")
   local errors = drain_errors()
   assert(#errors == 1 and errors[1]:find("has published no agent launch", 1, true),
@@ -4441,7 +4607,7 @@ test("Alt+B uses full addresses and clearing leaves other owners and activity", 
   local review = dofile(repo_root .. "/plugin/init.lua")
   local config = {}
   review.apply_to_config(config, { auto_poll = false, dir = test_dir, integration_root = writer_root })
-  local toggle = assert(config.keys and config.keys[#config.keys].action,
+  local toggle = assert(key_entry(config, "b") and key_entry(config, "b").action,
     "Alt+B action was not registered")
   local pane_a = pane_from_entry({ id = 9061, domain = "unix-a", attention = wire_a })
   local pane_b = pane_from_entry({ id = 9062, domain = "unix-b", attention = wire_b })
@@ -4452,7 +4618,7 @@ test("Alt+B uses full addresses and clearing leaves other owners and activity", 
   local user_key = internal.sha256("user")
   local user_path = pane_a_root .. "/reviews/" .. user_key .. ".json"
 
-  with_plugin_command(reviewing_answer, function() toggle(window, pane_a) end)
+  with_plugin_command(flag_answer, function() toggle(window, pane_a) end)
   local user_raw = assert(read_path(user_path))
   local user_record = assert(internal.parse_v2_record_json(user_raw, "review"))
   assert(user_record.owner_id == "user" and user_record.address.realm_id == wire_a.address.realm_id,
@@ -4470,7 +4636,7 @@ test("Alt+B uses full addresses and clearing leaves other owners and activity", 
     .. "/bindings/" .. samples.binding.binding_id .. "/activity.json"
   local activity_before = assert(read_path(activity_path))
 
-  with_plugin_command(reviewing_answer, function() toggle(window, pane_a) end)
+  with_plugin_command(flag_answer, function() toggle(window, pane_a) end)
   assert(not path_exists(user_path), "a press must remove the active pane's user review")
   assert(path_exists(pane_b_root .. "/reviews/" .. other.owner_key .. ".json"),
     "another owner's review is that owner's to withdraw")
@@ -4488,7 +4654,7 @@ test("Alt+B names the launch the pane published, and says once why the command r
   local review = dofile(repo_root .. "/plugin/init.lua")
   local config = {}
   review.apply_to_config(config, { auto_poll = false, dir = test_dir, integration_root = writer_root })
-  local toggle = assert(config.keys[#config.keys].action)
+  local toggle = assert(key_entry(config, "b").action)
   local spec = { id = 9081, domain = "unix", attention = wire }
   local window = window_double({ tabs = { { spec } }, focused = true, active_pane_id = spec })
   local spawned = with_plugin_command(function()
@@ -5785,8 +5951,8 @@ test("a first observation through Alt+B participates in scalar ambiguity", funct
   local wb=window_double({window_id=9023,tabs={{pb}},focused=false})
   instance.poll(wa,{now_unix_ns=protocol_fixture.state_case.now_unix_ns,call_after=function()end})
   assert(instance.get_attention(42)=="notify")
-  with_plugin_command(reviewing_answer, function()
-    config.keys[#config.keys].action(wb,pane_from_entry(pb))
+  with_plugin_command(flag_answer, function()
+    key_entry(config,"b").action(wb,pane_from_entry(pb))
   end)
   assert(instance.get_attention_view(pane_from_entry(pb)))
   assert(instance.get_attention(42)==nil,"overlay observation must not select either realm")
@@ -5804,8 +5970,8 @@ test("Alt+B replaces the same pane's earlier identity", function()
   local wire=materialize_v2_fixture(id,string.rep("f",64))
   local entry={id=id,domain="local",attention=wire}
   local window=window_double({window_id=9024,tabs={{entry}},focused=false})
-  with_plugin_command(reviewing_answer, function()
-    config.keys[#config.keys].action(window,pane_from_entry(entry))
+  with_plugin_command(flag_answer, function()
+    key_entry(config,"b").action(window,pane_from_entry(entry))
   end)
   local view=assert(instance.get_attention_view(pane_from_entry(entry)))
   assert(view.type and instance.get_attention(id)==view.type,"one pane must not count as two scalar owners")
@@ -5938,6 +6104,7 @@ test("a wrong value inside an option table is named, and its default used", func
     { colors = { thinking = { "#000000" } }, name = "colors.thinking" },
     { review_key = { "b", "ALT" }, name = "review_key" },
     { review_key = { key = "b", mods = 3 }, name = "review_key" },
+    { mute_key = { "m", "ALT" }, name = "mute_key" },
   }
   for _, case in ipairs(cases) do
     local config = {}
@@ -5945,7 +6112,7 @@ test("a wrong value inside an option table is named, and its default used", func
     local handler = #(handlers["format-tab-title"] or {}) + 1
     local ok, failure = pcall(instance.apply_to_config, config, { auto_poll = false, dir = test_dir,
       integration_root = writer_root, indicators = case.indicators, colors = case.colors,
-      review_key = case.review_key })
+      review_key = case.review_key, mute_key = case.mute_key })
     assert(ok, "a wrong value must not break the config: " .. tostring(failure))
     local warnings = table.concat(drain_warnings(), "\n")
     assert(warnings:find("option " .. case.name, 1, true) and warnings:find("default", 1, true),
@@ -5957,8 +6124,10 @@ test("a wrong value inside an option table is named, and its default used", func
     local text = rendered_text(rendered)
     assert(text:find("[◌◔◑◕]") and rendered[1].Background.Color == "#1c1730",
       case.name .. ": the default spinner and tint are drawn, got " .. text)
-    local key = config.keys[#config.keys]
-    assert(key.key == "b" and key.mods == "ALT", case.name .. ": the review key is Alt+B")
+    local key = key_entry(config, "b")
+    assert(key and key.mods == "ALT", case.name .. ": the review key is Alt+B")
+    key = key_entry(config, "m")
+    assert(key and key.mods == "ALT", case.name .. ": the mute key is Alt+M")
   end
 end)
 

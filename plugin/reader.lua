@@ -423,6 +423,7 @@ return function(context)
       subagents = 0,
       subagents_uncertain = false,
       review = false,
+      muted = false,
       binding_phase = nil,
       pane_presence = unavailable and "unavailable" or "present",
       reader_confidence = "unconfirmed",
@@ -660,6 +661,13 @@ return function(context)
       break
     end
 
+    -- The user's mute is a fact beside the pane's attention, not a change to
+    -- it: the tab bar decides what a muted pane shows.
+    local mute, mute_diagnostic = read_expected_record_cached(
+      pane_root .. "/mute.json", "mute", { address = address }, false, previous_records.mute)
+    records.mute = mute
+    collect_diagnostic(diagnostics, mute_diagnostic)
+
     -- Children are counted from the one set the writer keeps per binding, read
     -- and reused like every other record. A provider that runs no sub-agents
     -- has no set to read.
@@ -790,6 +798,7 @@ return function(context)
       subagents = children.count,
       subagents_uncertain = children.uncertain,
       review = review,
+      muted = mute ~= nil,
       binding_phase = binding_end and binding and ends_binding(binding_end, binding)
         and "ended" or (binding and "active" or nil),
       pane_presence = unavailable and "unavailable" or "present",

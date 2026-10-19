@@ -120,6 +120,16 @@
       "owner_key": "04f8996da763b7a969b1028ee3007569eaf3a635486ddab211d512c85b9df8fb",
       "event_id": "00000000-0000-4000-8000-000000000005"
     },
+    "mute": {
+      "kind": "mute",
+      "schema": 3,
+      "address": {
+        "realm_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "incarnation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pane_id": "42"
+      },
+      "event_id": "00000000-0000-4000-8000-000000000015"
+    },
     "binding_end": {
       "kind": "binding_end",
       "schema": 3,
@@ -299,6 +309,9 @@
     { "id": "activity_valid", "parser": "record", "sample": "activity", "expected": "valid" },
     { "id": "activity_clear_valid", "parser": "record", "sample": "activity_clear", "expected": "valid" },
     { "id": "review_valid_without_clock", "parser": "record", "sample": "review", "expected": "valid" },
+    { "id": "mute_valid", "parser": "record", "sample": "mute", "expected": "valid" },
+    { "id": "record_mute_has_no_owner", "parser": "record", "sample": "mute", "patch": { "owner_id": "user" }, "expected": "record_invalid" },
+    { "id": "record_mute_needs_its_event", "parser": "record", "sample": "mute", "remove": ["event_id"], "expected": "record_invalid" },
     { "id": "binding_end_valid", "parser": "record", "sample": "binding_end", "expected": "valid" },
     { "id": "binding_end_names_its_binding_event", "parser": "record", "sample": "binding_end", "patch": { "binding_event_id": "00000000-0000-4000-8000-000000000003" }, "expected": "valid" },
     { "id": "binding_end_binding_event_must_be_uuid", "parser": "record", "sample": "binding_end", "patch": { "binding_event_id": "not-a-uuid" }, "expected": "record_invalid" },

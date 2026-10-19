@@ -4,6 +4,8 @@
 
 ### Added
 
+- **`Alt+M` mutes a tab.** A muted tab shows a bell with a slash (`indicators.muted`, Font Awesome's U+F1F6 from the Nerd Font symbols WezTerm bundles) and no tint, and nothing of its agent until the agent waits on you: then `!` in the notify tint after the bell. Your own `◆` flag stays. The mute is a new pane record, `mute.json`, which only `attention plugin set-mute` and `clear-mute` write. The pane view and a title formatter's `ctx.attention` carry `muted`. See "Muting a tab" in the README. **If your config binds `Alt+M`, the plugin's key now replaces it:** set `mute_key` to another key or to `false`.
+- **Hook deliveries say whether the pane is muted.** A consumer that plays a sound reads `muted` and plays nothing. See the consumer guide's "Transient hook delivery".
 - **`attention observe` reports one binding's lifecycle events since a cursor.** A first call without `--timeout-ms` answers a baseline cursor; later calls with `--since` answer the lead prompt, answer and turn-end events recorded since it — including a follower-produced Codex or Claude turn end — or an explicit `gap` when retention moved past the cursor, `binding_replaced` when the scope no longer names the current binding, and `unavailable` when a record could not be read. `--timeout-ms` waits inside the call. Events carry no prompt or reply text. See the consumer guide's "Wait on one binding's events".
 
 ## 1.5.0 — 2026-10-17

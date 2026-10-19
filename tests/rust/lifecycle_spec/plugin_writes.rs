@@ -1,7 +1,7 @@
-//! The plugin's own writes: the user's review flag and the acknowledgement of
-//! an activity the user has looked at. The plugin is not a process in the
-//! pane, so each command names its pane and launch in flags, and runs here
-//! with none of the pane's environment.
+//! The plugin's own writes: the user's review flag, the user's mute and the
+//! acknowledgement of an activity the user has looked at. The plugin is not a
+//! process in the pane, so each command names its pane and launch in flags,
+//! and runs here with none of the pane's environment.
 
 use super::*;
 
@@ -57,6 +57,11 @@ fn review_path(setup: &Setup, owner: &str) -> PathBuf {
             "{}.json",
             wezterm_attention::protocol::sha256_hex(owner.as_bytes())
         ))
+}
+
+fn mute_path(setup: &Setup) -> PathBuf {
+    let (address, _) = pane_address(&setup.env).unwrap();
+    pane_dir(&state_root(&setup.env).unwrap(), &address).join("mute.json")
 }
 
 fn read_json(path: &std::path::Path) -> Value {
@@ -123,6 +128,16 @@ fn the_plugin_leaves_no_trace_on_a_pane_with_no_records() {
         (1, Some("claim_stale"))
     );
     let (code, response) = plugin(&setup, "clear-review", LAUNCH, &[]);
+    assert_eq!(
+        (code, response["result"]["disposition"].as_str()),
+        (0, Some("skipped"))
+    );
+    let (code, response) = plugin(&setup, "set-mute", LAUNCH, &[]);
+    assert_eq!(
+        (code, response["diagnostics"][0]["code"].as_str()),
+        (1, Some("claim_stale"))
+    );
+    let (code, response) = plugin(&setup, "clear-mute", LAUNCH, &[]);
     assert_eq!(
         (code, response["result"]["disposition"].as_str()),
         (0, Some("skipped"))
@@ -229,6 +244,112 @@ fn the_users_review_is_written_and_removed_only_under_the_review_locks() {
         assert_eq!(code, 1);
         assert!(review_path(&setup, "user").exists());
     }
+}
+
+#[test]
+fn the_plugin_sets_and_clears_the_users_mute_on_the_pane_it_names() {
+    let setup = bound();
+    let (code, response) = plugin(&setup, "set-mute", LAUNCH, &[]);
+    assert_eq!(code, 0, "{response}");
+    assert_eq!(response["command"], "plugin set-mute");
+    assert_eq!(response["result"]["disposition"], "applied");
+    let (address, _) = pane_address(&setup.env).unwrap();
+    let mute = read_json(&mute_path(&setup));
+    assert_eq!(mute["kind"], "mute");
+    assert_eq!(mute["address"], json!(address));
+    assert_eq!(mute["event_id"], response["result"]["event_id"]);
+    wezterm_attention::protocol::validate_record(&mute, Some("mute")).expect("a valid mute");
+
+    let (code, response) = plugin(&setup, "clear-mute", LAUNCH, &[]);
+    assert_eq!(code, 0, "{response}");
+    assert_eq!(response["command"], "plugin clear-mute");
+    assert_eq!(response["result"]["disposition"], "applied");
+    assert!(!mute_path(&setup).exists());
+    let (_, again) = plugin(&setup, "clear-mute", LAUNCH, &[]);
+    assert_eq!(again["result"]["disposition"], "skipped");
+}
+
+// The mute follows the review's claim rule: setting it needs the launch the
+// pane published, and taking it back needs nothing, since it lights nothing.
+#[test]
+fn the_users_mute_is_set_only_under_the_published_launch_and_withdrawn_under_any() {
+    let setup = bound();
+    let (code, response) = plugin(&setup, "set-mute", OTHER_LAUNCH, &[]);
+    assert_eq!(code, 1, "{response}");
+    assert_eq!(response["diagnostics"][0]["code"], "claim_stale");
+    assert!(!mute_path(&setup).exists());
+
+    plugin(&setup, "set-mute", LAUNCH, &[]);
+    let (code, response) = plugin(&setup, "clear-mute", OTHER_LAUNCH, &[]);
+    assert_eq!(code, 0, "{response}");
+    assert_eq!(response["result"]["disposition"], "applied");
+    assert!(!mute_path(&setup).exists());
+}
+
+#[test]
+fn the_users_mute_is_written_and_removed_only_under_the_claim_lock() {
+    let setup = bound();
+    let (address, _) = pane_address(&setup.env).unwrap();
+    let lock = pane_dir(&state_root(&setup.env).unwrap(), &address).join(".claim.lock");
+    let (code, response) = with_lock(&lock, Duration::from_secs(5), || {
+        Ok(plugin(&setup, "set-mute", LAUNCH, &[]))
+    })
+    .unwrap();
+    assert_eq!(code, 1, "{response}");
+    assert_eq!(response["diagnostics"][0]["code"], "probe_unavailable");
+    assert!(!mute_path(&setup).exists());
+    plugin(&setup, "set-mute", LAUNCH, &[]);
+    let (code, _) = with_lock(&lock, Duration::from_secs(5), || {
+        Ok(plugin(&setup, "clear-mute", LAUNCH, &[]))
+    })
+    .unwrap();
+    assert_eq!(code, 1);
+    assert!(mute_path(&setup).exists());
+}
+
+// The command writes the mute and the plugin reads it, in two languages:
+// each has to name the file the other does.
+#[test]
+fn the_mute_key_and_the_tab_find_the_mute_the_command_sets() {
+    let setup = bound();
+    assert_eq!(
+        mark_clear::plugin_reader_answer(&setup, "muted"),
+        "user_mute=false muted=false"
+    );
+    let (code, response) = plugin(&setup, "set-mute", LAUNCH, &[]);
+    assert_eq!(code, 0, "{response}");
+    assert_eq!(
+        mark_clear::plugin_reader_answer(&setup, "muted"),
+        "user_mute=true muted=true"
+    );
+}
+
+// The finish sound is played by a consumer, which learns of the mute from the
+// delivery: read after the hook's own writes, so a mute set while the agent
+// worked silences the turn's end.
+#[test]
+fn a_delivery_says_whether_the_user_has_muted_the_pane() {
+    let setup = bound();
+    let stop = |observation: &str| {
+        let outcome = wezterm_attention::lifecycle::apply_provider_event_with_outcome(
+            &event(
+                "claude",
+                "Stop",
+                "plugin",
+                json!({"stop_hook_active":false}),
+            ),
+            &setup.env,
+            observation,
+            &setup.ports(),
+        );
+        super::self_claim::delivered(&outcome).expect("the turn end is delivered")
+    };
+    assert_eq!(stop("00000000000000000300")["muted"], false);
+    let (code, response) = plugin(&setup, "set-mute", LAUNCH, &[]);
+    assert_eq!(code, 0, "{response}");
+    assert_eq!(stop("00000000000000000310")["muted"], true);
+    plugin(&setup, "clear-mute", LAUNCH, &[]);
+    assert_eq!(stop("00000000000000000320")["muted"], false);
 }
 
 #[test]
@@ -412,6 +533,18 @@ fn the_plugin_never_writes_over_a_record_it_cannot_read() {
         assert_eq!(code, 1, "{response}");
         assert_eq!(response["diagnostics"][0]["code"], "future_schema");
         assert_eq!(fs::read(&review).unwrap(), review_bytes);
+    }
+
+    let mute_bytes = future(json!({
+        "kind": "mute", "address": address,
+        "event_id": "00000000-0000-4000-8000-000000000504",
+    }));
+    fs::write(mute_path(&setup), &mute_bytes).unwrap();
+    for action in ["set-mute", "clear-mute"] {
+        let (code, response) = plugin(&setup, action, LAUNCH, &[]);
+        assert_eq!(code, 1, "{response}");
+        assert_eq!(response["diagnostics"][0]["code"], "future_schema");
+        assert_eq!(fs::read(mute_path(&setup)).unwrap(), mute_bytes);
     }
 
     let event_id = stopped(&setup, "00000000000000000300");

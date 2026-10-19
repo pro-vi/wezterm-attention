@@ -71,6 +71,8 @@ name="the example config loads with follow-up.lua beside it"
 check grep -q '^loaded=true$' "$scratch/result"
 name="the example keeps the plugin's Alt+B binding"
 check grep -q "^    { key = 'b', mods = 'ALT', " "$scratch/keys"
+name="the example keeps the plugin's Alt+M binding"
+check grep -q "^    { key = 'm', mods = 'ALT', " "$scratch/keys"
 name="the example's update-status handler polls with the event pane"
 check sh -c 'grep -q "^polled=true$" "$1" && grep -q "^update_status=true" "$1"' _ "$scratch/result"
 

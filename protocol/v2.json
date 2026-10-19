@@ -1114,6 +1114,16 @@
         "event_id": "uuid"
       }
     },
+    "mute": {
+      "required": ["kind", "schema", "address", "event_id"],
+      "optional": [],
+      "types": {
+        "kind": "record_kind",
+        "schema": "record_schema",
+        "address": "pane_address",
+        "event_id": "uuid"
+      }
+    },
     "binding_end": {
       "required": ["kind", "schema", "address", "launch_id", "binding_id", "reason", "event_id", "observed_mono_ns", "written_at_unix_ns"],
       "optional": ["operation_id", "binding_event_id"],

@@ -36,6 +36,7 @@ v2/realms/<realm>/
     panes/<pane>/
       claim.json
       absence-probe.json
+      mute.json
       reviews/<owner-key>.json
       launches/<launch>/
         activity.json
@@ -427,6 +428,11 @@ answer is the ordinary JSON envelope, with `result.disposition` and `result.even
   owner's to withdraw and is left alone. A withdrawal does not look at the claim: it lights
   nothing, and the key has to be able to take back any flag it finds. `mark --source` refuses the
   `user` owner, so no producer can forge or clear it.
+- `attention plugin set-mute` and `attention plugin clear-mute` set and withdraw the pane's
+  `mute.json` under the pane's claim lock. No other writer writes the mute, and it has no owner
+  field: it is always the user's. The mute key sets it on every claimed pane of a tab that
+  carries none, and clears it from every pane of a tab that does. Like the review's withdrawal,
+  `clear-mute` does not look at the claim. The mute changes no other record.
 - `attention plugin acknowledge --activity-event-id E` writes the acknowledgement for activity
   `E` under the launch lock and then the claim lock, the scope every activity writer takes, and
   only while `E` is still the activity the pane shows: a newer activity, or an activity clear
@@ -437,7 +443,8 @@ answer is the ordinary JSON envelope, with `result.disposition` and `result.even
 
 The plugin waits for each answer on WezTerm's GUI thread, so these commands wait at most 50 ms for
 each lock, where every other writer waits 2 s, and answer `probe_unavailable` when that runs out.
-A press of the review key that meets a held lock is logged once and does nothing more.
+A press of the review key or the mute key that meets a held lock is logged once and does nothing
+more.
 
 Rust validates acknowledgements during reads and never creates or removes one on a read. An
 acknowledgement is removed only with the directory that holds it, when `attention sweep --apply`

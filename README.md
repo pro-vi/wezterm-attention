@@ -27,6 +27,8 @@ When multiple panes in a tab have different states, the highest-priority one win
 
 The `review` flag is yours, not a writer's: it is a record of its own, so you can flag a pane that is mid-`thinking` or showing a `stop` without touching either. See [The review flag](#the-review-flag).
 
+`Alt+M` mutes a tab: it shows a bell until its agent waits on you. See [Muting a tab](#muting-a-tab).
+
 A pane can also report how many subagents are still working inside it. The tab appends that count to whatever indicator it is already showing — `✓+2` — or shows `+2` on its own when the pane has nothing else to show. See [Subagent activity](#subagent-activity).
 
 ## Install
@@ -44,7 +46,7 @@ local attention = wezterm.plugin.require("https://github.com/pro-vi/wezterm-atte
 attention.apply_to_config(config)
 ```
 
-`apply_to_config` adds its `Alt+B` key to `config.keys`. Assign your own `config.keys = { ... }` before this call: an assignment after it replaces the list and drops `Alt+B`.
+`apply_to_config` adds its `Alt+B` and `Alt+M` keys to `config.keys`. Assign your own `config.keys = { ... }` before this call: an assignment after it replaces the list and drops both.
 
 ### 2. Build the `attention` command
 
@@ -140,7 +142,7 @@ attention.apply_to_config(config, {
     -- ctx.default_title: the base title from the rule above
     -- ctx.tab_title, ctx.directory, ctx.settled_title: its sources, nil when empty
     -- ctx.attention: { indicator, type, color, subagents, subagents_uncertain,
-    --   source, label, provider, review, binding_health }
+    --   source, label, provider, review, muted, binding_health }
     local pane = tab.active_pane
     return pane.title  -- just the pane title, no directory
   end,
@@ -149,7 +151,7 @@ attention.apply_to_config(config, {
 
 `ctx.attention[1]`, `[2]` and `[3]` are the indicator, type and color, for formatters written against the positional form.
 
-The tab's `type`, `color`, `source`, `label`, `provider` and `binding_health` are those of the pane whose type ranks highest in `priority`. `subagents` is the sum of every pane's count, and `subagents_uncertain` and `review` are true when they are true for any pane of the tab.
+The tab's `type`, `color`, `source`, `label`, `provider` and `binding_health` are those of the pane whose type ranks highest in `priority`, where a muted pane ranks only by its `notify` or your review flag. `subagents` is the sum of every pane's count, less those of muted panes that show no `notify`, and `subagents_uncertain`, `review` and `muted` are true when they are true for any pane of the tab.
 
 ## Configure
 
@@ -203,6 +205,7 @@ attention.apply_to_config(config, {
     quiet  = "↪ ",
     notify = "! ",
     review = "◆ ",
+    muted  = "\u{f1f6} ",  -- a bell with a slash, from the Nerd Font symbols WezTerm bundles
   },
 
   -- Priority order (last = highest)
@@ -214,6 +217,9 @@ attention.apply_to_config(config, {
   -- Review toggle keybind (false to disable). Added to config.keys, so assign
   -- config.keys before calling apply_to_config.
   review_key = { key = "b", mods = "ALT" },
+
+  -- Mute toggle keybind (false to disable), added the same way.
+  mute_key = { key = "m", mods = "ALT" },
 
   -- Register the plugin's own update-status poller. See
   -- "Existing update-status handler?" below.
@@ -355,6 +361,34 @@ be lost. If `attention sweep --apply` already removed the old records, there
 is nothing to carry. Flags on plain claimed commands remain tied to their
 pane. A provider that delays resume registration carries its flag only when
 that registration arrives.
+
+### Muting a tab
+
+`Alt+M` mutes the focused tab: a tab whose agent you do not need to hear from
+for now, such as one running a long job or a loop. A muted tab shows a bell
+with a slash and no tint, and nothing of what its agent is doing, until the
+agent waits on you:
+
+| Agent | Tab shows |
+|-------|-----------|
+| idle, `thinking`, held, `stop`, quiet, sub-agents only | the bell |
+| `notify`, or a sub-agent waiting for permission | the bell, then `!`, in the notify tint |
+| your review flag | the bell, then `◆`, in the review tint |
+
+A press mutes every pane of the tab that a launch has claimed, so a split tab
+is muted as one; a press on a tab with any muted pane unmutes them all. A pane
+that is not muted, such as one split into the tab later, still lights it, after
+the bell. The mute stays until you press `Alt+M` again, also when a new agent
+starts in that pane.
+
+The mute is a record of its own, `mute.json` in the pane's directory, which
+only `attention plugin set-mute` and `clear-mute` write. It changes no other
+record: `get_attention_view(pane).muted` and a title formatter's
+`ctx.attention.muted` say a pane or tab is muted, and `type` still says what
+the agent is doing. Hook deliveries carry `muted` too, so a consumer that plays
+a sound when a turn ends can play nothing; see the consumer guide's "Transient
+hook delivery".
+
 ## Existing update-status handler?
 
 By default, the plugin registers its own `update-status` handler to poll pane records. If you already have one (e.g., for a git status bar), use manual polling instead:
@@ -607,6 +641,10 @@ The Lua implementation is split by responsibility under `plugin/`: protocol vali
 **Tab titles look wrong?**
 - WezTerm only runs the **first** registered `format-tab-title` handler. If you have your own handler, set `renderer = "manual"` and use `wrap_title_formatter()` or the plugin API. Two handlers cannot coexist.
 - Use `title_formatter` to customize the base title while keeping the plugin's indicators.
+
+**Alt+M not working?**
+- As for `Alt+B` below, with `mute_key` in place of `review_key`. A tab where no pane has published a launch is refused (`cannot toggle mute: no pane of this tab has published an agent launch`).
+- The plugin adds its keys after yours, and WezTerm keeps the later of two bindings of one key (as of WezTerm 20260905-195314-b99b1ca2), so a binding of your own on `Alt+M` is replaced. Set `mute_key` to another key, or to `false`, to keep yours.
 
 **Alt+B not working?**
 - Check for keybind conflicts. Move the binding by setting `review_key = { key = "...", mods = "..." }`. The default, `Alt+B`, also moves back one word in bash 3.2 and in zsh 5.9's emacs mode, so choose another key if you use that.

@@ -51,32 +51,45 @@ return function(context)
     -- Any pane's review, whoever owns it, and not only the winning pane's: a
     -- flag outranked by another pane's type is still on the tab.
     local review = false
+    local muted = false
 
     for _, id in ipairs(pane_ids) do
       local cached = attention_cache[id]
       if cached then
-        subagents = subagents + (cached.subagents or 0)
-        subagents_uncertain = subagents_uncertain or cached.subagents_uncertain == true
-        review = review or cached.review == true
         -- A count-only entry has no type. It contributes its subagents and never
         -- competes for the tab's marker glyph.
         local candidate_type = cached.type
+        local held, quiet = cached.turn_end_held == true, cached.turn_end_quiet == true
+        local label = cached.label
+        muted = muted or cached.muted == true
+        -- The user muted this pane: its agent shows nothing until it waits on
+        -- the user, and the user's own flag stays, since it is not the agent's.
+        if cached.muted == true and candidate_type ~= "notify" then
+          candidate_type = cached.review == true and "review" or nil
+          held, quiet, label = false, false, nil
+        else
+          subagents = subagents + (cached.subagents or 0)
+          subagents_uncertain = subagents_uncertain or cached.subagents_uncertain == true
+        end
+        review = review or cached.review == true
         if candidate_type then
-          local pri = cached.turn_end_quiet and 0 or (cfg_priority[candidate_type] or 0)
+          local pri = quiet and 0 or (cfg_priority[candidate_type] or 0)
           if pri > best_priority then
             best_type     = candidate_type
             best_priority = pri
             best_frame    = candidate_type == "thinking" and cached.frame or nil
             best_source   = cached.source
-            best_label    = cached.label
+            best_label    = label
             best_provider = cached.provider
             best_health   = cached.binding_health
-            best_held     = cached.turn_end_held == true
-            best_quiet    = cached.turn_end_quiet == true
+            best_held     = held
+            best_quiet    = quiet
           end
         end
       end
     end
+    -- The mute's mark goes in front of whatever else the tab shows.
+    local mark = muted and (cfg_indicators.muted or defaults.indicators.muted) or ""
 
     -- A pane whose count could not be read marks the tab's count with "?":
     -- the other panes' children are counted, and there may be more.
@@ -88,14 +101,14 @@ return function(context)
       -- colors. There is no marker type to name here, so `type` stays nil.
       if count_text ~= "" then
         return {
-          indicator = count_text .. " ", type = nil, color = nil,
+          indicator = mark .. count_text .. " ", type = nil, color = nil,
           subagents = subagents, subagents_uncertain = subagents_uncertain,
-          source = nil, provider = nil,
+          source = nil, provider = nil, muted = muted,
         }
       end
       return {
-        indicator = "", type = nil, color = nil, subagents = 0,
-        subagents_uncertain = false, source = nil, provider = nil,
+        indicator = mark, type = nil, color = nil, subagents = 0,
+        subagents_uncertain = false, source = nil, provider = nil, muted = muted,
       }
     end
 
@@ -123,7 +136,8 @@ return function(context)
     elseif cfg_indicators[best_type] then
       indicator = cfg_indicators[best_type]
     end
-    indicator = with_count(indicator)
+    indicator = mark .. with_count(indicator)
+    if still_indicator then still_indicator = mark .. still_indicator end
 
     local show_provider = M._active_show_provider == true
     local provider_display = { claude = "Claude", codex = "Codex", pi = "Pi" }
@@ -140,6 +154,7 @@ return function(context)
       label = best_label,
       provider = best_provider,
       review = review,
+      muted = muted,
       binding_health = best_health,
       agent_suffix = show_provider and provider_display[best_provider] or nil,
     }
@@ -189,6 +204,7 @@ return function(context)
       label = visible.label,
       provider = visible.provider,
       review = visible.review == true,
+      muted = visible.muted == true,
       binding_health = visible.binding_health,
     }
     return {

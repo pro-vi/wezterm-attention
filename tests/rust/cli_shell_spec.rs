@@ -1493,7 +1493,7 @@ local config = {
   window_close_confirmation='NeverPrompt', default_prog={'/bin/sleep','120'},
 }
 attention.apply_to_config(config, {
-  dir=os.getenv('ATTENTION_GUI_STATE'), review_key=false, auto_clear={}, request_redraw=false,
+  dir=os.getenv('ATTENTION_GUI_STATE'), review_key=false, mute_key=false, auto_clear={}, request_redraw=false,
 })
 wezterm.on('update-status', function(window)
   local source = attention._internal.tab_source()

@@ -711,6 +711,39 @@ fn a_pane_where_reviews_were_marked_and_cleared_is_removed_once_old() {
     assert!(!setup_pane_dir(&setup).exists());
 }
 
+/// The user's mute is a record sweep recognises: a mute still standing goes
+/// with the old pane it silences.
+#[test]
+fn a_pane_still_muted_is_removed_once_old() {
+    let setup = Setup::new();
+    setup.claim_and_bind();
+    let pane = setup_pane_dir(&setup);
+    let claim: Value = serde_json::from_slice(&fs::read(pane.join("claim.json")).unwrap()).unwrap();
+    let address = pane_address(&setup.env).expect("address").0;
+    wezterm_attention::lifecycle::set_user_mute(
+        &setup.root(),
+        &address,
+        claim["launch_id"].as_str().expect("launch id"),
+    )
+    .expect("mute");
+    assert!(pane.join("mute.json").exists(), "the mute stands");
+    end_long_ago(&setup);
+    setup.panes.set(Vec::new());
+    setup.processes.set(Presence::Absent);
+    setup.clock.set_monotonic(1_000);
+    setup.run_sweep(true);
+    setup
+        .clock
+        .set_monotonic(1_000 + ABSENCE_INTERVAL_NS as u64);
+    let (result, diagnostics) = setup.run_sweep(true);
+    assert_eq!(
+        actions(&result.details, "pane_retention"),
+        [&json!("prune")],
+        "{diagnostics:?}"
+    );
+    assert!(!pane.exists());
+}
+
 /// A review is a record sweep recognises, kept in the pane's own reviews
 /// directory, so one still standing goes with the old pane it flags rather
 /// than keeping its tree.

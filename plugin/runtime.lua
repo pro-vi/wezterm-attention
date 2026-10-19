@@ -101,6 +101,7 @@ return function()
       { name = "subagents", redraw = true, public = true, normal = as_count },
       { name = "subagents_uncertain", redraw = true, public = true, normal = as_flag },
       { name = "review", redraw = true, public = true, normal = as_flag },
+      { name = "muted", redraw = true, public = true, normal = as_flag },
       { name = "binding_phase", redraw = true, public = true },
       { name = "pane_presence", redraw = true, public = true },
       { name = "reader_confidence", redraw = true, public = true },
@@ -454,8 +455,8 @@ return function()
           failure = "it gave no answer; the attention command in " .. root
             .. " may predate this plugin, so run scripts/install-cli.sh there"
           kind, passing = "exited_silent", true
-          -- A log line alone goes unread while focus and Alt+B stop working,
-          -- so the focused tab says so until a command answers.
+          -- A log line alone goes unread while focus, Alt+B and Alt+M stop
+          -- working, so the focused tab says so until a command answers.
           M._writer_outdated = true
         else
           failure, kind, passing = "it gave no answer", "silent", true
@@ -475,6 +476,13 @@ return function()
         v2_pane_root(dir, read.address) .. "/reviews/" .. owner_key .. ".json",
         "review", { address = read.address }, true)
       return record ~= nil and record.owner_key == owner_key
+    end
+
+    --- Does the user's mute stand on the pane? Read from disk, as the review
+    --- is, for the same reason.
+    local function user_mute_present(read, dir)
+      return read_expected_record(v2_pane_root(dir, read.address) .. "/mute.json",
+        "mute", { address = read.address }, true) ~= nil
     end
 
     --- Read one pane again after a write outside the poll, so the tab shows
@@ -1377,6 +1385,7 @@ return function()
       tab_panes_containing_read = tab_panes_containing_read,
       run_plugin_write = run_plugin_write,
       user_review_present = user_review_present,
+      user_mute_present = user_mute_present,
       refresh_cached_pane = refresh_cached_pane,
       request_tab_bar_redraw = request_tab_bar_redraw,
     }

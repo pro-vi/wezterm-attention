@@ -361,6 +361,10 @@ enum PluginCommand {
     SetReview(PluginPaneArgs),
     /// Withdraw the user's review flag; other owners' reviews stay.
     ClearReview(PluginPaneArgs),
+    /// Mute the pane: its tab shows its agent only while it waits for the user.
+    SetMute(PluginPaneArgs),
+    /// Unmute the pane.
+    ClearMute(PluginPaneArgs),
     /// Acknowledge the activity the user saw, if it is still the one shown.
     Acknowledge(ActivityEventArgs),
 }
@@ -390,6 +394,8 @@ impl PluginCommand {
         match self {
             Self::SetReview(_) => "plugin set-review",
             Self::ClearReview(_) => "plugin clear-review",
+            Self::SetMute(_) => "plugin set-mute",
+            Self::ClearMute(_) => "plugin clear-mute",
             Self::Acknowledge(_) => "plugin acknowledge",
         }
     }
@@ -1152,7 +1158,10 @@ fn run_plugin(
     environment: &BTreeMap<String, String>,
 ) -> Result<ExitCode, AttentionError> {
     let pane = match command {
-        PluginCommand::SetReview(pane) | PluginCommand::ClearReview(pane) => pane,
+        PluginCommand::SetReview(pane)
+        | PluginCommand::ClearReview(pane)
+        | PluginCommand::SetMute(pane)
+        | PluginCommand::ClearMute(pane) => pane,
         PluginCommand::Acknowledge(args) => &args.pane,
     };
     let scope = pane.scope()?;
@@ -1163,6 +1172,12 @@ fn run_plugin(
         }
         PluginCommand::ClearReview(_) => {
             wezterm_attention::lifecycle::clear_user_review(&root, scope.address())
+        }
+        PluginCommand::SetMute(_) => {
+            wezterm_attention::lifecycle::set_user_mute(&root, scope.address(), scope.launch_id())
+        }
+        PluginCommand::ClearMute(_) => {
+            wezterm_attention::lifecycle::clear_user_mute(&root, scope.address())
         }
         PluginCommand::Acknowledge(args) => {
             let activity_event_id = wezterm_attention::identity::canonical_uuid(

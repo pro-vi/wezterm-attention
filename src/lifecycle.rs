@@ -48,6 +48,9 @@ pub struct HookOutcome {
     pub observation_id: Option<String>,
     pub turn_end: Option<TurnEnd>,
     pub hold_checks: Vec<HoldCheckOutcome>,
+    /// Whether the admitted pane carried the user's mute once the hook's
+    /// writes were done; false when no pane was admitted.
+    pub muted: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -677,7 +680,7 @@ impl ResumeReview {
             Some(record) => record,
             None => {
                 destination
-                    .plan(ReviewChange::Set)?
+                    .plan(FlagChange::Set)?
                     .replacements
                     .into_iter()
                     .next()
@@ -734,13 +737,9 @@ mod review_carry_failure_tests {
         let destination = review_slot(&root, &new_address, USER_REVIEW_OWNER).unwrap();
         crate::records::mkdir_private(source.path.parent().unwrap()).unwrap();
         crate::records::mkdir_private(destination.path.parent().unwrap()).unwrap();
-        let old = source
-            .plan(ReviewChange::Set)
-            .unwrap()
-            .replacements
-            .remove(0);
+        let old = source.plan(FlagChange::Set).unwrap().replacements.remove(0);
         let new = destination
-            .plan(ReviewChange::Set)
+            .plan(FlagChange::Set)
             .unwrap()
             .replacements
             .remove(0);
@@ -2275,7 +2274,7 @@ pub fn apply_mark_review(env: &BTreeMap<String, String>, source: &str) -> Result
                     "current launch does not match claim",
                 ));
             }
-            review.plan(ReviewChange::Set)
+            review.plan(FlagChange::Set)
         },
         |_| Ok(()),
     )?;
@@ -2313,48 +2312,63 @@ fn review_slot<'a>(
     })
 }
 
+/// What a write does to one of the pane's flags: a review or the mute.
 #[derive(Clone, Copy)]
-enum ReviewChange {
+enum FlagChange {
     Set,
     Withdraw,
 }
 
 impl ReviewSlot<'_> {
     /// The plan that sets the owner's review, replacing whatever is there,
-    /// or withdraws it: `applied` when there was one to withdraw, `skipped`
-    /// when there was none. Never over, or instead of, a review this version
-    /// cannot read.
-    fn plan(&self, change: ReviewChange) -> Result<CommitPlan<Mutation>> {
-        let existing = read_record(&self.path, Some("review"), &self.identity)?;
-        match change {
-            ReviewChange::Set => {
-                let event_id = Uuid::new_v4().to_string();
-                let record = json!({
-                    "kind": "review",
-                    "schema": manifest()?.record_schema,
-                    "address": self.address,
-                    "owner_id": self.owner_id,
-                    "owner_key": self.owner_key,
-                    "event_id": event_id,
-                });
-                let mut result = LifecycleResult::new(Disposition::Applied);
-                result.event_id = Some(event_id);
-                Ok(CommitPlan {
-                    replacements: vec![Replacement::always(self.path.clone(), record)],
-                    ..CommitPlan::reporting(Mutation::plain(result))
-                })
-            }
-            ReviewChange::Withdraw => Ok(CommitPlan {
-                removals: vec![self.path.clone()],
-                ..CommitPlan::reporting(Mutation::plain(LifecycleResult::new(
-                    if existing.is_some() {
-                        Disposition::Applied
-                    } else {
-                        Disposition::Skipped
-                    },
-                )))
-            }),
+    /// or withdraws it.
+    fn plan(&self, change: FlagChange) -> Result<CommitPlan<Mutation>> {
+        plan_flag(&self.path, "review", &self.identity, change, |event_id| {
+            Ok(json!({
+                "kind": "review",
+                "schema": manifest()?.record_schema,
+                "address": self.address,
+                "owner_id": self.owner_id,
+                "owner_key": self.owner_key,
+                "event_id": event_id,
+            }))
+        })
+    }
+}
+
+/// The plan that sets one of the pane's flags at `path` to `record`, given a
+/// new event id, or withdraws it: `applied` when there was one to withdraw,
+/// `skipped` when there was none. Never over, or instead of, a flag this
+/// version cannot read.
+fn plan_flag(
+    path: &Path,
+    kind: &str,
+    identity: &RecordIdentity,
+    change: FlagChange,
+    record: impl FnOnce(&str) -> Result<Value>,
+) -> Result<CommitPlan<Mutation>> {
+    let existing = read_record(path, Some(kind), identity)?;
+    match change {
+        FlagChange::Set => {
+            let event_id = Uuid::new_v4().to_string();
+            let record = record(&event_id)?;
+            let mut result = LifecycleResult::new(Disposition::Applied);
+            result.event_id = Some(event_id);
+            Ok(CommitPlan {
+                replacements: vec![Replacement::always(path.to_owned(), record)],
+                ..CommitPlan::reporting(Mutation::plain(result))
+            })
         }
+        FlagChange::Withdraw => Ok(CommitPlan {
+            removals: vec![path.to_owned()],
+            ..CommitPlan::reporting(Mutation::plain(LifecycleResult::new(
+                if existing.is_some() {
+                    Disposition::Applied
+                } else {
+                    Disposition::Skipped
+                },
+            )))
+        }),
     }
 }
 
@@ -2393,7 +2407,7 @@ pub fn apply_mark_clear(
                     "current launch does not match claim",
                 ));
             }
-            let withdrawn = review.plan(ReviewChange::Withdraw)?;
+            let withdrawn = review.plan(FlagChange::Withdraw)?;
             let pointer = read_record_at(&root, "current_binding", &launch)?;
             let current = read_current(&root, pointer, &address, &launch_id)?;
             let mut replacements = Vec::new();
@@ -2471,7 +2485,7 @@ pub fn set_user_review(
     address: &PaneAddress,
     launch_id: &str,
 ) -> Result<LifecycleResult> {
-    commit_user_review(root, address, ReviewChange::Set, |claim| {
+    commit_user_review(root, address, FlagChange::Set, |claim| {
         require_plugin_claim(claim, address, launch_id)
     })
 }
@@ -2482,36 +2496,108 @@ pub fn set_user_review(
 /// owner's review is touched: another owner's review is that owner's to
 /// withdraw.
 pub fn clear_user_review(root: &Path, address: &PaneAddress) -> Result<LifecycleResult> {
-    commit_user_review(root, address, ReviewChange::Withdraw, |_| Ok(()))
+    commit_user_review(root, address, FlagChange::Withdraw, |_| Ok(()))
 }
 
 fn commit_user_review(
     root: &Path,
     address: &PaneAddress,
-    change: ReviewChange,
+    change: FlagChange,
     check_claim: impl FnOnce(Option<&Value>) -> Result<()>,
+) -> Result<LifecycleResult> {
+    let review = review_slot(root, address, USER_REVIEW_OWNER)?;
+    commit_pane_flag(
+        root,
+        address,
+        &[&claim_lock(root, address), &review.lock],
+        check_claim,
+        || review.plan(change),
+    )
+}
+
+/// Commits a plugin write of one of the pane's flags under `locks`, the
+/// claim lock first, once `check_claim` accepts the claim read under them.
+fn commit_pane_flag(
+    root: &Path,
+    address: &PaneAddress,
+    locks: &[&Path],
+    check_claim: impl FnOnce(Option<&Value>) -> Result<()>,
+    plan: impl FnOnce() -> Result<CommitPlan<Mutation>>,
 ) -> Result<LifecycleResult> {
     // Taking the locks creates the pane's directory, and sweep reaches a pane
     // tree only through its bindings, so a pane with no records keeps none:
-    // it has no claim to flag and no review to withdraw.
+    // it has no claim to flag and no flag to withdraw.
     if !pane_dir(root, address).is_dir() {
         check_claim(None)?;
         return Ok(LifecycleResult::new(Disposition::Skipped));
     }
-    let review = review_slot(root, address, USER_REVIEW_OWNER)?;
     let (mutation, ()) = commit_waiting(
         root,
-        &[&claim_lock(root, address), &review.lock],
+        locks,
         PLUGIN_LOCK_TIMEOUT,
         "claim",
         &RecordIdentity::pane(address),
         |claim| {
             check_claim(claim.as_ref())?;
-            review.plan(change)
+            plan()
         },
         |_| Ok(()),
     )?;
     Ok(mutation.result)
+}
+
+/// Mutes the pane at `address` whose published launch is `launch_id`: the
+/// reader then shows its agent only while it waits for the user. The mute is
+/// the user's alone, and only `attention plugin` writes it.
+pub fn set_user_mute(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+) -> Result<LifecycleResult> {
+    commit_user_mute(root, address, FlagChange::Set, |claim| {
+        require_plugin_claim(claim, address, launch_id)
+    })
+}
+
+/// Unmutes the pane at `address`. Like the review's withdrawal, it does not
+/// look at the claim: a withdrawal lights nothing.
+pub fn clear_user_mute(root: &Path, address: &PaneAddress) -> Result<LifecycleResult> {
+    commit_user_mute(root, address, FlagChange::Withdraw, |_| Ok(()))
+}
+
+fn commit_user_mute(
+    root: &Path,
+    address: &PaneAddress,
+    change: FlagChange,
+    check_claim: impl FnOnce(Option<&Value>) -> Result<()>,
+) -> Result<LifecycleResult> {
+    let identity = RecordIdentity::pane(address);
+    let path = identity.path(root, "mute")?;
+    // The mute has no writer but these two, and both hold the claim lock.
+    commit_pane_flag(
+        root,
+        address,
+        &[&claim_lock(root, address)],
+        check_claim,
+        || {
+            plan_flag(&path, "mute", &identity, change, |event_id| {
+                Ok(json!({
+                    "kind": "mute",
+                    "schema": manifest()?.record_schema,
+                    "address": address,
+                    "event_id": event_id,
+                }))
+            })
+        },
+    )
+}
+
+/// Whether the pane at `address` carries the user's mute now. A mute that
+/// cannot be read counts as none: the answer decides only whether a sound
+/// plays, and a sound too many is the smaller mistake.
+pub fn user_mute_present(root: &Path, address: &PaneAddress) -> bool {
+    read_record_at(root, "mute", &RecordIdentity::pane(address))
+        .is_ok_and(|record| record.is_some())
 }
 
 /// Records that the user has seen the activity `activity_event_id` of launch
@@ -2787,9 +2873,9 @@ fn apply_review_event(
                 )));
             }
             review.plan(if clear {
-                ReviewChange::Withdraw
+                FlagChange::Withdraw
             } else {
-                ReviewChange::Set
+                FlagChange::Set
             })
         },
         |mutation| {
@@ -3141,6 +3227,9 @@ fn apply_provider_event_with_request(
             }
         }
     }
+    let muted = evidence.admission.as_ref().is_some_and(|admitted| {
+        state_root(env).is_ok_and(|root| user_mute_present(&root, &admitted.scope.address))
+    });
     HookOutcome {
         result,
         admission: evidence.admission.clone(),
@@ -3148,6 +3237,7 @@ fn apply_provider_event_with_request(
         observation_id: evidence.observation_id.clone(),
         turn_end: evidence.turn_end.clone(),
         hold_checks: evidence.hold_checks.clone(),
+        muted,
     }
 }
 

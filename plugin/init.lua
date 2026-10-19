@@ -37,6 +37,9 @@ local defaults = {
     quiet  = "↪ ",
     notify = "! ",
     review = "◆ ",
+    -- Font Awesome's bell with a slash (U+F1F6), from the Nerd Font symbols
+    -- WezTerm bundles. A muted tab shows it in front of whatever else it shows.
+    muted  = "\239\135\182 ",
   },
 
   -- Higher index = higher priority when multiple panes have attention
@@ -47,6 +50,9 @@ local defaults = {
 
   -- Keybind to toggle the user's review flag on the active tab (false to disable)
   review_key = { key = "b", mods = "ALT" },
+
+  -- Keybind to mute and unmute the active tab (false to disable)
+  mute_key = { key = "m", mods = "ALT" },
 
   -- Ask WezTerm to rebuild the tab bar when a pane's attention changes.
   -- Set false when the host already repaints titles on its own tick.
@@ -267,7 +273,7 @@ local option_kinds = {
   dir = { "string" }, renderer = { "string" },
   title_formatter = { "function" }, on_view_change = { "function" },
   colors = { "table" }, indicators = { "table" }, priority = { "table" }, auto_clear = { "table" },
-  review_key = { "table", false },
+  review_key = { "table", false }, mute_key = { "table", false },
   request_redraw = { "boolean" }, auto_poll = { "boolean" }, show_provider = { "boolean" },
   show_directory = { "boolean" }, settled_title_fallback = { "boolean" },
   integration_root = { "string" },
@@ -370,7 +376,7 @@ local function usable_options(opts)
       end
       return count == #entry
     end },
-    stop = text, notify = text, review = text,
+    stop = text, notify = text, review = text, muted = text,
   })
   usable.colors = usable_entries("colors", usable.colors,
     { thinking = text, stop = text, quiet = text, notify = text, review = text })
@@ -405,12 +411,14 @@ local function usable_options(opts)
       usable[name] = nil
     end
   end
-  local review_key = usable.review_key
-  if review_key and (type(review_key.key) ~= "string"
-      or (review_key.mods ~= nil and type(review_key.mods) ~= "string")) then
-    report_warning_once("option:review_key", 'option review_key must be a table like '
-      .. '{ key = "b", mods = "ALT" }, with key a string and mods a string or absent; the default is used')
-    usable.review_key = nil
+  for _, name in ipairs({ "review_key", "mute_key" }) do
+    local key = usable[name]
+    if key and (type(key.key) ~= "string" or (key.mods ~= nil and type(key.mods) ~= "string")) then
+      report_warning_once("option:" .. name, "option " .. name .. " must be a table like "
+        .. string.format('{ key = "%s", mods = "%s" }', defaults[name].key, defaults[name].mods)
+        .. ", with key a string and mods a string or absent; the default is used")
+      usable[name] = nil
+    end
   end
   return usable
 end
@@ -593,7 +601,46 @@ function M.apply_to_config(config, opts)
   end
   -- renderer == "manual": no format-tab-title registered
 
-  -- ── Review toggle keybind ─────────────────────────────────────────────
+  -- ── Tab keybinds: the review flag and the mute ─────────────────────────
+
+  --- The focused pane's read, and the reads of the panes of its tab that a
+  --- launch has claimed; nil, after saying why once, when the pane has not
+  --- published who it is, so its tab cannot be found. Panes not in any tab
+  --- (GUI overlays) stand for themselves.
+  local function focused_tab_reads(win, pane, what)
+    local mux_win = win:mux_window()
+    local target_read = reader.resolve_pane_read(pane)
+    if target_read.kind ~= "claimed" and target_read.kind ~= "unclaimed" then
+      report_error_once(what .. "-unpublished-pane",
+        "cannot toggle " .. what .. ": this pane has not published who it is")
+      return nil
+    end
+    local panes
+    if mux_win then
+      -- The same race the poll walks carry: a tab can go between the listing
+      -- and the read. Falling back to this pane alone is better than a key
+      -- press that does nothing.
+      local tabs_ok, mux_tabs = pcall(mux_win.tabs, mux_win)
+      if tabs_ok and type(mux_tabs) == "table" then
+        panes = runtime.tab_panes_containing_read(mux_tabs, target_read)
+      end
+    end
+    panes = panes or { pane }
+    local reads = {}
+    for _, observed_pane in ipairs(panes) do
+      local read = reader.resolve_pane_read(observed_pane)
+      runtime.observe_pane(win, observed_pane, read)
+      if read.kind == "claimed" then reads[#reads + 1] = read end
+    end
+    return target_read, reads
+  end
+
+  --- Show the panes a key just wrote now rather than on the next tick.
+  local function show_written(win, pane, written)
+    if #written == 0 then return end
+    for _, read in ipairs(written) do runtime.refresh_cached_pane(read, dir) end
+    runtime.request_tab_bar_redraw(win, pane)
+  end
 
   local review_key = opts.review_key
   if review_key == nil then review_key = defaults.review_key end
@@ -608,34 +655,10 @@ function M.apply_to_config(config, opts)
         -- if ANY of its panes is flagged. So toggle across every pane in the
         -- focused pane's tab — toggling only the focused pane leaves a split
         -- tab stuck showing ◆ (the other pane is still flagged) and unclearable.
-        -- Panes not in any tab (GUI overlays) fall back to per-pane behavior.
         -- The flag toggled is the user's own: another owner's review is that
         -- owner's to withdraw, and a press leaves it.
-        local mux_win = win:mux_window()
-        local target_read = reader.resolve_pane_read(pane)
-        if target_read.kind ~= "claimed" and target_read.kind ~= "unclaimed" then
-          -- The pane has not published who it is, so its tab cannot be found.
-          report_error_once("review-unpublished-pane",
-            "cannot toggle review: this pane has not published who it is")
-          return
-        end
-        local panes
-        if mux_win then
-          -- The same race the poll walks carry: a tab can go between the listing
-          -- and the read. Falling back to this pane alone is better than a key
-          -- press that does nothing.
-          local tabs_ok, mux_tabs = pcall(mux_win.tabs, mux_win)
-          if tabs_ok and type(mux_tabs) == "table" then
-            panes = runtime.tab_panes_containing_read(mux_tabs, target_read)
-          end
-        end
-        panes = panes or { pane }
-        local reads = {}
-        for _, observed_pane in ipairs(panes) do
-          local read = reader.resolve_pane_read(observed_pane)
-          runtime.observe_pane(win, observed_pane, read)
-          if read.kind == "claimed" then reads[#reads + 1] = read end
-        end
+        local target_read, reads = focused_tab_reads(win, pane, "review")
+        if not target_read then return end
 
         -- Decide on disk truth, never the cache. poll() rebuilds the cache
         -- from files every tick, so the cache can lag a flag another window's
@@ -664,9 +687,41 @@ function M.apply_to_config(config, opts)
         elseif runtime.run_plugin_write("set-review", target_read, dir) then
           written[1] = target_read
         end
-        if #written == 0 then return end
-        for _, read in ipairs(written) do runtime.refresh_cached_pane(read, dir) end
-        runtime.request_tab_bar_redraw(win, pane)
+        show_written(win, pane, written)
+      end),
+    })
+  end
+
+  local mute_key = opts.mute_key
+  if mute_key == nil then mute_key = defaults.mute_key end
+
+  if mute_key then
+    config.keys = config.keys or {}
+    table.insert(config.keys, {
+      key  = mute_key.key,
+      mods = mute_key.mods,
+      action = wezterm.action_callback(function(win, pane)
+        -- A tab with any muted pane is unmuted; any other has every claimed
+        -- pane muted. Decided on disk, as the review key is.
+        local target_read, reads = focused_tab_reads(win, pane, "mute")
+        if not target_read then return end
+        if #reads == 0 then
+          -- No reader would show a mute written for a pane nothing claimed.
+          report_error_once("mute-unclaimed-tab",
+            "cannot toggle mute: no pane of this tab has published an agent launch")
+          return
+        end
+        local muted = {}
+        for _, read in ipairs(reads) do
+          if runtime.user_mute_present(read, dir) then muted[#muted + 1] = read end
+        end
+        local action, targets = "clear-mute", muted
+        if #muted == 0 then action, targets = "set-mute", reads end
+        local written = {}
+        for _, read in ipairs(targets) do
+          if runtime.run_plugin_write(action, read, dir) then written[#written + 1] = read end
+        end
+        show_written(win, pane, written)
       end),
     })
   end
@@ -703,6 +758,7 @@ M._internal = {
   resolve_pane_read = reader.resolve_pane_read,
   read_attention_view = reader.read_attention_view,
   user_review_present = runtime.user_review_present,
+  user_mute_present = runtime.user_mute_present,
   attention_cache = runtime_state.attention_cache,
 }
 

@@ -68,7 +68,7 @@ end
     local callback_instance = require("plugin")
     local deliveries = {}
     callback_instance.apply_to_config({}, { dir = lifecycle_dir, renderer = "manual", auto_poll = false,
-      review_key = false, auto_clear = {}, settled_title_fallback = false,
+      review_key = false, mute_key = false, auto_clear = {}, settled_title_fallback = false,
       on_view_change = function(message) deliveries[#deliveries + 1] = message end })
     pane.pane_id = function() return 91001 end
     pane.get_domain_name = function() return "fixture" end
