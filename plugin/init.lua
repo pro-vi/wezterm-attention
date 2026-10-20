@@ -235,6 +235,22 @@ function M.wrap_title_formatter(base_fn)
   end
 end
 
+--- A tab's attention as its renderer resolves it, from the GUI pane ids
+--- WezTerm's TabInformation carries (numbers or strings), for a caller that
+--- draws one thing for several tabs, such as a folded tab group in the bar.
+--- Returns the renderer's projection: indicator, still_indicator, glyph (the
+--- state's own glyph, with no spinner frame, mute mark or count; "" for none),
+--- priority, type, color and the rest. Read-only; a pane no poll has walked yet
+--- contributes nothing.
+function M.visible_attention(pane_ids)
+  local keys = {}
+  for _, id in ipairs(pane_ids or {}) do
+    local key = runtime_state.drawn_pane_key(tostring(id))
+    if key then keys[#keys + 1] = key end
+  end
+  return format.resolve_visible_attention(keys)
+end
+
 -- ── apply_to_config ─────────────────────────────────────────────────────────
 
 --- Tab orders drawn while this GUI is still asking who it is, by window id. A

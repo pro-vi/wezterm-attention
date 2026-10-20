@@ -72,7 +72,7 @@ Both work on a pane where an agent, or a shell that claims panes, has started a 
 
 Attention keeps a record of the agent session in each pane: its state, which agent it is, its session file, and its prompts, turn ends and questions. Your own code can read it, and can set a tab itself.
 
-- **Inside WezTerm:** `attention.get_attention_view(pane)` returns a pane's view, and the `on_view_change` option calls your function when a view changes.
+- **Inside WezTerm:** `attention.get_attention_view(pane)` returns a pane's view, and the `on_view_change` option calls your function when a view changes. `attention.visible_attention(pane_ids)` returns what the tab renderer resolves for a tab with those GUI pane ids, including `glyph`, the state's glyph with no spinner frame, mark or count.
 - **From any program:** `attention bindings`, `attention tabs`, `attention inspect` and `attention observe` answer in JSON.
 - **On each hook:** a program registered with `--consumer` receives the event, and with `--include-reply` the agent's final message.
 - **To set a tab:** `attention mark thinking|stop|notify|review|clear --source NAME`, run from a shell that has claimed the pane.

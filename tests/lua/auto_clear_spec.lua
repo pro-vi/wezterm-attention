@@ -969,6 +969,33 @@ test("both renderers project the same attention for the same tab", function()
     "ctx.attention should still be indicator, type, color")
 end)
 
+test("visible_attention resolves a tab from its GUI pane ids as the renderer does", function()
+  write_activity(751, "thinking")
+  write_activity(752, "notify")
+  poll({ 751, 752 })
+
+  local visible = attention.visible_attention({ 751, "752" })
+  local rendered = format_tab_title(tab(751, 752, false))
+  assert(visible.type == "notify", "notify outranks thinking, got " .. tostring(visible.type))
+  assert(rendered[2].Text:find(visible.indicator, 1, true), "the renderer draws the same indicator")
+  assert(visible.glyph == "!", "the glyph is the notify indicator without its space, got " .. tostring(visible.glyph))
+  assert(type(visible.priority) == "number" and visible.priority > 0, "a typed tab carries its priority")
+
+  local none = attention.visible_attention({ 799 })
+  assert(none.type == nil and none.glyph == "" and none.priority == -1, "an unwalked pane gives nothing")
+end)
+
+test("a thinking tab's glyph is its first frame whatever frame the spinner is on", function()
+  write_activity(753, "thinking")
+  local w = window_double({ tabs = { { 753 } }, focused = false })
+  -- Frame 2 of the wall-clock spinner, so the drawn frame is not the first.
+  attention.poll(w, { now_ms = 2000, now_unix_ns = fixture_now })
+  local frames = attention._active_indicators.thinking_frames
+  local visible = attention.visible_attention({ 753 })
+  assert(visible.indicator ~= frames[1], "the spinner should be past its first frame")
+  assert(visible.glyph == frames[1]:gsub("%s+$", ""), "glyph " .. tostring(visible.glyph) .. " is not the first frame")
+end)
+
 -- ── Publishing the drawn tab order ─────────────────────────────────────────
 
 --- WezTerm's format-tab-title argument is TabInformation userdata, not a table.

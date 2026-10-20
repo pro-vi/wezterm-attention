@@ -101,13 +101,13 @@ return function(context)
       -- colors. There is no marker type to name here, so `type` stays nil.
       if count_text ~= "" then
         return {
-          indicator = mark .. count_text .. " ", type = nil, color = nil,
+          indicator = mark .. count_text .. " ", type = nil, color = nil, glyph = "", priority = -1,
           subagents = subagents, subagents_uncertain = subagents_uncertain,
           source = nil, provider = nil, muted = muted,
         }
       end
       return {
-        indicator = mark, type = nil, color = nil, subagents = 0,
+        indicator = mark, type = nil, color = nil, glyph = "", priority = -1, subagents = 0,
         subagents_uncertain = false, source = nil, provider = nil, muted = muted,
       }
     end
@@ -123,19 +123,27 @@ return function(context)
     -- What the bar draws for this state whatever the frame. The published copy
     -- of the bar uses it, so a spinner does not rewrite that file every second.
     local still_indicator
+    -- The state's own glyph, with no spinner frame, mute mark or count, for a
+    -- caller that counts tabs by state (a folded tab group's label).
+    local glyph = ""
     if best_type == "thinking" and best_held then
       indicator = cfg_indicators.held or defaults.indicators.held
+      glyph = indicator
     elseif best_type == "thinking" then
       local frames = cfg_indicators.thinking_frames
       if frames and #frames > 0 then
         indicator = frames[((best_frame or 0) % #frames) + 1]
         still_indicator = with_count(frames[1])
+        glyph = frames[1]
       end
     elseif best_type == "stop" and best_quiet then
       indicator = cfg_indicators.quiet or defaults.indicators.quiet
+      glyph = indicator
     elseif cfg_indicators[best_type] then
       indicator = cfg_indicators[best_type]
+      glyph = indicator
     end
+    glyph = glyph:gsub("%s+$", "")
     indicator = mark .. with_count(indicator)
     if still_indicator then still_indicator = mark .. still_indicator end
 
@@ -144,6 +152,8 @@ return function(context)
     return {
       indicator = indicator,
       still_indicator = still_indicator or indicator,
+      glyph = glyph,
+      priority = best_priority,
       type = best_type,
       turn_end_held = best_held,
       turn_end_quiet = best_quiet,
