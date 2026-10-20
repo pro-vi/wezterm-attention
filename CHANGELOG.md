@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`--check-budget-ms N` sets the time the hold and quiet checks share, per hook line.** Whole milliseconds from 1 to 86400000; the default stays 5000 ms. A declared time may be as long as the budget. Attention 1.7.0 and earlier reject the flag and record nothing for the event, so update Attention before adding it to a hook command. See the consumer guide's "Pre-write hold checks".
+
 ## 1.7.0 — 2026-10-20
 
 ### Changed

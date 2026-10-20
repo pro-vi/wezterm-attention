@@ -8,8 +8,8 @@ use wezterm_attention::lifecycle::apply_provider_event_with_checks;
 const HOLD_LINE: &str = "{\"hold\": true, \"answer\": \"waiting_on_own_work\"}\n";
 
 /// The chain budget for tests that hold a check open on purpose. The command's
-/// own `TOTAL_BUDGET` is a few seconds, which a loaded machine can spend before
-/// a shell script has started, and then the check never runs.
+/// default budget is a few seconds, which a loaded machine can spend before a
+/// shell script has started, and then the check never runs.
 const CHECK_BUDGET: Duration = Duration::from_secs(30);
 
 fn wait_for_check_start(ready: &Path) {
@@ -229,16 +229,23 @@ fn a_child_waiting_for_permission_keeps_the_hold_check_from_running() {
 fn timed_out_hold_check_records_unheld_stop() {
     let setup = Setup::new();
     bind(&setup, "claude");
+    // A budget shorter than the default keeps the test short.
+    let budget = Duration::from_millis(2000);
     let check = executable(
         &setup,
         &format!(
             "/bin/cat >/dev/null\nprintf '%s' '{}'\n/bin/sleep {}",
             HOLD_LINE,
-            hold_check::TOTAL_BUDGET.as_secs() + 1
+            budget.as_secs() + 1
         ),
     );
     let began = Instant::now();
-    let output = hook(&setup, &payload(), &check, &[]);
+    let output = hook(
+        &setup,
+        &payload(),
+        &check,
+        &["--check-budget-ms", &budget.as_millis().to_string()],
+    );
     let elapsed = began.elapsed();
     println!("disposable Stop hook elapsed_ms={}", elapsed.as_millis());
     assert!(
@@ -252,7 +259,7 @@ fn timed_out_hold_check_records_unheld_stop() {
         "timed_out"
     );
     assert!(
-        elapsed < hold_check::TOTAL_BUDGET + Duration::from_millis(300),
+        elapsed < budget + Duration::from_millis(300),
         "hook took {elapsed:?}"
     );
     assert!(activity.get("hold_notes").is_none());
@@ -805,8 +812,12 @@ fn quiet_stop(
     check: &std::path::Path,
     order: &str,
 ) -> wezterm_attention::lifecycle::HookOutcome {
-    let registrations =
-        hold_check::validate_checks(&[], &[format!("wezpup={}", check.display())]).unwrap();
+    let registrations = hold_check::validate_checks(
+        &[],
+        &[format!("wezpup={}", check.display())],
+        hold_check::DEFAULT_BUDGET,
+    )
+    .unwrap();
     let stop = event(
         provider,
         "Stop",
@@ -1018,6 +1029,24 @@ fn a_malformed_quiet_check_is_reported_under_its_own_flag() {
 }
 
 #[test]
+fn a_check_budget_outside_its_range_is_refused() {
+    let setup = Setup::new();
+    let output = run_hook(
+        &setup,
+        &["hooks", "event", "claude", "Stop", "--check-budget-ms", "0"],
+        &payload(),
+    );
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "invalid value '0' for '--check-budget-ms <CHECK_BUDGET_MS>': 0 is not in 1..=86400000"
+        ),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn a_failed_check_without_debug_still_names_its_stage() {
     let setup = Setup::new();
     bind(&setup, "claude");
@@ -1126,9 +1155,9 @@ fn permission_during_check(hold: bool) {
     );
     let named = vec![format!("checker={}", check.display())];
     let registrations = if hold {
-        hold_check::validate_checks(&named, &[])
+        hold_check::validate_checks(&named, &[], hold_check::DEFAULT_BUDGET)
     } else {
-        hold_check::validate_checks(&[], &named)
+        hold_check::validate_checks(&[], &named, hold_check::DEFAULT_BUDGET)
     }
     .unwrap();
     let payload = json!({"hook_event_name":"Stop", "session_id":"hold-session",

@@ -122,6 +122,9 @@ struct EventArgs {
     /// NAME=/absolute/executable proving a quiet lead Stop from frozen lifecycle evidence; NAME:100ms=… declares its time; repeatable.
     #[arg(long)]
     quiet_check: Vec<String>,
+    /// Milliseconds the hold and quiet checks share, from the start of the chain (1..=86400000).
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=86400000))]
+    check_budget_ms: Option<u64>,
 }
 
 fn provider_event_help() -> String {
@@ -844,11 +847,18 @@ fn run_hooks_event(
     environment: &BTreeMap<String, String>,
 ) -> Result<ExitCode, AttentionError> {
     let ports = system_ports();
-    let hold_checks =
-        match wezterm_attention::hold_check::validate_checks(&args.hold_check, &args.quiet_check) {
-            Ok(registrations) => registrations,
-            Err(error) => return Ok(emit_hook_error(&error, args.debug, args.strict, name)),
-        };
+    let check_budget = args.check_budget_ms.map_or(
+        wezterm_attention::hold_check::DEFAULT_BUDGET,
+        std::time::Duration::from_millis,
+    );
+    let hold_checks = match wezterm_attention::hold_check::validate_checks(
+        &args.hold_check,
+        &args.quiet_check,
+        check_budget,
+    ) {
+        Ok(registrations) => registrations,
+        Err(error) => return Ok(emit_hook_error(&error, args.debug, args.strict, name)),
+    };
     let consumer_timeout = match wezterm_attention::consumer::validate_consumers(
         &args.consumer,
         args.consumer_timeout_ms,
@@ -916,7 +926,7 @@ fn run_hooks_event(
             registrations: &hold_checks,
             reply: &check_reply,
             background_tasks,
-            budget: wezterm_attention::hold_check::TOTAL_BUDGET,
+            budget: check_budget,
         };
         let outcome = wezterm_attention::lifecycle::apply_provider_event_with_checks(
             &event,

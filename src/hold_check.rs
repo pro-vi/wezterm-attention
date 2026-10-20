@@ -20,7 +20,9 @@ use crate::protocol::{
     AttentionError, Result, canonical_decimal_text, format_ns20, free_of_control, manifest,
 };
 
-pub const TOTAL_BUDGET: Duration = Duration::from_millis(5000);
+/// The time the hold and quiet checks share when the hook line sets none with
+/// `--check-budget-ms`.
+pub const DEFAULT_BUDGET: Duration = Duration::from_millis(5000);
 /// The chain stops each check this much earlier for every eligible check
 /// after it that declares no time of its own, so a slow check cannot spend a
 /// later check's time.
@@ -245,10 +247,14 @@ pub fn failed(outcomes: &[HoldCheckOutcome]) -> bool {
 }
 
 pub fn validate_registrations(values: &[String]) -> Result<Vec<Registration>> {
-    validate_checks(values, &[])
+    validate_checks(values, &[], DEFAULT_BUDGET)
 }
 
-pub fn validate_checks(holds: &[String], quiets: &[String]) -> Result<Vec<Registration>> {
+pub fn validate_checks(
+    holds: &[String],
+    quiets: &[String],
+    budget: Duration,
+) -> Result<Vec<Registration>> {
     let limits = &manifest()?.limits;
     let mut names = BTreeSet::new();
     let mut registrations = Vec::new();
@@ -269,7 +275,7 @@ pub fn validate_checks(holds: &[String], quiets: &[String]) -> Result<Vec<Regist
         // A name has no colon, so a colon before the `=` starts a declared time.
         let (name, declared) = match label.split_once(':') {
             None => (label, None),
-            Some((name, time)) => (name, Some(declared_time(flag, time)?)),
+            Some((name, time)) => (name, Some(declared_time(flag, time, budget)?)),
         };
         if !token(name, true)
             || name.len() > limits.safe_label_max_bytes
@@ -298,15 +304,15 @@ pub fn validate_checks(holds: &[String], quiets: &[String]) -> Result<Vec<Regist
         let reserved = reserved(later);
         let (short, needs) = match first.declared {
             Some(declared) => (
-                reserved + declared > TOTAL_BUDGET,
+                reserved + declared > budget,
                 format!("declares {}ms", declared.as_millis()),
             ),
-            None => (reserved >= TOTAL_BUDGET, "needs more than 0ms".to_owned()),
+            None => (reserved >= budget, "needs more than 0ms".to_owned()),
         };
         if short {
             return Err(AttentionError::usage(format!(
                 "--hold-check and --quiet-check registrations exceed the {}ms check budget: the checks after {} reserve {}ms, {}ms for each that declares no time, and {} {needs}; declare shorter times, such as wezpup:100ms, or register fewer",
-                TOTAL_BUDGET.as_millis(),
+                budget.as_millis(),
                 first.name,
                 reserved.as_millis(),
                 LATER_CHECK_RESERVE.as_millis(),
@@ -346,16 +352,16 @@ pub fn validate_checks(holds: &[String], quiets: &[String]) -> Result<Vec<Regist
 
 /// Reads a declared time such as `100ms`: whole milliseconds, from one to the
 /// chain's budget.
-fn declared_time(flag: &str, text: &str) -> Result<Duration> {
+fn declared_time(flag: &str, text: &str, budget: Duration) -> Result<Duration> {
     text.strip_suffix("ms")
-        .filter(|digits| canonical_decimal_text(digits, 4))
+        .filter(|digits| canonical_decimal_text(digits, usize::MAX))
         .and_then(|digits| digits.parse().ok())
         .map(Duration::from_millis)
-        .filter(|time| !time.is_zero() && *time <= TOTAL_BUDGET)
+        .filter(|time| !time.is_zero() && *time <= budget)
         .ok_or_else(|| {
             AttentionError::usage(format!(
                 "{flag} requires a declared time of whole milliseconds from 1ms to {}ms, as NAME:100ms=/absolute/executable",
-                TOTAL_BUDGET.as_millis()
+                budget.as_millis()
             ))
         })
 }
@@ -389,7 +395,8 @@ pub struct Request<'a> {
     pub registrations: &'a [Registration],
     pub reply: &'a HookContent,
     pub background_tasks: Option<&'a [Value]>,
-    /// How long the whole chain may run. The command passes `TOTAL_BUDGET`.
+    /// How long the whole chain may run: the hook line's `--check-budget-ms`, or
+    /// `DEFAULT_BUDGET`.
     pub budget: Duration,
 }
 
@@ -634,8 +641,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     /// The chain budget for tests whose checks outlast it on purpose. It is
-    /// shorter than `TOTAL_BUDGET`, so those tests do not wait out the
-    /// command's whole budget.
+    /// shorter than `DEFAULT_BUDGET`, so those tests do not wait out the
+    /// default budget.
     const SHORT_BUDGET: Duration = Duration::from_millis(2500);
 
     fn check(body: &str) -> (std::path::PathBuf, Registration) {
@@ -828,15 +835,15 @@ mod tests {
         let (second_root, mut second) = check("/bin/cat >/dev/null");
         first.name = "first".into();
         second.name = "second".into();
-        let (_, told) = deadlines(&[first, second], TOTAL_BUDGET, Duration::ZERO);
+        let (_, told) = deadlines(&[first, second], DEFAULT_BUDGET, Duration::ZERO);
         assert_eq!(
             told,
             [
                 (
                     "first".into(),
-                    after_start(TOTAL_BUDGET - LATER_CHECK_RESERVE)
+                    after_start(DEFAULT_BUDGET - LATER_CHECK_RESERVE)
                 ),
-                ("second".into(), after_start(TOTAL_BUDGET)),
+                ("second".into(), after_start(DEFAULT_BUDGET)),
             ]
         );
         for root in [first_root, second_root] {
@@ -924,7 +931,7 @@ mod tests {
         };
         let checks = [r.clone(), r];
         let spent = run_from(&checks, Duration::ZERO, Some(START_NS), &mut input);
-        let unreadable = run_from(&checks, TOTAL_BUDGET, None, &mut input);
+        let unreadable = run_from(&checks, DEFAULT_BUDGET, None, &mut input);
         for outcome in spent.iter().chain(&unreadable) {
             assert_eq!(outcome.stage, Stage::NotDispatched);
             assert_eq!(outcome.reason, Some(Bypass::TotalDeadline));
@@ -964,7 +971,7 @@ mod tests {
         }
         let (root, r) = check("exit 0");
         fs::write(&r.executable, "not an executable format").unwrap();
-        let outcome = run(&[r], TOTAL_BUDGET, |_, _, _| Some(b"{}\n".to_vec())).remove(0);
+        let outcome = run(&[r], DEFAULT_BUDGET, |_, _, _| Some(b"{}\n".to_vec())).remove(0);
         assert_eq!(outcome.stage, Stage::NotStarted);
         assert!(outcome.note.is_none());
         fs::remove_dir_all(root).unwrap();
@@ -990,6 +997,7 @@ mod tests {
         let line = validate_checks(
             &["jev=/opt/example/a:b".into()],
             &["wezpup:100ms=/opt/example/quiet".into()],
+            DEFAULT_BUDGET,
         )
         .unwrap();
         assert_eq!(
@@ -1009,9 +1017,21 @@ mod tests {
             "0ms", "5001ms", "0100ms", "100", "ms", "+100ms", "1.5ms", "100s", "",
         ] {
             let line = [format!("wezpup:{time}=/opt/example/quiet")];
-            assert!(validate_checks(&[], &line).is_err(), "{time}");
+            assert!(
+                validate_checks(&[], &line, DEFAULT_BUDGET).is_err(),
+                "{time}"
+            );
         }
-        assert!(validate_checks(&[], &["wezpup:5000ms=/opt/example/quiet".into()]).is_ok());
+        let quiet = |time: &str, budget: u64| {
+            validate_checks(
+                &[],
+                &[format!("wezpup:{time}=/opt/example/quiet")],
+                Duration::from_millis(budget),
+            )
+        };
+        // The line's own budget bounds a declared time, in either direction.
+        assert!(quiet("1001ms", 1000).is_err());
+        assert!(quiet("12000ms", 12000).is_ok());
     }
 
     #[test]
@@ -1020,6 +1040,7 @@ mod tests {
             validate_checks(
                 &[format!("{first}=/opt/example/check")],
                 &[format!("{later}=/opt/example/quiet")],
+                DEFAULT_BUDGET,
             )
         };
         assert!(line("jev", "wezpup:4999ms").is_ok());
@@ -1032,7 +1053,7 @@ mod tests {
         assert!(line("jev:4501ms", "wezpup").is_err());
         // Enough checks that declare nothing leave the first none of the
         // budget, and it is not dispatched, as before declarations existed.
-        let count = (TOTAL_BUDGET.as_millis() / LATER_CHECK_RESERVE.as_millis()) as usize + 1;
+        let count = (DEFAULT_BUDGET.as_millis() / LATER_CHECK_RESERVE.as_millis()) as usize + 1;
         let mut checks: Vec<String> = (0..count)
             .map(|n| format!("check{n}=/opt/example/check"))
             .collect();
