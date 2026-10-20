@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Hold and quiet checks share a 5000 ms budget, up from 2500 ms.** TCP waits about a second before resending a lost packet, which was enough to make a hold check's network request miss the earlier budget. A hold check followed by a quiet check that declares no time is stopped at 4500 ms, not 2000 ms, and a check can declare up to 5000 ms. A turn end whose checks run to the end of the budget is recorded up to 2500 ms later than in 1.6.0, and so is anything that waits for it, such as a finish sound; checks that answer in time delay nothing. See the consumer guide's "Pre-write hold checks".
+
 ## 1.6.0 — 2026-10-19
 
 ### Added

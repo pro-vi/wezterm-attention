@@ -8,8 +8,8 @@ use wezterm_attention::lifecycle::apply_provider_event_with_checks;
 const HOLD_LINE: &str = "{\"hold\": true, \"answer\": \"waiting_on_own_work\"}\n";
 
 /// The chain budget for tests that hold a check open on purpose. The command's
-/// own `TOTAL_BUDGET` is 2.5 s, which a loaded machine can spend before a
-/// shell script has started, and then the check never runs.
+/// own `TOTAL_BUDGET` is a few seconds, which a loaded machine can spend before
+/// a shell script has started, and then the check never runs.
 const CHECK_BUDGET: Duration = Duration::from_secs(30);
 
 fn wait_for_check_start(ready: &Path) {
@@ -232,8 +232,9 @@ fn timed_out_hold_check_records_unheld_stop() {
     let check = executable(
         &setup,
         &format!(
-            "/bin/cat >/dev/null\nprintf '%s' '{}'\n/bin/sleep 3",
-            HOLD_LINE
+            "/bin/cat >/dev/null\nprintf '%s' '{}'\n/bin/sleep {}",
+            HOLD_LINE,
+            hold_check::TOTAL_BUDGET.as_secs() + 1
         ),
     );
     let began = Instant::now();
@@ -251,7 +252,7 @@ fn timed_out_hold_check_records_unheld_stop() {
         "timed_out"
     );
     assert!(
-        elapsed < Duration::from_millis(2800),
+        elapsed < hold_check::TOTAL_BUDGET + Duration::from_millis(300),
         "hook took {elapsed:?}"
     );
     assert!(activity.get("hold_notes").is_none());

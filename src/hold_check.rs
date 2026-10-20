@@ -20,7 +20,7 @@ use crate::protocol::{
     AttentionError, Result, canonical_decimal_text, format_ns20, free_of_control, manifest,
 };
 
-pub const TOTAL_BUDGET: Duration = Duration::from_millis(2500);
+pub const TOTAL_BUDGET: Duration = Duration::from_millis(5000);
 /// The chain stops each check this much earlier for every eligible check
 /// after it that declares no time of its own, so a slow check cannot spend a
 /// later check's time.
@@ -633,6 +633,11 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
+    /// The chain budget for tests whose checks outlast it on purpose. It is
+    /// shorter than `TOTAL_BUDGET`, so those tests do not wait out the
+    /// command's whole budget.
+    const SHORT_BUDGET: Duration = Duration::from_millis(2500);
+
     fn check(body: &str) -> (std::path::PathBuf, Registration) {
         let root = std::env::temp_dir().join(format!("attention-hold-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
@@ -700,10 +705,10 @@ mod tests {
         ] {
             let (root, r) = check(body);
             let began = Instant::now();
-            let result = run(&[r], TOTAL_BUDGET, |_, _, _| Some(vec![b'a'; 500_000])).remove(0);
+            let result = run(&[r], SHORT_BUDGET, |_, _, _| Some(vec![b'a'; 500_000])).remove(0);
             assert_eq!(result.stage, Stage::TimedOut);
             assert!(result.note.is_none());
-            assert!(began.elapsed() < Duration::from_millis(3000));
+            assert!(began.elapsed() < SHORT_BUDGET + Duration::from_millis(500));
             fs::remove_dir_all(root).unwrap();
         }
     }
@@ -761,7 +766,7 @@ mod tests {
         third.name = "third".into();
         fourth.name = "fourth".into();
         warm(&[&first, &second, &fourth]);
-        let outcomes = run(&[first, second, third, fourth], TOTAL_BUDGET, |_, _, _| {
+        let outcomes = run(&[first, second, third, fourth], SHORT_BUDGET, |_, _, _| {
             Some(b"{}\n".to_vec())
         });
         // The third check is stopped while the fourth's reserve remains, so
@@ -827,8 +832,11 @@ mod tests {
         assert_eq!(
             told,
             [
-                ("first".into(), after_start(Duration::from_millis(2000))),
-                ("second".into(), after_start(Duration::from_millis(2500))),
+                (
+                    "first".into(),
+                    after_start(TOTAL_BUDGET - LATER_CHECK_RESERVE)
+                ),
+                ("second".into(), after_start(TOTAL_BUDGET)),
             ]
         );
         for root in [first_root, second_root] {
@@ -941,8 +949,8 @@ mod tests {
             ),
         ] {
             let (root, r) = check(body);
-            // This exercises the I/O failure itself; the chain's 2 s budget
-            // has separate deadline tests. Leave startup scheduling out of
+            // This exercises the I/O failure itself; the chain's budget has
+            // separate deadline tests. Leave startup scheduling out of
             // this branch's assertion by supplying a generous private deadline.
             let outcome = dispatch(
                 &r,
@@ -998,12 +1006,12 @@ mod tests {
             ]
         );
         for time in [
-            "0ms", "2501ms", "0100ms", "100", "ms", "+100ms", "1.5ms", "100s", "",
+            "0ms", "5001ms", "0100ms", "100", "ms", "+100ms", "1.5ms", "100s", "",
         ] {
             let line = [format!("wezpup:{time}=/opt/example/quiet")];
             assert!(validate_checks(&[], &line).is_err(), "{time}");
         }
-        assert!(validate_checks(&[], &["wezpup:2500ms=/opt/example/quiet".into()]).is_ok());
+        assert!(validate_checks(&[], &["wezpup:5000ms=/opt/example/quiet".into()]).is_ok());
     }
 
     #[test]
@@ -1014,21 +1022,22 @@ mod tests {
                 &[format!("{later}=/opt/example/quiet")],
             )
         };
-        assert!(line("jev", "wezpup:2499ms").is_ok());
-        assert!(line("jev:2400ms", "wezpup:100ms").is_ok());
+        assert!(line("jev", "wezpup:4999ms").is_ok());
+        assert!(line("jev:4900ms", "wezpup:100ms").is_ok());
         assert_eq!(
-            line("jev", "wezpup:2500ms").unwrap_err().to_string(),
-            "bad_usage: --hold-check and --quiet-check registrations exceed the 2500ms check budget: the checks after jev reserve 2500ms, 500ms for each that declares no time, and jev needs more than 0ms; declare shorter times, such as wezpup:100ms, or register fewer"
+            line("jev", "wezpup:5000ms").unwrap_err().to_string(),
+            "bad_usage: --hold-check and --quiet-check registrations exceed the 5000ms check budget: the checks after jev reserve 5000ms, 500ms for each that declares no time, and jev needs more than 0ms; declare shorter times, such as wezpup:100ms, or register fewer"
         );
-        assert!(line("jev:2400ms", "wezpup:101ms").is_err());
-        assert!(line("jev:2001ms", "wezpup").is_err());
-        // Six checks that declare nothing leave the first none of the budget,
-        // and it is not dispatched, as before declarations existed.
-        let mut six: Vec<String> = (0..6)
+        assert!(line("jev:4900ms", "wezpup:101ms").is_err());
+        assert!(line("jev:4501ms", "wezpup").is_err());
+        // Enough checks that declare nothing leave the first none of the
+        // budget, and it is not dispatched, as before declarations existed.
+        let count = (TOTAL_BUDGET.as_millis() / LATER_CHECK_RESERVE.as_millis()) as usize + 1;
+        let mut checks: Vec<String> = (0..count)
             .map(|n| format!("check{n}=/opt/example/check"))
             .collect();
-        assert!(validate_registrations(&six).is_ok());
-        six[5] = "check5:500ms=/opt/example/check".into();
-        assert!(validate_registrations(&six).is_err());
+        assert!(validate_registrations(&checks).is_ok());
+        checks[count - 1] = format!("check{}:500ms=/opt/example/check", count - 1);
+        assert!(validate_registrations(&checks).is_err());
     }
 }
