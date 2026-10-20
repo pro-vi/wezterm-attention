@@ -2,7 +2,7 @@
   "manifest_schema": 2,
   "wire_version": 2,
   "record_schema": 3,
-  "writer_version": "1.7.0",
+  "writer_version": "1.8.0",
   "native_hooks": {
     "claude": {
       "SessionStart": {
