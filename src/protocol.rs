@@ -57,6 +57,7 @@ diagnostic_codes! {
     SessionDetached => "session_detached",
     ChildActiveAfterParentClear => "child_active_after_parent_clear",
     OutsidePane => "outside_pane",
+    StateRootMissing => "state_root_missing",
 }
 
 impl fmt::Display for DiagnosticCode {

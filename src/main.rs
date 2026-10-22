@@ -262,7 +262,7 @@ impl BindingField {
 
 fn bindings_help() -> String {
     format!(
-        "Example: attention bindings --fields address,provider,current\nFields: {}\ncurrent is true for the binding the pane's claim and current-binding record name, also after it ended or its pane is gone; for live agents also require binding_phase=active and pane_presence=present.\nEvery matching row is returned unless --limit caps them.\ncomplete is false when --limit truncated the rows or a state directory could not be read, and with --socket on any diagnostic: a probe that did not answer, a selected record that could not be read, a binding_conflict. Exit 0 when complete, 1 when not, 2 for a usage error.\nresult.timing_ms says where the call's time went: pane_list (wezterm cli list), process_list (the process probe), records (the file walk).\nIf truncated, narrow with --provider, or raise or drop --limit.\n--socket queries prevent WezTerm auto-start; --realm selects a recorded realm ID.",
+        "Example: attention bindings --fields address,provider,current\nFields: {}\ncurrent is true for the binding the pane's claim and current-binding record name, also after it ended or its pane is gone; for live agents also require binding_phase=active and pane_presence=present.\nEvery matching row is returned unless --limit caps them.\ncomplete is false when --limit truncated the rows or a state directory could not be read, and with --socket on any diagnostic but state_root_missing: a probe that did not answer, a selected record that could not be read, a binding_conflict. Exit 0 when complete, 1 when not, 2 for a usage error.\nresult.timing_ms says where the call's time went: pane_list (wezterm cli list), process_list (the process probe), records (the file walk).\nIf truncated, narrow with --provider, or raise or drop --limit.\n--socket queries prevent WezTerm auto-start; --realm selects a recorded realm ID.",
         BindingField::value_variants()
             .iter()
             .map(|field| field.name())
@@ -1046,7 +1046,7 @@ fn run_bindings(
     // A socket answer reports an unreadable directory as a diagnostic,
     // and any diagnostic already makes it incomplete.
     let mut walked_every_directory = true;
-    let (scope, mut rows, diagnostics, timing) = if let Some(socket) = &args.socket {
+    let (scope, mut rows, mut diagnostics, timing) = if let Some(socket) = &args.socket {
         let (scope, mut rows, diagnostics, timing) =
             match wezterm_attention::query::read_bindings_for_socket_timed(
                 &root,
@@ -1134,6 +1134,12 @@ fn run_bindings(
     // says nothing about the rows. A directory that could not be read
     // may hold rows, so it does.
     let complete = !truncated && walked_every_directory && (!socket_mode || diagnostics.is_empty());
+    // After `complete`, which it does not change: a machine where no agent
+    // has run yet has no state root either.
+    diagnostics.extend(wezterm_attention::records::missing_state_root(
+        &root,
+        environment,
+    ));
     emit(
         &Response::new(
             name,

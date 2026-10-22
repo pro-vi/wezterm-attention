@@ -1692,6 +1692,9 @@ mod row_agreement;
 #[path = "maintenance_spec/unreadable_state.rs"]
 mod unreadable_state;
 
+#[path = "maintenance_spec/missing_root.rs"]
+mod missing_root;
+
 #[path = "maintenance_spec/diagnostic_context.rs"]
 mod diagnostic_context;
 

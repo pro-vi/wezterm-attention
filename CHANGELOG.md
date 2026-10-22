@@ -4,6 +4,7 @@
 
 ### Added
 
+- **`attention bindings` reports a state directory that does not exist.** It adds `state_root_missing`, with the directory in `state_root` and the variable that chose it in `variable` (`WEZTERM_ATTENTION_DIR`, `XDG_STATE_HOME` or `HOME`), and `status` is `findings`. `complete` and the exit code do not change. Before, a program run outside a pane without `WEZTERM_ATTENTION_DIR` read the default directory and answered `ok` with no agents. See the consumer guide's "Diagnostic codes" and [Troubleshooting](docs/troubleshooting.md).
 - **`attention.visible_attention(pane_ids)` resolves a tab's attention from its GUI pane ids.** It returns what the tab renderer resolves for a tab with those panes, for a config that draws one thing for several tabs, such as a folded group of tabs in the bar. The projection, which `ctx.attention` is built from, gains `glyph` (the state's own glyph with no spinner frame, mute mark or subagent count, `""` for none) and `priority` (the winning type's priority, `-1` for none), so a caller can count tabs by state without its count changing with each spinner frame. See "Inside WezTerm" in the README.
 
 ## 1.8.0 — 2026-10-20

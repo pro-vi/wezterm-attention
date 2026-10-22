@@ -240,7 +240,8 @@
       "self_claim_parent_unverified",
       "session_detached",
       "child_active_after_parent_clear",
-      "outside_pane"
+      "outside_pane",
+      "state_root_missing"
     ],
     "end_reasons": ["session_end", "sweep_absent"],
     "pane_presence": ["present", "verified_absent", "unavailable"],

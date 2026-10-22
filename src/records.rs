@@ -572,6 +572,12 @@ pub(crate) const NOT_UTF8: &str = "\0";
 /// is not UTF-8 is refused where it decides the root: this writer cannot name
 /// that directory, and another root would hide every record from the plugin.
 pub fn state_root(env: &BTreeMap<String, String>) -> Result<PathBuf> {
+    state_root_and_variable(env).map(|(root, _)| root)
+}
+
+/// The state root and the variable that chose it: `WEZTERM_ATTENTION_DIR`,
+/// `XDG_STATE_HOME`, or `HOME` for the default under it.
+fn state_root_and_variable(env: &BTreeMap<String, String>) -> Result<(PathBuf, &'static str)> {
     if let Some(name) = STATE_ROOT_VARIABLES
         .into_iter()
         .find(|name| env.get(*name).is_some_and(|value| !value.is_empty()))
@@ -586,18 +592,44 @@ pub fn state_root(env: &BTreeMap<String, String>) -> Result<PathBuf> {
         .get("WEZTERM_ATTENTION_DIR")
         .filter(|path| !path.is_empty())
     {
-        return absolute_path(path, "WEZTERM_ATTENTION_DIR");
+        return Ok((
+            absolute_path(path, "WEZTERM_ATTENTION_DIR")?,
+            "WEZTERM_ATTENTION_DIR",
+        ));
     }
     if let Some(path) = env
         .get("XDG_STATE_HOME")
         .and_then(|path| absolute_path(path, "XDG_STATE_HOME").ok())
     {
-        return Ok(path.join("wezterm-attention"));
+        return Ok((path.join("wezterm-attention"), "XDG_STATE_HOME"));
     }
     let home = env
         .get("HOME")
         .ok_or_else(|| AttentionError::new(DiagnosticCode::RecordInvalid, "HOME is missing"))?;
-    Ok(absolute_path(home, "HOME")?.join(".local/state/wezterm-attention"))
+    Ok((
+        absolute_path(home, "HOME")?.join(".local/state/wezterm-attention"),
+        "HOME",
+    ))
+}
+
+/// `root`, when it does not exist, named with the variable in `env` that
+/// chose it. A program run outside a pane, without the `WEZTERM_ATTENTION_DIR`
+/// the plugin sets in its panes, resolves the default root, and an answer from
+/// a root with nothing in it reads as "no agents". A fresh machine has no root
+/// either, so this says which root was read and leaves `complete` alone.
+pub fn missing_state_root(root: &Path, env: &BTreeMap<String, String>) -> Option<Diagnostic> {
+    if root.exists() {
+        return None;
+    }
+    let mut diagnostic = Diagnostic::new(
+        DiagnosticCode::StateRootMissing,
+        "state directory does not exist",
+    )
+    .with("state_root", root.to_string_lossy().into_owned());
+    if let Ok((_, variable)) = state_root_and_variable(env) {
+        diagnostic.set("variable", variable);
+    }
+    Some(diagnostic)
 }
 
 fn absolute_path(value: &str, name: &str) -> Result<PathBuf> {
@@ -1660,7 +1692,7 @@ pub(crate) fn unreadable_state(root: &Path, path: &Path) -> Diagnostic {
 }
 
 /// A state path as the diagnostic context names it: relative to the state
-/// root, so a diagnostic never carries the local home directory.
+/// root, so a record diagnostic never carries the local home directory.
 pub(crate) fn state_relative(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
