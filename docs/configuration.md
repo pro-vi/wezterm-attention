@@ -178,6 +178,15 @@ local state, frame = attention.get_attention(marker_id)
 -- the plugin cache.
 local view = attention.get_attention_view(pane)
 
+-- What the tab renderer resolves for a tab with these GUI pane ids (the
+-- numbers or strings WezTerm's TabInformation carries), for a config that
+-- draws one thing for several tabs, such as a folded group. Besides
+-- indicator, type, color and the rest, it carries glyph, the state's own glyph
+-- with no spinner frame, mute mark or count ("" for none), and priority, the
+-- winning type's priority (-1 for none), so tabs can be counted by state. A
+-- pane no poll has walked yet adds nothing. Read-only.
+local visible = attention.visible_attention({ 3, 4 })
+
 -- Poll manually (for auto_poll = false)
 attention.poll(window, { active_pane = pane })
 
