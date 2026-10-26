@@ -268,8 +268,12 @@ impl ResolvedLaunch<'_> {
 struct Mutation {
     result: LifecycleResult,
     lifecycle_replacement: Option<PreparedRecordWrite>,
-    /// The lead's prompt record, written after the lifecycle file it follows.
+    /// The lead's prompt record, written after the lifecycle file it follows,
+    /// or alone for a prompt the pools do not store.
     prompts_replacement: Option<PreparedRecordWrite>,
+    /// Whether the prompt record alone stores the lead's prompt, so that its
+    /// write is what confirms the prompt.
+    prompt_record_alone: bool,
 }
 
 impl Mutation {
@@ -278,6 +282,7 @@ impl Mutation {
             result,
             lifecycle_replacement: None,
             prompts_replacement: None,
+            prompt_record_alone: false,
         }
     }
 }
@@ -1190,7 +1195,14 @@ struct ActivityOutcome {
 
 fn newer_lead_observation(root: &Path, identity: &RecordIdentity, observation: &str) -> bool {
     // Repeated thinking can keep the activity stamp unchanged. The lead's
-    // recorded events still show whether it advanced while a check ran.
+    // recorded events still show whether it advanced while a check ran: its
+    // pooled observations, and the prompt record's latest prompt, where alone
+    // a prompt typed while its turn runs is kept.
+    if latest_prompt(root, identity)
+        .is_some_and(|prompt| prompt.observed_mono_ns.as_str() > observation)
+    {
+        return true;
+    }
     // Unavailable rich history does not veto an independent native mutation;
     // append_observation retains the read diagnostic on its existing path.
     let Some(snapshot) = read_record_at(root, "lifecycle_snapshot", identity)
@@ -1356,6 +1368,7 @@ fn append_observation(
     let mut moved_aside = None;
     let mut prompts_problem = None;
     let mut prompts_replacement = None;
+    let mut prompt_record_alone = false;
     let prepared = (|| -> Result<Option<PreparedRecordWrite>> {
         if let Some(diagnostic) = &event.observation_diagnostic {
             return Err(AttentionError {
@@ -1430,7 +1443,8 @@ fn append_observation(
         let mut candidate = draft.clone();
         candidate.observed_mono_ns = observation.to_owned();
         candidate.written_at_unix_ns = written_at.to_owned();
-        if candidate.ends_turn(provider) {
+        let ends_turn = candidate.ends_turn(provider);
+        if ends_turn {
             let checks = resolved
                 .evidence
                 .as_ref()
@@ -1461,8 +1475,9 @@ fn append_observation(
         // will not store too: the general pool keeps one prompt per turn id,
         // and a prompt typed while a turn runs, an answer among them (see
         // `PromptAnswer`), carries that turn's id. A record that cannot be
-        // prepared is reported and left as it is; the lifecycle evidence is
-        // written without it.
+        // prepared is reported and left as it is; a prompt the pool stores is
+        // written without it, and one the record alone would store is
+        // rejected.
         if let Some(prompt) = &lead_prompt {
             match prepare_prompts(
                 resolved,
@@ -1478,7 +1493,10 @@ fn append_observation(
                 Err(error) => prompts_problem = Some(error.diagnostic),
             }
         }
-        if !snapshot.reduce(candidate)? {
+        let recorded_prompt = ends_turn
+            .then(|| latest_prompt(&resolved.root, &identity))
+            .flatten();
+        if !snapshot.reduce(candidate, recorded_prompt.as_ref())? {
             let stored = snapshot
                 .pools
                 .general
@@ -1487,26 +1505,21 @@ fn append_observation(
                 .find(|item| item.storage_key() == key);
             // A turn end the pools hold is confirmed as that end. A prompt
             // whose turn's prompt the pool holds is kept in the prompt record
-            // alone; once that record names it, it is confirmed under its own
-            // observation id, so consumers still receive the person's prompt.
-            let confirmed = match stored {
-                Some(stored) if stored.ends_turn(provider) => {
-                    Some((stored.observation_id.clone(), stored.turn_end.clone()))
-                }
-                Some(stored) if stored.is_lead_prompt() && prompts_replacement.is_some() => {
-                    Some((draft.observation_id.clone(), None))
-                }
-                _ => None,
-            };
+            // alone; it is confirmed under its own observation id once that
+            // record is written, so consumers still receive the person's prompt.
             if let Some(evidence) = &resolved.evidence {
                 let mut evidence = evidence.borrow_mut();
-                match confirmed {
-                    Some((observation_id, turn_end)) => {
+                match stored {
+                    Some(stored) if stored.ends_turn(provider) => {
                         evidence.persistence.lifecycle = Persistence::Confirmed;
-                        evidence.observation_id = Some(observation_id);
-                        evidence.turn_end = turn_end;
+                        evidence.observation_id = Some(stored.observation_id.clone());
+                        evidence.turn_end = stored.turn_end.clone();
                     }
-                    None => evidence.persistence.lifecycle = Persistence::Rejected,
+                    Some(stored) if stored.is_lead_prompt() && prompts_replacement.is_some() => {
+                        evidence.pending_observation_id = Some(draft.observation_id.clone());
+                        prompt_record_alone = true;
+                    }
+                    _ => evidence.persistence.lifecycle = Persistence::Rejected,
                 }
             }
             return Ok(None);
@@ -1534,6 +1547,7 @@ fn append_observation(
         Ok(replacement) => {
             plan.result.lifecycle_replacement = replacement;
             plan.result.prompts_replacement = prompts_replacement;
+            plan.result.prompt_record_alone = prompt_record_alone;
         }
         Err(error) => {
             if let Some(evidence) = &resolved.evidence {
@@ -1673,8 +1687,8 @@ fn read_or_move_aside(
 
 /// The lead's prompt record with `prompt` and the questions it answered
 /// added, prepared for writing unless nothing changed, and whether an invalid
-/// record was moved aside first. Runs inside the locks of the lifecycle write
-/// it goes with.
+/// record was moved aside first. Runs inside the locks the lifecycle write
+/// takes, whether or not that write stores the prompt.
 fn prepare_prompts(
     resolved: &ResolvedLaunch,
     identity: &RecordIdentity,
@@ -1845,7 +1859,13 @@ fn apply_activity(
                         .ok()
                         .flatten()
                         .and_then(|value| serde_json::from_value::<LifecycleSnapshot>(value).ok())
-                        .is_some_and(|snapshot| snapshot.repeats_turn_end(draft, observation))
+                        .is_some_and(|snapshot| {
+                            snapshot.repeats_turn_end(
+                                draft,
+                                observation,
+                                latest_prompt(&resolved.root, &identity).as_ref(),
+                            )
+                        })
             });
             if replay {
                 let mut result = LifecycleResult::new(Disposition::Skipped);
@@ -2111,19 +2131,26 @@ fn apply_observed_outputs_with(
             error
         }
     };
-    if let Some(replacement) = &mutation.lifecycle_replacement {
-        replace(replacement).map_err(unconfirmed("lifecycle_write"))?;
+    let confirm_pending = || {
         if let Some(cell) = &resolved.evidence {
             let mut evidence = cell.borrow_mut();
             evidence.persistence.lifecycle = Persistence::Confirmed;
             evidence.observation_id = evidence.pending_observation_id.clone();
             evidence.turn_end = evidence.pending_turn_end.clone();
         }
+    };
+    if let Some(replacement) = &mutation.lifecycle_replacement {
+        replace(replacement).map_err(unconfirmed("lifecycle_write"))?;
+        confirm_pending();
     }
     // After the lifecycle file. A failed write of the prompt record is a
-    // failed sidecar write: reported, and fatal only under `--strict`.
+    // failed sidecar write: reported, and fatal only under `--strict`; for a
+    // prompt the record alone stores, it also leaves that prompt unconfirmed.
     if let Some(prompts) = &mutation.prompts_replacement {
         replace(prompts).map_err(unconfirmed("prompts_write"))?;
+        if mutation.prompt_record_alone {
+            confirm_pending();
+        }
     }
     Ok(())
 }
@@ -3939,7 +3966,9 @@ fn obtain_hold_notes(
     // not known, and a replay or newer event makes it unsuitable for a check.
     let prospective = event.observation.as_ref().and_then(|draft| {
         let snapshot = snapshot.as_ref()?;
-        if snapshot.repeats_turn_end(draft, observation)
+        let recorded_prompt = prompts.as_ref().and_then(|prompts| prompts.latest.as_ref());
+        if snapshot.repeats_turn_end(draft, observation, recorded_prompt)
+            || recorded_prompt.is_some_and(|prompt| prompt.observed_mono_ns.as_str() >= observation)
             || snapshot
                 .pools
                 .general
@@ -4138,6 +4167,7 @@ mod lifecycle_write_tests {
             result: planned,
             lifecycle_replacement: Some(PreparedRecordWrite::new(path.clone(), &snapshot).unwrap()),
             prompts_replacement: None,
+            prompt_record_alone: false,
         };
         let error = crate::records::with_lock(
             &launch_lock(&root, &address, &launch_id),

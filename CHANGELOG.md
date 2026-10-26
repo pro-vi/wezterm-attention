@@ -6,10 +6,15 @@
 
 - **A lead Claude prompt and turn end carry a turn id.** `correlation.turn_id` on a lead Claude `prompt_submitted`, `response_finished` and `attempt_outcome` is Claude Code's `prompt_id`, which a prompt typed while a turn runs and every `Stop` of that turn share. A consumer pairs a turn end with the prompts that carry its id, and tells a blocked `Stop`'s continuation from a new turn. See the consumer guide's "Which observations end a turn".
 
+### Changed
+
+- **A Claude prompt typed while a turn runs is kept as a Codex one is.** It carries the turn's id, so the pools keep the turn's first prompt and the prompt record its latest; in 1.9.0 the pools kept each Claude prompt. Hook consumers still receive each prompt. `attention observe` reports a later prompt only as `latest_prompt`, with no `turn_id`, so one that a further prompt replaces before the next read is not reported.
+
 ### Fixed
 
-- **A `Stop` after a blocked `Stop` ends the turn again.** Codex gives both the turn's id, and Attention took the second for the first delivered again: the tab stayed thinking after the continuation's tool calls. It is now written as the turn's new end. The same `Stop` delivered twice is still a replay.
-- **A prompt typed while a turn runs reaches hook consumers.** The pools keep one prompt per turn id, and Attention reported such a prompt's lifecycle write as rejected, which kept it from every `--consumer`. It is now delivered, with its own `observation_id` and the turn's `turn_id`.
+- **A `Stop` after a blocked `Stop` ends the turn again.** Codex gives both the turn's id, and Attention took the second for the first delivered again: the tab stayed thinking after the continuation's tool calls. It is now written as the turn's new end once Attention recorded anything of the turn after the first end, a prompt typed into it included. The same `Stop` delivered twice is still a replay.
+- **A turn end observed before a prompt of its own turn is superseded.** A Codex prompt typed while the turn ran, which only the prompt record holds, did not count as newer than a `Stop` observed before it and written after it (its checks ran meanwhile), so that end replaced the prompt's thinking and a quiet note could apply to it. A new turn's prompt already counted.
+- **A Codex prompt typed while a turn runs reaches hook consumers.** The pools keep one prompt per turn id, and Attention reported such a prompt's lifecycle write as rejected, which kept it from every `--consumer`. It is now delivered once the prompt record, which alone stores it, is written, with its own `observation_id` and the turn's `turn_id`.
 
 ## 1.9.0 — 2026-10-22
 

@@ -882,3 +882,73 @@ fn a_prompt_typed_while_the_turn_runs_reaches_consumers_with_its_turn_id() {
         );
     }
 }
+
+// A prompt typed while its turn runs is stored by the prompt record alone, so
+// it reaches consumers only once that record is written: a failed write of
+// it leaves the prompt unconfirmed and undelivered. The record is made
+// immutable to fail its replacement, since the writer resets its directory's
+// permissions; `chflags` is macOS's.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_prompt_typed_while_the_turn_runs_reaches_consumers_only_once_its_record_is_written() {
+    for (provider, id_field) in [("codex", "turn_id"), ("claude", "prompt_id")] {
+        let setup = Setup::new();
+        bind(&setup, provider);
+        let apply = |prompt: &str, at: &str| {
+            let mut patch = json!({ "prompt": prompt });
+            patch[id_field] = json!("turn-1");
+            apply_provider_event_with_outcome(
+                &event(provider, "UserPromptSubmit", "consumer-session", patch),
+                &setup.env,
+                at,
+                &setup.ports(),
+            )
+        };
+        apply("start the work", "00000000000000000300");
+        let record = setup
+            .binding_dir(provider, "consumer-session")
+            .join("prompts.json");
+        let flag = |flag: &str| {
+            assert!(
+                Command::new("chflags")
+                    .arg(flag)
+                    .arg(&record)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        flag("uchg");
+        let unwritten = apply("and also this", "00000000000000000400");
+        flag("nouchg");
+        assert_eq!(
+            unwritten.persistence.lifecycle,
+            Persistence::Unconfirmed,
+            "{provider}"
+        );
+        assert!(unwritten.observation_id.is_none(), "{provider}");
+        assert!(
+            matches!(
+                consumer::delivery_bytes(
+                    &unwritten,
+                    HookContent::NotRequested,
+                    HookContent::NotRequested
+                ),
+                Err(consumer::NotDispatchedReason::LifecycleUnconfirmed)
+            ),
+            "{provider}"
+        );
+        let written = apply("and this too", "00000000000000000500");
+        assert_eq!(
+            written.persistence.lifecycle,
+            Persistence::Confirmed,
+            "{provider}"
+        );
+        let prompts: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+        assert_eq!(
+            prompts["latest"]["observation_id"].as_str(),
+            written.observation_id.as_deref(),
+            "{provider}"
+        );
+    }
+}

@@ -238,8 +238,8 @@ pub struct PromptReference {
 /// A prompt that answered one question of a call: the call's native id, the
 /// question's index in it, and the prompt's observation id and order. The
 /// lifecycle file may never have held that observation: as of Codex 0.162.0
-/// every prompt of a turn carries the turn's id, and the general pool keeps
-/// one per turn.
+/// and Claude Code 2.1.310 a prompt typed while a turn runs carries the
+/// turn's id, and the general pool keeps one per turn id.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PromptAnswer {
@@ -951,14 +951,19 @@ impl LifecycleSnapshot {
 
     /// Whether `draft`, a lead turn end observed at `at`, is an end the pools
     /// hold delivered again (see [`Self::repeats`]).
-    pub fn repeats_turn_end(&self, draft: &LifecycleObservation, at: &str) -> bool {
+    pub fn repeats_turn_end(
+        &self,
+        draft: &LifecycleObservation,
+        at: &str,
+        recorded_prompt: Option<&PromptReference>,
+    ) -> bool {
         let key = draft.storage_key_parts();
         self.pools
             .general
             .observations
             .iter()
             .find(|item| item.storage_key_parts() == key)
-            .is_some_and(|stored| self.repeats(stored, draft, at))
+            .is_some_and(|stored| self.repeats(stored, draft, at, recorded_prompt))
     }
 
     /// Whether `candidate`, observed at `at`, is `stored`, which has its key,
@@ -966,17 +971,27 @@ impl LifecycleSnapshot {
     /// went on with. A `Stop` hook that blocks lets the lead go on with the
     /// same turn, whose next `Stop` carries the same turn id; once the lead
     /// recorded something after the stored end and began no other turn, that
-    /// `Stop` is the turn's new end.
+    /// `Stop` is the turn's new end. The pools keep one prompt per turn id, so
+    /// a prompt typed while the turn runs is recorded only as the prompt
+    /// record's latest, `recorded_prompt`, and counts as the lead's too. That
+    /// prompt is taken to be of the stored end's turn: a prompt that began
+    /// another turn is pooled, under its own turn id.
     fn repeats(
         &self,
         stored: &LifecycleObservation,
         candidate: &LifecycleObservation,
         at: &str,
+        recorded_prompt: Option<&PromptReference>,
     ) -> bool {
-        !self.turn_went_on(stored, at) && stored.semantic() == candidate.semantic()
+        !self.turn_went_on(stored, at, recorded_prompt) && stored.semantic() == candidate.semantic()
     }
 
-    fn turn_went_on(&self, stored: &LifecycleObservation, at: &str) -> bool {
+    fn turn_went_on(
+        &self,
+        stored: &LifecycleObservation,
+        at: &str,
+        recorded_prompt: Option<&PromptReference>,
+    ) -> bool {
         if stored.turn_id().is_none() || !stored.ends_turn(self.provider) {
             return false;
         }
@@ -984,8 +999,15 @@ impl LifecycleSnapshot {
             self.lead_observations()
                 .filter(|item| item.observed_mono_ns > stored.observed_mono_ns)
         };
-        after().any(|item| item.observed_mono_ns.as_str() < at)
-            && !after().any(|item| item.is_lead_prompt() && item.turn_id() != stored.turn_id())
+        let went_on = after()
+            .map(|item| item.observed_mono_ns.as_str())
+            .chain(
+                recorded_prompt
+                    .map(|prompt| prompt.observed_mono_ns.as_str())
+                    .filter(|order| *order > stored.observed_mono_ns.as_str()),
+            )
+            .any(|order| order < at);
+        went_on && !after().any(|item| item.is_lead_prompt() && item.turn_id() != stored.turn_id())
     }
 
     pub fn validate_semantics(&self) -> Result<()> {
@@ -1115,7 +1137,13 @@ impl LifecycleSnapshot {
     }
 
     /// Returns false on a duplicate/older/fenced receipt. Conflicts are errors.
-    pub fn reduce(&mut self, candidate: LifecycleObservation) -> Result<bool> {
+    /// `recorded_prompt` is the prompt record's latest, which can show that the
+    /// lead went on with a stored end's turn (see [`Self::repeats`]).
+    pub fn reduce(
+        &mut self,
+        candidate: LifecycleObservation,
+        recorded_prompt: Option<&PromptReference>,
+    ) -> Result<bool> {
         self.validate_semantics()?;
         let limits = &manifest()?.limits;
         if !candidate.within_bounds()? {
@@ -1146,8 +1174,12 @@ impl LifecycleSnapshot {
             if existing.body.tool() != candidate.body.tool() {
                 return Err(invalid());
             }
-            if self.repeats(existing, &candidate, &candidate.observed_mono_ns)
-                || candidate.observed_mono_ns < existing.observed_mono_ns
+            if self.repeats(
+                existing,
+                &candidate,
+                &candidate.observed_mono_ns,
+                recorded_prompt,
+            ) || candidate.observed_mono_ns < existing.observed_mono_ns
             {
                 return Ok(false);
             }
@@ -1308,14 +1340,14 @@ mod tests {
             let mut item = template.clone();
             item.observation_id = Uuid::new_v4().to_string();
             item.observed_mono_ns = format!("{:020}", 1000 + index);
-            assert!(snapshot.reduce(item).unwrap());
+            assert!(snapshot.reduce(item, None).unwrap());
         }
         assert!(snapshot.pools.general.retention_floor_mono_ns.is_none());
         let full = snapshot.clone();
         let mut late = template;
         late.observation_id = Uuid::new_v4().to_string();
         late.observed_mono_ns = format!("{:020}", 500);
-        assert!(!snapshot.reduce(late).unwrap());
+        assert!(!snapshot.reduce(late, None).unwrap());
         assert_eq!(snapshot, full);
     }
 }

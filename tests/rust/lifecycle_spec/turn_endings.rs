@@ -155,7 +155,11 @@ fn lead(provider: &str, name: &str, tool: &str) -> ProviderEvent {
 }
 
 fn shown(setup: &Setup, provider: &str) -> String {
-    let activity = read(setup.binding_dir(provider, "parent").join("activity.json"));
+    shown_in(setup, provider, "parent")
+}
+
+fn shown_in(setup: &Setup, provider: &str, session: &str) -> String {
+    let activity = read(setup.binding_dir(provider, session).join("activity.json"));
     activity["type"].as_str().unwrap().to_owned()
 }
 
@@ -297,6 +301,40 @@ fn a_child_permission_request_shows_past_an_unreadable_child_set() {
     }
 }
 
+// A session of `provider` that has just started, and a function applying
+// events of its one turn, `turn-1`, named in the field that provider gives it,
+// at the order given.
+fn one_turn<'a>(
+    setup: &'a Setup,
+    provider: &'a str,
+    id_field: &'a str,
+    session: &'a str,
+) -> impl Fn(&str, Value, u32) -> wezterm_attention::lifecycle::LifecycleResult + 'a {
+    setup.claim();
+    setup.apply(
+        &event(
+            provider,
+            "SessionStart",
+            session,
+            json!({"source":"startup"}),
+        ),
+        "00000000000000000200",
+    );
+    move |name, mut patch, at| {
+        patch[id_field] = json!("turn-1");
+        setup.apply(&event(provider, name, session, patch), &format!("{at:020}"))
+    }
+}
+
+fn newest_pooled(setup: &Setup, provider: &str, session: &str) -> Value {
+    let mut lifecycle = read(setup.binding_dir(provider, session).join("lifecycle.json"));
+    lifecycle["pools"]["general"]["observations"]
+        .as_array_mut()
+        .unwrap()
+        .pop()
+        .unwrap()
+}
+
 // A Stop hook that blocks lets the agent go on with the same turn, and the
 // next Stop says so with `stop_hook_active`. Each of those Stops ends the turn
 // again: the tab shows it finished, and the newest end follows the
@@ -308,48 +346,24 @@ fn each_stop_after_a_blocked_stop_ends_the_turn_again() {
         ("claude", "prompt_id", "Bash"),
     ] {
         let setup = Setup::new();
-        setup.claim();
-        let turn = |name: &str, mut patch: Value, at: &str| {
-            patch[id_field] = json!("turn-1");
-            setup.apply(&event(provider, name, "blocked", patch), at)
-        };
-        setup.apply(
-            &event(
-                provider,
-                "SessionStart",
-                "blocked",
-                json!({"source":"startup"}),
-            ),
-            "00000000000000000200",
-        );
-        turn("UserPromptSubmit", json!({}), "00000000000000000300");
+        let turn = one_turn(&setup, provider, id_field, "blocked");
+        turn("UserPromptSubmit", json!({}), 300);
         let mut at = 400;
         for active in [false, true, true] {
             turn(
                 "PreToolUse",
                 json!({"tool_name":tool,"tool_use_id":format!("call-{at}")}),
-                &format!("{at:020}"),
+                at,
             );
-            let stop = turn(
-                "Stop",
-                json!({"stop_hook_active":active}),
-                &format!("{:020}", at + 50),
-            );
+            let stop = turn("Stop", json!({"stop_hook_active":active}), at + 50);
             assert_eq!(stop.disposition, "applied", "{provider} at {at}");
-            let directory = setup.binding_dir(provider, "blocked");
             assert_eq!(
-                read(directory.join("activity.json"))["type"],
+                shown_in(&setup, provider, "blocked"),
                 "stop",
                 "{provider}: the Stop at {} shows the turn finished",
                 at + 50
             );
-            let lifecycle = read(directory.join("lifecycle.json"));
-            let newest = lifecycle["pools"]["general"]["observations"]
-                .as_array()
-                .unwrap()
-                .last()
-                .unwrap()
-                .clone();
+            let newest = newest_pooled(&setup, provider, "blocked");
             assert_eq!(newest["kind"], "response_finished", "{provider} at {at}");
             assert_eq!(
                 newest["observed_mono_ns"],
@@ -358,6 +372,67 @@ fn each_stop_after_a_blocked_stop_ends_the_turn_again() {
             );
             at += 100;
         }
+    }
+}
+
+// A prompt typed while the turn runs is kept in the prompt record alone, and
+// it shows the lead went on with the turn: after a second blocked Stop and
+// such a prompt, the next Stop ends the turn though no tool ran between them.
+#[test]
+fn a_stop_after_a_prompt_typed_in_a_continuation_ends_the_turn_again() {
+    for (provider, id_field) in [("codex", "turn_id"), ("claude", "prompt_id")] {
+        let setup = Setup::new();
+        let turn = one_turn(&setup, provider, id_field, "typed");
+        turn("UserPromptSubmit", json!({"prompt":"start"}), 300);
+        turn("Stop", json!({"stop_hook_active":false}), 400);
+        turn("Stop", json!({"stop_hook_active":true}), 500);
+        turn("UserPromptSubmit", json!({"prompt":"and this"}), 600);
+        let stop = turn("Stop", json!({"stop_hook_active":true}), 700);
+        assert_eq!(stop.disposition, "applied", "{provider}");
+        assert_eq!(shown_in(&setup, provider, "typed"), "stop", "{provider}");
+        let newest = newest_pooled(&setup, provider, "typed");
+        assert_eq!(newest["kind"], "response_finished", "{provider}");
+        assert_eq!(
+            newest["observed_mono_ns"],
+            format!("{:020}", 700),
+            "{provider}"
+        );
+    }
+}
+
+// A turn end observed before a prompt of its own turn and written after it,
+// as a Stop is when the prompt arrives while its checks run, does not end the
+// turn: the prompt record alone holds that prompt, and it is newer.
+#[test]
+fn a_stop_older_than_a_prompt_typed_in_its_turn_leaves_the_turn_running() {
+    for (provider, id_field, tool) in [
+        ("codex", "turn_id", "shell"),
+        ("claude", "prompt_id", "Bash"),
+    ] {
+        let setup = Setup::new();
+        let turn = one_turn(&setup, provider, id_field, "raced");
+        turn("UserPromptSubmit", json!({"prompt":"start"}), 300);
+        turn("Stop", json!({"stop_hook_active":false}), 400);
+        turn(
+            "PreToolUse",
+            json!({"tool_name":tool,"tool_use_id":"call-1"}),
+            450,
+        );
+        turn("UserPromptSubmit", json!({"prompt":"and this"}), 600);
+        turn("Stop", json!({"stop_hook_active":true}), 500);
+        assert_eq!(
+            shown_in(&setup, provider, "raced"),
+            "thinking",
+            "{provider}"
+        );
+        let lifecycle = read(setup.binding_dir(provider, "raced").join("lifecycle.json"));
+        let end = lifecycle["pools"]["general"]["observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["observed_mono_ns"] == format!("{:020}", 500))
+            .unwrap();
+        assert_eq!(end["turn_end"]["status"], "superseded", "{provider}");
     }
 }
 

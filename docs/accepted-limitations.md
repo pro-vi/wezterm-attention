@@ -42,15 +42,20 @@ A semantically repeated activity keeps its earlier timestamp. Advancing it
 would let a repeated Codex Stop clear children that started after the original
 Stop. Repeated activity also keeps its event ID and write time.
 
-A lead turn end now checks the recorded lifecycle events under the writer
-locks as well. A newer prompt therefore supersedes an older Stop even when
-both prompts produced the same `thinking` activity. The tests
+A lead turn end now checks the lead's recorded lifecycle events and the prompt
+record's latest prompt under the writer locks as well. A newer prompt therefore
+supersedes an older Stop even when both prompts produced the same `thinking`
+activity, and even when only the prompt record holds it, as it holds a prompt
+typed while its turn runs. The tests
 `a_recorded_prompt_fences_stop_even_when_activity_is_deduplicated` and
-`duplicate_codex_stop_keeps_a_child_newer_than_the_surviving_activity` pin both
-requirements in `tests/rust/lifecycle_spec.rs`.
+`duplicate_codex_stop_keeps_a_child_newer_than_the_surviving_activity` in
+`tests/rust/lifecycle_spec.rs`, and
+`a_stop_older_than_a_prompt_typed_in_its_turn_leaves_the_turn_running` in
+`tests/rust/lifecycle_spec/turn_endings.rs`, pin these requirements.
 
-This additional check needs readable lifecycle history. If that history is
-unavailable, native activity retains its existing timestamp-based ordering.
+This additional check reads the lifecycle file and the prompt record apart and
+uses whichever it can read. If neither is readable, native activity retains its
+existing timestamp-based ordering.
 Ordinary non-terminal activity writes still use that ordering alone. Splitting
 all four roles remains a record-contract change.
 ## Consumer options belong to the hook invocation, not to each consumer
@@ -359,6 +364,8 @@ recorded, and a file that cannot be read cannot be shown to be invalid.
 A `prompts.json` or `host.json` that cannot be read or that a newer version
 wrote is left as it is too, but nothing is refused for it: the hook writes its
 lifecycle observation, runs its consumer, and reports the prompt or host record.
+A turn end that cannot read the prompt record decides whether it repeats or is
+superseded from the lifecycle file alone, and reports nothing for it.
 
 ## A plugin and a command from either side of the child set show no sub-agents
 
