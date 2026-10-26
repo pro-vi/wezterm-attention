@@ -514,79 +514,26 @@ fn a_stop_observed_before_the_next_turns_prompt_is_stored_superseded() {
     }
 }
 
-// As of Claude Code 2.1.310 a turn's first Stop is its only one with
-// `stop_hook_active` false, so once its continuation has ended the turn, that
-// Stop delivered again is a repeat: with nothing after the continuation, and
-// while the turn answering a prompt typed during the Stop hooks runs, which
-// no prompt of its own id names.
+// A Stop of a turn the lead went on with is that turn's new end, whatever its
+// `stop_hook_active`: Codex 0.163.0 runs a turn again under the same id for
+// input queued while it ran, and each run's Stop starts the flag false.
 #[test]
-fn a_claude_turns_first_stop_delivered_after_its_continuation_is_a_repeat() {
-    for answered in [false, true] {
-        let (provider, id_field, tool) = ("claude", "prompt_id", "Bash");
+fn a_turns_second_unblocked_stop_after_a_typed_prompt_ends_it_again() {
+    for (provider, id_field) in [("codex", "turn_id"), ("claude", "prompt_id")] {
         let setup = Setup::new();
-        let turn = one_turn(&setup, provider, id_field, "first");
+        let turn = one_turn(&setup, provider, id_field, "steered");
         turn("UserPromptSubmit", json!({"prompt":"start"}), 300);
         turn("Stop", json!({"stop_hook_active":false}), 400);
-        turn(
-            "PreToolUse",
-            json!({"tool_name":tool,"tool_use_id":"call-1"}),
-            450,
-        );
-        turn("Stop", json!({"stop_hook_active":true}), 500);
-        if answered {
-            turn(
-                "UserPromptSubmit",
-                json!({"prompt":"typed in its hooks"}),
-                550,
-            );
-            let mut call = json!({"tool_name":tool,"tool_use_id":"call-2"});
-            call[id_field] = json!("turn-2");
-            setup.apply(
-                &event(provider, "PreToolUse", "first", call),
-                "00000000000000000600",
-            );
-        }
-        let replay = turn("Stop", json!({"stop_hook_active":false}), 700);
-        assert_eq!(replay.disposition, "skipped", "{provider} {answered}");
-        let shown = if answered { "thinking" } else { "stop" };
+        turn("UserPromptSubmit", json!({"prompt":"and this"}), 450);
+        let stop = turn("Stop", json!({"stop_hook_active":false}), 500);
+        assert_eq!(stop.disposition, "applied", "{provider}");
+        assert_eq!(shown_in(&setup, provider, "steered"), "stop", "{provider}");
         assert_eq!(
-            shown_in(&setup, provider, "first"),
-            shown,
-            "{provider} {answered}"
-        );
-        let lifecycle = read(setup.binding_dir(provider, "first").join("lifecycle.json"));
-        let ends: Vec<_> = lifecycle["pools"]["general"]["observations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|item| item["kind"] == "response_finished")
-            .map(|item| item["observed_mono_ns"].clone())
-            .collect();
-        assert_eq!(
-            ends,
-            [json!(format!("{:020}", 500))],
-            "{provider} {answered}"
+            newest_pooled(&setup, provider, "steered")["observed_mono_ns"],
+            format!("{:020}", 500),
+            "{provider}"
         );
     }
-}
-
-// Codex 0.163.0 runs a turn again under the same id for input queued while it
-// ran, and each run's Stop starts `stop_hook_active` false, so a Stop of the
-// same turn with the flag false after a prompt typed into it is a new end.
-#[test]
-fn a_codex_turns_second_unblocked_stop_after_a_typed_prompt_ends_it_again() {
-    let setup = Setup::new();
-    let turn = one_turn(&setup, "codex", "turn_id", "steered");
-    turn("UserPromptSubmit", json!({"prompt":"start"}), 300);
-    turn("Stop", json!({"stop_hook_active":false}), 400);
-    turn("UserPromptSubmit", json!({"prompt":"and this"}), 450);
-    let stop = turn("Stop", json!({"stop_hook_active":false}), 500);
-    assert_eq!(stop.disposition, "applied");
-    assert_eq!(shown_in(&setup, "codex", "steered"), "stop");
-    assert_eq!(
-        newest_pooled(&setup, "codex", "steered")["observed_mono_ns"],
-        format!("{:020}", 500)
-    );
 }
 
 // Claude Code's `prompt_id` is the turn id of the lead's prompts and turn

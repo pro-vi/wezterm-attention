@@ -59,18 +59,39 @@ existing timestamp-based ordering.
 Ordinary non-terminal activity writes still use that ordering alone. Splitting
 all four roles remains a record-contract change.
 
-## A Codex turn's Stop delivered again after the turn went on is a new end
+## A Stop delivered again after its turn went on is a new end
 
 A hook payload carries no delivery id, so Attention tells a `Stop` delivered
-again from a new one by what the binding recorded. A Claude turn's first `Stop`
-is its only one with `stop_hook_active` false (Claude Code 2.1.310), so that
-one is a repeat once its turn has an end. Codex 0.163.0 runs a turn again under
-the same id for input queued while it ran, and each run starts the flag false
+again from a new one by what the binding recorded, under the replay rule in the
+consumer guide's [Public consumer contracts](consumer-guide.md#public-consumer-contracts):
+once the turn went on after the stored end, a later `Stop` of it is its new
+end. One delivered again then is written as a new end too: the tab shows the
+turn finished, and the end can stop sub-agents that started after the original
+`Stop` (see [One timestamp field carries four roles](#one-timestamp-field-carries-four-roles)).
+`stop_hook_active` does not decide it. As of Claude Code 2.1.310 only a turn's
+first `Stop` carries false, but Codex 0.163.0 runs a turn again under the same
+id for input queued while it ran, and each run starts the flag false
 (`codex-rs/core/src/tasks/regular.rs`), so two genuine ends of one Codex turn
-can both carry false. A Codex `Stop` delivered again after its turn went on,
-with no prompt of another turn between, is therefore written as a new end. No
-source of such deliveries is known: both agents finish a turn's `Stop` hooks
-before they act on a block.
+can both carry false; a rule on the flag would drop the second one, and a
+Claude Code that set it the same way would make it drop Claude's too. No source
+of such deliveries is known while the hooks run synchronously, as
+[Claude Code hooks](setup.md#claude-code-hooks) in the setup guide requires
+(see [The sub-agent count depends on how Claude Code and Codex send hooks](#the-sub-agent-count-depends-on-how-claude-code-and-codex-send-hooks)):
+both agents finish a turn's `Stop` hooks before they act on a block.
+
+The prompt record makes the same rule miss a turn that went on. A turn end
+that cannot read the record, or reads one a failed write left behind, does not
+see a prompt typed into a blocked `Stop`'s continuation, which only the record
+holds, so a `Stop` after it that equals the stored end, with no tool call
+between, is taken for a repeat and the tab stays thinking.
+
+## A prompt hook delivered twice in one turn reaches consumers twice
+
+A prompt typed while its turn runs is stored by the prompt record alone. The
+same prompt hook delivered again is later, so it moves that record's `latest`
+and is confirmed under an observation id of its own: a consumer cannot tell it
+from a second prompt. No source of such deliveries is known.
+
 ## Consumer options belong to the hook invocation, not to each consumer
 
 `--consumer` repeats, so one hook can deliver to several executables. The options
@@ -377,8 +398,10 @@ recorded, and a file that cannot be read cannot be shown to be invalid.
 A `prompts.json` or `host.json` that cannot be read or that a newer version
 wrote is left as it is too, but nothing is refused for it: the hook writes its
 lifecycle observation, runs its consumer, and reports the prompt or host record.
-A turn end that cannot read the prompt record decides whether it repeats or is
-superseded from the lifecycle file alone, and reports nothing for it.
+A prompt typed while its turn runs is the exception, since only the prompt
+record stores it: it is rejected and reaches no consumer. A turn end decides
+from the lifecycle file alone and reports nothing for the record (see
+[A Stop delivered again after its turn went on is a new end](#a-stop-delivered-again-after-its-turn-went-on-is-a-new-end)).
 
 ## A plugin and a command from either side of the child set show no sub-agents
 
