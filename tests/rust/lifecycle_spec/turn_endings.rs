@@ -436,6 +436,84 @@ fn a_stop_older_than_a_prompt_typed_in_its_turn_leaves_the_turn_running() {
     }
 }
 
+// Once a prompt of another turn was recorded, an end of the turn before it is
+// that turn's end delivered again: after a blocked Stop's continuation ended
+// and the next prompt began a new turn, the first Stop delivered again leaves
+// the new turn running.
+#[test]
+fn a_stop_of_a_turn_delivered_again_after_the_next_turn_began_is_a_repeat() {
+    for (provider, id_field, tool) in [
+        ("codex", "turn_id", "shell"),
+        ("claude", "prompt_id", "Bash"),
+    ] {
+        let setup = Setup::new();
+        let turn = one_turn(&setup, provider, id_field, "replayed");
+        turn("UserPromptSubmit", json!({"prompt":"start"}), 300);
+        turn("Stop", json!({"stop_hook_active":false}), 400);
+        turn(
+            "PreToolUse",
+            json!({"tool_name":tool,"tool_use_id":"call-1"}),
+            450,
+        );
+        turn("Stop", json!({"stop_hook_active":true}), 500);
+        let mut next = json!({"prompt":"next"});
+        next[id_field] = json!("turn-2");
+        setup.apply(
+            &event(provider, "UserPromptSubmit", "replayed", next),
+            "00000000000000000600",
+        );
+        let replay = turn("Stop", json!({"stop_hook_active":false}), 700);
+        assert_eq!(replay.disposition, "skipped", "{provider}");
+        assert_eq!(
+            shown_in(&setup, provider, "replayed"),
+            "thinking",
+            "{provider}"
+        );
+        assert_eq!(
+            newest_pooled(&setup, provider, "replayed")["observed_mono_ns"],
+            format!("{:020}", 600),
+            "{provider}"
+        );
+    }
+}
+
+// A Stop observed before the next turn's prompt and written after it is that
+// turn's last end, not a delivery of an earlier one: it is stored, superseded
+// by the newer prompt, and leaves the new turn running.
+#[test]
+fn a_stop_observed_before_the_next_turns_prompt_is_stored_superseded() {
+    for (provider, id_field, tool) in [
+        ("codex", "turn_id", "shell"),
+        ("claude", "prompt_id", "Bash"),
+    ] {
+        let setup = Setup::new();
+        let turn = one_turn(&setup, provider, id_field, "late");
+        turn("UserPromptSubmit", json!({"prompt":"start"}), 300);
+        turn("Stop", json!({"stop_hook_active":false}), 400);
+        turn(
+            "PreToolUse",
+            json!({"tool_name":tool,"tool_use_id":"call-1"}),
+            450,
+        );
+        let mut next = json!({"prompt":"next"});
+        next[id_field] = json!("turn-2");
+        setup.apply(
+            &event(provider, "UserPromptSubmit", "late", next),
+            "00000000000000000600",
+        );
+        turn("Stop", json!({"stop_hook_active":true}), 500);
+        assert_eq!(shown_in(&setup, provider, "late"), "thinking", "{provider}");
+        let lifecycle = read(setup.binding_dir(provider, "late").join("lifecycle.json"));
+        let end = lifecycle["pools"]["general"]["observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["observed_mono_ns"] == format!("{:020}", 500))
+            .unwrap();
+        assert_eq!(end["turn_end"]["status"], "superseded", "{provider}");
+    }
+}
+
 // Claude Code's `prompt_id` is the turn id of the lead's prompts and turn
 // ends. A tool call, a compaction and a sub-agent's events keep none, so
 // request groups and stored compactions are keyed as before.

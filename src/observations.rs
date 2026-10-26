@@ -967,15 +967,15 @@ impl LifecycleSnapshot {
     }
 
     /// Whether `candidate`, observed at `at`, is `stored`, which has its key,
-    /// delivered again: equal to it, unless `stored` ended a turn the lead
-    /// went on with. A `Stop` hook that blocks lets the lead go on with the
-    /// same turn, whose next `Stop` carries the same turn id; once the lead
-    /// recorded something after the stored end and began no other turn, that
-    /// `Stop` is the turn's new end. The pools keep one prompt per turn id, so
-    /// a prompt typed while the turn runs is recorded only as the prompt
-    /// record's latest, `recorded_prompt`, and counts as the lead's too. That
-    /// prompt is taken to be of the stored end's turn: a prompt that began
-    /// another turn is pooled, under its own turn id.
+    /// delivered again. When `stored` ends a turn that has an id, it is if a
+    /// prompt of another turn was recorded after `stored` and before `at`,
+    /// since that turn is over, and it is not if the lead went on with the
+    /// turn before `at`, as a `Stop` hook that blocks lets it do: the next
+    /// `Stop`, with the same turn id, is then the turn's new end. Otherwise it
+    /// is when it equals `stored`. The pools keep one prompt per turn id, so a
+    /// prompt typed while the turn runs is recorded only as the prompt
+    /// record's latest, `recorded_prompt`, and counts as the lead going on; a
+    /// prompt carrying another turn's id is pooled, under that id.
     fn repeats(
         &self,
         stored: &LifecycleObservation,
@@ -983,31 +983,31 @@ impl LifecycleSnapshot {
         at: &str,
         recorded_prompt: Option<&PromptReference>,
     ) -> bool {
-        !self.turn_went_on(stored, at, recorded_prompt) && stored.semantic() == candidate.semantic()
-    }
-
-    fn turn_went_on(
-        &self,
-        stored: &LifecycleObservation,
-        at: &str,
-        recorded_prompt: Option<&PromptReference>,
-    ) -> bool {
-        if stored.turn_id().is_none() || !stored.ends_turn(self.provider) {
-            return false;
+        if stored.turn_id().is_some() && stored.ends_turn(self.provider) {
+            let after = || {
+                self.lead_observations()
+                    .filter(|item| item.observed_mono_ns > stored.observed_mono_ns)
+            };
+            if after().any(|item| {
+                item.is_lead_prompt()
+                    && item.turn_id() != stored.turn_id()
+                    && item.observed_mono_ns.as_str() < at
+            }) {
+                return true;
+            }
+            if after()
+                .map(|item| item.observed_mono_ns.as_str())
+                .chain(
+                    recorded_prompt
+                        .map(|prompt| prompt.observed_mono_ns.as_str())
+                        .filter(|order| *order > stored.observed_mono_ns.as_str()),
+                )
+                .any(|order| order < at)
+            {
+                return false;
+            }
         }
-        let after = || {
-            self.lead_observations()
-                .filter(|item| item.observed_mono_ns > stored.observed_mono_ns)
-        };
-        let went_on = after()
-            .map(|item| item.observed_mono_ns.as_str())
-            .chain(
-                recorded_prompt
-                    .map(|prompt| prompt.observed_mono_ns.as_str())
-                    .filter(|order| *order > stored.observed_mono_ns.as_str()),
-            )
-            .any(|order| order < at);
-        went_on && !after().any(|item| item.is_lead_prompt() && item.turn_id() != stored.turn_id())
+        stored.semantic() == candidate.semantic()
     }
 
     pub fn validate_semantics(&self) -> Result<()> {
@@ -1174,12 +1174,13 @@ impl LifecycleSnapshot {
             if existing.body.tool() != candidate.body.tool() {
                 return Err(invalid());
             }
-            if self.repeats(
-                existing,
-                &candidate,
-                &candidate.observed_mono_ns,
-                recorded_prompt,
-            ) || candidate.observed_mono_ns < existing.observed_mono_ns
+            if candidate.observed_mono_ns < existing.observed_mono_ns
+                || self.repeats(
+                    existing,
+                    &candidate,
+                    &candidate.observed_mono_ns,
+                    recorded_prompt,
+                )
             {
                 return Ok(false);
             }
