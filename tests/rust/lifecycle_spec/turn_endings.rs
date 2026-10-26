@@ -296,3 +296,137 @@ fn a_child_permission_request_shows_past_an_unreadable_child_set() {
         assert_eq!(shown(&setup, provider), "notify", "{provider}");
     }
 }
+
+// A Stop hook that blocks lets the agent go on with the same turn, and the
+// next Stop says so with `stop_hook_active`. Each of those Stops ends the turn
+// again: the tab shows it finished, and the newest end follows the
+// continuation's tool calls. The turn's id is the same on all of them.
+#[test]
+fn each_stop_after_a_blocked_stop_ends_the_turn_again() {
+    for (provider, id_field, tool) in [
+        ("codex", "turn_id", "shell"),
+        ("claude", "prompt_id", "Bash"),
+    ] {
+        let setup = Setup::new();
+        setup.claim();
+        let turn = |name: &str, mut patch: Value, at: &str| {
+            patch[id_field] = json!("turn-1");
+            setup.apply(&event(provider, name, "blocked", patch), at)
+        };
+        setup.apply(
+            &event(
+                provider,
+                "SessionStart",
+                "blocked",
+                json!({"source":"startup"}),
+            ),
+            "00000000000000000200",
+        );
+        turn("UserPromptSubmit", json!({}), "00000000000000000300");
+        let mut at = 400;
+        for active in [false, true, true] {
+            turn(
+                "PreToolUse",
+                json!({"tool_name":tool,"tool_use_id":format!("call-{at}")}),
+                &format!("{at:020}"),
+            );
+            let stop = turn(
+                "Stop",
+                json!({"stop_hook_active":active}),
+                &format!("{:020}", at + 50),
+            );
+            assert_eq!(stop.disposition, "applied", "{provider} at {at}");
+            let directory = setup.binding_dir(provider, "blocked");
+            assert_eq!(
+                read(directory.join("activity.json"))["type"],
+                "stop",
+                "{provider}: the Stop at {} shows the turn finished",
+                at + 50
+            );
+            let lifecycle = read(directory.join("lifecycle.json"));
+            let newest = lifecycle["pools"]["general"]["observations"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()
+                .clone();
+            assert_eq!(newest["kind"], "response_finished", "{provider} at {at}");
+            assert_eq!(
+                newest["observed_mono_ns"],
+                format!("{:020}", at + 50),
+                "{provider}: the newest end is this Stop"
+            );
+            at += 100;
+        }
+    }
+}
+
+// Claude Code's `prompt_id` is the turn id of the lead's prompts and turn
+// ends. A tool call, a compaction and a sub-agent's events keep none, so
+// request groups and stored compactions are keyed as before.
+#[test]
+fn a_claude_prompt_id_is_the_turn_id_of_lead_prompts_and_turn_ends() {
+    let turn_id = |name: &str, mut patch: Value| {
+        patch["prompt_id"] = json!("4d1f6c3e-0b5a-4f8e-9c2d-7a6b5e4d3c2b");
+        event("claude", name, "turns", patch)
+            .observation
+            .and_then(|observation| observation.correlation)
+            .and_then(|correlation| correlation.turn_id)
+    };
+    let id = Some("4d1f6c3e-0b5a-4f8e-9c2d-7a6b5e4d3c2b".to_owned());
+    for (name, patch) in [
+        ("UserPromptSubmit", json!({"prompt":"go"})),
+        ("Stop", json!({"stop_hook_active":false})),
+        ("StopFailure", json!({"error":"rate_limit"})),
+    ] {
+        assert_eq!(turn_id(name, patch), id, "{name}");
+    }
+    for (name, patch) in [
+        (
+            "PreToolUse",
+            json!({"tool_name":"Bash","tool_use_id":"call-1"}),
+        ),
+        ("PreCompact", json!({"trigger":"auto"})),
+        (
+            "UserPromptSubmit",
+            json!({"agent_id":"child-a","agent_type":"Explore"}),
+        ),
+        (
+            "StopFailure",
+            json!({"agent_id":"child-a","agent_type":"Explore","error":"overloaded"}),
+        ),
+    ] {
+        assert_eq!(turn_id(name, patch), None, "{name}");
+    }
+}
+
+// A Pi end has no turn id; its identity is the transport id of its delivery.
+// The same delivery arriving again after newer records is still a repeat, and
+// leaves the newer activity in place.
+#[test]
+fn a_pi_end_delivered_again_after_newer_records_is_still_a_repeat() {
+    let setup = Setup::new();
+    setup.claim();
+    let apply =
+        |name: &str, patch: Value, at: &str| setup.apply(&event("pi", name, "settled", patch), at);
+    apply(
+        "session_start",
+        json!({"start_source":"startup"}),
+        "00000000000000000200",
+    );
+    let settled = json!({"transport_id":"7b6e2c1a-4f3d-4e5a-9b8c-0d1e2f3a4b5c"});
+    apply("agent_settled", settled.clone(), "00000000000000000300");
+    apply(
+        "tool_execution_start",
+        json!({"tool_name":"bash","tool_use_id":"call-1"}),
+        "00000000000000000400",
+    );
+    let directory = setup.binding_dir("pi", "settled");
+    assert_eq!(read(directory.join("activity.json"))["type"], "thinking");
+    apply("agent_settled", settled, "00000000000000000500");
+    assert_eq!(
+        read(directory.join("activity.json"))["type"],
+        "thinking",
+        "the repeated end does not overwrite the newer activity"
+    );
+}

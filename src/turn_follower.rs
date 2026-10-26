@@ -71,8 +71,8 @@ pub struct CodexTurn {
     pub offset: u64,
 }
 
-/// A Claude Code turn, named by the prompt that began it, since a Claude
-/// prompt carries no turn id: that prompt as the writer stored it, and the
+/// A Claude Code turn, named by the prompt it follows, whether or not that
+/// prompt carries a turn id: the prompt as the writer stored it, and the
 /// status file of the host process.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]

@@ -949,6 +949,45 @@ impl LifecycleSnapshot {
             .filter(|item| item.actor == Actor::Lead)
     }
 
+    /// Whether `draft`, a lead turn end observed at `at`, is an end the pools
+    /// hold delivered again (see [`Self::repeats`]).
+    pub fn repeats_turn_end(&self, draft: &LifecycleObservation, at: &str) -> bool {
+        let key = draft.storage_key_parts();
+        self.pools
+            .general
+            .observations
+            .iter()
+            .find(|item| item.storage_key_parts() == key)
+            .is_some_and(|stored| self.repeats(stored, draft, at))
+    }
+
+    /// Whether `candidate`, observed at `at`, is `stored`, which has its key,
+    /// delivered again: equal to it, unless `stored` ended a turn the lead
+    /// went on with. A `Stop` hook that blocks lets the lead go on with the
+    /// same turn, whose next `Stop` carries the same turn id; once the lead
+    /// recorded something after the stored end and began no other turn, that
+    /// `Stop` is the turn's new end.
+    fn repeats(
+        &self,
+        stored: &LifecycleObservation,
+        candidate: &LifecycleObservation,
+        at: &str,
+    ) -> bool {
+        !self.turn_went_on(stored, at) && stored.semantic() == candidate.semantic()
+    }
+
+    fn turn_went_on(&self, stored: &LifecycleObservation, at: &str) -> bool {
+        if stored.turn_id().is_none() || !stored.ends_turn(self.provider) {
+            return false;
+        }
+        let after = || {
+            self.lead_observations()
+                .filter(|item| item.observed_mono_ns > stored.observed_mono_ns)
+        };
+        after().any(|item| item.observed_mono_ns.as_str() < at)
+            && !after().any(|item| item.is_lead_prompt() && item.turn_id() != stored.turn_id())
+    }
+
     pub fn validate_semantics(&self) -> Result<()> {
         let limits = &manifest()?.limits;
         let mut keys = std::collections::BTreeSet::new();
@@ -1107,7 +1146,7 @@ impl LifecycleSnapshot {
             if existing.body.tool() != candidate.body.tool() {
                 return Err(invalid());
             }
-            if existing.semantic() == candidate.semantic()
+            if self.repeats(existing, &candidate, &candidate.observed_mono_ns)
                 || candidate.observed_mono_ns < existing.observed_mono_ns
             {
                 return Ok(false);

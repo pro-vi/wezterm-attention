@@ -1459,9 +1459,10 @@ fn append_observation(
             .then(|| PromptReference::of(&candidate));
         // Every lead prompt reaches the prompt record, the ones this file
         // will not store too: the general pool keeps one prompt per turn id,
-        // and an answer typed while a turn runs carries that turn's id (see
-        // `PromptAnswer`). A record that cannot be prepared is reported and
-        // left as it is; the lifecycle evidence is written without it.
+        // and a prompt typed while a turn runs, an answer among them (see
+        // `PromptAnswer`), carries that turn's id. A record that cannot be
+        // prepared is reported and left as it is; the lifecycle evidence is
+        // written without it.
         if let Some(prompt) = &lead_prompt {
             match prepare_prompts(
                 resolved,
@@ -1483,18 +1484,30 @@ fn append_observation(
                 .general
                 .observations
                 .iter()
-                .find(|item| item.storage_key() == key && item.ends_turn(provider));
-            if let Some(stored) = stored {
-                if let Some(evidence) = &resolved.evidence {
-                    let mut evidence = evidence.borrow_mut();
-                    evidence.persistence.lifecycle = Persistence::Confirmed;
-                    evidence.observation_id = Some(stored.observation_id.clone());
-                    evidence.turn_end = stored.turn_end.clone();
+                .find(|item| item.storage_key() == key);
+            // A turn end the pools hold is confirmed as that end. A prompt
+            // whose turn's prompt the pool holds is kept in the prompt record
+            // alone; once that record names it, it is confirmed under its own
+            // observation id, so consumers still receive the person's prompt.
+            let confirmed = match stored {
+                Some(stored) if stored.ends_turn(provider) => {
+                    Some((stored.observation_id.clone(), stored.turn_end.clone()))
                 }
-                return Ok(None);
-            }
+                Some(stored) if stored.is_lead_prompt() && prompts_replacement.is_some() => {
+                    Some((draft.observation_id.clone(), None))
+                }
+                _ => None,
+            };
             if let Some(evidence) = &resolved.evidence {
-                evidence.borrow_mut().persistence.lifecycle = Persistence::Rejected;
+                let mut evidence = evidence.borrow_mut();
+                match confirmed {
+                    Some((observation_id, turn_end)) => {
+                        evidence.persistence.lifecycle = Persistence::Confirmed;
+                        evidence.observation_id = Some(observation_id);
+                        evidence.turn_end = turn_end;
+                    }
+                    None => evidence.persistence.lifecycle = Persistence::Rejected,
+                }
             }
             return Ok(None);
         }
@@ -1832,14 +1845,7 @@ fn apply_activity(
                         .ok()
                         .flatten()
                         .and_then(|value| serde_json::from_value::<LifecycleSnapshot>(value).ok())
-                        .is_some_and(|snapshot| {
-                            snapshot
-                                .pools
-                                .general
-                                .observations
-                                .iter()
-                                .any(|item| item.storage_key() == draft.storage_key())
-                        })
+                        .is_some_and(|snapshot| snapshot.repeats_turn_end(draft, observation))
             });
             if replay {
                 let mut result = LifecycleResult::new(Disposition::Skipped);
@@ -3336,8 +3342,8 @@ fn apply_provider_event_inner(
 ///
 /// A Codex follower starts whatever the prompt's disposition: a prompt whose
 /// thinking lost the activity slot still began its turn, and the follower
-/// writes only for a turn the binding recorded. A Claude prompt carries no
-/// turn id, so its follower follows the prompt, and starts only once the
+/// writes only for a turn the binding recorded. A Claude follower follows the
+/// prompt, whether or not it carries a turn id, and starts only once the
 /// prompt record names it as the lead's latest prompt: it ends the turn only
 /// while that holds. A `CLAUDE_CONFIG_DIR` the hook could not keep starts none,
 /// since the status file is in that directory, not in `~/.claude`.
@@ -3933,16 +3939,14 @@ fn obtain_hold_notes(
     // not known, and a replay or newer event makes it unsuitable for a check.
     let prospective = event.observation.as_ref().and_then(|draft| {
         let snapshot = snapshot.as_ref()?;
-        if snapshot
-            .pools
-            .general
-            .observations
-            .iter()
-            .chain(&snapshot.pools.requests.observations)
-            .any(|item| {
-                item.observed_mono_ns.as_str() >= observation
-                    || item.storage_key() == draft.storage_key()
-            })
+        if snapshot.repeats_turn_end(draft, observation)
+            || snapshot
+                .pools
+                .general
+                .observations
+                .iter()
+                .chain(&snapshot.pools.requests.observations)
+                .any(|item| item.observed_mono_ns.as_str() >= observation)
         {
             return None;
         }

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **A lead Claude prompt and turn end carry a turn id.** `correlation.turn_id` on a lead Claude `prompt_submitted`, `response_finished` and `attempt_outcome` is Claude Code's `prompt_id`, which a prompt typed while a turn runs and every `Stop` of that turn share. A consumer pairs a turn end with the prompts that carry its id, and tells a blocked `Stop`'s continuation from a new turn. See the consumer guide's "Which observations end a turn".
+
+### Fixed
+
+- **A `Stop` after a blocked `Stop` ends the turn again.** Codex gives both the turn's id, and Attention took the second for the first delivered again: the tab stayed thinking after the continuation's tool calls. It is now written as the turn's new end. The same `Stop` delivered twice is still a replay.
+- **A prompt typed while a turn runs reaches hook consumers.** The pools keep one prompt per turn id, and Attention reported such a prompt's lifecycle write as rejected, which kept it from every `--consumer`. It is now delivered, with its own `observation_id` and the turn's `turn_id`.
+
 ## 1.9.0 — 2026-10-22
 
 ### Added

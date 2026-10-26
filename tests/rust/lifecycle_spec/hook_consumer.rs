@@ -837,3 +837,48 @@ fn malformed_consumer_arguments_fail_before_native_application() {
         );
     }
 }
+
+// A prompt typed while a turn runs carries that turn's id, and the general
+// pool keeps one prompt per turn id, so the pool does not hold it. The prompt
+// record does, and consumers still receive it, with the turn's id beside it,
+// so they can pair it with that turn's Stop.
+#[test]
+fn a_prompt_typed_while_the_turn_runs_reaches_consumers_with_its_turn_id() {
+    for (provider, id_field) in [("codex", "turn_id"), ("claude", "prompt_id")] {
+        let setup = Setup::new();
+        bind(&setup, provider);
+        let mut delivered = Vec::new();
+        for (prompt, at) in [
+            ("start the work", "00000000000000000300"),
+            ("and also this", "00000000000000000400"),
+        ] {
+            let mut patch = json!({"prompt":prompt});
+            patch[id_field] = json!("turn-1");
+            let outcome = apply_provider_event_with_outcome(
+                &event(provider, "UserPromptSubmit", "consumer-session", patch),
+                &setup.env,
+                at,
+                &setup.ports(),
+            );
+            assert_eq!(
+                outcome.persistence.lifecycle,
+                Persistence::Confirmed,
+                "{provider} {prompt}"
+            );
+            let bytes = consumer::delivery_bytes(
+                &outcome,
+                HookContent::NotRequested,
+                HookContent::NotRequested,
+            )
+            .unwrap_or_else(|reason| panic!("{provider} {prompt}: {reason:?}"));
+            delivered.push(serde_json::from_slice::<Value>(&bytes).unwrap());
+        }
+        for delivery in &delivered {
+            assert_eq!(delivery["correlation"]["turn_id"], "turn-1", "{provider}");
+        }
+        assert_ne!(
+            delivered[0]["observation_id"], delivered[1]["observation_id"],
+            "{provider}: each prompt keeps its own observation id"
+        );
+    }
+}
