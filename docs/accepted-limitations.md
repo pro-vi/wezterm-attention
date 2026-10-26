@@ -43,7 +43,7 @@ would let a repeated Codex Stop clear children that started after the original
 Stop. Repeated activity also keeps its event ID and write time.
 
 A lead turn end also checks the lead's recorded lifecycle events and the prompt
-record's latest prompt under the writer locks as well. A newer prompt therefore
+record's latest prompt under the writer locks. A newer prompt therefore
 supersedes an older Stop even when both prompts produced the same `thinking`
 activity, and even when only the prompt record holds it, as it holds a prompt
 typed while its turn runs. The tests

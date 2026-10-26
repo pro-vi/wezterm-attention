@@ -238,8 +238,8 @@ pub struct PromptReference {
 /// A prompt that answered one question of a call: the call's native id, the
 /// question's index in it, and the prompt's observation id and order. The
 /// lifecycle file may never have held that observation: as of Codex 0.162.0
-/// and Claude Code 2.1.310 a prompt typed while a turn runs carries the
-/// turn's id, and the general pool keeps one per turn id.
+/// a prompt typed while a turn runs carries the turn's id, and the general
+/// pool keeps one per turn id.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PromptAnswer {
