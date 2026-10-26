@@ -1848,8 +1848,8 @@ fn apply_activity(
             let clear = read_record_at(&resolved.root, "activity_clear", &identity)?;
             let visible =
                 activity_visible(&resolved.root, &identity, existing.as_ref(), clear.as_ref());
-            // A native replay names an end the pools hold, or an end of a turn
-            // another turn has since followed, even when its hook receives a
+            // A native replay names an end of a turn whose end the pools hold
+            // (see `LifecycleSnapshot::repeats`), even when its hook receives a
             // later local timestamp. Keep its stored decision and leave
             // later activity and children untouched.
             let replay = event.observation.as_ref().is_some_and(|draft| {

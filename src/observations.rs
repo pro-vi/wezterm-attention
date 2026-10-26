@@ -949,8 +949,8 @@ impl LifecycleSnapshot {
             .filter(|item| item.actor == Actor::Lead)
     }
 
-    /// Whether `draft`, a lead turn end observed at `at`, is an end the pools
-    /// hold delivered again (see [`Self::repeats`]).
+    /// Whether `draft`, a lead turn end observed at `at`, is an end delivered
+    /// again, of a turn the pools hold an end of (see [`Self::repeats`]).
     pub fn repeats_turn_end(
         &self,
         draft: &LifecycleObservation,
@@ -967,12 +967,13 @@ impl LifecycleSnapshot {
     }
 
     /// Whether `candidate`, observed at `at`, is `stored`, which has its key,
-    /// delivered again. When `stored` ends a turn that has an id, it is if a
-    /// prompt of another turn was recorded after `stored` and before `at`,
-    /// since that turn is over, and it is not if the lead went on with the
-    /// turn before `at`, as a `Stop` hook that blocks lets it do: the next
-    /// `Stop`, with the same turn id, is then the turn's new end. Otherwise it
-    /// is when it equals `stored`. The pools keep one prompt per turn id, so a
+    /// delivered again. When `stored` ends a turn that has an id, it is if
+    /// `candidate` is a Claude turn's first `Stop`, or if a prompt of another
+    /// turn was recorded after `stored` and before `at`, since that turn is
+    /// over. Failing both, it is not if the lead went on with the turn before
+    /// `at`, as a `Stop` hook that blocks lets it do: a later `Stop` of the
+    /// turn is then its new end. Otherwise it is when it equals `stored`. The
+    /// pools keep one prompt per turn id, so a
     /// prompt typed while the turn runs is recorded only as the prompt
     /// record's latest, `recorded_prompt`, and counts as the lead going on; a
     /// prompt carrying another turn's id is pooled, under that id.
@@ -984,6 +985,22 @@ impl LifecycleSnapshot {
         recorded_prompt: Option<&PromptReference>,
     ) -> bool {
         if stored.turn_id().is_some() && stored.ends_turn(self.provider) {
+            // As of Claude Code 2.1.310 a turn's first Stop is its only one
+            // with `stop_hook_active` false, so once the turn has an end it
+            // can only be that Stop delivered again. Codex 0.163.0 runs a turn
+            // again under the same id for input queued while it ran, and each
+            // run starts the flag false (codex-rs/core/src/tasks/regular.rs),
+            // so a Codex turn can end more than once with it false.
+            if self.provider == Provider::Claude
+                && matches!(
+                    candidate.body,
+                    ObservationBody::ResponseFinished {
+                        stop_hook_active: Some(false)
+                    }
+                )
+            {
+                return true;
+            }
             let after = || {
                 self.lead_observations()
                     .filter(|item| item.observed_mono_ns > stored.observed_mono_ns)

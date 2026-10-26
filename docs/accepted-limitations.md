@@ -58,6 +58,19 @@ uses whichever it can read. If neither is readable, native activity retains its
 existing timestamp-based ordering.
 Ordinary non-terminal activity writes still use that ordering alone. Splitting
 all four roles remains a record-contract change.
+
+## A Codex turn's Stop delivered again after the turn went on is a new end
+
+A hook payload carries no delivery id, so Attention tells a `Stop` delivered
+again from a new one by what the binding recorded. A Claude turn's first `Stop`
+is its only one with `stop_hook_active` false (Claude Code 2.1.310), so that
+one is a repeat once its turn has an end. Codex 0.163.0 runs a turn again under
+the same id for input queued while it ran, and each run starts the flag false
+(`codex-rs/core/src/tasks/regular.rs`), so two genuine ends of one Codex turn
+can both carry false. A Codex `Stop` delivered again after its turn went on,
+with no prompt of another turn between, is therefore written as a new end. No
+source of such deliveries is known: both agents finish a turn's `Stop` hooks
+before they act on a block.
 ## Consumer options belong to the hook invocation, not to each consumer
 
 `--consumer` repeats, so one hook can deliver to several executables. The options
