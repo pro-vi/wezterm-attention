@@ -538,7 +538,8 @@ fn a_turns_second_unblocked_stop_after_a_typed_prompt_ends_it_again() {
 
 // Claude Code's `prompt_id` is the turn id of the lead's prompts and turn
 // ends. A tool call, a compaction and a sub-agent's events keep none, so
-// request groups and stored compactions are keyed as before.
+// request groups and stored compactions, which are keyed by turn id, do not
+// collapse to one per prompt.
 #[test]
 fn a_claude_prompt_id_is_the_turn_id_of_lead_prompts_and_turn_ends() {
     let turn_id = |name: &str, mut patch: Value| {

@@ -42,7 +42,7 @@ A semantically repeated activity keeps its earlier timestamp. Advancing it
 would let a repeated Codex Stop clear children that started after the original
 Stop. Repeated activity also keeps its event ID and write time.
 
-A lead turn end now checks the lead's recorded lifecycle events and the prompt
+A lead turn end also checks the lead's recorded lifecycle events and the prompt
 record's latest prompt under the writer locks as well. A newer prompt therefore
 supersedes an older Stop even when both prompts produced the same `thinking`
 activity, and even when only the prompt record holds it, as it holds a prompt
@@ -53,7 +53,7 @@ typed while its turn runs. The tests
 `a_stop_older_than_a_prompt_typed_in_its_turn_leaves_the_turn_running` in
 `tests/rust/lifecycle_spec/turn_endings.rs`, pin these requirements.
 
-This additional check reads the lifecycle file and the prompt record apart and
+This check reads the lifecycle file and the prompt record apart and
 uses whichever it can read. If neither is readable, native activity retains its
 existing timestamp-based ordering.
 Ordinary non-terminal activity writes still use that ordering alone. Splitting
@@ -76,8 +76,12 @@ can both carry false; a rule on the flag would drop the second one, and a
 Claude Code that set it the same way would make it drop Claude's too. No source
 of such deliveries is known while the hooks run synchronously, as
 [Claude Code hooks](setup.md#claude-code-hooks) in the setup guide requires
-(see [The sub-agent count depends on how Claude Code and Codex send hooks](#the-sub-agent-count-depends-on-how-claude-code-and-codex-send-hooks)):
-both agents finish a turn's `Stop` hooks before they act on a block.
+(see [The sub-agent count depends on how Claude Code and Codex send hooks](#the-sub-agent-count-depends-on-how-claude-code-and-codex-send-hooks)).
+
+The same rule takes a genuine second end for a repeat when nothing was recorded
+between the two, as when a `Stop` hook blocks twice and the continuation
+between them only writes text: the stored end is delivered again and no new end
+is recorded, though the tab still shows the turn finished.
 
 The prompt record makes the same rule miss a turn that went on. A turn end
 that cannot read the record, or reads one a failed write left behind, does not
@@ -399,8 +403,9 @@ A `prompts.json` or `host.json` that cannot be read or that a newer version
 wrote is left as it is too, but nothing is refused for it: the hook writes its
 lifecycle observation, runs its consumer, and reports the prompt or host record.
 A prompt typed while its turn runs is the exception, since only the prompt
-record stores it: it is rejected and reaches no consumer. A turn end decides
-from the lifecycle file alone and reports nothing for the record (see
+record stores it: it is rejected and reaches no consumer. A turn end whose
+prompt record cannot be read decides from the lifecycle file alone and reports
+nothing for the record, so it can miss a prompt only the record holds (see
 [A Stop delivered again after its turn went on is a new end](#a-stop-delivered-again-after-its-turn-went-on-is-a-new-end)).
 
 ## A plugin and a command from either side of the child set show no sub-agents
