@@ -3397,8 +3397,10 @@ fn start_turn_follower(
             let turn_id = observation.turn_id()?;
             let rollout = event.transcript_path.as_ref()?;
             let binding_id = event_binding_id(event, &resolved.launch_id).ok()?;
-            // A holder that just recorded a failure leaves without reading the
-            // next turn's start, so a prompt does not trust the lock.
+            // A holder can leave without reading the next turn's start: one
+            // that Attention 1.10.0 or earlier started leaves at its turn's
+            // end, and one whose write failed leaves at once. So a prompt does
+            // not trust the lock.
             if !observation.is_lead_prompt()
                 && crate::turn_follower::is_followed(&turn_follower_lock(
                     &resolved.root,

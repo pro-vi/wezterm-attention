@@ -4,8 +4,9 @@
 //! rollout, as a `task_complete` record that carries an `error` object.
 //!
 //! The rollout is Codex's own file, and every line of it is untrusted. Only
-//! complete lines of two shapes, as Codex 0.162.0 and 0.163.0 write them, are
-//! acted on; any other shape yields nothing, never a record.
+//! complete lines of three shapes, a turn's start and its two ends, as Codex
+//! 0.162.0 and 0.163.0 write them, are acted on; any other shape yields
+//! nothing, never a record.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
@@ -30,7 +31,9 @@ const MAX_LINE_BYTES: usize = 4 << 20;
 pub enum TurnSignal {
     /// Its `task_complete` carries an error.
     Failed { error_code: Option<String> },
-    /// Another lead turn started, so this one is over; this is its id.
+    /// Another lead turn started, so this one is over; this is its id. A start
+    /// that names the followed turn as its parent counts only after the
+    /// followed turn's end.
     OtherTurnStarted { turn_id: String },
 }
 
@@ -62,6 +65,8 @@ pub struct Rollout {
     offset: u64,
     /// Whether the read stopped inside an overlong line, skipped to its end.
     skipping: bool,
+    /// The followed turn whose end was read last.
+    ended: Option<String>,
 }
 
 impl Rollout {
@@ -111,6 +116,7 @@ impl Rollout {
             inode: metadata.ino(),
             offset,
             skipping: false,
+            ended: None,
         })
     }
 
@@ -157,18 +163,20 @@ impl Rollout {
                 return Ok(None);
             }
             self.offset += consumed;
-            if let Some(signal) = classify(&line, turn_id) {
+            if let Some(signal) = classify(&line, turn_id, &mut self.ended) {
                 return Ok(Some(signal));
             }
         }
     }
 }
 
-/// What one complete rollout line says about `turn_id`, if anything.
-fn classify(line: &[u8], turn_id: &str) -> Option<TurnSignal> {
+/// What one complete rollout line says about `turn_id`, if anything; `ended`
+/// is the followed turn whose end was read last, which an end of `turn_id`
+/// replaces.
+fn classify(line: &[u8], turn_id: &str, ended: &mut Option<String>) -> Option<TurnSignal> {
     let line = std::str::from_utf8(line).ok()?;
-    // Most lines are neither record; they are not parsed.
-    if !["\"task_complete\"", "\"task_started\""]
+    // Most lines are none of these records; they are not parsed.
+    if !["\"task_complete\"", "\"task_started\"", "\"turn_aborted\""]
         .iter()
         .any(|name| line.contains(name))
     {
@@ -181,24 +189,34 @@ fn classify(line: &[u8], turn_id: &str) -> Option<TurnSignal> {
     let payload = value.get("payload")?;
     let kind = payload.get("type")?.as_str()?;
     let record_turn = payload.get("turn_id")?.as_str()?;
-    // As of Codex 0.162.0 a child turn's record names its root turn in
-    // `root_turn_id`; only the lead's are read.
-    if payload
-        .get("root_turn_id")
-        .is_some_and(|root| !root.is_null() && root.as_str() != Some(record_turn))
-    {
-        return None;
-    }
     match kind {
-        "task_complete" if record_turn == turn_id => match payload.get("error") {
-            Some(Value::Object(error)) => Some(TurnSignal::Failed {
+        "task_complete" | "turn_aborted" if record_turn == turn_id => {
+            *ended = Some(record_turn.to_owned());
+            let error = payload
+                .get("error")?
+                .as_object()
+                .filter(|_| kind == "task_complete")?;
+            Some(TurnSignal::Failed {
                 error_code: error.get("codex_error_info").and_then(error_code),
-            }),
-            _ => None,
-        },
-        "task_started" if record_turn != turn_id => safe_text(record_turn, "turn_id")
-            .ok()
-            .map(|turn_id| TurnSignal::OtherTurnStarted { turn_id }),
+            })
+        }
+        "task_started" if record_turn != turn_id => {
+            // A start naming the followed turn as its parent and read before
+            // that turn's end is skipped. As of Codex
+            // 0.163.0 a goal the model created names the turn before as each
+            // goal turn's parent, and `/review` writes its child session's
+            // turn start into the lead's rollout during the lead's turn, naming
+            // that turn as the parent; `root_turn_id` is the same for both.
+            let parent = payload
+                .pointer("/turn_attribution/parent_turn_id")
+                .and_then(Value::as_str);
+            if parent == Some(turn_id) && ended.as_deref() != Some(turn_id) {
+                return None;
+            }
+            safe_text(record_turn, "turn_id")
+                .ok()
+                .map(|turn_id| TurnSignal::OtherTurnStarted { turn_id })
+        }
         _ => None,
     }
 }

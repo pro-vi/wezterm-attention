@@ -780,9 +780,9 @@ The follower below was checked once against a live Codex 0.162.0 turn whose
 model server answered HTTP 503 `server_is_overloaded`, before a follower went
 on to later turns: one follower ran during the turn and none after it, and the
 end was recorded with `error_code` `server_overloaded` and a `notify` labelled
-with it. Going on to later turns, and starting from a tool hook, were not seen
-on a live turn; they are checked against rollouts in the shape Codex 0.163.0
-writes.
+with it. Going on to later turns, going on after a failure, and starting from a
+tool hook were not seen on a live turn; they are checked against rollouts in
+the shape Codex 0.163.0 writes.
 
 As of Codex 0.162.0 a turn that ends on a model error runs no hook. Its turn
 loop runs `Stop`, and the legacy `notify`, only when the model finished without
@@ -798,9 +798,9 @@ hook on this case.
 
 So a lead Codex prompt hook starts a follower, `attention hooks follow-turn`,
 and any other lead Codex hook that names its turn, a tool hook for one, starts
-one while no follower holds the binding's follower lock. The follower reads
-that rollout from turn to turn until a lead turn ends on a model error, and
-records that end. What it cannot do:
+one while no follower holds the binding's follower lock. The follower reads that
+rollout from turn to turn, and records each lead turn that ends on a model
+error. What it cannot do:
 
 - It starts only from a hook that proved its host: one that names its agent in
   `WEZTERM_ATTENTION_HOST_PID`, on macOS. Elsewhere the `thinking` the hook
@@ -816,6 +816,23 @@ records that end. What it cannot do:
   an earlier turn the binding recorded. The first turn of a session that Codex
   starts or resumes straight into a goal, before any hook of that session names
   a turn, is not recorded.
+- A turn start that names the followed turn as its parent
+  (`turn_attribution.parent_turn_id`) is taken as a later lead turn only when it
+  comes after the followed turn's end in the rollout. As of Codex 0.163.0 a goal
+  the model created with its `create_goal` tool starts each goal turn after the
+  one before it ended, naming that turn as the parent (`on_tool_finish` and
+  `on_turn_stop` in `ext/goal/src/extension.rs`), while `/review` writes its
+  child session's turn start into the lead's rollout during the lead's turn,
+  naming that turn as the parent (`run_codex_thread_one_shot` in
+  `core/src/codex_delegate.rs`; `process_review_events` in
+  `core/src/tasks/review.rs` forwards the start). Both name the turn that began
+  the chain as their `root_turn_id`, so that field cannot tell them apart. A
+  follower that never reads its turn's end, as when that line is longer than 4
+  MiB and so skipped unread, would take the next turn that names it as the
+  parent for a child's and miss that turn, whose tool hooks start no follower
+  while the holder keeps the lock. In the 106 lead rollouts Codex wrote in the
+  two weeks before 2026-10-27, 2,726 of 2,727 turn starts came after the end of
+  the turn before it; the other came after its Codex process had died.
 - A turn whose `Stop` hook ran and that then ends on an error gets that end
   recorded only when something of the turn was recorded after the `Stop`: a
   record of it, or a prompt typed into it before any record of a later turn.
@@ -823,21 +840,27 @@ records that end. What it cannot do:
   the same records: a `Stop` that blocks lets the turn go on and its next model
   request fails, and a post-turn compaction after a `Stop` that did not block
   hits the usage limit (`run_turn` in `core/src/session/turn.rs`).
-- A follower runs for as long as its Codex session does, reading the rollout
-  once a second. It leaves earlier once it records a failure, or when it stops
-  without recording (see the item on that below); the turns after it are then
-  unfollowed until the next lead hook that names a turn starts one, so a goal
-  turn that fails before its first tool call in that time is not recorded. After
-  a failure, a prompt typed next starts a follower even while the old one still
-  holds the lock. Several followers can start at once when a session's hooks run
-  before the first has taken the lock; the others leave. After Attention is
-  updated, a running session keeps its old follower until that follower leaves.
+- A follower runs for as long as its Codex session and the binding it follows
+  do, reading the rollout once a second, and goes on after each failure it
+  records: as of Codex 0.163.0 a turn's error, other than a usage limit, blocks
+  its goal, and `/goal resume` runs no hook and starts a goal turn that can fail
+  again before its first tool call. It leaves earlier only when it stops without
+  recording (see the item on that below); the turns after it are then unfollowed
+  until the next lead hook that names a turn starts one, so a goal turn that
+  fails before its first tool call in that time is not recorded. A prompt starts
+  a follower even while one holds the lock, because a holder can leave without
+  reading the next turn's start: one that Attention 1.10.0 or earlier started
+  leaves at its turn's end, and one whose write failed leaves at once. Several
+  followers can start at once when a session's hooks run before the first has
+  taken the lock; the others leave. After Attention is updated, a running
+  session keeps its old follower until that follower leaves.
 - No hook-delivered finish sound, reply capture, hold or quiet check runs for
   this end; a finish-sound reader of the records still accepts it.
 - It is seen within a second of Codex writing it, not at once.
 - It keeps Codex's name for the error, never the message.
 - A rollout record it does not recognise yields no record, so a Codex that
-  changes the shape of `task_complete` brings this limitation back.
+  changes the shape of `task_complete`, `turn_aborted` or a turn start's
+  `turn_attribution` brings this limitation back.
 - A follower that stops without recording, because its host could not be read,
   the rollout was refused, its lock could not be rewritten to name the next
   turn or its write failed, leaves no record that it stopped.

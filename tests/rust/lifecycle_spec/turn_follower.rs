@@ -17,14 +17,39 @@ pub(super) fn last_request(setup: &Setup) -> FollowRequest {
         .expect("the hook asked for a follower")
 }
 
-/// Run the follower to its end. One that would wait for ever, as a follower
-/// that misses its turn's end does, is stopped by its host exiting, and the
-/// test fails.
+/// Run the follower to its end, or to the first end it records.
 pub(super) fn follow_every(setup: &Setup, request: &FollowRequest, poll: Duration) -> Followed {
+    follow_through(setup, request, poll, 1)
+}
+
+/// Run the follower to its end, or to the `ends`th end it records. One that
+/// would wait for ever, as a follower that misses an end does, is stopped by
+/// its host exiting, and the test fails.
+pub(super) fn follow_through(
+    setup: &Setup,
+    request: &FollowRequest,
+    poll: Duration,
+    ends: usize,
+) -> Followed {
     let (sent, received) = std::sync::mpsc::channel();
+    let mut left = ends;
+    let mut recorded = || {
+        left -= 1;
+        if left == 0 {
+            std::ops::ControlFlow::Break(())
+        } else {
+            std::ops::ControlFlow::Continue(())
+        }
+    };
     thread::scope(|scope| {
         scope.spawn(|| {
-            let _ = sent.send(follow_turn(request, &setup.env, &setup.ports(), poll));
+            let _ = sent.send(follow_turn(
+                request,
+                &setup.env,
+                &setup.ports(),
+                poll,
+                &mut recorded,
+            ));
         });
         match received.recv_timeout(Duration::from_secs(5)) {
             Ok(result) => result.expect("the follower runs"),

@@ -82,8 +82,8 @@ enum HookCommand {
     Publish(PublishArgs),
     /// Accept one provider callback.
     Event(EventArgs),
-    /// Follow a lead turn until it ends, and a Codex turn's successors until
-    /// one fails; started by a lead hook.
+    /// Follow a lead turn until it ends, and a Codex turn's successors while
+    /// its host and binding last; started by a lead hook.
     #[command(hide = true)]
     FollowTurn(FollowTurnArgs),
 }
@@ -676,6 +676,7 @@ fn run_hooks_follow_turn(
         environment,
         &system_ports(),
         std::time::Duration::from_secs(1),
+        &mut || std::ops::ControlFlow::Continue(()),
     )?;
     Ok(ExitCode::SUCCESS)
 }

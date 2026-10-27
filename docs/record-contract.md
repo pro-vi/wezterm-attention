@@ -250,24 +250,27 @@ records the end: an `attempt_outcome` with `outcome` `failed`, `source_event` `t
 turn's `turn_id`, and the code Codex gives the error (`codex_error_info` in its rollout), kept as
 `error_code` when it is a safe label. A prompt hook starts a follower, and any other such hook, a
 tool hook for one, starts one while none holds the binding's follower lock; the follower goes on
-from its turn to each later lead turn the rollout starts, until one ends on a model error, since a
-turn that continues a goal can run no hook. While the turn is still the newest one the binding
-observed the follower also writes `notify` labelled with that code; otherwise the turn end is
-`superseded` and no `notify` is written. It writes under the launch and claim locks, only while the
-claim, the binding and the host it was handed still hold. It writes nothing for a turn whose last
-record is already an end, unless that end is a hook's, the lead's latest prompt came after it, and
-no record of another turn did: as of Codex 0.162.0 a `Stop` hook that blocks lets Codex continue the
-turn, and its later records, or a prompt typed into it, then follow that end. For a turn with no
-record it writes only when it carried into that turn from turns it followed before and the binding
-recorded one of them; such a turn is the newest while the binding's newest record that names a turn
-names one of those. The end's `observed_mono_ns` is just after the turn's last record, or for a turn
-with no record the latest record of the turns the follower carried it from, not when the follower
-read the end, so a hook that began after Codex ended the turn orders after it. While the turn is
-still the newest one the binding observed, the end is also after the lead's latest prompt, which can
-be a prompt typed while the turn ran. A `notify` it writes is stamped after both, and after the
-activity and the activity clear in its slot. One follower at a time holds `.follower.lock` in the
-binding's directory, which names the turn it follows; a follower kept out of it for ten seconds
-reads the rollout once, so an end already written is not lost. See [Accepted
+from its turn to each later lead turn the rollout starts, recording each that ends on a model error,
+until its host exits or its binding ends, since a turn that continues a goal can run no hook. A turn
+start that names the followed turn as its parent before the rollout holds that turn's end is not a
+later lead turn: as of Codex 0.163.0 `/review` writes its child session's turn start into the lead's
+rollout. While the turn is still the newest one the binding observed the follower also writes
+`notify` labelled with that code; otherwise the turn end is `superseded` and no `notify` is written.
+It writes under the launch and claim locks, only while the claim, the binding and the host it was
+handed still hold. It writes nothing for a turn whose last record is already an end, unless that end
+is a hook's, the lead's latest prompt came after it, and no record of another turn did: as of Codex
+0.162.0 a `Stop` hook that blocks lets Codex continue the turn, and its later records, or a prompt
+typed into it, then follow that end. For a turn with no record it writes only when it carried into
+that turn from turns it followed before and the binding recorded one of them; such a turn is the
+newest while the binding's newest record that names a turn names one of those. The end's
+`observed_mono_ns` is just after the turn's last record, or for a turn with no record the latest
+record of the turns the follower carried it from, not when the follower read the end, so a hook that
+began after Codex ended the turn orders after it. While the turn is still the newest one the binding
+observed, the end is also after the lead's latest prompt, which can be a prompt typed while the turn
+ran. A `notify` it writes is stamped after both, and after the activity and the activity clear in
+its slot. One follower at a time holds `.follower.lock` in the binding's directory, which names the
+turn it follows; a follower kept out of it for ten seconds reads the rollout once, so an end already
+written is not lost. See [Accepted
 limitations](accepted-limitations.md#a-codex-turn-that-ends-on-a-model-error-is-recorded-only-from-its-rollout).
 
 `SessionStart` with source `fork` binds the forked session for Claude and Codex, replacing the

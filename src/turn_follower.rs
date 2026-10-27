@@ -4,7 +4,7 @@
 //! recorded the turn, and records an end only through the writer, under the
 //! locks every writer takes. A Claude Code follower follows the turn of one
 //! prompt. A Codex follower follows its turn, then each lead turn the rollout
-//! starts after it, until one ends on a model error.
+//! starts after it, recording each that ends on a model error.
 //!
 //! What it reads is the provider's own file, which a reader for that provider
 //! turns into what the follower acts on; nothing else here knows that file.
@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::ops::ControlFlow;
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -40,7 +41,7 @@ pub const FOLLOWER_SOURCES: [(Provider, &str); 2] = [
 /// How many polls a follower waits for another turn's follower to leave the
 /// lock or to name this turn: a Claude follower leaves within one poll of
 /// seeing its turn end, and a Codex follower names the next turn within one
-/// poll of reading its start, or leaves once it records a failure.
+/// poll of reading its start.
 const TAKE_OVER_POLLS: u32 = 10;
 
 /// What a follower is handed: the binding's scope, the host process whose
@@ -207,7 +208,8 @@ pub fn is_followed(path: &Path) -> bool {
 #[derive(Clone, Debug)]
 pub enum Followed {
     /// The turn ended in a way its follower records, and this is what
-    /// recording it did.
+    /// recording it did. A Codex follower that holds the lock finishes on it
+    /// only when the caller says so.
     Recorded(LifecycleResult),
     /// The host process is gone, or could not be read.
     HostGone,
@@ -266,9 +268,10 @@ impl<'a> Reader<'a> {
     }
 
     /// Read once. `Some` when the follower is done, with how; `None` while
-    /// the turn has not yet ended in a way this reader decides. A Codex
-    /// reader that `held` the lock goes on to the next lead turn, naming it in
-    /// the lock; one kept out leaves that turn to the holder.
+    /// the turn has not yet ended in a way this reader decides. A Codex reader
+    /// that `held` the lock goes on to the next lead turn, naming it in the
+    /// lock, and past each end it records unless `recorded` says to finish;
+    /// one kept out leaves that turn to the holder.
     fn read(
         &mut self,
         request: &FollowRequest,
@@ -276,6 +279,7 @@ impl<'a> Reader<'a> {
         host: &ClaimOwner,
         ports: &RuntimePorts<'_>,
         mut held: Option<&mut FollowerLock>,
+        recorded: &mut dyn FnMut() -> ControlFlow<()>,
     ) -> Result<Option<Followed>> {
         match self {
             Self::Codex {
@@ -291,7 +295,7 @@ impl<'a> Reader<'a> {
                             turn_id,
                             error_code,
                         );
-                        return crate::lifecycle::record_codex_turn_failure(
+                        let result = crate::lifecycle::record_codex_turn_failure(
                             root,
                             &request.address,
                             &request.launch_id,
@@ -299,8 +303,10 @@ impl<'a> Reader<'a> {
                             before,
                             &event,
                             ports,
-                        )
-                        .map(|result| Some(Followed::Recorded(result)));
+                        )?;
+                        if held.is_none() || recorded().is_break() {
+                            return Ok(Some(Followed::Recorded(result)));
+                        }
                     }
                     Ok(Some(TurnSignal::OtherTurnStarted { turn_id: next })) => {
                         let Some(lock) = held.as_deref_mut() else {
@@ -368,14 +374,18 @@ impl<'a> Reader<'a> {
 }
 
 /// Follow `request`'s turn until it ends, its host is gone or its binding
-/// stops being current, reading every `poll`; a Codex follower goes on to each
-/// later lead turn until one ends on a model error. A follower that another
-/// turn's follower keeps out of the lock for its wait reads once instead.
+/// stops being current, reading every `poll`. A Codex follower that holds the
+/// lock goes on to each later lead turn, past each end it records, since as of
+/// Codex 0.163.0 `/goal resume` runs no hook and starts a goal turn that can
+/// fail before it runs one; after each such end it asks `recorded` whether to
+/// finish instead. A follower that another turn's follower keeps out of the
+/// lock for its wait reads once instead.
 pub fn follow_turn(
     request: &FollowRequest,
     env: &BTreeMap<String, String>,
     ports: &RuntimePorts<'_>,
     poll: Duration,
+    recorded: &mut dyn FnMut() -> ControlFlow<()>,
 ) -> Result<Followed> {
     let invalid = || AttentionError::usage("follow-turn request is invalid");
     PaneScope::new(request.address.clone(), request.launch_id.clone(), None)
@@ -412,7 +422,7 @@ pub fn follow_turn(
         if !current() {
             return Ok(Followed::BindingChanged);
         }
-        match reader.read(request, &root, &host, ports, held.as_mut())? {
+        match reader.read(request, &root, &host, ports, held.as_mut(), recorded)? {
             Some(followed) => return Ok(followed),
             None if held.is_none() => return Ok(Followed::AlreadyFollowed),
             None => thread::sleep(poll),

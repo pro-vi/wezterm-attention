@@ -1,11 +1,11 @@
 //! As of Codex 0.162.0 a turn that ends on a model error runs no hook; its
 //! end is only in the session rollout, as a `task_complete` that carries an
 //! `error`. The turn follower a lead Codex hook starts reads the rollout from
-//! that hook's turn through the lead turns after it, and records the first end
-//! on a model error.
+//! that hook's turn through the lead turns after it, and records each end on a
+//! model error.
 
 use super::self_claim::{apply_as, install, records, start};
-use super::turn_follower::{follow_every, last_request, recorded};
+use super::turn_follower::{follow_every, follow_through, last_request, recorded};
 use super::*;
 use std::sync::atomic::Ordering;
 use wezterm_attention::codex_rollout::{Refusal, Rollout, TurnSignal};
@@ -47,18 +47,40 @@ fn started(turn: &str) -> String {
     )
 }
 
-fn failed(turn: &str, info: Value) -> String {
+/// The start of `turn`, begun by `trigger` and naming `parent` as its parent,
+/// in the chain of turns `root` began, as Codex 0.163.0 attributes it.
+fn started_by(turn: &str, trigger: &str, parent: Option<&str>, root: &str) -> String {
     line(
         "event_msg",
-        json!({"type":"task_complete","turn_id":turn,"root_turn_id":turn,
+        json!({"type":"task_started","turn_id":turn,"root_turn_id":root,
+               "turn_attribution":{"turn_id":turn,"turn_trigger":trigger,
+                                   "parent_turn_id":parent,"initiating_agent_path":null,
+                                   "root_turn_id":root}}),
+    )
+}
+
+fn failed(turn: &str, info: Value) -> String {
+    failed_in(turn, turn, info)
+}
+
+/// `turn`'s end on an error, in the chain of turns `root` began.
+fn failed_in(turn: &str, root: &str, info: Value) -> String {
+    line(
+        "event_msg",
+        json!({"type":"task_complete","turn_id":turn,"root_turn_id":root,
                "last_agent_message":null,"error":{"message":MESSAGE,"codex_error_info":info}}),
     )
 }
 
 fn finished(turn: &str) -> String {
+    finished_in(turn, turn)
+}
+
+/// `turn`'s end, in the chain of turns `root` began.
+fn finished_in(turn: &str, root: &str) -> String {
     line(
         "event_msg",
-        json!({"type":"task_complete","turn_id":turn,"root_turn_id":turn,
+        json!({"type":"task_complete","turn_id":turn,"root_turn_id":root,
                "last_agent_message":"done"}),
     )
 }
@@ -356,18 +378,26 @@ fn an_end_without_an_error_records_nothing_and_the_follower_goes_on() {
         "event_msg",
         json!({"type":"turn_aborted","turn_id":TURN,"reason":"interrupted"}),
     );
-    let child = line(
-        "event_msg",
-        json!({"type":"task_complete","turn_id":TURN,"root_turn_id":"another-root",
-               "error":{"message":MESSAGE,"codex_error_info":"other"}}),
-    );
-    for (name, ended) in [
-        ("successful task_complete", vec![finished(TURN)]),
-        ("turn_aborted", vec![aborted]),
-        ("another turn started", vec![]),
+    // As of Codex 0.163.0 `/review` writes its child session's turn start
+    // into the lead's rollout while the lead's turn runs. Its end is not
+    // forwarded (`process_review_events` returns on it); the errored end here
+    // checks that another turn's end is not taken for the lead's.
+    // A goal turn names the turn before it as its parent, so it is the next
+    // lead turn only after that turn's end.
+    let goal = || started_by(NEXT_TURN, "goal", Some(TURN), TURN);
+    let child = vec![
+        started_by("child-turn", "user", Some(TURN), TURN),
+        failed_in("child-turn", TURN, json!("other")),
+        finished(TURN),
+        goal(),
+    ];
+    for (name, mut lines) in [
+        ("successful task_complete", vec![finished(TURN), goal()]),
+        ("turn_aborted", vec![aborted, goal()]),
+        ("another turn started", vec![started(NEXT_TURN)]),
         (
-            "a child turn's errored record, then the lead's own end",
-            vec![child, finished(TURN)],
+            "a turn started inside it ended on an error, then the lead's own end",
+            child,
         ),
     ] {
         let mut setup = Setup::new();
@@ -375,11 +405,7 @@ fn an_end_without_an_error_records_nothing_and_the_follower_goes_on() {
         // As of Codex 0.163.0 a turn that continues a goal runs no prompt hook,
         // and one that fails before its first tool call runs none at all, so
         // the binding records nothing of the next turn.
-        let mut lines = ended;
-        lines.extend([
-            started(NEXT_TURN),
-            failed(NEXT_TURN, json!("server_overloaded")),
-        ]);
+        lines.push(failed(NEXT_TURN, json!("server_overloaded")));
         append(&rollout_path(&setup), &lines);
         assert_eq!(recorded(&follow(&setup, &request)), "applied", "{name}");
         let ends = attempt_outcomes(&setup);
@@ -451,11 +477,95 @@ fn a_goal_turn_after_a_stop_and_a_turn_without_hooks_is_recorded() {
 }
 
 #[test]
+fn the_turns_of_a_goal_the_model_created_are_followed() {
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    // As of Codex 0.163.0 a goal the model creates with its `create_goal` tool
+    // starts each goal turn after the one before it ended, naming that turn as
+    // its parent and the creating turn's root as its root.
+    append(
+        &rollout_path(&setup),
+        &[
+            finished(TURN),
+            started_by(NEXT_TURN, "goal", Some(TURN), TURN),
+            finished_in(NEXT_TURN, TURN),
+            started_by("turn-3", "goal", Some(NEXT_TURN), TURN),
+            failed_in("turn-3", TURN, json!("server_overloaded")),
+        ],
+    );
+    assert_eq!(recorded(&follow(&setup, &request)), "applied");
+    let ends = attempt_outcomes(&setup);
+    assert_eq!(ends.len(), 1, "{ends:?}");
+    assert_eq!(ends[0]["correlation"]["turn_id"], "turn-3");
+    assert_eq!(ends[0]["turn_end"]["status"], "recorded");
+    assert_eq!(activity(&setup)["type"], "notify");
+}
+
+#[test]
+fn a_turn_started_inside_the_followed_one_leaves_it_followed() {
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    // As of Codex 0.163.0 `/review` writes its child session's turn start
+    // into the lead's rollout while the lead's turn runs, naming that turn as
+    // its parent.
+    append(
+        &rollout_path(&setup),
+        &[
+            started_by("child-turn", "user", Some(TURN), TURN),
+            failed(TURN, json!("server_overloaded")),
+        ],
+    );
+    assert_eq!(recorded(&follow(&setup, &request)), "applied");
+    let ends = attempt_outcomes(&setup);
+    assert_eq!(ends.len(), 1, "{ends:?}");
+    assert_eq!(ends[0]["correlation"]["turn_id"], TURN);
+    assert_eq!(fs::read_to_string(follower_lock(&setup)).unwrap(), TURN);
+}
+
+#[test]
+fn a_follower_goes_on_after_it_records_a_failure() {
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    // As of Codex 0.163.0 a turn's error, other than a usage limit, blocks its
+    // goal, and `/goal resume` runs no hook: the goal turn it starts can fail
+    // before its first tool call, so the binding records nothing of it.
+    append(
+        &rollout_path(&setup),
+        &[
+            failed(TURN, json!("server_overloaded")),
+            started_by(NEXT_TURN, "goal", None, NEXT_TURN),
+            failed(NEXT_TURN, json!("other")),
+        ],
+    );
+    assert_eq!(
+        recorded(&follow_through(&setup, &request, POLL, 2)),
+        "applied"
+    );
+    let ends = attempt_outcomes(&setup);
+    assert_eq!(ends.len(), 2, "{ends:?}");
+    let end = ends
+        .iter()
+        .find(|end| end["correlation"]["turn_id"] == NEXT_TURN)
+        .expect("the next turn's end");
+    assert_eq!(end["turn_end"]["status"], "recorded");
+    // Just after the end of the turn it was carried from.
+    assert_eq!(end["observed_mono_ns"], "00000000000000000302");
+    let activity = activity(&setup);
+    assert_eq!(activity["type"], "notify");
+    assert_eq!(activity["label"], "other");
+    assert_eq!(
+        fs::read_to_string(follower_lock(&setup)).unwrap(),
+        NEXT_TURN
+    );
+}
+
+#[test]
 fn a_prompt_starts_a_follower_while_a_leaving_one_holds_the_lock() {
     let mut setup = Setup::new();
     let request = prompted(&mut setup);
-    // The turn's follower holds the lock between two polls. Codex has ended
-    // the turn on an error and sent the next queued prompt.
+    // The turn's follower holds the lock, as one that Attention 1.10.0 started
+    // does until it reads its turn's end. Codex has ended the turn on an error
+    // and sent the next queued prompt.
     let TakenTurn::Taken(held) = take_turn(&follower_lock(&setup), TURN, POLL).expect("lock")
     else {
         panic!("the lock is free");
@@ -467,8 +577,8 @@ fn a_prompt_starts_a_follower_while_a_leaving_one_holds_the_lock() {
     prompt(&setup, NEXT_TURN, "00000000000000000400");
     let mut next = last_request(&setup);
     assert_eq!(codex_turn(&mut next).turn_id, NEXT_TURN);
-    // That follower records its turn's end and leaves, without reading the
-    // next turn's start; the next turn's follower then takes the lock.
+    // That follower records its turn's end and leaves without reading the next
+    // turn's start; the next turn's follower then takes the lock.
     drop(held);
     assert_eq!(recorded(&follow(&setup, &request)), "ignored");
     append(
@@ -1164,7 +1274,7 @@ mod real_follower {
     use super::*;
 
     #[test]
-    fn a_real_prompt_hook_leaves_a_follower_that_records_the_errored_end() {
+    fn a_real_prompt_hook_leaves_a_follower_that_records_the_errored_end_and_stays() {
         let mut pane = Pane::new();
         let directory = pane.dir().to_owned();
         let rollout = directory.join("rollout-2026-10-12T00-00-00-real.jsonl");
@@ -1234,7 +1344,21 @@ mod real_follower {
         let activity = activity_in(&binding);
         assert_eq!(activity["type"], "notify");
         assert_eq!(activity["label"], "server_overloaded");
-        wait_for("the follower to leave", || followers(&directory).is_empty());
+        // It stays for the turns after it, such as one `/goal resume` starts
+        // with no hook, until its host exits.
+        append(
+            &rollout,
+            &[started(NEXT_TURN), failed(NEXT_TURN, json!("other"))],
+        );
+        wait_for("the follower to record the next turn's end", || {
+            attempt_outcomes_in(&binding)
+                .iter()
+                .any(|end| end["correlation"]["turn_id"] == NEXT_TURN)
+        });
+        assert_eq!(activity_in(&binding)["label"], "other");
         pane.kill_shell();
+        wait_for("the follower to leave after its host", || {
+            followers(&directory).is_empty()
+        });
     }
 }
