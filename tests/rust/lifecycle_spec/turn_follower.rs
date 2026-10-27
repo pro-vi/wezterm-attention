@@ -5,7 +5,7 @@ use super::*;
 use wezterm_attention::protocol::manifest;
 use wezterm_attention::turn_follower::{FOLLOWER_SOURCES, FollowRequest, Followed, follow_turn};
 
-/// The follower request the latest admitted prompt made.
+/// The follower request the latest admitted hook made.
 pub(super) fn last_request(setup: &Setup) -> FollowRequest {
     setup
         .followers
@@ -14,7 +14,7 @@ pub(super) fn last_request(setup: &Setup) -> FollowRequest {
         .unwrap()
         .last()
         .cloned()
-        .expect("the prompt asked for a follower")
+        .expect("the hook asked for a follower")
 }
 
 /// Run the follower to its end. One that would wait for ever, as a follower

@@ -1,11 +1,11 @@
-//! A Codex session rollout, read for one thing: how a lead turn that a hook
-//! saw start came to its end. As of Codex 0.162.0 a turn that ends on a model
-//! error runs no hook, so its end is only in the rollout, as a `task_complete`
-//! record that carries an `error` object.
+//! A Codex session rollout, read for one thing: whether the lead turn a hook
+//! saw, or a lead turn after it, ended on a model error. As of Codex 0.162.0 a
+//! turn that ends on a model error runs no hook, so its end is only in the
+//! rollout, as a `task_complete` record that carries an `error` object.
 //!
 //! The rollout is Codex's own file, and every line of it is untrusted. Only
-//! complete lines of three shapes, as Codex 0.162.0 writes them, are acted on;
-//! any other shape yields nothing, never a record.
+//! complete lines of two shapes, as Codex 0.162.0 and 0.163.0 write them, are
+//! acted on; any other shape yields nothing, never a record.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
@@ -23,18 +23,15 @@ pub const TASK_COMPLETE: &str = "task_complete";
 /// The longest line read. A longer one is skipped unread.
 const MAX_LINE_BYTES: usize = 4 << 20;
 
-/// How the followed turn came to its end, as the rollout says.
+/// What the rollout says while a turn is followed. Any other end of that turn,
+/// a `task_complete` without an error or a `turn_aborted`, yields nothing: its
+/// own hook records it, or nothing does.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TurnSignal {
     /// Its `task_complete` carries an error.
     Failed { error_code: Option<String> },
-    /// Its `task_complete` carries none; `Stop` records that end.
-    Finished,
-    /// It was aborted. As of Codex 0.162.0 `Interrupt` records that end only
-    /// when the turn was interrupted; for another reason nothing does.
-    Aborted,
-    /// Another turn started, so this one is over.
-    OtherTurnStarted,
+    /// Another lead turn started, so this one is over; this is its id.
+    OtherTurnStarted { turn_id: String },
 }
 
 /// Why a rollout was not read.
@@ -117,8 +114,9 @@ impl Rollout {
         })
     }
 
-    /// Read what Codex appended since the last read, and return how
-    /// `turn_id` ended if a complete line says so.
+    /// Read what Codex appended since the last read, and return the first
+    /// thing a complete line says about `turn_id`: that it ended on an error,
+    /// or that another lead turn started.
     pub fn next_signal(
         &mut self,
         turn_id: &str,
@@ -169,8 +167,8 @@ impl Rollout {
 /// What one complete rollout line says about `turn_id`, if anything.
 fn classify(line: &[u8], turn_id: &str) -> Option<TurnSignal> {
     let line = std::str::from_utf8(line).ok()?;
-    // Most lines are none of the three records; they are not parsed.
-    if !["\"task_complete\"", "\"turn_aborted\"", "\"task_started\""]
+    // Most lines are neither record; they are not parsed.
+    if !["\"task_complete\"", "\"task_started\""]
         .iter()
         .any(|name| line.contains(name))
     {
@@ -192,14 +190,15 @@ fn classify(line: &[u8], turn_id: &str) -> Option<TurnSignal> {
         return None;
     }
     match kind {
-        "task_complete" if record_turn == turn_id => Some(match payload.get("error") {
-            Some(Value::Object(error)) => TurnSignal::Failed {
+        "task_complete" if record_turn == turn_id => match payload.get("error") {
+            Some(Value::Object(error)) => Some(TurnSignal::Failed {
                 error_code: error.get("codex_error_info").and_then(error_code),
-            },
-            _ => TurnSignal::Finished,
-        }),
-        "turn_aborted" if record_turn == turn_id => Some(TurnSignal::Aborted),
-        "task_started" if record_turn != turn_id => Some(TurnSignal::OtherTurnStarted),
+            }),
+            _ => None,
+        },
+        "task_started" if record_turn != turn_id => safe_text(record_turn, "turn_id")
+            .ok()
+            .map(|turn_id| TurnSignal::OtherTurnStarted { turn_id }),
         _ => None,
     }
 }

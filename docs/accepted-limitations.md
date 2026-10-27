@@ -777,15 +777,18 @@ the Stop cannot tell the two apart.
 ## A Codex turn that ends on a model error is recorded only from its rollout
 
 The follower below was checked once against a live Codex 0.162.0 turn whose
-model server answered HTTP 503 `server_is_overloaded`: one follower ran during
-the turn and none after it, and the end was recorded with `error_code`
-`server_overloaded` and a `notify` labelled with it.
+model server answered HTTP 503 `server_is_overloaded`, before a follower went
+on to later turns: one follower ran during the turn and none after it, and the
+end was recorded with `error_code` `server_overloaded` and a `notify` labelled
+with it. Going on to later turns, and starting from a tool hook, were not seen
+on a live turn; they are checked against rollouts in the shape Codex 0.163.0
+writes.
 
 As of Codex 0.162.0 a turn that ends on a model error runs no hook. Its turn
 loop runs `Stop`, and the legacy `notify`, only when the model finished without
 needing a follow-up, and `Interrupt` only when the user interrupted the turn; an
 error from the model request leaves the loop. It writes the end to the session
-rollout, the file the prompt's `transcript_path` names, as a `task_complete`
+rollout, the file the hook's `transcript_path` names, as a `task_complete`
 that carries an `error`. Read in the Codex source at tag
 `rust-v0.162.0`: `run_turn_stop_hooks` in `core/src/hook_runtime.rs`, called
 from the turn loop in `core/src/session/turn.rs`, whose `Err` arms `break`
@@ -793,21 +796,42 @@ without calling it.
 [openai/codex#22774](https://github.com/openai/codex/issues/22774) asks for a
 hook on this case.
 
-So the Codex prompt hook starts a follower for the turn, `attention hooks
-follow-turn`, which reads that rollout until the turn ends and records an
-errored end. What it cannot do:
+So a lead Codex prompt hook starts a follower, `attention hooks follow-turn`,
+and any other lead Codex hook that names its turn, a tool hook for one, starts
+one while no follower holds the binding's follower lock. The follower reads
+that rollout from turn to turn until a lead turn ends on a model error, and
+records that end. What it cannot do:
 
-- It starts only from a prompt hook that proved its host: one that names its
-  agent in `WEZTERM_ATTENTION_HOST_PID`, on macOS. Elsewhere the `thinking` the
-  prompt wrote stays on the tab until the next turn ends, or until Codex quits
-  and prompt return clears it.
-- A turn Codex starts by itself to continue a goal (`turn_trigger` `goal` in
-  the rollout's `task_started`) runs no prompt hook, so no follower starts for
-  it and an errored end of that turn is not recorded. Read in the Codex source
-  at tag `rust-v0.162.0`, not seen on a live turn: the goal runtime
-  (`ext/goal/src/runtime.rs`) starts the turn from a model input item, and
+- It starts only from a hook that proved its host: one that names its agent in
+  `WEZTERM_ATTENTION_HOST_PID`, on macOS. Elsewhere the `thinking` the hook
+  wrote stays on the tab until the next turn ends, or until Codex quits and
+  prompt return clears it.
+- A turn Codex starts by itself to continue a goal (`turn_trigger` `goal` in the
+  rollout's `task_started`) runs no prompt hook. Read in the Codex source at tag
+  `rust-v0.163.0`: the goal runtime (`continue_if_idle` in
+  `ext/goal/src/runtime.rs`) starts the turn from a model input item, and
   `inspect_pending_input` in `core/src/hook_runtime.rs` runs `UserPromptSubmit`
-  only for a user message.
+  only for a user message. One that fails before its first tool call runs no
+  hook at all, and its end is recorded only when a follower went on into it from
+  an earlier turn the binding recorded. The first turn of a session that Codex
+  starts or resumes straight into a goal, before any hook of that session names
+  a turn, is not recorded.
+- A turn whose `Stop` hook ran and that then ends on an error gets that end
+  recorded only when something of the turn was recorded after the `Stop`: a
+  record of it, or a prompt typed into it before any record of a later turn.
+  Otherwise the `Stop` stands as its end. As of Codex 0.163.0 two cases leave
+  the same records: a `Stop` that blocks lets the turn go on and its next model
+  request fails, and a post-turn compaction after a `Stop` that did not block
+  hits the usage limit (`run_turn` in `core/src/session/turn.rs`).
+- A follower runs for as long as its Codex session does, reading the rollout
+  once a second. It leaves earlier once it records a failure, or when it stops
+  without recording (see the item on that below); the turns after it are then
+  unfollowed until the next lead hook that names a turn starts one, so a goal
+  turn that fails before its first tool call in that time is not recorded. After
+  a failure, a prompt typed next starts a follower even while the old one still
+  holds the lock. Several followers can start at once when a session's hooks run
+  before the first has taken the lock; the others leave. After Attention is
+  updated, a running session keeps its old follower until that follower leaves.
 - No hook-delivered finish sound, reply capture, hold or quiet check runs for
   this end; a finish-sound reader of the records still accepts it.
 - It is seen within a second of Codex writing it, not at once.
@@ -815,8 +839,8 @@ errored end. What it cannot do:
 - A rollout record it does not recognise yields no record, so a Codex that
   changes the shape of `task_complete` brings this limitation back.
 - A follower that stops without recording, because its host could not be read,
-  the rollout was refused or its write failed, leaves no record that it
-  stopped.
+  the rollout was refused, its lock could not be rewritten to name the next
+  turn or its write failed, leaves no record that it stopped.
 
 ## A pane a shell has claimed refuses agents started without its launch id
 

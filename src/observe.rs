@@ -7,7 +7,7 @@
 //! the observation ids in each pool, each pool's retention floor, the
 //! latest prompt and the known answers — so the next
 //! read can diff by identity rather than by timestamp: an observation a
-//! follower stamped just after its turn's last record, or one a hook
+//! follower stamped just after an earlier record, or one a hook
 //! delivered late below the cursor's newest stamp, is still reported
 //! while its pool retains it. What retention took between two reads is
 //! not reconstructed: any movement of a pool's floor ends the chain

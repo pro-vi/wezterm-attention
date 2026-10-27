@@ -35,9 +35,9 @@ use crate::records::{
     commit, commit_waiting, ends_binding, launch_lock, pane_dir, read_claim, read_record,
     read_record_at, read_record_typed, read_record_typed_at, removal_confined, remove_file_durable,
     review_lock, session_binding_files, session_entry, session_entry_path,
-    session_registration_lock, state_root, with_lock, within_read_bound,
+    session_registration_lock, state_root, turn_follower_lock, with_lock, within_read_bound,
 };
-use crate::turn_follower::{ClaudeTurn, CodexTurn, FollowRequest, FollowedTurn};
+use crate::turn_follower::{ClaudeTurn, CodexTurn, FOLLOWER_SOURCES, FollowRequest, FollowedTurn};
 use crate::wezterm::RuntimePorts;
 
 #[derive(Debug)]
@@ -3351,8 +3351,8 @@ fn apply_provider_event_inner(
         {
             report_instead(&mut result.diagnostic, problem);
         }
-        // A follower that could not start leaves the prompt as recorded, and
-        // says so only where nothing else is reported.
+        // A follower that could not start leaves the hook's record as written,
+        // and says so only where nothing else is reported.
         if let Some(problem) = start_turn_follower(&resolved, event, env, ports) {
             result.diagnostic.get_or_insert(problem);
         }
@@ -3360,42 +3360,65 @@ fn apply_provider_event_inner(
     })
 }
 
-/// Start the follower of the lead turn a prompt began, for an end its
-/// provider runs no hook for (see [`crate::turn_follower`]). As of Codex
-/// 0.162.0 a turn that ends on a model error runs no hook, and only the
-/// session rollout says it ended; the follower reads it from where the rollout
-/// stands now. As of Claude Code 2.1.300 a turn the user stops with Esc runs
-/// no hook, and the host's status file shows it. A follower needs the hook's
-/// proof of its host, because it lives no longer than that process.
+/// Start the follower of a lead turn, for an end its provider runs no hook
+/// for (see [`crate::turn_follower`]). As of Codex 0.162.0 a turn that ends on
+/// a model error runs no hook, and only the session rollout says it ended; the
+/// follower reads it from where the rollout stands now. As of Claude Code
+/// 2.1.300 a turn the user stops with Esc runs no hook, and the host's status
+/// file shows it. A follower needs the hook's proof of its host, because it
+/// lives no longer than that process.
 ///
-/// A Codex follower starts whatever the prompt's disposition: a prompt whose
-/// thinking lost the activity slot still began its turn, and the follower
-/// writes only for a turn the binding recorded. A Claude follower follows the
-/// prompt, whether or not it carries a turn id, and starts only once the
-/// prompt record names it as the lead's latest prompt: it ends the turn only
-/// while that holds. A `CLAUDE_CONFIG_DIR` the hook could not keep starts none,
-/// since the status file is in that directory, not in `~/.claude`.
+/// A lead Codex prompt starts one, which waits for a follower that holds the
+/// binding's follower lock to leave or to name the prompt's turn. Any other
+/// lead Codex hook that names its turn starts one only while no follower holds
+/// that lock: as of Codex 0.163.0 a turn that continues a goal runs no prompt
+/// hook, and its tool hooks name it, and the follower that holds the lock goes
+/// on to each later turn. A Codex follower starts whatever the hook's
+/// disposition: a prompt whose thinking lost the activity slot still began its
+/// turn, and the follower writes only for a turn the binding recorded or one
+/// it carried into. A Claude follower follows a prompt, whether or not it
+/// carries a turn id, and starts only once the prompt record names it as the
+/// lead's latest prompt: it ends the turn only while that holds. A
+/// `CLAUDE_CONFIG_DIR` the hook could not keep starts none, since the status
+/// file is in that directory, not in `~/.claude`.
 fn start_turn_follower(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
     env: &BTreeMap<String, String>,
     ports: &RuntimePorts<'_>,
 ) -> Option<Diagnostic> {
-    let prompt = event.observation.as_ref()?;
-    if !prompt.is_lead_prompt() {
-        return None;
-    }
+    let observation = event.observation.as_ref()?;
     let host = &resolved.host.as_ref()?.proof.owner;
     let turn = match event.provider? {
         Provider::Codex => {
-            let rollout = event.transcript_path.clone()?;
+            if observation.actor != crate::observations::Actor::Lead {
+                return None;
+            }
+            let turn_id = observation.turn_id()?;
+            let rollout = event.transcript_path.as_ref()?;
+            let binding_id = event_binding_id(event, &resolved.launch_id).ok()?;
+            // A holder that just recorded a failure leaves without reading the
+            // next turn's start, so a prompt does not trust the lock.
+            if !observation.is_lead_prompt()
+                && crate::turn_follower::is_followed(&turn_follower_lock(
+                    &resolved.root,
+                    &resolved.address,
+                    &resolved.launch_id,
+                    &binding_id,
+                ))
+            {
+                return None;
+            }
             FollowedTurn::Codex(CodexTurn {
-                turn_id: prompt.turn_id()?.to_owned(),
-                offset: std::fs::metadata(&rollout).ok()?.len(),
-                rollout,
+                turn_id: turn_id.to_owned(),
+                offset: std::fs::metadata(rollout).ok()?.len(),
+                rollout: rollout.clone(),
             })
         }
         Provider::Claude => {
+            if !observation.is_lead_prompt() {
+                return None;
+            }
             if event.config_dir.is_none()
                 && env
                     .get("CLAUDE_CONFIG_DIR")
@@ -3405,7 +3428,7 @@ fn start_turn_follower(
             }
             let binding_id = event_binding_id(event, &resolved.launch_id).ok()?;
             let latest = latest_prompt(&resolved.root, &resolved.binding(&binding_id))
-                .filter(|latest| latest.observation_id == prompt.observation_id)?;
+                .filter(|latest| latest.observation_id == observation.observation_id)?;
             let status_file = crate::claude_status::status_path(
                 event.config_dir.as_deref(),
                 env.get("HOME").map(String::as_str),
@@ -3537,16 +3560,19 @@ fn followed_snapshot(root: &Path, identity: &RecordIdentity) -> Result<Option<Li
 /// the launch and claim locks, as `apply_activity` takes them.
 ///
 /// Nothing is written once [`followed_binding`] finds the binding no longer
-/// current or ended, once the host is gone or cannot be read, when the turn
-/// has no record,
-/// nor when its last record is already an end. The `notify` it writes says
-/// the turn needs the user; it is written only while this turn is the newest
-/// one the binding observed, and otherwise the end is kept as superseded.
+/// current or ended, once the host is gone or cannot be read, or when the
+/// turn's last record is already an end that nothing recorded after shows the
+/// turn went on from. A turn with no record is written only when the follower
+/// carried into it from the turns `before`, which it followed earlier, and
+/// the binding recorded one of those. The `notify` it writes says the turn
+/// needs the user; it is written only while this turn is the newest one the
+/// binding observed, and otherwise the end is kept as superseded.
 pub(crate) fn record_codex_turn_failure(
     root: &Path,
     address: &PaneAddress,
     launch_id: &str,
     host: &ClaimOwner,
+    before: &[String],
     event: &ProviderEvent,
     ports: &RuntimePorts<'_>,
 ) -> Result<LifecycleResult> {
@@ -3578,29 +3604,58 @@ pub(crate) fn record_codex_turn_failure(
                     .iter()
                     .flat_map(LifecycleSnapshot::lead_observations)
             };
-            // The turn's last record decides. When it is an end, its own hook's
-            // or an earlier follower's, that end stays: as of Codex 0.162.0 a
-            // Stop hook that blocks lets Codex go on with the same turn, whose
-            // next records then come after it. Codex wrote this end after that
-            // last record and before any hook that began after the end, so the
-            // end is ordered just after it, not when this follower read it.
-            let Some((last, after_turn)) =
-                latest(lead_turns().filter(|item| item.turn_id() == turn_id))
-                    .filter(|last| !last.ends_turn(provider))
-                    .and_then(|last| {
-                        Some((
-                            last,
-                            just_after(iter::once(last.observed_mono_ns.as_str()))?,
-                        ))
+            // The pools keep one prompt per turn, so a prompt typed while this
+            // turn ran survives only as the lead's latest prompt, and the end
+            // also comes after that. A prompt record that cannot be read gives
+            // the end none.
+            let prompt = latest_prompt(root, &identity);
+            // An end, its own hook's or an earlier follower's, stays the turn's
+            // end unless the lead went on from a hook's end: as of Codex 0.162.0
+            // a Stop hook that blocks lets Codex go on with the same turn, and a
+            // prompt typed into it then is kept only as the lead's latest prompt.
+            // Nothing else shows it: as of Codex 0.163.0 a post-turn compaction
+            // that hits the usage limit after a Stop that did not block also ends
+            // the turn on an error, and leaves nothing after the Stop.
+            let went_on = |end: &LifecycleObservation| {
+                !FOLLOWER_SOURCES
+                    .iter()
+                    .any(|(_, source)| *source == end.source_event)
+                    && prompt
+                        .as_ref()
+                        .is_some_and(|latest| latest.observed_mono_ns > end.observed_mono_ns)
+                    && !lead_turns().any(|item| {
+                        item.observed_mono_ns > end.observed_mono_ns
+                            && item.turn_id().is_some_and(|turn| Some(turn) != turn_id)
                     })
-            else {
+            };
+            // The turn's last record, or for a turn that ran no hook, as one
+            // that continues a goal can as of Codex 0.163.0, the latest record
+            // of the turns the follower carried into it from.
+            let anchor = match latest(lead_turns().filter(|item| item.turn_id() == turn_id)) {
+                Some(last) => (!last.ends_turn(provider) || went_on(last)).then_some(last),
+                None => latest(lead_turns().filter(|item| {
+                    item.turn_id()
+                        .is_some_and(|turn| before.iter().any(|earlier| earlier == turn))
+                })),
+            };
+            // Codex wrote the end after that record and before any hook that
+            // began after the end, so the end is ordered just after it, not
+            // when this follower read it.
+            let Some((last, after_turn)) = anchor.and_then(|last| {
+                Some((
+                    last,
+                    just_after(iter::once(last.observed_mono_ns.as_str()))?,
+                ))
+            }) else {
                 return Ok(CommitPlan::reporting(Mutation::plain(
                     LifecycleResult::new(Disposition::Skipped),
                 )));
             };
-            let newest = latest(lead_turns().filter(|item| item.turn_id().is_some()))
-                .and_then(LifecycleObservation::turn_id);
-            if newest != turn_id {
+            // Current while the record the end follows is the newest that names
+            // a turn.
+            if latest(lead_turns().filter(|item| item.turn_id().is_some()))
+                .is_none_or(|newest| newest.observation_id != last.observation_id)
+            {
                 return Ok(append_observation(
                     &resolved,
                     event,
@@ -3609,11 +3664,6 @@ pub(crate) fn record_codex_turn_failure(
                     CommitPlan::reporting(Mutation::plain(turn_end_superseded())),
                 ));
             }
-            // The pools keep one prompt per turn, so a prompt typed while this
-            // turn ran survives only as the lead's latest prompt, and the end
-            // also comes after that. A prompt record that cannot be read gives
-            // the end none.
-            let prompt = latest_prompt(root, &identity);
             let turn_stamps = || {
                 iter::once(last.observed_mono_ns.as_str()).chain(
                     prompt
@@ -3709,7 +3759,9 @@ fn latest_prompt(root: &Path, identity: &RecordIdentity) -> Option<PromptReferen
 /// the lead's last record after it is not a turn end, its `Stop`, its
 /// `StopFailure` or another follower's interrupt. A `Stop` hook that blocks
 /// lets Claude Code go on with the same turn, whose next records then come
-/// after that `Stop`, so the last record decides, as it does for a Codex turn.
+/// after that `Stop`, so the last record decides, as it does for a Codex turn
+/// unless a prompt typed after a hook's end shows the turn went on
+/// ([`record_codex_turn_failure`]).
 /// The prompt's own observation may have left the pools; only stamps are
 /// compared. The end and the clear are ordered just
 /// after the latest of the prompt, the lead's observations and the activity,

@@ -82,7 +82,8 @@ enum HookCommand {
     Publish(PublishArgs),
     /// Accept one provider callback.
     Event(EventArgs),
-    /// Follow one lead turn until it ends; started by a prompt hook.
+    /// Follow a lead turn until it ends, and a Codex turn's successors until
+    /// one fails; started by a lead hook.
     #[command(hide = true)]
     FollowTurn(FollowTurnArgs),
 }

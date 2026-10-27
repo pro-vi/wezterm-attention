@@ -1,8 +1,10 @@
-//! A turn follower: a process a lead prompt hook leaves behind to learn how
-//! the turn it began came to an end, for the ends a provider runs no hook for.
-//! It lives no longer than the agent process whose hook started it, the
-//! binding that recorded the prompt, or its turn, and records an end only
-//! through the writer, under the locks every writer takes.
+//! A turn follower: a process a lead hook leaves behind to learn how a turn
+//! came to an end, for the ends a provider runs no hook for. It lives no
+//! longer than the agent process whose hook started it or the binding that
+//! recorded the turn, and records an end only through the writer, under the
+//! locks every writer takes. A Claude Code follower follows the turn of one
+//! prompt. A Codex follower follows its turn, then each lead turn the rollout
+//! starts after it, until one ends on a model error.
 //!
 //! What it reads is the provider's own file, which a reader for that provider
 //! turns into what the follower acts on; nothing else here knows that file.
@@ -36,11 +38,13 @@ pub const FOLLOWER_SOURCES: [(Provider, &str); 2] = [
 ];
 
 /// How many polls a follower waits for another turn's follower to leave the
-/// lock; that follower leaves within one poll of seeing its turn end.
+/// lock or to name this turn: a Claude follower leaves within one poll of
+/// seeing its turn end, and a Codex follower names the next turn within one
+/// poll of reading its start, or leaves once it records a failure.
 const TAKE_OVER_POLLS: u32 = 10;
 
 /// What a follower is handed: the binding's scope, the host process whose
-/// hook saw the turn start, and the turn, with what to read it from.
+/// hook saw the turn, and the turn, with what to read it from.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FollowRequest {
@@ -112,7 +116,7 @@ impl FollowRequest {
         }
     }
 
-    /// The binding that recorded the followed turn's prompt.
+    /// The binding the followed turn belongs to.
     pub fn binding_id(&self) -> String {
         binding_id(
             self.turn.provider().as_str(),
@@ -125,6 +129,22 @@ impl FollowRequest {
 /// The binding's follower lock, held by the follower of one of its turns and
 /// naming that turn. A follower kept out of it reads without it.
 pub struct FollowerLock(File);
+
+impl FollowerLock {
+    /// Name the turn `key` as the one followed.
+    fn name(&mut self, key: &str) -> Result<()> {
+        self.0
+            .set_len(0)
+            .and_then(|()| self.0.seek(SeekFrom::Start(0)))
+            .and_then(|_| self.0.write_all(key.as_bytes()))
+            .map_err(|_| {
+                AttentionError::new(
+                    DiagnosticCode::StatePermissions,
+                    "the turn follower's lock could not be written",
+                )
+            })
+    }
+}
 
 impl Drop for FollowerLock {
     fn drop(&mut self) {
@@ -143,7 +163,7 @@ pub enum TakenTurn {
 }
 
 /// Take the follower lock at `path` for the turn `key` names, waiting up to
-/// `wait` for another turn's follower to leave.
+/// `wait` for another turn's follower to leave or to name this turn.
 pub fn take_turn(path: &Path, key: &str, wait: Duration) -> Result<TakenTurn> {
     let mut file = open_state_lock(path)?;
     let deadline = Instant::now() + wait;
@@ -170,17 +190,17 @@ pub fn take_turn(path: &Path, key: &str, wait: Duration) -> Result<TakenTurn> {
             }
         }
     }
-    let named = file
-        .set_len(0)
-        .and_then(|()| file.seek(SeekFrom::Start(0)))
-        .and_then(|_| file.write_all(key.as_bytes()));
-    if named.is_err() {
-        return Err(AttentionError::new(
-            DiagnosticCode::StatePermissions,
-            "the turn follower's lock could not be written",
-        ));
-    }
-    Ok(TakenTurn::Taken(FollowerLock(file)))
+    let mut lock = FollowerLock(file);
+    lock.name(key)?;
+    Ok(TakenTurn::Taken(lock))
+}
+
+/// Whether a follower holds the follower lock at `path`, or one could not take
+/// it. Asking takes the lock shared for an instant; a follower that tries to
+/// take it in that instant, while the lock names its turn, leaves, and the
+/// hook that asked then starts one itself.
+pub fn is_followed(path: &Path) -> bool {
+    File::open(path).is_ok_and(|file| file.try_lock_shared().is_err())
 }
 
 /// How a follower finished.
@@ -189,9 +209,6 @@ pub enum Followed {
     /// The turn ended in a way its follower records, and this is what
     /// recording it did.
     Recorded(LifecycleResult),
-    /// The Codex turn ended some other way; its own hook records that, or
-    /// nothing does.
-    RolloutEnded(TurnSignal),
     /// The host process is gone, or could not be read.
     HostGone,
     /// The binding is not the launch's current one or has ended, or the claim
@@ -214,8 +231,11 @@ pub enum Followed {
 
 /// What one provider's follower reads its turn's end from.
 enum Reader<'a> {
+    /// `turn_id` is the turn followed now, and `before` the turns this
+    /// follower followed before it, oldest first.
     Codex {
-        turn: &'a CodexTurn,
+        turn_id: String,
+        before: Vec<String>,
         rollout: Rollout,
     },
     /// Read whole at every poll. `last_working_at` is when the latest
@@ -230,8 +250,13 @@ impl<'a> Reader<'a> {
     fn open(request: &'a FollowRequest) -> std::result::Result<Self, Refusal> {
         match &request.turn {
             FollowedTurn::Codex(turn) => {
-                Rollout::open(Path::new(&turn.rollout), &request.session_id, turn.offset)
-                    .map(|rollout| Self::Codex { turn, rollout })
+                Rollout::open(Path::new(&turn.rollout), &request.session_id, turn.offset).map(
+                    |rollout| Self::Codex {
+                        turn_id: turn.turn_id.clone(),
+                        before: Vec::new(),
+                        rollout,
+                    },
+                )
             }
             FollowedTurn::Claude(turn) => Ok(Self::Claude {
                 turn,
@@ -241,35 +266,51 @@ impl<'a> Reader<'a> {
     }
 
     /// Read once. `Some` when the follower is done, with how; `None` while
-    /// the turn has not yet ended in a way this reader decides.
+    /// the turn has not yet ended in a way this reader decides. A Codex
+    /// reader that `held` the lock goes on to the next lead turn, naming it in
+    /// the lock; one kept out leaves that turn to the holder.
     fn read(
         &mut self,
         request: &FollowRequest,
         root: &Path,
         host: &ClaimOwner,
         ports: &RuntimePorts<'_>,
+        mut held: Option<&mut FollowerLock>,
     ) -> Result<Option<Followed>> {
         match self {
-            Self::Codex { turn, rollout } => match rollout.next_signal(&turn.turn_id) {
-                Err(refusal) => Ok(Some(Followed::RolloutRefused(refusal))),
-                Ok(Some(TurnSignal::Failed { error_code })) => {
-                    let event = ProviderEvent::codex_turn_failure(
-                        &request.session_id,
-                        &turn.turn_id,
-                        error_code,
-                    );
-                    crate::lifecycle::record_codex_turn_failure(
-                        root,
-                        &request.address,
-                        &request.launch_id,
-                        host,
-                        &event,
-                        ports,
-                    )
-                    .map(|result| Some(Followed::Recorded(result)))
+            Self::Codex {
+                turn_id,
+                before,
+                rollout,
+            } => loop {
+                match rollout.next_signal(turn_id) {
+                    Err(refusal) => return Ok(Some(Followed::RolloutRefused(refusal))),
+                    Ok(Some(TurnSignal::Failed { error_code })) => {
+                        let event = ProviderEvent::codex_turn_failure(
+                            &request.session_id,
+                            turn_id,
+                            error_code,
+                        );
+                        return crate::lifecycle::record_codex_turn_failure(
+                            root,
+                            &request.address,
+                            &request.launch_id,
+                            host,
+                            before,
+                            &event,
+                            ports,
+                        )
+                        .map(|result| Some(Followed::Recorded(result)));
+                    }
+                    Ok(Some(TurnSignal::OtherTurnStarted { turn_id: next })) => {
+                        let Some(lock) = held.as_deref_mut() else {
+                            return Ok(Some(Followed::AlreadyFollowed));
+                        };
+                        lock.name(&next)?;
+                        before.push(std::mem::replace(turn_id, next));
+                    }
+                    Ok(None) => return Ok(None),
                 }
-                Ok(Some(signal)) => Ok(Some(Followed::RolloutEnded(signal))),
-                Ok(None) => Ok(None),
             },
             Self::Claude {
                 turn,
@@ -327,8 +368,9 @@ impl<'a> Reader<'a> {
 }
 
 /// Follow `request`'s turn until it ends, its host is gone or its binding
-/// stops being current, reading every `poll`. A follower that another turn's
-/// follower keeps out of the lock for its wait reads once instead.
+/// stops being current, reading every `poll`; a Codex follower goes on to each
+/// later lead turn until one ends on a model error. A follower that another
+/// turn's follower keeps out of the lock for its wait reads once instead.
 pub fn follow_turn(
     request: &FollowRequest,
     env: &BTreeMap<String, String>,
@@ -350,7 +392,7 @@ pub fn follow_turn(
         return Ok(Followed::BindingChanged);
     }
     let lock = turn_follower_lock(&root, &request.address, &request.launch_id, &binding);
-    let held = match take_turn(&lock, request.turn.key(), poll * TAKE_OVER_POLLS)? {
+    let mut held = match take_turn(&lock, request.turn.key(), poll * TAKE_OVER_POLLS)? {
         TakenTurn::Taken(lock) => Some(lock),
         TakenTurn::AlreadyFollowed => return Ok(Followed::AlreadyFollowed),
         // A later turn's follower can hold the lock while this turn's end is
@@ -370,7 +412,7 @@ pub fn follow_turn(
         if !current() {
             return Ok(Followed::BindingChanged);
         }
-        match reader.read(request, &root, &host, ports)? {
+        match reader.read(request, &root, &host, ports, held.as_mut())? {
             Some(followed) => return Ok(followed),
             None if held.is_none() => return Ok(Followed::AlreadyFollowed),
             None => thread::sleep(poll),

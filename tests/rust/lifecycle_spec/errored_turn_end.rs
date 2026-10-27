@@ -1,7 +1,8 @@
 //! As of Codex 0.162.0 a turn that ends on a model error runs no hook; its
 //! end is only in the session rollout, as a `task_complete` that carries an
-//! `error`. The turn follower a Codex prompt hook starts reads the rollout and
-//! records that end.
+//! `error`. The turn follower a lead Codex hook starts reads the rollout from
+//! that hook's turn through the lead turns after it, and records the first end
+//! on a model error.
 
 use super::self_claim::{apply_as, install, records, start};
 use super::turn_follower::{follow_every, last_request, recorded};
@@ -118,6 +119,16 @@ fn hook(
     result
 }
 
+/// `TURN`'s `Stop` hook, observed at `observation`.
+fn stop(setup: &Setup, observation: &str) {
+    hook(
+        setup,
+        "Stop",
+        json!({"stop_hook_active":false,"turn_id":TURN}),
+        observation,
+    );
+}
+
 /// The Codex turn `request` follows.
 fn codex_turn(request: &mut FollowRequest) -> &mut CodexTurn {
     match &mut request.turn {
@@ -126,10 +137,9 @@ fn codex_turn(request: &mut FollowRequest) -> &mut CodexTurn {
     }
 }
 
-/// A pane its shell claimed, where Codex session "s" started and a prompt
-/// for `TURN` was admitted from a hook that names its agent, and the follower
-/// request that prompt made. The clock then reads later than every hook.
-fn prompted(setup: &mut Setup) -> FollowRequest {
+/// A pane its shell claimed, where Codex session "s" started from a hook that
+/// names its agent.
+fn session_started(setup: &Setup) {
     setup.claim();
     let result = apply_as(
         setup,
@@ -138,6 +148,13 @@ fn prompted(setup: &mut Setup) -> FollowRequest {
         "00000000000000000200",
     );
     assert_eq!(result.disposition, "applied", "{result:?}");
+}
+
+/// [`session_started`], then a prompt for `TURN` admitted from a hook that
+/// names its agent, and the follower request that prompt made. The clock then
+/// reads later than every hook.
+fn prompted(setup: &mut Setup) -> FollowRequest {
+    session_started(setup);
     prompt(setup, TURN, "00000000000000000300");
     setup.clock = FixedClock {
         monotonic: "00000000000000000900",
@@ -332,9 +349,9 @@ fn the_error_code_is_codex_s_name_when_it_is_a_safe_label() {
 }
 
 // Every other end is recorded by the turn's own hook, or by nothing: the
-// follower leaves without writing.
+// follower goes on without writing.
 #[test]
-fn an_end_without_an_error_records_nothing() {
+fn an_end_without_an_error_records_nothing_and_the_follower_goes_on() {
     let aborted = line(
         "event_msg",
         json!({"type":"turn_aborted","turn_id":TURN,"reason":"interrupted"}),
@@ -344,35 +361,185 @@ fn an_end_without_an_error_records_nothing() {
         json!({"type":"task_complete","turn_id":TURN,"root_turn_id":"another-root",
                "error":{"message":MESSAGE,"codex_error_info":"other"}}),
     );
-    for (name, lines, ended) in [
-        (
-            "successful task_complete",
-            vec![finished(TURN)],
-            TurnSignal::Finished,
-        ),
-        ("turn_aborted", vec![aborted], TurnSignal::Aborted),
-        (
-            "another turn started",
-            vec![started(NEXT_TURN)],
-            TurnSignal::OtherTurnStarted,
-        ),
+    for (name, ended) in [
+        ("successful task_complete", vec![finished(TURN)]),
+        ("turn_aborted", vec![aborted]),
+        ("another turn started", vec![]),
         (
             "a child turn's errored record, then the lead's own end",
             vec![child, finished(TURN)],
-            TurnSignal::Finished,
         ),
     ] {
         let mut setup = Setup::new();
         let request = prompted(&mut setup);
-        let before = records(&setup);
+        // As of Codex 0.163.0 a turn that continues a goal runs no prompt hook,
+        // and one that fails before its first tool call runs none at all, so
+        // the binding records nothing of the next turn.
+        let mut lines = ended;
+        lines.extend([
+            started(NEXT_TURN),
+            failed(NEXT_TURN, json!("server_overloaded")),
+        ]);
         append(&rollout_path(&setup), &lines);
-        let followed = follow(&setup, &request);
-        let Followed::RolloutEnded(signal) = &followed else {
-            panic!("{name}: {followed:?}");
-        };
-        assert_eq!(*signal, ended, "{name}");
-        assert!(records(&setup) == before, "{name}");
+        assert_eq!(recorded(&follow(&setup, &request)), "applied", "{name}");
+        let ends = attempt_outcomes(&setup);
+        assert_eq!(ends.len(), 1, "{name}: {ends:?}");
+        assert_eq!(ends[0]["correlation"]["turn_id"], NEXT_TURN, "{name}");
+        assert_eq!(ends[0]["turn_end"]["status"], "recorded", "{name}");
+        // Just after the last record of the turn it was carried from.
+        assert_eq!(
+            ends[0]["observed_mono_ns"], "00000000000000000301",
+            "{name}"
+        );
+        let activity = activity(&setup);
+        assert_eq!(activity["type"], "notify", "{name}");
+        assert_eq!(activity["label"], "server_overloaded", "{name}");
+        assert_eq!(
+            fs::read_to_string(follower_lock(&setup)).unwrap(),
+            NEXT_TURN,
+            "{name}"
+        );
     }
+}
+
+#[test]
+fn a_carried_turn_s_failure_after_a_later_turn_s_prompt_is_superseded() {
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    append(
+        &rollout_path(&setup),
+        &[
+            finished(TURN),
+            started(NEXT_TURN),
+            failed(NEXT_TURN, json!("server_overloaded")),
+        ],
+    );
+    // The prompt of the turn after it reached the writer before the follower
+    // read that end.
+    prompt(&setup, "turn-3", "00000000000000000400");
+    assert_eq!(recorded(&follow(&setup, &request)), "ignored");
+    let ends = attempt_outcomes(&setup);
+    assert_eq!(ends.len(), 1, "{ends:?}");
+    assert_eq!(ends[0]["correlation"]["turn_id"], NEXT_TURN);
+    assert_eq!(ends[0]["turn_end"]["status"], "superseded");
+    assert_eq!(activity(&setup)["type"], "thinking");
+}
+
+#[test]
+fn a_goal_turn_after_a_stop_and_a_turn_without_hooks_is_recorded() {
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    stop(&setup, "00000000000000000500");
+    // Two goal turns follow; neither runs a hook, and the second fails.
+    append(
+        &rollout_path(&setup),
+        &[
+            finished(TURN),
+            started(NEXT_TURN),
+            finished(NEXT_TURN),
+            started("turn-3"),
+            failed("turn-3", json!("server_overloaded")),
+        ],
+    );
+    assert_eq!(recorded(&follow(&setup, &request)), "applied");
+    let ends = attempt_outcomes(&setup);
+    assert_eq!(ends.len(), 1, "{ends:?}");
+    assert_eq!(ends[0]["correlation"]["turn_id"], "turn-3");
+    assert_eq!(ends[0]["turn_end"]["status"], "recorded");
+    assert_eq!(ends[0]["observed_mono_ns"], "00000000000000000501");
+    assert_eq!(activity(&setup)["type"], "notify");
+}
+
+#[test]
+fn a_prompt_starts_a_follower_while_a_leaving_one_holds_the_lock() {
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    // The turn's follower holds the lock between two polls. Codex has ended
+    // the turn on an error and sent the next queued prompt.
+    let TakenTurn::Taken(held) = take_turn(&follower_lock(&setup), TURN, POLL).expect("lock")
+    else {
+        panic!("the lock is free");
+    };
+    append(
+        &rollout_path(&setup),
+        &[failed(TURN, json!("server_overloaded"))],
+    );
+    prompt(&setup, NEXT_TURN, "00000000000000000400");
+    let mut next = last_request(&setup);
+    assert_eq!(codex_turn(&mut next).turn_id, NEXT_TURN);
+    // That follower records its turn's end and leaves, without reading the
+    // next turn's start; the next turn's follower then takes the lock.
+    drop(held);
+    assert_eq!(recorded(&follow(&setup, &request)), "ignored");
+    append(
+        &rollout_path(&setup),
+        &[failed(NEXT_TURN, json!("server_overloaded"))],
+    );
+    assert_eq!(recorded(&follow(&setup, &next)), "applied");
+    assert_eq!(activity(&setup)["type"], "notify");
+}
+
+#[test]
+fn a_tool_hook_starts_the_follower_of_a_turn_that_ran_no_prompt_hook() {
+    let setup = Setup::new();
+    session_started(&setup);
+    // As of Codex 0.163.0 a turn that continues a goal runs no prompt hook;
+    // its tool hooks name it.
+    let rollout = rollout_path(&setup);
+    append(&rollout, &[header(SESSION), started(TURN)]);
+    hook(
+        &setup,
+        "PreToolUse",
+        json!({"tool_name":"shell","tool_use_id":"call-1","turn_id":TURN,
+               "transcript_path":rollout}),
+        "00000000000000000300",
+    );
+    let mut request = last_request(&setup);
+    assert_eq!(codex_turn(&mut request).turn_id, TURN);
+    assert_eq!(activity(&setup)["type"], "thinking");
+    append(&rollout, &[failed(TURN, json!("server_overloaded"))]);
+    assert_eq!(recorded(&follow(&setup, &request)), "applied");
+    let ends = attempt_outcomes(&setup);
+    assert_eq!(ends.len(), 1, "{ends:?}");
+    assert_eq!(ends[0]["error_code"], "server_overloaded");
+    assert_eq!(ends[0]["turn_end"]["status"], "recorded");
+    let activity = activity(&setup);
+    assert_eq!(activity["type"], "notify");
+    assert_eq!(activity["label"], "server_overloaded");
+}
+
+#[test]
+fn a_hook_starts_no_follower_while_one_holds_the_lock_nor_for_a_child() {
+    let mut setup = Setup::new();
+    prompted(&mut setup);
+    let rollout = rollout_path(&setup);
+    let started = || setup.followers.started.lock().unwrap().len();
+    let tool = |call: &str, observation: &str| {
+        hook(
+            &setup,
+            "PreToolUse",
+            json!({"tool_name":"shell","tool_use_id":call,"turn_id":TURN,
+                   "transcript_path":rollout}),
+            observation,
+        );
+    };
+    let TakenTurn::Taken(held) = take_turn(&follower_lock(&setup), TURN, POLL).expect("lock")
+    else {
+        panic!("the lock is free");
+    };
+    tool("call-1", "00000000000000000400");
+    assert_eq!(started(), 1);
+    drop(held);
+    hook(
+        &setup,
+        "PreToolUse",
+        json!({"tool_name":"shell","tool_use_id":"call-2","turn_id":"child-turn",
+               "agent_id":"child-a","agent_type":"worker","transcript_path":rollout}),
+        "00000000000000000500",
+    );
+    assert_eq!(started(), 1);
+    tool("call-3", "00000000000000000600");
+    assert_eq!(started(), 2);
 }
 
 #[test]
@@ -510,12 +677,7 @@ fn replayed_task_complete_is_idempotent_by_turn_id() {
 fn a_turn_its_own_hook_ended_is_not_recorded_again() {
     let mut setup = Setup::new();
     let request = prompted(&mut setup);
-    hook(
-        &setup,
-        "Stop",
-        json!({"stop_hook_active":false,"turn_id":TURN}),
-        "00000000000000000500",
-    );
+    stop(&setup, "00000000000000000500");
     let before = records(&setup);
     append(
         &rollout_path(&setup),
@@ -527,17 +689,63 @@ fn a_turn_its_own_hook_ended_is_not_recorded_again() {
 }
 
 #[test]
+fn a_prompt_typed_into_a_turn_after_its_stop_lets_its_failure_be_recorded() {
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    stop(&setup, "00000000000000000500");
+    // The Stop blocked and Codex went on with the turn. A prompt typed into
+    // it carries the turn's id as of Codex 0.162.0, so only the prompt record
+    // keeps it.
+    hook(
+        &setup,
+        "UserPromptSubmit",
+        json!({"prompt":"and this","turn_id":TURN,"transcript_path":rollout_path(&setup)}),
+        "00000000000000000600",
+    );
+    append(
+        &rollout_path(&setup),
+        &[failed(TURN, json!("server_overloaded"))],
+    );
+    assert_eq!(recorded(&follow(&setup, &request)), "applied");
+    let ends = attempt_outcomes(&setup);
+    assert_eq!(ends.len(), 1, "{ends:?}");
+    assert_eq!(ends[0]["turn_end"]["status"], "recorded");
+    assert_eq!(ends[0]["observed_mono_ns"], "00000000000000000601");
+    assert_eq!(activity(&setup)["type"], "notify");
+}
+
+#[test]
+fn a_later_turn_s_prompt_after_a_stop_does_not_reopen_the_turn() {
+    let mut setup = Setup::new();
+    let request = prompted(&mut setup);
+    stop(&setup, "00000000000000000500");
+    // As of Codex 0.163.0 a post-turn compaction that hits the usage limit
+    // ends the turn on an error after a Stop that did not block.
+    append(
+        &rollout_path(&setup),
+        &[failed(TURN, json!("usage_limit_exceeded"))],
+    );
+    prompt(&setup, NEXT_TURN, "00000000000000000600");
+    // A second prompt of the next turn is kept only as the latest prompt.
+    hook(
+        &setup,
+        "UserPromptSubmit",
+        json!({"prompt":"and this","turn_id":NEXT_TURN,"transcript_path":rollout_path(&setup)}),
+        "00000000000000000700",
+    );
+    let before = records(&setup);
+    assert_eq!(recorded(&follow(&setup, &request)), "skipped");
+    assert!(records(&setup) == before);
+    assert!(attempt_outcomes(&setup).is_empty());
+}
+
+#[test]
 fn a_turn_that_went_on_after_its_stop_and_failed_is_recorded() {
     let mut setup = Setup::new();
     let request = prompted(&mut setup);
     // As of Codex 0.162.0 a Stop hook that blocks makes Codex continue the
     // same turn.
-    hook(
-        &setup,
-        "Stop",
-        json!({"stop_hook_active":false,"turn_id":TURN}),
-        "00000000000000000500",
-    );
+    stop(&setup, "00000000000000000500");
     hook(
         &setup,
         "PreToolUse",

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **A Codex turn follower goes on to later turns.** It follows each later lead turn in the rollout until a turn ends on a model error, its binding ends or Codex exits, where before each turn had its own: one `attention hooks follow-turn` process holds the binding's follower lock for each Codex session and reads the rollout once a second. After an update, a running session's follower stays the old version until it leaves.
+
+### Fixed
+
+- **A Codex turn that continues a goal is followed, so its model-error end is recorded.** As of Codex 0.163.0 such a turn runs no prompt hook, and only a prompt hook started a follower: the tab stayed thinking and no `attempt_outcome` was written. A lead hook that names its turn, a tool hook included, now starts a follower when none holds the binding's follower lock, and a goal turn that fails before its first tool call is recorded when the follower went on into it from an earlier turn the binding recorded. The first turn of a session that Codex starts straight into a goal is still not. See [accepted limitations](docs/accepted-limitations.md#a-codex-turn-that-ends-on-a-model-error-is-recorded-only-from-its-rollout).
+- **A Codex turn that fails after a prompt typed into it past a blocked `Stop` is recorded.** As of Codex 0.162.0 a `Stop` that blocks lets the turn go on, and a prompt typed into it then is kept only as the latest prompt; the follower took the `Stop` as the turn's end and wrote nothing, so the tab stayed thinking. A failure with nothing of the turn recorded after its `Stop` still leaves the `Stop` as the end.
+
 ## 1.10.0 — 2026-10-26
 
 ### Added
