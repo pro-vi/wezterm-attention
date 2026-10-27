@@ -592,7 +592,7 @@ fn observation_pools_preserve_each_other_and_fence_evicted_receipts() {
         let mut item = template.clone();
         item.observation_id = Uuid::new_v4().to_string();
         item.observed_mono_ns = format!("{:020}", 1000 + index);
-        assert!(snapshot.reduce(item).unwrap());
+        assert!(snapshot.reduce(item, None).unwrap());
         assert_eq!(snapshot.pools.requests, request_pool);
     }
     assert_eq!(snapshot.pools.general.observations.len(), 64);
@@ -603,11 +603,11 @@ fn observation_pools_preserve_each_other_and_fence_evicted_receipts() {
     let retained = snapshot.clone();
     let mut delayed = template.clone();
     delayed.observed_mono_ns = "00000000000000001065".to_owned();
-    assert!(!snapshot.reduce(delayed).unwrap());
+    assert!(!snapshot.reduce(delayed, None).unwrap());
     assert_eq!(snapshot, retained);
     let mut oversized = template;
     oversized.source_version = Some("x".repeat(2048));
-    assert!(snapshot.reduce(oversized).is_err());
+    assert!(snapshot.reduce(oversized, None).is_err());
     assert_eq!(snapshot, retained);
 }
 
@@ -786,19 +786,19 @@ fn same_key_order_conflict_and_equal_time_eviction() {
         tool_call_id: Some("stable".into()),
         ..Default::default()
     });
-    assert!(snapshot.reduce(item.clone()).unwrap());
+    assert!(snapshot.reduce(item.clone(), None).unwrap());
     let mut older = item.clone();
     older.observed_mono_ns = "00000000000000000001".into();
     older.source_version = Some("old".into());
-    assert!(!snapshot.reduce(older).unwrap());
+    assert!(!snapshot.reduce(older, None).unwrap());
     let mut conflict = item.clone();
     conflict.source_version = Some("conflict".into());
-    assert!(snapshot.reduce(conflict).is_err());
+    assert!(snapshot.reduce(conflict, None).is_err());
     for _ in 0..63 {
         let mut sibling = item.clone();
         sibling.observation_id = Uuid::new_v4().to_string();
         sibling.correlation = None;
-        assert!(snapshot.reduce(sibling).unwrap());
+        assert!(snapshot.reduce(sibling, None).unwrap());
     }
     // A full pool evicts everything at its oldest instant. When that instant
     // is the candidate's own, the candidate goes too, so nothing is stored
@@ -807,7 +807,7 @@ fn same_key_order_conflict_and_equal_time_eviction() {
     let mut sibling = item.clone();
     sibling.observation_id = Uuid::new_v4().to_string();
     sibling.correlation = None;
-    assert!(!snapshot.reduce(sibling).unwrap());
+    assert!(!snapshot.reduce(sibling, None).unwrap());
     assert_eq!(snapshot, full);
     assert_eq!(snapshot.pools.general.observations.len(), 64);
     assert!(snapshot.pools.general.retention_floor_mono_ns.is_none());
@@ -1282,7 +1282,7 @@ fn byte_pressure_is_pool_local_with_maximal_valid_metadata() {
             candidate.observed_mono_ns = format!("{:020}", 1000 + index);
             candidate.correlation.as_mut().unwrap().tool_call_id =
                 Some(format!("{}{:010}", "t".repeat(246), index));
-            snapshot.reduce(candidate).unwrap();
+            snapshot.reduce(candidate, None).unwrap();
         }
         let (changed, unchanged) = if requests {
             (&snapshot.pools.requests, &snapshot.pools.general)

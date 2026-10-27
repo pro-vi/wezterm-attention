@@ -659,7 +659,7 @@ fn native_stop_replay_ignores_execution_audit() {
     end.hold_checks[0].elapsed_ms = 999;
     end.hold_checks[0].note = None;
     assert_ne!(stored.turn_end, replay.turn_end);
-    assert!(!snapshot.reduce(replay).unwrap());
+    assert!(!snapshot.reduce(replay, None).unwrap());
     assert_eq!(snapshot.pools.general.observations.len(), 1);
     assert_eq!(snapshot.pools.general.observations[0], stored);
 }
@@ -1284,4 +1284,70 @@ fn the_guide_example_input_has_the_fields_a_hold_check_receives() {
             .collect::<Vec<_>>()
     };
     assert_eq!(keys(&example), keys(&delivered));
+}
+
+// A prompt typed while the turn's Stop hooks run carries that turn's id, so
+// only the prompt record keeps it. Committed during a quiet check, it still
+// supersedes the older Stop, and the check's note is not applied.
+#[test]
+fn a_same_turn_prompt_committed_during_quiet_check_supersedes_the_stop() {
+    let setup = Setup::new();
+    bind(&setup, "claude");
+    let prompt = json!({"prompt_id":"turn-1"});
+    setup.apply(
+        &event("claude", "UserPromptSubmit", "hold-session", prompt.clone()),
+        "00000000000000000300",
+    );
+    let ready = setup._scratch.0.join("ready");
+    let released = setup._scratch.0.join("released");
+    let check = executable(
+        &setup,
+        &format!(
+            "/bin/cat >/dev/null\n: > '{}'\nwhile [ ! -f '{}' ]; do :; done\nprintf '%s' '{}'",
+            ready.display(),
+            released.display(),
+            QUIET_LINE
+        ),
+    );
+    let registrations = hold_check::validate_checks(
+        &[],
+        &[format!("wezpup={}", check.display())],
+        hold_check::DEFAULT_BUDGET,
+    )
+    .unwrap();
+    thread::scope(|scope| {
+        let writer = scope.spawn(|| {
+            wait_for_check_start(&ready);
+            setup.apply(
+                &event("claude", "UserPromptSubmit", "hold-session", prompt.clone()),
+                "00000000000000000500",
+            );
+            fs::write(&released, "").unwrap();
+        });
+        let outcome = apply_provider_event_with_checks(
+            &event(
+                "claude",
+                "Stop",
+                "hold-session",
+                json!({"prompt_id":"turn-1","stop_hook_active":false}),
+            ),
+            &setup.env,
+            "00000000000000000400",
+            &setup.ports(),
+            &Request {
+                registrations: &registrations,
+                reply: &wezterm_attention::hook_content::HookContent::NotRequested,
+                background_tasks: None,
+                budget: CHECK_BUDGET,
+            },
+        );
+        writer.join().unwrap();
+        assert_eq!(outcome.hold_checks[0].stage, hold_check::Stage::Completed);
+        assert_eq!(outcome.result.as_ref().unwrap().disposition, "ignored");
+        assert_eq!(
+            outcome.turn_end.as_ref().unwrap().status,
+            wezterm_attention::observations::TurnEndStatus::Superseded
+        );
+        assert!(records(&setup, "claude").0.get("hold_notes").is_none());
+    });
 }

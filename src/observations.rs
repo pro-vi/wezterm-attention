@@ -238,8 +238,8 @@ pub struct PromptReference {
 /// A prompt that answered one question of a call: the call's native id, the
 /// question's index in it, and the prompt's observation id and order. The
 /// lifecycle file may never have held that observation: as of Codex 0.162.0
-/// every prompt of a turn carries the turn's id, and the general pool keeps
-/// one per turn.
+/// a prompt typed while a turn runs carries the turn's id, and the general
+/// pool keeps one per turn id.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PromptAnswer {
@@ -308,7 +308,7 @@ impl LeadPrompts {
     }
 
     /// Adds the questions `prompt` answered. A question already answered
-    /// keeps its first answer, so a hook delivered twice adds nothing. The
+    /// keeps its first answer, so a hook delivered twice adds no second answer. The
     /// answers stay in observation order, and beyond `limit` the oldest go.
     /// Says whether it changed.
     pub fn record_answers(
@@ -949,6 +949,67 @@ impl LifecycleSnapshot {
             .filter(|item| item.actor == Actor::Lead)
     }
 
+    /// Whether `draft`, a lead turn end observed at `at`, is an end delivered
+    /// again, of a turn the pools hold an end of (see [`Self::repeats`]).
+    pub fn repeats_turn_end(
+        &self,
+        draft: &LifecycleObservation,
+        at: &str,
+        recorded_prompt: Option<&PromptReference>,
+    ) -> bool {
+        let key = draft.storage_key_parts();
+        self.pools
+            .general
+            .observations
+            .iter()
+            .find(|item| item.storage_key_parts() == key)
+            .is_some_and(|stored| self.repeats(stored, draft, at, recorded_prompt))
+    }
+
+    /// Whether `candidate`, observed at `at`, is `stored`, which has its key,
+    /// delivered again. When `stored` ends a turn that has an id, it is if a
+    /// prompt of another turn was recorded after `stored` and before `at`,
+    /// since that turn is over. Failing that, it is not if the lead went on
+    /// with the turn before `at`, as a `Stop` hook that blocks lets it do: a
+    /// later `Stop` of the turn is then its new end. Otherwise it is when it
+    /// equals `stored`. The pools keep one prompt per turn id, so a prompt
+    /// typed while the turn runs is recorded only as the prompt record's
+    /// latest, `recorded_prompt`, and counts as the lead going on; a prompt
+    /// carrying another turn's id is pooled, under that id.
+    fn repeats(
+        &self,
+        stored: &LifecycleObservation,
+        candidate: &LifecycleObservation,
+        at: &str,
+        recorded_prompt: Option<&PromptReference>,
+    ) -> bool {
+        if stored.turn_id().is_some() && stored.ends_turn(self.provider) {
+            let after = || {
+                self.lead_observations()
+                    .filter(|item| item.observed_mono_ns > stored.observed_mono_ns)
+            };
+            if after().any(|item| {
+                item.is_lead_prompt()
+                    && item.turn_id() != stored.turn_id()
+                    && item.observed_mono_ns.as_str() < at
+            }) {
+                return true;
+            }
+            if after()
+                .map(|item| item.observed_mono_ns.as_str())
+                .chain(
+                    recorded_prompt
+                        .map(|prompt| prompt.observed_mono_ns.as_str())
+                        .filter(|order| *order > stored.observed_mono_ns.as_str()),
+                )
+                .any(|order| order < at)
+            {
+                return false;
+            }
+        }
+        stored.semantic() == candidate.semantic()
+    }
+
     pub fn validate_semantics(&self) -> Result<()> {
         let limits = &manifest()?.limits;
         let mut keys = std::collections::BTreeSet::new();
@@ -1076,7 +1137,13 @@ impl LifecycleSnapshot {
     }
 
     /// Returns false on a duplicate/older/fenced receipt. Conflicts are errors.
-    pub fn reduce(&mut self, candidate: LifecycleObservation) -> Result<bool> {
+    /// `recorded_prompt` is the prompt record's latest, which can show that the
+    /// lead went on with a stored end's turn (see [`Self::repeats`]).
+    pub fn reduce(
+        &mut self,
+        candidate: LifecycleObservation,
+        recorded_prompt: Option<&PromptReference>,
+    ) -> Result<bool> {
         self.validate_semantics()?;
         let limits = &manifest()?.limits;
         if !candidate.within_bounds()? {
@@ -1107,8 +1174,13 @@ impl LifecycleSnapshot {
             if existing.body.tool() != candidate.body.tool() {
                 return Err(invalid());
             }
-            if existing.semantic() == candidate.semantic()
-                || candidate.observed_mono_ns < existing.observed_mono_ns
+            if candidate.observed_mono_ns < existing.observed_mono_ns
+                || self.repeats(
+                    existing,
+                    &candidate,
+                    &candidate.observed_mono_ns,
+                    recorded_prompt,
+                )
             {
                 return Ok(false);
             }
@@ -1269,14 +1341,14 @@ mod tests {
             let mut item = template.clone();
             item.observation_id = Uuid::new_v4().to_string();
             item.observed_mono_ns = format!("{:020}", 1000 + index);
-            assert!(snapshot.reduce(item).unwrap());
+            assert!(snapshot.reduce(item, None).unwrap());
         }
         assert!(snapshot.pools.general.retention_floor_mono_ns.is_none());
         let full = snapshot.clone();
         let mut late = template;
         late.observation_id = Uuid::new_v4().to_string();
         late.observed_mono_ns = format!("{:020}", 500);
-        assert!(!snapshot.reduce(late).unwrap());
+        assert!(!snapshot.reduce(late, None).unwrap());
         assert_eq!(snapshot, full);
     }
 }

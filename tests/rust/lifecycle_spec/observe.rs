@@ -133,24 +133,27 @@ fn a_follower_produced_end_is_a_turn_end_like_any_other() {
     let mut snapshot: LifecycleSnapshot =
         serde_json::from_slice(&fs::read(dir.join("lifecycle.json")).unwrap()).unwrap();
     snapshot
-        .reduce(LifecycleObservation {
-            observation_id: Uuid::new_v4().to_string(),
-            source_event: "task_complete".into(),
-            source_version: None,
-            observed_mono_ns: "00000000000000000301".into(),
-            written_at_unix_ns: "00000000000000000900".into(),
-            actor: Actor::Lead,
-            correlation: Some(NativeCorrelation {
-                turn_id: Some("turn-a".into()),
-                ..Default::default()
-            }),
-            turn_end: None,
-            body: ObservationBody::AttemptOutcome {
-                outcome: AttemptOutcome::Failed,
-                error_category: None,
-                error_code: Some("server_overloaded".into()),
+        .reduce(
+            LifecycleObservation {
+                observation_id: Uuid::new_v4().to_string(),
+                source_event: "task_complete".into(),
+                source_version: None,
+                observed_mono_ns: "00000000000000000301".into(),
+                written_at_unix_ns: "00000000000000000900".into(),
+                actor: Actor::Lead,
+                correlation: Some(NativeCorrelation {
+                    turn_id: Some("turn-a".into()),
+                    ..Default::default()
+                }),
+                turn_end: None,
+                body: ObservationBody::AttemptOutcome {
+                    outcome: AttemptOutcome::Failed,
+                    error_category: None,
+                    error_code: Some("server_overloaded".into()),
+                },
             },
-        })
+            None,
+        )
         .unwrap();
     atomic_replace(&dir.join("lifecycle.json"), &json!(snapshot)).unwrap();
     let answer = observe(&root, &scope, &filters(), Some(&cursor), Duration::ZERO).unwrap();
@@ -317,20 +320,23 @@ fn a_prompt_seen_only_in_the_prompt_record_is_not_reported_twice() {
     let mut snapshot: LifecycleSnapshot =
         serde_json::from_slice(&fs::read(dir.join("lifecycle.json")).unwrap()).unwrap();
     snapshot
-        .reduce(LifecycleObservation {
-            observation_id: observation_id.clone(),
-            source_event: "UserPromptSubmit".into(),
-            source_version: None,
-            observed_mono_ns: "00000000000000000300".into(),
-            written_at_unix_ns: "00000000000000000300".into(),
-            actor: Actor::Lead,
-            correlation: Some(NativeCorrelation {
-                turn_id: Some("turn-a".into()),
-                ..Default::default()
-            }),
-            turn_end: None,
-            body: ObservationBody::PromptSubmitted { input_source: None },
-        })
+        .reduce(
+            LifecycleObservation {
+                observation_id: observation_id.clone(),
+                source_event: "UserPromptSubmit".into(),
+                source_version: None,
+                observed_mono_ns: "00000000000000000300".into(),
+                written_at_unix_ns: "00000000000000000300".into(),
+                actor: Actor::Lead,
+                correlation: Some(NativeCorrelation {
+                    turn_id: Some("turn-a".into()),
+                    ..Default::default()
+                }),
+                turn_end: None,
+                body: ObservationBody::PromptSubmitted { input_source: None },
+            },
+            None,
+        )
         .unwrap();
     atomic_replace(&dir.join("lifecycle.json"), &json!(snapshot)).unwrap();
     let next = ObserveCursor::parse(answer.cursor.as_deref().unwrap(), &scope, &filters()).unwrap();

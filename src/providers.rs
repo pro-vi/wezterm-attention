@@ -1101,10 +1101,26 @@ fn observation_for_body(
         } else {
             None
         },
-        turn_id: if provider == Provider::Codex {
-            strict_optional_label(payload, "turn_id")?
-        } else {
-            None
+        turn_id: match provider {
+            Provider::Codex => strict_optional_label(payload, "turn_id")?,
+            // As of Claude Code 2.1.310 a prompt typed while a turn runs, and
+            // every Stop of that turn, carry the turn's `prompt_id`; any other
+            // input starts a new one. Only the lead's prompts and turn ends
+            // take it as their turn id. Request groups and stored compactions
+            // are keyed by turn id too, and with it two compactions in one
+            // turn would be stored as one.
+            Provider::Claude
+                if event.agent_id.is_none()
+                    && matches!(
+                        body,
+                        ObservationBody::PromptSubmitted { .. }
+                            | ObservationBody::ResponseFinished { .. }
+                            | ObservationBody::AttemptOutcome { .. }
+                    ) =>
+            {
+                strict_optional_label(payload, "prompt_id")?
+            }
+            Provider::Claude | Provider::Pi => None,
         },
         elicitation_id: if elicitation {
             strict_optional_label(payload, "elicitation_id")?

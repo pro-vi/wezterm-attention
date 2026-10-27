@@ -701,13 +701,13 @@ fn rust_and_installed_lua_share_relation_cases_and_retention_floors() {
         snapshot.pools = Default::default();
         let mut siblings = snapshot.clone();
         siblings.kind = "child_lifecycle_snapshot".into();
-        snapshot.reduce(pre).unwrap();
+        snapshot.reduce(pre, None).unwrap();
         // A child's observation is read from the children's file.
         let children = if post.actor == Actor::Lead {
-            snapshot.reduce(post).unwrap();
+            snapshot.reduce(post, None).unwrap();
             None
         } else {
-            siblings.reduce(post).unwrap();
+            siblings.reduce(post, None).unwrap();
             Some(siblings)
         };
         snapshot.pools.requests.retention_floor_mono_ns = Some("00000000000000000001".into());
