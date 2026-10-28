@@ -58,6 +58,7 @@ diagnostic_codes! {
     ChildActiveAfterParentClear => "child_active_after_parent_clear",
     OutsidePane => "outside_pane",
     StateRootMissing => "state_root_missing",
+    TranscriptReplaced => "transcript_replaced",
 }
 
 impl fmt::Display for DiagnosticCode {

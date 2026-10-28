@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -29,7 +29,7 @@ use crate::records::{
 };
 use crate::wezterm::{
     Clock, ControllingTerminal, PaneLister, Presence, ProcessInspector, ProcessListing,
-    ProcessProbe, ProcessRead,
+    ProcessProbe, ProcessRead, resolved_path,
 };
 
 pub const ABSENCE_INTERVAL_NS: u128 = 60_000_000_000;
@@ -330,15 +330,12 @@ pub fn doctor_with_environment(
     probes.push(json!({"name":"environment","status":environment_status}));
     let codex_status = codex_server_probe(processes, &mut diagnostics);
     probes.push(json!({"name":"codex_server","status":codex_status}));
+    let running = running_bindings(root, &audited_records, inspector);
+    let codex_rollout = codex_rollout_probe(&running, inspector, &mut diagnostics);
+    probes.push(json!({"name":"codex_rollout","status":codex_rollout}));
     // After `versions`, which counts each integration_version_mismatch reported
     // before it: a status file Claude Code changed says nothing of this build.
-    let claude_status = claude_status_probe(
-        root,
-        &audited_records,
-        environment,
-        inspector,
-        &mut diagnostics,
-    );
+    let claude_status = claude_status_probe(&running, environment, inspector, &mut diagnostics);
     probes.push(json!({"name":"claude_status","status":claude_status}));
     let claude_sessions = claude_sessions_probe(
         &rows,
@@ -358,7 +355,7 @@ pub fn doctor_with_environment(
         .collect();
     Ok((
         json!({
-            "scope": ["state_files","socket","processes","permissions","versions","environment","codex_server","claude_status","claude_sessions"],
+            "scope": ["state_files","socket","processes","permissions","versions","environment","codex_server","codex_rollout","claude_status","claude_sessions"],
             "unobserved": unobserved,
             "probes": probes,
             "bindings_scanned": rows.len(),
@@ -423,33 +420,13 @@ fn codex_server_probe(
 /// more after one short wait, and a missing one whose host has exited by then
 /// is left out.
 fn claude_status_probe(
-    root: &Path,
-    records: &[Value],
+    running: &[(ClaimOwner, Value)],
     environment: &BTreeMap<String, String>,
     inspector: &dyn ProcessInspector,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> &'static str {
     let mut sessions = Vec::new();
-    for host in records.iter().filter(|record| record["kind"] == "host") {
-        // Most recorded hosts have exited, and that is told without a file.
-        let Ok(Some(owner)) = ClaimOwner::of(host) else {
-            continue;
-        };
-        if owner_state(&owner, inspector) != OwnerState::Alive {
-            continue;
-        }
-        let (Some(address), Some(launch_id), Some(binding_id)) = (
-            record_address(host),
-            host["launch_id"].as_str(),
-            host["binding_id"].as_str(),
-        ) else {
-            continue;
-        };
-        let Some(binding) =
-            crate::lifecycle::followed_binding(root, &address, launch_id, binding_id)
-        else {
-            continue;
-        };
+    for (owner, binding) in running {
         let (Some("claude"), Some(session)) = (
             binding["provider"].as_str(),
             binding["provider_session_id"].as_str(),
@@ -504,6 +481,98 @@ fn claude_status_probe(
         status = "finding";
     }
     status
+}
+
+/// The current binding of each recorded host that still runs, with that host.
+fn running_bindings(
+    root: &Path,
+    records: &[Value],
+    inspector: &dyn ProcessInspector,
+) -> Vec<(ClaimOwner, Value)> {
+    records
+        .iter()
+        .filter(|record| record["kind"] == "host")
+        .filter_map(|host| {
+            // Most recorded hosts have exited, and that is told without a file.
+            let owner = ClaimOwner::of(host).ok().flatten()?;
+            if owner_state(&owner, inspector) != OwnerState::Alive {
+                return None;
+            }
+            let binding = crate::lifecycle::followed_binding(
+                root,
+                &record_address(host)?,
+                host["launch_id"].as_str()?,
+                host["binding_id"].as_str()?,
+            )?;
+            Some((owner, binding))
+        })
+        .collect()
+}
+
+/// Whether each Codex session running now writes its rollout to the file at
+/// the rollout's path, which is the file its turn follower opens (see
+/// [`crate::turn_follower`]). As of Codex 0.163.0 a session holds its rollout
+/// open from its first write until a write fails, so a file it holds under
+/// that path that the path no longer names was renamed over or removed there:
+/// a follower started since reads a copy none of its turn ends reach, or finds
+/// no file. A session counts when its recorded host still runs, its binding is
+/// current and names a rollout, and the host holds a file under that path.
+fn codex_rollout_probe(
+    running: &[(ClaimOwner, Value)],
+    inspector: &dyn ProcessInspector,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> &'static str {
+    let (mut checked, mut unanswered, mut found) = (false, false, false);
+    for (owner, binding) in running {
+        let (Some("codex"), Some(session), Some(rollout), Some(pane)) = (
+            binding["provider"].as_str(),
+            binding["provider_session_id"].as_str(),
+            binding["transcript_path"].as_str(),
+            binding.pointer("/address/pane_id").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let Some(files) = inspector.open_files(owner.pid) else {
+            unanswered = true;
+            continue;
+        };
+        let rollout = resolved_path(rollout).unwrap_or_else(|| PathBuf::from(rollout));
+        let mut held = files.iter().filter(|file| file.path == rollout).peekable();
+        if held.peek().is_none() {
+            continue;
+        }
+        // As the follower reads it: a link at the path is not the file.
+        let named = match fs::symlink_metadata(&rollout) {
+            Ok(metadata) => Some((u64::from(metadata.dev() as u32), metadata.ino())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => {
+                unanswered = true;
+                continue;
+            }
+        };
+        checked = true;
+        if held.all(|file| named == Some((file.device, file.inode))) {
+            continue;
+        }
+        let mut item = Diagnostic::new(
+            DiagnosticCode::TranscriptReplaced,
+            "a running Codex session writes to a rollout that is no longer the file at its \
+             path, so a turn of it that ends on a model error is not recorded",
+        );
+        item.set("provider_session_id", session);
+        item.set("pane_id", pane);
+        diagnostics.push(item);
+        found = true;
+    }
+    if found {
+        "finding"
+    } else if unanswered {
+        "unavailable"
+    } else if checked {
+        "healthy"
+    } else {
+        "unobserved"
+    }
 }
 
 /// Whether each interactive Claude Code session running in a pane a recorded

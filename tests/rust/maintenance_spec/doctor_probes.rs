@@ -435,17 +435,21 @@ impl ProcessInspector for OneHost {
     }
 }
 
-/// Records `HOST_PID` as the host of the binding of session-a, as a prompt
+/// Records `pid` as the host of `provider`'s binding of `session`, as a prompt
 /// hook that proved it would.
-fn record_claude_host(setup: &Setup) {
+fn record_host(setup: &Setup, provider: &str, session: &str, pid: i32) {
     let (address, _) = pane_address(&setup.env).expect("address");
     let launch = &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"];
+    let binding = binding_id(provider, session, launch);
     atomic_replace(
-        &setup.binding_dir().join("host.json"),
+        &launch_dir(&setup.root(), &address, launch)
+            .join("bindings")
+            .join(&binding)
+            .join("host.json"),
         &json!({
             "kind":"host","schema":3,"address":address,"launch_id":launch,
-            "binding_id":binding_id("claude", "session-a", launch),
-            "owner_pid":HOST_PID.to_string(),"owner_started_sec":"1700000000",
+            "binding_id":binding,
+            "owner_pid":pid.to_string(),"owner_started_sec":"1700000000",
             "owner_started_usec":HOST_STARTED_USEC.to_string(),
             "owner_boot_session_id":BOOT,"tty_path":"/dev/ttys888",
             "tty_fingerprint":"f".repeat(64),"source_event":"UserPromptSubmit",
@@ -516,7 +520,7 @@ fn doctor_reports_whether_running_claude_sessions_status_files_are_understood() 
             .contains(&json!("claude_status")),
         "{result}"
     );
-    record_claude_host(&setup);
+    record_host(&setup, "claude", "session-a", HOST_PID);
     let (result, _) = doctor(false);
     assert_eq!(
         probe_status(&result, "claude_status"),
@@ -609,7 +613,7 @@ fn doctor_reads_a_claude_session_s_file_in_its_configuration_directory() {
         &BTreeMap::from([("CLAUDE_CONFIG_DIR".to_owned(), config.display().to_string())]),
     );
     apply_provider_event(&event, &setup.env, "00000000000000000200", &setup.ports()).expect("bind");
-    record_claude_host(&setup);
+    record_host(&setup, "claude", "session-a", HOST_PID);
     write_status(&config, &status_file("idle"));
     let (result, _) = wezterm_attention::maintenance::doctor_with_environment(
         &setup.root(),
@@ -753,4 +757,185 @@ fn doctor_names_a_running_claude_session_in_a_pane_with_no_current_binding() {
     unobserved("settings that do not call Attention", host_facts());
     fs::remove_file(&settings).expect("settings removed");
     unobserved("no settings", host_facts());
+}
+
+/// A process table where only the Codex process at `pid` runs, while
+/// `running`, as the host [`host_facts`] describes. Its open files are the
+/// kernel's list for `files_of`, and cannot be listed without one.
+#[cfg(target_os = "macos")]
+struct CodexHost {
+    pid: i32,
+    running: bool,
+    files_of: Option<i32>,
+}
+
+#[cfg(target_os = "macos")]
+impl ProcessInspector for CodexHost {
+    fn self_claim_supported(&self) -> bool {
+        true
+    }
+
+    fn own_pid(&self) -> i32 {
+        0
+    }
+
+    fn process(&self, pid: i32) -> ProcessRead {
+        if self.running && pid == self.pid {
+            ProcessRead::Found(host_facts())
+        } else {
+            ProcessRead::Gone
+        }
+    }
+
+    fn boot_session(&self) -> Option<String> {
+        Some(BOOT.to_owned())
+    }
+
+    fn terminal_device(&self, _path: &str) -> Option<u64> {
+        Some(PANE_DEVICE)
+    }
+
+    fn open_files(&self, _pid: i32) -> Option<Vec<wezterm_attention::wezterm::OpenFile>> {
+        wezterm_attention::wezterm::SystemProcessInspector.open_files(self.files_of?)
+    }
+}
+
+/// A child process that holds files open for append until dropped.
+#[cfg(target_os = "macos")]
+struct Holder(std::process::Child);
+
+#[cfg(target_os = "macos")]
+impl Drop for Holder {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// As of Codex 0.163.0 a running session keeps writing the rollout it opened,
+/// so a rollout renamed over at its path leaves its turn follower reading a
+/// copy that no turn end reaches. Doctor compares the file the session holds
+/// under that path with the file the path names.
+#[cfg(target_os = "macos")]
+#[test]
+fn doctor_reports_a_codex_session_writing_a_rollout_replaced_at_its_path() {
+    use std::io::BufRead;
+    let setup = Setup::new();
+    wezterm_attention::claim_launch(&setup.env, &setup.ports()).expect("claim");
+    let session = "019a2b3c-4d5e-7f60-8a1b-2c3d4e5f6a7b";
+    // Under /tmp, which the kernel names by its target, /private/tmp.
+    let rollout = setup
+        ._scratch
+        .0
+        .join(format!("rollout-2026-10-28T00-00-00-{session}.jsonl"));
+    fs::write(&rollout, "{\"type\":\"session_meta\"}\n").expect("rollout");
+    let event = parse_provider_event(
+        "codex",
+        "SessionStart",
+        &json!({"session_id":session,"transcript_path":rollout.display().to_string(),
+                "cwd":"/tmp/project","hook_event_name":"SessionStart","source":"startup",
+                "model":"model-a"}),
+        &BTreeMap::new(),
+    );
+    apply_provider_event(&event, &setup.env, "00000000000000000200", &setup.ports()).expect("bind");
+    // A second file it holds is not the rollout, whatever its inode.
+    let mut child = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            "exec 3>>\"$0\" 4>>\"$1\" && echo held && exec sleep 60",
+        ])
+        .arg(&rollout)
+        .arg(setup._scratch.0.join("other.jsonl"))
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("holder");
+    let mut held = String::new();
+    std::io::BufReader::new(child.stdout.take().expect("stdout"))
+        .read_line(&mut held)
+        .expect("holder ready");
+    let holder = Holder(child);
+    let pid = i32::try_from(holder.0.id()).expect("pid");
+    let doctor = |running: bool, files_of: Option<i32>| {
+        wezterm_attention::maintenance::doctor_with_environment(
+            &setup.root(),
+            &setup.env,
+            Some(&setup.panes),
+            Some(&setup.processes),
+            &CodexHost {
+                pid,
+                running,
+                files_of,
+            },
+        )
+        .expect("doctor")
+    };
+    let replaced = |diagnostics: &[wezterm_attention::protocol::Diagnostic]| {
+        diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::TranscriptReplaced)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    let (result, _) = doctor(true, Some(pid));
+    assert_eq!(
+        probe_status(&result, "codex_rollout"),
+        "unobserved",
+        "no host is recorded: {result}"
+    );
+    assert!(
+        result["scope"]
+            .as_array()
+            .expect("scope")
+            .contains(&json!("codex_rollout")),
+        "{result}"
+    );
+    record_host(&setup, "codex", session, pid);
+    let (result, diagnostics) = doctor(true, Some(pid));
+    assert_eq!(
+        probe_status(&result, "codex_rollout"),
+        "healthy",
+        "{result}"
+    );
+    assert!(replaced(&diagnostics).is_empty(), "{diagnostics:?}");
+    let own = i32::try_from(std::process::id()).expect("pid");
+    let (result, _) = doctor(true, Some(own));
+    assert_eq!(
+        probe_status(&result, "codex_rollout"),
+        "unobserved",
+        "a host that holds nothing under the path: {result}"
+    );
+    let (result, _) = doctor(true, None);
+    assert_eq!(
+        probe_status(&result, "codex_rollout"),
+        "unavailable",
+        "{result}"
+    );
+
+    let copy = rollout.with_extension("copy");
+    fs::copy(&rollout, &copy).expect("copy");
+    fs::rename(&copy, &rollout).expect("rename over the rollout");
+    let (result, diagnostics) = doctor(true, Some(pid));
+    assert_eq!(
+        probe_status(&result, "codex_rollout"),
+        "finding",
+        "{result}"
+    );
+    let found = replaced(&diagnostics);
+    assert_eq!(found.len(), 1, "{diagnostics:?}");
+    assert_eq!(
+        found[0].context.get("provider_session_id"),
+        Some(&json!(session))
+    );
+    let (address, _) = pane_address(&setup.env).expect("address");
+    assert_eq!(
+        found[0].context.get("pane_id"),
+        Some(&json!(address.pane_id))
+    );
+    let (result, _) = doctor(false, Some(pid));
+    assert_eq!(
+        probe_status(&result, "codex_rollout"),
+        "unobserved",
+        "the host has exited: {result}"
+    );
 }

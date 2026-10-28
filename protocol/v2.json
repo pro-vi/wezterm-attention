@@ -241,7 +241,8 @@
       "session_detached",
       "child_active_after_parent_clear",
       "outside_pane",
-      "state_root_missing"
+      "state_root_missing",
+      "transcript_replaced"
     ],
     "end_reasons": ["session_end", "sweep_absent"],
     "pane_presence": ["present", "verified_absent", "unavailable"],

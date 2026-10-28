@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`attention doctor` has a `codex_rollout` probe.** It reports a running Codex session that writes to a rollout which is no longer the file at its rollout path, as `transcript_replaced` (a new diagnostic code) with `context.provider_session_id` and `context.pane_id`. A writer that renames a new file over a running session's rollout, as `sed -i`, an editor's safe save or Python's `os.replace` do, leaves Codex appending to the file it opened, and a turn follower started after that reads the copy at the path, which no turn end reaches, so a turn that ends on a model error is not recorded and nothing said so. On macOS the probe compares the file the session's process holds open under the rollout path with the file the path names. A session counts when its recorded host still runs, its binding is current and names a rollout, and the process holds a file under that path; with none the probe is `unobserved`, and where the process's open files cannot be listed it is `unavailable`. See [accepted limitations](docs/accepted-limitations.md#a-codex-turn-that-ends-on-a-model-error-is-recorded-only-from-its-rollout).
+
 ## 1.10.1 — 2026-10-27
 
 ### Changed

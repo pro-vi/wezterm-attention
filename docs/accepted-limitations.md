@@ -864,6 +864,24 @@ error. What it cannot do:
 - A follower that stops without recording, because its host could not be read,
   the rollout was refused, its lock could not be rewritten to name the next
   turn or its write failed, leaves no record that it stopped.
+- A follower reads the file at the rollout's path. A writer that renames a new
+  file over a running session's rollout, as `sed -i`, an editor's safe save or
+  Python's `os.replace` do, leaves Codex appending to the file it opened, which
+  then has no name. A follower that had that file open leaves at its next read,
+  as above, and one that the next hook starts reads the copy at the path, which
+  no turn end reaches: it waits until the session or its binding ends, and no
+  turn of the session that ends on a model error is recorded. Seen once, with
+  Codex 0.163.0 on 2026-10-27, after a script rewrote a running session's
+  rollout with `os.replace`. On macOS `attention doctor`'s `codex_rollout`
+  probe reports such a session as `transcript_replaced`: it compares the file
+  the session's process holds open under the rollout path with the file the
+  path names (checked on macOS 26.7.1, where the kernel keeps a removed file's
+  last path). What Codex wrote after the rename is only in the file it holds,
+  and is gone when it exits. Resuming the session makes Codex write the file at
+  the path again, continuing from what that file holds (read in the Codex
+  source at tag `rust-v0.163.0`: `RolloutRecorderParams::Resume` in
+  `rollout/src/recorder.rs`; not tried). To rewrite a running session's
+  rollout, write the file in place.
 
 ## A pane a shell has claimed refuses agents started without its launch id
 

@@ -134,7 +134,7 @@ pub enum Presence {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PaneProcessSet {
     pairs: BTreeSet<(String, String)>,
-    /// Each socket spelling a process carries, as [`resolved_socket_path`]
+    /// Each socket spelling a process carries, as [`resolved_path`]
     /// resolves it; `None` when its directory could not be resolved.
     resolved: BTreeMap<String, Option<PathBuf>>,
     /// Some process of this user was listed and its environment could not be
@@ -177,12 +177,13 @@ fn codex_home(codex_home: Option<&[u8]>, home: Option<&[u8]>) -> Option<PathBuf>
         .or_else(|| home.and_then(text).map(|home| home.join(".codex")))
 }
 
-/// A socket path as two spellings of it can be compared: its directory with
-/// every symlink resolved, joined to its file name. The file itself is left
-/// as named, because it may be the part that is gone. A realm record keeps
-/// the path resolved, while a process keeps it as WezTerm was configured to
-/// spell it, through `/tmp` on macOS or a symlinked home.
-fn resolved_socket_path(path: &str) -> Option<PathBuf> {
+/// A path as two spellings of it can be compared: its directory with every
+/// symlink resolved, joined to its file name. The file itself is left as
+/// named, because it may be the part that is gone. A realm record keeps a
+/// socket path resolved, while a process keeps it as WezTerm was configured to
+/// spell it, through `/tmp` on macOS or a symlinked home; as of macOS 26.7.1
+/// the kernel names a file a process holds open with every symlink resolved.
+pub(crate) fn resolved_path(path: &str) -> Option<PathBuf> {
     let path = Path::new(path);
     if !path.is_absolute() {
         return None;
@@ -218,7 +219,7 @@ impl PaneProcessSet {
     fn insert(&mut self, socket: &str, pane: &str) {
         if !self.resolved.contains_key(socket) {
             self.resolved
-                .insert(socket.to_owned(), resolved_socket_path(socket));
+                .insert(socket.to_owned(), resolved_path(socket));
         }
         self.pairs.insert((socket.to_owned(), pane.to_owned()));
     }
@@ -275,8 +276,7 @@ impl PaneProcessSet {
     /// `Absent` only when every process was read and every socket carrying
     /// that pane id could be compared; otherwise it is `Unseen`.
     pub fn presence(&self, socket_path: &str, pane_id: &str) -> Presence {
-        let wanted =
-            resolved_socket_path(socket_path).unwrap_or_else(|| PathBuf::from(socket_path));
+        let wanted = resolved_path(socket_path).unwrap_or_else(|| PathBuf::from(socket_path));
         let mut undecided = false;
         for (socket, _) in self.pairs.iter().filter(|(_, pane)| pane == pane_id) {
             if socket == socket_path {
@@ -424,6 +424,16 @@ pub enum ProcessRead {
     Unknown,
 }
 
+/// A regular file a process holds open, as the kernel names it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenFile {
+    /// The name the kernel keeps for it. As of macOS 26.7.1 that is the name
+    /// it last had once it was removed or renamed over.
+    pub path: PathBuf,
+    pub device: u64,
+    pub inode: u64,
+}
+
 /// The kernel's process table and terminal devices, as the claim an agent
 /// makes from its own hook needs them.
 pub trait ProcessInspector: Send + Sync {
@@ -439,6 +449,11 @@ pub trait ProcessInspector: Send + Sync {
     /// The device number of the terminal at `path`, or `None` unless it is a
     /// character device this user owns.
     fn terminal_device(&self, path: &str) -> Option<u64>;
+    /// The regular files `pid` holds open, or `None` when they cannot be
+    /// listed.
+    fn open_files(&self, _pid: i32) -> Option<Vec<OpenFile>> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -466,6 +481,10 @@ impl ProcessInspector for SystemProcessInspector {
         let metadata = fs::metadata(path).ok()?;
         (metadata.file_type().is_char_device() && metadata.uid() == effective_uid())
             .then(|| u64::from(metadata.rdev() as u32))
+    }
+
+    fn open_files(&self, pid: i32) -> Option<Vec<OpenFile>> {
+        read_open_files(pid)
     }
 }
 
@@ -587,6 +606,110 @@ fn with_kinfo_proc<T>(pid: i32, read: impl FnOnce(&[u8]) -> T) -> Option<T> {
 #[cfg(not(target_os = "macos"))]
 fn read_process(_pid: i32) -> ProcessRead {
     ProcessRead::Unknown
+}
+
+/// `struct vnode_fdinfowithpath` from `<sys/proc_info.h>`, which `libc`
+/// 0.2.189 does not define: the descriptor's 24-byte `struct proc_fileinfo`,
+/// not read here, then its vnode and path.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct VnodeDescriptor {
+    _file: [u64; 3],
+    vnode: libc::vnode_info_path,
+}
+
+#[cfg(target_os = "macos")]
+const _: () = assert!(std::mem::size_of::<VnodeDescriptor>() == 1200);
+
+/// `PROC_PIDFDVNODEPATHINFO`, the `proc_pidfdinfo` flavor that answers a
+/// [`VnodeDescriptor`], which `libc` 0.2.189 does not define either.
+#[cfg(target_os = "macos")]
+const VNODE_PATH_FLAVOR: libc::c_int = 2;
+
+#[cfg(target_os = "macos")]
+fn read_open_files(pid: i32) -> Option<Vec<OpenFile>> {
+    use std::mem::size_of;
+    use std::os::unix::ffi::OsStrExt;
+    if pid <= 0 {
+        return None;
+    }
+    // SAFETY: a null buffer of size 0 asks only for the size the list needs.
+    let needed =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    let needed = usize::try_from(needed).ok().filter(|bytes| *bytes > 0)?;
+    // Room for descriptors opened between the two calls.
+    let mut descriptors = vec![
+        libc::proc_fdinfo {
+            proc_fd: 0,
+            proc_fdtype: 0,
+        };
+        needed / size_of::<libc::proc_fdinfo>() + 32
+    ];
+    let capacity =
+        libc::c_int::try_from(descriptors.len() * size_of::<libc::proc_fdinfo>()).ok()?;
+    // SAFETY: `descriptors` is writable for the `capacity` bytes the call is
+    // told of.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            descriptors.as_mut_ptr().cast(),
+            capacity,
+        )
+    };
+    let written = usize::try_from(written).ok().filter(|bytes| *bytes > 0)?;
+    descriptors.truncate(written / size_of::<libc::proc_fdinfo>());
+    let files = descriptors
+        .iter()
+        .filter(|descriptor| {
+            libc::c_int::try_from(descriptor.proc_fdtype) == Ok(libc::PROX_FDTYPE_VNODE)
+        })
+        .filter_map(|descriptor| {
+            let mut info = std::mem::MaybeUninit::<VnodeDescriptor>::zeroed();
+            let size = libc::c_int::try_from(size_of::<VnodeDescriptor>()).ok()?;
+            // SAFETY: `info` is writable for the `size` bytes the call is told
+            // of.
+            let read = unsafe {
+                libc::proc_pidfdinfo(
+                    pid,
+                    descriptor.proc_fd,
+                    VNODE_PATH_FLAVOR,
+                    info.as_mut_ptr().cast(),
+                    size,
+                )
+            };
+            if read != size {
+                return None;
+            }
+            // SAFETY: the call filled all of it, and it began zeroed, which is
+            // a valid value of every field.
+            let info = unsafe { info.assume_init_ref() };
+            let stat = &info.vnode.vip_vi.vi_stat;
+            if stat.vst_mode & libc::S_IFMT != libc::S_IFREG {
+                return None;
+            }
+            let path: Vec<u8> = info
+                .vnode
+                .vip_path
+                .iter()
+                .flatten()
+                .map(|byte| *byte as u8)
+                .take_while(|byte| *byte != 0)
+                .collect();
+            Some(OpenFile {
+                path: PathBuf::from(OsStr::from_bytes(&path)),
+                device: u64::from(stat.vst_dev),
+                inode: stat.vst_ino,
+            })
+        })
+        .collect();
+    Some(files)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_open_files(_pid: i32) -> Option<Vec<OpenFile>> {
+    None
 }
 
 /// A boot session id as `kern.bootsessionuuid` gives it: a hyphenated UUID,
