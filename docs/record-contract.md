@@ -173,7 +173,10 @@ lock: its publication names only the pane, which leaves any launch a claim publi
 retention-floor, and absence fences; a running child's order is its `last_mono_ns` in
 `children.json`. `written_at_unix_ns` is required on activity, binding, binding-end and child
 presence set records. It supplies TTL and 30-day retention age; on the child presence set it says
-when the set was last written and decides nothing.
+when the set was last written and decides nothing. An activity written again with the same content
+and a `ttl_ms` while it is still shown keeps its `event_id` and `observed_mono_ns` and takes the new
+`written_at_unix_ns`, which restarts its TTL. Written again after its TTL ran out, it is a new
+activity.
 
 A binding-end record ends the binding event its `binding_event_id` names, and any binding it was
 observed at or after. The name is what orders an end across a reboot: the monotonic clock restarts

@@ -3678,6 +3678,36 @@ test("activity TTL uses written Unix time while event order stays monotonic", fu
   write_json_path(activity_path, samples.activity)
 end)
 
+test("a renewed thinking activity stays shown past its first write and sends no new view", function()
+  materialize_state_case(protocol_fixture.state_case)
+  local samples = protocol_fixture.record_samples
+  local activity = decode_json(encode_json(samples.activity))
+  activity.type = "thinking"
+  activity.ttl_ms = 30000
+  activity.written_at_unix_ns = "00000000010000000000"
+  local activity_path = fixture_binding_dir() .. "/activity.json"
+  write_json_path(activity_path, activity)
+
+  local messages = {}
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  instance.apply_to_config({}, { auto_poll = false, dir = test_dir, review_key = false,
+    on_view_change = function(message) messages[#messages + 1] = message end })
+  local pane = { id = 4281, domain = "unix", attention = protocol_fixture.wire_sample }
+  local window = window_double({ tabs = { { pane } }, focused = false })
+  instance.poll(window, { now_unix_ns = "00000000020000000000", call_after = function() end })
+  assert(#messages == 1 and messages[1].kind == "initial", "precondition: one initial view")
+  assert(messages[1].view.activity_type == "thinking", "the mark is shown inside its first limit")
+
+  activity.written_at_unix_ns = "00000000030000000000"
+  write_json_path(activity_path, activity)
+  instance.poll(window, { now_unix_ns = "00000000050000000000", call_after = function() end })
+  assert(pane_view(pane, instance).activity_type == "thinking",
+    "the same event is still shown after the first write time plus ttl_ms")
+  assert(#messages == 1, "rewriting the write time of the same event is not a new view, got "
+    .. #messages)
+  write_json_path(activity_path, samples.activity)
+end)
+
 test("a record written after the poll's clock sample is fresh, not clock skew", function()
   materialize_state_case(protocol_fixture.state_case)
   local samples = protocol_fixture.record_samples

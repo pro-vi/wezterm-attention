@@ -4,7 +4,12 @@
 
 ### Added
 
+- **Sending the same mark again renews its time limit.** `attention mark --ttl-ms` answered `skipped` for a mark identical to the stored one and kept the old write time, so a program that sends the mark every few seconds could not keep it alive, and changing `--frame` to force a write held the spinner on one frame and fired `on_view_change` on every send. A repeat before the limit runs out now answers `renewed`, a new disposition value, and keeps the event id and the order stamp.
 - **`attention doctor` has a `codex_rollout` probe.** It reports a running Codex session that writes to a rollout which is no longer the file at its rollout path, as `transcript_replaced` (a new diagnostic code) with `context.provider_session_id` and `context.pane_id`. A writer that renames a new file over a running session's rollout, as `sed -i`, an editor's safe save or Python's `os.replace` do, leaves Codex appending to the file it opened, and a turn follower started after that reads the copy at the path, which no turn end reaches, so a turn that ends on a model error is not recorded and nothing said so. On macOS the probe compares the file the session's process holds open under the rollout path with the file the path names. A session counts when its recorded host still runs, its binding is current and names a rollout, and the process holds a file under that path; with none the probe is `unobserved`, and where the process's open files cannot be listed it is `unavailable`. See [accepted limitations](docs/accepted-limitations.md#a-codex-turn-that-ends-on-a-model-error-is-recorded-only-from-its-rollout).
+
+### Fixed
+
+- **A repeated mark sent after its time limit ran out is written again.** The writer never checked expiry, so an identical mark sent after the stored one expired was `skipped` and the tab stayed empty. It is now a new event, with a new event id.
 
 ## 1.10.1 — 2026-10-27
 

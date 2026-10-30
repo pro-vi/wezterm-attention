@@ -442,7 +442,7 @@ struct MarkArgs {
     /// Store a label (1..=256 bytes, no control characters) on the activity; inspect, get_attention_view and a tab formatter's ctx.attention.label return it, the default tab does not draw it. thinking, stop and notify only.
     #[arg(long)]
     label: Option<String>,
-    /// The activity expires this many milliseconds after it is written, and the tab stops showing it. thinking, stop and notify only.
+    /// The activity expires this many milliseconds after it is written, and the tab stops showing it. thinking, stop and notify only. Sending the same mark again before the limit runs out renews it: the limit starts again, and the event id stays the same.
     #[arg(long)]
     ttl_ms: Option<u64>,
 }

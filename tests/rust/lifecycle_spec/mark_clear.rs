@@ -126,7 +126,7 @@ fn cli_mark_clear_writes_the_activity_clear() {
 
 /// What the Rust reader reports for the launch's selected activity: its
 /// availability and, when one is present, its source.
-fn rust_activity(setup: &Setup) -> (RecordAvailability, Option<String>) {
+pub(super) fn rust_activity(setup: &Setup) -> (RecordAvailability, Option<String>) {
     let launch_id = &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"];
     let root = state_root(&setup.env).unwrap();
     let (address, _) = pane_address(&setup.env).unwrap();
@@ -188,7 +188,7 @@ pub(super) fn plugin_reader_answer(setup: &Setup, question: &str) -> String {
         .to_owned()
 }
 
-fn launch_activity_path(setup: &Setup) -> PathBuf {
+pub(super) fn launch_activity_path(setup: &Setup) -> PathBuf {
     let root = state_root(&setup.env).unwrap();
     let (address, _) = pane_address(&setup.env).unwrap();
     launch_dir(&root, &address, &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"]).join("activity.json")

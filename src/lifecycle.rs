@@ -25,8 +25,8 @@ use crate::observations::{
     PromptReference, TurnEnd, TurnEndStatus,
 };
 use crate::protocol::{
-    AttentionError, Diagnostic, DiagnosticCode, Disposition, Provider, Result, free_of_control,
-    manifest,
+    AttentionError, Diagnostic, DiagnosticCode, Disposition, Provider, Result, elapsed_beyond,
+    free_of_control, manifest,
 };
 use crate::providers::{ProviderAction, ProviderEvent};
 use crate::records::{
@@ -77,6 +77,7 @@ fn accepted(result: &LifecycleResult) -> bool {
             | Disposition::Confirmed
             | Disposition::Replaced
             | Disposition::Skipped
+            | Disposition::Renewed
     )
 }
 
@@ -1170,16 +1171,29 @@ fn activity_slot(
     )
 }
 
-/// Whether the activity `existing` is still on screen: newer than the clear
-/// watermark of its slot, and not acknowledged by the user.
+/// Whether the activity `existing` is still on screen at the wall time `now`:
+/// newer than the clear watermark of its slot, not acknowledged by the user,
+/// and inside its time limit. A wall age that cannot be read (a clock set
+/// back, a stamp that does not parse) counts as inside it.
 fn activity_visible(
     root: &Path,
     identity: &RecordIdentity,
     existing: Option<&Value>,
     clear: Option<&Value>,
+    now: &str,
 ) -> bool {
     match existing {
-        Some(activity) => uncleared(activity, clear) && !acknowledged(root, identity, activity),
+        Some(activity) => {
+            uncleared(activity, clear)
+                && !acknowledged(root, identity, activity)
+                && !activity["ttl_ms"].as_u64().is_some_and(|ttl_ms| {
+                    elapsed_beyond(
+                        now,
+                        activity["written_at_unix_ns"].as_str().unwrap_or(""),
+                        u128::from(ttl_ms) * 1_000_000,
+                    ) == Some(true)
+                })
+        }
         None => clear.is_none(),
     }
 }
@@ -1243,9 +1257,10 @@ fn just_after<'a>(stamps: impl Iterator<Item = &'a str>) -> Option<String> {
 /// The one ordering every activity writer applies. An activity with content
 /// `base`, observed at `observation`, meets the activity `existing` in its
 /// slot and the slot's `clear` watermark. The same content still `visible`
-/// is a replay of it; a `held` activity keeps the slot; otherwise the later
-/// observation takes the slot, unless the clear already covers it. An equal
-/// observation with other content is a conflict.
+/// is a replay of it, and a replay of an activity with a time limit renews
+/// it: the limit starts again from this write. A `held` activity keeps the
+/// slot; otherwise the later observation takes the slot, unless the clear
+/// already covers it. An equal observation with other content is a conflict.
 fn plan_activity(
     existing: Option<Value>,
     clear: Option<&Value>,
@@ -1265,7 +1280,17 @@ fn plan_activity(
         if visible && semantic_activity(existing.clone()) == *base {
             let mut result = LifecycleResult::new(Disposition::Skipped);
             result.event_id = existing["event_id"].as_str().map(str::to_owned);
-            return kept(result, Some(existing));
+            if existing.get("ttl_ms").is_none() {
+                return kept(result, Some(existing));
+            }
+            result.disposition = Disposition::Renewed;
+            let mut renewed = existing;
+            renewed["written_at_unix_ns"] = json!(written_at);
+            return ActivityOutcome {
+                result,
+                standing: Some(renewed.clone()),
+                written: Some(renewed),
+            };
         }
         if held {
             return kept(LifecycleResult::new(Disposition::Ignored), Some(existing));
@@ -1846,8 +1871,13 @@ fn apply_activity(
             }
             let existing = read_record(&activity_path, Some("activity"), &identity)?;
             let clear = read_record_at(&resolved.root, "activity_clear", &identity)?;
-            let visible =
-                activity_visible(&resolved.root, &identity, existing.as_ref(), clear.as_ref());
+            let visible = activity_visible(
+                &resolved.root,
+                &identity,
+                existing.as_ref(),
+                clear.as_ref(),
+                written_at,
+            );
             // A native replay names an end of a turn whose end the pools hold
             // (see `LifecycleSnapshot::repeats`), even when its hook receives a
             // later local timestamp. Keep its stored decision and leave
@@ -2263,6 +2293,7 @@ pub fn apply_mark_activity(
                 &activity_identity,
                 existing.as_ref(),
                 clear.as_ref(),
+                written_at,
             );
             let ActivityOutcome {
                 result, written, ..
@@ -3686,7 +3717,13 @@ pub(crate) fn record_codex_turn_failure(
                 ),
             )
             .unwrap_or_else(|| end_observation.clone());
-            let visible = activity_visible(root, &identity, existing.as_ref(), clear.as_ref());
+            let visible = activity_visible(
+                root,
+                &identity,
+                existing.as_ref(),
+                clear.as_ref(),
+                &written_at,
+            );
             let base = activity_base(&resolved, event, &binding_id)?;
             let ActivityOutcome {
                 result, written, ..

@@ -253,6 +253,10 @@ pub enum Disposition {
     Confirmed,
     Replaced,
     Skipped,
+    /// An identical activity with a time limit, sent again while it is still
+    /// shown: the stored event stays, and its write time moves to this write,
+    /// which starts the limit again.
+    Renewed,
     Ignored,
     Conflict,
     Partial,
@@ -267,6 +271,7 @@ impl Disposition {
             Self::Confirmed => "confirmed",
             Self::Replaced => "replaced",
             Self::Skipped => "skipped",
+            Self::Renewed => "renewed",
             Self::Ignored => "ignored",
             Self::Conflict => "conflict",
             Self::Partial => "partial",

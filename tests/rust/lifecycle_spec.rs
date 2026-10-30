@@ -69,6 +69,9 @@ mod metadata_fields;
 #[path = "lifecycle_spec/mark_clear.rs"]
 mod mark_clear;
 
+#[path = "lifecycle_spec/mark_renewal.rs"]
+mod mark_renewal;
+
 #[path = "lifecycle_spec/self_claim.rs"]
 mod self_claim;
 
@@ -2672,7 +2675,7 @@ fn pi_review_and_clear_share_the_current_binding_without_ending_it() {
 }
 
 #[test]
-fn manual_mark_targets_the_launch_and_a_duplicate_is_skipped() {
+fn manual_mark_targets_the_launch_and_a_duplicate_renews_its_time_limit() {
     let setup = Setup::new();
     setup.claim();
     let first = apply_mark_activity(
@@ -2698,7 +2701,8 @@ fn manual_mark_targets_the_launch_and_a_duplicate_is_skipped() {
         "00000000012345678900",
     )
     .expect("unchanged duplicate manual mark");
-    assert_eq!(unchanged.disposition, "skipped");
+    assert_eq!(unchanged.disposition, "renewed");
+    assert_eq!(unchanged.event_id, first.event_id);
     let duplicate = apply_mark_activity(
         &setup.env,
         "notify",
@@ -2710,7 +2714,7 @@ fn manual_mark_targets_the_launch_and_a_duplicate_is_skipped() {
         "00000000012345678900",
     )
     .expect("duplicate manual mark");
-    assert_eq!(duplicate.disposition, "skipped");
+    assert_eq!(duplicate.disposition, "renewed");
     assert_eq!(
         apply_mark_activity(
             &setup.env,

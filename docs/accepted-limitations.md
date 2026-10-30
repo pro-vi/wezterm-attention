@@ -38,9 +38,13 @@ that nothing handles should return an `AttentionError`.
 cutoff for a Codex parent's child clear, and controls how long a child's
 permission request holds `notify` against the lead's tool calls.
 
-A semantically repeated activity keeps its earlier timestamp. Advancing it
-would let a repeated Codex Stop clear children that started after the original
-Stop. Repeated activity also keeps its event ID and write time.
+A semantically repeated activity that is still shown keeps its earlier
+timestamp. Advancing it would let a repeated Codex Stop clear children that
+started after the original Stop. Repeated activity also keeps its event ID, and
+its write time unless it carries a time limit: a repeated mark with `--ttl-ms`
+takes the new write time, which restarts the limit (see the [record
+contract](record-contract.md#ordering-and-wall-age)). A repeat of an activity
+that expired, was cleared or was acknowledged is a new event.
 
 A lead turn end also checks the lead's recorded lifecycle events and the prompt
 record's latest prompt under the writer locks. A newer prompt therefore
