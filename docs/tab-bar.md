@@ -26,6 +26,8 @@ The `review` flag is yours, not a writer's: it is a record of its own, so you ca
 
 A pane can also report how many subagents are still working inside it. The tab appends that count to whatever indicator it is already showing — `✓+2` — or shows `+2` on its own when the pane has nothing else to show. See [Subagent activity](#subagent-activity).
 
+A program that reports progress with WezTerm's progress sequence (OSC 9;4), as cargo 1.94 does, gets WezTerm's own gauge just before the base title: green for a percentage, red for an error (WezTerm builds from February 2025 on; checked on 20260905-195314-b99b1ca2). The gauge follows the tab's active pane. It does not tint the tab and needs no acknowledgement. The spinning form is not drawn, since an agent's own mark already says it is busy.
+
 ## Subagent activity
 
 Claude Code and Codex hooks record each subagent of a pane from its

@@ -106,7 +106,7 @@ end))
 
 ## Custom tab titles
 
-The plugin draws each tab as ` <number>: <indicator><base title> `, with ` · <provider>` before the closing space when `show_provider = true`. The number is left out when `config.show_tab_index_in_tab_bar = false`.
+The plugin draws each tab as ` <number>: <indicator><gauge><base title> `, with ` · <provider>` before the closing space when `show_provider = true`. `<gauge>` is WezTerm's progress gauge, empty unless the tab's active pane reports a percentage or an error (see [the tab bar](tab-bar.md#states)); `wrap_title_formatter` draws it too, so a formatter need not draw its own. The number is left out when `config.show_tab_index_in_tab_bar = false`.
 
 The default base title is the first of these that is not empty:
 

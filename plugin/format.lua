@@ -170,24 +170,63 @@ return function(context)
     }
   end
 
+  -- { highest percentage, glyph } pairs from `pct_to_glyph` in
+  -- wezterm-gui/src/tabbar.rs (as of WezTerm 20260905-195314-b99b1ca2): Nerd
+  -- Fonts' md_checkbox_blank_circle_outline, then md_circle_slice_1 to _8.
+  local progress_glyphs = {
+    { 5, "\u{f0130}" }, { 18, "\u{f0a9e}" }, { 31, "\u{f0a9f}" }, { 43, "\u{f0aa0}" },
+    { 56, "\u{f0aa1}" }, { 68, "\u{f0aa2}" }, { 81, "\u{f0aa3}" }, { 94, "\u{f0aa4}" },
+    { math.huge, "\u{f0aa5}" },
+  }
+
+  --- The progress gauge WezTerm's default title draws, which a format-tab-title
+  --- callback replaces: `{ glyph = string, ansi_color = string }` from the
+  --- tab's active pane for a percentage (green) or an error (red). Nil for no
+  --- progress, for a build older than the progress field, and for the spinning
+  --- form, which an agent's own mark already covers.
+  local function progress_gauge(tab)
+    local pane = tab.active_pane
+    local progress = pane and pane.progress
+    if type(progress) ~= "table" then return nil end
+    local value, ansi_color = progress.Percentage, "Green"
+    if value == nil then value, ansi_color = progress.Error, "Red" end
+    if type(value) ~= "number" then return nil end
+    for _, step in ipairs(progress_glyphs) do
+      if value <= step[1] then return { glyph = step[2], ansi_color = ansi_color } end
+    end
+    return nil
+  end
+
   --- Apply the shared attention indicator and color decoration to a base title.
   -- `2: ◔ name`: the index first, as WezTerm's own default renders it, then the
   -- attention indicator, then the base. `show_index` false drops the index the
   -- way `show_tab_index_in_tab_bar = false` does for the default renderer.
   --- `indicator` replaces the visible one when given.
-  --- `warning` goes between the indicator and the base.
-  local function decorate_tab_title(tab, visible, base, show_index, indicator, warning)
+  --- `warning` goes between the indicator and the gauge.
+  --- `gauge`, from progress_gauge, goes just before the base, in its own color.
+  --- Returns a string, or a list of format items when the tab is tinted or has
+  --- a gauge.
+  local function decorate_tab_title(tab, visible, base, show_index, indicator, warning, gauge)
     local index = ""
     if show_index ~= false then index = (tab.tab_index + 1) .. ": " end
     local suffix = visible.agent_suffix and (" · " .. visible.agent_suffix) or ""
-    local text = " " .. index .. (indicator or visible.indicator) .. (warning or "") .. base .. suffix .. " "
-    if visible.color then
+    local head = " " .. index .. (indicator or visible.indicator) .. (warning or "")
+    local tail = base .. suffix .. " "
+    if not gauge then
+      if not visible.color then return head .. tail end
       return {
         { Background = { Color = visible.color } },
-        { Text = text },
+        { Text = head .. tail },
       }
     end
-    return text
+    local items = {}
+    if visible.color then items[1] = { Background = { Color = visible.color } } end
+    items[#items + 1] = { Text = head }
+    items[#items + 1] = { Foreground = { AnsiColor = gauge.ansi_color } }
+    items[#items + 1] = { Text = gauge.glyph .. " " }
+    items[#items + 1] = { Foreground = "Default" }
+    items[#items + 1] = { Text = tail }
+    return items
   end
 
   --- What the focused tab draws while the attention command answers the
@@ -242,9 +281,9 @@ return function(context)
   -- every tab in the callback's own array has been through it.
   local drawn_by_window = {}
 
-  --- The text a formatter return carries, whether it was tinted or not. A tinted
-  --- return is a list of format items and the text is the one that has it; an
-  --- untinted return is the string itself.
+  --- The text a decorate_tab_title return without a gauge carries: the string
+  --- itself, or the one Text item of a tinted list. A return with a gauge holds
+  --- three Text items, so its caller publishes a copy drawn without the gauge.
   local function drawn_text(rendered)
     if type(rendered) == "string" then return rendered end
     if type(rendered) ~= "table" then return nil end
@@ -299,6 +338,7 @@ return function(context)
     subagent_count_text = subagent_count_text,
     resolve_visible_attention = resolve_visible_attention,
     decorate_tab_title = decorate_tab_title,
+    progress_gauge = progress_gauge,
     writer_warning = writer_warning,
     drawn_tab_order = drawn_tab_order,
     build_formatter_context = build_formatter_context,

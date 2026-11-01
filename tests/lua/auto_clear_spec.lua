@@ -969,6 +969,61 @@ test("both renderers project the same attention for the same tab", function()
     "ctx.attention should still be indicator, type, color")
 end)
 
+-- The glyphs below are the codepoints WezTerm's own `pct_to_glyph` draws.
+
+test("a percentage on the active pane draws WezTerm's gauge before the base, in both renderers", function()
+  local drawn = tab(761, 762, false)
+  drawn.active_pane.progress = { Percentage = 37 }
+  local rendered = format_tab_title(drawn)
+  assert(type(rendered) == "table", "the gauge has its own color, so the title is a list")
+  assert(rendered[1].Text == " 1: ", "the index comes first, got " .. tostring(rendered[1].Text))
+  assert(rendered[2].Foreground.AnsiColor == "Green", "a percentage is green")
+  assert(rendered[3].Text == "\u{f0aa0} ", "37% is WezTerm's 37.5% slice")
+  assert(rendered[4].Foreground == "Default", "the color stops after the gauge")
+  assert(rendered[5].Text == "pane-761 ", "the base follows the gauge, got " .. tostring(rendered[5].Text))
+
+  local wrapped = attention.wrap_title_formatter(function() return "base" end)(drawn)
+  assert(wrapped[3].Text == "\u{f0aa0} " and wrapped[5].Text == "base ", "a manual renderer draws it too")
+end)
+
+test("the gauge uses WezTerm's percentage bands", function()
+  local bands = {
+    { 0, "\u{f0130}" }, { 5, "\u{f0130}" }, { 6, "\u{f0a9e}" }, { 50, "\u{f0aa1}" },
+    { 94, "\u{f0aa4}" }, { 95, "\u{f0aa5}" }, { 100, "\u{f0aa5}" },
+  }
+  for _, band in ipairs(bands) do
+    local drawn = tab(763, 764, false)
+    drawn.active_pane.progress = { Percentage = band[1] }
+    local rendered = format_tab_title(drawn)
+    assert(rendered[3].Text == band[2] .. " ", band[1] .. "% drew the wrong glyph")
+  end
+end)
+
+test("an error draws the gauge red and the tab keeps its attention tint", function()
+  write_activity(765, "stop")
+  poll({ 765, 766 })
+  local drawn = tab(765, 766, false)
+  drawn.active_pane.progress = { Error = 0 }
+  local rendered = format_tab_title(drawn)
+  assert(rendered[1].Background.Color == "#12271c", "the stop tint stays")
+  assert(rendered[2].Text:find("✓ ", 1, true), "the attention indicator stays before the gauge")
+  assert(rendered[3].Foreground.AnsiColor == "Red", "an error is red")
+  assert(rendered[4].Text == "\u{f0130} ", "an error at 0% is the empty circle")
+end)
+
+test("the spinning form, no progress and a sibling's progress draw no gauge", function()
+  local plain = format_tab_title(tab(767, 768, false))
+  assert(type(plain) == "string", "an untinted tab without a gauge is plain text")
+  for _, progress in ipairs({ "Indeterminate", "None" }) do
+    local drawn = tab(767, 768, false)
+    drawn.active_pane.progress = progress
+    assert(format_tab_title(drawn) == plain, progress .. " should draw nothing")
+  end
+  local drawn = tab(767, 768, false)
+  drawn.panes[2].progress = { Percentage = 50 }
+  assert(format_tab_title(drawn) == plain, "only the active pane's progress is drawn")
+end)
+
 test("visible_attention resolves a tab from its GUI pane ids as the renderer does", function()
   write_activity(751, "thinking")
   write_activity(752, "notify")
@@ -1920,6 +1975,21 @@ test("the focused tab says to rebuild while the command answers nothing, until i
   end)
   local after = rendered_text(format_tab_title(focused, bar))
   assert(not after:find(warning, 1, true), "a command that answers clears it, got " .. after)
+end)
+
+test("the published tab order leaves the progress gauge out", function()
+  -- A finished turn: an empty tab, or a spinner on a later frame, is drawn
+  -- again for publishing anyway, which would leave the gauge out by accident.
+  write_activity(9852, "stop")
+  poll({ 9852 })
+  local drawn = gui_tab({ window_id = 9850, tab_id = 9851, tab_index = 0, panes = { 9852 } })
+  drawn.active_pane.progress = { Percentage = 50 }
+  local rendered = format_tab_title(drawn, { drawn })
+  assert(type(rendered) == "table" and rendered[4].Text == "\u{f0aa1} ", "the bar draws the gauge")
+  local published = assert(read_tab_publication(9850), "the drawn window should be published")
+  assert(published.tabs[1].text == " 1: ✓ pane-9852 ",
+    "the published order names the tab without the gauge, got " .. published.tabs[1].text)
+  os.remove(tab_publication_path(9850))
 end)
 
 test("a pane that vanishes between polls leaves the cache and keeps its records", function()

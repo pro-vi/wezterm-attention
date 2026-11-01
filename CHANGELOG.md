@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **The tab shows WezTerm's progress gauge again.** WezTerm draws a gauge on its default tab title for a program that reports progress with OSC 9;4, as cargo does, and skips it when a plugin draws the title, so Attention's tab hid it. The tab now draws the same glyph just before the base title, from the tab's active pane: green for a percentage, red for an error. The spinning form is not drawn, and `attention tabs` does not report the gauge. See [the tab bar](docs/tab-bar.md#states).
+
 ## 1.11.0 — 2026-10-30
 
 ### Added

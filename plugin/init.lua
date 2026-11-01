@@ -231,7 +231,7 @@ function M.wrap_title_formatter(base_fn)
     })
     local show_index = not (config and config.show_tab_index_in_tab_bar == false)
     return format.decorate_tab_title(tab, visible, call_title_formatter(base_fn, tab, ctx), show_index,
-      nil, format.writer_warning(tab))
+      nil, format.writer_warning(tab), format.progress_gauge(tab))
   end
 end
 
@@ -598,15 +598,17 @@ function M.apply_to_config(config, opts)
       end
 
       local warning = format.writer_warning(tab)
-      local rendered = format.decorate_tab_title(tab, visible, base, show_index, nil, warning)
+      local gauge = format.progress_gauge(tab)
+      local rendered = format.decorate_tab_title(tab, visible, base, show_index, nil, warning, gauge)
 
       -- Nothing outside this process can see the order the bar draws, so the
       -- bar publishes it. Only a window whose every tab has been drawn, and
       -- only when the drawn list or its source identity changes: an ordinary
       -- redraw with the same source touches no file. The published copy
-      -- leaves out the rebuild warning, which names no tab.
+      -- leaves out the rebuild warning, which names no tab, and the progress
+      -- gauge, which would rewrite the file at every step of a build.
       local published = rendered
-      if visible.still_indicator ~= visible.indicator or warning then
+      if visible.still_indicator ~= visible.indicator or warning or gauge then
         published = format.decorate_tab_title(tab, visible, base, show_index, visible.still_indicator)
       end
       local order, window_id = format.drawn_tab_order(tab, tabs, marker_ids, published)
