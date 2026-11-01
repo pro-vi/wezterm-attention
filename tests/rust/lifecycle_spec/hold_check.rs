@@ -127,7 +127,7 @@ fn always_hold_keeps_running_claude_stop_out_of_checkmark() {
     let shown = super::mark_clear::plugin_reader_answer(&setup, "held_render");
     assert_eq!(
         shown,
-        "raw=stop shown=thinking held=true indicator=\u{f04b2}  published=\u{f04b2}  color=#1c1730"
+        "raw=stop shown=thinking held=true indicator=\u{f186}  published=\u{f186}  color=#1c1730"
     );
     assert!(!shown.contains('\u{f00c}'));
     assert_eq!(activity["hold_notes"]["jev"]["hold"], true);

@@ -3,7 +3,7 @@ local repo_root = source:match("^(.*)/tests/lua/auto_clear_spec.lua$") or "."
 
 -- The default marks (plugin/init.lua indicators) without their trailing space.
 local MARK = {
-  stop = "\u{f00c}", notify = "\u{f06a}", review = "\u{f02e}", held = "\u{f04b2}", quiet = "↪",
+  stop = "\u{f00c}", notify = "\u{f06a}", review = "\u{f02e}", held = "\u{f186}", quiet = "↪",
   muted = "\u{f1f6}", frames = { "\u{f167a}", "\u{f06a9}" },
 }
 

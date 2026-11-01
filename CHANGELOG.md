@@ -8,7 +8,7 @@
 
 ### Changed
 
-- **The default tab marks are Nerd Font symbols.** Working is a robot that blinks (U+F167A, U+F06A9), finished a check (U+F00C), waiting an exclamation mark in a circle (U+F06A), the review flag a bookmark (U+F02E), and a held turn end a "zzz" (U+F04B2), in place of ◌ ◔ ◑ ◕, ✓, !, ◆ and ⏾. Each is in the Nerd Font symbols WezTerm bundles from `20230320-124340-559cb7b0` on, so a stock install draws it; ◑ is in none of the fonts WezTerm bundles, so it fell back to a system font or drew as a box. The quiet mark ↪ and the mute bell are unchanged. To keep the old marks, set them in `indicators` ([Configuration](docs/configuration.md)).
+- **The default tab marks are Nerd Font symbols.** Working is a robot that blinks (U+F167A, U+F06A9), finished a check (U+F00C), waiting an exclamation mark in a circle (U+F06A), the review flag a bookmark (U+F02E), and a held turn end a crescent moon (U+F186), in place of ◌ ◔ ◑ ◕, ✓, !, ◆ and ⏾. Each is in the Nerd Font symbols WezTerm bundles from `20230320-124340-559cb7b0` on, so a stock install draws it; ◑ is in none of the fonts WezTerm bundles, so it fell back to a system font or drew as a box. The quiet mark ↪ and the mute bell are unchanged. To keep the old marks, set them in `indicators` ([Configuration](docs/configuration.md)).
 
 ## 1.11.0 — 2026-10-30
 

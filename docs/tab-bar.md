@@ -10,7 +10,7 @@ What a tab shows, which pane decides it, and when a mark goes away. [Configurati
 | `stop` | A check | Mint | Agent finished — check results |
 | `notify` | An exclamation mark in a circle | Rose | Something needs your attention |
 | `review` | A bookmark | Gold | Manually flagged for review (`Alt+B`) |
-| `thinking`, turn end held | A "zzz" | Violet | The turn ended, and a [hold check](setup.md#claude-code-hooks) says the agent's work goes on |
+| `thinking`, turn end held | A crescent moon | Violet | The turn ended, and a [hold check](setup.md#claude-code-hooks) says the agent's work goes on |
 | `stop`, quiet turn end | ↪ | Blue | The turn ended, and a [quiet check](setup.md#claude-code-hooks) says nobody needs to be called |
 | muted | a bell with a slash | None | You muted the tab with `Alt+M`; see [Muting a tab](#muting-a-tab) |
 

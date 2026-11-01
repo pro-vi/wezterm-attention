@@ -50,7 +50,7 @@ attention.apply_to_config(config, {
   indicators = {
     thinking_frames = { "\u{f167a} ", "\u{f06a9} " },  -- a robot that blinks
     stop   = "\u{f00c} ",   -- a check
-    held   = "\u{f04b2} ",  -- sleep, a "zzz"
+    held   = "\u{f186} ",   -- a crescent moon
     quiet  = "↪ ",
     notify = "\u{f06a} ",   -- an exclamation mark in a circle
     review = "\u{f02e} ",   -- a bookmark
