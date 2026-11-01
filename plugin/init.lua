@@ -29,17 +29,19 @@ local defaults = {
     review   = "#1a1a0c",
   },
 
-  -- Tab text indicators
+  -- Tab text indicators. All but quiet are Font Awesome and Material Design
+  -- glyphs from the Nerd Font symbols WezTerm bundles, so a stock install draws
+  -- them (each is in the font WezTerm 20230320-124340-559cb7b0 bundles).
   indicators = {
-    thinking_frames = { "◌ ", "◔ ", "◑ ", "◕ " },
-    stop   = "✓ ",
-    held   = "⏾ ",
+    -- a robot that blinks: its outline, then filled
+    thinking_frames = { "\u{f167a} ", "\u{f06a9} " },
+    stop   = "\u{f00c} ",   -- a check
+    held   = "\u{f04b2} ",  -- sleep, a "zzz"
     quiet  = "↪ ",
-    notify = "! ",
-    review = "◆ ",
-    -- Font Awesome's bell with a slash (U+F1F6), from the Nerd Font symbols
-    -- WezTerm bundles. A muted tab shows it in front of whatever else it shows.
-    muted  = "\239\135\182 ",
+    notify = "\u{f06a} ",   -- an exclamation mark in a circle
+    review = "\u{f02e} ",   -- a bookmark
+    -- a bell with a slash: a muted tab shows it in front of whatever else it shows
+    muted  = "\u{f1f6} ",
   },
 
   -- Higher index = higher priority when multiple panes have attention
@@ -672,7 +674,7 @@ function M.apply_to_config(config, opts)
         -- The review indicator is tab-level: resolve_visible_attention lights the tab
         -- if ANY of its panes is flagged. So toggle across every pane in the
         -- focused pane's tab — toggling only the focused pane leaves a split
-        -- tab stuck showing ◆ (the other pane is still flagged) and unclearable.
+        -- tab stuck showing its review mark (the other pane is still flagged) and unclearable.
         -- The flag toggled is the user's own: another owner's review is that
         -- owner's to withdraw, and a press leaves it.
         local target_read, reads = focused_tab_reads(win, pane, "review")

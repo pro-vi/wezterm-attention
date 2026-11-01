@@ -8,14 +8,14 @@ Your WezTerm tab bar shows what the AI agent in each tab is doing: working, fini
 
 | Tab shows | Tint | Meaning |
 |-----------|------|---------|
-| ◌ ◔ ◑ ◕ (animated) | Violet | The agent is working |
-| ✓ | Mint | The agent finished; check the result |
-| ! | Rose | The agent needs you, for example at a permission prompt |
-| ◆ | Gold | You flagged the tab for review with `Alt+B` |
+| A robot, blinking | Violet | The agent is working |
+| A check | Mint | The agent finished; check the result |
+| An exclamation mark in a circle | Rose | The agent needs you, for example at a permission prompt |
+| A bookmark | Gold | You flagged the tab for review with `Alt+B` |
 | A bell with a slash | None | You muted the tab with `Alt+M` |
-| ✓+2 | Mint | The agent finished, and two of its sub-agents are still running |
+| A check, then +2 | Mint | The agent finished, and two of its sub-agents are still running |
 
-A tab lights up while you are on another tab. Focusing the pane clears a ✓ and, in most cases, a !. When a tab's panes differ, by default ! wins over ✓, ✓ over ◆, and ◆ over the spinner. [The tab bar](docs/tab-bar.md) has every rule.
+A tab lights up while you are on another tab. Focusing the pane clears a check and, in most cases, an exclamation mark. When a tab's panes differ, by default the exclamation mark wins over the check, the check over the bookmark, and the bookmark over the robot. The marks come from the Nerd Font symbols that WezTerm ships with, so they need no font of your own. [The tab bar](docs/tab-bar.md) has every rule.
 
 ## Install
 
@@ -65,7 +65,7 @@ Start an agent in a new pane, and its tab lights up. If it does not, run `attent
 
 | Key | What it does |
 |-----|--------------|
-| `Alt+B` | Flags the tab for your own review (◆). Press it again to clear the flag. |
+| `Alt+B` | Flags the tab for your own review (a bookmark). Press it again to clear the flag. |
 | `Alt+M` | Mutes the tab: it shows the bell and hides its agent's activity until the agent needs you. Press it again to unmute. |
 
 Both work on a pane where an agent, or a shell that claims panes, has started a command. Move either key, or turn it off, with `review_key` and `mute_key` in [Configuration](docs/configuration.md#options). The plugin adds its keys after yours, so on WezTerm `20260905-195314-b99b1ca2` they replace your own bindings of the same keys.

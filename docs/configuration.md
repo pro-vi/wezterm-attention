@@ -46,15 +46,15 @@ attention.apply_to_config(config, {
     review   = "#1a1a0c",  -- gold tint
   },
 
-  -- Tab text indicators
+  -- Tab text indicators: all but quiet are from the Nerd Font symbols WezTerm bundles
   indicators = {
-    thinking_frames = { "◌ ", "◔ ", "◑ ", "◕ " },
-    stop   = "✓ ",
-    held   = "⏾ ",
+    thinking_frames = { "\u{f167a} ", "\u{f06a9} " },  -- a robot that blinks
+    stop   = "\u{f00c} ",   -- a check
+    held   = "\u{f04b2} ",  -- sleep, a "zzz"
     quiet  = "↪ ",
-    notify = "! ",
-    review = "◆ ",
-    muted  = "\u{f1f6} ",  -- a bell with a slash, from the Nerd Font symbols WezTerm bundles
+    notify = "\u{f06a} ",   -- an exclamation mark in a circle
+    review = "\u{f02e} ",   -- a bookmark
+    muted  = "\u{f1f6} ",   -- a bell with a slash
   },
 
   -- Priority order (last = highest)

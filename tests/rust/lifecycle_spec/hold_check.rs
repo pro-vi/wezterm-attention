@@ -127,9 +127,9 @@ fn always_hold_keeps_running_claude_stop_out_of_checkmark() {
     let shown = super::mark_clear::plugin_reader_answer(&setup, "held_render");
     assert_eq!(
         shown,
-        "raw=stop shown=thinking held=true indicator=⏾  published=⏾  color=#1c1730"
+        "raw=stop shown=thinking held=true indicator=\u{f04b2}  published=\u{f04b2}  color=#1c1730"
     );
-    assert!(!shown.contains('✓'));
+    assert!(!shown.contains('\u{f00c}'));
     assert_eq!(activity["hold_notes"]["jev"]["hold"], true);
     let end = last_end(&snapshot);
     assert_eq!(end["kind"], "response_finished");
@@ -266,7 +266,7 @@ fn timed_out_hold_check_records_unheld_stop() {
     assert_eq!(last_end(&snapshot)["turn_end"]["held"], false);
     assert_eq!(last_end(&snapshot)["turn_end"]["status"], "recorded");
     let shown = super::mark_clear::plugin_reader_answer(&setup, "held_render");
-    assert!(shown.contains("indicator=✓ "), "{shown}");
+    assert!(shown.contains("indicator=\u{f00c} "), "{shown}");
     assert!(shown.contains("shown=stop"), "{shown}");
 }
 
@@ -800,7 +800,8 @@ fn hold_audit_reservation_preserves_large_native_observation() {
     assert!(end.to_string().len() > 2048);
     wezterm_attention::protocol::validate_record(&snapshot, Some("lifecycle_snapshot")).unwrap();
     assert!(
-        super::mark_clear::plugin_reader_answer(&setup, "held_render").contains("indicator=✓ ")
+        super::mark_clear::plugin_reader_answer(&setup, "held_render")
+            .contains("indicator=\u{f00c} ")
     );
 }
 

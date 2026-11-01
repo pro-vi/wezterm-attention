@@ -530,7 +530,7 @@
       "review": true
     },
     "expected_render": {
-      "indicator": "! ",
+      "indicator": "\uf06a ",
       "type": "notify",
       "color": "#240f16"
     }

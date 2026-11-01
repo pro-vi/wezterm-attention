@@ -27,7 +27,7 @@ A WezTerm window attached to a mux server mirrors the server's tabs under number
   "window_id": 0,
   "published_at_ms": 1789884000123,
   "source": { "socket_path": "/…/gui-sock-4946", "realm_id": "…", "incarnation_id": "…" },
-  "tabs": [ { "number": 11, "text": " 11: ✓ braid ", "marker_ids": ["v2:…:…:16"] } ] }
+  "tabs": [ { "number": 11, "text": " 11: \uf00c braid ", "marker_ids": ["v2:…:…:16"] } ] }
 ```
 
 `source` names the GUI that drew the window, because a window id means something only inside one GUI process. The plugin learns that identity by asking the `attention` command shortly after startup. A window's first order is held until that answer arrives and then written under its source; when the command is not built, or no answer can come, it is written as a schema-1 file at `tabs/<window id>.json` with no `source`. A window keeps the one file it was first written to for as long as it is open, with one exception: after a config reload that finds the command built, a window first written without a `source` is written under its source, and the plugin removes the schema-1 file it wrote for that window unless another GUI has rewritten it since.

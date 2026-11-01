@@ -112,8 +112,8 @@ return function(context)
       }
     end
 
-    -- The count rides inside the indicator's own trailing space: "✓ " with two
-    -- subagents renders "✓+2 ", which adds only the "+2".
+    -- The count rides inside the indicator's own trailing space: a stop mark
+    -- and its space with two subagents render as the mark, "+2" and the space.
     local function with_count(glyph)
       if count_text ~= "" then return glyph:gsub("%s+$", "") .. count_text .. " " end
       return glyph
@@ -198,7 +198,7 @@ return function(context)
   end
 
   --- Apply the shared attention indicator and color decoration to a base title.
-  -- `2: ◔ name`: the index first, as WezTerm's own default renders it, then the
+  -- `2: <indicator> name`: the index first, as WezTerm's own default renders it, then the
   -- attention indicator, then the base. `show_index` false drops the index the
   -- way `show_tab_index_in_tab_bar = false` does for the default renderer.
   --- `indicator` replaces the visible one when given.

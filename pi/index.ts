@@ -402,13 +402,13 @@ export default function weztermAttentionPiExtension(pi: ExtensionAPI): void {
 	// `agent_settled`, NOT `agent_end`: agent_end fires at the end of every
 	// low-level run, but Pi may still auto-retry, auto-compact and retry, or
 	// continue with queued follow-up messages — writing `stop` there flashes a
-	// false ✓ mid-task. agent_settled fires only once Pi will not continue
+	// false finished mark mid-task. agent_settled fires only once Pi will not continue
 	// running automatically. Requires Pi >= 0.80.5.
 	pi.on("agent_settled", (_event, ctx) =>
 		forward(ctx, (facts) => ({ kind: "activity", state: "stop", event: "agent_settled", ...facts }), { makeCurrent: true }));
 
 	// Cooperative: any other Pi extension (e.g. an ask-user extension) can emit
-	// this event to request a state — notably `notify` (the "waiting for you" `!`),
+	// this event to request a state — notably `notify` (the "waiting for you" mark),
 	// which the lifecycle events never produce. Emit a bare string ("notify") or
 	// an object ({ type: "notify", label }); "clear" withdraws it.
 	// The bus ignores the handler's return value; we return the mutation promise

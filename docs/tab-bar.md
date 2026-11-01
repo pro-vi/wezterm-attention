@@ -6,11 +6,11 @@ What a tab shows, which pane decides it, and when a mark goes away. [Configurati
 
 | State | Indicator | Tab tint | Meaning |
 |-------|-----------|----------|---------|
-| `thinking` | ◌ ◔ ◑ ◕ (animated) | Violet | Agent is working |
-| `stop` | ✓ | Mint | Agent finished — check results |
-| `notify` | ! | Rose | Something needs your attention |
-| `review` | ◆ | Gold | Manually flagged for review (`Alt+B`) |
-| `thinking`, turn end held | ⏾ | Violet | The turn ended, and a [hold check](setup.md#claude-code-hooks) says the agent's work goes on |
+| `thinking` | A robot, blinking | Violet | Agent is working |
+| `stop` | A check | Mint | Agent finished — check results |
+| `notify` | An exclamation mark in a circle | Rose | Something needs your attention |
+| `review` | A bookmark | Gold | Manually flagged for review (`Alt+B`) |
+| `thinking`, turn end held | A "zzz" | Violet | The turn ended, and a [hold check](setup.md#claude-code-hooks) says the agent's work goes on |
 | `stop`, quiet turn end | ↪ | Blue | The turn ended, and a [quiet check](setup.md#claude-code-hooks) says nobody needs to be called |
 | muted | a bell with a slash | None | You muted the tab with `Alt+M`; see [Muting a tab](#muting-a-tab) |
 
@@ -24,7 +24,7 @@ The `review` flag is yours, not a writer's: it is a record of its own, so you ca
 
 `Alt+M` mutes a tab: it shows a bell until its agent waits on you. See [Muting a tab](#muting-a-tab).
 
-A pane can also report how many subagents are still working inside it. The tab appends that count to whatever indicator it is already showing — `✓+2` — or shows `+2` on its own when the pane has nothing else to show. See [Subagent activity](#subagent-activity).
+A pane can also report how many subagents are still working inside it. The tab appends that count to whatever indicator it is already showing — a check, then `+2` — or shows `+2` on its own when the pane has nothing else to show. See [Subagent activity](#subagent-activity).
 
 A program that reports progress with WezTerm's progress sequence (OSC 9;4), as cargo 1.94 does, gets WezTerm's own gauge just before the base title: green for a percentage, red for an error (WezTerm builds from February 2025 on; checked on 20260905-195314-b99b1ca2). The gauge follows the tab's active pane. It does not tint the tab and needs no acknowledgement. The spinning form is not drawn, since an agent's own mark already says it is busy.
 
@@ -38,20 +38,20 @@ quiet, as while it runs one long command. It stops counting at its own
 a Claude lead's `Stop` whose `background_tasks` no longer lists it, or when its
 session ends. The count is independent of the pane's own activity: a
 pane can carry running subagents with no activity at all — the parent agent
-stopped and you acknowledged its ✓ — or alongside activity of any type.
+stopped and you acknowledged its check — or alongside activity of any type.
 
 The tab renders the count as `+N`, inside the space the indicator already
 occupies:
 
 | Activity | Subagents | Tab shows |
 |----------|-----------|-----------|
-| `stop` | 0 | `✓ ` |
-| `stop` | 2 | `✓+2 ` |
-| `stop` | 1, waiting for permission | `!+1 ` |
-| `thinking` | 3 | `◑+3 ` |
-| `notify` | 1 | `!+1 ` |
+| `stop` | 0 | a check |
+| `stop` | 2 | a check, then `+2` |
+| `stop` | 1, waiting for permission | an exclamation mark, then `+1` |
+| `thinking` | 3 | a robot, then `+3` |
+| `notify` | 1 | an exclamation mark, then `+1` |
 | none | 2 | `+2 ` with default tab colors |
-| `stop` | unknown | `✓+? ` |
+| `stop` | unknown | a check, then `+?` |
 | none | 2 in one pane, unknown in another | `+2? ` |
 
 `+?` means the pane's record of its subagents, or of its session's end, is
@@ -86,21 +86,21 @@ records:
 
 | Activity | Your flag | Tab shows |
 |----------|-----------|-----------|
-| none | set | `◆ ` |
-| `thinking` | set | `◆ ` (the flag outranks `thinking`) |
-| `stop` unacknowledged | set | `✓ ` (the activity outranks the flag) |
-| `stop` acknowledged | set | `◆ ` |
-| `notify` | set | `! ` |
+| none | set | the bookmark |
+| `thinking` | set | the bookmark (the flag outranks `thinking`) |
+| `stop` unacknowledged | set | the check (the activity outranks the flag) |
+| `stop` acknowledged | set | the bookmark |
+| `notify` | set | the exclamation mark |
 
 Which one wins is the configured `priority` order, with the flag standing in for
 `review`: by default `notify > stop > review > thinking`. The flag is never
 acknowledged — `auto_clear` does not include `review` — so a flagged pane
-comes back to `◆` once its `stop` or `notify` has been seen, and stays there
+comes back to the bookmark once its `stop` or `notify` has been seen, and stays there
 until you clear it, while that pane remains available.
 
 A review is withdrawn only by its owner. A review another source published —
 `attention mark review --source NAME`, or Pi's bus as `pi-bus` — also shows
-`◆`, and `Alt+B` leaves it; `attention mark clear --source NAME` withdraws it.
+the bookmark, and `Alt+B` leaves it; `attention mark clear --source NAME` withdraws it.
 
 For an agent session, Attention carries your flag when the session registers
 with `resume` in a new pane after its old socket is removed or replaced, or
@@ -127,8 +127,8 @@ agent waits on you:
 | Agent | Tab shows |
 |-------|-----------|
 | idle, `thinking`, held, `stop`, quiet, sub-agents only | the bell |
-| `notify`, or a sub-agent waiting for permission | the bell, then `!`, in the notify tint |
-| your review flag | the bell, then `◆`, in the review tint |
+| `notify`, or a sub-agent waiting for permission | the bell, then the exclamation mark, in the notify tint |
+| your review flag | the bell, then the bookmark, in the review tint |
 
 A press mutes every pane of the tab that a launch has claimed, so a split tab
 is muted as one; a press on a tab with any muted pane unmutes them all. A pane

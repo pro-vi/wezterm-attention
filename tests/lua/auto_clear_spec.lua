@@ -1,6 +1,12 @@
 local source = debug.getinfo(1, "S").source:sub(2)
 local repo_root = source:match("^(.*)/tests/lua/auto_clear_spec.lua$") or "."
 
+-- The default marks (plugin/init.lua indicators) without their trailing space.
+local MARK = {
+  stop = "\u{f00c}", notify = "\u{f06a}", review = "\u{f02e}", held = "\u{f04b2}", quiet = "↪",
+  muted = "\u{f1f6}", frames = { "\u{f167a}", "\u{f06a9}" },
+}
+
 local function shell_quote(value)
   return "'" .. value:gsub("'", "'\\''") .. "'"
 end
@@ -845,7 +851,7 @@ test("held turn ends keep a fixed indicator and cannot be automatically acknowle
   assert(view.activity_type == "stop" and view.type == "thinking" and view.turn_end_held == true)
   assert(view.frame == nil, "held activity must not acquire a spinner frame")
   local visible = internal.resolve_visible_attention({ seeded_key(pane_id) })
-  assert(visible.indicator == "⏾ " and visible.still_indicator == "⏾ ")
+  assert(visible.indicator == MARK.held .. " " and visible.still_indicator == MARK.held .. " ")
   assert(visible.color == "#1c1730")
   for _, frame in ipairs(attention._active_indicators.thinking_frames) do
     assert(frame ~= visible.indicator, "a held tab must not pass for a running one")
@@ -859,7 +865,7 @@ test("projection returns the highest-priority cached pane and ignores uncached o
 
   local visible = internal.resolve_visible_attention({ seeded_key(711), seeded_key(712), "799" })
   assert(visible.type == "notify", "notify outranks thinking, got " .. tostring(visible.type))
-  assert(visible.indicator == "! ", "indicator should be the notify glyph")
+  assert(visible.indicator == MARK.notify .. " ", "indicator should be the notify glyph")
   assert(visible.color == "#240f16", "color should be the notify tint")
 
   local empty = internal.resolve_visible_attention({ "799" })
@@ -883,7 +889,7 @@ test("generated thinking frames are stable inside one wall-clock bucket", functi
 
   attention.poll(w, { now_ms = 2000, now_unix_ns = fixture_now })
   local _, next_frame = attention.get_attention(731)
-  assert(next_frame == 2, "crossing the bucket should advance to frame 2, got " .. tostring(next_frame))
+  assert(next_frame ~= f2, "crossing the bucket should advance to the next frame, got " .. tostring(next_frame))
 end)
 
 test("time-derived frames preserve the public get_attention return shape", function()
@@ -894,10 +900,13 @@ test("time-derived frames preserve the public get_attention return shape", funct
   local state, frame = attention.get_attention(732)
 
   assert(state == "thinking", "the first return remains the marker type")
-  assert(frame == 3, "the second return remains the derived frame, got " .. tostring(frame))
+  assert(frame == 3 % #MARK.frames, "the second return remains the derived frame, got " .. tostring(frame))
   local view = assert(pane_view(732), "the pane has a view")
   assert(view.type == state and view.frame == frame,
     "the view carries the same type and frame, got " .. tostring(view.frame))
+  -- The next second gives the next frame, so the frame is the clock's, not a constant.
+  attention.poll(w, { now_ms = 4000, now_unix_ns = fixture_now })
+  assert(select(2, attention.get_attention(732)) == 4 % #MARK.frames, "the frame should follow the clock")
 end)
 
 test("a turning spinner sends no view message, and messages leave the frame out", function()
@@ -942,7 +951,7 @@ test("the tab renders the highest-priority pane, sibling included", function()
 
   assert(type(rendered) == "table", "an attention tab should carry a tint")
   assert(rendered[1].Background.Color == "#12271c", "tint should be the stop color")
-  assert(rendered[2].Text:find("✓ ", 1, true), "stop outranks review and should be shown")
+  assert(rendered[2].Text:find(MARK.stop .. " ", 1, true), "stop outranks review and should be shown")
 end)
 
 test("both renderers project the same attention for the same tab", function()
@@ -962,9 +971,9 @@ test("both renderers project the same attention for the same tab", function()
     "both renderers should tint the tab")
   assert(default_rendered[1].Background.Color == wrapped_rendered[1].Background.Color,
     "both renderers should pick the same tint")
-  assert(default_rendered[2].Text:find("✓ ", 1, true), "default renderer should show stop")
-  assert(wrapped_rendered[2].Text:find("✓ ", 1, true), "wrapper should show stop")
-  assert(wrapper_attention[1] == "✓ " and wrapper_attention[2] == "stop"
+  assert(default_rendered[2].Text:find(MARK.stop .. " ", 1, true), "default renderer should show stop")
+  assert(wrapped_rendered[2].Text:find(MARK.stop .. " ", 1, true), "wrapper should show stop")
+  assert(wrapper_attention[1] == MARK.stop .. " " and wrapper_attention[2] == "stop"
     and wrapper_attention[3] == "#12271c",
     "ctx.attention should still be indicator, type, color")
 end)
@@ -1006,7 +1015,7 @@ test("an error draws the gauge red and the tab keeps its attention tint", functi
   drawn.active_pane.progress = { Error = 0 }
   local rendered = format_tab_title(drawn)
   assert(rendered[1].Background.Color == "#12271c", "the stop tint stays")
-  assert(rendered[2].Text:find("✓ ", 1, true), "the attention indicator stays before the gauge")
+  assert(rendered[2].Text:find(MARK.stop .. " ", 1, true), "the attention indicator stays before the gauge")
   assert(rendered[3].Foreground.AnsiColor == "Red", "an error is red")
   assert(rendered[4].Text == "\u{f0130} ", "an error at 0% is the empty circle")
 end)
@@ -1033,7 +1042,7 @@ test("visible_attention resolves a tab from its GUI pane ids as the renderer doe
   local rendered = format_tab_title(tab(751, 752, false))
   assert(visible.type == "notify", "notify outranks thinking, got " .. tostring(visible.type))
   assert(rendered[2].Text:find(visible.indicator, 1, true), "the renderer draws the same indicator")
-  assert(visible.glyph == "!", "the glyph is the notify indicator without its space, got " .. tostring(visible.glyph))
+  assert(visible.glyph == MARK.notify, "the glyph is the notify indicator without its space, got " .. tostring(visible.glyph))
   assert(type(visible.priority) == "number" and visible.priority > 0, "a typed tab carries its priority")
 
   local none = attention.visible_attention({ 799 })
@@ -1043,8 +1052,8 @@ end)
 test("a thinking tab's glyph is its first frame whatever frame the spinner is on", function()
   write_activity(753, "thinking")
   local w = window_double({ tabs = { { 753 } }, focused = false })
-  -- Frame 2 of the wall-clock spinner, so the drawn frame is not the first.
-  attention.poll(w, { now_ms = 2000, now_unix_ns = fixture_now })
+  -- Frame 1 of the wall-clock spinner, so the drawn frame is not the first.
+  attention.poll(w, { now_ms = 1000, now_unix_ns = fixture_now })
   local frames = attention._active_indicators.thinking_frames
   local visible = attention.visible_attention({ 753 })
   assert(visible.indicator ~= frames[1], "the spinner should be past its first frame")
@@ -1340,7 +1349,7 @@ test("a window first published without a source keeps that one file after the so
   local sourced = test_dir .. "/tabs/" .. string.rep("a", 64) .. "-9830.json"
   assert(not path_exists(sourced), "the window is not given a second file")
   local publication = assert(read_tab_publication(9830))
-  assert(publication.schema == 1 and publication.tabs[1].text:find("✓ ", 1, true),
+  assert(publication.schema == 1 and publication.tabs[1].text:find(MARK.stop .. " ", 1, true),
     "the changed bar is written to the window's one file")
   assert(path_exists(test_dir .. "/tabs/" .. string.rep("a", 64) .. "-9829.json"),
     "a window first drawn after the answer is published under the source")
@@ -1551,7 +1560,7 @@ test("a redraw that draws the same thing writes no file", function()
     "a changed bar publishes the whole window again")
   assert(published.tabs[2].text == rendered_text(changed_drawn),
     "the republished text is the changed one")
-  assert(published.tabs[2].text:find("! ", 1, true),
+  assert(published.tabs[2].text:find(MARK.notify .. " ", 1, true),
     "the changed tab draws the notify glyph")
 end)
 
@@ -1581,7 +1590,7 @@ test("a mux-client pane drawn before any poll shows no other pane's attention", 
   window_double({ window_id = 9748, tabs = { { { id = 9746, domain = "unix" } } }, focused = false })
   local drawn = gui_tab({ window_id = 9748, tab_id = 9749, tab_index = 0, panes = { 9746 } })
   local rendered = format_tab_title(drawn, { drawn })
-  assert(not rendered_text(rendered):find("✓", 1, true),
+  assert(not rendered_text(rendered):find(MARK.stop, 1, true),
     "the local number names another pane's markers, got " .. rendered_text(rendered))
   assert(not rendered_text(rendered):find("server-job", 1, true),
     "nor the other pane's settled title, got " .. rendered_text(rendered))
@@ -1987,7 +1996,7 @@ test("the published tab order leaves the progress gauge out", function()
   local rendered = format_tab_title(drawn, { drawn })
   assert(type(rendered) == "table" and rendered[4].Text == "\u{f0aa1} ", "the bar draws the gauge")
   local published = assert(read_tab_publication(9850), "the drawn window should be published")
-  assert(published.tabs[1].text == " 1: ✓ pane-9852 ",
+  assert(published.tabs[1].text == " 1: " .. MARK.stop .. " pane-9852 ",
     "the published order names the tab without the gauge, got " .. published.tabs[1].text)
   os.remove(tab_publication_path(9850))
 end)
@@ -2126,10 +2135,11 @@ test("animation redraws once per wall-clock bucket, not once per poll", function
   attention.poll(w, { now_ms = 1000, now_unix_ns = fixture_now })
   attention.poll(w, { now_ms = 1999, now_unix_ns = fixture_now })
   assert(#w.actions == 1, "induced polls in one bucket must not redraw again")
+  local old_frame = select(2, attention.get_attention(871))
 
   attention.poll(w, { now_ms = 2000, now_unix_ns = fixture_now })
   assert(#w.actions == 2, "the next bucket is a new indicator, so one new redraw")
-  assert(select(2, attention.get_attention(871)) == 2, "the frame should come from the new bucket")
+  assert(select(2, attention.get_attention(871)) ~= old_frame, "the frame should come from the new bucket")
 end)
 
 test("a thinking pane animates from the wall clock", function()
@@ -2154,7 +2164,7 @@ test("a thinking pane animates from the wall clock", function()
     frames[second] = internal.attention_cache[key].frame
   end
   materialize_state_case(protocol_fixture.state_case)
-  assert(frames[1] == 1 and frames[2] == 2,
+  assert(frames[1] == 1 and frames[2] == 2 % #MARK.frames,
     "a thinking view must carry the wall-clock frame, got " .. tostring(frames[1]) .. ", " .. tostring(frames[2]))
 end)
 
@@ -2376,7 +2386,7 @@ test("a mux pane that has published nothing has no marker id and is skipped", fu
   local rendered = format_tab_title(tab(7003, 7003, true))
   assert(type(rendered) == "string",
     "a tab of unresolvable panes must carry no tint")
-  assert(not rendered:find("! ", 1, true),
+  assert(not rendered:find(MARK.notify .. " ", 1, true),
     "a tab of unresolvable panes must not borrow another pane's indicator")
 end)
 
@@ -2616,7 +2626,8 @@ test("a held turn end yields to a child waiting on a permission prompt", functio
     "a waiting child must show notify, got " .. tostring(view.type) .. " held=" .. tostring(view.turn_end_held))
   assert(view.label == nil, "the waiting child's notify does not carry the stop's label")
   local visible = internal.resolve_visible_attention({ seeded_key(pane_id) })
-  assert(visible.type == "notify" and visible.indicator:find("^!") ~= nil, "got indicator " .. tostring(visible.indicator))
+  assert(visible.type == "notify" and visible.indicator:find(MARK.notify, 1, true) == 1,
+    "got indicator " .. tostring(visible.indicator))
   local w = window_double({ tabs = { { pane_id } }, focused = true, active_pane_id = pane_id })
   local spawned = with_plugin_command(function() error("a held activity tried to acknowledge") end, function()
     attention.poll(w, { now_ms = 1000, now_unix_ns = fixture_now })
@@ -2628,8 +2639,8 @@ test("a held turn end yields to a child waiting on a permission prompt", functio
   assert(view.type == "thinking" and view.turn_end_held == true, "the hold returns when the wait ends")
 end)
 
--- The default mute mark: Font Awesome's bell with a slash, U+F1F6.
-local MUTE_MARK = "\239\135\182 "
+-- The default mute mark and its space.
+local MUTE_MARK = MARK.muted .. " "
 
 local function mute_path(pane_id)
   return seeded_pane_root(pane_id) .. "/mute.json"
@@ -2650,11 +2661,11 @@ test("a muted tab shows its bell and nothing of its agent until the agent waits 
     { name = "finished", activity = "stop" },
     { name = "finished with two sub-agents", activity = "stop", subagents = 2 },
     { name = "only sub-agents", subagents = 2 },
-    { name = "needs the user", activity = "notify", indicator = MUTE_MARK .. "! ",
+    { name = "needs the user", activity = "notify", indicator = MUTE_MARK .. MARK.notify .. " ",
       type = "notify", color = "#240f16" },
     { name = "a child waits on a permission", activity = "stop", subagents = 1, waiting = true,
-      indicator = MUTE_MARK .. "!+1 ", type = "notify", color = "#240f16" },
-    { name = "the user's own flag", activity = "stop", review = true, indicator = MUTE_MARK .. "◆ ",
+      indicator = MUTE_MARK .. MARK.notify .. "+1 ", type = "notify", color = "#240f16" },
+    { name = "the user's own flag", activity = "stop", review = true, indicator = MUTE_MARK .. MARK.review .. " ",
       type = "review", color = "#1a1a0c" },
   }
   for index, case in ipairs(cases) do
@@ -2683,7 +2694,7 @@ test("a muted tab shows its bell and nothing of its agent until the agent waits 
   os.remove(mute_path(finished))
   poll_at({ finished })
   local visible = internal.resolve_visible_attention({ seeded_key(finished) })
-  assert(visible.indicator == "✓ " and visible.type == "stop" and visible.muted == false,
+  assert(visible.indicator == MARK.stop .. " " and visible.type == "stop" and visible.muted == false,
     "unmuted, the turn end shows, got " .. tostring(visible.indicator))
 end)
 
@@ -2708,7 +2719,7 @@ test("a pane that is not muted lights a tab beside a muted one", function()
   write_activity(other, "thinking", 2)
   poll_at({ muted, other })
   local visible = internal.resolve_visible_attention({ seeded_key(muted), seeded_key(other) })
-  assert(visible.indicator == MUTE_MARK .. "◑ " and visible.type == "thinking"
+  assert(visible.indicator == MUTE_MARK .. MARK.frames[2 % #MARK.frames + 1] .. " " and visible.type == "thinking"
     and visible.color == "#1c1730" and visible.muted == true,
     "the other pane's thinking shows after the mark, got " .. tostring(visible.indicator))
 end)
@@ -2759,7 +2770,7 @@ test("Alt+M mutes every claimed pane of the tab, and a second press unmutes them
     "one clear-mute, for the muted pane")
   assert(not path_exists(mute_path(first)), "the tab is unmuted")
   visible = instance._internal.resolve_visible_attention({ seeded_key(first), seeded_key(second) })
-  assert(visible.indicator == "✓ " and visible.muted == false, "got " .. tostring(visible.indicator))
+  assert(visible.indicator == MARK.stop .. " " and visible.muted == false, "got " .. tostring(visible.indicator))
 end)
 
 test("Alt+M on a tab no launch has claimed writes nothing and says why", function()
@@ -2791,7 +2802,7 @@ test("quiet completion has its own color and yields to human attention", functio
   local view = assert(pane_view(pane_id))
   assert(view.type == "stop" and view.turn_end_quiet and not view.turn_end_held)
   local visible = internal.resolve_visible_attention({ seeded_key(pane_id) })
-  assert(visible.indicator == "↪ " and visible.color == "#122033")
+  assert(visible.indicator == MARK.quiet .. " " and visible.color == "#122033")
   local review = seeded_record(pane_id, "review")
   write_json_path(user_review_path(pane_id), review)
   poll_at({ pane_id })
@@ -2801,13 +2812,13 @@ test("quiet completion has its own color and yields to human attention", functio
   write_activity(7593, "stop")
   poll_at({ pane_id, 7593 })
   visible = internal.resolve_visible_attention({ seeded_key(pane_id), seeded_key(7593) })
-  assert(visible.indicator == "✓ " and not visible.turn_end_quiet)
+  assert(visible.indicator == MARK.stop .. " " and not visible.turn_end_quiet)
   write_subagents(pane_id, 1, "waiting")
   poll_at({ pane_id })
   view = assert(pane_view(pane_id))
   assert(view.type == "notify" and not view.turn_end_quiet)
   visible = internal.resolve_visible_attention({ seeded_key(pane_id) })
-  assert(visible.indicator:find("^!") and visible.color == "#240f16")
+  assert(visible.indicator:find(MARK.notify, 1, true) == 1 and visible.color == "#240f16")
 end)
 
 test("the shown activity's label reaches the view and the formatter", function()
@@ -2909,14 +2920,14 @@ test("the tab indicator carries the subagent count", function()
   poll_at({ 7521, 7522 })
 
   local visible = internal.resolve_visible_attention({ seeded_key(7521), seeded_key(7522) })
-  assert(visible.indicator == "✓+2 ",
+  assert(visible.indicator == MARK.stop .. "+2 ",
     "the count rides in the indicator's own trailing space, got " .. tostring(visible.indicator))
   assert(visible.type == "stop", "the activity type is unchanged")
   assert(visible.color == "#12271c", "and so is its tint")
 
   local rendered = format_tab_title(tab(7521, 7522, true))
   assert(type(rendered) == "table", "the tab still carries a tint")
-  assert(rendered[2].Text:find("✓+2 ", 1, true),
+  assert(rendered[2].Text:find(MARK.stop .. "+2 ", 1, true),
     "the rendered title should carry the count, got " .. tostring(rendered[2].Text))
 
   local count_only = internal.resolve_visible_attention({ seeded_key(7522) })
@@ -3029,9 +3040,9 @@ test("built-in and manual formatter contexts expose identical named attention", 
     "the additive named context must preserve the positional attention tuple")
   assert(type(built_rendered) == "table" and type(manual_rendered) == "table",
     "both renderers must carry the marker tint")
-  assert(built_rendered[2].Text:find("!+2 built · Claude", 1, true),
+  assert(built_rendered[2].Text:find(MARK.notify .. "+2 built · Claude", 1, true),
     "built-in output must include the marker, count, base, and closed provider suffix")
-  assert(manual_rendered[2].Text:find("!+2 manual · Claude", 1, true),
+  assert(manual_rendered[2].Text:find(MARK.notify .. "+2 manual · Claude", 1, true),
     "manual output must apply the same decoration")
 end)
 
@@ -3423,7 +3434,7 @@ test("the review flag outranks a thinking activity without replacing it", functi
   assert(flagged == true, "the entry should record the flag, got " .. tostring(flagged))
   assert(internal.attention_cache[seeded_key(7601)].activity_type == "thinking",
     "the activity underneath is untouched")
-  assert(internal.resolve_visible_attention({ seeded_key(7601) }).indicator == "◆ ",
+  assert(internal.resolve_visible_attention({ seeded_key(7601) }).indicator == MARK.review .. " ",
     "and the tab should show the review glyph")
 end)
 
@@ -3436,7 +3447,7 @@ test("a stop outranks the flag until that stop is acknowledged", function()
   local flagged = pane_view(7611).review
   assert(atype == "stop", "stop outranks review, got " .. tostring(atype))
   assert(flagged == true, "but the entry still carries the flag, got " .. tostring(flagged))
-  assert(internal.resolve_visible_attention({ seeded_key(7611) }).indicator == "✓ ",
+  assert(internal.resolve_visible_attention({ seeded_key(7611) }).indicator == MARK.stop .. " ",
     "and the tab shows the stop glyph")
 
   with_plugin_command(acknowledging_answer, function()
@@ -4013,7 +4024,7 @@ test("an invalid or future identity is diagnosed and shows nothing", function()
   assert(attention.get_attention(7781) == nil,
     "a malformed identity reads nothing under the pane id it also published")
   local rendered = format_tab_title(tab(7780, 7782, false))
-  assert(type(rendered) == "string" and not rendered:find("! ", 1, true),
+  assert(type(rendered) == "string" and not rendered:find(MARK.notify .. " ", 1, true),
     "a malformed identity renders no attention")
   local malformed_errors = drain_errors()
   assert(#malformed_errors == 1 and malformed_errors[1]:find("record_invalid", 1, true),
@@ -6245,11 +6256,11 @@ test("a wrong value inside an option table is named, and its default used", func
     assert(warnings:find("option " .. case.name, 1, true) and warnings:find("default", 1, true),
       case.name .. " must be named: " .. warnings)
     instance.poll(window_double({ tabs = { { 9760 } }, focused = false }),
-      { now_unix_ns = fixture_now })
+      { now_ms = 0, now_unix_ns = fixture_now })
     local drawn, rendered = pcall(handlers["format-tab-title"][handler], tab(9760, 9761, false))
     assert(drawn, case.name .. ": the tab must still draw: " .. tostring(rendered))
     local text = rendered_text(rendered)
-    assert(text:find("[◌◔◑◕]") and rendered[1].Background.Color == "#1c1730",
+    assert(text:find(MARK.frames[1], 1, true) and rendered[1].Background.Color == "#1c1730",
       case.name .. ": the default spinner and tint are drawn, got " .. text)
     local key = key_entry(config, "b")
     assert(key and key.mods == "ALT", case.name .. ": the review key is Alt+B")
@@ -6276,9 +6287,9 @@ test("an unknown name inside colors or indicators is named, and left out", funct
     assert(instance._active_indicators.thinking == nil and instance._active_colors.notfy == nil,
       case.name .. ": the unknown name is left out")
     instance.poll(window_double({ tabs = { { 9770 } }, focused = false }),
-      { now_unix_ns = fixture_now })
+      { now_ms = 0, now_unix_ns = fixture_now })
     local rendered = handlers["format-tab-title"][handler](tab(9770, 9771, false))
-    assert(rendered_text(rendered):find("[◌◔◑◕]") and rendered[1].Background.Color == "#1c1730",
+    assert(rendered_text(rendered):find(MARK.frames[1], 1, true) and rendered[1].Background.Color == "#1c1730",
       case.name .. ": the default spinner and tint are drawn, got " .. rendered_text(rendered))
   end
 end)

@@ -180,7 +180,7 @@ function loggedCalls(log: string): Array<{ command: string; payload: Record<stri
 test("lifecycle: agent_settled — not agent_end — reports the turn settled", async () => {
 	// agent_end is nonterminal (auto-retry/compaction can follow); only
 	// agent_settled means Pi is truly done, so `stop` must hang off it. Assert
-	// agent_end is NOT even registered, so a false mid-run ✓ is impossible.
+	// agent_end is NOT even registered, so a false mid-run finished mark is impossible.
 	const log = fakeWriter("wez-settled-");
 	const { lifecycle } = loadExt();
 	expect(lifecycle["agent_end"]).toBeUndefined();
