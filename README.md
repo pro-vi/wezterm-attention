@@ -68,7 +68,7 @@ Start an agent in a new pane, and its tab lights up. If it does not, run `attent
 | `Alt+B` | Flags the tab for your own review (a bookmark). Press it again to clear the flag. |
 | `Alt+M` | Mutes the tab: it shows the bell and hides its agent's activity until the agent needs you. Press it again to unmute. |
 
-Both work on a pane where an agent, or a shell that claims panes, has started a command. Move either key, or turn it off, with `review_key` and `mute_key` in [Configuration](docs/configuration.md#options). The plugin adds its keys after yours, so on WezTerm `20260905-195314-b99b1ca2` they replace your own bindings of the same keys.
+Both work on a pane where an agent, or a shell that claims panes, has started a command, and do nothing on a pane read from another machine ([Panes on another machine](docs/mux-setup.md#panes-on-another-machine)). Move either key, or turn it off, with `review_key` and `mute_key` in [Configuration](docs/configuration.md#options). The plugin adds its keys after yours, so on WezTerm `20260905-195314-b99b1ca2` they replace your own bindings of the same keys.
 
 ## Build on it
 

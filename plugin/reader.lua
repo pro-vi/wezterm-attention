@@ -374,12 +374,24 @@ return function(context)
           "this GUI's own mux identity is not known yet, so the pane's cannot be checked",
           { pane_id = local_id }) }
       end
+      -- A domain whose records are read from its own machine: the identity
+      -- must name the mux running there, as that machine last said.
+      local remote_verdict = context.remote.verdict(domain, wire.address)
+      if remote_verdict == "other" then
+        return { kind = "invalid", diagnostic = invalid(
+          "WEZTERM_ATTENTION names a pane of another mux than the one behind domain " .. domain) }
+      elseif remote_verdict == "unknown" then
+        return { kind = "invalid", deferred = true, diagnostic = diagnostic("probe_unavailable",
+          "the mux behind domain " .. domain .. " has not said which it is yet, so the pane's identity cannot be checked") }
+      end
       return {
         kind = "claimed",
         address = wire.address,
         launch_id = wire.launch_id,
         marker_id = wire.address.pane_id,
         cache_key = address_cache_key(wire.address),
+        -- The domain whose machine holds the records, for a pane read from there.
+        remote_domain = remote_verdict and domain or nil,
       }
     end
 

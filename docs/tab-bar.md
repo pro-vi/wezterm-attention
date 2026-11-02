@@ -16,7 +16,7 @@ What a tab shows, which pane decides it, and when a mark goes away. [Configurati
 
 Tabs light up when an agent or script records a state for its pane—even when another pane in that tab is currently focused, and even when the tab itself is not the one you are on. Focusing a pane acknowledges only that pane's `stop` and `notify` (not a `notify` shown over its agent's finished turn while a sub-agent waits for permission); states of unfocused sibling panes remain visible until you visit them. `thinking` persists until its writer replaces or clears it, or until the TTL it was written with expires; a `review` flag persists until you press `Alt+B` again.
 
-Only the active pane of the focused window is acknowledged. The writer's record stays in place; the plugin has the `attention` command record which activity you were shown, and only while that activity is still the pane's, so an unseen notification remains visible.
+Only the active pane of the focused window is acknowledged, and never a pane read from another machine through `remote_domains`, which that machine's own GUI acknowledges. The writer's record stays in place; the plugin has the `attention` command record which activity you were shown, and only while that activity is still the pane's, so an unseen notification remains visible.
 
 When multiple panes in a tab have different states, the highest-priority one wins: **notify > stop > review > thinking**.
 

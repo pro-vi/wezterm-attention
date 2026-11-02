@@ -32,6 +32,7 @@ return function()
     local report_warning_once = context.overlays.report_warning_once
     local withdraw_closed_tab_orders = context.overlays.withdraw_closed_tab_orders
     local reader = context.reader
+    local remote = context.remote
     local resolve_pane_read = reader.resolve_pane_read
     local read_attention_view = reader.read_attention_view
     local pane_method = reader.pane_method
@@ -385,19 +386,26 @@ return function()
           "cannot republish mux identity: background_child_process is unavailable")
         return false
       end
-      local arguments = { "hooks", "publish", "--socket", socket, "--quiet" }
-      if selective then
-        local ids, incarnation = publication_exclusions(socket, root)
-        if ids then
-          arguments[#arguments + 1] = "--incarnation-id"
-          arguments[#arguments + 1] = incarnation
-          for _, id in ipairs(ids) do
-            arguments[#arguments + 1] = "--except-pane"
-            arguments[#arguments + 1] = id
+      local argv
+      if socket == remote.mount_root(domain) then
+        -- The domain's mux is on another machine: publish there, where its
+        -- socket is, every pane of it.
+        argv = remote.publish_argv(domain)
+      else
+        local arguments = { "hooks", "publish", "--socket", socket, "--quiet" }
+        if selective then
+          local ids, incarnation = publication_exclusions(socket, root)
+          if ids then
+            arguments[#arguments + 1] = "--incarnation-id"
+            arguments[#arguments + 1] = incarnation
+            for _, id in ipairs(ids) do
+              arguments[#arguments + 1] = "--except-pane"
+              arguments[#arguments + 1] = id
+            end
           end
         end
+        argv = attention_argv(root, M._active_dir, arguments)
       end
-      local argv = attention_argv(root, M._active_dir, arguments)
       local ok, started = pcall(wezterm.background_child_process, argv)
       if not ok or started == false then
         report_error_once("publish-spawn:" .. socket,
@@ -416,6 +424,9 @@ return function()
     --- command that could not start or gave no answer. Any other diagnostic is
     --- a refusal, which stands until what the command reads changes.
     local function run_plugin_write(action, read, dir, extra)
+      -- A pane on another machine has its records there, and this GUI only
+      -- reads them: nothing is written for it, whichever caller asks.
+      if read.remote_domain then return nil end
       local root = M._active_integration_root
       -- A failure is logged once per pane, action and kind of failure: a
       -- different failure on a later run says something the first did not.
@@ -607,6 +618,9 @@ return function()
         -- here, so membership is the freshness check. A flag that cannot be false
         -- reads like a guard and guards nothing.
         if not pane then return nil end
+        -- A pane on another machine is acknowledged there, by that machine's
+        -- own GUI: this one writes nothing for it.
+        if read.remote_domain then return nil end
         -- No publication read is an answer: there was nothing to dismiss. Saying
         -- so here keeps the contract in the decision rather than leaving the
         -- executor to notice that its expected value is missing.
@@ -764,15 +778,21 @@ return function()
     --- from the tabs that happened to answer.
     local function update_publish_schedule(
         domain, window_key, pane_count, unpublished, opts, partial)
-      local socket = reader.unix_domain_socket(domain)
+      -- A domain named in remote_domains publishes on its own machine, which
+      -- needs no writer on this one; its schedule is keyed by where its
+      -- records are read from.
+      local remote_publication = remote.entry(domain) ~= nil
+      local socket = remote_publication and remote.mount_root(domain) or reader.unix_domain_socket(domain)
       local root = M._active_integration_root
       if not socket and unpublished then
         report_warning_once("unpublished-domain:" .. domain, "panes on domain " .. domain
           .. " have not published their identity, and there is no socket on this machine to "
           .. "republish it through; they show no attention until something in the pane "
-          .. "publishes it, as the shell integration does at each prompt")
+          .. "publishes it, as the shell integration does at each prompt. If the domain's mux "
+          .. "runs on another machine, name it in remote_domains")
       end
-      if not socket or not root or not M._active_writer_installed then return false end
+      if not socket then return false end
+      if not remote_publication and (not root or not M._active_writer_installed) then return false end
       local schedule = publish_schedule_by_realm[socket]
       if not schedule then
         -- A partial look cannot start one either: its count is the count of the
@@ -1092,6 +1112,7 @@ return function()
       local callback_entries = {}
       local seen = {}             -- cache key → identity and domain observed in this window
       local live_local_ids = {}   -- GUI pane lifetime is independent of its storage key.
+      local fetched_domains = {}  -- domains shown here whose records are read from their machine
 
       local now = (opts and opts.now_ms) or now_ms()
       local cfg_indicators = M._active_indicators or defaults.indicators
@@ -1157,6 +1178,7 @@ return function()
         end
         for _, p in ipairs(tab_panes) do
           local domain = pane_method(p, "get_domain_name") or "?"
+          if remote.entry(domain) then fetched_domains[domain] = true end
           local domain_item = domain_evidence(domain)
           domain_item.observed = true
           -- Recorded here rather than beside the cache key below, so a pane with
@@ -1197,25 +1219,41 @@ return function()
               resample_utc = resample_utc,
               now_ms = now,
             }
-            local view = read_attention_view(read, now_unix_ns, read_opts)
-            -- A hook writes no frame, so a thinking view is animated from the
-            -- wall clock.
-            if view.type == "thinking" and view.frame == nil and not view.turn_end_held then
-              view.frame = frame_for_now(now, frame_count)
+            local view
+            if read.remote_domain then
+              -- Read from what the last fetch from the domain's machine
+              -- printed: a launch no fetch has read yet keeps what it showed,
+              -- and records too old to trust show nothing.
+              local coverage = remote.coverage(read.remote_domain, read)
+              if coverage == "covered" then
+                read_opts.dir = remote.mount_root(read.remote_domain)
+                view = read_attention_view(read, now_unix_ns, read_opts)
+              elseif coverage == "pending" then
+                view = before[key]
+              end
+            else
+              view = read_attention_view(read, now_unix_ns, read_opts)
             end
             attention_cache[key] = view
-            evidence.panes[key].event_id = view.event_id
-            -- The activity the tab shows for this pane, if it shows one: a
-            -- review flag that outranks it hides it.
-            evidence.panes[key].shown = view.type == view.activity_type and view.activity_type or nil
-            evidence.panes[key].turn_end_held = view.turn_end_held
-            for _, item in ipairs(view.diagnostics or {}) do
-              report_error_once("v2:" .. key .. ":" .. item.code .. ":" .. item.message,
-                item.code .. ": " .. item.message)
-            end
-            local boundary = view.next_wakeup_unix_ns
-            if boundary and (not earliest_wakeup_unix_ns or boundary < earliest_wakeup_unix_ns) then
-              earliest_wakeup_unix_ns = boundary
+            if view then
+              -- A hook writes no frame, so a thinking view is animated from the
+              -- wall clock.
+              if view.type == "thinking" and view.frame == nil and not view.turn_end_held then
+                view.frame = frame_for_now(now, frame_count)
+              end
+              evidence.panes[key].event_id = view.event_id
+              -- The activity the tab shows for this pane, if it shows one: a
+              -- review flag that outranks it hides it.
+              evidence.panes[key].shown = view.type == view.activity_type and view.activity_type or nil
+              evidence.panes[key].turn_end_held = view.turn_end_held
+              for _, item in ipairs(view.diagnostics or {}) do
+                report_error_once("v2:" .. key .. ":" .. item.code .. ":" .. item.message,
+                  item.code .. ": " .. item.message)
+              end
+              local boundary = view.next_wakeup_unix_ns
+              if boundary and (not earliest_wakeup_unix_ns or boundary < earliest_wakeup_unix_ns) then
+                earliest_wakeup_unix_ns = boundary
+              end
             end
           elseif read.kind == "unclaimed" then
             -- Published, and with nothing to show: no launch has claimed the
@@ -1253,6 +1291,10 @@ return function()
         end
       end
 
+
+      if next(fetched_domains) then
+        remote.request(fetched_domains, publish_call_after(opts), parse_tab_source_response)
+      end
 
       -- Retiring says this window left the domain. An unreadable tab has not said
       -- that, so a domain it remembers counts as still here.

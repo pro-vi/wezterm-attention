@@ -22,6 +22,11 @@ attention.apply_to_config(config, {
   -- WezTerm loaded the plugin from. See Install.
   integration_root = nil,
 
+  -- Domains whose mux runs on another machine, by domain name, and how to
+  -- read that machine's records. See "Panes on another machine" in
+  -- docs/mux-setup.md.
+  remote_domains = nil,  -- { [domain] = { command = { ... }, socket = "...", dir = nil, attention = nil } }
+
   -- Custom base title (tab mode only; plugin adds indicators + colors around it)
   title_formatter = nil,  -- function(tab, ctx) -> string of plain text
 

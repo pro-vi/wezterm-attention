@@ -3,14 +3,42 @@ return function(context)
   local protocol_path = context.protocol_path
 
   local container_kinds = setmetatable({}, { __mode = "k" })
+
+  -- Record trees held in memory rather than on this machine's disk, by the
+  -- root they are read under: another machine's records, fetched over ssh.
+  -- A root is never an absolute path, so no state directory can be one. Each
+  -- tree answers `read(relative)` with the bytes, or nil and why, and
+  -- `list(relative_directory)` with the file names in it, or nil when it
+  -- cannot say.
+  local mounted = {}
+
+  local function mount(root, tree)
+    mounted[root] = tree
+  end
+
+  local function mounted_tree(path)
+    for root, tree in pairs(mounted) do
+      if path:sub(1, #root + 1) == root .. "/" then return tree, path:sub(#root + 2), root end
+    end
+    return nil
+  end
+
   local function read_all(path, maximum)
-    local file, open_err = io.open(path, "r")
-    if not file then return nil, open_err end
-    local content, read_err = file:read(maximum and maximum + 1 or "*a")
-    if maximum and content == nil and read_err == nil then content = "" end
-    local closed, close_err = file:close()
-    if not content then return nil, read_err end
-    if not closed then return nil, close_err end
+    local tree, relative = mounted_tree(path)
+    local content, problem
+    if tree then
+      content, problem = tree.read(relative)
+      if not content then return nil, problem end
+    else
+      local file, open_err = io.open(path, "r")
+      if not file then return nil, open_err end
+      local closed, close_err
+      content, problem = file:read(maximum and maximum + 1 or "*a")
+      if maximum and content == nil and problem == nil then content = "" end
+      closed, close_err = file:close()
+      if not content then return nil, problem end
+      if not closed then return nil, close_err end
+    end
     if maximum and #content > maximum then return nil, "record exceeds its bound", "invalid" end
     return content
   end
@@ -985,6 +1013,19 @@ return function(context)
 
   local function glob_paths(pattern, opts)
     local glob = (opts and opts.glob) or wezterm.glob
+    local tree, relative, root = mounted_tree(pattern)
+    if tree then
+      -- A mounted tree lists the one pattern the reader asks for: every .json
+      -- file of a directory.
+      local directory = relative:match("^(.*)/%*%.json$")
+      glob = function()
+        local names = directory and tree.list(directory)
+        if not names then return nil end
+        local paths = {}
+        for index, name in ipairs(names) do paths[index] = root .. "/" .. directory .. "/" .. name end
+        return paths
+      end
+    end
     if type(glob) ~= "function" then
       return nil, diagnostic("probe_unavailable", "record enumeration is unavailable", {
         pattern = pattern,
@@ -1104,6 +1145,8 @@ return function(context)
     address_cache_key = address_cache_key,
     v2_pane_root = v2_pane_root,
     binding_root = binding_root,
+    is_uuid = is_uuid,
+    mount = mount,
     read_record_file = read_record_file,
     identity_diagnostic = identity_diagnostic,
     read_expected_record = read_expected_record,

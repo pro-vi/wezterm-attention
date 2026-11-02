@@ -1,6 +1,6 @@
 # Mux setup
 
-This setup keeps attention on the right pane across local and attached WezTerm GUIs. Writing v2 records needs macOS or Linux (glibc, including aarch64), the two tested platforms, and the `attention` command built by `scripts/install-cli.sh` (see [Install](../README.md#install)). Without the command nothing is recorded, and the plugin has nothing to show. Attention reads only this machine's state directory, so a pane whose shell runs on another host (an SSH or TLS domain, or a `proxy_command` that reaches one) shows nothing here.
+This setup keeps attention on the right pane across local and attached WezTerm GUIs. Writing v2 records needs macOS or Linux (glibc, including aarch64), the two tested platforms, and the `attention` command built by `scripts/install-cli.sh` (see [Install](../README.md#install)). Without the command nothing is recorded, and the plugin has nothing to show. Attention reads this machine's state directory, so a pane whose shell runs on another machine (an SSH or TLS domain, or a `proxy_command` that reaches one) shows nothing here, unless its domain is a unix domain named in `remote_domains` (see [Panes on another machine](#panes-on-another-machine)).
 
 ## WezTerm configuration
 
@@ -35,12 +35,47 @@ Republication needs the socket of the mux behind the domain:
 
 - A unix domain with an absolute `socket_path` uses that path.
 - A unix domain with no `socket_path`, including WezTerm's implicit `unix` domain, uses WezTerm's default socket: `$XDG_RUNTIME_DIR/wezterm/sock` on Linux when `XDG_RUNTIME_DIR` is set, else `~/.local/share/wezterm/sock`.
-- A domain with a `proxy_command` or a relative `socket_path` has no socket on this machine to republish through. The plugin logs once for panes on such a domain; when their shell runs on this machine, they show attention again after its next prompt republishes.
+- A domain with a `proxy_command` or a relative `socket_path` has no socket on this machine to republish through. The plugin logs once for panes on such a domain; when their shell runs on this machine, they show attention again after its next prompt republishes. A domain named in `remote_domains` republishes on its own machine instead.
 - A server whose config lists several `unix_domains` listens on all of them, but gives its panes only the last one's `socket_path` (WezTerm source at commit `4fbd6b8e9`). A GUI attached through another of them finds no claims to republish, and its panes show attention again only after their shell's next prompt.
 
 The domain lists are read when a poll needs them, so `unix_domains` set after `apply_to_config` still counts. The `local` domain, every exec domain, every serial port and every WSL domain are this GUI's own panes and need no republication.
 
 Publication validates the socket, pane ID, tty owner, character-device type, claim, and opened tty fingerprint. It writes terminal output only; it never writes pane input.
+
+## Panes on another machine
+
+A unix domain whose mux runs on another machine, as one that a `proxy_command` reaches over ssh does, has its records in that machine's state directory. Name the domain in `remote_domains`, and the plugin reads them from there:
+
+```lua
+attention.apply_to_config(config, {
+  remote_domains = {
+    ["work-laptop"] = {
+      -- The argv that runs one shell command line on that machine, as ssh does:
+      -- the plugin adds the command line as the last argument.
+      command = { "ssh", "-T", "-C", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "work-laptop" },
+      -- The socket of the mux the domain attaches to, as a path on that
+      -- machine. A path that starts with ~/ is under that machine's home.
+      socket = "~/.local/share/wezterm/sock",
+      -- Optional: the state directory there. Without it, that machine's own
+      -- WEZTERM_ATTENTION_DIR, then $XDG_STATE_HOME/wezterm-attention, then
+      -- ~/.local/state/wezterm-attention, as the command's shell sees them.
+      dir = nil,
+      -- Optional: the attention command there. Without it, `attention` on the
+      -- command's PATH.
+      attention = nil,
+    },
+  },
+})
+```
+
+That machine needs `attention` 1.0.0 or later, `/bin/sh` and `awk`.
+
+- **Reading.** While a window shows the domain, the plugin starts a fetch at most every 3 seconds, in a `wezterm.time.call_after` callback of its own, so no poll and no tab bar draw waits on it. A fetch runs `command` once. On that machine it asks `attention tab-source` which mux runs behind `socket`, and prints the records the plugin reads for each pane this GUI shows from that mux. The plugin keeps them in memory. Each fetch is a new ssh connection unless your ssh configuration shares one, and the records are JSON, so ssh's `-C` shortens a fetch on a slow link.
+- **Which panes.** A pane's identity is believed only when it names the realm and incarnation of that mux. Two machines whose users have the same home and socket path have the same realm, so the incarnation is what tells them apart. Until the first fetch answers, the domain's panes show nothing; their states appear after the second, within a few seconds.
+- **No record is written.** A pane there is never acknowledged from here: its finished or waiting mark stays until that machine's own GUI acknowledges it, or the agent moves on. The review and mute keys do nothing on such a pane and say so once in the log. A view of such a pane carries no lifecycle evidence: its `lifecycle.availability` is `absent`, because a fetch does not read lifecycle snapshots or prompt records.
+- **When a fetch fails.** The panes keep what was last read for 30 seconds, then show nothing until a fetch succeeds. Each kind of failure is logged once.
+- **Identity.** A GUI attached to a mux learns a pane's user variables only when the pane sets them after it attached: a client pane starts with none (`wezterm-client/src/pane/clientpane.rs`, WezTerm source at commit `4fbd6b8e9`). So, with the waits and retries described above for a local socket, one schedule per domain, the plugin runs `attention hooks publish --socket <socket> --quiet` on that machine through `command`, for every pane there, with no `--except-pane`, as that machine's own GUI would. It writes each pane's identity to that pane's terminal there, and briefly holds the claim lock of each pane that has records there, as any publication does.
+- **Time.** A mark with a time limit (`attention mark --ttl-ms`) is timed by this machine's clock against the time that machine wrote it.
 
 ## Bash launch claims
 

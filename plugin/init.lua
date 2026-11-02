@@ -108,6 +108,10 @@ local protocol_path = plugin_root .. "/protocol/v2.json"
 local protocol_api = load_plugin_module("protocol")({ wezterm = wezterm, protocol_path = protocol_path })
 local overlays = load_plugin_module("overlays")({ wezterm = wezterm, now_ms = protocol_api.now_ms })
 local runtime_state = load_plugin_module("runtime")()
+local remote = load_plugin_module("remote")({
+  wezterm = wezterm, protocol_api = protocol_api,
+  report_error_once = overlays.report_error_once, report_warning_once = overlays.report_warning_once,
+})
 -- The runtime reads panes through the reader, and the reader asks the runtime
 -- which mux this GUI is, so that one question is looked up when it is asked.
 local runtime
@@ -117,6 +121,7 @@ local reader = load_plugin_module("reader")({
   defaults = defaults,
   home_dir = home,
   protocol_api = protocol_api,
+  remote = remote,
   own_mux_identity = function() return runtime.own_mux_identity() end,
 })
 local titles = load_plugin_module("titles")({
@@ -132,6 +137,7 @@ runtime = runtime_state.bind({
   protocol_api = protocol_api,
   overlays = overlays,
   reader = reader,
+  remote = remote,
   titles = titles,
 })
 local report_error_once = overlays.report_error_once
@@ -294,7 +300,7 @@ local option_kinds = {
   review_key = { "table", false }, mute_key = { "table", false },
   request_redraw = { "boolean" }, auto_poll = { "boolean" }, show_provider = { "boolean" },
   show_directory = { "boolean" }, settled_title_fallback = { "boolean" },
-  integration_root = { "string" },
+  integration_root = { "string" }, remote_domains = { "table" },
 }
 -- What to say about a name that is not an option: the option it is spelled
 -- as, or why it went.
@@ -493,6 +499,7 @@ function M.apply_to_config(config, opts)
   -- may set them after this call.
   M._active_config = config
   reader.refresh_domain_facts()
+  remote.configure(opts.remote_domains)
   local request_redraw = opts.request_redraw
   if request_redraw == nil then request_redraw = defaults.request_redraw end
   M._active_request_redraw = request_redraw ~= false
@@ -630,6 +637,13 @@ function M.apply_to_config(config, opts)
   local function focused_tab_reads(win, pane, what)
     local mux_win = win:mux_window()
     local target_read = reader.resolve_pane_read(pane)
+    -- Its records are on its own machine, and this GUI only reads them.
+    if target_read.remote_domain then
+      report_error_once(what .. "-remote-pane:" .. target_read.remote_domain, "cannot toggle " .. what
+        .. ": this pane runs on the machine behind domain " .. target_read.remote_domain
+        .. ", whose records this GUI only reads")
+      return nil
+    end
     if target_read.kind ~= "claimed" and target_read.kind ~= "unclaimed" then
       report_error_once(what .. "-unpublished-pane",
         "cannot toggle " .. what .. ": this pane has not published who it is")
@@ -650,7 +664,7 @@ function M.apply_to_config(config, opts)
     for _, observed_pane in ipairs(panes) do
       local read = reader.resolve_pane_read(observed_pane)
       runtime.observe_pane(win, observed_pane, read)
-      if read.kind == "claimed" then reads[#reads + 1] = read end
+      if read.kind == "claimed" and not read.remote_domain then reads[#reads + 1] = read end
     end
     return target_read, reads
   end

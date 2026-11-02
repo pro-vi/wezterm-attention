@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **A domain whose mux runs on another machine shows that machine's attention.** Name a unix domain in the new `remote_domains` option, with an ssh argv that runs a shell command line there and the mux socket's path there. While a window shows the domain, the plugin reads its panes' records from that machine at most every 3 seconds, without holding up a poll or a draw, and draws them as it draws its own. A pane's identity counts only when it names the realm and the incarnation of that mux, since two machines with the same home and socket path share a realm. Panes that have not published an identity are republished on that machine. No record is written on either machine: such a pane is never acknowledged from here, the review and mute keys leave it alone, and its view carries no lifecycle evidence. That machine needs `attention` 1.0.0 or later, `/bin/sh` and `awk`. See [panes on another machine](docs/mux-setup.md#panes-on-another-machine).
+
 ## 1.12.0 — 2026-11-01
 
 ### Added

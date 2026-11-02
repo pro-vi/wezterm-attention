@@ -2511,6 +2511,260 @@ test("a pane with no socket to republish through is named once in the log", func
   assert(#warnings == 1 and warnings[1]:find("SSHMUX:host", 1, true))
 end)
 
+-- ── A domain whose records are on another machine ───────────────────────────
+
+-- The other machine: its home, its state directory, its mux socket, and an
+-- `attention` that answers tab-source for that socket and notes every other
+-- call. Its mux shares this machine's realm, as two machines whose users have
+-- the same home and socket path do, and runs incarnation "b" of it.
+local remote_home = test_dir .. "/remote-home"
+local remote_state = remote_home .. "/state"
+local remote_socket = "/remote/.local/share/wezterm/human-main.sock"
+local remote_realm = internal.sha256(remote_socket)
+local remote_incarnation = string.rep("b", 64)
+local remote_calls = remote_home .. "/attention-calls.log"
+assert(os.execute("mkdir -p " .. shell_quote(remote_home .. "/bin")) == 0)
+do
+  local answer = assert(io.open(remote_home .. "/tab-source.json", "w"))
+  assert(answer:write(tab_source_response(remote_socket, "b")))
+  assert(answer:close())
+  local fake = assert(io.open(remote_home .. "/bin/attention", "w"))
+  assert(fake:write("#!/bin/sh\n"
+    .. 'case "$1" in tab-source) cat ' .. shell_quote(remote_home .. "/tab-source.json") .. " ;; esac\n"
+    .. 'printf "%s %s\\n" "$WEZTERM_ATTENTION_DIR" "$*" >> ' .. shell_quote(remote_calls) .. "\n"))
+  assert(fake:close())
+  assert(os.execute("chmod 755 " .. shell_quote(remote_home .. "/bin/attention")) == 0)
+end
+
+--- A record of the fixture's kind `sample`, moved to `address`.
+local function record_at(address, sample)
+  local record = copy_json(protocol_fixture.record_samples[sample])
+  if record.realm_id then record.realm_id = address.realm_id end
+  if record.incarnation_id then record.incarnation_id = address.incarnation_id end
+  if record.address then record.address = copy_json(address) end
+  return record
+end
+
+--- A claimed and bound pane under the state directory `dir`, showing
+--- `activity_type` when one is given, with the identity it publishes.
+local function write_pane_at(dir, incarnation_id, pane_id, activity_type)
+  local wire = copy_json(protocol_fixture.wire_sample)
+  wire.address = { realm_id = remote_realm, incarnation_id = incarnation_id, pane_id = tostring(pane_id) }
+  local address = wire.address
+  local realm_root = dir .. "/v2/realms/" .. address.realm_id
+  local pane_root = realm_root .. "/incarnations/" .. incarnation_id .. "/panes/" .. address.pane_id
+  assert(os.execute("rm -rf " .. shell_quote(pane_root)) == 0)
+  write_json_path(realm_root .. "/realm.json", record_at(address, "realm"))
+  write_json_path(realm_root .. "/incarnations/" .. incarnation_id .. "/incarnation.json",
+    record_at(address, "incarnation"))
+  write_json_path(pane_root .. "/claim.json", record_at(address, "claim"))
+  local launch_root = pane_root .. "/launches/" .. wire.launch_id
+  write_json_path(launch_root .. "/current-binding.json", record_at(address, "current_binding"))
+  local binding_root = launch_root .. "/bindings/" .. protocol_fixture.record_samples.binding.binding_id
+  write_json_path(binding_root .. "/binding.json", record_at(address, "binding"))
+  if activity_type then
+    local activity = record_at(address, "activity")
+    activity.type = activity_type
+    activity.event_id = next_event_id()
+    activity.observed_mono_ns = string.format("%020d", 3000000000 + event_counter)
+    write_json_path(binding_root .. "/activity.json", activity)
+  end
+  return wire
+end
+
+--- Every file under `dir`, with its size and modification time, one per line.
+local function listing(dir)
+  local pipe = assert(io.popen("find " .. shell_quote(dir) .. " -type f -exec stat -f '%N %z %m' {} + 2>/dev/null | sort"))
+  local text = pipe:read("*a")
+  pipe:close()
+  return text
+end
+
+--- A plugin whose domain "work" reads its records from the other machine,
+--- through `command` (by default /bin/sh -c, which runs the command line as
+--- ssh's remote shell would), with the clock, the callbacks it schedules and
+--- the processes it starts in the test's hands. Returns the plugin and a
+--- harness: `poll(window)`, `fetch()` runs the scheduled fetches,
+--- `advance(seconds)` moves the clock, `commands` holds every argv started,
+--- `restore()` puts WezTerm's functions back.
+local function remote_plugin(entry, apply)
+  local harness = { commands = {}, scheduled = {}, clock = os.time() }
+  local real_run, real_background, real_time =
+    wezterm.run_child_process, wezterm.background_child_process, os.time
+  local function run(argv)
+    harness.commands[#harness.commands + 1] = argv
+    local words = {}
+    for index, value in ipairs(argv) do words[index] = shell_quote(value) end
+    local pipe = assert(io.popen(table.concat(words, " ") .. " 2>/dev/null"))
+    local output = pipe:read("*a")
+    pipe:close()
+    return true, output, ""
+  end
+  wezterm.run_child_process = run
+  wezterm.background_child_process = function(argv) run(argv); return true end
+  os.time = function() return harness.clock end
+  function harness.restore()
+    wezterm.run_child_process, wezterm.background_child_process, os.time =
+      real_run, real_background, real_time
+  end
+  function harness.advance(seconds) harness.clock = harness.clock + seconds end
+  function harness.fetch()
+    local due = harness.scheduled
+    harness.scheduled = {}
+    for _, callback in ipairs(due) do callback() end
+  end
+  local instance = dofile(repo_root .. "/plugin/init.lua")
+  harness.config = {}
+  local options = { auto_poll = false, dir = test_dir, review_key = false, mute_key = false,
+    renderer = "manual", integration_root = writer_root,
+    remote_domains = { work = entry or {
+      command = { "/bin/sh", "-c" },
+      socket = remote_socket,
+      dir = remote_state,
+      attention = remote_home .. "/bin/attention",
+    } } }
+  for key, value in pairs(apply or {}) do options[key] = value end
+  instance.apply_to_config(harness.config, options)
+  function harness.poll(window)
+    instance.poll(window, { now_unix_ns = fixture_now,
+      call_after = function(_, callback) harness.scheduled[#harness.scheduled + 1] = callback end })
+  end
+  return instance, harness
+end
+
+--- The work pane `wire` names, shown in a GUI window as GUI pane `local_id`.
+local function work_pane(local_id, wire)
+  return { id = local_id, domain = "work", attention = wire }
+end
+
+--- Poll, fetch, wait out the fetch interval, and again, so the pane's
+--- records have been read: the first fetch learns which mux runs there,
+--- the second reads the panes that name it.
+local function settle(harness, window)
+  for _ = 1, 2 do
+    harness.poll(window)
+    harness.fetch()
+    harness.advance(3)
+  end
+  harness.poll(window)
+end
+
+test("a remote domain's pane shows the state recorded on its own machine, and nothing is written", function()
+  -- This machine has records for the same realm and pane number under its
+  -- own incarnation, which a remote pane must never be read from.
+  write_pane_at(test_dir, string.rep("a", 64), 83, "stop")
+  local wire = write_pane_at(remote_state, remote_incarnation, 83, "notify")
+  os.remove(remote_calls)
+  local local_before, remote_before = listing(test_dir .. "/v2"), listing(remote_state)
+  local instance, harness = remote_plugin()
+  local ok, failure = pcall(function()
+    local window = window_double({ tabs = { { work_pane(5, wire) } }, focused = true,
+      active_pane_id = work_pane(5, wire) })
+    harness.poll(window)
+    assert(instance.pane_marker_id(pane_from_entry(work_pane(5, wire))) == nil,
+      "before the other machine says which mux runs there, the identity is not believed")
+    harness.fetch()
+    harness.advance(3)
+    harness.poll(window)
+    assert(instance.pane_marker_id(pane_from_entry(work_pane(5, wire))) == "83")
+    assert(pane_view(work_pane(5, wire), instance) == nil, "no records read yet, so nothing shown")
+    harness.fetch()
+    harness.advance(3)
+    harness.poll(window)
+    local view = assert(pane_view(work_pane(5, wire), instance), "the fetched records were not read")
+    assert(view.type == "notify", "the other machine's state is shown, got " .. tostring(view.type))
+    assert(view.address.incarnation_id == remote_incarnation)
+    assert(view.lifecycle.availability == "absent", "a fetch reads no lifecycle snapshot")
+  end)
+  harness.restore()
+  assert(ok, failure)
+  for _, argv in ipairs(harness.commands) do
+    local line = table.concat(argv, " ")
+    assert(not line:find(" plugin ", 1, true), "a remote pane was written to through: " .. line)
+    assert(argv[1] == "/bin/sh", "every command ran on the other machine, got " .. argv[1])
+  end
+  assert(listing(test_dir .. "/v2") == local_before, "this machine's state directory changed")
+  assert(listing(remote_state) == remote_before, "the other machine's state directory changed")
+end)
+
+test("a remote pane naming another incarnation of that mux is refused", function()
+  -- A pane printing an identity from before the server there restarted.
+  local stale = write_pane_at(remote_state, string.rep("c", 64), 84, "stop")
+  local instance, harness = remote_plugin()
+  local ok, failure = pcall(function()
+    settle(harness, window_double({ tabs = { { work_pane(6, stale) } }, focused = false }))
+    assert(instance.pane_marker_id(pane_from_entry(work_pane(6, stale))) == nil)
+    assert(pane_view(work_pane(6, stale), instance) == nil)
+  end)
+  harness.restore()
+  assert(ok, failure)
+  local errors = drain_errors()
+  assert(#errors == 1 and errors[1]:find("another mux than the one behind domain work", 1, true),
+    "the refusal is named once, got " .. tostring(errors[1]))
+end)
+
+test("a remote pane shows nothing once its records are too old to trust", function()
+  local wire = write_pane_at(remote_state, remote_incarnation, 85, "thinking")
+  local instance, harness = remote_plugin()
+  local ok, failure = pcall(function()
+    local window = window_double({ tabs = { { work_pane(7, wire) } }, focused = false })
+    settle(harness, window)
+    assert(pane_view(work_pane(7, wire), instance).type == "thinking")
+    -- The other machine stops answering: its fetches never run.
+    harness.advance(31)
+    harness.poll(window)
+    assert(pane_view(work_pane(7, wire), instance) == nil, "a state that may have ended is still shown")
+  end)
+  harness.restore()
+  assert(ok, failure)
+end)
+
+test("an unpublished remote pane is republished on its own machine, through ~ there", function()
+  os.remove(remote_calls)
+  local _, harness = remote_plugin({
+    command = { "env", "HOME=" .. remote_home, "/bin/sh", "-c" },
+    socket = remote_socket, dir = "~/state", attention = "~/bin/attention",
+  })
+  local ok, failure = pcall(function()
+    local window = window_double({ tabs = { { { id = 8, domain = "work" } } }, focused = false })
+    harness.poll(window)
+    harness.poll(window)
+  end)
+  harness.restore()
+  assert(ok, failure)
+  local calls = read_path(remote_calls) or ""
+  assert(calls:find(remote_state .. " hooks publish --socket " .. remote_socket .. " --quiet", 1, true),
+    "the publication ran there with its state directory, got: " .. calls)
+  drain_warnings()
+end)
+
+test("the review and mute keys leave a remote pane alone", function()
+  local wire = write_pane_at(remote_state, remote_incarnation, 86, "stop")
+  local instance, harness = remote_plugin(nil, { review_key = { key = "b", mods = "ALT" },
+    mute_key = { key = "m", mods = "ALT" } })
+  local ok, failure = pcall(function()
+    local window = window_double({ tabs = { { work_pane(9, wire) } }, focused = false })
+    settle(harness, window)
+    harness.commands = {}
+    for _, key in ipairs({ "b", "m" }) do
+      key_entry(harness.config, key).action(window, pane_from_entry(work_pane(9, wire)))
+    end
+    assert(#harness.commands == 0, "a key ran " .. #harness.commands .. " commands for a remote pane")
+    assert(pane_view(work_pane(9, wire), instance).type == "stop")
+  end)
+  harness.restore()
+  assert(ok, failure)
+  local errors = drain_errors()
+  assert(#errors == 2 and errors[1]:find("only reads", 1, true), "each key says why once, got " .. #errors)
+end)
+
+test("a remote_domains entry that cannot be used is named once and left out", function()
+  local _, harness = remote_plugin({ command = "ssh work", socket = "relative.sock" })
+  harness.restore()
+  local warnings = drain_warnings()
+  assert(#warnings == 1 and warnings[1]:find("remote_domains[work]", 1, true), tostring(warnings[1]))
+end)
+
 -- ── A closed pane versus a detached domain ──────────────────────────────────
 
 test("a detached domain keeps the attention of panes still running on the server", function()
