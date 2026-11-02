@@ -381,8 +381,11 @@ return function(context)
         return { kind = "invalid", diagnostic = invalid(
           "WEZTERM_ATTENTION names a pane of another mux than the one behind domain " .. domain) }
       elseif remote_verdict == "unknown" then
-        return { kind = "invalid", deferred = true, diagnostic = diagnostic("probe_unavailable",
-          "the mux behind domain " .. domain .. " has not said which it is yet, so the pane's identity cannot be checked") }
+        -- What the pane names goes with it, for the first fetch to read.
+        return { kind = "invalid", deferred = true, remote_domain = domain,
+          address = wire.address, launch_id = wire.launch_id,
+          diagnostic = diagnostic("probe_unavailable", "the mux behind domain " .. domain
+            .. " has not said which it is yet, so the pane's identity cannot be checked") }
       end
       return {
         kind = "claimed",

@@ -173,7 +173,7 @@ mean six kinds of leftover stay on disk:
   it has exited (see the next section), so a file naming only claimed local
   panes goes. A pane no launch has claimed is named by a bare decimal id,
   which names no realm to ask, so a window with one plain shell pane keeps its
-  file. So does a window holding only panes of domains whose mux runs on another machine that publish no id.
+  file. So does a window holding only panes of a domain named in `remote_domains`: its file names none of them.
   A window attached to a mux server names that server's panes, which are
   usually still running, or gone together with their socket with nothing to
   show the server gone, which a reader reports as unavailable rather than

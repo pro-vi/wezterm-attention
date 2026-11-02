@@ -2,14 +2,18 @@ return function(context)
   local M = context.M
   local defaults = context.defaults
   local drawn_pane_key = context.runtime_state.drawn_pane_key
+  local published_pane_key = context.runtime_state.published_pane_key
   local attention_cache = context.runtime_state.attention_cache
   local title_sources = context.titles.title_sources
   local display_text = context.titles.display_text
 
-  local function gui_tab_pane_ids(tab)
+  --- The keys of a GUI tab's panes, as the bar draws them, or as `key_of`
+  --- names them.
+  local function gui_tab_pane_ids(tab, key_of)
+    key_of = key_of or drawn_pane_key
     local ids = {}
     for _, p in ipairs(tab.panes) do
-      local key = drawn_pane_key(tostring(p.pane_id))
+      local key = key_of(tostring(p.pane_id))
       if key then ids[#ids + 1] = key end
     end
     return ids
@@ -297,7 +301,9 @@ return function(context)
   --- in the order the bar draws them once every one of them has been drawn.
   --- Returns nil while the window is still incomplete, so a caller publishes a
   --- whole bar or nothing. No file work happens here: this is the GUI thread.
-  local function drawn_tab_order(tab, tabs, marker_ids, rendered)
+  local function drawn_tab_order(tab, tabs, rendered)
+    -- The panes as the published order names them: none of another machine.
+    local marker_ids = gui_tab_pane_ids(tab, published_pane_key)
     local window_id, tab_id = tab.window_id, tab.tab_id
     local text = drawn_text(rendered)
     if type(window_id) ~= "number" or type(tab_id) ~= "number" then return nil end

@@ -14,8 +14,9 @@ return function(context)
   local report_warning_once = context.report_warning_once
   local now_ms = protocol_api.now_ms
 
-  --- How long after one fetch starts the next may start. A fetch over ssh
-  --- takes about as long, mostly in the key exchange.
+  --- How long after one fetch starts the next may start. Only one runs at a
+  --- time, and over ssh one takes seconds: 1.5 to 15 s for 33 panes,
+  --- compressed, measured on 2026-11-02.
   local fetch_interval_ms = 3000
   --- A fetch still running after this long is given up on, so one ssh that
   --- hangs cannot stop the reads for good.
@@ -31,6 +32,9 @@ return function(context)
 
   local entries = {}
   local states = {}
+  -- How a tab-source answer is read: the runtime's parser, handed over by
+  -- configure.
+  local parse_tab_source
 
   local function quote(value)
     return "'" .. value:gsub("'", "'\\''") .. "'"
@@ -198,9 +202,10 @@ exec "$attention" hooks publish --socket "$socket" --quiet
 
   --- Keep the usable entries of the remote_domains option, naming each
   --- problem once in the log, and read records through them from now on.
-  local function configure(option)
+  local function configure(option, tab_source_parser)
     entries = {}
     states = {}
+    parse_tab_source = tab_source_parser
     for domain, entry in pairs(option or {}) do
       local problem
       if type(domain) ~= "string" or domain == "" then
@@ -259,14 +264,21 @@ exec "$attention" hooks publish --socket "$socket" --quiet
     return "other"
   end
 
+  --- Ask the next fetch for the pane and launch `read` names, under the
+  --- realm and incarnation its identity names.
+  local function want(domain, read)
+    local state, at = state_of(domain), now_ms()
+    state.wanted[read.address.pane_id] = { realm_id = read.address.realm_id,
+      incarnation_id = read.address.incarnation_id, launch_id = read.launch_id, at = at }
+    return state, at
+  end
+
   --- Ask the next fetch for the launch `read` names, and say whether its
   --- records can be shown: "covered" when the latest fetch read it and is
   --- recent, "pending" when no fetch has read it yet, "stale" when the
   --- latest records are too old to show.
   local function coverage(domain, read)
-    local state = state_of(domain)
-    local at = now_ms()
-    state.wanted[read.address.pane_id] = { launch_id = read.launch_id, at = at }
+    local state, at = want(domain, read)
     local snapshot = state.snapshot
     if not snapshot then return "pending" end
     if at - snapshot.taken_ms > stale_after_ms then return "stale" end
@@ -292,15 +304,15 @@ exec "$attention" hooks publish --socket "$socket" --quiet
   --- What a fetch printed: the mux identity it names and, when it read the
   --- records of `asked` (the identity the fetch named) and that is still the
   --- mux there, the snapshot of them; nil and why when it cannot be used.
-  local function parse(text, asked, parse_tab_source)
+  local function parse(text, asked)
     if type(text) ~= "string" or #text > max_output_bytes then return nil, "output is missing or too large" end
     local list = chunks(text)
     if not list or #list == 0 then return nil, "output is not what the fetch prints" end
     local source_text = list[1]:match("^@source\n(.*)$")
     local identity = source_text and parse_tab_source(source_text)
     if not identity then return nil, "attention tab-source gave no usable answer there" end
-    -- Records read for a mux that was replaced since the panes were named
-    -- are not theirs.
+    -- Records read for a mux that was replaced since the panes were named,
+    -- or that their identities never named, are not theirs.
     if not asked or identity.realm_id ~= asked.realm_id
         or identity.incarnation_id ~= asked.incarnation_id then
       return identity
@@ -330,37 +342,58 @@ exec "$attention" hooks publish --socket "$socket" --quiet
     return identity, nil, snapshot
   end
 
-  --- The fetch's arguments: the realm and incarnation, then each wanted
-  --- pane and launch, checked to be the digits and UUID the wire format
-  --- allows before they go on a command line.
-  local function fetch_arguments(state, at)
-    local identity = state.identity
-    if not identity then return { "-", "-" } end
-    local arguments = { identity.realm_id, identity.incarnation_id }
+  --- What the next fetch asks for: the mux identity its records are read
+  --- under, and its arguments, that identity's realm and incarnation then
+  --- each wanted pane and launch under it, checked to be the hex, digits and
+  --- UUID the wire format allows before they go on a command line. Before
+  --- that machine has said which mux runs there, the identity the lowest
+  --- wanted pane names is asked for, so states show from the first fetch.
+  local function fetch_request(state)
+    local at = now_ms()
     local panes = {}
     for pane_id, wanted in pairs(state.wanted) do
       if at - wanted.at > wanted_for_ms then
         state.wanted[pane_id] = nil
-      elseif pane_id:match("^%d+$") and protocol_api.is_uuid(wanted.launch_id) then
+      elseif pane_id:match("^%d+$") and protocol_api.is_uuid(wanted.launch_id)
+          and protocol_api.is_hex64(wanted.realm_id) and protocol_api.is_hex64(wanted.incarnation_id) then
         panes[#panes + 1] = pane_id
       end
     end
     table.sort(panes, function(a, b) return tonumber(a) < tonumber(b) end)
+    local identity = state.identity or state.wanted[panes[1] or ""]
+    if not identity then return nil, { "-", "-" } end
+    local arguments = { identity.realm_id, identity.incarnation_id }
     for _, pane_id in ipairs(panes) do
-      arguments[#arguments + 1] = pane_id
-      arguments[#arguments + 1] = state.wanted[pane_id].launch_id
+      local wanted = state.wanted[pane_id]
+      if wanted.realm_id == identity.realm_id and wanted.incarnation_id == identity.incarnation_id then
+        arguments[#arguments + 1] = pane_id
+        arguments[#arguments + 1] = wanted.launch_id
+      end
     end
-    return arguments
+    return identity, arguments
   end
 
-  --- Run one fetch for the domain and keep what it read.
-  local function fetch(domain, state, token, argv, asked, parse_tab_source)
-    local ok, success, stdout = pcall(wezterm.run_child_process, argv)
-    if state ~= states[domain] or state.token ~= token then return end
+  --- The domain's state while fetch number `token` is still the latest, else nil.
+  local function current(domain, token)
+    local state = states[domain]
+    if state and state.token == token then return state end
+    return nil
+  end
+
+  --- Run fetch number `token` for the domain and keep what it read. The
+  --- command line is built here, in the callback, so the callback WezTerm
+  --- keeps registered holds only the domain and the number.
+  local function fetch(domain, token)
+    local state = current(domain, token)
+    if not state then return end
+    local asked, arguments = fetch_request(state)
+    local ok, success, stdout = pcall(wezterm.run_child_process,
+      remote_argv(entries[domain], fetch_script, arguments))
+    if current(domain, token) ~= state then return end
     state.running_since = nil
     local identity, problem, snapshot
     if ok and success then
-      identity, problem, snapshot = parse(stdout, asked, parse_tab_source)
+      identity, problem, snapshot = parse(stdout, asked)
     else
       problem = ok and "the command failed" or ("the command could not start: " .. tostring(success))
     end
@@ -380,7 +413,7 @@ exec "$attention" hooks publish --socket "$socket" --quiet
   --- Start a fetch for each domain a poll showed, when one is due, through
   --- `call_after`, so the ssh runs in a callback of its own and no poll or
   --- tab bar draw waits on it.
-  local function request(domains, call_after, parse_tab_source)
+  local function request(domains, call_after)
     if type(call_after) ~= "function" or type(wezterm.run_child_process) ~= "function" then
       report_error_once("remote-fetch-unavailable", "cannot read the records of a domain on another "
         .. "machine: wezterm.time.call_after or wezterm.run_child_process is unavailable")
@@ -393,9 +426,8 @@ exec "$attention" hooks publish --socket "$socket" --quiet
       if not running and (not state.started_ms or at - state.started_ms >= fetch_interval_ms) then
         state.token = state.token + 1
         state.started_ms, state.running_since = at, at
-        local token, asked = state.token, state.identity
-        local argv = remote_argv(entries[domain], fetch_script, fetch_arguments(state, at))
-        call_after(0, function() fetch(domain, state, token, argv, asked, parse_tab_source) end)
+        local token = state.token
+        call_after(0, function() fetch(domain, token) end)
       end
     end
   end
@@ -411,6 +443,7 @@ exec "$attention" hooks publish --socket "$socket" --quiet
     entry = entry,
     mount_root = mount_root,
     verdict = verdict,
+    want = want,
     coverage = coverage,
     request = request,
     publish_argv = publish_argv,

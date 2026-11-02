@@ -147,9 +147,9 @@ return function(context)
 
   --- Publish the drawn order under its source incarnation and window ID, or
   --- under the legacy window ID while the source is unknown. It is not a pane
-  --- record and carries its own schema. `marker_ids` are what `gui_tab_pane_ids`
-  --- returned: the panes' cache keys, already translated out of the window's
-  --- local numbering, so a reader never repeats that translation.
+  --- record and carries its own schema. `marker_ids` are the panes' cache keys,
+  --- already translated out of the window's local numbering, so a reader never
+  --- repeats that translation; a pane of another machine has none here.
   ---
   --- A window keeps the name of its first publication, source or none, for as
   --- long as this module runs, so it has one file here. The caller holds a

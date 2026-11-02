@@ -2,6 +2,9 @@ return function()
   local attention_cache = {}
   local cache_key_by_marker_id = {}
   local marker_id_by_local = {}
+  -- GUI-local panes on a domain named in remote_domains, whose keys name
+  -- panes of another machine.
+  local remote_by_local = {}
   local seen_marker_ids_by_window = {}
   local callback_views_by_window = {}
   local delivering_views = false
@@ -12,6 +15,13 @@ return function()
   --- walked the pane yet.
   local function drawn_pane_key(local_id)
     return marker_id_by_local[local_id] or nil
+  end
+
+  --- The key the drawn tab order names a pane by: its drawn key, unless the
+  --- pane is on another machine, whose panes this machine's file never names.
+  local function published_pane_key(local_id)
+    if remote_by_local[local_id] then return nil end
+    return drawn_pane_key(local_id)
   end
 
   local function bind(context)
@@ -1178,7 +1188,8 @@ return function()
         end
         for _, p in ipairs(tab_panes) do
           local domain = pane_method(p, "get_domain_name") or "?"
-          if remote.entry(domain) then fetched_domains[domain] = true end
+          local on_remote = remote.entry(domain) ~= nil
+          if on_remote then fetched_domains[domain] = true end
           local domain_item = domain_evidence(domain)
           domain_item.observed = true
           -- Recorded here rather than beside the cache key below, so a pane with
@@ -1186,6 +1197,7 @@ return function()
           domain_item.count = domain_item.count + 1
           local local_id = tostring(pane_method(p, "pane_id"))
           live_local_ids[local_id] = true
+          remote_by_local[local_id] = on_remote
           local read = resolve_pane_read(p)
           local key = read.cache_key
           marker_id_by_local[local_id] = key or false
@@ -1198,6 +1210,9 @@ return function()
             local item = read.diagnostic or diagnostic("record_invalid", "pane identity is invalid")
             report_error_once("v2-identity:" .. local_id .. ":" .. item.code,
               item.code .. ": " .. item.message)
+          elseif read.kind == "invalid" and read.remote_domain then
+            -- Not checked yet: the first fetch reads it under the mux it names.
+            remote.want(read.remote_domain, read)
           elseif read.kind == "claimed" then
             callback_entries[key] = read
             saw_claimed = true
@@ -1292,9 +1307,7 @@ return function()
       end
 
 
-      if next(fetched_domains) then
-        remote.request(fetched_domains, publish_call_after(opts), parse_tab_source_response)
-      end
+      if next(fetched_domains) then remote.request(fetched_domains, publish_call_after(opts)) end
 
       -- Retiring says this window left the domain. An unreadable tab has not said
       -- that, so a domain it remembers counts as still here.
@@ -1436,6 +1449,7 @@ return function()
   return {
     attention_cache = attention_cache,
     drawn_pane_key = drawn_pane_key,
+    published_pane_key = published_pane_key,
     bind = bind,
   }
 end

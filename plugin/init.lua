@@ -499,7 +499,7 @@ function M.apply_to_config(config, opts)
   -- may set them after this call.
   M._active_config = config
   reader.refresh_domain_facts()
-  remote.configure(opts.remote_domains)
+  remote.configure(opts.remote_domains, runtime.parse_tab_source_response)
   local request_redraw = opts.request_redraw
   if request_redraw == nil then request_redraw = defaults.request_redraw end
   M._active_request_redraw = request_redraw ~= false
@@ -615,12 +615,13 @@ function M.apply_to_config(config, opts)
       -- only when the drawn list or its source identity changes: an ordinary
       -- redraw with the same source touches no file. The published copy
       -- leaves out the rebuild warning, which names no tab, and the progress
-      -- gauge, which would rewrite the file at every step of a build.
+      -- gauge, which would rewrite the file at every step of a build, and it
+      -- names no pane of another machine.
       local published = rendered
       if visible.still_indicator ~= visible.indicator or warning or gauge then
         published = format.decorate_tab_title(tab, visible, base, show_index, visible.still_indicator)
       end
-      local order, window_id = format.drawn_tab_order(tab, tabs, marker_ids, published)
+      local order, window_id = format.drawn_tab_order(tab, tabs, published)
       if order then publish_drawn_tab_order(dir, window_id, order) end
 
       return rendered

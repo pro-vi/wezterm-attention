@@ -52,7 +52,8 @@ attention.apply_to_config(config, {
     ["work-laptop"] = {
       -- The argv that runs one shell command line on that machine, as ssh does:
       -- the plugin adds the command line as the last argument.
-      command = { "ssh", "-T", "-C", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "work-laptop" },
+      command = { "ssh", "-T", "-C", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "work-laptop" },
       -- The socket of the mux the domain attaches to, as a path on that
       -- machine. A path that starts with ~/ is under that machine's home.
       socket = "~/.local/share/wezterm/sock",
@@ -71,9 +72,9 @@ attention.apply_to_config(config, {
 That machine needs `attention` 1.0.0 or later, `/bin/sh` and `awk`.
 
 - **Reading.** While a window shows the domain, the plugin starts a fetch at most every 3 seconds, in a `wezterm.time.call_after` callback of its own, so no poll and no tab bar draw waits on it. A fetch runs `command` once. On that machine it asks `attention tab-source` which mux runs behind `socket`, and prints the records the plugin reads for each pane this GUI shows from that mux. The plugin keeps them in memory. Each fetch is a new ssh connection unless your ssh configuration shares one, and the records are JSON, so ssh's `-C` shortens a fetch on a slow link.
-- **Which panes.** A pane's identity is believed only when it names the realm and incarnation of that mux. Two machines whose users have the same home and socket path have the same realm, so the incarnation is what tells them apart. Until the first fetch answers, the domain's panes show nothing; their states appear after the second, within a few seconds.
-- **No record is written.** A pane there is never acknowledged from here: its finished or waiting mark stays until that machine's own GUI acknowledges it, or the agent moves on. The review and mute keys do nothing on such a pane and say so once in the log. A view of such a pane carries no lifecycle evidence: its `lifecycle.availability` is `absent`, because a fetch does not read lifecycle snapshots or prompt records.
-- **When a fetch fails.** The panes keep what was last read for 30 seconds, then show nothing until a fetch succeeds. Each kind of failure is logged once.
+- **Which panes.** A pane's identity is believed only when it names the realm and incarnation of that mux. Two machines whose users have the same home and socket path have the same realm, so the incarnation is what tells them apart. The first fetch reads the panes under the mux their identities name and keeps the records only if that machine says it runs that mux, so states appear with the first fetch.
+- **No record is written.** The [drawn tab order](building-on-attention.md#the-drawn-tab-order) this GUI publishes keeps the text of a tab of such panes but names none of them. A pane there is never acknowledged from here: its finished or waiting mark stays until that machine's own GUI acknowledges it, or the agent moves on. The review and mute keys do nothing on such a pane and say so once in the log. A view of such a pane carries no lifecycle evidence: its `lifecycle.availability` is `absent`, because a fetch does not read lifecycle snapshots or prompt records.
+- **When a fetch fails.** The panes keep what was last read for 30 seconds, then show nothing until a fetch succeeds. Each kind of failure is logged once. A fetch still running after 60 seconds is given up on and a new one starts; ssh's `ServerAliveInterval` and `ServerAliveCountMax` end the old one on a dead link.
 - **Identity.** A GUI attached to a mux learns a pane's user variables only when the pane sets them after it attached: a client pane starts with none (`wezterm-client/src/pane/clientpane.rs`, WezTerm source at commit `4fbd6b8e9`). So, with the waits and retries described above for a local socket, one schedule per domain, the plugin runs `attention hooks publish --socket <socket> --quiet` on that machine through `command`, for every pane there, with no `--except-pane`, as that machine's own GUI would. It writes each pane's identity to that pane's terminal there, and briefly holds the claim lock of each pane that has records there, as any publication does.
 - **Time.** A mark with a time limit (`attention mark --ttl-ms`) is timed by this machine's clock against the time that machine wrote it.
 

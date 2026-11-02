@@ -2637,15 +2637,12 @@ local function work_pane(local_id, wire)
   return { id = local_id, domain = "work", attention = wire }
 end
 
---- Poll, fetch, wait out the fetch interval, and again, so the pane's
---- records have been read: the first fetch learns which mux runs there,
---- the second reads the panes that name it.
+--- Poll, fetch, wait out the fetch interval, and poll again: the first
+--- fetch learns which mux runs there and reads the panes that name it.
 local function settle(harness, window)
-  for _ = 1, 2 do
-    harness.poll(window)
-    harness.fetch()
-    harness.advance(3)
-  end
+  harness.poll(window)
+  harness.fetch()
+  harness.advance(3)
   harness.poll(window)
 end
 
@@ -2663,15 +2660,13 @@ test("a remote domain's pane shows the state recorded on its own machine, and no
     harness.poll(window)
     assert(instance.pane_marker_id(pane_from_entry(work_pane(5, wire))) == nil,
       "before the other machine says which mux runs there, the identity is not believed")
+    -- The first fetch reads the pane under the mux its identity names, and
+    -- that machine confirms it, so the state shows from that fetch on.
     harness.fetch()
     harness.advance(3)
     harness.poll(window)
     assert(instance.pane_marker_id(pane_from_entry(work_pane(5, wire))) == "83")
-    assert(pane_view(work_pane(5, wire), instance) == nil, "no records read yet, so nothing shown")
-    harness.fetch()
-    harness.advance(3)
-    harness.poll(window)
-    local view = assert(pane_view(work_pane(5, wire), instance), "the fetched records were not read")
+    local view = assert(pane_view(work_pane(5, wire), instance), "the first fetch's records were not read")
     assert(view.type == "notify", "the other machine's state is shown, got " .. tostring(view.type))
     assert(view.address.incarnation_id == remote_incarnation)
     assert(view.lifecycle.availability == "absent", "a fetch reads no lifecycle snapshot")
@@ -2685,6 +2680,51 @@ test("a remote domain's pane shows the state recorded on its own machine, and no
   end
   assert(listing(test_dir .. "/v2") == local_before, "this machine's state directory changed")
   assert(listing(remote_state) == remote_before, "the other machine's state directory changed")
+end)
+
+test("a fetch's callback holds only the domain and the fetch number until it runs", function()
+  -- WezTerm keeps every call_after callback registered until the next config
+  -- load, so what one captures is kept for every fetch: no command line, no
+  -- table of panes.
+  local wire = write_pane_at(remote_state, remote_incarnation, 87, "stop")
+  local _, harness = remote_plugin()
+  local ok, failure = pcall(function()
+    local window = window_double({ tabs = { { work_pane(10, wire) } }, focused = false })
+    settle(harness, window)
+    harness.poll(window)
+    assert(#harness.scheduled == 1, "one fetch is waiting to run, got " .. #harness.scheduled)
+    local callback, index = harness.scheduled[1], 1
+    while true do
+      local name, value = debug.getupvalue(callback, index)
+      if not name then break end
+      assert(type(value) ~= "table" and not (type(value) == "string" and #value > 64),
+        "the callback keeps " .. name .. ", a " .. type(value))
+      index = index + 1
+    end
+    assert(index > 1, "the callback captures what names its fetch")
+  end)
+  harness.restore()
+  assert(ok, failure)
+end)
+
+test("the drawn tab order names no pane of another machine, and keeps its text", function()
+  local wire = write_pane_at(remote_state, remote_incarnation, 88, "notify")
+  local _, harness = remote_plugin(nil, { renderer = "tab" })
+  local handler = handlers["format-tab-title"][#handlers["format-tab-title"]]
+  local window_id = 9871
+  local ok, failure = pcall(function()
+    settle(harness, window_double({ window_id = window_id, tabs = { { work_pane(11, wire) } }, focused = false }))
+    local tab = gui_tab({ window_id = window_id, tab_id = 9872, tab_index = 0, panes = { 11 } })
+    local drawn = rendered_text(handler(tab, { tab }))
+    assert(drawn and drawn:find(MARK.notify, 1, true), "the tab draws the other machine's state")
+  end)
+  harness.restore()
+  assert(ok, failure)
+  local publication = assert(read_tab_publication(window_id), "the drawn order is published")
+  os.remove(tab_publication_path(window_id))
+  assert(publication.tabs[1].text:find(MARK.notify, 1, true), "the published text carries the mark")
+  assert(#publication.tabs[1].marker_ids == 0,
+    "the published order names " .. #publication.tabs[1].marker_ids .. " panes of the other machine")
 end)
 
 test("a remote pane naming another incarnation of that mux is refused", function()
