@@ -2743,6 +2743,38 @@ test("a remote pane naming another incarnation of that mux is refused", function
     "the refusal is named once, got " .. tostring(errors[1]))
 end)
 
+test("a fetch that returns after a newer one started does not replace its records", function()
+  local wire = write_pane_at(remote_state, remote_incarnation, 89, "thinking")
+  local instance, harness = remote_plugin()
+  local ok, failure = pcall(function()
+    local window = window_double({ tabs = { { work_pane(12, wire) } }, focused = false })
+    harness.poll(window)
+    assert(#harness.scheduled == 1, "fetch 1 is scheduled")
+    local first = harness.scheduled[1]
+    harness.scheduled = {}
+    local run = wezterm.run_child_process
+    wezterm.run_child_process = function(argv)
+      wezterm.run_child_process = run
+      -- Fetch 1 reads the records as they are now, then its ssh hangs.
+      local ok1, out1, err1 = run(argv)
+      -- While it hangs: 61 s pass, the state there changes, and fetch 2 runs.
+      harness.advance(61)
+      write_pane_at(remote_state, remote_incarnation, 89, "stop")
+      harness.poll(window)
+      assert(#harness.scheduled == 1, "fetch 2 is scheduled once fetch 1 is given up on")
+      harness.fetch()
+      return ok1, out1, err1
+    end
+    first()
+    harness.advance(3)
+    harness.poll(window)
+    local view = assert(pane_view(work_pane(12, wire), instance), "the pane shows a state")
+    assert(view.type == "stop", "the newer fetch's state is kept, got " .. tostring(view.type))
+  end)
+  harness.restore()
+  assert(ok, failure)
+end)
+
 test("a remote pane shows nothing once its records are too old to trust", function()
   local wire = write_pane_at(remote_state, remote_incarnation, 85, "thinking")
   local instance, harness = remote_plugin()
