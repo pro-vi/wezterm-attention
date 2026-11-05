@@ -128,7 +128,7 @@ local titles = load_plugin_module("titles")({
   M = M, protocol_api = protocol_api, overlays = overlays, runtime_state = runtime_state,
 })
 local format = load_plugin_module("format")({
-  M = M, defaults = defaults, runtime_state = runtime_state, titles = titles,
+  M = M, wezterm = wezterm, defaults = defaults, runtime_state = runtime_state, titles = titles,
 })
 runtime = runtime_state.bind({
   M = M,
@@ -615,8 +615,9 @@ function M.apply_to_config(config, opts)
       -- only when the drawn list or its source identity changes: an ordinary
       -- redraw with the same source touches no file. The published copy
       -- leaves out the rebuild warning, which names no tab, and the progress
-      -- gauge, which would rewrite the file at every step of a build, and it
-      -- names no pane of another machine.
+      -- gauge, which would rewrite the file at every step of a build. It names
+      -- every pane of the tab, including those a zoom hides, and no pane of
+      -- another machine.
       local published = rendered
       if visible.still_indicator ~= visible.indicator or warning or gauge then
         published = format.decorate_tab_title(tab, visible, base, show_index, visible.still_indicator)

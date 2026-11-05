@@ -2017,9 +2017,10 @@ pub fn read_checked_tab_publications(
 }
 
 /// One drawn tab: the number the bar printed, the text it drew, and the ids the
-/// plugin already uses for those panes. An unclaimed pane is its canonical
-/// decimal pane id; a claimed pane is `v2:<realm_id>:<incarnation_id>:<pane_id>`. Both are already
-/// translated out of the window's local numbering.
+/// plugin already uses for the tab's panes, including panes a zoom hides. An
+/// unclaimed pane is its canonical decimal pane id; a claimed pane is
+/// `v2:<realm_id>:<incarnation_id>:<pane_id>`. Both are already translated out
+/// of the window's local numbering.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublishedTab {

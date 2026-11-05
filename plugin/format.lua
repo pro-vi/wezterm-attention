@@ -1,5 +1,6 @@
 return function(context)
   local M = context.M
+  local wezterm = context.wezterm
   local defaults = context.defaults
   local drawn_pane_key = context.runtime_state.drawn_pane_key
   local published_pane_key = context.runtime_state.published_pane_key
@@ -14,6 +15,27 @@ return function(context)
     local ids = {}
     for _, p in ipairs(tab.panes) do
       local key = key_of(tostring(p.pane_id))
+      if key then ids[#ids + 1] = key end
+    end
+    return ids
+  end
+
+  local function mux_tab_panes(tab_id)
+    return wezterm.mux.get_tab(tab_id):panes()
+  end
+
+  --- The keys of every pane of a GUI tab, as the drawn tab order publishes
+  --- them. A zoomed tab's TabInformation lists only the zoomed pane (WezTerm
+  --- builds it from `iter_panes()`, which honors zoom); `MuxTab:panes()` also
+  --- lists the panes the zoom hides. `wezterm.mux.get_tab` raises for a tab
+  --- the mux no longer has, and then the panes the bar drew stand in.
+  --- (As of WezTerm 20260905-195314-b99b1ca2.)
+  local function published_tab_pane_ids(tab)
+    local ok, panes = pcall(mux_tab_panes, tab.tab_id)
+    if not ok or type(panes) ~= "table" then return gui_tab_pane_ids(tab, published_pane_key) end
+    local ids = {}
+    for _, pane in ipairs(panes) do
+      local key = published_pane_key(tostring(pane:pane_id()))
       if key then ids[#ids + 1] = key end
     end
     return ids
@@ -302,12 +324,13 @@ return function(context)
   --- Returns nil while the window is still incomplete, so a caller publishes a
   --- whole bar or nothing. No file work happens here: this is the GUI thread.
   local function drawn_tab_order(tab, tabs, rendered)
-    -- The panes as the published order names them: none of another machine.
-    local marker_ids = gui_tab_pane_ids(tab, published_pane_key)
     local window_id, tab_id = tab.window_id, tab.tab_id
     local text = drawn_text(rendered)
     if type(window_id) ~= "number" or type(tab_id) ~= "number" then return nil end
     if type(tabs) ~= "table" or text == nil then return nil end
+    -- The panes as the published order names them: every pane of the tab,
+    -- hidden by a zoom or not, and none of another machine.
+    local marker_ids = published_tab_pane_ids(tab)
     local drawn = drawn_by_window[window_id]
     if not drawn then
       drawn = {}

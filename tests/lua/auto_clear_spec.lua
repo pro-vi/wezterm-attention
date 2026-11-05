@@ -221,6 +221,17 @@ local wezterm = {
       end
       return mux_pane(pane_id)
     end,
+    -- Raises for a tab no mux window double holds, as WezTerm does (as of
+    -- 20260905-195314-b99b1ca2); the published order then falls back to the
+    -- panes the bar drew.
+    get_tab = function(tab_id)
+      for _, mux_window in pairs(mux_windows_by_id) do
+        for _, mux_tab in ipairs(mux_window.tabs()) do
+          if mux_tab.tab_id() == tab_id then return mux_tab end
+        end
+      end
+      error("tab id " .. tostring(tab_id) .. " not found in mux")
+    end,
   },
   action_callback = function(callback) return callback end,
   action = {
@@ -1578,6 +1589,23 @@ test("the published ids are the translated ones, not the window's local ids", fu
       .. tostring(published.tabs[1].marker_ids[1]))
 end)
 
+test("a zoomed tab publishes every pane but draws the mark of the zoomed pane alone", function()
+  write_activity(9852, "stop")
+  -- The mux tab holds both panes; WezTerm hands the bar only the zoomed one.
+  attention.poll(window_double({ window_id = 9850,
+    tabs = { { tab_id = 9851, panes = { 9852, 9853 } } }, focused = false }),
+    { now_unix_ns = fixture_now })
+  local zoomed = gui_tab({ window_id = 9850, tab_id = 9851, tab_index = 0, panes = { 9853 } })
+  local rendered = format_tab_title(zoomed, { zoomed })
+
+  local published = assert(read_tab_publication(9850), "the window should be published")
+  local ids = published.tabs[1].marker_ids
+  assert(#ids == 2 and ids[1] == seeded_key(9852) and ids[2] == "9853",
+    "the published tab names both panes in the mux's order, got " .. encode_json(ids))
+  assert(not rendered_text(rendered):find(MARK.stop, 1, true),
+    "the bar should draw only the zoomed pane's mark, got " .. rendered_text(rendered))
+end)
+
 test("a mux-client pane drawn before any poll shows no other pane's attention", function()
   write_activity(9746, "stop")
   -- A client pane that published 9746 as its marker id, walked by polls long
@@ -2707,13 +2735,16 @@ test("a fetch's callback holds only the domain and the fetch number until it run
   assert(ok, failure)
 end)
 
-test("the drawn tab order names no pane of another machine, and keeps its text", function()
+test("the drawn tab order names no pane of another machine, hidden by a zoom or not, and keeps its text", function()
   local wire = write_pane_at(remote_state, remote_incarnation, 88, "notify")
+  local hidden = write_pane_at(remote_state, remote_incarnation, 89, "stop")
   local _, harness = remote_plugin(nil, { renderer = "tab" })
   local handler = handlers["format-tab-title"][#handlers["format-tab-title"]]
   local window_id = 9871
   local ok, failure = pcall(function()
-    settle(harness, window_double({ window_id = window_id, tabs = { { work_pane(11, wire) } }, focused = false }))
+    -- The mux tab holds both panes; the zoom on 11 hands the bar only that one.
+    settle(harness, window_double({ window_id = window_id,
+      tabs = { { tab_id = 9872, panes = { work_pane(11, wire), work_pane(12, hidden) } } }, focused = false }))
     local tab = gui_tab({ window_id = window_id, tab_id = 9872, tab_index = 0, panes = { 11 } })
     local drawn = rendered_text(handler(tab, { tab }))
     assert(drawn and drawn:find(MARK.notify, 1, true), "the tab draws the other machine's state")
