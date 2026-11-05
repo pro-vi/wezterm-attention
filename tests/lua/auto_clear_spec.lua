@@ -222,8 +222,8 @@ local wezterm = {
       return mux_pane(pane_id)
     end,
     -- Raises for a tab no mux window double holds, as WezTerm does (as of
-    -- 20260905-195314-b99b1ca2); the published order then falls back to the
-    -- panes the bar drew.
+    -- 20260905-195314-b99b1ca2); a tab's marks and its published order then
+    -- fall back to the panes the bar was handed.
     get_tab = function(tab_id)
       for _, mux_window in pairs(mux_windows_by_id) do
         for _, mux_tab in ipairs(mux_window.tabs()) do
@@ -1589,21 +1589,24 @@ test("the published ids are the translated ones, not the window's local ids", fu
       .. tostring(published.tabs[1].marker_ids[1]))
 end)
 
-test("a zoomed tab publishes every pane but draws the mark of the zoomed pane alone", function()
+test("a zoomed tab publishes every pane and draws the mark of a pane the zoom hides", function()
   write_activity(9852, "stop")
   -- The mux tab holds both panes; WezTerm hands the bar only the zoomed one.
   attention.poll(window_double({ window_id = 9850,
     tabs = { { tab_id = 9851, panes = { 9852, 9853 } } }, focused = false }),
     { now_unix_ns = fixture_now })
   local zoomed = gui_tab({ window_id = 9850, tab_id = 9851, tab_index = 0, panes = { 9853 } })
-  local rendered = format_tab_title(zoomed, { zoomed })
+  local rendered = rendered_text(format_tab_title(zoomed, { zoomed }))
 
   local published = assert(read_tab_publication(9850), "the window should be published")
   local ids = published.tabs[1].marker_ids
   assert(#ids == 2 and ids[1] == seeded_key(9852) and ids[2] == "9853",
     "the published tab names both panes in the mux's order, got " .. encode_json(ids))
-  assert(not rendered_text(rendered):find(MARK.stop, 1, true),
-    "the bar should draw only the zoomed pane's mark, got " .. rendered_text(rendered))
+  assert(rendered:find(MARK.stop, 1, true),
+    "the bar should draw the hidden pane's mark, got " .. rendered)
+  local wrapped = rendered_text(attention.wrap_title_formatter(function() return "base" end)(zoomed))
+  assert(wrapped:find(MARK.stop, 1, true),
+    "a wrapped title formatter should draw the hidden pane's mark, got " .. wrapped)
 end)
 
 test("a mux-client pane drawn before any poll shows no other pane's attention", function()

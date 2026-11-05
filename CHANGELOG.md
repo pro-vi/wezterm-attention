@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- **A zoomed tab's drawn tab order names the panes the zoom hides.** WezTerm (as of 20260905-195314-b99b1ca2) hands the tab bar only the zoomed pane of a zoomed tab, so `attention tabs` listed only that pane in the tab's `marker_ids`, and a program that places agents by their panes could not place an agent in a hidden pane. The drawn tab order now takes each tab's panes from the mux, which lists them all; the tab's mark still comes from the zoomed pane alone.
+- **A zoomed tab marks an agent in any of its panes, and its drawn tab order names them all.** WezTerm (as of 20260905-195314-b99b1ca2) hands the tab bar only the zoomed pane of a zoomed tab, so the tab's mark ignored an agent in a pane the zoom hides, and `attention tabs` listed only the zoomed pane in the tab's `marker_ids`, so a program that places agents by their panes could not place an agent in a hidden pane. The tab bar, a title function wrapped with `wrap_title_formatter`, and the drawn tab order now take each tab's panes from the mux, which lists them all.
 
 ## 1.12.0 — 2026-11-01
 

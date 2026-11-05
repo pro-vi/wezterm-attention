@@ -2154,8 +2154,8 @@ fn read_tab_publication(
     }
 }
 
-/// What `gui_tab_pane_ids` publishes: an unclaimed pane's decimal id, or the v2 cache key
-/// `address_cache_key` builds after a poll has identified the pane.
+/// A `marker_ids` entry as the tab bar publishes it: an unclaimed pane's decimal id, or the
+/// v2 cache key `address_cache_key` builds after a poll has identified the pane.
 fn published_marker_id(text: &str, pane_id_max_digits: usize) -> bool {
     canonical_decimal_text(text, pane_id_max_digits) || marker_address(text).is_some()
 }

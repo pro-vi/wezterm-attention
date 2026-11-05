@@ -8,35 +8,30 @@ return function(context)
   local title_sources = context.titles.title_sources
   local display_text = context.titles.display_text
 
-  --- The keys of a GUI tab's panes, as the bar draws them, or as `key_of`
-  --- names them.
-  local function gui_tab_pane_ids(tab, key_of)
-    key_of = key_of or drawn_pane_key
-    local ids = {}
-    for _, p in ipairs(tab.panes) do
-      local key = key_of(tostring(p.pane_id))
-      if key then ids[#ids + 1] = key end
-    end
-    return ids
-  end
-
   local function mux_tab_panes(tab_id)
     return wezterm.mux.get_tab(tab_id):panes()
   end
 
-  --- The keys of every pane of a GUI tab, as the drawn tab order publishes
-  --- them. A zoomed tab's TabInformation lists only the zoomed pane (WezTerm
-  --- builds it from `iter_panes()`, which honors zoom); `MuxTab:panes()` also
-  --- lists the panes the zoom hides. `wezterm.mux.get_tab` raises for a tab
-  --- the mux no longer has, and then the panes the bar drew stand in.
-  --- (As of WezTerm 20260905-195314-b99b1ca2.)
-  local function published_tab_pane_ids(tab)
-    local ok, panes = pcall(mux_tab_panes, tab.tab_id)
-    if not ok or type(panes) ~= "table" then return gui_tab_pane_ids(tab, published_pane_key) end
+  --- The keys of every pane of a GUI tab, as the bar draws them, or as
+  --- `key_of` names them. A zoomed tab's TabInformation lists only the zoomed
+  --- pane (WezTerm builds it from `iter_panes()`, which honors zoom);
+  --- `MuxTab:panes()` also lists the panes the zoom hides, so a tab marks an
+  --- agent in any of its panes. `wezterm.mux.get_tab` raises for a tab the mux
+  --- no longer has, and then `tab.panes` stands in, which is empty too: its
+  --- getter looks the tab up in the same mux (`add_field_method_get("panes")`
+  --- in wezterm-gui/src/termwindow/mod.rs). (As of WezTerm 20260905-195314-b99b1ca2.)
+  local function tab_pane_ids(tab, key_of)
+    key_of = key_of or drawn_pane_key
     local ids = {}
-    for _, pane in ipairs(panes) do
-      local key = published_pane_key(tostring(pane:pane_id()))
+    local function add(local_id)
+      local key = key_of(tostring(local_id))
       if key then ids[#ids + 1] = key end
+    end
+    local ok, panes = pcall(mux_tab_panes, tab.tab_id)
+    if ok and type(panes) == "table" then
+      for _, pane in ipairs(panes) do add(pane:pane_id()) end
+    else
+      for _, p in ipairs(tab.panes) do add(p.pane_id) end
     end
     return ids
   end
@@ -328,9 +323,7 @@ return function(context)
     local text = drawn_text(rendered)
     if type(window_id) ~= "number" or type(tab_id) ~= "number" then return nil end
     if type(tabs) ~= "table" or text == nil then return nil end
-    -- The panes as the published order names them: every pane of the tab,
-    -- hidden by a zoom or not, and none of another machine.
-    local marker_ids = published_tab_pane_ids(tab)
+    local marker_ids = tab_pane_ids(tab, published_pane_key)
     local drawn = drawn_by_window[window_id]
     if not drawn then
       drawn = {}
@@ -363,7 +356,7 @@ return function(context)
 
 
   return {
-    gui_tab_pane_ids = gui_tab_pane_ids,
+    tab_pane_ids = tab_pane_ids,
     subagent_count_text = subagent_count_text,
     resolve_visible_attention = resolve_visible_attention,
     decorate_tab_title = decorate_tab_title,

@@ -232,7 +232,7 @@ function M.wrap_title_formatter(base_fn)
     -- Read-only. WezTerm may call this at any moment, including for a window
     -- the user is not looking at, so acknowledgement belongs in poll() where
     -- focus is known.
-    local visible = format.resolve_visible_attention(format.gui_tab_pane_ids(tab))
+    local visible = format.resolve_visible_attention(format.tab_pane_ids(tab))
 
     local ctx = format.build_formatter_context(tab, visible, {
       tabs = tabs, panes = panes, config = config, hover = hover, max_width = max_width,
@@ -249,7 +249,10 @@ end
 --- Returns the renderer's projection: indicator, still_indicator, glyph (the
 --- state's own glyph, with no spinner frame, mute mark or count; "" for none),
 --- priority, type, color and the rest. Read-only; a pane no poll has walked yet
---- contributes nothing.
+--- contributes nothing. A zoomed tab's TabInformation lists only the zoomed
+--- pane, but the renderer counts every pane of the tab; to match it, pass
+--- `pane:pane_id()` for each pane `MuxTab:panes()` returns (as of WezTerm
+--- 20260905-195314-b99b1ca2).
 function M.visible_attention(pane_ids)
   local keys = {}
   for _, id in ipairs(pane_ids or {}) do
@@ -591,7 +594,7 @@ function M.apply_to_config(config, opts)
       --
       -- Resolve what this tab shows, including an unfocused sibling marker
       -- on the active tab.
-      local marker_ids = format.gui_tab_pane_ids(tab)
+      local marker_ids = format.tab_pane_ids(tab)
       local visible = format.resolve_visible_attention(marker_ids)
       local show_index = not (cfg and cfg.show_tab_index_in_tab_bar == false)
 

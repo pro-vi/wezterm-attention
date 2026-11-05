@@ -189,7 +189,10 @@ local view = attention.get_attention_view(pane)
 -- indicator, type, color and the rest, it carries glyph, the state's own glyph
 -- with no spinner frame, mute mark or count ("" for none), and priority, the
 -- winning type's priority (-1 for none), so tabs can be counted by state. A
--- pane no poll has walked yet adds nothing. Read-only.
+-- pane no poll has walked yet adds nothing. Read-only. A zoomed tab's
+-- TabInformation lists only the zoomed pane, but the renderer counts every
+-- pane of the tab; to match it, pass pane:pane_id() for each pane
+-- MuxTab:panes() returns (as of WezTerm 20260905-195314-b99b1ca2).
 local visible = attention.visible_attention({ 3, 4 })
 
 -- Poll manually (for auto_poll = false)
