@@ -698,6 +698,11 @@ fn each_request_for_the_user_is_a_request_event_and_nothing_else_is() {
             "PreToolUse",
             json!({"tool_name":"AskUserQuestion","tool_use_id":"call_q"}),
         ),
+        // The question's own result answers it; it asks nothing.
+        (
+            "PostToolUse",
+            json!({"tool_name":"AskUserQuestion","tool_use_id":"call_q","tool_response":"Blue"}),
+        ),
         (
             "Notification",
             json!({"notification_type":"permission_prompt","message":"needs permission"}),
@@ -705,6 +710,11 @@ fn each_request_for_the_user_is_a_request_event_and_nothing_else_is() {
         (
             "Elicitation",
             json!({"mcp_server_name":"server-a","elicitation_id":"form-1","mode":"form"}),
+        ),
+        // The user's selection answers the elicitation; it asks nothing.
+        (
+            "ElicitationResult",
+            json!({"mcp_server_name":"server-a","elicitation_id":"form-1","action":"accept"}),
         ),
     ]
     .into_iter()
@@ -715,19 +725,32 @@ fn each_request_for_the_user_is_a_request_event_and_nothing_else_is() {
             &format!("{:020}", 300 + index),
         );
     }
-    // The generic call and the denial are stored, so their absence below
-    // is the rule's doing, not a missing observation.
+    // Every observation that must not be a request is stored, so its absence
+    // below is the rule's doing, not a missing observation.
     let raw =
         fs::read_to_string(setup.binding_dir("claude", SESSION).join("lifecycle.json")).unwrap();
     let stored: Value = serde_json::from_str(&raw).unwrap();
-    let bash: Vec<&str> = ["general", "requests"]
+    let kinds: Vec<(&str, &str)> = ["general", "requests"]
         .iter()
         .flat_map(|pool| stored["pools"][pool]["observations"].as_array().unwrap())
-        .filter(|item| item["tool_name"] == "Bash")
-        .map(|item| item["kind"].as_str().unwrap())
+        .map(|item| {
+            (
+                item["kind"].as_str().unwrap(),
+                item["tool_name"].as_str().unwrap_or_default(),
+            )
+        })
         .collect();
-    assert!(bash.contains(&"tool_preflight"), "{bash:?}");
-    assert!(bash.contains(&"automatic_denial"), "{bash:?}");
+    for expected in [
+        ("tool_preflight", "Bash"),
+        ("automatic_denial", "Bash"),
+        ("tool_result", "AskUserQuestion"),
+        ("elicitation_action_selected", ""),
+    ] {
+        assert!(
+            kinds.contains(&expected),
+            "{expected:?} not stored: {kinds:?}"
+        );
+    }
     let answer = observe(&root, &pinned, &requests(), Some(&cursor), Duration::ZERO).unwrap();
     assert_eq!(answer.outcome, ObserveOutcome::Events);
     let events = request_events(&answer);
@@ -767,6 +790,11 @@ fn each_request_for_the_user_is_a_request_event_and_nothing_else_is() {
         ]
     );
     assert_eq!(events[0]["question_mode"], Value::Null);
+    // Only a tool call's own hooks name the call; the permission hook, the
+    // notice and the elicitation do not, though this one was given an id.
+    for index in [0, 2, 3] {
+        assert_eq!(events[index]["tool_call_id"], Value::Null, "{events:#?}");
+    }
     // The chain advances past them.
     let next =
         ObserveCursor::parse(answer.cursor.as_deref().unwrap(), &pinned, &requests()).unwrap();

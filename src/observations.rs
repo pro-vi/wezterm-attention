@@ -547,17 +547,7 @@ impl LifecycleView {
     }
 }
 
-/// A request for the user that one observation opens.
-pub struct OpenedRequest<'a> {
-    pub kind: RequestKind,
-    /// A question's mode; `None` for every other kind.
-    pub question_mode: Option<QuestionMode>,
-    /// The tool that asked, when the observation names one.
-    pub tool_name: Option<&'a str>,
-}
-
 /// The part one observation plays in a request for the user.
-#[derive(Clone, Copy, Eq, PartialEq)]
 enum RequestRole {
     Request,
     Result,
@@ -566,23 +556,20 @@ enum RequestRole {
     Denial,
 }
 
-/// How one observation takes part in a request for the user. Change the
-/// classification here only: `attention inspect`'s request groups and
-/// observe's `request` events both read it.
-struct RequestPart<'a> {
-    kind: RequestKind,
+/// How one observation takes part in a request for the user, read by both
+/// `attention inspect`'s request groups and observe's `request` events.
+/// `plugin/reader.lua` classifies the same way for the tab bar; change both
+/// together, as the relation cases in `tests/rust/lifecycle_spec/pane_facts.rs`
+/// require.
+pub(crate) struct RequestPart<'a> {
+    pub(crate) kind: RequestKind,
     role: RequestRole,
-    tool_name: Option<&'a str>,
-    mode: Option<QuestionMode>,
+    pub(crate) tool_name: Option<&'a str>,
+    /// A stored tool observation matches `classify_tool`, which gives a mode
+    /// only to a question tool.
+    pub(crate) question_mode: Option<QuestionMode>,
     /// The native id's namespace and the id, when the observation names one.
     native: Option<(&'static str, &'a str)>,
-}
-
-impl RequestPart<'_> {
-    /// Only a question carries a mode.
-    fn question_mode(&self) -> Option<QuestionMode> {
-        self.mode.filter(|_| self.kind == RequestKind::Question)
-    }
 }
 
 fn request_part<'a>(item: &'a LifecycleObservation, provider: &str) -> Option<RequestPart<'a>> {
@@ -597,11 +584,11 @@ fn request_part<'a>(item: &'a LifecycleObservation, provider: &str) -> Option<Re
         ToolClass::Permission => RequestKind::Permission,
         ToolClass::Generic => RequestKind::Approval,
     };
-    let part = |kind, role, tool_name, mode, native| RequestPart {
+    let part = |kind, role, tool_name, question_mode, native| RequestPart {
         kind,
         role,
         tool_name,
-        mode,
+        question_mode,
         native,
     };
     Some(match &item.body {
@@ -686,17 +673,17 @@ fn request_evidence(observations: &[PooledObservation], provider: &str) -> Vec<R
     let mut groups: Vec<RequestEvidence> = Vec::new();
     for pooled in observations {
         let item = &pooled.observation;
-        let Some(part) = request_part(item, provider) else {
-            continue;
-        };
-        let question_mode = part.question_mode();
-        let RequestPart {
+        let Some(RequestPart {
             kind,
             role,
             tool_name,
-            mode,
+            question_mode,
             native,
-        } = part;
+        }) = request_part(item, provider)
+        else {
+            continue;
+        };
+        let (namespace, native_id) = native.unwrap_or(("observation_id", &item.observation_id));
         let correlation = item.correlation.as_ref();
         let (actor, agent) = match &item.actor {
             Actor::Lead => ("lead", ""),
@@ -706,19 +693,15 @@ fn request_evidence(observations: &[PooledObservation], provider: &str) -> Vec<R
             format!("{kind:?}"),
             actor.into(),
             agent.into(),
-            native
-                .map_or("observation_id", |(namespace, _)| namespace)
-                .into(),
-            native
-                .map_or(item.observation_id.as_str(), |(_, id)| id)
-                .into(),
+            namespace.into(),
+            native_id.into(),
             item.turn_id().unwrap_or_default().into(),
             correlation
                 .and_then(|c| c.mcp_server_name.as_deref())
                 .unwrap_or_default()
                 .into(),
             tool_name.unwrap_or_default().into(),
-            format!("{mode:?}"),
+            format!("{question_mode:?}"),
         ];
         let index = *indices.entry(key).or_insert_with(|| {
             let index = groups.len();
@@ -879,25 +862,17 @@ impl LifecycleObservation {
         self.actor == Actor::Lead && matches!(self.body, ObservationBody::PromptSubmitted { .. })
     }
 
-    /// The request for the user this observation opens, with a question's
-    /// mode; `None` when it opens none. A blocking question, a permission or
-    /// approval prompt, an elicitation and a notice open one where they are
-    /// asked. A nonblocking question opens one where the provider accepted
-    /// it for publication, since its preflight is only an attempt. A result,
-    /// a selection and an automatic denial open none.
-    pub fn opened_request(&self, provider: Provider) -> Option<OpenedRequest<'_>> {
+    /// The request for the user this observation opens; `None` when it
+    /// opens none. A nonblocking question opens one when the provider
+    /// accepts it, since its preflight is only an attempt.
+    pub(crate) fn opened_request(&self, provider: Provider) -> Option<RequestPart<'_>> {
         let part = request_part(self, provider.as_str())?;
-        let question_mode = part.question_mode();
         let opens = match part.role {
-            RequestRole::Request => question_mode != Some(QuestionMode::Nonblocking),
+            RequestRole::Request => part.question_mode != Some(QuestionMode::Nonblocking),
             RequestRole::Publication => true,
             RequestRole::Result | RequestRole::Selection | RequestRole::Denial => false,
         };
-        opens.then_some(OpenedRequest {
-            kind: part.kind,
-            question_mode,
-            tool_name: part.tool_name,
-        })
+        opens.then_some(part)
     }
 
     pub fn ends_turn(&self, provider: Provider) -> bool {
