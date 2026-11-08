@@ -194,10 +194,10 @@ struct ObserveArgs {
     /// Read the exact expected scope from JSON stdin; '-' is the only accepted value.
     #[arg(long, value_parser=["-"])]
     scope: String,
-    /// Wait only for these lead happenings (repeatable); the default is all three.
-    #[arg(long, value_parser = ["prompt", "answer", "turn_end"])]
+    /// Wait only for these lead happenings (repeatable); the default is prompt, answer and turn_end, so request (a permission prompt, question, elicitation or notice) must be named.
+    #[arg(long, value_parser = ["prompt", "answer", "turn_end", "request"])]
     r#for: Vec<String>,
-    /// With answer: only answers to this native tool call id.
+    /// With answer: only answers to this native tool call id. It does not narrow request events.
     #[arg(long)]
     call: Option<String>,
     /// Resume from a cursor a previous observe printed; it must belong to this scope and filter set.
@@ -1314,6 +1314,7 @@ fn run_observe(
         prompt: args.r#for.is_empty() || args.r#for.iter().any(|f| f == "prompt"),
         answer: args.r#for.is_empty() || args.r#for.iter().any(|f| f == "answer"),
         turn_end: args.r#for.is_empty() || args.r#for.iter().any(|f| f == "turn_end"),
+        request: args.r#for.iter().any(|f| f == "request"),
         call: args.call.clone(),
     };
     let scope = read_scope("observe")?;

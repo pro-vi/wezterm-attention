@@ -21,8 +21,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::observations::{
     Actor, LeadPrompts, LifecycleSnapshot, ObservationBody, ObservationPool, PromptReference,
+    RequestKind,
 };
-use crate::protocol::{AttentionError, Diagnostic, DiagnosticCode, Provider, Result};
+use crate::protocol::{AttentionError, Diagnostic, DiagnosticCode, Provider, QuestionMode, Result};
 use crate::query::PaneScope;
 use crate::records::{RecordIdentity, RecordRead, read_record_typed_at};
 
@@ -36,6 +37,8 @@ pub struct ObserveFilters {
     pub prompt: bool,
     pub answer: bool,
     pub turn_end: bool,
+    /// Requests for the user that the lead opened.
+    pub request: bool,
     /// Only answers to this native tool call, when answering is waited for.
     pub call: Option<String>,
 }
@@ -50,6 +53,9 @@ impl ObserveFilters {
         if self.prompt {
             names.push("prompt".to_owned());
         }
+        if self.request {
+            names.push("request".to_owned());
+        }
         if self.turn_end {
             names.push("turn_end".to_owned());
         }
@@ -61,7 +67,7 @@ impl ObserveFilters {
 /// nothing it carried: no prompt or reply text is ever in an event.
 #[derive(Clone, Debug, Serialize, Eq, PartialEq)]
 pub struct ObserveEvent {
-    /// `prompt`, `answer` or `turn_end`.
+    /// `prompt`, `answer`, `turn_end` or `request`.
     pub event: String,
     pub observation_id: String,
     /// The observation's own kind, such as `response_finished`.
@@ -72,7 +78,8 @@ pub struct ObserveEvent {
     pub actor: Actor,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
-    /// For an answer: the native call it answered.
+    /// For an answer: the native call it answered. For a request: the
+    /// native call that asked, when it names one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -80,6 +87,13 @@ pub struct ObserveEvent {
     /// For an `attempt_outcome` turn end: the provider's error code.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    /// For a request: the `kind` of its group in `attention inspect`'s
+    /// lifecycle `requests`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_kind: Option<RequestKind>,
+    /// For a question request: whether the agent waits for the answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question_mode: Option<QuestionMode>,
 }
 
 /// How an observe ended, as `result.outcome` spells it.
@@ -577,6 +591,8 @@ fn events_between(
                         turn_id: item.turn_id().map(str::to_owned),
                         tool_call_id: None,
                         question_index: None,
+                        request_kind: None,
+                        question_mode: None,
                         error_code: match &item.body {
                             ObservationBody::AttemptOutcome { error_code, .. } => {
                                 error_code.clone()
@@ -611,6 +627,15 @@ fn events_between(
                 prompt_ids.insert(item.observation_id.clone());
                 events.push(base("prompt", 0));
             }
+            if filters.request
+                && let Some((request_kind, question_mode)) = item.opened_request(state.provider)
+            {
+                let mut request = base("request", 1);
+                request.3.tool_call_id = item.tool_call_id().map(str::to_owned);
+                request.3.request_kind = Some(request_kind);
+                request.3.question_mode = question_mode;
+                events.push(request);
+            }
             if filters.turn_end && item.ends_turn(state.provider) {
                 events.push(base("turn_end", 2));
             }
@@ -640,6 +665,8 @@ fn events_between(
                 tool_call_id: None,
                 question_index: None,
                 error_code: None,
+                request_kind: None,
+                question_mode: None,
             },
         ));
     }
@@ -673,6 +700,8 @@ fn events_between(
                     tool_call_id: Some(answer.tool_call_id.clone()),
                     question_index: Some(answer.question_index),
                     error_code: None,
+                    request_kind: None,
+                    question_mode: None,
                 },
             ));
         }

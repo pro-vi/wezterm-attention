@@ -547,106 +547,148 @@ impl LifecycleView {
     }
 }
 
+/// The part one observation plays in a request for the user.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RequestRole {
+    Request,
+    Result,
+    Publication,
+    Selection,
+    Denial,
+}
+
+/// How one observation takes part in a request for the user. Change the
+/// classification here only: `attention inspect`'s request groups and
+/// observe's `request` events both read it.
+struct RequestPart<'a> {
+    kind: RequestKind,
+    role: RequestRole,
+    tool_name: Option<&'a str>,
+    mode: Option<QuestionMode>,
+    /// The native id's namespace and the id, when the observation names one.
+    native: Option<(&'static str, &'a str)>,
+}
+
+impl RequestPart<'_> {
+    /// Only a question carries a mode.
+    fn question_mode(&self) -> Option<QuestionMode> {
+        self.mode.filter(|_| self.kind == RequestKind::Question)
+    }
+}
+
+fn request_part<'a>(item: &'a LifecycleObservation, provider: &str) -> Option<RequestPart<'a>> {
+    let tool_call = item.tool_call_id().map(|id| ("tool", id));
+    let elicitation = item
+        .correlation
+        .as_ref()
+        .and_then(|c| c.elicitation_id.as_deref())
+        .map(|id| ("elicitation", id));
+    let from_class = |class| match class {
+        ToolClass::Question => RequestKind::Question,
+        ToolClass::Permission => RequestKind::Permission,
+        ToolClass::Generic => RequestKind::Approval,
+    };
+    let part = |kind, role, tool_name, mode, native| RequestPart {
+        kind,
+        role,
+        tool_name,
+        mode,
+        native,
+    };
+    Some(match &item.body {
+        ObservationBody::ToolPreflight {
+            tool_name,
+            tool_class,
+            question_mode,
+        } if *tool_class != ToolClass::Generic => part(
+            from_class(*tool_class),
+            RequestRole::Request,
+            Some(tool_name.as_str()),
+            *question_mode,
+            tool_call,
+        ),
+        ObservationBody::ToolResult {
+            tool_name,
+            tool_class,
+            question_mode,
+            ..
+        } if *tool_class != ToolClass::Generic => part(
+            from_class(*tool_class),
+            if *question_mode == Some(QuestionMode::Nonblocking) {
+                RequestRole::Publication
+            } else {
+                RequestRole::Result
+            },
+            Some(tool_name.as_str()),
+            *question_mode,
+            tool_call,
+        ),
+        ObservationBody::ApprovalRequested { tool_name } => part(
+            RequestKind::Approval,
+            RequestRole::Request,
+            tool_name.as_deref(),
+            None,
+            tool_call,
+        ),
+        ObservationBody::AutomaticDenial { tool_name, .. } => {
+            let (class, mode) = classify_tool(provider, tool_name);
+            part(
+                from_class(class),
+                RequestRole::Denial,
+                Some(tool_name.as_str()),
+                mode,
+                tool_call,
+            )
+        }
+        ObservationBody::ElicitationRequested { .. } => part(
+            RequestKind::Elicitation,
+            RequestRole::Request,
+            None,
+            None,
+            elicitation,
+        ),
+        ObservationBody::ElicitationActionSelected { .. } => part(
+            RequestKind::Elicitation,
+            RequestRole::Selection,
+            None,
+            None,
+            elicitation,
+        ),
+        ObservationBody::Notice { .. } => {
+            part(RequestKind::Notice, RequestRole::Request, None, None, None)
+        }
+        // A generic tool's call, and the rest of what a turn does, neither
+        // opens nor answers a request.
+        ObservationBody::ToolPreflight { .. }
+        | ObservationBody::ToolResult { .. }
+        | ObservationBody::PromptSubmitted { .. }
+        | ObservationBody::ResponseFinished { .. }
+        | ObservationBody::RunSettled
+        | ObservationBody::AttemptOutcome { .. }
+        | ObservationBody::UserInterrupt
+        | ObservationBody::CompactionAttempted { .. }
+        | ObservationBody::CompactionSucceeded { .. } => return None,
+    })
+}
+
 fn request_evidence(observations: &[PooledObservation], provider: &str) -> Vec<RequestEvidence> {
     use std::collections::BTreeMap;
-    #[derive(Clone, Copy)]
-    enum Role {
-        Request,
-        Result,
-        Publication,
-        Selection,
-        Denial,
-    }
     let mut indices = BTreeMap::new();
     let mut groups: Vec<RequestEvidence> = Vec::new();
     for pooled in observations {
         let item = &pooled.observation;
-        let c = item.correlation.clone().unwrap_or_default();
-        let from_class = |class| match class {
-            ToolClass::Question => RequestKind::Question,
-            ToolClass::Permission => RequestKind::Permission,
-            ToolClass::Generic => RequestKind::Approval,
+        let Some(part) = request_part(item, provider) else {
+            continue;
         };
-        let (kind, role, tool_name, mode, namespace, native_id) = match &item.body {
-            ObservationBody::ToolPreflight {
-                tool_name,
-                tool_class,
-                question_mode,
-            } if *tool_class != ToolClass::Generic => (
-                from_class(*tool_class),
-                Role::Request,
-                Some(tool_name.clone()),
-                *question_mode,
-                "tool",
-                c.tool_call_id.as_deref(),
-            ),
-            ObservationBody::ToolResult {
-                tool_name,
-                tool_class,
-                question_mode,
-                ..
-            } if *tool_class != ToolClass::Generic => (
-                from_class(*tool_class),
-                if *question_mode == Some(QuestionMode::Nonblocking) {
-                    Role::Publication
-                } else {
-                    Role::Result
-                },
-                Some(tool_name.clone()),
-                *question_mode,
-                "tool",
-                c.tool_call_id.as_deref(),
-            ),
-            ObservationBody::ApprovalRequested { tool_name } => (
-                RequestKind::Approval,
-                Role::Request,
-                tool_name.clone(),
-                None,
-                "tool",
-                c.tool_call_id.as_deref(),
-            ),
-            ObservationBody::AutomaticDenial { tool_name, .. } => {
-                let (class, mode) = classify_tool(provider, tool_name);
-                (
-                    from_class(class),
-                    Role::Denial,
-                    Some(tool_name.clone()),
-                    mode,
-                    "tool",
-                    c.tool_call_id.as_deref(),
-                )
-            }
-            ObservationBody::ElicitationRequested { .. } => (
-                RequestKind::Elicitation,
-                Role::Request,
-                None,
-                None,
-                "elicitation",
-                c.elicitation_id.as_deref(),
-            ),
-            ObservationBody::ElicitationActionSelected { .. } => (
-                RequestKind::Elicitation,
-                Role::Selection,
-                None,
-                None,
-                "elicitation",
-                c.elicitation_id.as_deref(),
-            ),
-            ObservationBody::Notice { .. } => {
-                (RequestKind::Notice, Role::Request, None, None, "", None)
-            }
-            // A generic tool's call, and the rest of what a turn does, neither
-            // opens nor answers a request.
-            ObservationBody::ToolPreflight { .. }
-            | ObservationBody::ToolResult { .. }
-            | ObservationBody::PromptSubmitted { .. }
-            | ObservationBody::ResponseFinished { .. }
-            | ObservationBody::RunSettled
-            | ObservationBody::AttemptOutcome { .. }
-            | ObservationBody::UserInterrupt
-            | ObservationBody::CompactionAttempted { .. }
-            | ObservationBody::CompactionSucceeded { .. } => continue,
-        };
+        let question_mode = part.question_mode();
+        let RequestPart {
+            kind,
+            role,
+            tool_name,
+            mode,
+            native,
+        } = part;
+        let correlation = item.correlation.as_ref();
         let (actor, agent) = match &item.actor {
             Actor::Lead => ("lead", ""),
             Actor::Child { agent_id, .. } => ("child", agent_id.as_str()),
@@ -655,15 +697,18 @@ fn request_evidence(observations: &[PooledObservation], provider: &str) -> Vec<R
             format!("{kind:?}"),
             actor.into(),
             agent.into(),
-            if native_id.is_some() {
-                namespace.into()
-            } else {
-                "observation_id".into()
-            },
-            native_id.unwrap_or(&item.observation_id).into(),
-            c.turn_id.clone().unwrap_or_default(),
-            c.mcp_server_name.clone().unwrap_or_default(),
-            tool_name.clone().unwrap_or_default(),
+            native
+                .map_or("observation_id", |(namespace, _)| namespace)
+                .into(),
+            native
+                .map_or(item.observation_id.as_str(), |(_, id)| id)
+                .into(),
+            item.turn_id().unwrap_or_default().into(),
+            correlation
+                .and_then(|c| c.mcp_server_name.as_deref())
+                .unwrap_or_default()
+                .into(),
+            tool_name.unwrap_or_default().into(),
             format!("{mode:?}"),
         ];
         let index = *indices.entry(key).or_insert_with(|| {
@@ -672,12 +717,8 @@ fn request_evidence(observations: &[PooledObservation], provider: &str) -> Vec<R
                 kind,
                 actor: item.actor.clone(),
                 correlation: item.correlation.clone(),
-                tool_name,
-                question_mode: if kind == RequestKind::Question {
-                    mode
-                } else {
-                    None
-                },
+                tool_name: tool_name.map(str::to_owned),
+                question_mode,
                 request_observation_ids: vec![],
                 result_observation_ids: vec![],
                 selection_observation_ids: vec![],
@@ -690,16 +731,16 @@ fn request_evidence(observations: &[PooledObservation], provider: &str) -> Vec<R
         });
         let group = &mut groups[index];
         let ids = match role {
-            Role::Request => &mut group.request_observation_ids,
-            Role::Result => &mut group.result_observation_ids,
-            Role::Selection => &mut group.selection_observation_ids,
-            Role::Denial => &mut group.denial_observation_ids,
+            RequestRole::Request => &mut group.request_observation_ids,
+            RequestRole::Result => &mut group.result_observation_ids,
+            RequestRole::Selection => &mut group.selection_observation_ids,
+            RequestRole::Denial => &mut group.denial_observation_ids,
             #[expect(
                 clippy::expect_used,
                 reason = "snapshots are validated before they are assembled, and \
                           `classify_tool` pairs a nonblocking result only with a question"
             )]
-            Role::Publication => group
+            RequestRole::Publication => group
                 .publication_observation_ids
                 .as_mut()
                 .expect("validated nonblocking question"),
@@ -819,8 +860,34 @@ impl LifecycleObservation {
         self.correlation.as_ref()?.turn_id.as_deref()
     }
 
+    /// The provider's id of the tool call this observation belongs to, when
+    /// it names one.
+    pub fn tool_call_id(&self) -> Option<&str> {
+        self.correlation.as_ref()?.tool_call_id.as_deref()
+    }
+
     pub fn is_lead_prompt(&self) -> bool {
         self.actor == Actor::Lead && matches!(self.body, ObservationBody::PromptSubmitted { .. })
+    }
+
+    /// The request for the user this observation opens, with a question's
+    /// mode; `None` when it opens none. A blocking question, a permission or
+    /// approval prompt, an elicitation and a notice open one where they are
+    /// asked. A nonblocking question opens one where the provider accepted
+    /// it for publication, since its preflight is only an attempt. A result,
+    /// a selection and an automatic denial open none.
+    pub fn opened_request(
+        &self,
+        provider: Provider,
+    ) -> Option<(RequestKind, Option<QuestionMode>)> {
+        let part = request_part(self, provider.as_str())?;
+        let mode = part.question_mode();
+        let opens = match part.role {
+            RequestRole::Request => mode != Some(QuestionMode::Nonblocking),
+            RequestRole::Publication => true,
+            RequestRole::Result | RequestRole::Selection | RequestRole::Denial => false,
+        };
+        opens.then_some((part.kind, mode))
     }
 
     pub fn ends_turn(&self, provider: Provider) -> bool {

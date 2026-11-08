@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`attention observe --for request` wakes a caller when the lead asks the user for something.** A permission or approval prompt, a question, an elicitation, or Claude's notice of one is reported as a `request` event with `request_kind`, `tool_call_id` when the observation names a call, and a question's `question_mode`; a nonblocking question is reported when the provider accepted it. The classification is the one `attention inspect` groups requests by. Without `--for`, observe still waits for prompts, answers and turn ends only, so existing callers see no new events. See [wait on one binding's events](docs/consumer-guide.md#wait-on-one-bindings-events).
+
 ## 1.13.0 — 2026-11-04
 
 ### Added

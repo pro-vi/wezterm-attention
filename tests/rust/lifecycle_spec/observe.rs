@@ -13,16 +13,21 @@ fn filters() -> ObserveFilters {
         prompt: true,
         answer: true,
         turn_end: true,
+        request: false,
         call: None,
     }
 }
 
 fn setup() -> Setup {
+    setup_for("codex")
+}
+
+fn setup_for(provider: &str) -> Setup {
     let setup = Setup::new();
     setup.claim();
     setup.apply(
         &event(
-            "codex",
+            provider,
             "SessionStart",
             SESSION,
             json!({"source":"startup"}),
@@ -42,13 +47,17 @@ fn scope(setup: &Setup, binding: bool) -> PaneScope {
 }
 
 fn baseline(setup: &Setup) -> (PaneScope, ObserveCursor, String) {
+    baseline_for(setup, &filters())
+}
+
+fn baseline_for(setup: &Setup, filters: &ObserveFilters) -> (PaneScope, ObserveCursor, String) {
     let scope = scope(setup, false);
     let root = state_root(&setup.env).unwrap();
-    let answer = observe(&root, &scope, &filters(), None, Duration::ZERO).unwrap();
+    let answer = observe(&root, &scope, filters, None, Duration::ZERO).unwrap();
     assert_eq!(answer.outcome, ObserveOutcome::Baseline);
     assert!(answer.events.is_empty());
     let encoded = answer.cursor.clone().expect("baseline cursor");
-    let cursor = ObserveCursor::parse(&encoded, &answer.scope, &filters()).unwrap();
+    let cursor = ObserveCursor::parse(&encoded, &answer.scope, filters).unwrap();
     (answer.scope, cursor, encoded)
 }
 
@@ -638,4 +647,205 @@ fn a_blocking_observe_returns_the_event_it_waited_for() {
     assert_eq!(answer.outcome, ObserveOutcome::Timeout);
     assert!(answer.outcome.complete());
     assert!(started.elapsed() >= Duration::from_millis(250));
+}
+
+fn requests() -> ObserveFilters {
+    ObserveFilters {
+        request: true,
+        ..ObserveFilters::default()
+    }
+}
+
+fn request_events(answer: &wezterm_attention::observe::ObserveAnswer) -> Vec<Value> {
+    answer
+        .events
+        .iter()
+        .map(|event| {
+            json!({
+                "event": event.event,
+                "kind": event.kind,
+                "request_kind": event.request_kind,
+                "question_mode": event.question_mode,
+                "tool_call_id": event.tool_call_id,
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn each_request_for_the_user_is_a_request_event_and_nothing_else_is() {
+    let setup = setup_for("claude");
+    let root = state_root(&setup.env).unwrap();
+    let (pinned, cursor, _) = baseline_for(&setup, &requests());
+    for (index, (name, patch)) in [
+        ("UserPromptSubmit", json!({"prompt":"go"})),
+        // A generic tool's call opens no request.
+        (
+            "PreToolUse",
+            json!({"tool_name":"Bash","tool_use_id":"call_bash"}),
+        ),
+        (
+            "PermissionRequest",
+            json!({"tool_name":"Bash","tool_use_id":"call_bash"}),
+        ),
+        // An automatic denial answers for the user; it asks nothing.
+        (
+            "PermissionDenied",
+            json!({"tool_name":"Bash","tool_use_id":"denied-1","permission_mode":"auto"}),
+        ),
+        (
+            "PreToolUse",
+            json!({"tool_name":"AskUserQuestion","tool_use_id":"call_q"}),
+        ),
+        (
+            "Notification",
+            json!({"notification_type":"permission_prompt","message":"needs permission"}),
+        ),
+        (
+            "Elicitation",
+            json!({"mcp_server_name":"server-a","elicitation_id":"form-1","mode":"form"}),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        setup.apply(
+            &event("claude", name, SESSION, patch),
+            &format!("{:020}", 300 + index),
+        );
+    }
+    // The generic call and the denial are stored, so their absence below
+    // is the rule's doing, not a missing observation.
+    let raw =
+        fs::read_to_string(setup.binding_dir("claude", SESSION).join("lifecycle.json")).unwrap();
+    let stored: Value = serde_json::from_str(&raw).unwrap();
+    let bash: Vec<&str> = ["general", "requests"]
+        .iter()
+        .flat_map(|pool| stored["pools"][pool]["observations"].as_array().unwrap())
+        .filter(|item| item["tool_name"] == "Bash")
+        .map(|item| item["kind"].as_str().unwrap())
+        .collect();
+    assert!(bash.contains(&"tool_preflight"), "{bash:?}");
+    assert!(bash.contains(&"automatic_denial"), "{bash:?}");
+    let answer = observe(&root, &pinned, &requests(), Some(&cursor), Duration::ZERO).unwrap();
+    assert_eq!(answer.outcome, ObserveOutcome::Events);
+    let events = request_events(&answer);
+    assert_eq!(
+        events.iter().map(|e| e["kind"].clone()).collect::<Vec<_>>(),
+        [
+            "approval_requested",
+            "tool_preflight",
+            "notice",
+            "elicitation_requested"
+        ],
+        "{events:#?}"
+    );
+    assert!(
+        events.iter().all(|e| e["event"] == "request"),
+        "{events:#?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .map(|e| e["request_kind"].clone())
+            .collect::<Vec<_>>(),
+        ["approval", "question", "notice", "elicitation"]
+    );
+    assert_eq!(events[1]["question_mode"], "blocking");
+    assert_eq!(events[1]["tool_call_id"], "call_q");
+    assert_eq!(events[0]["question_mode"], Value::Null);
+    // The chain advances past them.
+    let next =
+        ObserveCursor::parse(answer.cursor.as_deref().unwrap(), &pinned, &requests()).unwrap();
+    let quiet = observe(&root, &pinned, &requests(), Some(&next), Duration::ZERO).unwrap();
+    assert_eq!(quiet.outcome, ObserveOutcome::Timeout);
+}
+
+#[test]
+fn a_nonblocking_question_is_a_request_once_the_provider_accepted_it() {
+    let setup = setup();
+    let root = state_root(&setup.env).unwrap();
+    let (pinned, cursor, _) = baseline_for(&setup, &requests());
+    for (name, at, patch) in [
+        (
+            "PreToolUse",
+            "00000000000000000300",
+            json!({"tool_name":"request_user_input_async","tool_use_id":"call_async","turn_id":"turn-a"}),
+        ),
+        (
+            "PostToolUse",
+            "00000000000000000301",
+            json!({"tool_name":"request_user_input_async","tool_use_id":"call_async","turn_id":"turn-a","tool_response":"{\"accepted\":true}"}),
+        ),
+        (
+            "PreToolUse",
+            "00000000000000000302",
+            json!({"tool_name":"request_permissions","tool_use_id":"call_perm","turn_id":"turn-a"}),
+        ),
+    ] {
+        setup.apply(&event("codex", name, SESSION, patch), at);
+    }
+    let answer = observe(&root, &pinned, &requests(), Some(&cursor), Duration::ZERO).unwrap();
+    assert_eq!(answer.outcome, ObserveOutcome::Events);
+    let events = request_events(&answer);
+    assert_eq!(events.len(), 2, "{events:#?}");
+    // The publication, not the preflight attempt, is the request.
+    assert_eq!(events[0]["kind"], "tool_result");
+    assert_eq!(events[0]["request_kind"], "question");
+    assert_eq!(events[0]["question_mode"], "nonblocking");
+    assert_eq!(events[0]["tool_call_id"], "call_async");
+    assert_eq!(events[1]["kind"], "tool_preflight");
+    assert_eq!(events[1]["request_kind"], "permission");
+    assert_eq!(events[1]["question_mode"], Value::Null);
+    assert_eq!(events[1]["tool_call_id"], "call_perm");
+}
+
+#[test]
+fn observe_cli_reports_a_request_only_when_named() {
+    let setup = setup_for("claude");
+    let scope = serde_json::to_value(scope(&setup, false)).unwrap();
+    let run = |args: &[&str]| run_cli(&setup, args, &scope);
+    let cursor_of = |output: std::process::Output| -> String {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let baseline: Value = serde_json::from_slice(&output.stdout).unwrap();
+        baseline["result"]["cursor"].as_str().unwrap().to_owned()
+    };
+    let cursor = cursor_of(run(&["observe", "--scope", "-", "--for", "request"]));
+    let default_cursor = cursor_of(run(&["observe", "--scope", "-"]));
+    setup.apply(
+        &event(
+            "claude",
+            "PermissionRequest",
+            SESSION,
+            json!({"tool_name":"Bash"}),
+        ),
+        "00000000000000000300",
+    );
+    let output = run(&[
+        "observe", "--scope", "-", "--for", "request", "--since", &cursor,
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let answer: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(answer["result"]["outcome"], "events");
+    let event = &answer["result"]["events"][0];
+    assert_eq!(event["event"], "request");
+    assert_eq!(event["kind"], "approval_requested");
+    assert_eq!(event["request_kind"], "approval");
+    // Without --for, a request is not among the waited-for events.
+    let output = run(&["observe", "--scope", "-", "--since", &default_cursor]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let plain: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plain["result"]["outcome"], "timeout", "{plain}");
 }
