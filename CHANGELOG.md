@@ -4,7 +4,7 @@
 
 ### Added
 
-- **`attention observe --for request` wakes a caller when the lead asks the user for something.** A permission or approval prompt, a question, an elicitation, or Claude's notice of one is reported as a `request` event with `request_kind`, `tool_name` and `tool_call_id` when the observation names them, and a question's `question_mode`; a nonblocking question is reported when the provider accepted it. The classification is the one `attention inspect` groups requests by. Without `--for`, observe still waits for prompts, answers and turn ends only, so existing callers see no new events. See [wait on one binding's events](docs/consumer-guide.md#wait-on-one-bindings-events).
+- **`attention observe --for request` tells a program when the lead agent asks the user for something.** Observe gives a `request` event when the lead shows a permission prompt or asks a question. Observe also gives a `request` event when an MCP server asks the user for data (an elicitation). Observe gives a `request` event when Claude Code sends a notice about a prompt. Each `request` event has a `request_kind` field. The event also has the `tool_name` and `tool_call_id` fields when the observation has these values. A question event has a `question_mode` field. For a nonblocking question, observe gives the event when the provider accepts the question. Observe uses the same classification that `attention inspect` uses for request groups. If you do not use `--for`, observe waits only for prompts, answers and turn ends. Programs that already use observe do not get new events. Refer to [wait on one binding's events](docs/consumer-guide.md#wait-on-one-bindings-events).
 
 ## 1.13.0 — 2026-11-04
 
