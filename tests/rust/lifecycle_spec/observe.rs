@@ -182,20 +182,17 @@ fn an_answer_names_its_call_and_answers_the_call_filter() {
     let setup = setup();
     let (scope, cursor, _) = baseline(&setup);
     let root = state_root(&setup.env).unwrap();
-    for (name, at, patch) in [
+    let hooks = [
         (
             "PreToolUse",
-            "00000000000000000300",
             json!({"tool_name":"request_user_input_async","tool_use_id":"call_q","turn_id":"turn-a"}),
         ),
         (
             "PostToolUse",
-            "00000000000000000301",
             json!({"tool_name":"request_user_input_async","tool_use_id":"call_q","turn_id":"turn-a","tool_response":"{\"accepted\":true}"}),
         ),
-    ] {
-        setup.apply(&event("codex", name, SESSION, patch), at);
-    }
+    ];
+    replay(&setup, "codex", hooks);
     let id = json!(["request_user_input_async", "call_q", 0]).to_string();
     let items = json!([{"answer":"yes","question":"Which one?","questionItemId":id}]);
     setup.apply(
@@ -543,20 +540,17 @@ fn answers_missing_from_a_small_replacement_record_are_a_gap() {
     let setup = setup();
     let (scope, cursor, _) = baseline(&setup);
     let root = state_root(&setup.env).unwrap();
-    for (name, at, patch) in [
+    let hooks = [
         (
             "PreToolUse",
-            "00000000000000000300",
             json!({"tool_name":"request_user_input_async","tool_use_id":"call_q","turn_id":"turn-a"}),
         ),
         (
             "PostToolUse",
-            "00000000000000000301",
             json!({"tool_name":"request_user_input_async","tool_use_id":"call_q","turn_id":"turn-a","tool_response":"{\"accepted\":true}"}),
         ),
-    ] {
-        setup.apply(&event("codex", name, SESSION, patch), at);
-    }
+    ];
+    replay(&setup, "codex", hooks);
     let id = json!(["request_user_input_async", "call_q", 0]).to_string();
     let items = json!([{"answer":"yes","question":"Which one?","questionItemId":id}]);
     setup.apply(
@@ -649,6 +643,16 @@ fn a_blocking_observe_returns_the_event_it_waited_for() {
     assert!(started.elapsed() >= Duration::from_millis(250));
 }
 
+/// Applies the hook events in order, as observations 300 and up.
+fn replay(setup: &Setup, provider: &str, events: impl IntoIterator<Item = (&'static str, Value)>) {
+    for (index, (name, patch)) in events.into_iter().enumerate() {
+        setup.apply(
+            &event(provider, name, SESSION, patch),
+            &format!("{:020}", 300 + index),
+        );
+    }
+}
+
 fn requests() -> ObserveFilters {
     ObserveFilters {
         request: true,
@@ -679,7 +683,7 @@ fn each_request_for_the_user_is_a_request_event_and_nothing_else_is() {
     let setup = setup_for("claude");
     let root = state_root(&setup.env).unwrap();
     let (pinned, cursor, _) = baseline_for(&setup, &requests());
-    for (index, (name, patch)) in [
+    let hooks = [
         ("UserPromptSubmit", json!({"prompt":"go"})),
         // A generic tool's call opens no request.
         (
@@ -717,15 +721,8 @@ fn each_request_for_the_user_is_a_request_event_and_nothing_else_is() {
             "ElicitationResult",
             json!({"mcp_server_name":"server-a","elicitation_id":"form-1","action":"accept"}),
         ),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        setup.apply(
-            &event("claude", name, SESSION, patch),
-            &format!("{:020}", 300 + index),
-        );
-    }
+    ];
+    replay(&setup, "claude", hooks);
     // Every observation that must not be a request is stored, so its absence
     // below is the rule's doing, not a missing observation.
     let raw =
@@ -808,25 +805,21 @@ fn a_nonblocking_question_is_a_request_once_the_provider_accepted_it() {
     let setup = setup();
     let root = state_root(&setup.env).unwrap();
     let (pinned, cursor, _) = baseline_for(&setup, &requests());
-    for (name, at, patch) in [
+    let hooks = [
         (
             "PreToolUse",
-            "00000000000000000300",
             json!({"tool_name":"request_user_input_async","tool_use_id":"call_async","turn_id":"turn-a"}),
         ),
         (
             "PostToolUse",
-            "00000000000000000301",
             json!({"tool_name":"request_user_input_async","tool_use_id":"call_async","turn_id":"turn-a","tool_response":"{\"accepted\":true}"}),
         ),
         (
             "PreToolUse",
-            "00000000000000000302",
             json!({"tool_name":"request_permissions","tool_use_id":"call_perm","turn_id":"turn-a"}),
         ),
-    ] {
-        setup.apply(&event("codex", name, SESSION, patch), at);
-    }
+    ];
+    replay(&setup, "codex", hooks);
     let answer = observe(&root, &pinned, &requests(), Some(&cursor), Duration::ZERO).unwrap();
     assert_eq!(answer.outcome, ObserveOutcome::Events);
     let events = request_events(&answer);
@@ -911,7 +904,7 @@ fn a_blocking_question_s_own_result_is_its_answer_unless_it_failed() {
     };
     let (pinned, cursor, _) = baseline_for(&setup, &answers());
     let (_, call_cursor, _) = baseline_for(&setup, &call_q);
-    for (index, (name, patch)) in [
+    let hooks = [
         (
             "PreToolUse",
             json!({"tool_name":"AskUserQuestion","tool_use_id":"call_q"}),
@@ -938,15 +931,8 @@ fn a_blocking_question_s_own_result_is_its_answer_unless_it_failed() {
             "PostToolUse",
             json!({"tool_name":"AskUserQuestion","tool_response":"Red"}),
         ),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        setup.apply(
-            &event("claude", name, SESSION, patch),
-            &format!("{:020}", 300 + index),
-        );
-    }
+    ];
+    replay(&setup, "claude", hooks);
     let raw =
         fs::read_to_string(setup.binding_dir("claude", SESSION).join("lifecycle.json")).unwrap();
     assert_eq!(
@@ -990,7 +976,7 @@ fn a_codex_blocking_question_s_result_is_its_answer_and_an_async_one_s_is_not() 
     let setup = setup();
     let root = state_root(&setup.env).unwrap();
     let (pinned, cursor, _) = baseline_for(&setup, &answers());
-    for (index, (name, patch)) in [
+    let hooks = [
         (
             "PreToolUse",
             json!({"tool_name":"request_user_input","tool_use_id":"call_block","turn_id":"turn-a"}),
@@ -1003,15 +989,8 @@ fn a_codex_blocking_question_s_result_is_its_answer_and_an_async_one_s_is_not() 
             "PostToolUse",
             json!({"tool_name":"request_user_input_async","tool_use_id":"call_async","turn_id":"turn-a","tool_response":"{\"accepted\":true}"}),
         ),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        setup.apply(
-            &event("codex", name, SESSION, patch),
-            &format!("{:020}", 300 + index),
-        );
-    }
+    ];
+    replay(&setup, "codex", hooks);
     let answer = observe(&root, &pinned, &answers(), Some(&cursor), Duration::ZERO).unwrap();
     let calls: Vec<(&str, &str, Option<&str>)> = answer
         .events

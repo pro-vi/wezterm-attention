@@ -876,8 +876,8 @@ impl LifecycleObservation {
     }
 
     /// Whether this is a blocking question's tool result that came back
-    /// without an error or an interruption. A question's result is a blocking
-    /// one's: a nonblocking question's result is its publication.
+    /// without an error or an interruption. A nonblocking question's tool
+    /// result is its publication, never an answer.
     pub(crate) fn answers_blocking_question(&self, provider: Provider) -> bool {
         let failed = matches!(
             self.body,
