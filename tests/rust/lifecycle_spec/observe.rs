@@ -668,6 +668,7 @@ fn request_events(answer: &wezterm_attention::observe::ObserveAnswer) -> Vec<Val
                 "question_mode": event.question_mode,
                 "tool_call_id": event.tool_call_id,
                 "tool_name": event.tool_name,
+                "question_index": event.question_index,
             })
         })
         .collect()
@@ -891,4 +892,131 @@ fn observe_cli_reports_a_request_only_when_named() {
     );
     let plain: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(plain["result"]["outcome"], "timeout", "{plain}");
+}
+
+fn answers() -> ObserveFilters {
+    ObserveFilters {
+        answer: true,
+        ..ObserveFilters::default()
+    }
+}
+
+#[test]
+fn a_blocking_question_s_own_result_is_its_answer_unless_it_failed() {
+    let setup = setup_for("claude");
+    let root = state_root(&setup.env).unwrap();
+    let call_q = ObserveFilters {
+        call: Some("call_q".into()),
+        ..answers()
+    };
+    let (pinned, cursor, _) = baseline_for(&setup, &answers());
+    let (_, call_cursor, _) = baseline_for(&setup, &call_q);
+    for (index, (name, patch)) in [
+        (
+            "PreToolUse",
+            json!({"tool_name":"AskUserQuestion","tool_use_id":"call_q"}),
+        ),
+        (
+            "PostToolUse",
+            json!({"tool_name":"AskUserQuestion","tool_use_id":"call_q","tool_response":"Blue"}),
+        ),
+        (
+            "PostToolUse",
+            json!({"tool_name":"AskUserQuestion","tool_use_id":"call_other","tool_response":"Green"}),
+        ),
+        // A result that failed, one that was interrupted and one that names
+        // no call answer nothing.
+        (
+            "PostToolUseFailure",
+            json!({"tool_name":"AskUserQuestion","tool_use_id":"call_f","error":"denied"}),
+        ),
+        (
+            "PostToolUse",
+            json!({"tool_name":"AskUserQuestion","tool_use_id":"call_i","is_interrupt":true,"tool_response":""}),
+        ),
+        (
+            "PostToolUse",
+            json!({"tool_name":"AskUserQuestion","tool_response":"Red"}),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        setup.apply(
+            &event("claude", name, SESSION, patch),
+            &format!("{:020}", 300 + index),
+        );
+    }
+    let raw =
+        fs::read_to_string(setup.binding_dir("claude", SESSION).join("lifecycle.json")).unwrap();
+    assert_eq!(
+        raw.matches("\"tool_result\"").count(),
+        5,
+        "every result is stored, so the missing answers are the rule's doing: {raw}"
+    );
+    let all = observe(&root, &pinned, &answers(), Some(&cursor), Duration::ZERO).unwrap();
+    let events = request_events(&all);
+    assert_eq!(
+        events
+            .iter()
+            .map(|e| (
+                e["event"].clone(),
+                e["kind"].clone(),
+                e["tool_call_id"].clone()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (json!("answer"), json!("tool_result"), json!("call_q")),
+            (json!("answer"), json!("tool_result"), json!("call_other")),
+        ],
+        "{events:#?}"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|e| e["question_index"].is_null() && e["tool_name"].is_null())
+    );
+    let narrowed = observe(&root, &pinned, &call_q, Some(&call_cursor), Duration::ZERO).unwrap();
+    let narrowed: Vec<_> = narrowed
+        .events
+        .iter()
+        .map(|e| e.tool_call_id.as_deref())
+        .collect();
+    assert_eq!(narrowed, [Some("call_q")]);
+}
+
+#[test]
+fn a_codex_blocking_question_s_result_is_its_answer_and_an_async_one_s_is_not() {
+    let setup = setup();
+    let root = state_root(&setup.env).unwrap();
+    let (pinned, cursor, _) = baseline_for(&setup, &answers());
+    for (index, (name, patch)) in [
+        (
+            "PreToolUse",
+            json!({"tool_name":"request_user_input","tool_use_id":"call_block","turn_id":"turn-a"}),
+        ),
+        (
+            "PostToolUse",
+            json!({"tool_name":"request_user_input","tool_use_id":"call_block","turn_id":"turn-a","tool_response":"{}"}),
+        ),
+        (
+            "PostToolUse",
+            json!({"tool_name":"request_user_input_async","tool_use_id":"call_async","turn_id":"turn-a","tool_response":"{\"accepted\":true}"}),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        setup.apply(
+            &event("codex", name, SESSION, patch),
+            &format!("{:020}", 300 + index),
+        );
+    }
+    let answer = observe(&root, &pinned, &answers(), Some(&cursor), Duration::ZERO).unwrap();
+    let calls: Vec<(&str, &str, Option<&str>)> = answer
+        .events
+        .iter()
+        .map(|e| (e.event.as_str(), e.kind.as_str(), e.tool_call_id.as_deref()))
+        .collect();
+    assert_eq!(calls, [("answer", "tool_result", Some("call_block"))]);
 }

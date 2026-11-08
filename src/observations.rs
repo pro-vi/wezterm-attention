@@ -875,6 +875,21 @@ impl LifecycleObservation {
         opens.then_some(part)
     }
 
+    /// Whether this is a blocking question's tool result that came back
+    /// without an error or an interruption. A question's result is a blocking
+    /// one's: a nonblocking question's result is its publication.
+    pub(crate) fn answers_blocking_question(&self, provider: Provider) -> bool {
+        let failed = matches!(
+            self.body,
+            ObservationBody::ToolResult { is_error, interrupted, .. }
+                if is_error == Some(true) || interrupted == Some(true)
+        );
+        !failed
+            && request_part(self, provider.as_str()).is_some_and(|part| {
+                matches!(part.role, RequestRole::Result) && part.kind == RequestKind::Question
+            })
+    }
+
     pub fn ends_turn(&self, provider: Provider) -> bool {
         self.actor == Actor::Lead
             && manifest().is_ok_and(|m| {

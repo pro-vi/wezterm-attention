@@ -82,6 +82,8 @@ pub struct ObserveEvent {
     /// native call that asked, when it names one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// For an answer a prompt gave: the index of the question in its call.
+    /// A blocking question's tool result answers them all and has none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub question_index: Option<u64>,
     /// For an `attempt_outcome` turn end: the provider's error code.
@@ -640,6 +642,17 @@ fn events_between(
                 request.3.request_kind = Some(opened.kind);
                 request.3.question_mode = opened.question_mode;
                 events.push(request);
+            }
+            // A blocking question is answered by its own tool result, not by
+            // a later prompt, so the prompt record never names it.
+            if filters.answer
+                && item.answers_blocking_question(state.provider)
+                && let Some(call) = item.tool_call_id()
+                && filters.call.as_deref().is_none_or(|wanted| wanted == call)
+            {
+                let mut answer = base("answer", 1);
+                answer.3.tool_call_id = Some(call.to_owned());
+                events.push(answer);
             }
             if filters.turn_end && item.ends_turn(state.provider) {
                 events.push(base("turn_end", 2));
