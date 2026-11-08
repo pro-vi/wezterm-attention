@@ -667,6 +667,7 @@ fn request_events(answer: &wezterm_attention::observe::ObserveAnswer) -> Vec<Val
                 "request_kind": event.request_kind,
                 "question_mode": event.question_mode,
                 "tool_call_id": event.tool_call_id,
+                "tool_name": event.tool_name,
             })
         })
         .collect()
@@ -753,6 +754,18 @@ fn each_request_for_the_user_is_a_request_event_and_nothing_else_is() {
     );
     assert_eq!(events[1]["question_mode"], "blocking");
     assert_eq!(events[1]["tool_call_id"], "call_q");
+    assert_eq!(
+        events
+            .iter()
+            .map(|e| e["tool_name"].clone())
+            .collect::<Vec<_>>(),
+        [
+            json!("Bash"),
+            json!("AskUserQuestion"),
+            Value::Null,
+            Value::Null
+        ]
+    );
     assert_eq!(events[0]["question_mode"], Value::Null);
     // The chain advances past them.
     let next =
@@ -798,6 +811,8 @@ fn a_nonblocking_question_is_a_request_once_the_provider_accepted_it() {
     assert_eq!(events[1]["request_kind"], "permission");
     assert_eq!(events[1]["question_mode"], Value::Null);
     assert_eq!(events[1]["tool_call_id"], "call_perm");
+    assert_eq!(events[0]["tool_name"], "request_user_input_async");
+    assert_eq!(events[1]["tool_name"], "request_permissions");
 }
 
 #[test]

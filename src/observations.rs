@@ -547,6 +547,15 @@ impl LifecycleView {
     }
 }
 
+/// A request for the user that one observation opens.
+pub struct OpenedRequest<'a> {
+    pub kind: RequestKind,
+    /// A question's mode; `None` for every other kind.
+    pub question_mode: Option<QuestionMode>,
+    /// The tool that asked, when the observation names one.
+    pub tool_name: Option<&'a str>,
+}
+
 /// The part one observation plays in a request for the user.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum RequestRole {
@@ -876,18 +885,19 @@ impl LifecycleObservation {
     /// asked. A nonblocking question opens one where the provider accepted
     /// it for publication, since its preflight is only an attempt. A result,
     /// a selection and an automatic denial open none.
-    pub fn opened_request(
-        &self,
-        provider: Provider,
-    ) -> Option<(RequestKind, Option<QuestionMode>)> {
+    pub fn opened_request(&self, provider: Provider) -> Option<OpenedRequest<'_>> {
         let part = request_part(self, provider.as_str())?;
-        let mode = part.question_mode();
+        let question_mode = part.question_mode();
         let opens = match part.role {
-            RequestRole::Request => mode != Some(QuestionMode::Nonblocking),
+            RequestRole::Request => question_mode != Some(QuestionMode::Nonblocking),
             RequestRole::Publication => true,
             RequestRole::Result | RequestRole::Selection | RequestRole::Denial => false,
         };
-        opens.then_some((part.kind, mode))
+        opens.then_some(OpenedRequest {
+            kind: part.kind,
+            question_mode,
+            tool_name: part.tool_name,
+        })
     }
 
     pub fn ends_turn(&self, provider: Provider) -> bool {

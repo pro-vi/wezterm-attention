@@ -91,6 +91,9 @@ pub struct ObserveEvent {
     /// lifecycle `requests`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_kind: Option<RequestKind>,
+    /// For a request: the tool that asked, when the observation names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
     /// For a question request: whether the agent waits for the answer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub question_mode: Option<QuestionMode>,
@@ -592,6 +595,7 @@ fn events_between(
                         tool_call_id: None,
                         question_index: None,
                         request_kind: None,
+                        tool_name: None,
                         question_mode: None,
                         error_code: match &item.body {
                             ObservationBody::AttemptOutcome { error_code, .. } => {
@@ -628,12 +632,13 @@ fn events_between(
                 events.push(base("prompt", 0));
             }
             if filters.request
-                && let Some((request_kind, question_mode)) = item.opened_request(state.provider)
+                && let Some(opened) = item.opened_request(state.provider)
             {
                 let mut request = base("request", 1);
                 request.3.tool_call_id = item.tool_call_id().map(str::to_owned);
-                request.3.request_kind = Some(request_kind);
-                request.3.question_mode = question_mode;
+                request.3.tool_name = opened.tool_name.map(str::to_owned);
+                request.3.request_kind = Some(opened.kind);
+                request.3.question_mode = opened.question_mode;
                 events.push(request);
             }
             if filters.turn_end && item.ends_turn(state.provider) {
@@ -666,6 +671,7 @@ fn events_between(
                 question_index: None,
                 error_code: None,
                 request_kind: None,
+                tool_name: None,
                 question_mode: None,
             },
         ));
@@ -701,6 +707,7 @@ fn events_between(
                     question_index: Some(answer.question_index),
                     error_code: None,
                     request_kind: None,
+                    tool_name: None,
                     question_mode: None,
                 },
             ));
