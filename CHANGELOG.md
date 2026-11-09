@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`examples/restore.mjs` brings back a stopped mux server's agent panes from a checkpoint.** It prints a plan, and with `--apply` it opens new windows, tabs and splits in the recorded layout and directories. In each agent pane it types `claude --resume` or `codex resume` with the agent's recorded profile, and does not press Enter. It skips sessions that already run, and it touches only panes it opened. Refer to [restore panes after a restart](docs/setup.md#restore-panes-after-a-restart).
+
+### Changed
+
+- **`examples/checkpoint.mjs` saves a long-lived mux.** A closed pane, a session conflict or more than 100 bindings no longer stop it. It judges only the panes `wezterm cli list` shows, and saves a pane it cannot trust as unknown, with a reason. It keeps the checkpoint of an earlier server as `<file>.<incarnation id>.json`.
+
 ## 1.14.0 — 2026-11-08
 
 ### Added

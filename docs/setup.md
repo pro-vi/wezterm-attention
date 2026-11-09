@@ -168,3 +168,24 @@ Other extensions may emit `thinking`, `stop`, `notify`, `review`, or `clear` on 
 Pi writes through the `attention` command that `WEZTERM_ATTENTION_ROOT` names. Where it is unset in a WezTerm pane (the command is not built, or the pane was opened before it was), Pi records nothing and shows one warning. Outside WezTerm, where `WEZTERM_PANE` is unset, it records nothing and says nothing. Its records need a launch claim. On macOS, Pi's session start claims the pane for the Pi process itself, so `pi` needs no claim step; the extension tells the writer its own pid for that. On Linux, or with self-claim switched off, a pane where `pi` was started without a claim refuses every event, Pi shows one warning, and the tab shows nothing for Pi; start Pi from a shell that claims for it, see [Mux setup](mux-setup.md).
 
 For cached lifecycle observations, question-publication evidence and consumer-owned presentation, see the [consumer guide](consumer-guide.md).
+
+## Restore panes after a restart
+
+When a mux server stops, its panes and the agents in them stop too. Two recipes in `examples/` bring the panes back from a checkpoint. They need Node. Attention's command and plugin never act on a pane; `examples/restore.mjs` does, and only with `--apply`.
+
+Save a checkpoint of the server every minute, for example from cron:
+
+```crontab
+* * * * * /absolute/path/to/node /absolute/path/to/wezterm-attention/examples/checkpoint.mjs /absolute/path/to/attention /absolute/path/to/mux.sock /absolute/path/to/wezterm /absolute/path/to/checkpoint.json
+```
+
+After the server restarts, attach a GUI window to it, then read the plan and apply it:
+
+```sh
+node examples/restore.mjs /absolute/path/to/checkpoint.json /absolute/path/to/attention /absolute/path/to/mux.sock /absolute/path/to/wezterm
+node examples/restore.mjs /absolute/path/to/checkpoint.json /absolute/path/to/attention /absolute/path/to/mux.sock /absolute/path/to/wezterm --apply
+```
+
+Each restored agent pane has its resume command typed and waiting. Press Enter in the panes you want to resume. The first checkpoint after the restart keeps the old server's file as `checkpoint.json.<incarnation id>.json`; when restore refuses with "checkpoint is of the running server", it names that file, and you pass it instead.
+
+Attach the GUI window first, so new windows open at its size. In a smaller window a split can fail for lack of space, and stock WezTerm then keeps a pane you cannot see (see [Executable application recipes](consumer-guide.md#executable-application-recipes)). This works with a mux server, whose socket path stays the same across restarts ([Mux setup](mux-setup.md)). A WezTerm without a mux server gets a new socket path at each launch, so a scheduled checkpoint has no fixed socket to name; that case is not supported yet.
