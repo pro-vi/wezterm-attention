@@ -2,7 +2,7 @@ use super::*;
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
-fn public_checkpoint_inspector_and_reply_sink_recipes_execute() {
+fn public_checkpoint_inspector_restore_and_reply_sink_recipes_execute() {
     let mut setup = Setup::new();
     setup.claim();
     setup.apply(
@@ -60,10 +60,20 @@ fn public_checkpoint_inspector_and_reply_sink_recipes_execute() {
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
     let inspect: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let realm = rust_command(&setup)
+        .args([
+            "bindings",
+            "--realm",
+            bindings["result"]["scope"]["realm_id"].as_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(realm.status.success());
+    let realm: Value = serde_json::from_slice(&realm.stdout).unwrap();
     let input = setup._scratch.0.join("public-envelopes.json");
     fs::write(
         &input,
-        json!({"bindings":bindings,"inspect":inspect}).to_string(),
+        json!({"bindings":bindings,"inspect":inspect,"realm":realm}).to_string(),
     )
     .unwrap();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -71,6 +81,19 @@ fn public_checkpoint_inspector_and_reply_sink_recipes_execute() {
         .env_clear()
         .envs(&setup.env)
         .arg(root.join("tests/javascript/consumer_recipes.mjs"))
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    println!("{}", String::from_utf8_lossy(&output.stdout));
+    let output = Command::new(&node)
+        .env_clear()
+        .envs(&setup.env)
+        .arg(root.join("tests/javascript/restore_recipe.mjs"))
         .arg(&input)
         .output()
         .unwrap();
