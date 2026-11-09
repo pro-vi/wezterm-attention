@@ -1,11 +1,13 @@
 #!/usr/bin/env node
-// Bounded public discovery followed by exact address/launch/binding inspection.
+// Bounded public discovery followed by exact address/launch/binding inspection
+// of the trusted current rows; the other current rows are named, not inspected.
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { bindings, runJson } from "./checkpoint.mjs";
 
 export function inspectBindings({ attention, socket, run = runJson, limit = "100" }) {
   const discovery = bindings(attention, socket, run, limit);
+  if (!discovery.complete) throw new Error("binding discovery is incomplete; nothing was inspected");
   const panes = [];
   for (const row of discovery.current.values()) {
     const scope = { address: row.address, launch_id: row.launch_id, binding_id: row.binding_id };
@@ -18,7 +20,9 @@ export function inspectBindings({ attention, socket, run = runJson, limit = "100
         || actual.address?.pane_id !== scope.address.pane_id) throw new Error("inspection returned a different scope");
     panes.push(response.result);
   }
-  return { schema: 1, scope: discovery.scope, panes };
+  // Rows a checkpoint would not trust are named, not inspected.
+  const uncertain = [...discovery.uncertain].map(([pane, entry]) => ({ pane_id: pane, reason: entry.reason }));
+  return { schema: 1, scope: discovery.scope, panes, uncertain };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
