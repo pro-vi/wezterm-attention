@@ -15,6 +15,16 @@ const file = join(directory, "checkpoint.json");
 const realRow = () => structuredClone(fixture.bindings.result.rows.find(row => row.current));
 const scope = fixture.bindings.result.scope;
 const at = (row, pane) => { row.address.pane_id = pane; return row; };
+// Runs `action` while every write to an open descriptor fails.
+function withFailingWrite(action) {
+  const original = fs.writeFileSync;
+  fs.writeFileSync = (target, ...args) => {
+    if (typeof target === "number") throw new Error("synthetic write failure");
+    return original(target, ...args);
+  };
+  syncBuiltinESMExports();
+  try { return action(); } finally { fs.writeFileSync = original; syncBuiltinESMExports(); }
+}
 try {
   function runner(change = value => value, topology = [{ pane_id: 42, tab_id: 7, is_active: true }]) {
     let queries = 0;
@@ -37,8 +47,8 @@ try {
   assert.equal(result.panes[0].binding_unknown_reason, undefined);
   const previous = JSON.stringify(result) + "\n";
 
-  // An incomplete answer is still a usable answer when it is only `bindings`
-  // exiting 1: the reader accepts the exit, and the default refuses it.
+  // `bindings` exits 1 on an incomplete answer; runJson accepts that exit only
+  // when acceptExit lists it.
   const exitOne = [process.execPath, ["-e", "console.log(JSON.stringify({ok:1})); process.exit(1)"]];
   assert.deepEqual(runJson(...exitOne, undefined, undefined, { acceptExit: [0, 1] }), { ok: 1 });
   assert.throws(() => runJson(...exitOne));
@@ -69,8 +79,8 @@ try {
     assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).panes[0].binding_unknown_reason, reason);
   }
 
-  // The live shape: closed panes' current rows, and a session conflict between
-  // a listed pane and one wezterm no longer lists, in an answer that exited 1.
+  // A long-running mux: current rows of closed panes, and a conflict between a
+  // listed pane and an unlisted one, in an incomplete answer.
   const conflictOf = panes => ({
     code: "binding_conflict", message: "provider session is bound to multiple pane addresses",
     context: { provider: realRow().provider, provider_session_id: realRow().provider_session_id,
@@ -120,6 +130,13 @@ try {
   assert.equal(kept[0], `${file}.${other}.json`, "the replaced checkpoint is the newest kept");
   assert.equal(existsSync(`${file}.${"0".repeat(64)}.json`), false, "the oldest kept file is removed");
   assert.equal(readFileSync(stranger, "utf8"), "someone else's file");
+  // A save that fails after keeping an earlier server's checkpoint leaves
+  // that checkpoint at its path too.
+  const earlier = JSON.stringify({ ...result, scope: { ...scope, incarnation_id: "9".repeat(64) } }) + "\n";
+  writeFileSync(file, earlier);
+  withFailingWrite(() => assert.throws(() => saveCheckpoint({ ...options, run: runner() }, file), /synthetic write failure/));
+  assert.equal(readFileSync(file, "utf8"), earlier);
+  assert.equal(readFileSync(`${file}.${"9".repeat(64)}.json`, "utf8"), earlier);
   writeFileSync(file, "not a checkpoint");
   assert.throws(() => saveCheckpoint({ ...options, run: runner() }, file), /left in place/);
   assert.equal(readFileSync(file, "utf8"), "not a checkpoint");
@@ -144,7 +161,6 @@ try {
   } }), /incomplete/);
   assert.equal(inspected, false, "inspection also stops on an incomplete answer a checkpoint can read");
   const originalUUID = crypto.randomUUID;
-  const originalWrite = fs.writeFileSync;
   try {
     writeFileSync(file, previous);
     crypto.randomUUID = () => "collision";
@@ -154,17 +170,11 @@ try {
     assert.throws(() => saveCheckpoint({ ...options, run: runner() }, file));
     assert.equal(readFileSync(collision, "utf8"), "another writer's temporary file");
     rmSync(collision);
-    fs.writeFileSync = (target, ...args) => {
-      if (typeof target === "number") throw new Error("synthetic write failure");
-      return originalWrite(target, ...args);
-    };
-    syncBuiltinESMExports();
-    assert.throws(() => saveCheckpoint({ ...options, run: runner() }, file), /synthetic write failure/);
+    withFailingWrite(() => assert.throws(() => saveCheckpoint({ ...options, run: runner() }, file), /synthetic write failure/));
     assert.equal(readFileSync(file, "utf8"), previous);
     assert.equal(fs.existsSync(collision), false, "failed owned write must clean up its own temporary file");
   } finally {
     crypto.randomUUID = originalUUID;
-    fs.writeFileSync = originalWrite;
     syncBuiltinESMExports();
   }
   assert.equal(readdirSync(directory).filter(name => name.endsWith(".tmp")).length, 0);

@@ -1,25 +1,28 @@
 #!/usr/bin/env node
 // Application-owned checkpoint recipe. Attention owns identity and binding facts.
 import { spawnSync } from "node:child_process";
-import { openSync, closeSync, writeFileSync, renameSync, rmSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { openSync, closeSync, writeFileSync, renameSync, rmSync, readFileSync, readdirSync, lstatSync, linkSync } from "node:fs";
 import { isAbsolute, resolve, dirname, basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 
-// How many checkpoints of earlier servers stay beside the current one.
 const KEPT = 20;
 export const LIST = ["--skip-config", "cli", "--no-auto-start", "list", "--format", "json"];
 
-export function runJson(executable, args, input, env, { acceptExit = [0] } = {}) {
+// Resource budgets only; neither timeout nor missing output means no agent.
+export function runCommand(executable, args, input, env) {
   if (!isAbsolute(executable)) throw new Error("executable must be absolute");
-  // Resource budgets only; neither timeout nor missing output means no agent.
-  const result = spawnSync(executable, args, { input, env, encoding: "utf8", timeout: 10000, maxBuffer: 8 * 1024 * 1024 });
+  return spawnSync(executable, args, { input, env, encoding: "utf8", timeout: 10000, maxBuffer: 8 * 1024 * 1024 });
+}
+
+export function runJson(executable, args, input, env, { acceptExit = [0], exec = runCommand } = {}) {
+  const result = exec(executable, args, input, env);
   if (result.error || !acceptExit.includes(result.status)) throw new Error("command failed or was unavailable");
   try { return JSON.parse(result.stdout); } catch { throw new Error("command returned invalid JSON"); }
 }
 
-export function validScope(scope) {
+function validScope(scope) {
   return scope && typeof scope === "object" && !Array.isArray(scope)
     && Object.keys(scope).length === 2
     && /^[a-f0-9]{64}$/.test(scope.realm_id) && /^[a-f0-9]{64}$/.test(scope.incarnation_id);
@@ -49,7 +52,8 @@ export function bindingsEnvelope(response) {
 const inScope = (address, scope) => address && address.realm_id === scope.realm_id && address.incarnation_id === scope.incarnation_id;
 
 // The panes a diagnostic is about, or null when it is about the answer as a
-// whole. A conflict names its addresses; a presence diagnostic names one pane.
+// whole. A conflict names its addresses; a diagnostic whose context holds a
+// `pane_id` in this server's scope names that pane.
 function diagnosticPanes(diagnostic, scope) {
   const context = diagnostic?.context;
   if (!context || typeof context !== "object") return null;
@@ -182,8 +186,8 @@ export function captureCheckpoint({ attention, socket, wezterm, run = runJson, l
     else if (row.binding_phase === "active") unlisted.set(sessionKey(row), { provider: row.provider, provider_session_id: row.provider_session_id });
   }
   for (const key of seenListed) unlisted.delete(key);
-  // A null binding is unknown, not proof of no agent. Ended bindings remain
-  // explicitly ended; this snapshot supplies neither resume nor control permission.
+  // A null binding is unknown, not proof of no agent, and an ended binding stays
+  // ended. The snapshot itself grants no permission to resume or control a pane.
   return { schema: 1, scope: after.scope, panes, unlisted_sessions: [...unlisted.values()], binding_query_ms: [firstMs, secondMs] };
 }
 
@@ -195,22 +199,25 @@ export function keptCheckpoints(file) {
   return entries
     .filter(entry => entry.startsWith(prefix) && entry.endsWith(".json") && /^[a-f0-9]{64}$/.test(entry.slice(prefix.length, -5)))
     .map(entry => join(dirname(file), entry))
-    .map(path => ({ path, mtime: statSync(path).mtimeMs })).sort((a, b) => b.mtime - a.mtime).map(kept => kept.path);
+    .flatMap(path => { try { return [{ path, mtime: lstatSync(path).mtimeMs }]; } catch { return []; } })
+    .sort((a, b) => b.mtime - a.mtime).map(kept => kept.path);
 }
 
-// Before a checkpoint of an earlier server is replaced, it is kept under its
-// incarnation id, and only the newest KEPT such files remain.
+// The first checkpoint after a restart would overwrite the only record of the
+// server that stopped, so that file is first linked under its incarnation id;
+// restore reads it there. A link, not a rename: until the new checkpoint is
+// renamed over it, the old file stays at its path, so a failed save loses
+// nothing.
 function keepPrevious(file, incarnation) {
   let previous;
   try { previous = JSON.parse(readFileSync(file, "utf8")); } catch (error) {
     if (error.code === "ENOENT") return;
-    throw new Error("existing checkpoint is unreadable; it was left in place");
+    throw new Error(`existing checkpoint ${file} is unreadable; it was left in place`);
   }
   const old = checkpointScope(previous)?.incarnation_id;
-  if (!old) throw new Error("existing checkpoint is not a schema 1 checkpoint; it was left in place");
+  if (!old) throw new Error(`existing checkpoint ${file} is not a schema 1 checkpoint; it was left in place`);
   if (old === incarnation) return;
-  renameSync(file, `${file}.${old}.json`);
-  for (const path of keptCheckpoints(file).slice(KEPT)) rmSync(path, { force: true });
+  try { linkSync(file, `${file}.${old}.json`); } catch (error) { if (error.code !== "EEXIST") throw error; }
 }
 
 export function saveCheckpoint(options, file) {
@@ -224,6 +231,7 @@ export function saveCheckpoint(options, file) {
     renameSync(temporary, file);
   }
   finally { rmSync(temporary, { force: true }); }
+  for (const path of keptCheckpoints(file).slice(KEPT)) rmSync(path, { force: true });
   return checkpoint;
 }
 

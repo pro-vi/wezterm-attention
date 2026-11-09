@@ -1,49 +1,65 @@
 #!/usr/bin/env node
 // Application-owned restore recipe. It reopens a checkpoint's panes in new
 // windows and types each agent's resume line, never pressing Enter.
-// Attention's CLI and plugin never act on a pane; this script does, and only
-// when run with --apply.
-import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+// Attention's CLI and plugin never spawn a pane or send input to one; this
+// script does, and only when run with --apply.
+import { readFileSync, statSync } from "node:fs";
+import { hostname } from "node:os";
 import { isAbsolute, resolve, basename } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { LIST, bindings, bindingsEnvelope, checkpointScope, keptCheckpoints, listTopology, paneNumber, runJson, sessionKey } from "./checkpoint.mjs";
+import { LIST, bindings, bindingsEnvelope, checkpointScope, keptCheckpoints, listTopology, paneNumber, runCommand, runJson, sessionKey } from "./checkpoint.mjs";
 
 const CLI = LIST.slice(0, 3);
-const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+// A leading "-" would be read as an option of the agent command.
+const SESSION_ID = /^[A-Za-z0-9._:][A-Za-z0-9._:-]{0,127}$/;
 const CONTROL = /[\u0000-\u001f\u007f]/;
-const PROFILE_VARIABLE = { claude: "CLAUDE_CONFIG_DIR", codex: "CODEX_HOME" };
-const RESUME = { claude: id => `claude --resume ${id}`, codex: id => `codex resume ${id}` };
+const PROVIDERS = {
+  claude: { variable: "CLAUDE_CONFIG_DIR", resume: id => `claude --resume ${id}` },
+  codex: { variable: "CODEX_HOME", resume: id => `codex resume ${id}` },
+};
 
-export function shellWord(text) {
+function shellWord(text) {
   return /^[A-Za-z0-9_/.,:+@%-]+$/.test(text) ? text : `'${text.replaceAll("'", `'\\''`)}'`;
 }
 
-// Every record value that reaches `--cwd` or a typed line passes here.
+// A path from the checkpoint reaches `--cwd` or a typed line only through
+// here: a control character in it could press Enter or start an escape
+// sequence. Session ids are checked by SESSION_ID.
 const safePath = value => (typeof value === "string" && isAbsolute(value) && !CONTROL.test(value) ? value : null);
 
 // The command typed into a reopened pane, or the reason there is none. The
 // profile is the agent's own CLAUDE_CONFIG_DIR or CODEX_HOME as its hook saw
 // it (`config_dir`); without one the variable is unset, never guessed.
 export function resumeLine(binding) {
-  const variable = PROFILE_VARIABLE[binding.provider];
-  if (!variable) return { reason: `no_resume_form_for_${binding.provider}` };
+  const provider = Object.hasOwn(PROVIDERS, binding.provider) ? PROVIDERS[binding.provider] : null;
+  if (!provider) return { reason: `no_resume_form_for_${binding.provider}` };
   const id = binding.provider_session_id;
   if (typeof id !== "string" || !SESSION_ID.test(id)) return { reason: "session_id_invalid" };
   const transcript = typeof binding.transcript_path === "string" ? basename(binding.transcript_path) : "";
-  const named = binding.provider === "claude" ? transcript === `${id}.jsonl` : transcript.endsWith(`-${id}.jsonl`);
+  const named = binding.provider === "claude" ? transcript === `${id}.jsonl`
+    : /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(.+)\.jsonl$/.exec(transcript)?.[1] === id;
   if (!named) return { reason: "transcript_does_not_name_session" };
   const dir = binding.config_dir ?? null;
   if (dir !== null && !safePath(dir)) return { reason: "config_dir_invalid" };
-  const profile = dir ? `env ${variable}=${shellWord(dir)}` : `env -u ${variable}`;
-  return { line: `${profile} ${RESUME[binding.provider](id)}`, profile: dir };
+  const profile = dir ? `env ${provider.variable}=${shellWord(dir)}` : `env -u ${provider.variable}`;
+  return { line: `${profile} ${provider.resume(id)}`, profile: dir };
 }
 
+// A listed pane's directory from WezTerm's file URL, which may name this host.
 function topologyCwd(text) {
-  try { return safePath(fileURLToPath(text)); } catch { return null; }
+  try {
+    const url = new URL(text);
+    if (url.hostname && url.hostname !== hostname()) return null;
+    url.hostname = "";
+    return safePath(fileURLToPath(url));
+  } catch { return null; }
 }
 
-export function readCheckpoint(file) {
+const isDirectory = path => { try { return statSync(path).isDirectory(); } catch { return false; } };
+// A target with no `exists` (a caller's own) has every directory.
+const dirExists = (target, path) => (target.exists ? target.exists(path) : true);
+
+function readCheckpoint(file) {
   let checkpoint;
   try { checkpoint = JSON.parse(readFileSync(file, "utf8")); } catch { throw new Error("checkpoint is unreadable"); }
   if (!checkpointScope(checkpoint)) throw new Error("checkpoint is not a schema 1 checkpoint");
@@ -57,9 +73,9 @@ export function readCheckpoint(file) {
 
 class SameServer extends Error {}
 
-// The target server's identity, the sessions its listed panes run, and every
-// row of the checkpointed realm, from which the plan picks the active
-// sessions the checkpoint lacks.
+// The target server's identity, the sessions its listed panes run, every row
+// of the checkpointed realm (from which the plan picks the active sessions the
+// checkpoint lacks), and which directories exist.
 export function readTarget({ attention, socket, wezterm, checkpoint, run = runJson }) {
   const read = bindings(attention, socket, run);
   if (read.scope.incarnation_id === checkpoint.scope.incarnation_id) throw new SameServer("checkpoint is of the running server");
@@ -75,7 +91,7 @@ export function readTarget({ attention, socket, wezterm, checkpoint, run = runJs
     const response = run(attention, ["bindings", "--realm", checkpoint.scope.realm_id, "--json"]);
     if (bindingsEnvelope(response) && response.complete) realm = response.result.rows;
   } catch {}
-  return { scope: read.scope, live, realm };
+  return { scope: read.scope, live, realm, exists: isDirectory };
 }
 
 function rectangle(topology) {
@@ -83,8 +99,9 @@ function rectangle(topology) {
   return Object.values(r).every(value => Number.isSafeInteger(value) && value >= 0) && r.w > 0 && r.h > 0 ? r : null;
 }
 
-// In a zoomed tab WezTerm lists the zoomed pane at its own place but with the
-// whole tab's size; its real edge is where its nearest neighbour begins.
+// In a zoomed tab, a mux server running WezTerm 20261018-200420-656e4f47 lists
+// the zoomed pane at its own place but with the whole tab's size; its real
+// edge is where its nearest neighbour begins.
 function unzoom(items, zoomed) {
   const others = items.filter(item => item !== zoomed);
   if (!zoomed.r || others.some(item => !item.r)) return false;
@@ -120,27 +137,35 @@ const firstLeaf = node => node.leaf ?? firstLeaf(node.first);
 
 // Whether a recorded session can be resumed into a new pane: running already
 // in the target, no line for it, or its line and directory.
-function resumable(binding, live, resume) {
+// A directory that no longer exists would open the pane in the home folder,
+// where the agent would not find its session, so it gets no line.
+function resumable(binding, target, resume) {
   const evidence = { provider: binding.provider, session: binding.provider_session_id };
-  if (live.has(sessionKey(binding))) return { ...evidence, outcome: "already_running", live_pane: live.get(sessionKey(binding)) };
+  if (target.live.has(sessionKey(binding))) return { ...evidence, outcome: "already_running", live_pane: target.live.get(sessionKey(binding)) };
   const made = resume(binding);
   if (!made.line) return { ...evidence, outcome: "no_resume_line", reason: made.reason };
-  return { ...evidence, outcome: "resume", line: made.line, profile: made.profile ?? null, cwd: safePath(binding.cwd) };
+  // A caller's resumeLine is held to the rule the default keeps: no control
+  // character, which could press Enter.
+  if (CONTROL.test(made.line)) return { ...evidence, outcome: "no_resume_line", reason: "line_has_control_character" };
+  const cwd = safePath(binding.cwd);
+  if (cwd && !dirExists(target, cwd)) return { ...evidence, outcome: "no_resume_line", reason: "cwd_missing" };
+  return { ...evidence, outcome: "resume", line: made.line, profile: made.profile ?? null, cwd };
 }
 
 // What a checkpoint pane becomes.
-function paneOutcome(pane, live, resume) {
-  const shellCwd = topologyCwd(pane.topology.cwd);
+function paneOutcome(pane, target, resume) {
+  const recorded = topologyCwd(pane.topology.cwd);
+  const shellCwd = recorded && dirExists(target, recorded) ? recorded : null;
   const binding = pane.binding;
   if (!binding) return { cwd: shellCwd, outcome: "binding_unknown", reason: pane.binding_unknown_reason ?? null };
   const note = pane.binding_note ? { binding_note: pane.binding_note } : {};
   if (binding.binding_phase !== "active") return { cwd: shellCwd, provider: binding.provider, session: binding.provider_session_id, ...note, outcome: "agent_ended" };
-  const result = resumable(binding, live, resume);
+  const result = resumable(binding, target, resume);
   return { ...result, ...note, cwd: result.outcome === "resume" ? result.cwd ?? shellCwd : shellCwd };
 }
 
-// Turns a checkpoint and the target's state into tabs of steps. Pure: it
-// reads nothing and runs nothing.
+// Turns a checkpoint and the target's state into tabs of steps. It runs
+// nothing, and reads the filesystem only through `target.exists`.
 export function planRestore(checkpoint, target, { resumeLine: resume = resumeLine } = {}) {
   if (target.scope.incarnation_id === checkpoint.scope.incarnation_id) throw new SameServer("checkpoint is of the running server");
   let next = 0;
@@ -158,7 +183,7 @@ export function planRestore(checkpoint, target, { resumeLine: resume = resumeLin
     const tabIds = [...byWindow.get(windowId).keys()].sort((a, b) => a - b);
     for (const [tabIndex, tabId] of tabIds.entries()) {
       const items = byWindow.get(windowId).get(tabId)
-        .map(pane => ({ pane, topology: pane.topology, r: rectangle(pane.topology), plan: paneOutcome(pane, target.live, resume) }))
+        .map(pane => ({ pane, topology: pane.topology, r: rectangle(pane.topology), plan: paneOutcome(pane, target, resume) }))
         .sort((a, b) => (a.r?.y ?? 0) - (b.r?.y ?? 0) || (a.r?.x ?? 0) - (b.r?.x ?? 0));
       const zoomed = items.find(item => item.topology.is_zoomed);
       let layout = "exact";
@@ -198,7 +223,12 @@ export function planRestore(checkpoint, target, { resumeLine: resume = resumeLin
   // each in a new tab of the first window.
   const added = [];
   if (target.realm) {
-    const known = new Set([...checkpoint.panes.filter(p => p.binding).map(p => sessionKey(p.binding)), ...(checkpoint.unlisted_sessions ?? []).map(sessionKey)]);
+    // A session ended in its checkpoint pane may have been resumed in a new
+    // pane since, so only active ones count as known.
+    const known = new Set([
+      ...checkpoint.panes.filter(p => p.binding?.binding_phase === "active").map(p => sessionKey(p.binding)),
+      ...(checkpoint.unlisted_sessions ?? []).map(sessionKey),
+    ]);
     const groups = new Map();
     for (const row of target.realm) {
       if (!row?.current || row.binding_phase !== "active" || row.address?.incarnation_id !== checkpoint.scope.incarnation_id) continue;
@@ -209,7 +239,7 @@ export function planRestore(checkpoint, target, { resumeLine: resume = resumeLin
     }
     for (const rows of groups.values()) {
       if (rows.length > 1) { added.push({ provider: rows[0].provider, session: rows[0].provider_session_id, outcome: "not_added", reason: "conflicting_records" }); continue; }
-      const result = resumable(rows[0], target.live, resume);
+      const result = resumable(rows[0], target, resume);
       if (result.outcome === "already_running") { added.push(result); continue; }
       if (result.outcome !== "resume" || !result.cwd) { added.push({ ...result, outcome: "not_added", reason: result.reason ?? "cwd_unknown" }); continue; }
       const entry = { ...result, outcome: "resume_added" };
@@ -222,30 +252,35 @@ export function planRestore(checkpoint, target, { resumeLine: resume = resumeLin
   }
   const panes = tabs.flatMap(tab => tab.panes);
   return {
-    schema: 1, source: checkpoint.scope, target: target.scope, tabs, added, added_unavailable: target.realm ? null : "realm_read_failed",
+    source: checkpoint.scope, target: target.scope, tabs, added, added_unavailable: target.realm ? null : "realm_read_failed",
     counts: { windows: tabs.filter(tab => tab.steps[0].op === "spawn_window").length, panes: panes.length, lines: panes.filter(p => p.line).length },
   };
-}
-
-function execText(executable, args, env) {
-  if (!isAbsolute(executable)) throw new Error("executable must be absolute");
-  return spawnSync(executable, args, { env, encoding: "utf8", timeout: 10000 });
 }
 
 class Stop extends Error {
   constructor(reason, detail) { super(reason); this.detail = detail; }
 }
 
+// The socket file's identity. A server that restarts on the same path makes
+// a new socket file, and numbers its windows and panes from 0 again.
+const socketIdentity = path => { try { const s = statSync(path); return `${s.dev}:${s.ino}:${s.birthtimeMs}`; } catch { return null; } };
+
 // Runs a plan. Every pane it touches after creating it is one it created in
 // this call; it never closes, moves or resizes a pane.
-export function applyRestore(plan, { wezterm, socket, exec = execText, run = runJson, report = event => console.log(JSON.stringify(event)) }) {
+export function applyRestore(plan, { wezterm, socket, exec = runCommand, identity = socketIdentity, report = event => console.log(JSON.stringify(event)) }) {
   const env = { WEZTERM_UNIX_SOCKET: socket };
   const panes = new Map();
   const windows = new Map();
   const totals = { created: 0, staged: 0, failed: 0 };
-  const call = args => exec(wezterm, [...CLI, ...args], env);
+  const server = identity(socket);
+  // Every command checks that the socket still belongs to the server the run
+  // began with.
+  const sameServer = () => { if (server === null || identity(socket) !== server) throw new Stop("target_changed"); };
+  const call = args => { sameServer(); return exec(wezterm, [...CLI, ...args], undefined, env); };
   const listed = () => {
-    const list = run(wezterm, LIST, undefined, env);
+    sameServer();
+    let list = null;
+    try { list = runJson(wezterm, LIST, undefined, env, { exec }); } catch {}
     if (!Array.isArray(list)) throw new Stop("target_topology_unavailable");
     return list;
   };
@@ -284,12 +319,12 @@ export function applyRestore(plan, { wezterm, socket, exec = execText, run = run
           create(step, ["split-pane", "--pane-id", panes.get(step.from), `--${step.direction}`, ...percent, ...cwdArgs(step.cwd)]);
         }
       }
-      const opened = tab.panes.map(pane => panes.get(pane.ref));
+      const tabRoot = panes.get(tab.steps[0].ref);
       // A new window's id, and a split tab's pane count, come from the list;
       // a tab opened by one spawn into a known window needs neither.
       if (tab.steps[0].op === "spawn_window" || tab.steps.length > 1) {
         const list = listed();
-        const first = list.find(pane => String(pane.pane_id) === opened[0]);
+        const first = list.find(pane => String(pane.pane_id) === tabRoot);
         if (!first) throw new Stop("uncertain", { step: tab.steps[0].ref, why: "new_pane_not_listed" });
         if (tab.steps[0].op === "spawn_window") windows.set(tab.window, first.window_id);
         const count = list.filter(pane => pane.tab_id === first.tab_id).length;
@@ -298,11 +333,16 @@ export function applyRestore(plan, { wezterm, socket, exec = execText, run = run
       for (const pane of tab.panes) {
         if (!pane.line) continue;
         const id = panes.get(pane.ref);
+        const miss = event => { totals.failed++; report({ event, ref: pane.ref, pane_id: id }); };
+        // Checked again here, for a plan that did not come from planRestore:
+        // a newline in a line would press Enter.
+        if (CONTROL.test(pane.line)) { miss("line_refused"); continue; }
         const result = call(["send-text", "--pane-id", id, "--no-paste", "--", pane.line]);
-        if (result.error || result.status !== 0) { totals.failed++; report({ event: "type_failed", ref: pane.ref, pane_id: id }); }
+        if (result.error) miss("type_uncertain");
+        else if (result.status !== 0) miss("type_failed");
         else { totals.staged++; report({ event: "staged", ref: pane.ref, pane_id: id }); }
       }
-      if (tab.title) present("title", ["set-tab-title", "--pane-id", opened[0], tab.title]);
+      if (tab.title) present("title", ["set-tab-title", "--pane-id", tabRoot, tab.title]);
       if (tab.active && tab.panes.length > 1) present("activate", ["activate-pane", "--pane-id", panes.get(tab.active)]);
       if (tab.zoomed) present("zoom", ["zoom-pane", "--pane-id", panes.get(tab.zoomed), "--zoom"]);
     }

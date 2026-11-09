@@ -20,7 +20,6 @@ export function inspectBindings({ attention, socket, run = runJson, limit = "100
         || actual.address?.pane_id !== scope.address.pane_id) throw new Error("inspection returned a different scope");
     panes.push(response.result);
   }
-  // Rows a checkpoint would not trust are named, not inspected.
   const uncertain = [...discovery.uncertain].map(([pane, entry]) => ({ pane_id: pane, reason: entry.reason }));
   return { schema: 1, scope: discovery.scope, panes, uncertain };
 }

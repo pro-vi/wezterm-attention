@@ -9,6 +9,7 @@
 ### Changed
 
 - **`examples/checkpoint.mjs` saves a long-lived mux.** A closed pane, a session conflict or more than 100 bindings no longer stop it. It judges only the panes `wezterm cli list` shows, and saves a pane it cannot trust as unknown, with a reason. It keeps the checkpoint of an earlier server as `<file>.<incarnation id>.json`.
+- **`examples/inspect.mjs` lists a row it cannot trust as `uncertain`, with a reason, and no longer stops on one.** It still stops on an incomplete answer.
 
 ## 1.14.0 — 2026-11-08
 

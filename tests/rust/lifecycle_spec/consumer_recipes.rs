@@ -15,9 +15,13 @@ fn public_checkpoint_inspector_restore_and_reply_sink_recipes_execute() {
         "00000000000000000200",
     );
     let fake = setup._scratch.0.join("wezterm");
+    let wezterm_log = setup._scratch.0.join("wezterm.log");
     fs::write(
         &fake,
-        "#!/bin/sh\nprintf '%s\\n' '[{\"pane_id\":\"42\",\"tab_id\":7}]'\n",
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf '%s\\n' '[{{\"pane_id\":\"42\",\"tab_id\":7,\"window_id\":3,\"left_col\":0,\"top_row\":0,\"size\":{{\"cols\":80,\"rows\":24}},\"cwd\":\"file:///tmp/\"}}]'\n",
+            wezterm_log.display()
+        ),
     )
     .unwrap();
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
@@ -122,6 +126,37 @@ fn public_checkpoint_inspector_restore_and_reply_sink_recipes_execute() {
     println!(
         "Real CLI checkpoint recipe: {}",
         String::from_utf8_lossy(&output.stdout)
+    );
+    // The restore recipe's dry run, end to end: a checkpoint of an earlier
+    // server, the real CLI for the target, and a WezTerm that records every
+    // subcommand it is asked for.
+    let mut saved: Value = serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
+    saved["scope"]["incarnation_id"] = json!("a".repeat(64));
+    let earlier = setup._scratch.0.join("earlier-checkpoint.json");
+    fs::write(&earlier, saved.to_string()).unwrap();
+    fs::write(&wezterm_log, "").unwrap();
+    let output = Command::new(&node)
+        .env_clear()
+        .envs(&setup.env)
+        .arg(root.join("examples/restore.mjs"))
+        .arg(&earlier)
+        .arg(env!("CARGO_BIN_EXE_attention"))
+        .arg(&setup.env["WEZTERM_UNIX_SOCKET"])
+        .arg(&fake)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["tabs"][0]["panes"][0]["outcome"], "already_running");
+    let asked = fs::read_to_string(&wezterm_log).unwrap();
+    assert!(!asked.is_empty());
+    assert!(
+        asked.lines().all(|line| line.contains(" list ")),
+        "the dry run asked WezTerm for more than a list: {asked}"
     );
     let output = Command::new(&node)
         .env_clear()
