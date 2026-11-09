@@ -26,4 +26,15 @@ so `tests/gate.sh` is the only check, and nothing runs it for you.
 6. Check the real tag. Run the "stay on a release" steps in `docs/setup.md` against it
    (`git clone --branch vX.Y.Z`, `scripts/install-cli.sh`, load the plugin by
    path), then confirm that `attention --version` and `hooks describe`'s
-   `writer_version` both report the new version.
+   `writer_version` both report the new version. In a scratch folder:
+   - `git clone --branch vX.Y.Z https://github.com/pro-vi/wezterm-attention <clone>`.
+     Git 2.50.1 warns that the annotated tag "is not a commit"; the checkout is
+     still the tagged commit.
+   - `sh <clone>/scripts/install-cli.sh`, then `<clone>/bin/attention --version`
+     and `<clone>/bin/attention hooks describe --provider claude --json`, whose
+     `result.writer_version` holds the version.
+   - Write a config that loads `<clone>/plugin/init.lua` with `loadfile`, as
+     `docs/setup.md` shows, calls `apply_to_config` and then
+     `wezterm.log_info` with a marker, and run
+     `wezterm --config-file <that config> show-keys`. Exit 0, no error, and the
+     marker in stderr mean the plugin loaded.
