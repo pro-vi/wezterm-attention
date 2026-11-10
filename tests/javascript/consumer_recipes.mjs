@@ -65,6 +65,32 @@ try {
     assert.equal(readFileSync(file, "utf8"), previous);
   }
 
+  // A pane the list shows that Attention could not probe, or reads as not
+  // present, is a failed capture: the probe or the server failed, so the
+  // previous checkpoint stays. A program running outside the panes' state
+  // directory learns which directory Attention read.
+  const unprobed = value => {
+    value.complete = false;
+    value.status = "findings";
+    for (const row of value.result.rows) if (row.current) row.pane_presence = "unavailable";
+    value.diagnostics.push({ code: "realm_unavailable", message: "wezterm cli list exited with status 1", context: { ...scope, pane_id: "42" } });
+    return value;
+  };
+  for (const [change, message] of [
+    [unprobed, /realm_unavailable for pane 42/],
+    [(value, n) => { if (n === 2) value.result.rows.find(row => row.current).pane_presence = "verified_absent"; return value; }, /pane 42 reads verified_absent/],
+    [value => {
+      value.status = "findings";
+      value.result.rows = [];
+      value.diagnostics = [{ code: "state_root_missing", message: "state directory does not exist", context: { state_root: "/home/u/.local/state/wezterm-attention", variable: "WEZTERM_ATTENTION_DIR" } }];
+      return value;
+    }, /state_root_missing for \/home\/u\/\.local\/state\/wezterm-attention/],
+  ]) {
+    writeFileSync(file, previous);
+    assert.throws(() => saveCheckpoint({ ...options, run: runner(change) }, file), message);
+    assert.equal(readFileSync(file, "utf8"), previous);
+  }
+
   // A doubt about one pane leaves that pane unknown and saves the rest.
   for (const [change, reason] of [
     [value => { value.result.rows.push(realRow()); return value; }, "duplicate_current"],
@@ -112,6 +138,48 @@ try {
   const both = [{ pane_id: 42, tab_id: 7 }, { pane_id: 44, tab_id: 7 }];
   const unresolved = captureCheckpoint({ ...options, run: runner(live(["42", "44"], ["42", "44"]), both) });
   assert.deepEqual(unresolved.panes.map(pane => pane.binding_unknown_reason), ["binding_conflict", "binding_conflict"]);
+  // A conflict that also names a pane under another server is not resolved:
+  // the session may run there.
+  const elsewhere = captureCheckpoint({ ...options, run: runner(value => {
+    live(["42"], ["42"])(value);
+    value.diagnostics.at(-1).context.addresses.push({ ...scope, incarnation_id: "d".repeat(64), pane_id: "7" });
+    return value;
+  }) });
+  assert.equal(elsewhere.panes[0].binding, null);
+  assert.equal(elsewhere.panes[0].binding_unknown_reason, "binding_conflict");
+  // A conflict names a pane through any row that competes for the session,
+  // such as one a resume replaced without an end. A pane whose current row is
+  // another session keeps it, and the one listed pane that holds the session
+  // keeps that.
+  const replaced = captureCheckpoint({ ...options, run: runner(value => {
+    live(["42", "44"], ["44"])(value);
+    value.result.rows.find(row => row.current && row.address.pane_id === "42").provider_session_id = "after-clear";
+    return value;
+  }, both) });
+  assert.deepEqual(replaced.panes.map(pane => [pane.binding?.provider_session_id ?? null, pane.binding_note ?? pane.binding_unknown_reason ?? null]),
+    [["after-clear", null], [realRow().provider_session_id, "conflict_resolved_by_topology"]]);
+
+  // A session is recorded as gone before the capture exactly when it has an
+  // active row from the read before the pane list in a pane the list omits,
+  // and no active row in a listed pane in either read.
+  const placements = [];
+  for (const reads of [[1], [2], [1, 2]]) for (const pane of ["42", "43"]) for (const phase of ["active", "ended"]) placements.push({ reads, pane, phase });
+  const sessions = [
+    ...placements.map(place => [place]),
+    [{ reads: [1, 2], pane: "43", phase: "active" }, { reads: [1, 2], pane: "42", phase: "active" }],
+    [{ reads: [1, 2], pane: "43", phase: "active" }, { reads: [1, 2], pane: "42", phase: "ended" }],
+    [{ reads: [1], pane: "43", phase: "active" }, { reads: [2], pane: "42", phase: "active" }],
+  ];
+  const gone = captureCheckpoint({ ...options, run: runner((value, n) => {
+    value.result.rows = sessions.flatMap((places, index) => places.filter(place => place.reads.includes(n)).map(place => {
+      const row = at(realRow(), place.pane);
+      Object.assign(row, { provider_session_id: `s${index}`, binding_phase: place.phase });
+      if (place.pane !== "42") row.pane_presence = "verified_absent";
+      return row;
+    }));
+    return value;
+  }) });
+  assert.deepEqual(gone.unlisted_sessions.map(entry => entry.provider_session_id), ["s2", "s10", "s13"]);
 
   // A checkpoint of another server is kept under its incarnation id, and only
   // the newest twenty kept files remain; other names are never removed.
@@ -178,5 +246,5 @@ try {
     syncBuiltinESMExports();
   }
   assert.equal(readdirSync(directory).filter(name => name.endsWith(".tmp")).length, 0);
-  console.log("Consumer recipes: stable checkpoint, four whole-answer refusals, four unknown panes, a conflict resolved by topology, a conflict left unknown, unlisted sessions, kept checkpoints, exact inspection and three inspection refusals passed");
+  console.log("Consumer recipes: stable checkpoint, four whole-answer refusals, three failed probes or state roots, four unknown panes, conflicts resolved, left unknown, under another server and through a replaced binding, an unlisted-session table, kept checkpoints, exact inspection and three inspection refusals passed");
 } finally { rmSync(directory, { recursive: true, force: true }); }

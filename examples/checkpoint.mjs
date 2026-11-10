@@ -51,26 +51,13 @@ export function bindingsEnvelope(response) {
 
 const inScope = (address, scope) => address && address.realm_id === scope.realm_id && address.incarnation_id === scope.incarnation_id;
 
-// The panes a diagnostic is about, or null when it is about the answer as a
-// whole. A conflict names its addresses; a diagnostic whose context holds a
-// `pane_id` in this server's scope names that pane.
-function diagnosticPanes(diagnostic, scope) {
-  const context = diagnostic?.context;
-  if (!context || typeof context !== "object") return null;
-  if (diagnostic.code === "binding_conflict" && Array.isArray(context.addresses)) {
-    return context.addresses.filter(address => inScope(address, scope)).map(address => paneNumber(address.pane_id));
-  }
-  if (typeof context.pane_id === "string" && inScope(context, scope)) return [paneNumber(context.pane_id)];
-  return null;
-}
-
 // Why a checkpoint would not trust a pane's current row, most specific first;
 // empty when it would.
-function distrust(rows, flagged) {
+function distrust(rows, conflicted) {
   const [row] = rows;
   return [
     ...(rows.length > 1 ? ["duplicate_current"] : []),
-    ...(flagged ? [flagged] : []),
+    ...(conflicted ? ["binding_conflict"] : []),
     ...(row && row.binding_health !== "valid" ? [`binding_health_${row.binding_health}`] : []),
     ...(row && row.reader_confidence !== "confirmed" ? [`reader_confidence_${row.reader_confidence}`] : []),
     ...(row && row.pane_presence !== "present" ? [`pane_presence_${row.pane_presence}`] : []),
@@ -80,25 +67,18 @@ const CONFLICT_ONLY = new Set(["binding_conflict", "binding_health_conflicted"])
 
 // Reads one server's bindings. `rows` holds every current row of the server.
 // `current` holds, by pane, the rows a checkpoint can trust; `uncertain`
-// holds every other current row by pane with its reasons, plus panes a
-// diagnostic names that have no current row; `conflicts` lists each
-// `binding_conflict` with its panes. It throws on a failure about the answer
-// as a whole or on a malformed row.
+// holds every other current row by pane with its reasons. `unprobed` holds,
+// by pane, the code of a diagnostic that names that pane alone, which
+// Attention gives a pane it could not probe. `conflicts` lists each
+// `binding_conflict` with the panes of this server whose current row holds
+// its session, and whether it also names a pane under another server. It
+// throws on a failure about the answer as a whole or on a malformed row.
 export function bindings(attention, socket, run = runJson, limit) {
   const args = ["bindings", "--socket", socket, "--json"];
   if (limit !== undefined) args.push("--limit", limit);
   const response = run(attention, args, undefined, undefined, { acceptExit: [0, 1] });
   if (!bindingsEnvelope(response) || !validScope(response.result.scope)) throw new Error("binding discovery is incomplete or unsupported");
   const scope = response.result.scope;
-  const flagged = new Map();
-  const conflicts = [];
-  for (const diagnostic of response.diagnostics) {
-    const panes = diagnosticPanes(diagnostic, scope);
-    if (!panes) throw new Error("binding discovery is incomplete or unsupported");
-    for (const pane of panes) flagged.set(pane, diagnostic.code);
-    if (diagnostic.code === "binding_conflict") conflicts.push({ provider_session_id: diagnostic.context.provider_session_id, panes });
-  }
-  if (!response.complete && !response.diagnostics.length) throw new Error("binding discovery is incomplete or unsupported");
   const byPane = new Map();
   for (const row of response.result.rows) {
     if (!row || typeof row.current !== "boolean") throw new Error("binding selection is unknown");
@@ -108,15 +88,36 @@ export function bindings(attention, socket, run = runJson, limit) {
     if (!byPane.has(pane)) byPane.set(pane, []);
     byPane.get(pane).push(row);
   }
+  const conflicted = new Set();
+  const unprobed = new Map();
+  const conflicts = [];
+  for (const diagnostic of response.diagnostics) {
+    const context = diagnostic?.context;
+    if (diagnostic?.code === "binding_conflict" && Array.isArray(context?.addresses)) {
+      // A conflict is about one session. A pane it names through a row that is
+      // not the pane's current one, such as a binding a resume replaced, keeps
+      // its current row.
+      const key = sessionKey(context);
+      const holders = context.addresses.filter(address => inScope(address, scope)).map(address => paneNumber(address.pane_id))
+        .filter(pane => (byPane.get(pane) ?? []).some(row => sessionKey(row) === key));
+      for (const pane of holders) conflicted.add(pane);
+      conflicts.push({ holders, elsewhere: context.addresses.some(address => !inScope(address, scope)) });
+    } else if (typeof context?.pane_id === "string" && inScope(context, scope)) {
+      unprobed.set(paneNumber(context.pane_id), diagnostic.code);
+    } else {
+      const root = typeof context?.state_root === "string" ? ` for ${context.state_root}` : "";
+      throw new Error(`binding discovery is incomplete: ${diagnostic?.code ?? "unknown"}${root}`);
+    }
+  }
+  if (!response.complete && !response.diagnostics.length) throw new Error("binding discovery is incomplete or unsupported");
   const current = new Map();
   const uncertain = new Map();
-  for (const pane of new Set([...byPane.keys(), ...flagged.keys()])) {
-    const rows = byPane.get(pane) ?? [];
-    const reasons = distrust(rows, flagged.get(pane));
+  for (const [pane, rows] of byPane) {
+    const reasons = distrust(rows, conflicted.has(pane));
     if (reasons.length) uncertain.set(pane, { reason: reasons[0], reasons, rows });
     else current.set(pane, rows[0]);
   }
-  return { scope, complete: response.complete, rows: [...byPane.values()].flat(), current, uncertain, conflicts };
+  return { scope, complete: response.complete, rows: [...byPane.values()].flat(), current, uncertain, unprobed, conflicts };
 }
 
 // The server's listed panes, checked: each row an object with a canonical,
@@ -133,20 +134,34 @@ export function listTopology(wezterm, socket, run = runJson) {
   return { topology, ids, listed };
 }
 
-// A conflict whose addresses name exactly one listed pane leaves that pane's
-// row standing, when the conflict is all that is wrong with it: no other
-// listed pane holds the session, and an unlisted pane cannot be restored.
+// A conflict whose session is held by exactly one listed pane leaves that
+// pane's row standing, when the conflict is all that is wrong with it: no
+// other listed pane holds the session, and an unlisted pane of this server
+// cannot be restored. A conflict that also names a pane under another server
+// stays unresolved, since the session may run there.
 function resolveByTopology(read, listed) {
   const resolved = new Map(read.current);
   for (const conflict of read.conflicts) {
-    const panes = conflict.panes.filter(pane => listed.has(pane));
-    if (panes.length !== 1) continue;
+    const panes = conflict.holders.filter(pane => listed.has(pane));
+    if (conflict.elsewhere || panes.length !== 1) continue;
     const entry = read.uncertain.get(panes[0]);
-    if (entry?.rows.length === 1 && entry.rows[0].provider_session_id === conflict.provider_session_id
-        && entry.reasons.every(reason => CONFLICT_ONLY.has(reason))) resolved.set(panes[0], entry.rows[0]);
+    if (entry?.rows.length === 1 && entry.reasons.every(reason => CONFLICT_ONLY.has(reason))) resolved.set(panes[0], entry.rows[0]);
   }
   return resolved;
 }
+
+// Attention probes the panes the mux has just listed through the same
+// socket. A listed pane it could not probe, or reads as not present, means
+// the probe or the server failed during the capture: a fact about the
+// answer, not about that pane.
+function probeFailure(read, listed) {
+  for (const [pane, code] of read.unprobed) if (listed.has(pane)) return `${code} for pane ${pane}`;
+  const row = read.rows.find(row => inList(listed, row) && row.pane_presence !== "present");
+  return row ? `pane ${row.address.pane_id} reads ${row.pane_presence}` : null;
+}
+
+const inList = (listed, row) => listed.has(paneNumber(row.address.pane_id));
+const active = rows => rows.filter(row => row.binding_phase === "active");
 
 const sameBinding = (a, b) => ["launch_id", "binding_id", "provider", "provider_session_id"].every(field => a[field] === b[field]);
 
@@ -160,6 +175,8 @@ export function captureCheckpoint({ attention, socket, wezterm, run = runJson, l
   const after = bindings(attention, socket, run, limit);
   const secondMs = performance.now() - secondStarted;
   if (before.scope.realm_id !== after.scope.realm_id || before.scope.incarnation_id !== after.scope.incarnation_id) throw new Error("socket identity changed across topology capture");
+  const failure = probeFailure(before, listed) ?? probeFailure(after, listed);
+  if (failure) throw new Error(`Attention could not check a pane the mux lists (${failure})`);
   const first = resolveByTopology(before, listed);
   const second = resolveByTopology(after, listed);
   const panes = topology.map((pane, index) => {
@@ -176,16 +193,14 @@ export function captureCheckpoint({ attention, socket, wezterm, run = runJson, l
     }
     return entry;
   });
-  // Active sessions seen only in panes the mux no longer lists were gone
-  // before this capture, though no session end reached Attention; a restore
-  // must not bring them back as sessions the checkpoint missed.
-  const unlisted = new Map();
-  const seenListed = new Set();
-  for (const row of [...before.rows, ...after.rows]) {
-    if (listed.has(paneNumber(row.address.pane_id))) seenListed.add(sessionKey(row));
-    else if (row.binding_phase === "active") unlisted.set(sessionKey(row), { provider: row.provider, provider_session_id: row.provider_session_id });
-  }
-  for (const key of seenListed) unlisted.delete(key);
+  // An active session whose active rows, read before the pane list, are only
+  // in panes the list omits was gone before this capture, though no session
+  // end reached Attention; a restore must not bring it back as a session the
+  // checkpoint missed. A row first read after the list may be in a pane
+  // opened since, and an ended row in a listed pane holds no session.
+  const held = new Set(active([...before.rows, ...after.rows]).filter(row => inList(listed, row)).map(sessionKey));
+  const unlisted = new Map(active(before.rows).filter(row => !held.has(sessionKey(row)))
+    .map(row => [sessionKey(row), { provider: row.provider, provider_session_id: row.provider_session_id }]));
   // A null binding is unknown, not proof of no agent, and an ended binding stays
   // ended. The snapshot itself grants no permission to resume or control a pane.
   return { schema: 1, scope: after.scope, panes, unlisted_sessions: [...unlisted.values()], binding_query_ms: [firstMs, secondMs] };
