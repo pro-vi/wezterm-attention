@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { hostname } from "node:os";
+import os, { hostname } from "node:os";
+import { syncBuiltinESMExports } from "node:module";
 import { planRestore, applyRestore, readTarget, resumeLine } from "../../examples/restore.mjs";
 
 // The Rust test supplies real `bindings` envelopes; every variant below starts
@@ -27,9 +28,9 @@ const target = (live = new Map(), realm = []) => ({ scope: targetScope, live, re
 // The resume line, from the row's own config_dir.
 assert.equal(resumeLine(row("claude", "s1", { config_dir: "/home/u/.claude2" })).line, "env CLAUDE_CONFIG_DIR=/home/u/.claude2 claude --resume s1");
 assert.equal(resumeLine(row("claude", "s1")).line, "env -u CLAUDE_CONFIG_DIR claude --resume s1");
-assert.equal(resumeLine(row("codex", "01a1-c")).line, "env -u CODEX_HOME codex resume 01a1-c");
+assert.equal(resumeLine(row("codex", "01a1-c")).line, "env -u CODEX_HOME codex --no-daemon resume 01a1-c");
 assert.equal(resumeLine(row("codex", "01a1-c", { config_dir: "/home/u/.codex2" })).line,
-  "env CODEX_HOME=/home/u/.codex2 codex resume 01a1-c", "a transcript under ~/.codex does not override config_dir");
+  "env CODEX_HOME=/home/u/.codex2 codex --no-daemon resume 01a1-c", "a transcript under ~/.codex does not override config_dir");
 assert.equal(resumeLine(row("claude", "s1", { config_dir: "/a b/it's" })).line, `env CLAUDE_CONFIG_DIR='/a b/it'\\''s' claude --resume s1`);
 for (const [binding, reason] of [
   [row("pi", "p1"), "no_resume_form_for_pi"],
@@ -37,6 +38,7 @@ for (const [binding, reason] of [
   [row("claude", "s1", { transcript_path: "/home/u/.claude/projects/-p/other.jsonl" }), "transcript_does_not_name_session"],
   [row("claude", "s1", { config_dir: "relative/dir" }), "config_dir_invalid"],
   [row("claude", "s1", { config_dir: "/bad\u001b[0m" }), "config_dir_invalid"],
+  [row("claude", "s1", { config_dir: "/bad\u009b0m" }), "config_dir_invalid"],
   [row("claude", "--dangerously-skip-permissions"), "session_id_invalid"],
   [row("toString", "s1"), "no_resume_form_for_toString"],
   [row("codex", "bbbb", { transcript_path: "/home/u/.codex/sessions/2026/11/09/rollout-2026-11-09T01-02-03-0199-aaaa-bbbb.jsonl" }), "transcript_does_not_name_session"],
@@ -59,7 +61,7 @@ assert.deepEqual(plan.tabs[0].steps, [
 ]);
 assert.deepEqual(plan.tabs[1].steps, [{ op: "spawn_window", window: 1, ref: "p3", cwd: "/work/alone" }]);
 assert.deepEqual(plan.tabs[0].panes.map(p => [p.checkpoint_pane_id, p.outcome]), [["10", "resume"], ["11", "resume"], ["12", "binding_unknown"]]);
-assert.equal(plan.tabs[0].panes[1].line, "env CODEX_HOME=/home/u/.codex2 codex resume right-top");
+assert.equal(plan.tabs[0].panes[1].line, "env CODEX_HOME=/home/u/.codex2 codex --no-daemon resume right-top");
 assert.equal(plan.tabs[0].active, "p0");
 assert.equal(plan.tabs[0].title, "work");
 assert.deepEqual(plan.counts, { windows: 2, panes: 4, lines: 3 });
@@ -85,6 +87,25 @@ const gone = planRestore(checkpointOf([
 assert.deepEqual(gone.map(p => [p.outcome, p.reason ?? null, p.cwd, p.line ?? null]), [
   ["no_resume_line", "cwd_missing", "/shell/10", null], ["binding_unknown", "no_current_binding", "/shell/here", null], ["binding_unknown", "no_current_binding", null, null],
 ]);
+// A binding with no directory resumes in the pane's own, and gets no line
+// when that one is gone too.
+const noCwd = planRestore(checkpointOf([
+  pane(10, 1, 5, [0, 0, 80, 24], row("claude", "here", { cwd: null })),
+  pane(11, 1, 6, [0, 0, 80, 24], row("claude", "nowhere", { cwd: null })),
+]), { ...target(), exists: path => path !== "/shell/11" }).tabs.map(tab => tab.panes[0]);
+assert.deepEqual(noCwd.map(p => [p.outcome, p.reason ?? null, p.cwd, Boolean(p.line)]), [["resume", null, "/shell/10", true], ["no_resume_line", "cwd_unknown", null, false]]);
+// Node's URL parser (24.14.0) lower-cases the host, so a host name with capitals still
+// names this machine.
+const realHostname = os.hostname;
+try {
+  os.hostname = () => "Johns-MacBook-Pro.local";
+  syncBuiltinESMExports();
+  const cased = planRestore(checkpointOf([
+    pane(11, 1, 6, [0, 0, 80, 24], null, { cwd: "file://Johns-MacBook-Pro.local/shell/here" }),
+    pane(12, 1, 7, [0, 0, 80, 24], null, { cwd: "file://elsewhere/shell/there" }),
+  ]), target()).tabs.map(tab => tab.panes[0].cwd);
+  assert.deepEqual(cased, ["/shell/here", null]);
+} finally { os.hostname = realHostname; syncBuiltinESMExports(); }
 
 // Layout notes: a zoomed tab's real size comes from its neighbours; a share
 // past 10–90 is clamped; rectangles with no clean cut fall back to a chain.
@@ -186,6 +207,11 @@ assert.ok(touched.length && touched.every(id => created.has(id)), "only panes th
 assert.deepEqual(wez.log.find(cli => cli[0] === "split-pane"), ["split-pane", "--pane-id", "100", "--right", "--percent", "40", "--cwd", "/work/right-top"]);
 assert.deepEqual(wez.log.find(cli => cli[0] === "send-text"), ["send-text", "--pane-id", "100", "--no-paste", "--", "env -u CLAUDE_CONFIG_DIR claude --resume left"]);
 assert.ok(wez.log.every(cli => !cli.some(arg => /\n|\r/.test(arg))), "nothing typed carries Enter");
+assert.equal(events.some(e => e.event === "added_unavailable"), false);
+// A plan made without the checkpointed realm says so before it runs.
+const unread = [];
+assert.equal(applyWith(fakeWezterm(), e => unread.push(e), { plan: { ...plan, added_unavailable: "realm_read_failed" } }).failed, 1);
+assert.deepEqual(unread[0], { event: "added_unavailable", reason: "realm_read_failed" });
 
 // No space for a split: retried once without --percent.
 wez = fakeWezterm({ fail: (cli, log) => cli[0] === "split-pane" && cli.includes("--percent") && log.filter(c => c[0] === "split-pane").length === 1
@@ -230,8 +256,10 @@ assert.ok(timed.some(e => e.event === "type_uncertain" && e.pane_id === "100"));
 // makes one gets no line in the plan, and a plan carrying one anyway has it
 // refused at apply.
 const one = checkpointOf([pane(10, 1, 5, [0, 0, 80, 24], row("claude", "left"))]);
-const launcher = planRestore(one, target(), { resumeLine: binding => ({ line: `my-launcher ${binding.provider_session_id}\n`, profile: null }) });
-assert.deepEqual([launcher.tabs[0].panes[0].outcome, launcher.tabs[0].panes[0].reason], ["no_resume_line", "line_has_control_character"]);
+for (const end of ["\n", "\u009b2J"]) {
+  const launcher = planRestore(one, target(), { resumeLine: binding => ({ line: `my-launcher ${binding.provider_session_id}${end}`, profile: null }) });
+  assert.deepEqual([launcher.tabs[0].panes[0].outcome, launcher.tabs[0].panes[0].reason], ["no_resume_line", "line_has_control_character"]);
+}
 const edited = planRestore(one, target());
 edited.tabs[0].panes[0].line += "\n";
 wez = fakeWezterm();
@@ -249,4 +277,4 @@ assert.equal(restarted.stopped.reason, "target_changed");
 assert.deepEqual(Object.keys(restarted.stopped.opened), ["p0", "p1", "p2"]);
 assert.equal(wez.log.filter(cli => cli[0] === "send-text").length, 0);
 
-console.log("Restore recipe: resume lines, a two-window plan, outcomes, missing directories, layouts, added sessions, a read-only target read, and apply with retries, stops, typing failures, refused lines and a changed server passed");
+console.log("Restore recipe: resume lines, a two-window plan, outcomes, missing and unknown directories, host names, layouts, added sessions, a read-only target read, and apply with retries, stops, typing failures, refused lines, an unread realm and a changed server passed");

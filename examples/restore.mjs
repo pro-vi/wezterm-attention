@@ -12,10 +12,13 @@ import { LIST, bindings, bindingsEnvelope, checkpointScope, keptCheckpoints, lis
 const CLI = LIST.slice(0, 3);
 // A leading "-" would be read as an option of the agent command.
 const SESSION_ID = /^[A-Za-z0-9._:][A-Za-z0-9._:-]{0,127}$/;
-const CONTROL = /[\u0000-\u001f\u007f]/;
+// Every Unicode control character (C0, DEL and C1), as Attention's own check.
+const CONTROL = /\p{Cc}/u;
+// Resume forms as of Claude Code 2.1.319 and Codex 0.166.0. Codex resumes with
+// --no-daemon, as docs/setup.md ("Codex hooks") asks of every Codex start.
 const PROVIDERS = {
   claude: { variable: "CLAUDE_CONFIG_DIR", resume: id => `claude --resume ${id}` },
-  codex: { variable: "CODEX_HOME", resume: id => `codex resume ${id}` },
+  codex: { variable: "CODEX_HOME", resume: id => `codex --no-daemon resume ${id}` },
 };
 
 function shellWord(text) {
@@ -46,10 +49,12 @@ export function resumeLine(binding) {
 }
 
 // A listed pane's directory from WezTerm's file URL, which may name this host.
+// Node's URL parser (24.14.0) lower-cases a host, so this host's name is parsed
+// the same way.
 function topologyCwd(text) {
   try {
     const url = new URL(text);
-    if (url.hostname && url.hostname !== hostname()) return null;
+    if (url.hostname && url.hostname !== new URL(`file://${hostname()}/`).hostname) return null;
     url.hostname = "";
     return safePath(fileURLToPath(url));
   } catch { return null; }
@@ -99,9 +104,10 @@ function rectangle(topology) {
   return Object.values(r).every(value => Number.isSafeInteger(value) && value >= 0) && r.w > 0 && r.h > 0 ? r : null;
 }
 
-// In a zoomed tab, a mux server running WezTerm 20261018-200420-656e4f47 lists
-// the zoomed pane at its own place but with the whole tab's size; its real
-// edge is where its nearest neighbour begins.
+// WezTerm resizes a zoomed pane to the whole tab (`set_zoomed` in upstream
+// mux/src/tab.rs at 4fbd6b8e9), so a mux server running WezTerm
+// 20261018-200420-656e4f47 lists it at its own place with the tab's size; its
+// real edge is where its nearest neighbour begins.
 function unzoom(items, zoomed) {
   const others = items.filter(item => item !== zoomed);
   if (!zoomed.r || others.some(item => !item.r)) return false;
@@ -136,10 +142,11 @@ function splitTree(items) {
 const firstLeaf = node => node.leaf ?? firstLeaf(node.first);
 
 // Whether a recorded session can be resumed into a new pane: running already
-// in the target, no line for it, or its line and directory.
-// A directory that no longer exists would open the pane in the home folder,
-// where the agent would not find its session, so it gets no line.
-function resumable(binding, target, resume) {
+// in the target, no line for it, or its line and directory. The directory is
+// the binding's own, else `fallback`, which the caller has found to exist. A
+// line is typed only into a recorded directory that exists here: anywhere
+// else the agent would start away from where it ran.
+function resumable(binding, target, resume, fallback) {
   const evidence = { provider: binding.provider, session: binding.provider_session_id };
   if (target.live.has(sessionKey(binding))) return { ...evidence, outcome: "already_running", live_pane: target.live.get(sessionKey(binding)) };
   const made = resume(binding);
@@ -147,8 +154,10 @@ function resumable(binding, target, resume) {
   // A caller's resumeLine is held to the rule the default keeps: no control
   // character, which could press Enter.
   if (CONTROL.test(made.line)) return { ...evidence, outcome: "no_resume_line", reason: "line_has_control_character" };
-  const cwd = safePath(binding.cwd);
-  if (cwd && !dirExists(target, cwd)) return { ...evidence, outcome: "no_resume_line", reason: "cwd_missing" };
+  const own = safePath(binding.cwd);
+  if (own && !dirExists(target, own)) return { ...evidence, outcome: "no_resume_line", reason: "cwd_missing" };
+  const cwd = own ?? fallback;
+  if (!cwd) return { ...evidence, outcome: "no_resume_line", reason: "cwd_unknown" };
   return { ...evidence, outcome: "resume", line: made.line, profile: made.profile ?? null, cwd };
 }
 
@@ -160,8 +169,7 @@ function paneOutcome(pane, target, resume) {
   if (!binding) return { cwd: shellCwd, outcome: "binding_unknown", reason: pane.binding_unknown_reason ?? null };
   const note = pane.binding_note ? { binding_note: pane.binding_note } : {};
   if (binding.binding_phase !== "active") return { cwd: shellCwd, provider: binding.provider, session: binding.provider_session_id, ...note, outcome: "agent_ended" };
-  const result = resumable(binding, target, resume);
-  return { ...result, ...note, cwd: result.outcome === "resume" ? result.cwd ?? shellCwd : shellCwd };
+  return { cwd: shellCwd, ...resumable(binding, target, resume, shellCwd), ...note };
 }
 
 // Turns a checkpoint and the target's state into tabs of steps. It runs
@@ -241,7 +249,7 @@ export function planRestore(checkpoint, target, { resumeLine: resume = resumeLin
       if (rows.length > 1) { added.push({ provider: rows[0].provider, session: rows[0].provider_session_id, outcome: "not_added", reason: "conflicting_records" }); continue; }
       const result = resumable(rows[0], target, resume);
       if (result.outcome === "already_running") { added.push(result); continue; }
-      if (result.outcome !== "resume" || !result.cwd) { added.push({ ...result, outcome: "not_added", reason: result.reason ?? "cwd_unknown" }); continue; }
+      if (result.outcome !== "resume") { added.push({ ...result, outcome: "not_added" }); continue; }
       const entry = { ...result, outcome: "resume_added" };
       const id = ref();
       added.push(entry);
@@ -261,8 +269,8 @@ class Stop extends Error {
   constructor(reason, detail) { super(reason); this.detail = detail; }
 }
 
-// The socket file's identity. A server that restarts on the same path makes
-// a new socket file, and numbers its windows and panes from 0 again.
+// The socket file's identity. A different file at the path is taken as a
+// different server, whose window and pane ids are not this run's.
 const socketIdentity = path => { try { const s = statSync(path); return `${s.dev}:${s.ino}:${s.birthtimeMs}`; } catch { return null; } };
 
 // Runs a plan. Every pane it touches after creating it is one it created in
@@ -276,6 +284,8 @@ export function applyRestore(plan, { wezterm, socket, exec = runCommand, identit
   // Every command checks that the socket still belongs to the server the run
   // began with.
   const sameServer = () => { if (server === null || identity(socket) !== server) throw new Stop("target_changed"); };
+  // Sessions the checkpoint lacks were not looked for; this run cannot add them.
+  if (plan.added_unavailable) { totals.failed++; report({ event: "added_unavailable", reason: plan.added_unavailable }); }
   const call = args => { sameServer(); return exec(wezterm, [...CLI, ...args], undefined, env); };
   const listed = () => {
     sameServer();
@@ -368,8 +378,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     let plan;
     try { plan = planRestore(checkpoint, readTarget({ attention, socket, wezterm, checkpoint })); } catch (error) {
       if (!(error instanceof SameServer)) throw error;
-      const kept = keptCheckpoints(file);
-      throw new Error(error.message + (kept.length ? `; earlier servers' checkpoints: ${kept.join(", ")}` : ""));
+      const [newest, ...older] = keptCheckpoints(file);
+      throw new Error(error.message + (newest ? `; the previous server saved ${newest}` : "") + (older.length ? `; older servers saved ${older.join(", ")}` : ""));
     }
     if (!flags.includes("--apply")) console.log(JSON.stringify(plan));
     else {
