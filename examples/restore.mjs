@@ -13,6 +13,9 @@ const CLI = LIST.slice(0, 3);
 // A leading "-" would be read as an option of the agent command.
 const SESSION_ID = /^[A-Za-z0-9._:][A-Za-z0-9._:-]{0,127}$/;
 // Every Unicode control character (C0, DEL and C1), as Attention's own check.
+// WezTerm's parser runs a UTF-8 C1 control as a control (upstream vtparse at
+// 4fbd6b8e9, test `utf8_control`), so a C1 character can start an escape
+// sequence as ESC does.
 const CONTROL = /\p{Cc}/u;
 // Resume forms as of Claude Code 2.1.319 and Codex 0.166.0. Codex resumes with
 // --no-daemon, as docs/setup.md ("Codex hooks") asks of every Codex start.
@@ -152,7 +155,7 @@ function resumable(binding, target, resume, fallback) {
   const made = resume(binding);
   if (!made.line) return { ...evidence, outcome: "no_resume_line", reason: made.reason };
   // A caller's resumeLine is held to the rule the default keeps: no control
-  // character, which could press Enter.
+  // character, which could press Enter or start an escape sequence.
   if (CONTROL.test(made.line)) return { ...evidence, outcome: "no_resume_line", reason: "line_has_control_character" };
   const own = safePath(binding.cwd);
   if (own && !dirExists(target, own)) return { ...evidence, outcome: "no_resume_line", reason: "cwd_missing" };
@@ -234,7 +237,6 @@ export function planRestore(checkpoint, target, { resumeLine: resume = resumeLin
     // A session ended in its checkpoint pane may have been resumed in a new
     // pane since, so only active ones count as known.
     const known = new Set(checkpoint.panes.filter(p => p.binding?.binding_phase === "active").map(p => sessionKey(p.binding)));
-    // Sessions the checkpoint itself says not to add back, with its reason.
     const excluded = new Map((checkpoint.excluded_sessions ?? []).map(entry => [sessionKey(entry), entry.reason]));
     const groups = new Map();
     for (const row of target.realm) {
@@ -345,7 +347,8 @@ export function applyRestore(plan, { wezterm, socket, exec = runCommand, identit
         const id = panes.get(pane.ref);
         const miss = event => { totals.failed++; report({ event, ref: pane.ref, pane_id: id }); };
         // Checked again here, for a plan that did not come from planRestore:
-        // a newline in a line would press Enter.
+        // a control character in a line could press Enter or start an escape
+        // sequence.
         if (CONTROL.test(pane.line)) { miss("line_refused"); continue; }
         const result = call(["send-text", "--pane-id", id, "--no-paste", "--", pane.line]);
         if (result.error) miss("type_uncertain");

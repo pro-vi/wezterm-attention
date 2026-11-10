@@ -59,9 +59,9 @@ function distrust(rows, conflicted) {
   return [
     ...(rows.length > 1 ? ["duplicate_current"] : []),
     ...(conflicted ? ["binding_conflict"] : []),
-    ...(row && row.binding_health !== "valid" ? [`binding_health_${row.binding_health}`] : []),
-    ...(row && row.reader_confidence !== "confirmed" ? [`reader_confidence_${row.reader_confidence}`] : []),
-    ...(row && row.pane_presence !== "present" ? [`pane_presence_${row.pane_presence}`] : []),
+    ...(row.binding_health !== "valid" ? [`binding_health_${row.binding_health}`] : []),
+    ...(row.reader_confidence !== "confirmed" ? [`reader_confidence_${row.reader_confidence}`] : []),
+    ...(row.pane_presence !== "present" ? [`pane_presence_${row.pane_presence}`] : []),
   ];
 }
 const CONFLICT_ONLY = new Set(["binding_conflict", "binding_health_conflicted"]);
@@ -147,15 +147,16 @@ function resolveByTopology(read, listed) {
     const panes = conflict.holders.filter(pane => listed.has(pane));
     if (conflict.elsewhere || panes.length !== 1) continue;
     const entry = read.uncertain.get(panes[0]);
-    if (entry?.rows.length === 1 && entry.reasons.every(reason => CONFLICT_ONLY.has(reason))) resolved.set(panes[0], entry.rows[0]);
+    if (entry.rows.length === 1 && entry.reasons.every(reason => CONFLICT_ONLY.has(reason))) resolved.set(panes[0], entry.rows[0]);
   }
   return resolved;
 }
 
 // Attention probes the panes the mux has just listed through the same
 // socket. A listed pane it could not probe, or reads as not present, means
-// the probe or the server failed during the capture: a fact about the
-// answer, not about that pane.
+// the probe failed, the server stopped, or the pane closed after the list.
+// The answer cannot tell these apart, so the capture fails and the previous
+// checkpoint stays; a pane that closes after the list costs that minute's save.
 function probeFailure(read, listed) {
   for (const [pane, code] of read.unprobed) if (listed.has(pane)) return `${code} for pane ${pane}`;
   const row = read.rows.find(row => inList(listed, row) && row.pane_presence !== "present");
@@ -178,7 +179,7 @@ export function captureCheckpoint({ attention, socket, wezterm, run = runJson, l
   const secondMs = performance.now() - secondStarted;
   if (before.scope.realm_id !== after.scope.realm_id || before.scope.incarnation_id !== after.scope.incarnation_id) throw new Error("socket identity changed across topology capture");
   const failure = probeFailure(before, listed) ?? probeFailure(after, listed);
-  if (failure) throw new Error(`Attention could not check a pane the mux lists (${failure})`);
+  if (failure) throw new Error(`a pane the mux lists was not confirmed present (${failure})`);
   const first = resolveByTopology(before, listed);
   const second = resolveByTopology(after, listed);
   const panes = topology.map((pane, index) => {

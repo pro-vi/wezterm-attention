@@ -256,9 +256,9 @@ const timed = [];
 assert.equal(applyWith(wez, e => timed.push(e)).failed, 1);
 assert.ok(timed.some(e => e.event === "type_uncertain" && e.pane_id === "100"));
 
-// A line that would press Enter is never sent: a caller's resumeLine that
-// makes one gets no line in the plan, and a plan carrying one anyway has it
-// refused at apply.
+// A line with a control character, which could press Enter or start an
+// escape sequence, is never sent: a caller's resumeLine that makes one gets
+// no line in the plan, and a plan carrying one anyway has it refused at apply.
 const one = checkpointOf([pane(10, 1, 5, [0, 0, 80, 24], row("claude", "left"))]);
 for (const end of ["\n", "\u009b2J"]) {
   const launcher = planRestore(one, target(), { resumeLine: binding => ({ line: `my-launcher ${binding.provider_session_id}${end}`, profile: null }) });

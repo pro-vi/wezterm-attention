@@ -66,15 +66,18 @@ try {
   }
 
   // A pane the list shows that Attention could not probe, or reads as not
-  // present, is a failed capture: the probe or the server failed, so the
-  // previous checkpoint stays. A program running outside the panes' state
-  // directory learns which directory Attention read.
-  const unprobed = value => {
+  // present, fails the capture, and the previous checkpoint stays; a
+  // diagnostic for an unlisted pane does not. A program run without the
+  // panes' WEZTERM_ATTENTION_DIR learns which directory Attention read.
+  const probeFailed = (value, pane) => {
     value.complete = false;
     value.status = "findings";
-    for (const row of value.result.rows) if (row.current) row.pane_presence = "unavailable";
-    value.diagnostics.push({ code: "realm_unavailable", message: "wezterm cli list exited with status 1", context: { ...scope, pane_id: "42" } });
+    value.diagnostics.push({ code: "realm_unavailable", message: "wezterm cli list exited with status 1", context: { ...scope, pane_id: pane } });
     return value;
+  };
+  const unprobed = value => {
+    for (const row of value.result.rows) if (row.current) row.pane_presence = "unavailable";
+    return probeFailed(value, "42");
   };
   for (const [change, message] of [
     [unprobed, /realm_unavailable for pane 42/],
@@ -90,6 +93,8 @@ try {
     assert.throws(() => saveCheckpoint({ ...options, run: runner(change) }, file), message);
     assert.equal(readFileSync(file, "utf8"), previous);
   }
+  const closedProbe = saveCheckpoint({ ...options, run: runner(value => probeFailed(value, "43")) }, file);
+  assert.deepEqual(closedProbe.panes[0].binding, realRow(), "a probe diagnostic for a pane the list omits leaves the save alone");
 
   // A doubt about one pane leaves that pane unknown and saves the rest.
   for (const [change, reason] of [
