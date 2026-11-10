@@ -176,8 +176,10 @@ When a mux server stops, its panes and the agents in them stop too. Two recipes 
 Save a checkpoint of the server every minute, for example from cron:
 
 ```crontab
-* * * * * /absolute/path/to/node /absolute/path/to/wezterm-attention/examples/checkpoint.mjs /absolute/path/to/attention /absolute/path/to/mux.sock /absolute/path/to/wezterm /absolute/path/to/checkpoint.json
+* * * * * WEZTERM_ATTENTION_DIR=/absolute/path/to/state /absolute/path/to/node /absolute/path/to/wezterm-attention/examples/checkpoint.mjs /absolute/path/to/attention /absolute/path/to/mux.sock /absolute/path/to/wezterm /absolute/path/to/checkpoint.json
 ```
+
+The job does not run in a pane, so set `WEZTERM_ATTENTION_DIR` on the line to the state directory your panes use (the plugin's `dir`); without it the run fails with `state_root_missing` (see [Troubleshooting](troubleshooting.md)). Attention probes the panes with the `wezterm` it finds as [Mux setup](mux-setup.md#how-attention-finds-the-wezterm-command) describes; unless `wezterm` is in `/Applications/WezTerm.app`, set `PATH` on the line to include its folder. A run that fails keeps the previous checkpoint and prints why on stderr. Check once that the checkpoint file's time advances.
 
 After the server restarts, attach a GUI window to it, then read the plan and apply it:
 
@@ -186,6 +188,6 @@ node examples/restore.mjs /absolute/path/to/checkpoint.json /absolute/path/to/at
 node examples/restore.mjs /absolute/path/to/checkpoint.json /absolute/path/to/attention /absolute/path/to/mux.sock /absolute/path/to/wezterm --apply
 ```
 
-Each restored agent pane has its resume command typed and waiting. Press Enter in the panes you want to resume. Run `--apply` once: a second run opens every pane again. The first checkpoint after the restart keeps the old server's file as `checkpoint.json.<incarnation id>.json`; when restore refuses with "checkpoint is of the running server", it names that file, and you pass it instead.
+Each restored agent pane has its resume command typed and waiting (checked in zsh 5.9). Press Enter in the panes you want to resume. Run `--apply` once: a second run opens every pane again and types the same lines. If a run stops (a `stopped` line), close the panes its `opened` names with `WEZTERM_UNIX_SOCKET=/absolute/path/to/mux.sock wezterm cli kill-pane --pane-id <id>` (WezTerm 20260905-195314-b99b1ca2) before you run `--apply` again; after a stop for `uncertain`, the step it names may have opened one more pane, which you close too. The first checkpoint after the restart keeps the old server's file as `checkpoint.json.<incarnation id>.json`; when restore refuses with "checkpoint is of the running server", it names the earlier servers' checkpoints, newest first; pass the first instead.
 
 With no GUI attached, a new window was 80 columns by 24 rows (WezTerm 20260905-195314-b99b1ca2); in so small a window a split can be refused for lack of space, and that WezTerm then keeps a pane you cannot see (see [Executable application recipes](consumer-guide.md#executable-application-recipes)). This works with a mux server, whose socket path stays the same across restarts ([Mux setup](mux-setup.md)). A WezTerm without a mux server is not supported: its socket is named for the GUI's process (`gui-sock-<pid>`, see [what sweep leaves behind](accepted-limitations.md#what-sweep-leaves-behind)), so a scheduled checkpoint has no fixed socket to name.
