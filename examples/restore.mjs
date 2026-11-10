@@ -233,10 +233,9 @@ export function planRestore(checkpoint, target, { resumeLine: resume = resumeLin
   if (target.realm) {
     // A session ended in its checkpoint pane may have been resumed in a new
     // pane since, so only active ones count as known.
-    const known = new Set([
-      ...checkpoint.panes.filter(p => p.binding?.binding_phase === "active").map(p => sessionKey(p.binding)),
-      ...(checkpoint.unlisted_sessions ?? []).map(sessionKey),
-    ]);
+    const known = new Set(checkpoint.panes.filter(p => p.binding?.binding_phase === "active").map(p => sessionKey(p.binding)));
+    // Sessions the checkpoint itself says not to add back, with its reason.
+    const excluded = new Map((checkpoint.excluded_sessions ?? []).map(entry => [sessionKey(entry), entry.reason]));
     const groups = new Map();
     for (const row of target.realm) {
       if (!row?.current || row.binding_phase !== "active" || row.address?.incarnation_id !== checkpoint.scope.incarnation_id) continue;
@@ -245,8 +244,9 @@ export function planRestore(checkpoint, target, { resumeLine: resume = resumeLin
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(row);
     }
-    for (const rows of groups.values()) {
-      if (rows.length > 1) { added.push({ provider: rows[0].provider, session: rows[0].provider_session_id, outcome: "not_added", reason: "conflicting_records" }); continue; }
+    for (const [key, rows] of groups) {
+      const refused = excluded.has(key) ? excluded.get(key) : rows.length > 1 ? "conflicting_records" : null;
+      if (refused !== null) { added.push({ provider: rows[0].provider, session: rows[0].provider_session_id, outcome: "not_added", reason: refused }); continue; }
       const result = resumable(rows[0], target, resume);
       if (result.outcome === "already_running") { added.push(result); continue; }
       if (result.outcome !== "resume") { added.push({ ...result, outcome: "not_added" }); continue; }
@@ -378,8 +378,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     let plan;
     try { plan = planRestore(checkpoint, readTarget({ attention, socket, wezterm, checkpoint })); } catch (error) {
       if (!(error instanceof SameServer)) throw error;
-      const [newest, ...older] = keptCheckpoints(file);
-      throw new Error(error.message + (newest ? `; the previous server saved ${newest}` : "") + (older.length ? `; older servers saved ${older.join(", ")}` : ""));
+      const kept = keptCheckpoints(file);
+      throw new Error(error.message + (kept.length ? `; earlier checkpoints, newest first: ${kept.join(", ")}` : ""));
     }
     if (!flags.includes("--apply")) console.log(JSON.stringify(plan));
     else {

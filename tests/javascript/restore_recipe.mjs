@@ -139,9 +139,13 @@ assert.equal(planRestore(checkpointOf(panes), target(new Map(), null)).added_una
 const endedThenResumed = checkpointOf([pane(10, 1, 5, [0, 0, 80, 24], row("claude", "again", { binding_phase: "ended" }))]);
 assert.deepEqual(planRestore(endedThenResumed, target(new Map(), [realmRow("again")])).added.map(a => [a.session, a.outcome]), [["again", "resume_added"]],
   "a session ended in its checkpoint pane and resumed in a new pane is added");
-const goneBefore = { ...checkpointOf(panes), unlisted_sessions: [{ provider: "claude", provider_session_id: "gone-before" }] };
-assert.deepEqual(planRestore(goneBefore, target(new Map(), [realmRow("gone-before"), realmRow("missed")])).added.map(a => a.session), ["missed"],
-  "a session whose pane was already gone at capture is not added back");
+const goneBefore = { ...checkpointOf(panes), excluded_sessions: [{ provider: "claude", provider_session_id: "gone-before", reason: "gone_before_capture" }] };
+assert.deepEqual(planRestore(goneBefore, target(new Map(), [realmRow("gone-before"), realmRow("missed")])).added.map(a => [a.session, a.outcome, a.reason ?? null]),
+  [["gone-before", "not_added", "gone_before_capture"], ["missed", "resume_added", null]], "a session whose pane was already gone at capture is not added back");
+const far = { ...checkpointOf(panes), excluded_sessions: [{ provider: "claude", provider_session_id: "far", reason: "bound_under_another_server" }] };
+const farPlan = planRestore(far, target(new Map(), [realmRow("far")]));
+assert.deepEqual([farPlan.added.map(a => [a.session, a.outcome, a.reason]), farPlan.tabs.length], [[["far", "not_added", "bound_under_another_server"]], 2],
+  "a session the checkpoint also saw under another server is not added back");
 const onlyAdded = planRestore(checkpointOf([]), target(new Map(), [realmRow("missed")]));
 assert.deepEqual([onlyAdded.tabs[0].steps[0].op, onlyAdded.counts.windows], ["spawn_window", 1]);
 

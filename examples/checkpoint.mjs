@@ -35,6 +35,7 @@ export function paneNumber(value) {
 }
 
 export const sessionKey = row => `${row.provider}:${row.provider_session_id}`;
+const sessionRef = row => ({ provider: row.provider, provider_session_id: row.provider_session_id });
 
 // The scope of a parsed checkpoint, or null when it is not a schema 1 checkpoint.
 export function checkpointScope(value) {
@@ -70,8 +71,8 @@ const CONFLICT_ONLY = new Set(["binding_conflict", "binding_health_conflicted"])
 // holds every other current row by pane with its reasons. `unprobed` holds,
 // by pane, the code of a diagnostic that names that pane alone, which
 // Attention gives a pane it could not probe. `conflicts` lists each
-// `binding_conflict` with the panes of this server whose current row holds
-// its session, and whether it also names a pane under another server. It
+// `binding_conflict` with its session, the panes of this server whose current
+// row holds it, and whether it also names a pane under another server. It
 // throws on a failure about the answer as a whole or on a malformed row.
 export function bindings(attention, socket, run = runJson, limit) {
   const args = ["bindings", "--socket", socket, "--json"];
@@ -101,7 +102,8 @@ export function bindings(attention, socket, run = runJson, limit) {
       const holders = context.addresses.filter(address => inScope(address, scope)).map(address => paneNumber(address.pane_id))
         .filter(pane => (byPane.get(pane) ?? []).some(row => sessionKey(row) === key));
       for (const pane of holders) conflicted.add(pane);
-      conflicts.push({ holders, elsewhere: context.addresses.some(address => !inScope(address, scope)) });
+      conflicts.push({ session: sessionRef(context), holders,
+        elsewhere: context.addresses.some(address => !inScope(address, scope)) });
     } else if (typeof context?.pane_id === "string" && inScope(context, scope)) {
       unprobed.set(paneNumber(context.pane_id), diagnostic.code);
     } else {
@@ -193,17 +195,22 @@ export function captureCheckpoint({ attention, socket, wezterm, run = runJson, l
     }
     return entry;
   });
-  // An active session whose active rows, read before the pane list, are only
-  // in panes the list omits was gone before this capture, though no session
-  // end reached Attention; a restore must not bring it back as a session the
-  // checkpoint missed. A row first read after the list may be in a pane
-  // opened since, and an ended row in a listed pane holds no session.
+  // Sessions a restore must not add back as ones the checkpoint missed, each
+  // with its reason. An active session whose active rows, read before the
+  // pane list, are only in panes the list omits was gone before this capture,
+  // though no session end reached Attention; a row first read after the list
+  // may be in a pane opened since, and an ended row in a listed pane holds no
+  // session. A session whose conflict also names a pane under another server
+  // may run there, and a restore reads only this server's realm.
   const held = new Set(active([...before.rows, ...after.rows]).filter(row => inList(listed, row)).map(sessionKey));
-  const unlisted = new Map(active(before.rows).filter(row => !held.has(sessionKey(row)))
-    .map(row => [sessionKey(row), { provider: row.provider, provider_session_id: row.provider_session_id }]));
+  const excluded = new Map(active(before.rows).filter(row => !held.has(sessionKey(row)))
+    .map(row => [sessionKey(row), { ...sessionRef(row), reason: "gone_before_capture" }]));
+  for (const conflict of [...before.conflicts, ...after.conflicts]) {
+    if (conflict.elsewhere) excluded.set(sessionKey(conflict.session), { ...conflict.session, reason: "bound_under_another_server" });
+  }
   // A null binding is unknown, not proof of no agent, and an ended binding stays
   // ended. The snapshot itself grants no permission to resume or control a pane.
-  return { schema: 1, scope: after.scope, panes, unlisted_sessions: [...unlisted.values()], binding_query_ms: [firstMs, secondMs] };
+  return { schema: 1, scope: after.scope, panes, excluded_sessions: [...excluded.values()], binding_query_ms: [firstMs, secondMs] };
 }
 
 // The checkpoints of earlier servers kept beside `file`, newest first.

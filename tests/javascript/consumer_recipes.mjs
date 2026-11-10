@@ -127,7 +127,7 @@ try {
   const resolved = saveCheckpoint({ ...options, run: runner(live(["42", "99"], ["42", "99"])) }, file);
   assert.equal(resolved.panes[0].binding.provider_session_id, realRow().provider_session_id);
   assert.equal(resolved.panes[0].binding_note, "conflict_resolved_by_topology");
-  assert.deepEqual(resolved.unlisted_sessions.map(entry => entry.provider_session_id), ["closed-session"],
+  assert.deepEqual(resolved.excluded_sessions.map(entry => [entry.provider_session_id, entry.reason]), [["closed-session", "gone_before_capture"]],
     "a closed pane's active session is recorded as gone; a listed pane's session is not, though an unlisted twin holds it");
   const doubted = captureCheckpoint({ ...options, run: runner(value => {
     live(["42", "99"], ["42", "99"])(value);
@@ -147,6 +147,9 @@ try {
   }) });
   assert.equal(elsewhere.panes[0].binding, null);
   assert.equal(elsewhere.panes[0].binding_unknown_reason, "binding_conflict");
+  assert.deepEqual(elsewhere.excluded_sessions.filter(entry => entry.reason === "bound_under_another_server"), [{ provider: realRow().provider, provider_session_id: realRow().provider_session_id, reason: "bound_under_another_server" }],
+    "the checkpoint carries the session, so a restore does not add it back either");
+  assert.deepEqual(result.excluded_sessions, []);
   // A conflict names a pane through any row that competes for the session,
   // such as one a resume replaced without an end. A pane whose current row is
   // another session keeps it, and the one listed pane that holds the session
@@ -179,7 +182,7 @@ try {
     }));
     return value;
   }) });
-  assert.deepEqual(gone.unlisted_sessions.map(entry => entry.provider_session_id), ["s2", "s10", "s13"]);
+  assert.deepEqual(gone.excluded_sessions.map(entry => entry.provider_session_id), ["s2", "s10", "s13"]);
 
   // A checkpoint of another server is kept under its incarnation id, and only
   // the newest twenty kept files remain; other names are never removed.
@@ -246,5 +249,5 @@ try {
     syncBuiltinESMExports();
   }
   assert.equal(readdirSync(directory).filter(name => name.endsWith(".tmp")).length, 0);
-  console.log("Consumer recipes: stable checkpoint, four whole-answer refusals, three failed probes or state roots, four unknown panes, conflicts resolved, left unknown, under another server and through a replaced binding, an unlisted-session table, kept checkpoints, exact inspection and three inspection refusals passed");
+  console.log("Consumer recipes: stable checkpoint, four whole-answer refusals, three failed probes or state roots, four unknown panes, conflicts resolved, left unknown, under another server and through a replaced binding, a table of sessions gone before the capture, kept checkpoints, exact inspection and three inspection refusals passed");
 } finally { rmSync(directory, { recursive: true, force: true }); }
