@@ -1044,6 +1044,24 @@ test("the spinning form, no progress and a sibling's progress draw no gauge", fu
   assert(format_tab_title(drawn) == plain, "only the active pane's progress is drawn")
 end)
 
+test("a pane that raises on its missing progress field still gets its title", function()
+  -- As of WezTerm 20240203-110809-5046fc22, format-tab-title gets a pane object
+  -- that raises on a field it does not have, where a table gives nil.
+  local raising = tab(769, 770, false)
+  local fields = raising.active_pane
+  local pane = newproxy(true) -- userdata, as WezTerm's pane object is
+  getmetatable(pane).__index = function(_, key)
+    if key == "progress" then error("attempt to get an unknown field 'progress'", 2) end
+    return fields[key]
+  end
+  raising.active_pane = pane
+  local plain = tab(769, 770, false)
+  assert(format_tab_title(raising) == format_tab_title(plain), "the title is the one a pane with no progress gets")
+  local base = function() return "base" end
+  assert(attention.wrap_title_formatter(base)(raising) == attention.wrap_title_formatter(base)(plain),
+    "a manual renderer keeps its title too")
+end)
+
 test("visible_attention resolves a tab from its GUI pane ids as the renderer does", function()
   write_activity(751, "thinking")
   write_activity(752, "notify")

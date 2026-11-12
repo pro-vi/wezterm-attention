@@ -200,15 +200,20 @@ return function(context)
     { math.huge, "\u{f0aa5}" },
   }
 
+  --- A pane's `progress` field. WezTerm's pane object raises on a field it does
+  --- not have, where a table gives nil, and a build older than the progress
+  --- field has none (as of WezTerm 20240203-110809-5046fc22), so it is read
+  --- under pcall.
+  local function pane_progress(pane) return pane and pane.progress end
+
   --- The progress gauge WezTerm's default title draws, which a format-tab-title
   --- callback replaces: `{ glyph = string, ansi_color = string }` from the
   --- tab's active pane for a percentage (green) or an error (red). Nil for no
   --- progress, for a build older than the progress field, and for the spinning
   --- form, which an agent's own mark already covers.
   local function progress_gauge(tab)
-    local pane = tab.active_pane
-    local progress = pane and pane.progress
-    if type(progress) ~= "table" then return nil end
+    local ok, progress = pcall(pane_progress, tab.active_pane)
+    if not ok or type(progress) ~= "table" then return nil end
     local value, ansi_color = progress.Percentage, "Green"
     if value == nil then value, ansi_color = progress.Error, "Red" end
     if type(value) ~= "number" then return nil end

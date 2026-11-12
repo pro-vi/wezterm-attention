@@ -17,7 +17,7 @@ Stock is checked by running `tests/shell/run_wezterm_smoke.sh` with an upstream 
 ## Consequences
 
 - Costs that sit in WezTerm, such as a tab bar rebuild on every title write, stay outside Attention's reach. Attention can document a setting that avoids them but cannot remove them.
-- The smoke and examples checks cover loading and formatting on a stock release, not a live GUI window.
+- The smoke and examples checks cover loading and formatting on a stock release, with plain tables in place of the tab and pane objects WezTerm hands to `format-tab-title`, not a live GUI window. A build whose pane object lacks a field the plugin reads (`progress` on `20240203-110809-5046fc22`, where the read raises) shows only in a live window and in `tests/lua/auto_clear_spec.lua`.
 
 ## Revisit Triggers
 
@@ -28,4 +28,4 @@ Stock is checked by running `tests/shell/run_wezterm_smoke.sh` with an upstream 
 
 - `README.md`, Install: the minimum release.
 - `tests/shell/run_wezterm_smoke.sh`, `tests/shell/examples_spec.sh`.
-- Checked on upstream `20240203-110809-5046fc22`, 2026-10-05: the smoke test printed `ok`.
+- Checked on upstream `20240203-110809-5046fc22`, 2026-10-05: the smoke test printed `ok`. That was before the tab read a pane's `progress` field (1.12.0).

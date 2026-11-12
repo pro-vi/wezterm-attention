@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A WezTerm older than its progress field draws tab titles again.** Since 1.12.0 the tab read the active pane's `progress` field for the gauge, and the pane object WezTerm hands the tab bar raises on a field it does not have (as of 20240203-110809-5046fc22, the newest stable release), so the title function failed on every call and no tab showed a mark, with the built-in renderer and with `wrap_title_formatter` alike. The field is now read under `pcall`, and such a build draws the title with no gauge.
+
 ## 1.15.0 — 2026-11-10
 
 ### Added
