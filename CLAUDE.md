@@ -33,8 +33,10 @@ so `tests/gate.sh` is the only check, and nothing runs it for you.
    - `sh <clone>/scripts/install-cli.sh`, then `<clone>/bin/attention --version`
      and `<clone>/bin/attention hooks describe --provider claude --json`, whose
      `result.writer_version` holds the version.
-   - Write a config that loads `<clone>/plugin/init.lua` with `loadfile`, as
-     `docs/setup.md` shows, calls `apply_to_config` and then
-     `wezterm.log_info` with a marker, and run
-     `wezterm --config-file <that config> show-keys`. Exit 0, no error, and the
-     marker in stderr mean the plugin loaded.
+   - Write a config that loads the plugin as `docs/setup.md` shows,
+     `loadfile(clone .. "/plugin/init.lua")("wezterm-attention", clone .. "/plugin/init.lua")`,
+     calls `apply_to_config` and then `wezterm.log_info` with a marker, and
+     run `wezterm --config-file <that config> show-keys`. Only the marker in
+     stderr means the plugin loaded: when the config raises an error,
+     WezTerm 20260905-195314-b99b1ca2's `show-keys` still exits 0 and prints
+     nothing to stderr.
