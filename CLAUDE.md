@@ -17,7 +17,13 @@ so `tests/gate.sh` is the only check, and nothing runs it for you.
    build between releases reports the last release's version.
 3. Run `sh tests/gate.sh` on that exact commit, at normal load: a one-minute
    load average under about 12. At load 203 two shell timing specs failed in
-   the 1.0.0 gate run, and a rerun at normal load passed.
+   the 1.0.0 gate run, and a rerun at normal load passed. Load can also rise
+   during a run: the 1.15.1 gate started at 11.8, reached 44, and failed only
+   the hook-latency comparison (`sequential_p95_within_2x` from
+   `tests/python/measure.py`, a 95th-percentile ratio against a fixed old
+   build). Before rerunning, diff the hook writer's code since the last gate
+   that passed: when it is unchanged, the failure is the load; a rerun at
+   load 11.9 then passed.
 4. Tag that commit `vX.Y.Z` and push the commit and the tag. Tag after the
    heading is dated: the `v1.0.0` tag sits one commit before the one that dated
    its heading, so the tagged `CHANGELOG.md` has no date.
