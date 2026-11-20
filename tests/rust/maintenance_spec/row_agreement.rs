@@ -30,8 +30,8 @@ fn inspect(setup: &Setup, scope: &PaneScope) -> PaneFacts {
 }
 
 /// The bindings row for `scope`, the `bindings --socket` row for it, and
-/// inspect's answer must carry the same health and confidence. Returns
-/// inspect's answer for further checks.
+/// inspect's answer, with the row inside it, must carry the same health,
+/// confidence and presence. Returns inspect's answer for further checks.
 fn assert_agree(setup: &Setup, scope: &PaneScope) -> PaneFacts {
     let (rows, _) =
         read_bindings_with_ports(&setup.root(), Some(&setup.panes), Some(&setup.processes))
@@ -77,6 +77,14 @@ fn assert_agree(setup: &Setup, scope: &PaneScope) -> PaneFacts {
         serde_json::to_value(facts.pane_presence).expect("presence"),
         json!(row.pane_presence)
     );
+    let nested = facts.binding.as_ref().expect("inspect's binding row");
+    for field in ["binding_health", "reader_confidence", "pane_presence"] {
+        assert_eq!(
+            serde_json::to_value(nested).expect("inspect's row")[field],
+            serde_json::to_value(row).expect("row")[field],
+            "{field} differs between bindings and inspect's binding row"
+        );
+    }
     facts
 }
 

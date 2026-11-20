@@ -615,8 +615,8 @@ fn a_binding_whose_agent_is_gone_yields_its_session_to_another_pane() {
             .to_vec(),
     ));
 
-    // Pane 42's row in each answer, and whether each `bindings` answer
-    // reported the conflict.
+    // Pane 42's row in each answer, `inspect`'s own row included, and whether
+    // each `bindings` answer reported the conflict.
     let first = session_binding(&setup, "codex");
     let answers = || {
         let realm = read_bindings_timed(
@@ -649,11 +649,13 @@ fn a_binding_whose_agent_is_gone_yields_its_session_to_another_pane() {
             .collect();
         let facts = facts_with(&setup, &first, &setup.tty);
         rows.push((facts.binding_health, facts.reader_confidence));
+        let nested = facts.binding.expect("inspect's binding row");
+        rows.push((nested.binding_health, nested.reader_confidence));
         (rows, reported)
     };
     let expect = |label: &str, row: (BindingHealth, ReaderConfidence), reported: bool| {
         let (rows, found) = answers();
-        assert_eq!(rows, [row; 3], "{label}");
+        assert_eq!(rows, [row; 4], "{label}");
         assert_eq!(found, [reported; 2], "{label}");
     };
     use BindingHealth::{Conflicted, Valid};

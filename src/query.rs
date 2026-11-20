@@ -1000,8 +1000,11 @@ fn read_pane_facts_once(
         .record
         .as_ref()
         .zip(selected)
-        .map(|(record, selected)| {
-            BindingRow::of(
+        // The row carries the answer's confidence, so a binding whose agent is
+        // proven gone reads unconfirmed here too.
+        .map(|(record, selected)| BindingRow {
+            reader_confidence: confidence,
+            ..BindingRow::of(
                 record,
                 address.clone(),
                 scope.launch_id.clone(),
@@ -1212,7 +1215,9 @@ struct RowFacts {
 
 impl BindingRow {
     /// The row a reader answers for the binding record `binding`, whose
-    /// address, launch and binding are the ones given.
+    /// address, launch and binding are the ones given. Its `reader_confidence`
+    /// rests on `facts` alone: a reader that finds the agent proven gone while
+    /// another pane address holds the session lowers it to unconfirmed after.
     fn of(
         binding: &Value,
         address: PaneAddress,
