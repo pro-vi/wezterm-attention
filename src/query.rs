@@ -9,6 +9,7 @@ use serde_json::Value;
 use crate::children::{ChildPresenceSet, ChildStatus, EndMark};
 use crate::host::{HostCheckPorts, HostFacet, HostRefusal, check_host};
 use crate::identity::{PaneAddress, marker_address, socket_identity};
+use crate::launch::owner_proven_gone;
 use crate::observations::{LeadPrompts, LifecycleAvailability, LifecycleSnapshot, LifecycleView};
 use crate::presence::{
     AssemblyListings, PaneEvidence, RecordedServer, ServerState, SocketChange, SpawnSpend,
@@ -24,10 +25,10 @@ use crate::protocol::{
 use crate::records::{
     BINDING_FILE, BindingState, FileRecords, RecordIdentity, RecordRead, RecordReader,
     binding_ended, collect_binding_files, ends_binding, incarnation_dir, name_address, name_path,
-    naming_record, read_record, read_record_typed, record_address, reviews_dir,
-    session_binding_files, unreadable_state,
+    naming_record, read_record, read_record_typed, read_record_typed_at, record_address,
+    reviews_dir, session_binding_files, unreadable_state,
 };
-use crate::wezterm::{Clock, GuiWindowLister, PaneLister, ProcessProbe};
+use crate::wezterm::{Clock, GuiWindowLister, PaneLister, ProcessInspector, ProcessProbe};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PaneScope {
@@ -371,9 +372,10 @@ pub enum BindingHealth {
 /// the same through both. It rests only on the records that make the row: the
 /// binding record, its end record, the pane's claim and the launch's
 /// current-binding pointer, the first failed read deciding, and on whether the
-/// provider session is live at another pane address, which outranks them. An
-/// unreadable review, activity or child record is a diagnostic about that
-/// record, not about the binding.
+/// provider session is live at another pane address, which outranks them. Live
+/// there means competing (see [`competes`]) with a recorded agent process not
+/// proven gone. An unreadable review, activity or child record is a diagnostic
+/// about that record, not about the binding.
 fn binding_health(failed_reads: [Option<DiagnosticCode>; 4], conflicted: bool) -> BindingHealth {
     if conflicted {
         return BindingHealth::Conflicted;
@@ -386,7 +388,9 @@ fn binding_health(failed_reads: [Option<DiagnosticCode>; 4], conflicted: bool) -
 }
 
 /// A reader can act on a row when it is the pane's current binding and the
-/// pane was seen. The same rule for `bindings` and `inspect`.
+/// pane was seen. The same rule for `bindings` and `inspect`, which also read
+/// a row unconfirmed when its session is held at another pane address too and
+/// its own recorded agent process is proven gone.
 fn reader_confidence(current: bool, presence: PanePresence) -> ReaderConfidence {
     if current && presence == PanePresence::Present {
         ReaderConfidence::Confirmed
@@ -400,9 +404,39 @@ fn reader_confidence(current: bool, presence: PanePresence) -> ReaderConfidence 
 /// whose records are kept history (its socket path no longer serves its
 /// incarnation) is history. A session resumed in a new pane, or under a restarted
 /// mux, leaves one behind every time, and calling that a conflict hides the
-/// pane the session actually runs in.
+/// pane the session actually runs in. A fourth kind of history, a binding whose
+/// recorded agent process is proven gone, needs its host record and the process
+/// table, so callers ask [`host_proven_gone`] after this, and only where a
+/// conflict would otherwise be declared.
 fn competes(ended: bool, kept_history: bool, presence: PanePresence) -> bool {
     !ended && !kept_history && presence != PanePresence::VerifiedAbsent
+}
+
+/// Whether the agent process recorded as `binding`'s host is proven gone. An
+/// agent that exits without running its session-end hook leaves its binding
+/// active in a pane whose shell still runs, so this, not the pane, says the
+/// binding no longer holds its session. Without `inspector`, or a host record,
+/// it is not proven.
+fn host_proven_gone(
+    root: &Path,
+    binding: &RecordIdentity,
+    inspector: Option<&dyn ProcessInspector>,
+) -> bool {
+    inspector.is_some_and(|inspector| {
+        read_record_typed_at(root, "host", binding)
+            .record()
+            .is_some_and(|host| owner_proven_gone(host, inspector))
+    })
+}
+
+/// Where else a provider session is held, as the inspected binding sees it:
+/// at no other pane address, only by bindings whose recorded agent process is
+/// proven gone, or by one that is live.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HeldElsewhere {
+    Nowhere,
+    OnlyStopped,
+    Live,
 }
 
 impl PaneFacts {
@@ -475,8 +509,9 @@ pub fn read_pane_facts(root: &Path, scope: &PaneScope) -> Result<PaneFacts> {
     )
 }
 
-/// [`read_pane_facts_checking_host`] with no way to check a recorded host,
-/// which the `host` facet then refuses as `probe_unavailable`.
+/// [`read_pane_facts_checking_host`] with no way to check a recorded host: the
+/// `host` facet refuses it as `probe_unavailable`, and a binding whose host
+/// has exited still conflicts.
 pub fn read_pane_facts_with_ports(
     root: &Path,
     scope: &PaneScope,
@@ -872,17 +907,25 @@ fn read_pane_facts_once(
     // A scope whose records are kept history was answered above, so the one
     // left here is live or shown exited, as `bindings` would say of this row.
     let kept_history = false;
-    let conflicted = binding.record.as_ref().is_some_and(|record| {
-        competes(ended, kept_history, presence)
-            && session_live_elsewhere(
-                root,
-                address,
-                &string(record, "provider").unwrap_or_default(),
-                &string(record, "provider_session_id").unwrap_or_default(),
-                panes,
-                processes,
-            )
-    });
+    let inspector = host_ports.map(|ports| ports.processes);
+    let elsewhere = match &binding.record {
+        Some(record) if competes(ended, kept_history, presence) => session_held_elsewhere(
+            root,
+            address,
+            &string(record, "provider").unwrap_or_default(),
+            &string(record, "provider_session_id").unwrap_or_default(),
+            panes,
+            processes,
+            inspector,
+        ),
+        _ => HeldElsewhere::Nowhere,
+    };
+    // A binding whose agent is proven gone while another pane address holds
+    // its session holds it no longer: it does not conflict, and reads
+    // unconfirmed, as `bindings` says of it.
+    let stopped =
+        elsewhere != HeldElsewhere::Nowhere && host_proven_gone(root, &identity, inspector);
+    let conflicted = elsewhere == HeldElsewhere::Live && !stopped;
     let after_claim = RecordFacet::at(
         reader,
         root,
@@ -915,7 +958,8 @@ fn read_pane_facts_once(
     } else {
         presence
     };
-    let conflicted = conflicted && competes(ended, kept_history, presence);
+    let still_competes = competes(ended, kept_history, presence);
+    let (conflicted, stopped) = (conflicted && still_competes, stopped && still_competes);
     if after_claim.failed() || after_pointer.failed() {
         return Ok(PaneFacts::unavailable(
             scope,
@@ -946,7 +990,11 @@ fn read_pane_facts_once(
     }
     // The claim names this launch and the pointer this binding, or the scope
     // would not have matched, so the row is the pane's current one.
-    let confidence = reader_confidence(true, presence);
+    let confidence = if stopped {
+        ReaderConfidence::Unconfirmed
+    } else {
+        reader_confidence(true, presence)
+    };
     let health = binding_health([None, end.failure_code(), None, None], conflicted);
     let row = binding
         .record
@@ -1211,6 +1259,9 @@ pub fn validate_socket_selector(socket: &str) -> Result<()> {
     Ok(())
 }
 
+/// [`read_bindings_for_socket_timed`] without its timing, and without a process
+/// inspector: a binding whose recorded agent process has exited still
+/// conflicts.
 pub fn read_bindings_for_socket_with_ports(
     root: &Path,
     socket: &str,
@@ -1218,7 +1269,7 @@ pub fn read_bindings_for_socket_with_ports(
     processes: Option<&dyn ProcessProbe>,
 ) -> Result<(BindingQueryScope, Vec<BindingRow>, Vec<Diagnostic>)> {
     let (scope, rows, diagnostics, _) =
-        read_bindings_for_socket_timed(root, socket, panes, processes)?;
+        read_bindings_for_socket_timed(root, socket, panes, processes, None)?;
     Ok((scope, rows, diagnostics))
 }
 
@@ -1228,6 +1279,7 @@ pub fn read_bindings_for_socket_timed(
     socket: &str,
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
+    inspector: Option<&dyn ProcessInspector>,
 ) -> Result<(
     BindingQueryScope,
     Vec<BindingRow>,
@@ -1262,8 +1314,16 @@ pub fn read_bindings_for_socket_timed(
         });
         elsewhere
     };
-    let (rows, mut read_diagnostics, spawns) =
-        assemble_bindings(root, files, &filter, Some(&rivals), panes, processes, true)?;
+    let (rows, mut read_diagnostics, spawns) = assemble_bindings(
+        root,
+        files,
+        &filter,
+        Some(&rivals),
+        panes,
+        processes,
+        inspector,
+        true,
+    )?;
     diagnostics.append(&mut read_diagnostics);
     let after = selected_socket_identity(socket)?;
     if after.0 != scope.realm_id || after.1 != scope.incarnation_id {
@@ -1430,18 +1490,21 @@ impl Serialize for BindingTiming {
 
 /// Whether another pane address holds a binding of this provider session that
 /// competes with the inspected one, by the rule `bindings` applies across its
-/// rows. Only same-session bindings have their end read and their pane probed,
-/// and once the session index is complete it names them, so a store with no
-/// rival costs one directory read and no subprocess; before that, a walk of
-/// binding records.
-fn session_live_elsewhere(
+/// rows, and whether one of those is live. Only same-session bindings have
+/// their end read and their pane probed, and once the session index is
+/// complete it names them, so a store with no rival costs one directory read
+/// and no subprocess; before that, a walk of binding records. A rival's host
+/// record is read only once it competes.
+fn session_held_elsewhere(
     root: &Path,
     address: &PaneAddress,
     provider: &str,
     session: &str,
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
-) -> bool {
+    inspector: Option<&dyn ProcessInspector>,
+) -> HeldElsewhere {
+    let mut held = HeldElsewhere::Nowhere;
     let sessions = BTreeSet::from([(provider.to_owned(), session.to_owned())]);
     for path in session_candidates(root, &sessions) {
         let Ok(identity) = RecordIdentity::from_state_path(root, &path, "binding") else {
@@ -1460,15 +1523,19 @@ fn session_live_elsewhere(
         }
         let (presence, kept_history) =
             reader_presence(root, other, panes, processes, &mut Vec::new());
-        if competes(
+        if !competes(
             binding_ended(root, &binding, &identity),
             kept_history,
             presence,
         ) {
-            return true;
+            continue;
         }
+        if !host_proven_gone(root, &identity, inspector) {
+            return HeldElsewhere::Live;
+        }
+        held = HeldElsewhere::OnlyStopped;
     }
-    false
+    held
 }
 
 fn session_key(binding: &Value) -> (String, String) {
@@ -1478,12 +1545,15 @@ fn session_key(binding: &Value) -> (String, String) {
     )
 }
 
+/// [`read_bindings_timed`] over every binding, without its timing, and without
+/// a process inspector: a binding whose recorded agent process has exited
+/// still conflicts.
 pub fn read_bindings_with_ports(
     root: &Path,
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
 ) -> Result<(Vec<BindingRow>, Vec<Diagnostic>)> {
-    let answer = read_bindings_timed(root, &BindingFilter::default(), panes, processes)?;
+    let answer = read_bindings_timed(root, &BindingFilter::default(), panes, processes, None)?;
     Ok((answer.rows, answer.diagnostics))
 }
 
@@ -1499,21 +1569,25 @@ pub struct RealmBindings {
     pub walked_every_directory: bool,
 }
 
-/// The realm-wide query with where its time went; the CLI prints the timing,
-/// maintenance and the other library callers do not want it.
+/// The realm-wide query with where its time went, which the CLI prints and
+/// `doctor` drops. `inspector` reads the process table, so that a binding
+/// whose recorded agent process is proven gone does not conflict; without it,
+/// such a binding still does.
 pub fn read_bindings_timed(
     root: &Path,
     filter: &BindingFilter,
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
+    inspector: Option<&dyn ProcessInspector>,
 ) -> Result<RealmBindings> {
     let started = Instant::now();
     let mut files = Vec::new();
     let mut diagnostics = Vec::new();
     collect_binding_files(root, &mut files, &mut diagnostics);
     let walked_every_directory = diagnostics.is_empty();
-    let (rows, mut read_diagnostics, spawns) =
-        assemble_bindings(root, files, filter, None, panes, processes, false)?;
+    let (rows, mut read_diagnostics, spawns) = assemble_bindings(
+        root, files, filter, None, panes, processes, inspector, false,
+    )?;
     diagnostics.append(&mut read_diagnostics);
     Ok(RealmBindings {
         rows,
@@ -1570,6 +1644,7 @@ type RivalLookup<'a> = dyn Fn(&Sessions) -> Vec<PathBuf> + 'a;
 /// The rows `files` make under `filter`. `rivals`, when given, names the
 /// binding records outside `files` that may share a provider session with an
 /// admitted row; without it `files` already holds every binding.
+#[allow(clippy::too_many_arguments)]
 fn assemble_bindings(
     root: &Path,
     mut files: Vec<PathBuf>,
@@ -1577,6 +1652,7 @@ fn assemble_bindings(
     rivals: Option<&RivalLookup<'_>>,
     panes: Option<&dyn PaneLister>,
     processes: Option<&dyn ProcessProbe>,
+    inspector: Option<&dyn ProcessInspector>,
     typed: bool,
 ) -> Result<(Vec<BindingRow>, Vec<Diagnostic>, SpawnSpend)> {
     let listings = AssemblyListings::new(panes, processes);
@@ -1784,13 +1860,33 @@ fn assemble_bindings(
             .or_default()
             .push(index);
     }
-    for indices in duplicates.values() {
-        let addresses: BTreeSet<PaneAddress> = indices
+    let addresses_of = |rows: &[BindingRow], indices: &[usize]| -> BTreeSet<PaneAddress> {
+        indices
             .iter()
             .map(|index| rows[*index].address.clone())
-            .collect();
+            .collect()
+    };
+    for indices in duplicates.values_mut() {
+        let mut addresses = addresses_of(&rows, indices);
+        // Host records are read only where a conflict would otherwise be
+        // declared. A row whose agent is proven gone holds the session no
+        // longer: it leaves the group and reads unconfirmed, as `inspect`
+        // says of it.
         if addresses.len() > 1 {
-            for index in indices {
+            indices.retain(|&index| {
+                let row = &rows[index];
+                let binding =
+                    RecordIdentity::binding(&row.address, &row.launch_id, &row.binding_id);
+                let stopped = host_proven_gone(root, &binding, inspector);
+                if stopped {
+                    rows[index].reader_confidence = ReaderConfidence::Unconfirmed;
+                }
+                !stopped
+            });
+            addresses = addresses_of(&rows, indices);
+        }
+        if addresses.len() > 1 {
+            for index in indices.iter() {
                 rows[*index].binding_health = BindingHealth::Conflicted;
             }
             // Rows outside the filter that conflict only with each other are

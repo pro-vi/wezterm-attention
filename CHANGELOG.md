@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- **A session resumed in another pane no longer conflicts with the binding its stopped agent left behind.** An agent that exits without running its session-end hook (Codex 0.170.0 does on SIGTERM) left its binding active in a pane whose shell still ran. Resuming the session elsewhere then marked both rows `conflicted` and made every `bindings --socket` answer for that server incomplete until the old pane closed. Now, where one session is held at more than one pane address, a binding whose recorded agent process is proven gone is left out of the conflict check and reads `reader_confidence` `unconfirmed`, in `bindings`, `inspect` and `doctor` alike, as the [record contract](docs/record-contract.md) says. `examples/checkpoint.mjs` already saves an unconfirmed row's pane as unknown, so a restore types the resume line only in the pane the session moved to. A binding with no recorded host, as on Linux, competes as before.
 - **A WezTerm older than its progress field draws tab titles again.** Since 1.12.0 the tab read the active pane's `progress` field for the gauge, and the pane object WezTerm hands the tab bar raises on a field it does not have (as of 20240203-110809-5046fc22, the newest stable release), so the title function failed on every call and no tab showed a mark, with the built-in renderer and with `wrap_title_formatter` alike. The field is now read under `pcall`, and such a build draws the title with no gauge.
 
 ## 1.15.0 — 2026-11-10

@@ -1059,10 +1059,10 @@ pub(crate) fn owner_state(owner: &ClaimOwner, processes: &dyn ProcessInspector) 
     }
 }
 
-/// Whether `claim` is an agent's own claim whose process is proven to have
-/// exited.
-pub(crate) fn owner_proven_gone(claim: &Value, processes: &dyn ProcessInspector) -> bool {
-    match ClaimMode::of(claim) {
+/// Whether `record`, an agent's own claim or a binding's host record, names a
+/// process proven to have exited.
+pub(crate) fn owner_proven_gone(record: &Value, processes: &dyn ProcessInspector) -> bool {
+    match ClaimMode::of(record) {
         Ok(ClaimMode::SelfOwned(owner)) => owner_state(&owner, processes) == OwnerState::Gone,
         Ok(ClaimMode::Shell) | Err(_) => false,
     }

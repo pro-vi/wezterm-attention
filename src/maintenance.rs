@@ -18,7 +18,9 @@ use crate::protocol::{
     AttentionError, Diagnostic, DiagnosticCode, EMBEDDED_MANIFEST, Result, elapsed_beyond,
     hex64_text, manifest, ns20_text, sha256_hex,
 };
-use crate::query::{BindingRow, FileStamp, read_bindings_with_ports, read_tab_publications};
+use crate::query::{
+    BindingFilter, BindingRow, FileStamp, read_bindings_timed, read_tab_publications,
+};
 use crate::records::{
     AGENTS, BINDING_FILE, BindingState, CommitPlan, FileRecords, RecordIdentity, RecordRead,
     Replacement, atomic_replace_if_different, binding_record_kind, binding_session_entry,
@@ -221,7 +223,14 @@ pub fn doctor_with_environment(
         }
     };
     probes.push(json!({"name":"permissions","status":permission_status}));
-    let (rows, binding_diagnostics) = read_bindings_with_ports(root, panes, processes)?;
+    let answer = read_bindings_timed(
+        root,
+        &BindingFilter::default(),
+        panes,
+        processes,
+        Some(inspector),
+    )?;
+    let (rows, binding_diagnostics) = (answer.rows, answer.diagnostics);
     let mut state_diagnostics = audit_diagnostics;
     state_diagnostics.extend(binding_diagnostics);
     let state_status = if !state_diagnostics.is_empty() {

@@ -892,12 +892,14 @@ fn the_process_probe_is_timed_only_when_it_runs() {
     let socket = &setup.env["WEZTERM_UNIX_SOCKET"];
     let slow = SlowListingProcesses;
     let (_, _, _, timing) =
-        read_bindings_for_socket_timed(&root, socket, Some(&setup.panes), Some(&slow)).unwrap();
+        read_bindings_for_socket_timed(&root, socket, Some(&setup.panes), Some(&slow), None)
+            .unwrap();
     assert_eq!(timing.process_list, std::time::Duration::ZERO, "{timing:?}");
 
     setup.panes.0.lock().unwrap().clear();
     let (_, rows, _, timing) =
-        read_bindings_for_socket_timed(&root, socket, Some(&setup.panes), Some(&slow)).unwrap();
+        read_bindings_for_socket_timed(&root, socket, Some(&setup.panes), Some(&slow), None)
+            .unwrap();
     assert_eq!(rows[0].pane_presence, PanePresence::VerifiedAbsent);
     assert!(
         timing.process_list >= std::time::Duration::from_millis(50),

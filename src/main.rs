@@ -1055,6 +1055,7 @@ fn run_bindings(
                 socket,
                 Some(&WeztermPaneLister),
                 Some(&SystemProcessProbe),
+                Some(&SystemProcessInspector),
             ) {
                 Ok(result) => result,
                 Err(error) => {
@@ -1081,6 +1082,7 @@ fn run_bindings(
             &filter,
             Some(&WeztermPaneLister),
             Some(&SystemProcessProbe),
+            Some(&SystemProcessInspector),
         )?;
         walked_every_directory = answer.walked_every_directory;
         (None, answer.rows, answer.diagnostics, answer.timing)

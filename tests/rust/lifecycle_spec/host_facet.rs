@@ -6,7 +6,9 @@ use super::self_claim::{apply_as, launch_of, setup_launch_dir, start, start_agen
 use super::*;
 use wezterm_attention::host::{HostCheckPorts, HostFacet};
 use wezterm_attention::query::{
-    PaneFacts, PaneScope, read_pane_facts_checking_host, read_pane_facts_with_ports,
+    BindingFilter, BindingHealth, PaneFacts, PaneScope, ReaderConfidence,
+    read_bindings_for_socket_timed, read_bindings_timed, read_pane_facts_checking_host,
+    read_pane_facts_with_ports,
 };
 use wezterm_attention::records::FileRecords;
 
@@ -554,6 +556,118 @@ fn an_invalid_host_record_is_refused_and_recorded_again_by_the_next_proof() {
             "{label}: the invalid record is kept aside"
         );
     }
+}
+
+/// The agent of a session resumed in another pane.
+const RESUMED_AGENT: i32 = 4200;
+
+/// An agent that exits without running its session-end hook, as Codex 0.170.0
+/// does on SIGTERM, leaves its binding active in a pane whose shell still
+/// runs. When its session is held at another pane address too, a binding whose
+/// recorded agent is proven gone does not conflict and reads unconfirmed, in
+/// `bindings`, `bindings --socket` and `inspect` alike, so a reader resumes
+/// the session only where it may still run.
+#[test]
+fn a_binding_whose_agent_is_gone_yields_its_session_to_another_pane() {
+    let setup = shell_session("codex");
+    let root = state_root(&setup.env).expect("state root");
+    let (address, _) = pane_address(&setup.env).expect("address");
+    let mut resumed = address.clone();
+    resumed.pane_id = "99".to_owned();
+    let resumed_launch = "00000000-0000-4000-8000-000000000702";
+    let resumed_binding = binding_id("codex", SESSION, resumed_launch);
+    let binding_dir = launch_dir(&root, &resumed, resumed_launch)
+        .join("bindings")
+        .join(&resumed_binding);
+    let record = json!({
+        "kind":"binding","schema":3,"address":resumed,"launch_id":resumed_launch,
+        "binding_id":resumed_binding,"event_id":Uuid::new_v4().to_string(),
+        "provider":"codex","provider_session_id":SESSION,"start_source":"resume",
+        "observed_mono_ns":"00000000000000000300",
+        "written_at_unix_ns":"00000000001000000000","writer_version":"1.0.0"
+    });
+    atomic_replace(&binding_dir.join("binding.json"), &record).expect("resumed binding");
+    let (entry_path, entry) =
+        wezterm_attention::records::binding_session_entry(&root, &record).expect("entry");
+    atomic_replace(&entry_path, &entry).expect("session entry");
+    // The resumed pane's agent, recorded as pane 42's was.
+    let mut host = stored_host_json(&setup, "codex");
+    host["address"] = json!(resumed);
+    host["launch_id"] = json!(resumed_launch);
+    host["binding_id"] = json!(resumed_binding);
+    host["owner_pid"] = json!(RESUMED_AGENT.to_string());
+    host["owner_started_usec"] = json!(RESUMED_AGENT.to_string());
+    atomic_replace(&binding_dir.join("host.json"), &host).expect("resumed host");
+    let running = |pid| {
+        ProcessRead::Found(process_facts(
+            pid,
+            SHELL_PID,
+            ControllingTerminal::Device(PANE_TTY_DEVICE),
+        ))
+    };
+    setup.processes.set(RESUMED_AGENT, running(RESUMED_AGENT));
+    setup.panes.set(Some(
+        ["42", "99"]
+            .map(|pane| PaneRow {
+                pane_id: pane.to_owned(),
+                tty_name: Some(setup.tty.path.clone()),
+            })
+            .to_vec(),
+    ));
+
+    // Pane 42's row in each answer, and whether each `bindings` answer
+    // reported the conflict.
+    let first = session_binding(&setup, "codex");
+    let answers = || {
+        let realm = read_bindings_timed(
+            &root,
+            &BindingFilter::default(),
+            Some(&setup.panes),
+            None,
+            Some(&setup.processes),
+        )
+        .expect("bindings");
+        let (_, socket_rows, socket_diagnostics, _) = read_bindings_for_socket_timed(
+            &root,
+            &setup.env["WEZTERM_UNIX_SOCKET"],
+            Some(&setup.panes),
+            None,
+            Some(&setup.processes),
+        )
+        .expect("bindings --socket");
+        let reported = [&realm.diagnostics, &socket_diagnostics].map(|found| {
+            found
+                .iter()
+                .any(|item| item.code == DiagnosticCode::BindingConflict)
+        });
+        let mut rows: Vec<(BindingHealth, ReaderConfidence)> = realm
+            .rows
+            .iter()
+            .chain(&socket_rows)
+            .filter(|row| row.binding_id == first)
+            .map(|row| (row.binding_health, row.reader_confidence))
+            .collect();
+        let facts = facts_with(&setup, &first, &setup.tty);
+        rows.push((facts.binding_health, facts.reader_confidence));
+        (rows, reported)
+    };
+    let expect = |label: &str, row: (BindingHealth, ReaderConfidence), reported: bool| {
+        let (rows, found) = answers();
+        assert_eq!(rows, [row; 3], "{label}");
+        assert_eq!(found, [reported; 2], "{label}");
+    };
+    use BindingHealth::{Conflicted, Valid};
+    use ReaderConfidence::{Confirmed, Unconfirmed};
+
+    expect("both agents run", (Conflicted, Confirmed), true);
+    let agent = running(AGENT_PID);
+    setup.processes.set(AGENT_PID, ProcessRead::Gone);
+    expect("pane 42's agent is gone", (Valid, Unconfirmed), false);
+    setup.processes.set(AGENT_PID, agent);
+    setup.processes.set(RESUMED_AGENT, ProcessRead::Gone);
+    expect("pane 99's agent is gone", (Valid, Confirmed), false);
+    setup.processes.set(AGENT_PID, ProcessRead::Gone);
+    expect("both agents are gone", (Valid, Unconfirmed), false);
 }
 
 /// A real agent in a real pane: a shell made the session leader of a fresh
