@@ -472,9 +472,17 @@ new `thinking` activity, with `phase` `before_thinking`. It runs at every lead
 prompt, a prompt typed while a turn runs included, and at a lead tool call
 when the pane's activity is not a shown `thinking`: the first tool call of a
 turn that had no prompt, as after a `Stop` hook continued the turn, and the
-one after a permission prompt was answered. A tool call while the pane shows
+one after a permission prompt was answered. It runs once more at the first
+lead tool call after a prompt, on that prompt's `thinking`. As of Claude Code
+2.1.331 the prompt's row, which says where the prompt came from
+(`promptSource`, `turnOrigin`), is not yet in
+the session's transcript when the prompt's hook runs, and is there at that
+call; the check's `lifecycle` names the prompt (`latest_prompt`) and holds its
+observation, with the turn id. Any other tool call while the pane shows
 `thinking`, or while a sub-agent's permission prompt holds its `notify`, runs
-no check and keeps the stored note. A Codex
+no check and keeps the stored note. A program can be asked more than once
+at a turn's first tool calls: tool calls whose hooks run at the same moment as
+the first each find no tool call recorded yet. A Codex
 tool call that asks the user writes `notify` and runs no check. Hold checks
 do not run at this phase (`not_applicable`).
 
@@ -493,7 +501,10 @@ Attention applies the note to the `thinking` activity's `hold_notes` after
 the same snapshot recheck (a binding with no lifecycle file must still have
 none); changed evidence discards it with `evidence_changed`. A later prompt
 runs the check again, and its answer replaces the note, an empty one removing
-it. Its outcomes appear only in the hook's report. The default bar keeps the
+it. The answer at a turn's first tool call replaces the prompt's note the
+same way; a check that gives no answer there (a failure, a timeout, changed
+evidence) leaves the prompt's note. The outcomes of checks at this phase
+appear only in the hook's report. The default bar keeps the
 thinking indicator and tints the tab with `colors.thinking_quiet` (default
 `#0f2a3f`), ranked below every ordinary mark, as a quiet completion is. The `Stop` check is unchanged: a turn
 marked as it started gets its own answer when it ends.

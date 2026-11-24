@@ -151,6 +151,10 @@ def measure(
             "model": "measurement-model",
         }
         run([*command, "hooks", "event", "claude", "SessionStart", "--strict"], environment, start)
+        # A prompt starts the turn, so the timed tool calls take the lifecycle
+        # read a quiet check's line does after a turn's first tool call.
+        prompt = {**start, "hook_event_name": "UserPromptSubmit", "prompt": "measurement prompt"}
+        run([*command, "hooks", "event", "claude", "UserPromptSubmit", "--strict"], environment, prompt)
         activity = {
             **start,
             "hook_event_name": "PreToolUse",

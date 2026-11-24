@@ -1221,11 +1221,7 @@ fn newer_lead_observation(root: &Path, identity: &RecordIdentity, observation: &
     }
     // Unavailable rich history does not veto an independent native mutation;
     // append_observation retains the read diagnostic on its existing path.
-    let Some(snapshot) = read_record_at(root, "lifecycle_snapshot", identity)
-        .ok()
-        .flatten()
-        .and_then(|value| serde_json::from_value::<LifecycleSnapshot>(value).ok())
-    else {
+    let Some(snapshot) = lifecycle_snapshot(root, identity) else {
         return false;
     };
     snapshot
@@ -1888,17 +1884,13 @@ fn apply_activity(
                 event
                     .provider
                     .is_some_and(|provider| draft.ends_turn(provider))
-                    && read_record_at(&resolved.root, "lifecycle_snapshot", &identity)
-                        .ok()
-                        .flatten()
-                        .and_then(|value| serde_json::from_value::<LifecycleSnapshot>(value).ok())
-                        .is_some_and(|snapshot| {
-                            snapshot.repeats_turn_end(
-                                draft,
-                                observation,
-                                latest_prompt(&resolved.root, &identity).as_ref(),
-                            )
-                        })
+                    && lifecycle_snapshot(&resolved.root, &identity).is_some_and(|snapshot| {
+                        snapshot.repeats_turn_end(
+                            draft,
+                            observation,
+                            latest_prompt(&resolved.root, &identity).as_ref(),
+                        )
+                    })
             });
             if replay {
                 let mut result = LifecycleResult::new(Disposition::Skipped);
@@ -1956,20 +1948,32 @@ fn apply_activity(
                 }
             }
             let mut base = activity_base(resolved, event, &binding_id)?;
-            // A lead tool call while the pane shows its turn's thinking runs
-            // no quiet check (`obtain_hold_notes`), and keeps the note the
-            // turn was given when it started; one its own check gave stands.
+            // A lead tool call while the pane shows its turn's thinking keeps
+            // the notes the turn was given. Only the turn's first tool call
+            // runs the quiet checks (`tool_call_skips_check`), and a check
+            // that answers it replaces its own note, an empty answer removing
+            // it; a check that gave no answer leaves its note as it was.
             if event.agent_id.is_none()
                 && event.source_event == "PreToolUse"
                 && base["type"] == "thinking"
-                && base.get("hold_notes").is_none()
                 && visible
                 && let Some(notes) = existing
                     .as_ref()
                     .filter(|activity| activity["type"] == "thinking")
-                    .and_then(|activity| activity.get("hold_notes"))
+                    .and_then(|activity| activity["hold_notes"].as_object())
             {
-                base["hold_notes"] = notes.clone();
+                let answered = |name: &str| {
+                    resolved.evidence.as_ref().is_some_and(|evidence| {
+                        evidence.borrow().hold_checks.iter().any(|check| {
+                            check.name == name && check.stage == hold_check::Stage::Completed
+                        })
+                    })
+                };
+                for (name, note) in notes {
+                    if !answered(name) {
+                        base["hold_notes"][name] = note.clone();
+                    }
+                }
             }
             // A lead that waits on a sub-agent keeps calling tools, and each
             // call is thinking. While a child that asked for permission is
@@ -3807,6 +3811,15 @@ pub(crate) fn latest_prompt_is(
     })
 }
 
+/// The lead's lifecycle snapshot of the binding `identity` names; `None` when
+/// there is none or it cannot be read.
+fn lifecycle_snapshot(root: &Path, identity: &RecordIdentity) -> Option<LifecycleSnapshot> {
+    read_record_at(root, "lifecycle_snapshot", identity)
+        .ok()
+        .flatten()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
 /// The lead's latest prompt, from the binding's prompt record; `None` when
 /// the record names none or cannot be read.
 fn latest_prompt(root: &Path, identity: &RecordIdentity) -> Option<PromptReference> {
@@ -4083,7 +4096,7 @@ fn obtain_hold_notes(
     let before_thinking = phase == Phase::BeforeThinking;
     if before_thinking
         && event.source_event == "PreToolUse"
-        && tool_call_keeps_activity(resolved, event, now)
+        && tool_call_skips_check(resolved, event, now)
     {
         return outcomes;
     }
@@ -4215,11 +4228,15 @@ fn obtain_hold_notes(
     outcomes
 }
 
-/// Whether a lead tool call finds its pane already showing thinking, or a
-/// waiting child's notify it does not replace (see `apply_activity`). Either
-/// way it writes no new thinking, so no check runs before it. Read without
-/// the writer locks: the call applies under them by what it finds there.
-fn tool_call_keeps_activity(resolved: &ResolvedLaunch, event: &ProviderEvent, now: &str) -> bool {
+/// Whether a lead tool call runs no quiet check: it finds its pane showing a
+/// waiting child's notify, which it does not replace (see `apply_activity`),
+/// or showing thinking after the lead already called a tool since its latest
+/// prompt. The turn's first tool call is asked again on its prompt's
+/// thinking, because the prompt's transcript row is not yet written when the
+/// prompt's hook runs (as of Claude Code 2.1.331). Read without the writer
+/// locks: the call applies under them by what it finds there, and tool calls
+/// that start at the same moment as the first each run the check.
+fn tool_call_skips_check(resolved: &ResolvedLaunch, event: &ProviderEvent, now: &str) -> bool {
     let Ok(binding_id) = event_binding_id(event, &resolved.launch_id) else {
         return false;
     };
@@ -4227,7 +4244,8 @@ fn tool_call_keeps_activity(resolved: &ResolvedLaunch, event: &ProviderEvent, no
     let Ok(Some(existing)) = read_record_at(&resolved.root, "activity", &identity) else {
         return false;
     };
-    (existing["type"] == "thinking" || notify_held_by_child(resolved, &binding_id, &existing))
+    let thinking = existing["type"] == "thinking";
+    (thinking || notify_held_by_child(resolved, &binding_id, &existing))
         && read_record_at(&resolved.root, "activity_clear", &identity).is_ok_and(|clear| {
             activity_visible(
                 &resolved.root,
@@ -4237,6 +4255,25 @@ fn tool_call_keeps_activity(resolved: &ResolvedLaunch, event: &ProviderEvent, no
                 now,
             )
         })
+        && (!thinking || tool_called_since_prompt(&resolved.root, &identity))
+}
+
+/// Whether the lead's lifecycle holds a tool call after its latest prompt.
+/// With no prompt recorded, or a lifecycle that cannot be read, it answers
+/// yes, so the call keeps the note it finds.
+fn tool_called_since_prompt(root: &Path, identity: &RecordIdentity) -> bool {
+    let (Some(prompt), Some(snapshot)) = (
+        latest_prompt(root, identity),
+        lifecycle_snapshot(root, identity),
+    ) else {
+        return true;
+    };
+    snapshot.lead_observations().any(|item| {
+        matches!(
+            item.body,
+            crate::observations::ObservationBody::ToolPreflight { .. }
+        ) && item.observed_mono_ns > prompt.observed_mono_ns
+    })
 }
 
 /// Whether `activity` is a `notify` that a child's permission prompt, still
@@ -4259,7 +4296,8 @@ fn hold_applies(event: &ProviderEvent, request: &hold_check::Request<'_>) -> boo
 
 /// When the registered checks run for `event`, if they do: before a lead
 /// Claude or Codex `Stop`, and, for quiet checks, before a lead prompt or tool
-/// call writes `thinking`.
+/// call writes `thinking`. `obtain_hold_notes` then skips the tool calls after
+/// a turn's first (`tool_call_skips_check`).
 fn check_phase(event: &ProviderEvent, request: &hold_check::Request<'_>) -> Option<Phase> {
     if event.agent_id.is_some()
         || !matches!(event.provider, Some(Provider::Claude | Provider::Codex))

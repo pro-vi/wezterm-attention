@@ -67,8 +67,15 @@ the turn starts. A second phase, `before_thinking`, runs the quiet checks
 registered on a lead `UserPromptSubmit` or `PreToolUse` line before Attention
 writes a new `thinking` activity: at every lead prompt, and at a tool call
 whose pane does not show `thinking`, which covers a turn that starts without a
-prompt. A tool call on a shown `thinking` runs no check and keeps the stored
-note, so the hook cost falls on a turn's first tool call only. The input adds
+prompt. It runs once more at the first lead tool call after a prompt, whose
+answer replaces the prompt's note: as of Claude Code 2.1.331 the prompt's row
+is not yet in the session's transcript when the prompt's hook runs, and is
+there at that call, so an application that tells a person's prompt from
+another source by that row can answer only then. Any later tool call on a
+shown `thinking` runs no check and keeps the stored note, so the hook cost is
+one check per turn on the tool-call line, more when tool calls start at the
+same moment as the first, and a read of the lifecycle on each later call to
+find it is not the first. The input adds
 the prompt's text at a prompt, because an application proves its own prompt
 by what it wrote into it. The note keeps its
 grammar and lands on the `thinking` activity's `hold_notes` after the same

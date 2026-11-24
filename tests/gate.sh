@@ -211,7 +211,8 @@ if [ -n "$baseline_binary" ]; then
   candidate_binary=$(sh scripts/build-attention.sh "$root" "$root/target")
   # The candidate's tool calls carry a quiet check, as a machine that marks an
   # agent's turn as it starts registers one: such a line reads the pane's
-  # activity before each tool call, and runs the check at a turn's first.
+  # activity and the binding's lifecycle before each tool call, and runs the
+  # check at a turn's first.
   printf '#!/bin/sh\n/bin/cat >/dev/null\n' > "$gate_scratch/quiet-check"
   chmod +x "$gate_scratch/quiet-check"
   python3 tests/python/measure.py --baseline-rust "$baseline_binary" --rust-binary "$candidate_binary" \

@@ -1422,7 +1422,7 @@ fn logged_inputs(log: &Path) -> Vec<Value> {
 }
 
 #[test]
-fn a_quiet_check_marks_a_turn_as_it_starts_and_its_tool_calls_keep_the_mark() {
+fn a_quiet_check_marks_a_turn_as_it_starts_and_its_later_tool_calls_keep_the_mark() {
     for provider in ["claude", "codex"] {
         let setup = Setup::new();
         bind(&setup, provider);
@@ -1469,9 +1469,8 @@ fn a_quiet_check_marks_a_turn_as_it_starts_and_its_tool_calls_keep_the_mark() {
             "raw=thinking shown=thinking thinking_quiet=true turn_end_quiet=false color=#0f2a3f"
         );
 
-        // A tool call while the pane shows that thinking runs no check, and
-        // the note stays, with or without a check on its hook line.
-        fs::write(&answer, "").unwrap();
+        // The turn's first tool call is asked again, with no prompt in its
+        // input, and the same answer leaves the activity as it was.
         let outcome = quiet_thinking(
             &setup,
             provider,
@@ -1479,6 +1478,26 @@ fn a_quiet_check_marks_a_turn_as_it_starts_and_its_tool_calls_keep_the_mark() {
             tool("call_1"),
             &check,
             "00000000000000000310",
+        );
+        assert_eq!(outcome.result.as_ref().unwrap().disposition, "skipped");
+        assert_eq!(outcome.hold_checks[0].stage, hold_check::Stage::Completed);
+        assert_eq!(records(&setup, provider).0, started);
+        let inputs = logged_inputs(&log);
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[1]["phase"], "before_thinking");
+        assert_eq!(inputs[1]["source_event"], "PreToolUse");
+        assert!(inputs[1].get("prompt").is_none());
+
+        // Later tool calls of the turn run no check, and the note stays,
+        // with or without a check on their hook line.
+        fs::write(&answer, "").unwrap();
+        let outcome = quiet_thinking(
+            &setup,
+            provider,
+            "PreToolUse",
+            tool("call_2"),
+            &check,
+            "00000000000000000315",
         );
         assert_eq!(outcome.result.as_ref().unwrap().disposition, "skipped");
         assert_eq!(
@@ -1490,11 +1509,11 @@ fn a_quiet_check_marks_a_turn_as_it_starts_and_its_tool_calls_keep_the_mark() {
             Some(hold_check::Bypass::NotApplicable)
         );
         setup.apply(
-            &event(provider, "PreToolUse", "hold-session", tool("call_2")),
+            &event(provider, "PreToolUse", "hold-session", tool("call_2b")),
             "00000000000000000320",
         );
         assert_eq!(records(&setup, provider).0, started);
-        assert_eq!(logged_inputs(&log).len(), 1);
+        assert_eq!(logged_inputs(&log).len(), 2);
 
         // A later prompt is asked about again, and an empty answer takes the
         // note away.
@@ -1512,8 +1531,8 @@ fn a_quiet_check_marks_a_turn_as_it_starts_and_its_tool_calls_keep_the_mark() {
         assert!(typed.get("hold_notes").is_none());
         assert_ne!(typed["event_id"], started["event_id"]);
         let inputs = logged_inputs(&log);
-        assert_eq!(inputs.len(), 2, "{provider} {:?}", outcome.hold_checks);
-        assert!(inputs[1]["lifecycle"]["snapshot_id"].is_string());
+        assert_eq!(inputs.len(), 3, "{provider} {:?}", outcome.hold_checks);
+        assert!(inputs[2]["lifecycle"]["snapshot_id"].is_string());
         assert_eq!(
             super::mark_clear::plugin_reader_answer(&setup, "quiet_render"),
             "raw=thinking shown=thinking thinking_quiet=false turn_end_quiet=false color=#1c1730"
@@ -1544,10 +1563,10 @@ fn a_quiet_check_marks_a_turn_as_it_starts_and_its_tool_calls_keep_the_mark() {
         assert_eq!(continued["type"], "thinking");
         assert_eq!(continued["hold_notes"]["wezpup"]["quiet"], true);
         let inputs = logged_inputs(&log);
-        assert_eq!(inputs.len(), 3);
-        assert_eq!(inputs[2]["phase"], "before_thinking");
-        assert_eq!(inputs[2]["source_event"], "PreToolUse");
-        assert!(inputs[2].get("prompt").is_none());
+        assert_eq!(inputs.len(), 4);
+        assert_eq!(inputs[3]["phase"], "before_thinking");
+        assert_eq!(inputs[3]["source_event"], "PreToolUse");
+        assert!(inputs[3].get("prompt").is_none());
 
         // A Codex tool call that asks the user writes notify, not thinking,
         // and runs no check.
@@ -1572,8 +1591,93 @@ fn a_quiet_check_marks_a_turn_as_it_starts_and_its_tool_calls_keep_the_mark() {
                 "00000000000000000370",
             );
             assert_eq!(records(&setup, provider).0["type"], "notify");
-            assert_eq!(logged_inputs(&log).len(), 3);
+            assert_eq!(logged_inputs(&log).len(), 4);
         }
+    }
+}
+
+#[test]
+fn a_turns_first_tool_call_answer_replaces_the_prompts_note() {
+    for provider in ["claude", "codex"] {
+        let setup = Setup::new();
+        bind(&setup, provider);
+        let (check, log, answer) = logging_check(&setup);
+        let tool = |id: &str| json!({"tool_name":"Bash","tool_use_id":id,"turn_id":"turn"});
+        let prompt = |order: &str| {
+            quiet_thinking(
+                &setup,
+                provider,
+                "UserPromptSubmit",
+                json!({"turn_id":"turn","prompt":"SYNTHETIC-PROMPT"}),
+                &check,
+                order,
+            )
+        };
+        let call = |id: &str, order: &str| {
+            quiet_thinking(&setup, provider, "PreToolUse", tool(id), &check, order)
+        };
+
+        // A note the prompt was given goes when the first tool call's
+        // answer is empty, and stays gone for the rest of the turn.
+        prompt("00000000000000000300");
+        assert_eq!(
+            records(&setup, provider).0["hold_notes"]["wezpup"]["quiet"],
+            true
+        );
+        fs::write(&answer, "").unwrap();
+        let outcome = call("call_1", "00000000000000000310");
+        assert_eq!(outcome.hold_checks[0].stage, hold_check::Stage::Completed);
+        assert_eq!(outcome.result.as_ref().unwrap().disposition, "applied");
+        let (unmarked, _) = records(&setup, provider);
+        assert_eq!(unmarked["type"], "thinking");
+        assert!(unmarked.get("hold_notes").is_none());
+        // Its lifecycle names the turn's prompt and holds that prompt's
+        // observation.
+        let lifecycle = logged_inputs(&log)[1]["lifecycle"].clone();
+        let prompt_id = &lifecycle["latest_prompt"]["observation_id"];
+        assert!(
+            lifecycle["observations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["observation_id"] == *prompt_id
+                    && item["source_event"] == "UserPromptSubmit"),
+            "{provider} {lifecycle}"
+        );
+        fs::write(&answer, QUIET_LINE).unwrap();
+        let outcome = call("call_2", "00000000000000000320");
+        assert_eq!(
+            outcome.hold_checks[0].stage,
+            hold_check::Stage::NotDispatched
+        );
+        assert_eq!(records(&setup, provider).0, unmarked);
+        assert_eq!(logged_inputs(&log).len(), 2);
+
+        // A prompt given no note gets one from its first tool call.
+        fs::write(&answer, "").unwrap();
+        prompt("00000000000000000330");
+        assert!(records(&setup, provider).0.get("hold_notes").is_none());
+        fs::write(&answer, QUIET_LINE).unwrap();
+        let outcome = call("call_3", "00000000000000000340");
+        assert_eq!(outcome.result.as_ref().unwrap().disposition, "applied");
+        let (marked, _) = records(&setup, provider);
+        assert_eq!(marked["hold_notes"]["wezpup"]["quiet"], true);
+        wezterm_attention::protocol::validate_record(&marked, Some("activity")).unwrap();
+
+        // A first tool call whose check gives no answer keeps the prompt's
+        // note.
+        prompt("00000000000000000350");
+        let (noted, _) = records(&setup, provider);
+        assert_eq!(noted["hold_notes"]["wezpup"]["quiet"], true);
+        fs::write(&answer, "not an answer").unwrap();
+        let outcome = call("call_4", "00000000000000000360");
+        assert_eq!(
+            outcome.hold_checks[0].stage,
+            hold_check::Stage::InvalidOutput
+        );
+        assert_eq!(outcome.result.as_ref().unwrap().disposition, "skipped");
+        assert_eq!(records(&setup, provider).0, noted);
+        assert_eq!(logged_inputs(&log).len(), 6);
     }
 }
 
