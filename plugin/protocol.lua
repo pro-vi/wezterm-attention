@@ -761,12 +761,16 @@ return function(context)
     local parsed, err = validate_shape(value, spec, kind)
     if not parsed then return nil, invalid("invalid " .. kind .. " record: " .. tostring(err)) end
     if kind == "activity" and parsed.hold_notes then
-      if parsed.type ~= "stop" or parsed.target.kind ~= "binding" then
-        return nil, invalid("turn-end notes require a binding stop")
+      -- A turn end carries hold or quiet notes; a lead's thinking carries only
+      -- the quiet note its turn was given when it started.
+      if (parsed.type ~= "stop" and parsed.type ~= "thinking") or parsed.target.kind ~= "binding" then
+        return nil, invalid("hold notes require a binding stop or thinking")
       end
       for _, note in pairs(parsed.hold_notes) do
-        if parsed.source ~= "claude" and not (parsed.source == "codex" and note.quiet) then
-          return nil, invalid("turn-end note is not supported for this provider")
+        local supported = (note.quiet and (parsed.source == "claude" or parsed.source == "codex"))
+          or (parsed.source == "claude" and parsed.type == "stop")
+        if not supported then
+          return nil, invalid("hold note is not supported for this activity or provider")
         end
       end
     end

@@ -3199,6 +3199,56 @@ test("quiet completion has its own color and yields to human attention", functio
   assert(visible.indicator:find(MARK.notify, 1, true) == 1 and visible.color == "#240f16")
 end)
 
+test("a turn proved quiet as it started has its own color while it works", function()
+  local pane_id = 7597
+  write_activity(pane_id, "thinking")
+  local file = seeded_records_root(pane_id) .. "/activity.json"
+  local activity = decode_json(assert(read_path(file)))
+  activity.source = "claude"
+  activity.hold_notes = { wezpup = { quiet = true, answer = "wezpup_submitted" } }
+  write_json_path(file, activity)
+  poll_at({ pane_id })
+  local view = assert(pane_view(pane_id))
+  assert(view.type == "thinking" and view.thinking_quiet and not view.turn_end_quiet
+    and not view.turn_end_held)
+  local visible = internal.resolve_visible_attention({ seeded_key(pane_id) })
+  -- The thinking indicator stays; only the tint differs.
+  assert(visible.type == "thinking" and visible.thinking_quiet and visible.color == "#0f2a3f",
+    "got " .. tostring(visible.color))
+  assert(visible.glyph == MARK.frames[1], "got glyph " .. tostring(visible.glyph))
+  -- A title formatter is handed the flag.
+  poll_at({ 7598, pane_id })
+  assert(formatter_attention(pane_id, 7598).thinking_quiet == true)
+  -- Any ordinary mark in the tab outranks it, a person's thinking included.
+  write_activity(7599, "thinking")
+  poll_at({ pane_id, 7599 })
+  visible = internal.resolve_visible_attention({ seeded_key(pane_id), seeded_key(7599) })
+  assert(visible.type == "thinking" and not visible.thinking_quiet and visible.color == "#1c1730")
+  -- A review outranks thinking, and the flag goes with it.
+  write_json_path(user_review_path(pane_id), seeded_record(pane_id, "review"))
+  poll_at({ pane_id })
+  view = assert(pane_view(pane_id))
+  assert(view.type == "review" and not view.thinking_quiet)
+  os.remove(user_review_path(pane_id))
+  -- A held turn end shows thinking but is a stop, and is not a quiet start.
+  write_activity(pane_id, "stop")
+  activity = decode_json(assert(read_path(file)))
+  activity.source = "claude"
+  activity.hold_notes = { jev = { hold = true, answer = "waiting_on_own_work" } }
+  write_json_path(file, activity)
+  poll_at({ pane_id })
+  view = assert(pane_view(pane_id))
+  assert(view.type == "thinking" and view.turn_end_held and not view.thinking_quiet)
+  -- A Codex turn carries it too.
+  write_activity(pane_id, "thinking")
+  activity = decode_json(assert(read_path(file)))
+  activity.source = "codex"
+  activity.hold_notes = { wezpup = { quiet = true, answer = "wezpup_submitted" } }
+  write_json_path(file, activity)
+  poll_at({ pane_id })
+  assert(assert(pane_view(pane_id)).thinking_quiet)
+end)
+
 test("the shown activity's label reaches the view and the formatter", function()
   local pane_id = 7594
   write_activity(pane_id, "notify")
@@ -3427,15 +3477,15 @@ end)
 test("all rendered view fields participate in redraw equality", function()
   local baseline = {
     type = "notify", frame = 0, activity_type = "notify", label = "server_overloaded",
-    event_id = "a", turn_end_held = false, turn_end_quiet = false,
+    event_id = "a", turn_end_held = false, turn_end_quiet = false, thinking_quiet = false,
     source = "claude", provider = "claude", subagents = 1, subagents_uncertain = false,
     review = false, binding_phase = "active", pane_presence = "present",
     reader_confidence = "confirmed", binding_health = "valid",
     base_title = "base", settled_title = "settled",
   }
   for _, field in ipairs({
-    "type", "frame", "activity_type", "label", "turn_end_held", "turn_end_quiet", "event_id",
-    "source", "provider",
+    "type", "frame", "activity_type", "label", "turn_end_held", "turn_end_quiet", "thinking_quiet",
+    "event_id", "source", "provider",
     "subagents", "subagents_uncertain", "review", "binding_phase", "pane_presence",
     "reader_confidence", "binding_health", "base_title", "settled_title",
   }) do

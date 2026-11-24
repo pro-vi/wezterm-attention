@@ -209,7 +209,13 @@ if [ -z "$baseline_binary" ] && git cat-file -e "$baseline_commit^{commit}" 2>/d
 fi
 if [ -n "$baseline_binary" ]; then
   candidate_binary=$(sh scripts/build-attention.sh "$root" "$root/target")
-  python3 tests/python/measure.py --baseline-rust "$baseline_binary" --rust-binary "$candidate_binary"
+  # The candidate's tool calls carry a quiet check, as a machine that marks an
+  # agent's turn as it starts registers one: such a line reads the pane's
+  # activity before each tool call, and runs the check at a turn's first.
+  printf '#!/bin/sh\n/bin/cat >/dev/null\n' > "$gate_scratch/quiet-check"
+  chmod +x "$gate_scratch/quiet-check"
+  python3 tests/python/measure.py --baseline-rust "$baseline_binary" --rust-binary "$candidate_binary" \
+    --candidate-quiet-check "$gate_scratch/quiet-check"
 else
   printf 'gate: performance comparison SKIPPED (commit %s is not in this clone; fetch a ref that contains it, or set ATTENTION_BASELINE_RUST to a build of it)\n' \
     "$baseline_commit"

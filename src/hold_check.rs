@@ -1,5 +1,6 @@
-//! Application notes obtained before a native turn end is applied. Input and
-//! raw output remain transient; only validated notes and execution facts escape.
+//! Application notes obtained before a native turn end, or a lead's new
+//! `thinking` activity, is applied. Input and raw output remain transient; only
+//! validated notes and execution facts escape.
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::io::{ErrorKind, Read, Write};
@@ -51,6 +52,16 @@ fn reserved(later: &[Registration]) -> Duration {
 pub enum Purpose {
     Hold,
     Quiet,
+}
+
+/// When a chain runs: before a lead turn end is recorded, or before a lead
+/// prompt or tool call writes a new `thinking` activity. Only quiet checks run
+/// before thinking.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    BeforeTurnEnd,
+    BeforeThinking,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -369,7 +380,7 @@ fn declared_time(flag: &str, text: &str, budget: Duration) -> Result<Duration> {
 #[derive(Serialize)]
 pub struct HoldCheckInput<'a> {
     pub schema: u8,
-    pub phase: &'static str,
+    pub phase: Phase,
     pub check_id: &'a str,
     pub check_name: &'a str,
     pub scope: &'a HookScope,
@@ -383,8 +394,15 @@ pub struct HoldCheckInput<'a> {
     /// The earliest moment this check is stopped, on the clock of
     /// `observed_mono_ns`.
     pub deadline_mono_ns: &'a str,
-    pub reply: &'a HookContent,
-    pub background_tasks: &'a [Value],
+    /// Before a turn end only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply: Option<&'a HookContent>,
+    /// Before a turn end only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_tasks: Option<&'a [Value]>,
+    /// Before a prompt's thinking only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<&'a HookContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<&'a crate::observations::LifecycleView>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -395,6 +413,8 @@ pub struct Request<'a> {
     pub registrations: &'a [Registration],
     pub reply: &'a HookContent,
     pub background_tasks: Option<&'a [Value]>,
+    /// The submitted prompt, which a check before a prompt's thinking reads.
+    pub prompt: &'a HookContent,
     /// How long the whole chain may run: the hook line's `--check-budget-ms`, or
     /// `DEFAULT_BUDGET`.
     pub budget: Duration,

@@ -11,6 +11,7 @@
 - **Amended:** 2026-10-20 — the shared deadline is 5000 ms, up from 2500 ms
 - **Amended:** 2026-10-20 — `--check-budget-ms` sets the shared deadline for its hook line; 5000 ms without it
 - **Amended:** 2026-11-01 — the default held indicator is U+F186, Font Awesome's crescent moon
+- **Amended:** 2026-11-24 — a quiet check also runs as a lead turn starts, and its note marks the turn's `thinking`
 
 ## Context
 
@@ -58,6 +59,24 @@ retains its original decision and cannot overwrite later activity. The
 existing hold-only executable contract remains in use; each registration
 accepts only its own note kind and both share the same transport budget, each
 within its own deadline.
+
+Amendment, 2026-11-24: run quiet checks as a lead Claude or Codex turn starts,
+too, so a bar can show a turn an application sent as such while it works,
+not only when it ends; the application that sent the turn can prove that when
+the turn starts. A second phase, `before_thinking`, runs the quiet checks
+registered on a lead `UserPromptSubmit` or `PreToolUse` line before Attention
+writes a new `thinking` activity: at every lead prompt, and at a tool call
+whose pane does not show `thinking`, which covers a turn that starts without a
+prompt. A tool call on a shown `thinking` runs no check and keeps the stored
+note, so the hook cost falls on a turn's first tool call only. The input adds
+the prompt's text at a prompt, because an application proves its own prompt
+by what it wrote into it. The note keeps its
+grammar and lands on the `thinking` activity's `hold_notes` after the same
+snapshot recheck. A binding with no lifecycle file yet is no history rather
+than unreadable history, since a session's first prompt is its first
+observation. Rejected: a declaration on the launch that its turns are an
+agent's unless a person submits the prompt, which would keep state on the
+launch and still need the prompt check to say which prompts are the person's.
 ## Rationale
 
 A pre-write application check keeps message judgment with the application while Attention owns native facts and final state. Post-write consumers are too late. Keeping the preceding activity can keep an earlier checkmark. An internal question-matching heuristic duplicates application policy and gives Attention responsibility for message interpretation.

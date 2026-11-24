@@ -106,6 +106,7 @@ return function()
       { name = "label", redraw = true, public = true },
       { name = "turn_end_held", redraw = true, public = true, normal = as_flag },
       { name = "turn_end_quiet", redraw = true, public = true, normal = as_flag },
+      { name = "thinking_quiet", redraw = true, public = true, normal = as_flag },
       { name = "event_id", redraw = true, public = true },
       { name = "source", redraw = true, public = true },
       { name = "provider", redraw = true, public = true },

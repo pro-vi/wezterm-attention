@@ -943,13 +943,15 @@ pub fn parse_record_value(value: &Value, protocol: &Manifest) -> Verdict {
     }
     let digest_matches = match kind {
         "activity" if value.get("hold_notes").is_some() => {
-            value["type"] == "stop"
-                && (value["source"] == "claude"
-                    || (value["source"] == "codex"
-                        && value["hold_notes"]
-                            .as_object()
-                            .is_some_and(|notes| notes.values().all(|note| note["quiet"] == true))))
-                && value["target"]["kind"] == "binding"
+            let quiet = value["hold_notes"]
+                .as_object()
+                .is_some_and(|notes| notes.values().all(|note| note["quiet"] == true));
+            // Only a Claude turn end takes hold notes; a quiet note goes on a
+            // Claude or Codex turn end, or the thinking of a turn as it started.
+            value["target"]["kind"] == "binding"
+                && (value["type"] == "stop" || value["type"] == "thinking")
+                && (value["source"] == "claude" || value["source"] == "codex")
+                && (quiet || (value["type"] == "stop" && value["source"] == "claude"))
         }
         kind if is_lifecycle_snapshot_kind(kind) => {
             crate::observations::LifecycleSnapshot::deserialize(value)

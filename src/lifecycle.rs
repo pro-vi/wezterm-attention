@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::children::{ChildPresenceSet, ChildTransition, EndMark};
-use crate::hold_check::{self, Bypass, HoldCheckInput, HoldCheckOutcome};
+use crate::hold_check::{self, Bypass, HoldCheckInput, HoldCheckOutcome, Phase};
 use crate::identity::{PaneAddress, canonical_uuid, pane_address};
 use crate::launch::{ClaimOwner, OwnerState, owner_state};
 use crate::lifecycle::outcome::{
@@ -67,7 +67,9 @@ struct HookEvidence {
     pending_turn_end: Option<TurnEnd>,
     turn_end: Option<TurnEnd>,
     hold_checks: Vec<HoldCheckOutcome>,
-    quiet_snapshot: Option<String>,
+    /// The lifecycle snapshot id a quiet check read, `Some(None)` when the
+    /// binding had recorded none yet; checked again under the writer locks.
+    quiet_snapshot: Option<Option<String>>,
 }
 
 fn accepted(result: &LifecycleResult) -> bool {
@@ -1916,15 +1918,32 @@ fn apply_activity(
             // cannot suppress a call after a new prompt or permission request.
             if let Some(evidence) = &resolved.evidence {
                 let mut evidence = evidence.borrow_mut();
-                let unchanged = evidence.quiet_snapshot.as_ref().is_some_and(|expected| {
-                    read_record_at(&resolved.root, "lifecycle_snapshot", &identity)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|snapshot| snapshot["snapshot_id"] == *expected)
-                });
-                let waiting = known_child_wait(resolved, &binding_id, |set, end| {
-                    set.waits_through_stop(end, observation, event.in_flight_task_ids.as_deref())
-                }) != Some(false);
+                // Read only when a quiet note is there to keep or discard.
+                let quiet_note = evidence
+                    .hold_checks
+                    .iter()
+                    .any(|check| check.note.as_ref().is_some_and(|note| !note.holds()));
+                let unchanged = quiet_note
+                    && evidence.quiet_snapshot.as_ref().is_some_and(|expected| {
+                        read_record_at(&resolved.root, "lifecycle_snapshot", &identity).is_ok_and(
+                            |found| {
+                                found
+                                    .as_ref()
+                                    .and_then(|snapshot| snapshot["snapshot_id"].as_str())
+                                    == expected.as_deref()
+                            },
+                        )
+                    });
+                // Only a turn end waits on a child: a prompt or tool call
+                // starts work whatever a child waits for.
+                let waiting = event.source_event == "Stop"
+                    && known_child_wait(resolved, &binding_id, |set, end| {
+                        set.waits_through_stop(
+                            end,
+                            observation,
+                            event.in_flight_task_ids.as_deref(),
+                        )
+                    }) != Some(false);
                 for check in &mut evidence.hold_checks {
                     if check
                         .note
@@ -1936,7 +1955,22 @@ fn apply_activity(
                     }
                 }
             }
-            let base = activity_base(resolved, event, &binding_id)?;
+            let mut base = activity_base(resolved, event, &binding_id)?;
+            // A lead tool call while the pane shows its turn's thinking runs
+            // no quiet check (`obtain_hold_notes`), and keeps the note the
+            // turn was given when it started; one its own check gave stands.
+            if event.agent_id.is_none()
+                && event.source_event == "PreToolUse"
+                && base["type"] == "thinking"
+                && base.get("hold_notes").is_none()
+                && visible
+                && let Some(notes) = existing
+                    .as_ref()
+                    .filter(|activity| activity["type"] == "thinking")
+                    .and_then(|activity| activity.get("hold_notes"))
+            {
+                base["hold_notes"] = notes.clone();
+            }
             // A lead that waits on a sub-agent keeps calling tools, and each
             // call is thinking. While a child that asked for permission is
             // still waiting, its notify is what the user needs to see, and
@@ -1946,15 +1980,9 @@ fn apply_activity(
                 && base["type"] == "thinking"
                 && event.source_event != "UserPromptSubmit"
                 && visible
-                && existing.as_ref().is_some_and(|activity| {
-                    activity["type"] == "notify"
-                        && child_waits(resolved, &binding_id, |set, end| {
-                            set.waits_since(
-                                end,
-                                activity["observed_mono_ns"].as_str().unwrap_or(""),
-                            )
-                        })
-                });
+                && existing
+                    .as_ref()
+                    .is_some_and(|activity| notify_held_by_child(resolved, &binding_id, activity));
             let ActivityOutcome {
                 result,
                 standing: activity,
@@ -3256,7 +3284,7 @@ fn apply_provider_event_with_request(
             .map(|r| {
                 hold_check::bypass(
                     r.registrations,
-                    if hold_check_applies(event, r) {
+                    if check_phase(event, r).is_some() {
                         Bypass::NoCurrentScope
                     } else {
                         Bypass::NotApplicable
@@ -3338,7 +3366,10 @@ fn apply_provider_event_inner(
     };
     resolved.evidence = evidence;
     if let Some(request) = request {
-        let outcomes = obtain_hold_notes(&resolved, event, observation, request);
+        // Whether the pane's activity is still shown, before the checks: a
+        // clock that cannot be read counts it as inside any time limit.
+        let now = ports.clock.unix_ns20().unwrap_or_default();
+        let outcomes = obtain_hold_notes(&resolved, event, observation, &now, request);
         if let Some(evidence) = &resolved.evidence {
             evidence.borrow_mut().hold_checks = outcomes;
         }
@@ -3962,6 +3993,9 @@ fn record_host(
 struct HoldScope {
     scope: HookScope,
     snapshot: Option<LifecycleSnapshot>,
+    /// The binding has no lifecycle file yet, as before its first prompt;
+    /// false when one exists but could not be read.
+    snapshot_absent: bool,
     prompts: Option<LeadPrompts>,
 }
 
@@ -4006,8 +4040,16 @@ fn prepare_hold_scope(
                     .ok()
                     .flatten()
             };
-            let snapshot =
-                read("lifecycle_snapshot").and_then(|value| serde_json::from_value(value).ok());
+            let found = read_record_at(
+                &resolved.root,
+                "lifecycle_snapshot",
+                &resolved.binding(&binding_id),
+            );
+            let snapshot_absent = matches!(found, Ok(None));
+            let snapshot = found
+                .ok()
+                .flatten()
+                .and_then(|value| serde_json::from_value(value).ok());
             let prompts = read("lead_prompts").and_then(|value| serde_json::from_value(value).ok());
             Ok(CommitPlan::reporting(Some(HoldScope {
                 scope: HookScope {
@@ -4018,6 +4060,7 @@ fn prepare_hold_scope(
                     },
                 },
                 snapshot,
+                snapshot_absent,
                 prompts,
             })))
         },
@@ -4030,24 +4073,35 @@ fn obtain_hold_notes(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
     observation: &str,
+    now: &str,
     request: &hold_check::Request<'_>,
 ) -> Vec<HoldCheckOutcome> {
     let mut outcomes = hold_check::bypass(request.registrations, Bypass::NotApplicable);
-    if !hold_check_applies(event, request) {
+    let Some(phase) = check_phase(event, request) else {
+        return outcomes;
+    };
+    let before_thinking = phase == Phase::BeforeThinking;
+    if before_thinking
+        && event.source_event == "PreToolUse"
+        && tool_call_keeps_activity(resolved, event, now)
+    {
         return outcomes;
     }
     let Ok(Some(HoldScope {
         scope,
         snapshot,
+        snapshot_absent,
         prompts,
     })) = prepare_hold_scope(resolved, event)
     else {
         return hold_check::bypass(request.registrations, Bypass::NoCurrentScope);
     };
     let BindingTarget::Binding { binding_id } = &scope.target;
-    if child_waits(resolved, binding_id, |set, end| {
-        set.waits_through_stop(end, observation, event.in_flight_task_ids.as_deref())
-    }) {
+    if !before_thinking
+        && child_waits(resolved, binding_id, |set, end| {
+            set.waits_through_stop(end, observation, event.in_flight_task_ids.as_deref())
+        })
+    {
         return hold_check::bypass(request.registrations, Bypass::ChildWaiting);
     }
     let lifecycle = snapshot.as_ref().map(|snapshot| {
@@ -4056,19 +4110,29 @@ fn obtain_hold_notes(
     });
     // A draft is not yet a persisted observation. Its eventual write time is
     // not known, and a replay or newer event makes it unsuitable for a check.
+    // A turn's start may be the binding's first observation, so before
+    // thinking a lifecycle file not yet written is no history, not history
+    // that could not be read.
     let prospective = event.observation.as_ref().and_then(|draft| {
-        let snapshot = snapshot.as_ref()?;
         let recorded_prompt = prompts.as_ref().and_then(|prompts| prompts.latest.as_ref());
-        if snapshot.repeats_turn_end(draft, observation, recorded_prompt)
-            || recorded_prompt.is_some_and(|prompt| prompt.observed_mono_ns.as_str() >= observation)
-            || snapshot
-                .pools
-                .general
-                .observations
-                .iter()
-                .chain(&snapshot.pools.requests.observations)
-                .any(|item| item.observed_mono_ns.as_str() >= observation)
-        {
+        if snapshot.is_none() && !(before_thinking && snapshot_absent) {
+            return None;
+        }
+        // A turn end delivered again keeps its stored decision. A turn's
+        // start has none to keep: a Codex prompt typed while its turn runs
+        // shares the turn id of the prompt that started it.
+        let superseded = snapshot.as_ref().is_some_and(|snapshot| {
+            (!before_thinking && snapshot.repeats_turn_end(draft, observation, recorded_prompt))
+                || snapshot
+                    .pools
+                    .general
+                    .observations
+                    .iter()
+                    .chain(&snapshot.pools.requests.observations)
+                    .any(|item| item.observed_mono_ns.as_str() >= observation)
+        }) || recorded_prompt
+            .is_some_and(|prompt| prompt.observed_mono_ns.as_str() >= observation);
+        if superseded {
             return None;
         }
         let mut value = serde_json::to_value(draft).ok()?;
@@ -4081,7 +4145,8 @@ fn obtain_hold_notes(
     if prospective.is_some()
         && let Some(evidence) = &resolved.evidence
     {
-        evidence.borrow_mut().quiet_snapshot = snapshot.as_ref().map(|s| s.snapshot_id.clone());
+        evidence.borrow_mut().quiet_snapshot =
+            Some(snapshot.as_ref().map(|s| s.snapshot_id.clone()));
     }
     let eligible: Vec<_> = request
         .registrations
@@ -4117,7 +4182,7 @@ fn obtain_hold_notes(
         let quiet = registration.purpose == hold_check::Purpose::Quiet;
         let input = HoldCheckInput {
             schema: 1,
-            phase: "before_turn_end",
+            phase,
             check_id: id,
             check_name: &registration.name,
             scope: &scope,
@@ -4128,8 +4193,10 @@ fn obtain_hold_notes(
             actor: crate::observations::Actor::Lead,
             observed_mono_ns: observation,
             deadline_mono_ns: deadline,
-            reply: request.reply,
-            background_tasks: request.background_tasks.unwrap_or(&[]),
+            reply: (!before_thinking).then_some(request.reply),
+            background_tasks: (!before_thinking).then_some(request.background_tasks.unwrap_or(&[])),
+            prompt: (before_thinking && event.source_event == "UserPromptSubmit")
+                .then_some(request.prompt),
             lifecycle: quiet.then_some(lifecycle.as_ref()).flatten(),
             prospective_observation: quiet.then_some(prospective.as_ref()).flatten(),
         };
@@ -4148,6 +4215,39 @@ fn obtain_hold_notes(
     outcomes
 }
 
+/// Whether a lead tool call finds its pane already showing thinking, or a
+/// waiting child's notify it does not replace (see `apply_activity`). Either
+/// way it writes no new thinking, so no check runs before it. Read without
+/// the writer locks: the call applies under them by what it finds there.
+fn tool_call_keeps_activity(resolved: &ResolvedLaunch, event: &ProviderEvent, now: &str) -> bool {
+    let Ok(binding_id) = event_binding_id(event, &resolved.launch_id) else {
+        return false;
+    };
+    let identity = resolved.binding(&binding_id);
+    let Ok(Some(existing)) = read_record_at(&resolved.root, "activity", &identity) else {
+        return false;
+    };
+    (existing["type"] == "thinking" || notify_held_by_child(resolved, &binding_id, &existing))
+        && read_record_at(&resolved.root, "activity_clear", &identity).is_ok_and(|clear| {
+            activity_visible(
+                &resolved.root,
+                &identity,
+                Some(&existing),
+                clear.as_ref(),
+                now,
+            )
+        })
+}
+
+/// Whether `activity` is a `notify` that a child's permission prompt, still
+/// waiting, holds against the lead's tool calls.
+fn notify_held_by_child(resolved: &ResolvedLaunch, binding_id: &str, activity: &Value) -> bool {
+    activity["type"] == "notify"
+        && child_waits(resolved, binding_id, |set, end| {
+            set.waits_since(end, activity["observed_mono_ns"].as_str().unwrap_or(""))
+        })
+}
+
 fn hold_applies(event: &ProviderEvent, request: &hold_check::Request<'_>) -> bool {
     event.provider == Some(Provider::Claude)
         && event.source_event == "Stop"
@@ -4157,13 +4257,29 @@ fn hold_applies(event: &ProviderEvent, request: &hold_check::Request<'_>) -> boo
             .is_some_and(|tasks| !tasks.is_empty())
 }
 
-fn hold_check_applies(event: &ProviderEvent, request: &hold_check::Request<'_>) -> bool {
-    event.agent_id.is_none()
-        && event.source_event == "Stop"
-        && matches!(event.provider, Some(Provider::Claude | Provider::Codex))
-        && request.registrations.iter().any(|registration| {
-            registration.purpose == hold_check::Purpose::Quiet || hold_applies(event, request)
-        })
+/// When the registered checks run for `event`, if they do: before a lead
+/// Claude or Codex `Stop`, and, for quiet checks, before a lead prompt or tool
+/// call writes `thinking`.
+fn check_phase(event: &ProviderEvent, request: &hold_check::Request<'_>) -> Option<Phase> {
+    if event.agent_id.is_some()
+        || !matches!(event.provider, Some(Provider::Claude | Provider::Codex))
+    {
+        return None;
+    }
+    let quiet = request
+        .registrations
+        .iter()
+        .any(|registration| registration.purpose == hold_check::Purpose::Quiet);
+    if event.source_event == "Stop" && (quiet || hold_applies(event, request)) {
+        return Some(Phase::BeforeTurnEnd);
+    }
+    (quiet
+        && event.activity_type.as_deref() == Some("thinking")
+        && matches!(
+            event.source_event.as_str(),
+            "UserPromptSubmit" | "PreToolUse"
+        ))
+    .then_some(Phase::BeforeThinking)
 }
 
 #[cfg(test)]

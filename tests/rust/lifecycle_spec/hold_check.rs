@@ -371,6 +371,7 @@ fn assert_newer_prompt_supersedes_stop(already_thinking: bool) {
                 registrations: &registrations,
                 reply: &reply,
                 background_tasks: payload["background_tasks"].as_array().map(Vec::as_slice),
+                prompt: &wezterm_attention::hook_content::HookContent::NotRequested,
                 budget: CHECK_BUDGET,
             },
         );
@@ -429,6 +430,7 @@ fn binding_rotation_during_hold_check_cannot_follow_new_occupant() {
                 registrations: &registrations,
                 reply: &reply,
                 background_tasks: payload["background_tasks"].as_array().map(Vec::as_slice),
+                prompt: &wezterm_attention::hook_content::HookContent::NotRequested,
                 budget: CHECK_BUDGET,
             },
         );
@@ -502,6 +504,7 @@ fn inherited_host_changed_during_hold_check_writes_no_turn_end() {
                     registrations: &registrations,
                     reply: &reply,
                     background_tasks: payload["background_tasks"].as_array().map(Vec::as_slice),
+                    prompt: &wezterm_attention::hook_content::HookContent::NotRequested,
                     budget: CHECK_BUDGET,
                 },
             );
@@ -782,6 +785,7 @@ fn hold_audit_reservation_preserves_large_native_observation() {
             registrations: &registrations,
             reply: &reply,
             background_tasks: payload["background_tasks"].as_array().map(Vec::as_slice),
+            prompt: &wezterm_attention::hook_content::HookContent::NotRequested,
             budget: CHECK_BUDGET,
         },
     );
@@ -834,6 +838,7 @@ fn quiet_stop(
             registrations: &registrations,
             reply: &wezterm_attention::hook_content::HookContent::NotRequested,
             background_tasks: None,
+            prompt: &wezterm_attention::hook_content::HookContent::NotRequested,
             budget: CHECK_BUDGET,
         },
     )
@@ -1188,6 +1193,7 @@ fn permission_during_check(hold: bool) {
                 registrations: &registrations,
                 reply: &reply,
                 background_tasks: payload["background_tasks"].as_array().map(Vec::as_slice),
+                prompt: &wezterm_attention::hook_content::HookContent::NotRequested,
                 budget: CHECK_BUDGET,
             },
         );
@@ -1339,6 +1345,7 @@ fn a_same_turn_prompt_committed_during_quiet_check_supersedes_the_stop() {
                 registrations: &registrations,
                 reply: &wezterm_attention::hook_content::HookContent::NotRequested,
                 background_tasks: None,
+                prompt: &wezterm_attention::hook_content::HookContent::NotRequested,
                 budget: CHECK_BUDGET,
             },
         );
@@ -1351,4 +1358,351 @@ fn a_same_turn_prompt_committed_during_quiet_check_supersedes_the_stop() {
         );
         assert!(records(&setup, "claude").0.get("hold_notes").is_none());
     });
+}
+
+/// Applies `name` with the quiet check `check` registered, as a hook line
+/// with `--quiet-check wezpup=…` does, handing the check the prompt as the
+/// command does.
+fn quiet_thinking(
+    setup: &Setup,
+    provider: &str,
+    name: &str,
+    patch: Value,
+    check: &std::path::Path,
+    order: &str,
+) -> wezterm_attention::lifecycle::HookOutcome {
+    use wezterm_attention::hook_content::HookContent;
+    let registrations = hold_check::validate_checks(
+        &[],
+        &[format!("wezpup={}", check.display())],
+        hold_check::DEFAULT_BUDGET,
+    )
+    .unwrap();
+    let payload = super::payload(provider, name, "hold-session", patch);
+    let event = parse_provider_event(provider, name, &payload, &BTreeMap::new());
+    let prompt = wezterm_attention::providers::prompt_content(&event, &payload, true);
+    apply_provider_event_with_checks(
+        &event,
+        &setup.env,
+        order,
+        &setup.ports(),
+        &Request {
+            registrations: &registrations,
+            reply: &HookContent::NotRequested,
+            background_tasks: None,
+            prompt: &prompt,
+            budget: CHECK_BUDGET,
+        },
+    )
+}
+
+/// A quiet check that appends each input it is given to `log`, one line
+/// each, and prints what `answer` holds.
+fn logging_check(setup: &Setup) -> (PathBuf, PathBuf, PathBuf) {
+    let log = setup._scratch.0.join("check-inputs.jsonl");
+    let answer = setup._scratch.0.join("check-answer");
+    fs::write(&answer, QUIET_LINE).unwrap();
+    let check = executable(
+        setup,
+        &format!(
+            "/bin/cat >> '{}'\n/bin/cat '{}'",
+            log.display(),
+            answer.display()
+        ),
+    );
+    (check, log, answer)
+}
+
+fn logged_inputs(log: &Path) -> Vec<Value> {
+    fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn a_quiet_check_marks_a_turn_as_it_starts_and_its_tool_calls_keep_the_mark() {
+    for provider in ["claude", "codex"] {
+        let setup = Setup::new();
+        bind(&setup, provider);
+        let (check, log, answer) = logging_check(&setup);
+        let tool = |id: &str| json!({"tool_name":"Bash","tool_use_id":id,"turn_id":"agent-turn"});
+
+        // The prompt is the binding's first observation: there is no history
+        // yet, and the check still runs.
+        let outcome = quiet_thinking(
+            &setup,
+            provider,
+            "UserPromptSubmit",
+            json!({"turn_id":"agent-turn","prompt":"SYNTHETIC-AGENT-PROMPT"}),
+            &check,
+            "00000000000000000300",
+        );
+        assert_eq!(outcome.result.as_ref().unwrap().disposition, "applied");
+        assert_eq!(outcome.hold_checks[0].stage, hold_check::Stage::Completed);
+        let (started, _) = records(&setup, provider);
+        assert_eq!(started["type"], "thinking");
+        assert_eq!(started["hold_notes"]["wezpup"]["quiet"], true);
+        assert_eq!(
+            started["hold_notes"]["wezpup"]["answer"],
+            "wezpup_submitted"
+        );
+        wezterm_attention::protocol::validate_record(&started, Some("activity")).unwrap();
+        let inputs = logged_inputs(&log);
+        assert_eq!(inputs.len(), 1);
+        let input = &inputs[0];
+        assert_eq!(input["phase"], "before_thinking");
+        assert_eq!(input["source_event"], "UserPromptSubmit");
+        assert_eq!(input["prompt"]["availability"], "available");
+        assert_eq!(input["prompt"]["text"], "SYNTHETIC-AGENT-PROMPT");
+        assert_eq!(input["transcript_path"], "/tmp/session.jsonl");
+        assert_eq!(
+            input["prospective_observation"]["source_event"],
+            "UserPromptSubmit"
+        );
+        for absent in ["reply", "background_tasks", "lifecycle"] {
+            assert!(input.get(absent).is_none(), "{provider} {absent}");
+        }
+        assert_eq!(
+            super::mark_clear::plugin_reader_answer(&setup, "quiet_render"),
+            "raw=thinking shown=thinking thinking_quiet=true turn_end_quiet=false color=#0f2a3f"
+        );
+
+        // A tool call while the pane shows that thinking runs no check, and
+        // the note stays, with or without a check on its hook line.
+        fs::write(&answer, "").unwrap();
+        let outcome = quiet_thinking(
+            &setup,
+            provider,
+            "PreToolUse",
+            tool("call_1"),
+            &check,
+            "00000000000000000310",
+        );
+        assert_eq!(outcome.result.as_ref().unwrap().disposition, "skipped");
+        assert_eq!(
+            outcome.hold_checks[0].stage,
+            hold_check::Stage::NotDispatched
+        );
+        assert_eq!(
+            outcome.hold_checks[0].reason,
+            Some(hold_check::Bypass::NotApplicable)
+        );
+        setup.apply(
+            &event(provider, "PreToolUse", "hold-session", tool("call_2")),
+            "00000000000000000320",
+        );
+        assert_eq!(records(&setup, provider).0, started);
+        assert_eq!(logged_inputs(&log).len(), 1);
+
+        // A later prompt is asked about again, and an empty answer takes the
+        // note away.
+        let outcome = quiet_thinking(
+            &setup,
+            provider,
+            "UserPromptSubmit",
+            json!({"turn_id":"agent-turn","prompt":"SYNTHETIC-TYPED-PROMPT"}),
+            &check,
+            "00000000000000000330",
+        );
+        assert_eq!(outcome.result.as_ref().unwrap().disposition, "applied");
+        let (typed, _) = records(&setup, provider);
+        assert_eq!(typed["type"], "thinking");
+        assert!(typed.get("hold_notes").is_none());
+        assert_ne!(typed["event_id"], started["event_id"]);
+        let inputs = logged_inputs(&log);
+        assert_eq!(inputs.len(), 2, "{provider} {:?}", outcome.hold_checks);
+        assert!(inputs[1]["lifecycle"]["snapshot_id"].is_string());
+        assert_eq!(
+            super::mark_clear::plugin_reader_answer(&setup, "quiet_render"),
+            "raw=thinking shown=thinking thinking_quiet=false turn_end_quiet=false color=#1c1730"
+        );
+
+        // After the turn ends, the tool call that starts the next turn's work
+        // without a prompt is asked about.
+        setup.apply(
+            &event(
+                provider,
+                "Stop",
+                "hold-session",
+                json!({"turn_id":"agent-turn"}),
+            ),
+            "00000000000000000340",
+        );
+        fs::write(&answer, QUIET_LINE).unwrap();
+        let outcome = quiet_thinking(
+            &setup,
+            provider,
+            "PreToolUse",
+            tool("call_3"),
+            &check,
+            "00000000000000000350",
+        );
+        assert_eq!(outcome.result.as_ref().unwrap().disposition, "applied");
+        let (continued, _) = records(&setup, provider);
+        assert_eq!(continued["type"], "thinking");
+        assert_eq!(continued["hold_notes"]["wezpup"]["quiet"], true);
+        let inputs = logged_inputs(&log);
+        assert_eq!(inputs.len(), 3);
+        assert_eq!(inputs[2]["phase"], "before_thinking");
+        assert_eq!(inputs[2]["source_event"], "PreToolUse");
+        assert!(inputs[2].get("prompt").is_none());
+
+        // A Codex tool call that asks the user writes notify, not thinking,
+        // and runs no check.
+        if provider == "codex" {
+            setup.apply(
+                &event(
+                    provider,
+                    "Stop",
+                    "hold-session",
+                    json!({"turn_id":"agent-turn"}),
+                ),
+                "00000000000000000360",
+            );
+            let mut ask = tool("call_4");
+            ask["tool_name"] = json!("request_user_input");
+            quiet_thinking(
+                &setup,
+                provider,
+                "PreToolUse",
+                ask,
+                &check,
+                "00000000000000000370",
+            );
+            assert_eq!(records(&setup, provider).0["type"], "notify");
+            assert_eq!(logged_inputs(&log).len(), 3);
+        }
+    }
+}
+
+#[test]
+fn a_tool_call_recorded_during_a_first_prompts_check_discards_its_note() {
+    let setup = Setup::new();
+    bind(&setup, "claude");
+    let ready = setup._scratch.0.join("ready");
+    let released = setup._scratch.0.join("released");
+    let check = executable(
+        &setup,
+        &format!(
+            "/bin/cat >/dev/null\n: > '{}'\nwhile [ ! -f '{}' ]; do :; done\nprintf '%s' '{}'",
+            ready.display(),
+            released.display(),
+            QUIET_LINE
+        ),
+    );
+    thread::scope(|scope| {
+        let writer = scope.spawn(|| {
+            wait_for_check_start(&ready);
+            setup.apply(
+                &event(
+                    "claude",
+                    "PreToolUse",
+                    "hold-session",
+                    json!({"tool_name":"Bash","tool_use_id":"call_1"}),
+                ),
+                "00000000000000000290",
+            );
+            fs::write(&released, "").unwrap();
+        });
+        let outcome = quiet_thinking(
+            &setup,
+            "claude",
+            "UserPromptSubmit",
+            json!({"prompt":"SYNTHETIC-AGENT-PROMPT"}),
+            &check,
+            "00000000000000000300",
+        );
+        writer.join().unwrap();
+        assert_eq!(
+            outcome.hold_checks[0].stage,
+            hold_check::Stage::EvidenceChanged
+        );
+        assert!(outcome.hold_checks[0].note.is_none());
+        let (activity, _) = records(&setup, "claude");
+        assert_eq!(activity["type"], "thinking");
+        assert!(activity.get("hold_notes").is_none());
+    });
+}
+
+#[test]
+fn a_quiet_check_on_a_prompt_hook_line_reads_the_prompt_without_include_prompt() {
+    let setup = Setup::new();
+    bind(&setup, "claude");
+    let (check, log, _) = logging_check(&setup);
+    let quiet = format!("wezpup={}", check.display());
+    let output = run_hook(
+        &setup,
+        &[
+            "hooks",
+            "event",
+            "claude",
+            "UserPromptSubmit",
+            "--strict",
+            "--quiet-check",
+            &quiet,
+        ],
+        &json!({"hook_event_name":"UserPromptSubmit", "session_id":"hold-session",
+            "prompt":"SYNTHETIC-AGENT-PROMPT"}),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    let inputs = logged_inputs(&log);
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0]["prompt"]["text"], "SYNTHETIC-AGENT-PROMPT");
+    assert_eq!(
+        records(&setup, "claude").0["hold_notes"]["wezpup"]["quiet"],
+        true
+    );
+}
+
+#[test]
+fn a_lead_tool_call_held_by_a_waiting_child_runs_no_quiet_check() {
+    let setup = Setup::new();
+    bind(&setup, "claude");
+    let (check, log, _) = logging_check(&setup);
+    setup.apply(
+        &event("claude", "UserPromptSubmit", "hold-session", json!({})),
+        "00000000000000000300",
+    );
+    setup.apply(
+        &event(
+            "claude",
+            "SubagentStart",
+            "hold-session",
+            json!({"agent_id":"child-a"}),
+        ),
+        "00000000000000000310",
+    );
+    setup.apply(
+        &event(
+            "claude",
+            "PermissionRequest",
+            "hold-session",
+            json!({"agent_id":"child-a","tool_name":"Bash","tool_use_id":"child_call"}),
+        ),
+        "00000000000000000320",
+    );
+    assert_eq!(records(&setup, "claude").0["type"], "notify");
+    let outcome = quiet_thinking(
+        &setup,
+        "claude",
+        "PreToolUse",
+        json!({"tool_name":"Bash","tool_use_id":"lead_call"}),
+        &check,
+        "00000000000000000330",
+    );
+    assert_eq!(outcome.result.as_ref().unwrap().disposition, "ignored");
+    assert_eq!(
+        outcome.hold_checks[0].reason,
+        Some(hold_check::Bypass::NotApplicable)
+    );
+    assert!(logged_inputs(&log).is_empty());
+    assert_eq!(records(&setup, "claude").0["type"], "notify");
 }

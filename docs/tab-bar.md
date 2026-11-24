@@ -12,13 +12,14 @@ What a tab shows, which pane decides it, and when a mark goes away. [Configurati
 | `review` | A bookmark | Gold | Manually flagged for review (`Alt+B`) |
 | `thinking`, turn end held | A crescent moon | Violet | The turn ended, and a [hold check](setup.md#claude-code-hooks) says the agent's work goes on |
 | `stop`, quiet turn end | ↪ | Blue | The turn ended, and a [quiet check](setup.md#claude-code-hooks) says nobody needs to be called |
+| `thinking`, quiet turn | A robot, blinking | A second blue | The agent is working, and a [quiet check](setup.md#claude-code-hooks) proved when the turn started that an application sent it |
 | muted | a bell with a slash | None | You muted the tab with `Alt+M`; see [Muting a tab](#muting-a-tab) |
 
 Tabs light up when an agent or script records a state for its pane—even when another pane in that tab is currently focused or zoomed, and even when the tab itself is not the one you are on. Focusing a pane acknowledges only that pane's `stop` and `notify` (not a `notify` shown over its agent's finished turn while a sub-agent waits for permission); states of unfocused sibling panes remain visible until you visit them. `thinking` persists until its writer replaces or clears it, or until the TTL it was written with expires; a `review` flag persists until you press `Alt+B` again.
 
 Only the active pane of the focused window is acknowledged, and never a pane read from another machine through `remote_domains`, which that machine's own GUI acknowledges. The writer's record stays in place; the plugin has the `attention` command record which activity you were shown, and only while that activity is still the pane's, so an unseen notification remains visible.
 
-When multiple panes in a tab have different states, the highest-priority one wins: **notify > stop > review > thinking**.
+When multiple panes in a tab have different states, the highest-priority one wins: **notify > stop > review > thinking**. A pane whose turn a quiet check proved an application's, finished or working, ranks below all of them.
 
 The `review` flag is yours, not a writer's: it is a record of its own, so you can flag a pane that is mid-`thinking` or showing a `stop` without touching either. See [The review flag](#the-review-flag).
 

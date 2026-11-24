@@ -536,8 +536,10 @@ JSON responses contain `schema`, `command`, `status`, `complete`, `result`, and 
 
 
 A `hold_notes` entry may instead contain exactly `quiet=true` and an `answer`
-token. This is allowed on Claude and Codex binding Stops. Its corresponding
-`turn_end.hold_checks` entry retains the same note. `held` is derived only from
+token. This is allowed on Claude and Codex binding Stops, where the
+corresponding `turn_end.hold_checks` entry retains the same note, and, as the
+only kind of note there, on a Claude or Codex binding's `thinking`: the note a
+quiet check gave as the lead's turn started, which has no `turn_end` entry. `held` is derived only from
 hold notes. Quiet presentation is derived from quiet notes and yields to held
 presentation and waiting permissions. A failed revalidation removes the
 applicable note and records `evidence_changed`; no stored quiet boolean is

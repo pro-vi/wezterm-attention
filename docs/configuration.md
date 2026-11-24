@@ -45,6 +45,7 @@ attention.apply_to_config(config, {
   -- Tab background tints per attention type
   colors = {
     thinking = "#1c1730",  -- violet tint
+    thinking_quiet = "#0f2a3f",  -- a second blue: thinking in a turn a quiet check proved an application's
     stop     = "#12271c",  -- mint tint
     quiet    = "#122033",  -- blue tint
     notify   = "#240f16",  -- rose tint
@@ -130,7 +131,8 @@ attention.apply_to_config(config, {
     -- ctx.default_title: the base title from the rule above
     -- ctx.tab_title, ctx.directory, ctx.settled_title: its sources, nil when empty
     -- ctx.attention: { indicator, type, color, subagents, subagents_uncertain,
-    --   source, label, provider, review, muted, binding_health }
+    --   source, label, provider, review, muted, binding_health,
+    --   turn_end_held, turn_end_quiet, thinking_quiet }
     local pane = tab.active_pane
     return pane.title  -- just the pane title, no directory
   end,
@@ -139,7 +141,7 @@ attention.apply_to_config(config, {
 
 `ctx.attention[1]`, `[2]` and `[3]` are the indicator, type and color, for formatters written against the positional form.
 
-The tab's `type`, `color`, `source`, `label`, `provider` and `binding_health` are those of the pane whose type ranks highest in `priority`, where a muted pane ranks only by its `notify` or your review flag. `subagents` is the sum of every pane's count, less those of muted panes that show no `notify`, and `subagents_uncertain`, `review` and `muted` are true when they are true for any pane of the tab.
+The tab's `type`, `color`, `source`, `label`, `provider`, `binding_health`, `turn_end_held`, `turn_end_quiet` and `thinking_quiet` are those of the pane whose type ranks highest in `priority`, where a muted pane ranks only by its `notify` or your review flag, and a pane whose turn a quiet check proved, finished or working, ranks below every other. `subagents` is the sum of every pane's count, less those of muted panes that show no `notify`, and `subagents_uncertain`, `review` and `muted` are true when they are true for any pane of the tab.
 
 ## Existing update-status handler?
 

@@ -50,6 +50,13 @@ local function run()
       tostring(view.activity_type), tostring(view.type), tostring(view.turn_end_held),
       visible.indicator, visible.still_indicator, tostring(visible.color))
   end
+  if os.getenv("WEZTERM_ATTENTION_VIEW_QUESTION") == "quiet_render" then
+    internal.attention_cache[read.cache_key] = view
+    local visible = internal.resolve_visible_attention({ read.cache_key })
+    return string.format("raw=%s shown=%s thinking_quiet=%s turn_end_quiet=%s color=%s",
+      tostring(view.activity_type), tostring(view.type), tostring(view.thinking_quiet),
+      tostring(view.turn_end_quiet), tostring(visible.color))
+  end
   return string.format("activity=%s source=%s",
     tostring(view.activity_type or "none"), tostring(view.source or "none"))
 end

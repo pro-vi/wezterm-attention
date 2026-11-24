@@ -120,7 +120,7 @@ struct EventArgs {
     /// NAME=/absolute/executable returning an optional hold note before a lead Claude Stop; NAME:100ms=… declares its time; repeatable.
     #[arg(long)]
     hold_check: Vec<String>,
-    /// NAME=/absolute/executable proving a quiet lead Stop from frozen lifecycle evidence; NAME:100ms=… declares its time; repeatable.
+    /// NAME=/absolute/executable proving a quiet lead Stop, or a quiet lead turn as it starts, from frozen lifecycle evidence; NAME:100ms=… declares its time; repeatable.
     #[arg(long)]
     quiet_check: Vec<String>,
     /// Milliseconds the hold and quiet checks share, from the start of the chain (1..=86400000).
@@ -924,10 +924,18 @@ fn run_hooks_event(
             && background_tasks.is_some_and(|tasks| !tasks.is_empty());
         let check_reply =
             wezterm_attention::providers::reply_content(&event, &payload, check_applies);
+        // A check before a prompt's thinking reads the prompt, whatever
+        // --include-prompt asks for consumers.
+        let check_prompt = wezterm_attention::providers::prompt_content(
+            &event,
+            &payload,
+            !args.quiet_check.is_empty(),
+        );
         let request = wezterm_attention::hold_check::Request {
             registrations: &hold_checks,
             reply: &check_reply,
             background_tasks,
+            prompt: &check_prompt,
             budget: check_budget,
         };
         let outcome = wezterm_attention::lifecycle::apply_provider_event_with_checks(

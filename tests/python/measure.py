@@ -114,7 +114,16 @@ def stage_python_baseline(
     return [sys.executable, str(writer)]
 
 
-def measure(implementation: str, command: list[str], scratch: pathlib.Path, *, full_lifecycle: bool = False) -> dict[str, Any]:
+def measure(
+    implementation: str,
+    command: list[str],
+    scratch: pathlib.Path,
+    *,
+    full_lifecycle: bool = False,
+    tool_flags: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Times hook calls of `command`. `tool_flags` go on every PreToolUse hook
+    line, as a check registered there does."""
     state = scratch / f"state-{implementation}"
     socket_path = scratch / "mux.sock"
     socket_path.unlink(missing_ok=True)
@@ -147,16 +156,17 @@ def measure(implementation: str, command: list[str], scratch: pathlib.Path, *, f
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
         }
+        pre_tool = [*command, "hooks", "event", "claude", "PreToolUse", "--strict", *tool_flags]
         if full_lifecycle:
             # Both binaries see identical native callbacks. The candidate starts
             # its timed runs with both observation pools at capacity.
             for tool in ["AskUserQuestion", "Bash"]:
                 for index in range(64):
-                    run([*command, "hooks", "event", "claude", "PreToolUse", "--strict"], environment, {**activity, "tool_name": tool, "tool_use_id": f"seed-{tool}-{index}"})
+                    run(pre_tool, environment, {**activity, "tool_name": tool, "tool_use_id": f"seed-{tool}-{index}"})
         for _ in range(5):
-            run([*command, "hooks", "event", "claude", "PreToolUse", "--strict"], environment, activity)
+            run(pre_tool, environment, activity)
         sequential = [
-            run([*command, "hooks", "event", "claude", "PreToolUse", "--strict"], environment, {**activity, "tool_use_id": f"timed-{index}"} if full_lifecycle else activity)
+            run(pre_tool, environment, {**activity, "tool_use_id": f"timed-{index}"} if full_lifecycle else activity)
             for index in range(HOOK_COUNT)
         ]
 
@@ -170,7 +180,7 @@ def measure(implementation: str, command: list[str], scratch: pathlib.Path, *, f
                 "agent_type": "general-purpose",
             }
             return run(
-                [*command, "hooks", "event", "claude", "PreToolUse", "--strict"],
+                pre_tool,
                 environment,
                 payload,
             )
@@ -213,6 +223,11 @@ def main() -> None:
         default=ROOT / "libexec" / "attention-rs",
     )
     parser.add_argument(
+        "--candidate-quiet-check",
+        type=pathlib.Path,
+        help="register this executable as a quiet check on the candidate's PreToolUse lines",
+    )
+    parser.add_argument(
         "--protocol-manifest",
         type=pathlib.Path,
         default=ROOT / "protocol" / "v2.json",
@@ -223,6 +238,13 @@ def main() -> None:
         identities = {"baseline": artifact_sha256(baseline_path), "candidate": artifact_sha256(candidate_path)}
         if identities["baseline"] == identities["candidate"]:
             parser.error("baseline and candidate have the same artifact identity")
+        # Only the candidate takes the check: the baseline predates quiet
+        # checks on a tool call's hook line.
+        candidate_flags = (
+            ("--quiet-check", f"measured={args.candidate_quiet_check.resolve()}")
+            if args.candidate_quiet_check
+            else ()
+        )
         rounds = []
         with tempfile.TemporaryDirectory(prefix="attention-rust-measure-") as directory:
             scratch = pathlib.Path(directory)
@@ -230,7 +252,13 @@ def main() -> None:
                 measured = {}
                 for name in order:
                     executable = baseline_path if name == "baseline" else candidate_path
-                    measured[name] = measure(f"{name}-{index}", [str(executable)], scratch, full_lifecycle=True)
+                    measured[name] = measure(
+                        f"{name}-{index}",
+                        [str(executable)],
+                        scratch,
+                        full_lifecycle=True,
+                        tool_flags=candidate_flags if name == "candidate" else (),
+                    )
                     measured[name]["state"].pop("_file_bytes")
                 measured["order"] = list(order)
                 rounds.append(measured)

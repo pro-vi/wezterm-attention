@@ -23,6 +23,8 @@ local defaults = {
   -- Tab background tint per attention type (subtle, dark)
   colors = {
     thinking = "#1c1730",
+    -- thinking in a turn a quiet check proved an application's
+    thinking_quiet = "#0f2a3f",
     stop     = "#12271c",
     quiet    = "#122033",
     notify   = "#240f16",
@@ -406,7 +408,7 @@ local function usable_options(opts)
     stop = text, notify = text, review = text, muted = text,
   })
   usable.colors = usable_entries("colors", usable.colors,
-    { thinking = text, stop = text, quiet = text, notify = text, review = text })
+    { thinking = text, thinking_quiet = text, stop = text, quiet = text, notify = text, review = text })
   -- priority and auto_clear are lists of the attention types the default
   -- ranking names. A table with other keys, or a name that is no attention
   -- type, means the option's default: a list with that entry left out would

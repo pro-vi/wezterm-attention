@@ -307,11 +307,13 @@ def parse_record(value: Any, manifest: dict[str, Any]) -> str:
         return "record_invalid"
     try:
         validate_shape(value, spec, manifest, kind)
-        if kind == "activity" and "hold_notes" in value and (
-            value["type"] != "stop" or value["target"]["kind"] != "binding"
-            or (value["source"] != "claude" and not (value["source"] == "codex" and all(note.get("quiet") is True for note in value["hold_notes"].values())))
-        ):
-            raise InvalidRecord("hold notes require a Claude binding stop")
+        if kind == "activity" and "hold_notes" in value:
+            quiet = all(note.get("quiet") is True for note in value["hold_notes"].values())
+            if value["target"]["kind"] != "binding" or not (
+                (value["type"] == "stop" and (value["source"] == "claude" or (value["source"] == "codex" and quiet)))
+                or (value["type"] == "thinking" and quiet and value["source"] in {"claude", "codex"})
+            ):
+                raise InvalidRecord("hold notes require a binding stop, or a quiet note on Claude or Codex thinking")
         if kind in LIFECYCLE_SNAPSHOT_KINDS:
             validate_lifecycle(value, manifest)
         if kind == "child_presence_set":

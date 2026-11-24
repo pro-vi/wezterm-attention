@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **A quiet check can mark an agent's turn while it works, not only when it ends.** Registered on the lead `UserPromptSubmit` and `PreToolUse` hook lines of Claude Code or Codex, `--quiet-check NAME=/absolute/executable` also runs as a turn starts, with `phase` `before_thinking`: at every lead prompt, and at the first tool call of a turn that started without one. At a prompt its input carries the prompt text, whatever `--include-prompt` says. A quiet note it returns goes on the turn's `thinking` activity, tool calls in the turn keep it, and the next prompt's answer replaces it. The pane view gains `thinking_quiet`, and the default bar draws such a pane's thinking indicator on `colors.thinking_quiet` (`#0f2a3f`), below every ordinary mark. Update the plugin and the `attention` command together: an older plugin rejects the note and shows nothing for that pane until the turn ends. See "Pre-write hold checks" in `docs/consumer-guide.md`.
+
 ## 1.15.1 — 2026-11-20
 
 ### Fixed

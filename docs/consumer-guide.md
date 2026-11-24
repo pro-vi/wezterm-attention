@@ -21,6 +21,7 @@ Use the full pane object. A server pane ID alone is not globally unique across m
 | `activity_type`, `event_id`, `source` | Eligible lead activity, independently of review |
 | `label` | The shown activity's label, such as the Codex error code on an errored turn's `notify`; `nil` when the activity has none, or when the pane shows another state than the activity's own: a review that outranks it, a hold, or a waiting child's `notify` |
 | `turn_end_held`, `turn_end_quiet` | Whether the shown turn end is held by a [hold check](#pre-write-hold-checks), or carries a quiet note; both false when neither applies |
+| `thinking_quiet` | Whether the pane shows a lead's `thinking` whose turn a [quiet check](#pre-write-hold-checks) proved an application's when it started; false on a held turn end and when a review outranks the thinking. Attention 1.15.1 and earlier never set it |
 | `review` | Owner-scoped review presence |
 | `muted` | Whether the user muted the pane with the mute key (`Alt+M`). It changes no other field: `type` and the rest still say what the pane's agent is doing, and the tab bar decides what a muted pane shows |
 | `subagents`, `subagents_uncertain` | How many of the pane's sub-agents are running, and whether that count could not be read; `subagents` is 0 when it could not |
@@ -348,7 +349,7 @@ A consumer that exits zero after deciding to do nothing has no channel to say wh
 
 `attention hooks event claude Stop --hold-check jev=/absolute/application/stop-hold` declares an application program that may attach one hold note before native persistence. Repeat either check flag for multiple unique lowercase names. Hold checks run first, then quiet checks, preserving order within each flag. It accepts an absolute executable, without arguments or shell syntax. A registration may declare the time its program needs after the name, in whole milliseconds from 1 to the budget, such as `wezpup:100ms=/absolute/executable`; the budget below says what a declared time does. A line that declares a time is a usage error when, counting 500 ms for each later program that declares none, it leaves its first program less than that program declares, or nothing when the first declares nothing: the hook prints `bad_usage` and records nothing for the event. Attention 1.3.0 and earlier reject every declared time this way. Consumers still run after persistence and receive the final decision.
 
-A check runs only for a lead Claude Stop with a non-empty native `background_tasks` array, available reply and a verified current scope. A non-empty array remains eligible even if child reconciliation cannot read its task ids. Other events, child actors, missing/unreadable/empty arrays and unavailable reply launch no check. Nor does a Stop that keeps a sub-agent counted while it waits on a permission prompt (`child_waiting`). The reply is requested for this point independently of `--include-reply` for consumers.
+A hold check runs only for a lead Claude Stop with a non-empty native `background_tasks` array, available reply and a verified current scope. A non-empty array remains eligible even if child reconciliation cannot read its task ids. Other events, child actors, missing/unreadable/empty arrays and unavailable reply launch no hold check. Nor does a Stop that keeps a sub-agent counted while it waits on a permission prompt (`child_waiting`). The reply is requested for this point independently of `--include-reply` for consumers.
 
 Stdin is one JSON object, newline and EOF:
 
@@ -393,7 +394,7 @@ An unheld program prints nothing (whitespace-only output is also accepted) and e
 
 Spaces between JSON tokens and a terminal newline are accepted. Only `hold=true` and an `answer` token matching `[a-z][a-z0-9_]*`, within the safe-label byte limit, are accepted. The token is application-owned. Unknown or duplicate keys, extra documents, false hold, wrong types, malformed/oversized output, incomplete input/output, nonzero exit or timeout supply no note. A line printed before a hang or failed exit does not count. Raw stdout/stderr are never recorded or included in diagnostics.
 
-Programs share a budget from the start of the chain, covering input serialization, launch, stdin, stdout EOF and direct-child exit: what the hook line's `--check-budget-ms N` sets, in whole milliseconds from 1 to 86400000, or 5000 ms without it. Attention 1.7.0 and earlier fix it: 5000 ms in 1.7.0, 2500 ms in 1.4.0 to 1.6.0, 2000 ms before. They reject `--check-budget-ms` as an unknown flag and record nothing for the event, so update Attention before setting it. Attention records the turn end only after the chain, so a chain that runs its whole budget delays the turn end, and every consumer that waits for it, such as a finish sound, by up to the budget. Each program is stopped early enough to leave every eligible program after it the time that program declares, or 500 ms for one that declares none, so a slow program leaves later ones their time. A program that declares a time is also stopped once it has had that long, counted from when Attention starts building its input, even while budget remains; the last eligible program, if it declares no time, may run to the end of the budget. With `--hold-check jev=… --quiet-check wezpup:100ms=…` and the default budget, jev is stopped 4900 ms into the chain; with an undeclared wezpup, at 4500 ms. A program whose deadline passes before it is launched is not dispatched, with reason `total_deadline`, even while time remains for later programs; so is every program when Attention cannot read the clock, since it has no deadline to give. Attention terminates its invocation-owned process group and reaps its direct child on failure/timeout. Descendants that escape that group are not contained. Later failures cannot cancel an earlier accepted note; later programs still run while budget remains. No retry or queue is provided.
+Programs share a budget from the start of the chain, covering input serialization, launch, stdin, stdout EOF and direct-child exit: what the hook line's `--check-budget-ms N` sets, in whole milliseconds from 1 to 86400000, or 5000 ms without it. Attention 1.7.0 and earlier fix it: 5000 ms in 1.7.0, 2500 ms in 1.4.0 to 1.6.0, 2000 ms before. They reject `--check-budget-ms` as an unknown flag and record nothing for the event, so update Attention before setting it. Attention records the turn end only after the chain, so a chain that runs its whole budget delays the turn end, and every consumer that waits for it, such as a finish sound, by up to the budget. A quiet check on a `UserPromptSubmit` or `PreToolUse` line delays that hook, and the `thinking` it writes, the same way. Each program is stopped early enough to leave every eligible program after it the time that program declares, or 500 ms for one that declares none, so a slow program leaves later ones their time. A program that declares a time is also stopped once it has had that long, counted from when Attention starts building its input, even while budget remains; the last eligible program, if it declares no time, may run to the end of the budget. With `--hold-check jev=… --quiet-check wezpup:100ms=…` and the default budget, jev is stopped 4900 ms into the chain; with an undeclared wezpup, at 4500 ms. A program whose deadline passes before it is launched is not dispatched, with reason `total_deadline`, even while time remains for later programs; so is every program when Attention cannot read the clock, since it has no deadline to give. Attention terminates its invocation-owned process group and reaps its direct child on failure/timeout. Descendants that escape that group are not contained. Later failures cannot cancel an earlier accepted note; later programs still run while budget remains. No retry or queue is provided.
 
 The budget does not bound the entire hook. Preparation and final application each take launch and claim locks with up to 2 s per lock; ordinary filesystem/process work and cleanup have no whole-hook deadline. Each configured consumer adds its own deadline. With the default 5000 ms check budget and one 1000 ms consumer, up to 6000 ms is reserved for executable work, before Attention's work. A provider hook timeout of 5 s can therefore expire before the checks and that consumer finish, and a longer one before the complete hook finishes under lock contention.
 
@@ -428,12 +429,12 @@ Held activity retains raw `type=stop` and accepted `hold_notes`. The GUI exposes
 These optional fields require matching updated Rust/Lua readers and writers. Existing unannotated records remain readable by the new readers. Old strict readers reject annotated records; an old writer can move an annotated snapshot aside. Drain old hooks and update matching readers/writers before activation. Downgrading annotated state needs separate review; do not delete user state as an upgrade step.
 
 `--quiet-check NAME=/absolute/executable` uses the same runner for lead Claude
-and Codex `Stop` events. It does not require a reply or background task. Its
+and Codex `Stop` events, and as a turn starts (below). It does not require a reply or background task. Its
 input adds `lifecycle`, the public lead lifecycle view frozen under the writer
 locks, and `prospective_observation`, the native observation about to be
 recorded. The prospective observation has its ID and observation time, but no
 write time or `turn_end`: neither fact exists yet. The scope and provider
-session identify the window. Missing or unreadable history, a native replay,
+session identify the window. At a `Stop`, missing or unreadable history, a native replay,
 or an event at or after this Stop's observation time, the prompt record's latest prompt included, supplies no check input
 (`history_unavailable`).
 
@@ -464,6 +465,45 @@ Quiet completion can be acknowledged like an ordinary Stop. A later human
 prompt and completion receive ordinary presentation unless independently
 proved quiet. All checks share the budget, each with its own deadline as
 described above.
+
+A quiet check registered on a lead Claude or Codex `UserPromptSubmit` or
+`PreToolUse` hook line also runs as a turn starts, before Attention writes a
+new `thinking` activity, with `phase` `before_thinking`. It runs at every lead
+prompt, a prompt typed while a turn runs included, and at a lead tool call
+when the pane's activity is not a shown `thinking`: the first tool call of a
+turn that had no prompt, as after a `Stop` hook continued the turn, and the
+one after a permission prompt was answered. A tool call while the pane shows
+`thinking`, or while a sub-agent's permission prompt holds its `notify`, runs
+no check and keeps the stored note. A Codex
+tool call that asks the user writes `notify` and runs no check. Hold checks
+do not run at this phase (`not_applicable`).
+
+The input is the one above for quiet checks, with `phase` `before_thinking`,
+`source_event` `UserPromptSubmit` or `PreToolUse`, and the prompt or tool
+observation as `prospective_observation`. It has no `reply` and no
+`background_tasks`. At a prompt it adds `prompt`, the content object
+`HookDelivery.prompt` uses (`availability`, and `text` when available),
+whatever `--include-prompt` says. A
+binding that has recorded nothing yet, as before its first prompt, gives no
+`lifecycle`, and the check still runs; history that exists but cannot be read
+gives `history_unavailable`. A program prints nothing for a `phase` it does not
+know.
+
+Attention applies the note to the `thinking` activity's `hold_notes` after
+the same snapshot recheck (a binding with no lifecycle file must still have
+none); changed evidence discards it with `evidence_changed`. A later prompt
+runs the check again, and its answer replaces the note, an empty one removing
+it. Its outcomes appear only in the hook's report. The default bar keeps the
+thinking indicator and tints the tab with `colors.thinking_quiet` (default
+`#0f2a3f`), ranked below every ordinary mark, as a quiet completion is. The `Stop` check is unchanged: a turn
+marked as it started gets its own answer when it ends.
+
+The Rust and Lua validators of Attention 1.15.1 and earlier accept notes only
+on a `stop`, so an older plugin shows nothing for a pane whose `thinking`
+carries one until the turn's `Stop` replaces it; update readers and writers
+together, as above. Attention 1.15.1 and earlier record a check registered on
+these lines as `not_dispatched` with `not_applicable` and write the event as
+before.
 ### Scoped headless inspection
 
 ```sh

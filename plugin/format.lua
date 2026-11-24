@@ -66,6 +66,7 @@ return function(context)
     local best_health   = nil
     local best_held     = false
     local best_quiet    = false
+    local best_thinking_quiet = false
 
     local subagents = 0
     local subagents_uncertain = false
@@ -81,20 +82,23 @@ return function(context)
         -- competes for the tab's marker glyph.
         local candidate_type = cached.type
         local held, quiet = cached.turn_end_held == true, cached.turn_end_quiet == true
+        local thinking_quiet = cached.thinking_quiet == true
         local label = cached.label
         muted = muted or cached.muted == true
         -- The user muted this pane: its agent shows nothing until it waits on
         -- the user, and the user's own flag stays, since it is not the agent's.
         if cached.muted == true and candidate_type ~= "notify" then
           candidate_type = cached.review == true and "review" or nil
-          held, quiet, label = false, false, nil
+          held, quiet, thinking_quiet, label = false, false, false, nil
         else
           subagents = subagents + (cached.subagents or 0)
           subagents_uncertain = subagents_uncertain or cached.subagents_uncertain == true
         end
         review = review or cached.review == true
         if candidate_type then
-          local pri = quiet and 0 or (cfg_priority[candidate_type] or 0)
+          -- A turn an application proved needs no one, finished or working,
+          -- ranks below every ordinary mark.
+          local pri = (quiet or thinking_quiet) and 0 or (cfg_priority[candidate_type] or 0)
           if pri > best_priority then
             best_type     = candidate_type
             best_priority = pri
@@ -105,6 +109,7 @@ return function(context)
             best_health   = cached.binding_health
             best_held     = held
             best_quiet    = quiet
+            best_thinking_quiet = thinking_quiet
           end
         end
       end
@@ -178,7 +183,10 @@ return function(context)
       type = best_type,
       turn_end_held = best_held,
       turn_end_quiet = best_quiet,
-      color = best_quiet and (cfg_colors.quiet or defaults.colors.quiet) or cfg_colors[best_type],
+      thinking_quiet = best_thinking_quiet,
+      color = best_quiet and (cfg_colors.quiet or defaults.colors.quiet)
+        or best_thinking_quiet and (cfg_colors.thinking_quiet or defaults.colors.thinking_quiet)
+        or cfg_colors[best_type],
       subagents = subagents,
       subagents_uncertain = subagents_uncertain,
       source = best_source,
@@ -272,6 +280,7 @@ return function(context)
       type = visible.type,
       turn_end_held = visible.turn_end_held == true,
       turn_end_quiet = visible.turn_end_quiet == true,
+      thinking_quiet = visible.thinking_quiet == true,
       color = visible.color,
       subagents = visible.subagents or 0,
       subagents_uncertain = visible.subagents_uncertain == true,

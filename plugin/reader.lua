@@ -712,16 +712,19 @@ return function(context)
         if note.hold then turn_end_held, shown_type = true, "thinking" end
       end
     end
-    local turn_end_quiet = false
-    if shown_type == "stop" and activity and activity.hold_notes then
-      for _, note in pairs(activity.hold_notes) do
-        if note.quiet then turn_end_quiet = true end
-      end
+    local quiet_note = false
+    for _, note in pairs(activity and activity.hold_notes or {}) do
+      if note.quiet then quiet_note = true end
     end
+    local turn_end_quiet = shown_type == "stop" and quiet_note
     if turn_end_quiet and review then
       shown_type, turn_end_quiet = "review", false
     end
     local effective_type = effective_attention_type(shown_type, review)
+    -- A lead's turn that a quiet check proved an application's when it
+    -- started, while the pane shows its thinking. A held turn end shows
+    -- thinking too, but is a stop.
+    local thinking_quiet = effective_type == "thinking" and activity_type == "thinking" and quiet_note
     local unavailable = diagnostics_have_unavailable_io(diagnostics)
     -- The lead's lifecycle snapshot, the one its children write beside it
     -- when the provider runs sub-agents, and the lead's prompt record.
@@ -804,6 +807,7 @@ return function(context)
       activity_type = activity_type,
       turn_end_held = turn_end_held,
       turn_end_quiet = turn_end_quiet,
+      thinking_quiet = thinking_quiet,
       frame = effective_type == activity_type and activity and activity.frame or nil,
       -- The label of the activity the pane shows, so it goes with its frame:
       -- a review, a hold or a waiting child's notify that shows another
