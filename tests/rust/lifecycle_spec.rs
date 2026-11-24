@@ -2474,8 +2474,14 @@ fn process_has_open(pid: u32, path: &std::path::Path) -> bool {
                 .any(|entry| fs::read_link(entry.path()).is_ok_and(|target| target == path))
         });
     }
+    // `-b` has lsof avoid the kernel calls that can block (`lstat`, `readlink`
+    // and `stat`, per its manual), and `-w` drops the warnings that brings.
+    // Without them one call took 2.4 s on one machine and read the process's
+    // descriptors only at the end of that time (lsof 4.91, macOS 26.7.1,
+    // measured 2026-11-24), after a hook had given up its 2 s wait for a held
+    // lock and closed the file. With them the same call took 0.03 s.
     let output = Command::new(executables::resolve("lsof"))
-        .args(["-a", "-p", &pid.to_string(), "-Fn"])
+        .args(["-b", "-w", "-a", "-p", &pid.to_string(), "-Fn"])
         .output()
         .expect("inspect open files");
     let name = format!("n{}", path.display());
