@@ -12,6 +12,8 @@
 - **Amended:** 2026-10-20 — `--check-budget-ms` sets the shared deadline for its hook line; 5000 ms without it
 - **Amended:** 2026-11-01 — the default held indicator is U+F186, Font Awesome's crescent moon
 - **Amended:** 2026-11-24 — a quiet check also runs as a lead turn starts, and its note marks the turn's `thinking`
+- **Amended:** 2026-11-25 — a stop the user is called to see stays under an application's turn until they have looked
+- **Amended:** 2026-11-25 — a check may also be registered in `checks.json` in the state root, which changes no hook line
 
 ## Context
 
@@ -84,6 +86,68 @@ than unreadable history, since a session's first prompt is its first
 observation. Rejected: a declaration on the launch that its turns are an
 agent's unless a person submits the prompt, which would keep state on the
 launch and still need the prompt check to say which prompts are the person's.
+
+Amendment, 2026-11-25: a stop the user is called to see, one that no hold
+note holds and no quiet note marks, stays on its pane through a turn a quiet
+check proved an application's, until the user has looked. Before, the next
+activity replaced it, so when a turn an application sent started in a pane
+whose finished turn nobody had looked at, that turn's working mark and then
+its quiet end took the pane, and the finished turn was never shown. The
+writer copies such a stop of the same source, while it is still shown, into
+the next activity record as `unseen_stop` when that record carries a quiet
+note: its event id, source and times, and its frame and label when it has
+them. Each later activity with a quiet note carries the copy on until the
+user acknowledges it or the activity it sits under, or a clear covers it.
+The view shows it as the pane's activity while the activity it sits under
+does not outrank a stop, and the plugin acknowledges it by its own event id.
+The `thinking` of a prompt the checks were asked about and did not claim
+carries it too, because as of Claude Code 2.1.331 a check can tell where a Claude
+prompt came from only at the turn's first tool call; that call, left
+unclaimed too, removes it. Any other activity drops it, because a turn that
+is not an application's is the user moving on, and a pane this GUI never
+acknowledges, such as one read from another machine, would otherwise keep it
+for good. A held stop is not copied, because the agent's work goes on and
+the turn's result comes with a later stop; neither is another publisher's
+stop, which only its own clear withdraws, nor a stop with a time limit,
+which the copy would outlive. Rejected: memory in the plugin or in a
+consumer's bar, which a configuration reload loses, another GUI never sees,
+and which no acknowledgement under the writer's locks can clear; and a
+record file of its own, which an older reader would ignore but which every
+activity writer would have to keep in step with the activity. An older
+reader rejects an activity that carries the copy.
+
+Amendment, 2026-11-25: a check may also be registered in `checks.json` in
+the state root, for one provider's hook event, and `hooks event` runs it after
+the checks of its kind that the hook line names. A check's registration no
+longer has to sit on the line, because a provider may tie its approval to the
+hook it approved. Codex (as of 0.171.0, read in its source) runs a hook only
+while the profile holds an approval of a hash of its event, matcher and
+handler, the command included, and a running session rebuilds its hooks against the approvals it
+already loaded, so a check added to a line needs a new approval in every
+Codex profile, and a session that was running can drop the line without a
+word. On 2026-11-25 one of two Codex sessions running while a check was added
+to its prompt and tool-call lines recorded no prompt and no tool call for its
+next two turns, the second after the lines were put back (wezpup's
+observation; wezpup is the application whose check it was). With the file, an
+installer adds, changes or removes a check, and no line changes. The file
+holds checks only, of both kinds, with what a flag carries: name, declared
+time, executable. It sets no environment; a check receives the hook's, as a
+line's check does. It lives in the state root, so whatever isolates the state
+root, such as a test's `WEZTERM_ATTENTION_DIR`, isolates its checks too. The
+whole file is ignored when it cannot be read, is not this user's, is writable
+by group or others, has a later schema, or holds an entry this build would
+refuse, a row it does not register included; an event's checks from it are
+left out when the line would be refused with them on it, by a name the line
+gives, times its budget cannot give, or more checks than the turn-end audit
+holds. Either way the event is recorded without them and the hook prints a
+diagnostic, which leaves the exit code alone as every diagnostic does.
+`doctor` lists the file's checks and says whether the file is valid; whether
+an event's checks fit beside its line shows only in that hook's diagnostic.
+Rejected: the same file for
+every option of `hooks event`, consumers and budget included, which nothing
+needs yet and which the file's `schema` leaves room for; a flag on the line
+that names the file, which would change every line once more; and keeping
+checks on the line only, which pays the approval on every change.
 ## Rationale
 
 A pre-write application check keeps message judgment with the application while Attention owns native facts and final state. Post-write consumers are too late. Keeping the preceding activity can keep an earlier checkmark. An internal question-matching heuristic duplicates application policy and gives Attention responsibility for message interpretation.

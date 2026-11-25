@@ -239,7 +239,7 @@ def validate_typed_field(
             raise InvalidRecord("live children must be an array")
         for item in value:
             validate_shape(item, manifest["lifecycle_shapes"]["child_presence_entry"], manifest, None)
-    elif field_type in {"child_parent_clear", "child_lifetime_end", "prompt_reference"}:
+    elif field_type in {"child_parent_clear", "child_lifetime_end", "prompt_reference", "unseen_stop"}:
         validate_shape(value, manifest["lifecycle_shapes"][field_type], manifest, None)
     elif field_type == "child_agent_ids":
         if not isinstance(value, list) or not all(
@@ -314,6 +314,13 @@ def parse_record(value: Any, manifest: dict[str, Any]) -> str:
                 or (value["type"] == "thinking" and quiet and value["source"] in {"claude", "codex", "agy"})
             ):
                 raise InvalidRecord("hold notes require a binding stop, or a quiet note on Claude, Codex or Agy thinking")
+        if kind == "activity" and "unseen_stop" in value and (
+            value["target"]["kind"] != "binding"
+            or (value["type"] != "thinking" and not any(
+                note.get("quiet") is True for note in value.get("hold_notes", {}).values()
+            ))
+        ):
+            raise InvalidRecord("an unseen stop is kept only under a quiet activity or a thinking")
         if kind in LIFECYCLE_SNAPSHOT_KINDS:
             validate_lifecycle(value, manifest)
         if kind == "child_presence_set":

@@ -355,6 +355,8 @@ pub fn doctor_with_environment(
         &mut diagnostics,
     );
     probes.push(json!({"name":"claude_sessions","status":claude_sessions}));
+    let (checks_status, checks) = checks_probe(root, &mut diagnostics);
+    probes.push(json!({"name":"checks","status":checks_status}));
     diagnostics.extend(state_diagnostics);
     let diagnostics = fold_kept_history(diagnostics);
     let unobserved: Vec<Value> = probes
@@ -364,10 +366,11 @@ pub fn doctor_with_environment(
         .collect();
     Ok((
         json!({
-            "scope": ["state_files","socket","processes","permissions","versions","environment","codex_server","codex_rollout","claude_status","claude_sessions"],
+            "scope": ["state_files","socket","processes","permissions","versions","environment","codex_server","codex_rollout","claude_status","claude_sessions","checks"],
             "unobserved": unobserved,
             "probes": probes,
             "bindings_scanned": rows.len(),
+            "checks": checks,
             "manifest": {
                 "embedded_sha256": embedded_digest,
                 "on_disk_sha256": disk_digest,
@@ -377,6 +380,21 @@ pub fn doctor_with_environment(
         }),
         diagnostics,
     ))
+}
+
+/// The hold and quiet checks `checks.json` registers, which run on their
+/// event's hook line without being named on it, and whether the file is
+/// valid. Whether an event's checks fit beside that line only its hook can
+/// tell.
+fn checks_probe(root: &Path, diagnostics: &mut Vec<Diagnostic>) -> (&'static str, Value) {
+    match crate::check_file::read(root) {
+        crate::check_file::Read::Absent => ("unobserved", json!([])),
+        crate::check_file::Read::Valid(entries) => ("healthy", json!(entries)),
+        crate::check_file::Read::Invalid(diagnostic) => {
+            diagnostics.push(diagnostic);
+            ("finding", json!([]))
+        }
+    }
 }
 
 /// Whether a Codex shared server runs for a `CODEX_HOME` whose hooks call

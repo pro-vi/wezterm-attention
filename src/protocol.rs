@@ -461,6 +461,7 @@ pub enum FieldType {
     ChildPresenceStatus,
     PromptReference,
     PromptAnswers,
+    UnseenStop,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -883,6 +884,7 @@ fn validate_field(
             .as_str()
             .is_some_and(|item| protocol.enums.child_presence_statuses.contains(item)),
         FieldType::PromptReference => fits_lifecycle_shape("prompt_reference", value, protocol),
+        FieldType::UnseenStop => fits_lifecycle_shape("unseen_stop", value, protocol),
         FieldType::PromptAnswers => value.as_array().is_some_and(|items| {
             items.len() <= limits.lifecycle_pool_max_count
                 && items
@@ -945,6 +947,18 @@ pub fn parse_record_value(value: &Value, protocol: &Manifest) -> Verdict {
         return Verdict::RecordInvalid;
     }
     let digest_matches = match kind {
+        // A binding's stop the user has not seen is kept under a turn a
+        // quiet check proved an application's, or a prompt's thinking.
+        "activity"
+            if value.get("unseen_stop").is_some()
+                && (value["target"]["kind"] != "binding"
+                    || (value["type"] != "thinking"
+                        && !value["hold_notes"].as_object().is_some_and(|notes| {
+                            notes.values().any(|note| note["quiet"] == true)
+                        }))) =>
+        {
+            false
+        }
         "activity" if value.get("hold_notes").is_some() => {
             let quiet = value["hold_notes"]
                 .as_object()

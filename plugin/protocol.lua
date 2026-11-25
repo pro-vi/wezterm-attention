@@ -455,7 +455,7 @@ return function(context)
       end
       return true
     elseif field_type == "child_parent_clear" or field_type == "child_lifetime_end"
-      or field_type == "prompt_reference" then
+      or field_type == "prompt_reference" or field_type == "unseen_stop" then
       return validate_shape(value, protocol.lifecycle_shapes[field_type]) ~= nil
     elseif field_type == "prompt_answers" then
       if not is_array(value) or #value > limits.lifecycle_pool_max_count then return false end
@@ -773,6 +773,17 @@ return function(context)
         if not supported then
           return nil, invalid("hold note is not supported for this activity or provider")
         end
+      end
+    end
+    if kind == "activity" and parsed.unseen_stop then
+      -- A binding's stop the user has not seen is kept under a turn a quiet
+      -- check proved an application's, or a prompt's thinking.
+      local quiet = false
+      for _, note in pairs(parsed.hold_notes or {}) do
+        if note.quiet then quiet = true end
+      end
+      if parsed.target.kind ~= "binding" or (parsed.type ~= "thinking" and not quiet) then
+        return nil, invalid("an unseen stop is kept only under a quiet activity or a thinking")
       end
     end
     if kind == "subagent_presence" and sha256(parsed.agent_id) ~= parsed.agent_key then

@@ -1,6 +1,7 @@
 //! What doctor asks of the machine, and what it says when it could not ask.
 
 use super::*;
+use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::AtomicUsize;
 use wezterm_attention::wezterm::{
     ControllingTerminal, PaneProcessSet, ProcessFacts, ProcessInspector, ProcessListing,
@@ -108,6 +109,7 @@ fn doctor_on_an_empty_setup_says_what_it_could_not_observe() {
         "socket",
         "processes",
         "environment",
+        "checks",
     ] {
         assert_eq!(
             probe_status(&result, name),
@@ -938,4 +940,41 @@ fn doctor_reports_a_codex_session_writing_a_rollout_replaced_at_its_path() {
         "unobserved",
         "the host has exited: {result}"
     );
+}
+
+/// Doctor names the checks `checks.json` registers, since no hook line shows
+/// them, and reports a file `hooks event` does not use.
+#[test]
+fn doctor_lists_the_checks_registered_in_checks_json() {
+    let setup = Setup::new();
+    let (result, _) = setup.doctor();
+    assert_eq!(probe_status(&result, "checks"), "unobserved");
+    assert_eq!(result["checks"], json!([]));
+
+    let root = setup.root();
+    fs::create_dir_all(&root).expect("state root");
+    let path = root.join("checks.json");
+    let entry = json!({"provider":"codex", "event":"PreToolUse", "kind":"quiet",
+        "name":"wezpup", "time_ms":300, "executable":"/opt/wezpup/consume"});
+    fs::write(&path, json!({"schema":1, "checks":[entry]}).to_string()).expect("write");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("mode");
+    let (result, diagnostics) = setup.doctor();
+    assert_eq!(probe_status(&result, "checks"), "healthy");
+    assert_eq!(result["checks"], json!([entry]));
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|item| item.context.get("path") == Some(&json!("checks.json"))),
+        "{diagnostics:?}"
+    );
+
+    fs::write(&path, "{").expect("write");
+    let (result, diagnostics) = setup.doctor();
+    assert_eq!(probe_status(&result, "checks"), "finding");
+    assert_eq!(result["checks"], json!([]));
+    let finding = diagnostics
+        .iter()
+        .find(|item| item.context.get("path") == Some(&json!("checks.json")))
+        .expect("a checks.json diagnostic");
+    assert_eq!(finding.code, DiagnosticCode::RecordInvalid);
 }

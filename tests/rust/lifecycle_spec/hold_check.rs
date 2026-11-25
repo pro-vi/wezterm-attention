@@ -1810,3 +1810,604 @@ fn a_lead_tool_call_held_by_a_waiting_child_runs_no_quiet_check() {
     assert!(logged_inputs(&log).is_empty());
     assert_eq!(records(&setup, "claude").0["type"], "notify");
 }
+
+fn acknowledge(setup: &Setup, event_id: &Value) -> String {
+    let root = state_root(&setup.env).unwrap();
+    let (address, _) = pane_address(&setup.env).unwrap();
+    wezterm_attention::lifecycle::acknowledge_activity(
+        &root,
+        &address,
+        &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"],
+        event_id.as_str().unwrap(),
+    )
+    .unwrap()
+    .disposition
+    .as_str()
+    .to_owned()
+}
+
+/// A person's finished turn stays on the pane until they have looked, through
+/// the turn an application starts there next: the tab shows the person's
+/// stop, not the application's thinking or its quiet stop, until the plugin
+/// acknowledges it. Then the application's activity shows, and its next turn
+/// keeps nothing.
+#[test]
+fn a_stop_the_user_has_not_seen_stays_under_an_applications_turn() {
+    for provider in ["claude", "codex"] {
+        let setup = Setup::new();
+        bind(&setup, provider);
+        let (check, _log, _answer) = logging_check(&setup);
+        setup.apply(
+            &event(
+                provider,
+                "UserPromptSubmit",
+                "hold-session",
+                json!({"turn_id":"typed-turn"}),
+            ),
+            "00000000000000000300",
+        );
+        setup.apply(
+            &event(
+                provider,
+                "Stop",
+                "hold-session",
+                json!({"turn_id":"typed-turn"}),
+            ),
+            "00000000000000000310",
+        );
+        let (typed, _) = records(&setup, provider);
+        assert_eq!(typed["type"], "stop");
+        assert!(typed.get("unseen_stop").is_none());
+        let typed_render = super::mark_clear::plugin_reader_answer(&setup, "quiet_render");
+
+        quiet_thinking(
+            &setup,
+            provider,
+            "UserPromptSubmit",
+            json!({"turn_id":"agent-turn","prompt":"SYNTHETIC-AGENT-PROMPT"}),
+            &check,
+            "00000000000000000320",
+        );
+        let (thinking, _) = records(&setup, provider);
+        assert_eq!(thinking["type"], "thinking");
+        assert_eq!(thinking["hold_notes"]["wezpup"]["quiet"], true);
+        assert_eq!(thinking["unseen_stop"]["event_id"], typed["event_id"]);
+        assert_eq!(thinking["unseen_stop"]["source"], provider);
+        wezterm_attention::protocol::validate_record(&thinking, Some("activity")).unwrap();
+        assert_eq!(
+            super::mark_clear::plugin_reader_answer(&setup, "quiet_render"),
+            typed_render,
+            "{provider}: the person's stop shows over the application's thinking"
+        );
+
+        // The turn's tool calls leave the record as it was.
+        quiet_thinking(
+            &setup,
+            provider,
+            "PreToolUse",
+            json!({"tool_name":"Bash","tool_use_id":"call_1","turn_id":"agent-turn"}),
+            &check,
+            "00000000000000000330",
+        );
+        assert_eq!(records(&setup, provider).0, thinking);
+
+        quiet_thinking(
+            &setup,
+            provider,
+            "Stop",
+            json!({"turn_id":"agent-turn"}),
+            &check,
+            "00000000000000000340",
+        );
+        let (ended, _) = records(&setup, provider);
+        assert_eq!(ended["type"], "stop");
+        assert_eq!(ended["hold_notes"]["wezpup"]["quiet"], true);
+        assert_eq!(ended["unseen_stop"], thinking["unseen_stop"]);
+        assert_eq!(
+            super::mark_clear::plugin_reader_answer(&setup, "quiet_render"),
+            typed_render,
+            "{provider}: the person's stop shows over the application's quiet stop"
+        );
+
+        assert_eq!(acknowledge(&setup, &typed["event_id"]), "applied");
+        let quiet_render = super::mark_clear::plugin_reader_answer(&setup, "quiet_render");
+        assert!(
+            quiet_render
+                .starts_with("raw=stop shown=stop thinking_quiet=false turn_end_quiet=true"),
+            "{provider}: {quiet_render}"
+        );
+        assert_eq!(acknowledge(&setup, &ended["event_id"]), "applied");
+        assert_eq!(
+            super::mark_clear::plugin_reader_answer(&setup, "activity"),
+            "activity=none source=none"
+        );
+
+        quiet_thinking(
+            &setup,
+            provider,
+            "UserPromptSubmit",
+            json!({"turn_id":"next-agent-turn","prompt":"SYNTHETIC-AGENT-PROMPT"}),
+            &check,
+            "00000000000000000350",
+        );
+        let (next, _) = records(&setup, provider);
+        assert_eq!(next["hold_notes"]["wezpup"]["quiet"], true);
+        assert!(next.get("unseen_stop").is_none(), "{provider}: {next}");
+    }
+}
+
+/// A prompt the quiet checks answered without claiming keeps the unseen stop
+/// until its turn's first tool call is answered, since a check can prove a
+/// Claude turn an application's only at that call; left unclaimed there too,
+/// the turn is the person's, and the stop goes. A prompt no quiet check was
+/// asked about keeps nothing, and neither does a held stop or another
+/// publisher's stop.
+#[test]
+fn only_an_applications_turn_keeps_the_unseen_stop() {
+    let setup = Setup::new();
+    bind(&setup, "claude");
+    let (check, _log, answer) = logging_check(&setup);
+    let tool = |id: &str, turn: &str| json!({"tool_name":"Bash","tool_use_id":id,"turn_id":turn});
+    setup.apply(
+        &event("claude", "Stop", "hold-session", json!({"turn_id":"t1"})),
+        "00000000000000000300",
+    );
+    let (first, _) = records(&setup, "claude");
+    fs::write(&answer, "").unwrap();
+    quiet_thinking(
+        &setup,
+        "claude",
+        "UserPromptSubmit",
+        json!({"turn_id":"t2","prompt":"SYNTHETIC-PEER-PROMPT"}),
+        &check,
+        "00000000000000000310",
+    );
+    let (unclaimed, _) = records(&setup, "claude");
+    assert_eq!(unclaimed["type"], "thinking");
+    assert!(unclaimed.get("hold_notes").is_none());
+    assert_eq!(unclaimed["unseen_stop"]["event_id"], first["event_id"]);
+    wezterm_attention::protocol::validate_record(&unclaimed, Some("activity")).unwrap();
+    assert!(
+        super::mark_clear::plugin_reader_answer(&setup, "quiet_render")
+            .starts_with("raw=stop shown=stop ")
+    );
+    quiet_thinking(
+        &setup,
+        "claude",
+        "PreToolUse",
+        tool("call_1", "t2"),
+        &check,
+        "00000000000000000315",
+    );
+    let (person, _) = records(&setup, "claude");
+    assert!(person.get("unseen_stop").is_none(), "{person}");
+    assert_eq!(person["event_id"], unclaimed["event_id"]);
+    assert!(
+        super::mark_clear::plugin_reader_answer(&setup, "quiet_render")
+            .starts_with("raw=thinking shown=thinking ")
+    );
+    assert_eq!(acknowledge(&setup, &first["event_id"]), "ignored");
+
+    // A prompt that no quiet check was asked about keeps nothing.
+    setup.apply(
+        &event("claude", "Stop", "hold-session", json!({"turn_id":"t2"})),
+        "00000000000000000320",
+    );
+    setup.apply(
+        &event(
+            "claude",
+            "UserPromptSubmit",
+            "hold-session",
+            json!({"turn_id":"t3"}),
+        ),
+        "00000000000000000330",
+    );
+    let (unasked, _) = records(&setup, "claude");
+    assert_eq!(unasked["type"], "thinking");
+    assert!(unasked.get("unseen_stop").is_none(), "{unasked}");
+
+    // A held turn end of the person's turn is not kept under the next turn.
+    let hold = executable(
+        &setup,
+        &format!("/bin/cat > /dev/null\nprintf '%s' '{HOLD_LINE}'"),
+    );
+    let output = hook(&setup, &payload(), &hold, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let (held, _) = records(&setup, "claude");
+    assert_eq!(held["hold_notes"]["jev"]["hold"], true, "{held}");
+    fs::write(&answer, QUIET_LINE).unwrap();
+    quiet_thinking(
+        &setup,
+        "claude",
+        "UserPromptSubmit",
+        json!({"turn_id":"t4","prompt":"SYNTHETIC-AGENT-PROMPT"}),
+        &check,
+        "99999999999999999990",
+    );
+    let (after_hold, _) = records(&setup, "claude");
+    assert_eq!(after_hold["hold_notes"]["wezpup"]["quiet"], true);
+    assert!(after_hold.get("unseen_stop").is_none(), "{after_hold}");
+
+    // Another publisher's stop is withdrawn by its own clear, so it is not
+    // copied under an application's turn.
+    apply_mark_activity(
+        &setup.env,
+        "stop",
+        "build",
+        None,
+        None,
+        None,
+        "99999999999999999991",
+        "00000000012345678900",
+    )
+    .expect("mark applies");
+    quiet_thinking(
+        &setup,
+        "claude",
+        "UserPromptSubmit",
+        json!({"turn_id":"t5","prompt":"SYNTHETIC-AGENT-PROMPT"}),
+        &check,
+        "99999999999999999992",
+    );
+    let (after_mark, _) = records(&setup, "claude");
+    assert_eq!(after_mark["hold_notes"]["wezpup"]["quiet"], true);
+    assert!(after_mark.get("unseen_stop").is_none(), "{after_mark}");
+}
+
+/// A prompt whose quiet check failed has not been shown to be the person's,
+/// so its thinking keeps the unseen stop, and a first tool call that proves
+/// the turn an application's keeps it on.
+#[test]
+fn a_prompt_whose_check_failed_keeps_the_unseen_stop_for_its_first_tool_call() {
+    let setup = Setup::new();
+    bind(&setup, "claude");
+    let (check, _log, _answer) = logging_check(&setup);
+    let failing = executable(&setup, "/bin/cat > /dev/null\nexit 3");
+    setup.apply(
+        &event("claude", "Stop", "hold-session", json!({"turn_id":"t1"})),
+        "00000000000000000300",
+    );
+    let (first, _) = records(&setup, "claude");
+    let outcome = quiet_thinking(
+        &setup,
+        "claude",
+        "UserPromptSubmit",
+        json!({"turn_id":"t2","prompt":"SYNTHETIC-PEER-PROMPT"}),
+        &failing,
+        "00000000000000000310",
+    );
+    assert_ne!(outcome.hold_checks[0].stage, hold_check::Stage::Completed);
+    let (prompted, _) = records(&setup, "claude");
+    assert!(prompted.get("hold_notes").is_none());
+    assert_eq!(prompted["unseen_stop"]["event_id"], first["event_id"]);
+    quiet_thinking(
+        &setup,
+        "claude",
+        "PreToolUse",
+        json!({"tool_name":"Bash","tool_use_id":"call_1","turn_id":"t2"}),
+        &check,
+        "00000000000000000315",
+    );
+    let (claimed, _) = records(&setup, "claude");
+    assert_eq!(claimed["hold_notes"]["wezpup"]["quiet"], true);
+    assert_eq!(claimed["unseen_stop"]["event_id"], first["event_id"]);
+}
+
+/// Writes `checks.json` in the state root, readable and writable by this
+/// user alone, with `checks` as its registrations.
+fn write_check_file(setup: &Setup, checks: &Value) -> PathBuf {
+    let root = state_root(&setup.env).unwrap();
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("checks.json");
+    fs::write(
+        &path,
+        serde_json::to_vec(&json!({"schema":1, "checks":checks})).unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    path
+}
+
+fn quiet_entry(provider: &str, event: &str, name: &str, check: &Path) -> Value {
+    json!({"provider":provider, "event":event, "kind":"quiet", "name":name,
+        "executable":check})
+}
+
+/// A lead prompt through `hooks event --strict`, with `flags` after the event
+/// and `CHECK_BUDGET` as the line's budget.
+fn prompt_hook(setup: &Setup, provider: &str, flags: &[&str]) -> std::process::Output {
+    let budget = CHECK_BUDGET.as_millis().to_string();
+    let mut arguments = vec![
+        "hooks",
+        "event",
+        provider,
+        "UserPromptSubmit",
+        "--strict",
+        "--check-budget-ms",
+        &budget,
+    ];
+    arguments.extend_from_slice(flags);
+    run_hook(
+        setup,
+        &arguments,
+        &super::payload(
+            provider,
+            "UserPromptSubmit",
+            "hold-session",
+            json!({"turn_id":"agent-turn", "prompt":"SYNTHETIC-AGENT-PROMPT"}),
+        ),
+    )
+}
+
+/// A quiet check that appends `name` to `order` and prints a quiet note.
+fn ordered_check(setup: &Setup, order: &Path, name: &str) -> PathBuf {
+    executable(
+        setup,
+        &format!(
+            "/bin/cat >/dev/null\necho {name} >> '{}'\nprintf '%s' '{QUIET_LINE}'",
+            order.display()
+        ),
+    )
+}
+
+#[test]
+fn a_check_in_checks_json_runs_on_a_hook_line_that_does_not_name_it() {
+    for (provider, other) in [("claude", "codex"), ("codex", "claude")] {
+        let setup = Setup::new();
+        bind(&setup, provider);
+        let (check, log, _) = logging_check(&setup);
+        let order = setup._scratch.0.join("order");
+        let elsewhere = ordered_check(&setup, &order, "elsewhere");
+        write_check_file(
+            &setup,
+            &json!([
+                quiet_entry(provider, "UserPromptSubmit", "wezpup", &check),
+                quiet_entry(provider, "Stop", "elsewhere", &elsewhere),
+                quiet_entry(other, "UserPromptSubmit", "elsewhere", &elsewhere),
+            ]),
+        );
+        let output = prompt_hook(&setup, provider, &[]);
+        assert!(
+            output.status.success(),
+            "{provider}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "", "{provider}");
+        let inputs = logged_inputs(&log);
+        assert_eq!(inputs.len(), 1, "{provider}");
+        assert_eq!(inputs[0]["phase"], "before_thinking");
+        assert_eq!(inputs[0]["check_name"], "wezpup");
+        // The prompt is read for a quiet check the line does not name too.
+        assert_eq!(inputs[0]["prompt"]["text"], "SYNTHETIC-AGENT-PROMPT");
+        let (activity, _) = records(&setup, provider);
+        assert_eq!(activity["type"], "thinking");
+        assert_eq!(
+            activity["hold_notes"]["wezpup"]["quiet"], true,
+            "{provider}"
+        );
+        assert!(!order.exists(), "{provider}: a check for another hook ran");
+    }
+}
+
+#[test]
+fn the_lines_checks_run_before_those_of_checks_json() {
+    let setup = Setup::new();
+    bind(&setup, "codex");
+    let order = setup._scratch.0.join("order");
+    let first = ordered_check(&setup, &order, "line");
+    let later = ordered_check(&setup, &order, "file");
+    write_check_file(
+        &setup,
+        &json!([quiet_entry("codex", "UserPromptSubmit", "later", &later)]),
+    );
+    let quiet = format!("first={}", first.display());
+    let output = prompt_hook(&setup, "codex", &["--quiet-check", &quiet]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(&order).unwrap(), "line\nfile\n");
+    let notes = records(&setup, "codex").0["hold_notes"].clone();
+    assert_eq!(notes["first"]["quiet"], true);
+    assert_eq!(notes["later"]["quiet"], true);
+}
+
+/// A name the line already gives, or times the line's budget cannot give,
+/// leave every check of the file out of that event, and the line's run as
+/// they would alone.
+#[test]
+fn checks_json_that_does_not_fit_beside_the_line_is_left_out_of_the_event() {
+    for case in ["same name", "budget"] {
+        let setup = Setup::new();
+        bind(&setup, "codex");
+        let order = setup._scratch.0.join("order");
+        let line = ordered_check(&setup, &order, "line");
+        let file = ordered_check(&setup, &order, "file");
+        let (named, line_time, file_time) = if case == "same name" {
+            ("wezpup", "", json!(null))
+        } else {
+            // 20 s for the line's check and 10 s for each of the file's
+            // leave the line's first check short of its time in 30 s.
+            ("other", ":20000ms", json!(10000))
+        };
+        let entries: Vec<Value> = [named, "later"]
+            .into_iter()
+            .map(|name| {
+                let mut entry = quiet_entry("codex", "UserPromptSubmit", name, &file);
+                if !file_time.is_null() {
+                    entry["time_ms"] = file_time.clone();
+                }
+                entry
+            })
+            .collect();
+        write_check_file(&setup, &json!(entries));
+        let quiet = format!("wezpup{line_time}={}", line.display());
+        let output = prompt_hook(&setup, "codex", &["--quiet-check", &quiet]);
+        assert!(
+            output.status.success(),
+            "{case}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.starts_with(
+                "attention: record_invalid: checks.json's checks for codex UserPromptSubmit were not run beside the hook line's: "
+            ),
+            "{case}: {stderr}"
+        );
+        assert_eq!(fs::read_to_string(&order).unwrap(), "line\n", "{case}");
+        let (activity, _) = records(&setup, "codex");
+        assert_eq!(activity["hold_notes"]["wezpup"]["quiet"], true, "{case}");
+    }
+}
+
+/// Turns a valid `checks.json`, at the first path, registering the check at
+/// the second, into one `hooks event` does not use.
+type Spoil = dyn Fn(&Path, &Path);
+
+/// A file `hooks event` does not use costs the event nothing but its checks:
+/// the prompt is recorded, `--strict` still exits zero, and the hook says why.
+#[test]
+fn a_checks_json_that_is_not_used_leaves_the_event_recorded_without_its_checks() {
+    let cases: [(&str, &Spoil, &str); 9] = [
+        (
+            "not JSON",
+            &|path, _| fs::write(path, "{").unwrap(),
+            "record_invalid: checks.json is invalid: ",
+        ),
+        (
+            "unknown field",
+            &|path, check| {
+                let mut entry = quiet_entry("codex", "UserPromptSubmit", "wezpup", check);
+                entry["env"] = json!({});
+                fs::write(path, json!({"schema":1, "checks":[entry]}).to_string()).unwrap();
+            },
+            "record_invalid: checks.json is invalid: unknown field `env`",
+        ),
+        (
+            // Its new field does not make it read as invalid.
+            "newer schema",
+            &|path, _| {
+                let file = json!({"schema":2, "checks":[], "consumers":[]});
+                fs::write(path, file.to_string()).unwrap();
+            },
+            "future_schema: checks.json has schema 2; this build reads schema 1",
+        ),
+        (
+            // `wezpup:100ms=…` would be read back as a check named wezpup
+            // that declares 100 ms.
+            "name with a colon",
+            &|path, check| {
+                let entry = quiet_entry("codex", "UserPromptSubmit", "wezpup:100ms", check);
+                fs::write(path, json!({"schema":1, "checks":[entry]}).to_string()).unwrap();
+            },
+            "record_invalid: checks.json names a check \"wezpup:100ms\"",
+        ),
+        (
+            // `a=/x=/y` would be read back as a check named a that runs `/x=/y`.
+            "name with an equals sign",
+            &|path, _| {
+                let entry = quiet_entry("codex", "UserPromptSubmit", "a=/x", Path::new("/y"));
+                fs::write(path, json!({"schema":1, "checks":[entry]}).to_string()).unwrap();
+            },
+            "record_invalid: checks.json names a check \"a=/x\"",
+        ),
+        (
+            // A FIFO would hold an open without O_NONBLOCK until a writer came.
+            "a FIFO",
+            &|path, _| {
+                fs::remove_file(path).unwrap();
+                let made = Command::new("/usr/bin/mkfifo").arg(path).status().unwrap();
+                assert!(made.success());
+            },
+            "record_invalid: checks.json is not a regular file",
+        ),
+        (
+            "unregistered hook",
+            &|path, check| {
+                let entry = quiet_entry("codex", "Notification", "wezpup", check);
+                fs::write(path, json!({"schema":1, "checks":[entry]}).to_string()).unwrap();
+            },
+            "record_invalid: checks.json names codex Notification, which is not a hook Attention registers",
+        ),
+        (
+            "relative program",
+            &|path, _| {
+                let entry = quiet_entry(
+                    "codex",
+                    "UserPromptSubmit",
+                    "wezpup",
+                    Path::new("bin/check"),
+                );
+                fs::write(path, json!({"schema":1, "checks":[entry]}).to_string()).unwrap();
+            },
+            "record_invalid: checks.json registers checks for codex UserPromptSubmit that a hook line could not: --quiet-check requires a unique lowercase name and absolute executable path",
+        ),
+        (
+            "group writable",
+            &|path, _| fs::set_permissions(path, fs::Permissions::from_mode(0o620)).unwrap(),
+            "state_permissions: checks.json must be owned by this user and not writable by group or others",
+        ),
+    ];
+    for (case, spoil, expected) in cases {
+        let setup = Setup::new();
+        bind(&setup, "codex");
+        let (check, log, _) = logging_check(&setup);
+        let path = write_check_file(
+            &setup,
+            &json!([quiet_entry("codex", "UserPromptSubmit", "wezpup", &check)]),
+        );
+        spoil(&path, &check);
+        let output = prompt_hook(&setup, "codex", &[]);
+        assert!(
+            output.status.success(),
+            "{case}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.starts_with(&format!("attention: {expected}")),
+            "{case}: {stderr}"
+        );
+        assert!(logged_inputs(&log).is_empty(), "{case}");
+        let (activity, _) = records(&setup, "codex");
+        assert_eq!(activity["type"], "thinking", "{case}");
+        assert!(activity.get("hold_notes").is_none(), "{case}: {activity}");
+    }
+}
+
+#[test]
+fn a_hold_check_in_checks_json_holds_a_claude_stop() {
+    let setup = Setup::new();
+    bind(&setup, "claude");
+    let check = executable(
+        &setup,
+        &format!("/bin/cat >/dev/null\nprintf '%s' '{HOLD_LINE}'"),
+    );
+    let mut entry = quiet_entry("claude", "Stop", "jev", &check);
+    entry["kind"] = json!("hold");
+    write_check_file(&setup, &json!([entry]));
+    let budget = CHECK_BUDGET.as_millis().to_string();
+    let output = run_hook(
+        &setup,
+        &[
+            "hooks",
+            "event",
+            "claude",
+            "Stop",
+            "--strict",
+            "--check-budget-ms",
+            &budget,
+        ],
+        &payload(),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (activity, snapshot) = records(&setup, "claude");
+    assert_eq!(activity["hold_notes"]["jev"]["hold"], true);
+    assert_eq!(last_end(&snapshot)["turn_end"]["held"], true);
+}

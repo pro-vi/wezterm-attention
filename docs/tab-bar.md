@@ -19,6 +19,8 @@ Tabs light up when an agent or script records a state for its pane—even when a
 
 Only the active pane of the focused window is acknowledged, and never a pane read from another machine through `remote_domains`, which that machine's own GUI acknowledges. The writer's record stays in place; the plugin has the `attention` command record which activity you were shown, and only while that activity is still the pane's, so an unseen notification remains visible.
 
+A finished turn you have not seen stays on its pane through the turns an application starts there. When a [quiet check](setup.md#claude-code-hooks) proves that a turn which started before you looked is an application's, as when another agent sends the pane a message, the pane keeps showing the check over that turn's working mark, its held mark and its quiet end. Focusing the pane acknowledges the check, and the pane then shows what its agent is doing now. A turn that is not an application's, such as one you start, takes the pane as before; so does a `notify`. A held turn end is not kept, since its result comes with a later one.
+
 When multiple panes in a tab have different states, the highest-priority one wins: **notify > stop > review > thinking**. A pane whose turn a quiet check proved an application's, finished or working, ranks below all of them.
 
 The `review` flag is yours, not a writer's: it is a record of its own, so you can flag a pane that is mid-`thinking` or showing a `stop` without touching either. See [The review flag](#the-review-flag).

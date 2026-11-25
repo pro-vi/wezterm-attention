@@ -24,6 +24,8 @@ use crate::protocol::{
 /// The time the hold and quiet checks share when the hook line sets none with
 /// `--check-budget-ms`.
 pub const DEFAULT_BUDGET: Duration = Duration::from_millis(5000);
+/// The longest budget `--check-budget-ms` may set: one day.
+pub const MAX_BUDGET_MS: u64 = 86_400_000;
 /// The chain stops each check this much earlier for every eligible check
 /// after it that declares no time of its own, so a slow check cannot spend a
 /// later check's time.
@@ -34,7 +36,8 @@ pub struct Registration {
     pub name: String,
     pub executable: String,
     pub purpose: Purpose,
-    /// The time the check declared it needs, as `NAME:100ms`. The chain stops
+    /// The time the check declared it needs: `NAME:100ms` on a hook line,
+    /// `time_ms` in `checks.json`. The chain stops
     /// the check once it has had that long, and earlier checks leave it that
     /// much of the budget instead of `LATER_CHECK_RESERVE`.
     pub declared: Option<Duration>,
@@ -48,10 +51,19 @@ fn reserved(later: &[Registration]) -> Duration {
         .sum()
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Purpose {
     Hold,
     Quiet,
+}
+
+/// Whether any of `registrations` is a quiet check, which reads the prompt
+/// and runs before a lead's `thinking` as well as before its turn end.
+pub fn has_quiet(registrations: &[Registration]) -> bool {
+    registrations
+        .iter()
+        .any(|registration| registration.purpose == Purpose::Quiet)
 }
 
 /// When a chain runs: before a lead turn end is recorded, or before a lead
@@ -307,8 +319,8 @@ pub fn validate_checks(
         });
     }
     // Every later check starts with at least what it reserves still left, so
-    // only the first can be short of its time. A line without a declaration
-    // keeps its earlier behavior: a first check left nothing is not dispatched.
+    // only the first can be short of its time. Checks without a declaration
+    // keep their earlier behavior: a first check left nothing is not dispatched.
     if registrations.iter().any(|r| r.declared.is_some())
         && let Some((first, later)) = registrations.split_first()
     {

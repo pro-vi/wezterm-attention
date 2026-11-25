@@ -124,13 +124,13 @@ struct EventArgs {
     #[arg(long)]
     quiet_check: Vec<String>,
     /// Milliseconds the hold and quiet checks share, from the start of the chain (1..=86400000).
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=86400000))]
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=wezterm_attention::hold_check::MAX_BUDGET_MS))]
     check_budget_ms: Option<u64>,
 }
 
 fn provider_event_help() -> String {
     let mut help =
-        "Example: attention hooks event claude Stop --consumer /absolute/reply-sink --consumer-timeout-ms 1000 --include-reply --strict < callback.json\nConsumers run after native locks release. Retrying may repeat consumer effects.\nRegistration details: attention hooks describe --provider <provider> --json".to_owned();
+        "Example: attention hooks event claude Stop --consumer /absolute/reply-sink --consumer-timeout-ms 1000 --include-reply --strict < callback.json\nConsumers run after native locks release. Retrying may repeat consumer effects.\nChecks that checks.json in the state root registers for the event run after the line's checks of the same kind; attention doctor lists them.\nRegistration details: attention hooks describe --provider <provider> --json".to_owned();
     if let Ok(manifest) = wezterm_attention::protocol::manifest() {
         for (provider, hooks) in &manifest.native_hooks {
             let events = hooks
@@ -853,7 +853,7 @@ fn run_hooks_event(
         wezterm_attention::hold_check::DEFAULT_BUDGET,
         std::time::Duration::from_millis,
     );
-    let hold_checks = match wezterm_attention::hold_check::validate_checks(
+    let line_checks = match wezterm_attention::hold_check::validate_checks(
         &args.hold_check,
         &args.quiet_check,
         check_budget,
@@ -861,6 +861,22 @@ fn run_hooks_event(
         Ok(registrations) => registrations,
         Err(error) => return Ok(emit_hook_error(&error, args.debug, args.strict, name)),
     };
+    // A root that cannot be resolved fails the event below.
+    let check_file = wezterm_attention::records::state_root(environment)
+        .map_or(wezterm_attention::check_file::Read::Absent, |root| {
+            wezterm_attention::check_file::read(&root)
+        });
+    // Checks the file could not add leave the event to the line's checks and
+    // print a diagnostic, which never changes the exit code.
+    let (hold_checks, check_file_diagnostic) = wezterm_attention::check_file::with_line_checks(
+        line_checks,
+        &args.hold_check,
+        &args.quiet_check,
+        check_budget,
+        check_file,
+        &args.provider,
+        &args.event,
+    );
     let consumer_timeout = match wezterm_attention::consumer::validate_consumers(
         &args.consumer,
         args.consumer_timeout_ms,
@@ -929,7 +945,7 @@ fn run_hooks_event(
         let check_prompt = wezterm_attention::providers::prompt_content(
             &event,
             &payload,
-            !args.quiet_check.is_empty(),
+            wezterm_attention::hold_check::has_quiet(&hold_checks),
         );
         let request = wezterm_attention::hold_check::Request {
             registrations: &hold_checks,
@@ -980,10 +996,11 @@ fn run_hooks_event(
                 && consumers
                     .iter()
                     .any(|result| result.stage != DeliveryStage::Completed));
-        let diagnostics = match &outcome.result {
+        let mut diagnostics: Vec<_> = match &outcome.result {
             Ok(result) => result.diagnostic.iter().cloned().collect(),
             Err(error) => vec![error.diagnostic.clone()],
         };
+        diagnostics.extend(check_file_diagnostic);
         // A failed check carries no diagnostic, so only the envelope can say
         // which stage it stopped at.
         if args.debug || !args.consumer.is_empty() || check_failed {
@@ -1020,17 +1037,23 @@ fn run_hooks_event(
         result.disposition,
         Disposition::Ignored | Disposition::Conflict | Disposition::Partial
     );
+    let diagnostics: Vec<_> = result
+        .diagnostic
+        .iter()
+        .cloned()
+        .chain(check_file_diagnostic)
+        .collect();
     if args.debug {
         let response = Response::new(
             name,
             if failed { "findings" } else { "ok" },
             !failed,
-            result.diagnostic.iter().cloned().collect(),
+            diagnostics,
             result,
         );
         print_err(&printable_json(&response));
-    } else if let Some(diagnostic) = &result.diagnostic {
-        print_diagnostic(diagnostic);
+    } else {
+        diagnostics.iter().for_each(print_diagnostic);
     }
     Ok(if args.strict && failed {
         ExitCode::from(1)

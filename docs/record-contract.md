@@ -79,6 +79,8 @@ The binding record is durable before its pointer. Every writer of pane records i
 
 Schema 2 carries `source` with canonical `socket_path`, `realm_id` and `incarnation_id`, derived from the publishing GUI socket. The filename must match its incarnation and window ID. Schema-1 files at `tabs/<window id>.json` remain readable with no known source. Equal window numbers do not associate legacy files with new sources. Cleanup uses the validated file path rather than reconstructing one from a window number.
 
+An application's installer may also write `checks.json` at the state root, which registers hold and quiet checks that `hooks event` runs. It is input, not a published fact, and like the tab-order files it carries its own `schema` (currently 1) rather than a manifest entry. No `attention` command writes or removes it. See [checks registered outside the hook line](consumer-guide.md#pre-write-hold-checks).
+
 
 Window checks are derived per query and never stored in publication files. Their statuses are `present`, `not_listed` and `unavailable`; source identity failure cannot produce `not_listed`. The recorded source namespace is separate from a pane realm, so realm-filtered sweep still leaves tab publications alone.
 
@@ -502,6 +504,25 @@ activity is committed: repeating the same semantic activity after its acknowledg
 new `event_id` instead of reporting the acknowledged one unchanged. Without that, a turn whose only
 activity is a `stop` the human already dismissed would never light the tab again. An unreadable
 acknowledgement counts as none, so it can only leave the earlier behaviour in place.
+
+A stop the user is called to see, one with no hold note that holds and no quiet note, stays under
+a turn a quiet check proved an application's until they have looked. When a hook's activity that
+carries a quiet note replaces such a stop of its own source while the stop is still shown and has
+no `ttl_ms`, the new record keeps a copy of it as `unseen_stop`: its `event_id`, `source`,
+`observed_mono_ns` and `written_at_unix_ns`, with `frame` and `label` when it has them. Each later
+hook activity with a quiet note carries the copy on while neither the slot's clear nor the
+acknowledgement covers the copy or the activity that carries it. The `thinking` of a prompt the quiet
+checks were asked about and did not claim carries the copy too, because as of Claude Code 2.1.331
+a check can tell where a Claude prompt came from only at the turn's first tool call; when that
+call's checks answer and none claims it, the record is written again without the copy, under the
+same `event_id`. Any other activity, a prompt no quiet check was asked about included,
+keeps none: the user's own turn, or a pane nobody can acknowledge from this GUI, would otherwise
+keep the copy for good. Only a binding's `thinking` or an activity with a quiet note carries one.
+The view shows the copy as the pane's activity while the activity under it does not outrank a
+stop in the configured priority, and `attention plugin acknowledge` accepts its event id while it
+is shown so. An acknowledgement of the copy, or of the activity that carries it, ends it. A `mark`
+write and a turn end the turn follower records keep none. Attention 1.16.0 and earlier, plugin or
+command, reject an activity that carries one.
 
 A held Claude Stop retains native activity `type=stop` and stores validated `hold_notes` under the configured program names. The GUI derives fixed held presentation from these notes. While the binding's child set holds a waiting child, the GUI presents any lead `stop`, held or not, as `notify`. The writer runs no hold check for a Stop that keeps a waiting child counted, and records each configured program as `not_dispatched` with reason `child_waiting` ([ADR 0005](adr/0005-application-hold-notes-on-recorded-turn-ends.md) says which children a Stop keeps). Automatic acknowledgement refuses held activity under the writer locks, including when custom auto_clear includes its displayed type. Any newer activity, such as the next prompt's or a later applicable unheld Stop's, replaces it.
 
