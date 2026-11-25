@@ -3515,25 +3515,31 @@ fn apply_provider_event_with_request(
     }
 }
 
+enum LazyBind {
+    Unneeded,
+    Bound(String),
+    Refused(LifecycleResult),
+}
+
 /// Lazily bind an `agy` lead session on `PreInvocation` when no active binding
 /// exists for `conversationId` yet (as of `agy` 1.5.16, `agy --resume <id>`
 /// skips `SessionStart` and begins on `PreInvocation`).
 ///
-/// Returns `Some(refusal)` if creating or replacing the binding was refused
+/// Returns `LazyBind::Refused` if creating or replacing the binding was refused
 /// (such as a foreign `agy` process attempting to replace another active
 /// binding), so the caller aborts without running checks or writing activity.
 fn ensure_agy_preinvocation_binding(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
     observation: &str,
-    written_at: &str,
-) -> Result<Option<LifecycleResult>> {
+    clock: &dyn crate::wezterm::Clock,
+) -> Result<LazyBind> {
     if event.provider != Some(Provider::Agy)
         || event.source_event != "PreInvocation"
         || event.agent_id.is_some()
         || event.transcript_path.is_none()
     {
-        return Ok(None);
+        return Ok(LazyBind::Unneeded);
     }
     let binding_id = event_binding_id(event, &resolved.launch_id)?;
     let pointer = read_record_at(&resolved.root, "current_binding", &resolved.launch())?;
@@ -3542,8 +3548,9 @@ fn ensure_agy_preinvocation_binding(
         .and_then(|record| record["binding_id"].as_str())
         == Some(binding_id.as_str())
     {
-        return Ok(None);
+        return Ok(LazyBind::Unneeded);
     }
+    let written_at = clock.unix_ns20()?;
     let mut binding_resolved = resolved.clone();
     binding_resolved.evidence = None;
     let binding_event = ProviderEvent {
@@ -3554,12 +3561,12 @@ fn ensure_agy_preinvocation_binding(
         ..event.clone()
     };
     let result =
-        binding_mutation(&binding_resolved, &binding_event, observation, written_at)?.result;
+        binding_mutation(&binding_resolved, &binding_event, observation, &written_at)?.result;
     if accepted(&result) {
-        let _ = record_host(&binding_resolved, &binding_event, written_at);
-        Ok(None)
+        let _ = record_host(&binding_resolved, &binding_event, &written_at);
+        Ok(LazyBind::Bound(written_at))
     } else {
-        Ok(Some(result))
+        Ok(LazyBind::Refused(result))
     }
 }
 
@@ -3594,11 +3601,13 @@ fn apply_provider_event_inner(
         Err(error) => return Ok(LifecycleResult::ignored_error(error)),
     };
     resolved.evidence = evidence;
-    if let Some(refused) =
-        ensure_agy_preinvocation_binding(&resolved, event, observation, &ports.clock.unix_ns20()?)?
-    {
-        return Ok(refused);
-    }
+    let bound_at =
+        match ensure_agy_preinvocation_binding(&resolved, event, observation, ports.clock)? {
+            LazyBind::Unneeded => None,
+            LazyBind::Bound(ts) => Some(ts),
+            LazyBind::Refused(refused) => return Ok(refused),
+        };
+    let mut ran_checks = false;
     if let Some(request) = request {
         // Whether the pane's activity is still shown, before the checks: a
         // clock that cannot be read counts it as inside any time limit.
@@ -3607,8 +3616,12 @@ fn apply_provider_event_inner(
         if let Some(evidence) = &resolved.evidence {
             evidence.borrow_mut().hold_checks = outcomes;
         }
+        ran_checks = true;
     }
-    let written_at = ports.clock.unix_ns20()?;
+    let written_at = match bound_at {
+        Some(ts) if !ran_checks => ts,
+        _ => ports.clock.unix_ns20()?,
+    };
     let result = match event.action {
         ProviderAction::Observation => {
             apply_observation(&resolved, event, observation, &written_at)
