@@ -37,7 +37,9 @@ use crate::records::{
     review_lock, session_binding_files, session_entry, session_entry_path,
     session_registration_lock, state_root, turn_follower_lock, with_lock, within_read_bound,
 };
-use crate::turn_follower::{ClaudeTurn, CodexTurn, FOLLOWER_SOURCES, FollowRequest, FollowedTurn};
+use crate::turn_follower::{
+    AgyTurn, ClaudeTurn, CodexTurn, FOLLOWER_SOURCES, FollowRequest, FollowedTurn,
+};
 use crate::wezterm::RuntimePorts;
 
 #[derive(Debug)]
@@ -46,6 +48,7 @@ pub struct HookOutcome {
     pub admission: Option<AdmittedHook>,
     pub persistence: HookPersistence,
     pub observation_id: Option<String>,
+    pub observation_kind: Option<String>,
     pub turn_end: Option<TurnEnd>,
     pub hold_checks: Vec<HoldCheckOutcome>,
     /// Whether the admitted pane carried the user's mute once the hook's
@@ -64,6 +67,8 @@ struct HookEvidence {
     native_refused: bool,
     pending_observation_id: Option<String>,
     observation_id: Option<String>,
+    pending_observation_kind: Option<String>,
+    observation_kind: Option<String>,
     pending_turn_end: Option<TurnEnd>,
     turn_end: Option<TurnEnd>,
     hold_checks: Vec<HoldCheckOutcome>,
@@ -450,13 +455,31 @@ fn resolve_launch<'a>(
             )),
         };
     }
-    let resolved = crate::launch::self_owned_launch(
-        env,
-        ports,
-        &address,
-        claim,
-        event.action == ProviderAction::Binding,
-    )?;
+    // As of agy 1.5.16, `agy --resume` emits no SessionStart hook; its first
+    // hook is a lead PreInvocation carrying a transcript path. Reuse an
+    // existing self-owned claim without querying the mux when this host owns
+    // it, and otherwise allow self-claiming just as SessionStart does.
+    let agy_resume_start = event.provider == Some(Provider::Agy)
+        && event.source_event == "PreInvocation"
+        && event.agent_id.is_none()
+        && event.transcript_path.is_some();
+    let resolved = if agy_resume_start && claim.is_some() {
+        match crate::launch::self_owned_launch(env, ports, &address, claim.clone(), false) {
+            Ok(resolved) => resolved,
+            Err(error) if error.diagnostic.code == DiagnosticCode::ClaimStale => {
+                crate::launch::self_owned_launch(env, ports, &address, claim, true)?
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        crate::launch::self_owned_launch(
+            env,
+            ports,
+            &address,
+            claim,
+            event.action == ProviderAction::Binding || agy_resume_start,
+        )?
+    };
     let launch_id = crate::launch::claim_launch_id(&resolved.claim)?;
     Ok(ResolvedLaunch {
         evidence: None,
@@ -904,6 +927,15 @@ fn binding_mutation_for_session(
                                     && started_by_recorded_host(resolved, current_id))
                         }
                         Provider::Pi => matches!(source, "new" | "resume" | "fork"),
+                        // As of agy 1.5.16, `/new` and `/clear` start a new
+                        // conversation in the same host process with no
+                        // SessionEnd hook, and `--resume` binds on its first
+                        // PreInvocation; replacing an active binding requires
+                        // a transcript path and the recorded host proof.
+                        Provider::Agy => {
+                            event.transcript_path.is_some()
+                                && started_by_recorded_host(resolved, current_id)
+                        }
                     };
                 if matches!(source, "compact" | "reload") || !replace {
                     return Ok(CommitPlan::reporting(Mutation::plain(
@@ -1536,10 +1568,12 @@ fn append_observation(
                     Some(stored) if stored.ends_turn(provider) => {
                         evidence.persistence.lifecycle = Persistence::Confirmed;
                         evidence.observation_id = Some(stored.observation_id.clone());
+                        evidence.observation_kind = Some(stored.body.kind().to_owned());
                         evidence.turn_end = stored.turn_end.clone();
                     }
                     Some(stored) if stored.is_lead_prompt() && prompts_replacement.is_some() => {
                         evidence.pending_observation_id = Some(draft.observation_id.clone());
+                        evidence.pending_observation_kind = Some(draft.body.kind().to_owned());
                         prompt_record_alone = true;
                     }
                     _ => evidence.persistence.lifecycle = Persistence::Rejected,
@@ -1550,6 +1584,7 @@ fn append_observation(
         if let Some(evidence) = &resolved.evidence {
             let mut evidence = evidence.borrow_mut();
             evidence.pending_observation_id = Some(draft.observation_id.clone());
+            evidence.pending_observation_kind = Some(draft.body.kind().to_owned());
             evidence.pending_turn_end = pending_end;
         }
         let value = serde_json::to_value(snapshot).map_err(AttentionError::record_json)?;
@@ -1771,6 +1806,24 @@ fn plan_children(
     transition: ChildTransition<'_>,
     replacements: &mut Vec<Replacement>,
 ) -> Result<LifecycleResult> {
+    plan_children_transitions(
+        resolved,
+        event,
+        binding_id,
+        written_at,
+        &[transition],
+        replacements,
+    )
+}
+
+fn plan_children_transitions(
+    resolved: &ResolvedLaunch,
+    event: &ProviderEvent,
+    binding_id: &str,
+    written_at: &str,
+    transitions: &[ChildTransition<'_>],
+    replacements: &mut Vec<Replacement>,
+) -> Result<LifecycleResult> {
     let identity = resolved.binding(binding_id);
     let kind = "child_presence_set";
     let path = identity.path(&resolved.root, kind)?;
@@ -1802,15 +1855,34 @@ fn plan_children(
         Replacing::Missing | Replacing::MovedAside => empty(),
     };
     set.schema = manifest()?.record_schema;
-    let reduction = set.apply(EndMark::of(end.as_ref(), &binding), transition);
-    let mut result = LifecycleResult::new(reduction.disposition);
-    result.diagnostic = reduction.diagnostic;
+    let end_mark = EndMark::of(end.as_ref(), &binding);
+    let mut any_changed = false;
+    let mut disposition = Disposition::Skipped;
+    let mut diagnostic = None;
+    for (index, &transition) in transitions.iter().enumerate() {
+        let reduction = set.apply(end_mark, transition);
+        if index == 0
+            || reduction.disposition == Disposition::Conflict
+            || (reduction.changed && disposition == Disposition::Skipped)
+        {
+            disposition = reduction.disposition;
+        }
+        any_changed |= reduction.changed;
+        if let Some(item) = reduction.diagnostic {
+            diagnostic = Some(item);
+        }
+        if reduction.disposition == Disposition::Conflict {
+            break;
+        }
+    }
+    let mut result = LifecycleResult::new(disposition);
+    result.diagnostic = diagnostic;
     // Starting again loses what the invalid set held, so the hook reports
     // that instead of anything the transition itself says.
     if started_again {
         report_instead(&mut result.diagnostic, started_again_diagnostic(kind));
     }
-    if reduction.changed || started_again {
+    if any_changed || started_again {
         set.revision = Uuid::new_v4().to_string();
         set.written_at_unix_ns = written_at.to_owned();
         let value = serde_json::to_value(&set).map_err(|_| {
@@ -1948,15 +2020,21 @@ fn apply_activity(
                 }
             }
             let mut base = activity_base(resolved, event, &binding_id)?;
-            // A lead tool call while the pane shows its turn's thinking keeps
-            // the notes the turn was given. Only the turn's first tool call
-            // runs the quiet checks (`tool_call_skips_check`), and a check
-            // that answers it replaces its own note, an empty answer removing
-            // it; a check that gave no answer leaves its note as it was.
+            let is_lead_prompt = event
+                .observation
+                .as_ref()
+                .is_some_and(LifecycleObservation::is_lead_prompt);
+            // A lead tool call (or intra-turn `agy` thinking continuation)
+            // while the pane shows its turn's thinking keeps the notes the
+            // turn was given. Only the turn's first tool call runs the quiet
+            // checks (`tool_call_skips_check`), and a check that answers it
+            // replaces its own note, an empty answer removing it; a check that
+            // gave no answer leaves its note as it was.
             if event.agent_id.is_none()
-                && event.source_event == "PreToolUse"
                 && base["type"] == "thinking"
                 && visible
+                && (event.source_event == "PreToolUse"
+                    || (event.provider == Some(Provider::Agy) && !is_lead_prompt))
                 && let Some(notes) = existing
                     .as_ref()
                     .filter(|activity| activity["type"] == "thinking")
@@ -1979,14 +2057,26 @@ fn apply_activity(
             // call is thinking. While a child that asked for permission is
             // still waiting, its notify is what the user needs to see, and
             // the lead's next tool call is expected, not a conflict. A
-            // prompt, or anything but thinking, replaces it as usual.
+            // prompt, a call killing all waiting children, or anything but
+            // thinking replaces it as usual.
+            let kills_all_children = event
+                .in_flight_task_ids
+                .as_deref()
+                .is_some_and(<[String]>::is_empty);
             let held = event.agent_id.is_none()
                 && base["type"] == "thinking"
                 && event.source_event != "UserPromptSubmit"
+                && !is_lead_prompt
+                && !kills_all_children
                 && visible
-                && existing
-                    .as_ref()
-                    .is_some_and(|activity| notify_held_by_child(resolved, &binding_id, activity));
+                && existing.as_ref().is_some_and(|activity| {
+                    notify_held_by_child_excluding(
+                        resolved,
+                        &binding_id,
+                        activity,
+                        &event.stopped_child_ids,
+                    )
+                });
             let ActivityOutcome {
                 result,
                 standing: activity,
@@ -2074,10 +2164,12 @@ fn apply_activity(
                     &mut replacements,
                 );
             }
-            // A Claude lead's stop carries the tasks the provider still runs,
-            // so a counted child it no longer lists ended without a stop of
-            // its own. The stop is the lead's own activity: a set it cannot
-            // change is reported and the stop still applies.
+            // A lead stop carries the tasks the provider still runs (or an
+            // empty list on a fully idle `agy` stop or `manage_subagents`
+            // `kill_all`), so a counted child it no longer lists ended without
+            // a stop of its own. The stop or tool result is the lead's own
+            // activity: a set it cannot change is reported and the activity
+            // still applies.
             if let Some(in_flight) = event.in_flight_task_ids.as_deref()
                 && !matches!(result.disposition.as_str(), "ignored" | "conflict")
             {
@@ -2089,6 +2181,20 @@ fn apply_activity(
                     ChildTransition::Reconcile {
                         order: observation,
                         in_flight,
+                    },
+                    &mut replacements,
+                );
+            } else if !event.stopped_child_ids.is_empty()
+                && !matches!(result.disposition.as_str(), "ignored" | "conflict")
+            {
+                children_report = plan_children_beside_activity(
+                    resolved,
+                    event,
+                    &binding_id,
+                    written_at,
+                    ChildTransition::StopIds {
+                        agent_ids: &event.stopped_child_ids,
+                        order: observation,
                     },
                     &mut replacements,
                 );
@@ -2199,6 +2305,7 @@ fn apply_observed_outputs_with(
             let mut evidence = cell.borrow_mut();
             evidence.persistence.lifecycle = Persistence::Confirmed;
             evidence.observation_id = evidence.pending_observation_id.clone();
+            evidence.observation_kind = evidence.pending_observation_kind.clone();
             evidence.turn_end = evidence.pending_turn_end.clone();
         }
     };
@@ -2792,7 +2899,7 @@ fn apply_child(
             agent_id,
             order: observation,
         },
-        (_, "SubagentStart") => ChildTransition::Start {
+        (_, "SubagentStart" | "SessionStart") => ChildTransition::Start {
             agent_id,
             agent_type: event.agent_type.as_deref(),
             order: observation,
@@ -2803,6 +2910,13 @@ fn apply_child(
             order: observation,
         },
     };
+    let mut transitions = vec![transition];
+    if !event.stopped_child_ids.is_empty() {
+        transitions.push(ChildTransition::StopIds {
+            agent_ids: &event.stopped_child_ids,
+            order: observation,
+        });
+    }
     let (mutation, ()) = commit(
         &resolved.root,
         &[&resolved.launch_lock(), &resolved.claim_lock()],
@@ -2822,12 +2936,12 @@ fn apply_child(
                 )));
             }
             let mut replacements = Vec::new();
-            let result = plan_children(
+            let result = plan_children_transitions(
                 resolved,
                 event,
                 &binding_id,
                 written_at,
-                transition,
+                &transitions,
                 &mut replacements,
             )?;
             Ok(append_observation(
@@ -3073,17 +3187,46 @@ fn apply_clear_event(
                 .is_some_and(|o| o.ends_turn(provider))
         }) {
             let identity = resolved.binding(&binding_id);
+            // A replayed turn-ending clear (such as a repeated USER_CANCELED
+            // Stop or Codex Interrupt) must not write a fresh clear watermark
+            // over a newer turn's activity.
+            let replay = event.observation.as_ref().is_some_and(|draft| {
+                lifecycle_snapshot(&resolved.root, &identity).is_some_and(|snapshot| {
+                    snapshot.repeats_turn_end(
+                        draft,
+                        observation,
+                        latest_prompt(&resolved.root, &identity).as_ref(),
+                    )
+                })
+            });
+            if replay {
+                let existing_clear = read_record_at(&resolved.root, "activity_clear", &identity)?;
+                let mut result = LifecycleResult::new(Disposition::Skipped);
+                result.event_id = existing_clear
+                    .as_ref()
+                    .and_then(|record| record["event_id"].as_str())
+                    .map(str::to_owned);
+                return Ok(append_observation(
+                    resolved,
+                    event,
+                    observation,
+                    written_at,
+                    CommitPlan::reporting(Mutation::plain(result)),
+                ));
+            }
             let activity = read_record_at(&resolved.root, "activity", &identity)?;
             let end = read_record_at(&resolved.root, "binding_end", &identity)?;
             if activity.as_ref().is_some_and(|a| {
                 a["observed_mono_ns"]
                     .as_str()
                     .is_some_and(|order| order > observation)
-            }) || end.as_ref().is_some_and(|end| {
-                current
-                    .as_ref()
-                    .is_some_and(|binding| ends_binding(end, binding))
-            }) {
+            }) || newer_lead_observation(&resolved.root, &identity, observation)
+                || end.as_ref().is_some_and(|end| {
+                    current
+                        .as_ref()
+                        .is_some_and(|binding| ends_binding(end, binding))
+                })
+            {
                 return Ok(append_observation(
                     resolved,
                     event,
@@ -3102,6 +3245,33 @@ fn apply_clear_event(
             &binding_id,
             observation,
         )?;
+        let mut replacements: Vec<_> = replacement.into_iter().collect();
+        let mut children_report = Ok(None);
+        if let Some(in_flight) = event.in_flight_task_ids.as_deref()
+            && !matches!(result.disposition.as_str(), "ignored" | "conflict")
+        {
+            children_report = plan_children_beside_activity(
+                resolved,
+                event,
+                &binding_id,
+                written_at,
+                ChildTransition::Reconcile {
+                    order: observation,
+                    in_flight,
+                },
+                &mut replacements,
+            );
+        }
+        let (refused, diagnostic) = match children_report {
+            Ok(diagnostic) => (false, diagnostic),
+            Err(diagnostic) => (true, Some(diagnostic)),
+        };
+        if let Some(diagnostic) = diagnostic {
+            report_instead(&mut result.diagnostic, diagnostic);
+        }
+        if refused && let Some(evidence) = &resolved.evidence {
+            evidence.borrow_mut().native_refused = true;
+        }
         let mut removals = Vec::new();
         if result.disposition != Disposition::Ignored
             && let Some(review_path) = &review_path
@@ -3111,17 +3281,21 @@ fn apply_clear_event(
             }
             removals.push(review_path.clone());
         }
-        Ok(append_observation(
+        let mut plan = append_observation(
             resolved,
             event,
             observation,
             written_at,
             CommitPlan {
-                replacements: replacement.into_iter().collect(),
+                replacements,
                 removals,
                 ..CommitPlan::reporting(Mutation::plain(result))
             },
-        ))
+        );
+        if refused && accepted(&plan.result.result) {
+            plan.result.result.disposition = Disposition::Partial;
+        }
+        Ok(plan)
     };
     let after_apply = |mutation: &Mutation| apply_observed_outputs(resolved, &binding_id, mutation);
     let (launch_lock, claim_lock) = (resolved.launch_lock(), resolved.claim_lock());
@@ -3281,6 +3455,8 @@ fn apply_provider_event_with_request(
         native_refused: false,
         pending_observation_id: None,
         observation_id: None,
+        pending_observation_kind: None,
+        observation_kind: None,
         pending_turn_end: None,
         turn_end: None,
         quiet_snapshot: None,
@@ -3332,9 +3508,58 @@ fn apply_provider_event_with_request(
         admission: evidence.admission.clone(),
         persistence: evidence.persistence.clone(),
         observation_id: evidence.observation_id.clone(),
+        observation_kind: evidence.observation_kind.clone(),
         turn_end: evidence.turn_end.clone(),
         hold_checks: evidence.hold_checks.clone(),
         muted,
+    }
+}
+
+/// Lazily bind an `agy` lead session on `PreInvocation` when no active binding
+/// exists for `conversationId` yet (as of `agy` 1.5.16, `agy --resume <id>`
+/// skips `SessionStart` and begins on `PreInvocation`).
+///
+/// Returns `Some(refusal)` if creating or replacing the binding was refused
+/// (such as a foreign `agy` process attempting to replace another active
+/// binding), so the caller aborts without running checks or writing activity.
+fn ensure_agy_preinvocation_binding(
+    resolved: &ResolvedLaunch,
+    event: &ProviderEvent,
+    observation: &str,
+    written_at: &str,
+) -> Result<Option<LifecycleResult>> {
+    if event.provider != Some(Provider::Agy)
+        || event.source_event != "PreInvocation"
+        || event.agent_id.is_some()
+        || event.transcript_path.is_none()
+    {
+        return Ok(None);
+    }
+    let binding_id = event_binding_id(event, &resolved.launch_id)?;
+    let pointer = read_record_at(&resolved.root, "current_binding", &resolved.launch())?;
+    if pointer
+        .as_ref()
+        .and_then(|record| record["binding_id"].as_str())
+        == Some(binding_id.as_str())
+    {
+        return Ok(None);
+    }
+    let mut binding_resolved = resolved.clone();
+    binding_resolved.evidence = None;
+    let binding_event = ProviderEvent {
+        action: ProviderAction::Binding,
+        start_source: Some("unspecified".to_owned()),
+        observation: None,
+        observation_diagnostic: None,
+        ..event.clone()
+    };
+    let result =
+        binding_mutation(&binding_resolved, &binding_event, observation, written_at)?.result;
+    if accepted(&result) {
+        let _ = record_host(&binding_resolved, &binding_event, written_at);
+        Ok(None)
+    } else {
+        Ok(Some(result))
     }
 }
 
@@ -3369,6 +3594,11 @@ fn apply_provider_event_inner(
         Err(error) => return Ok(LifecycleResult::ignored_error(error)),
     };
     resolved.evidence = evidence;
+    if let Some(refused) =
+        ensure_agy_preinvocation_binding(&resolved, event, observation, &ports.clock.unix_ns20()?)?
+    {
+        return Ok(refused);
+    }
     if let Some(request) = request {
         // Whether the pane's activity is still shown, before the checks: a
         // clock that cannot be read counts it as inside any time limit.
@@ -3506,6 +3736,31 @@ fn start_turn_follower(
                 prompt_observation_id: latest.observation_id,
                 prompt_observed_mono_ns: latest.observed_mono_ns,
                 status_file: status_file.display().to_string(),
+            })
+        }
+        Provider::Agy => {
+            if !observation.is_lead_prompt() {
+                return None;
+            }
+            let binding_id = event_binding_id(event, &resolved.launch_id).ok()?;
+            let latest = latest_prompt(&resolved.root, &resolved.binding(&binding_id))
+                .filter(|latest| latest.observation_id == observation.observation_id)?;
+            let home = env.get("HOME").map(String::as_str);
+            let summaries_db =
+                crate::agy_status::summaries_db_path(event.transcript_path.as_deref(), home)?;
+            let conv_db = event.provider_session_id.as_deref().and_then(|session_id| {
+                crate::agy_status::conversation_db_path(
+                    event.transcript_path.as_deref(),
+                    home,
+                    session_id,
+                )
+            });
+            FollowedTurn::Agy(AgyTurn {
+                prompt_observation_id: latest.observation_id,
+                prompt_observed_mono_ns: latest.observed_mono_ns,
+                summaries_db: summaries_db.display().to_string(),
+                conv_db: conv_db.map(|path| path.display().to_string()),
+                initial_step_count: event.initial_step_count.unwrap_or(0),
             })
         }
         Provider::Pi => return None,
@@ -3790,6 +4045,14 @@ pub(crate) fn record_codex_turn_failure(
     Ok(mutation.result)
 }
 
+/// The stored identity of a lead prompt followed by a prompt-keyed turn
+/// follower (Claude Code status file or Antigravity CLI status databases).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PromptTurn<'a> {
+    pub(crate) observation_id: &'a str,
+    pub(crate) observed_mono_ns: &'a str,
+}
+
 /// Whether the lead's latest prompt in the binding `binding_id` is the
 /// prompt `turn` follows. A prompt record that cannot be read names no
 /// prompt. A follower reads it without locks; its write reads it again under
@@ -3799,15 +4062,15 @@ pub(crate) fn latest_prompt_is(
     address: &PaneAddress,
     launch_id: &str,
     binding_id: &str,
-    turn: &ClaudeTurn,
+    turn: PromptTurn<'_>,
 ) -> bool {
     latest_prompt(
         root,
         &RecordIdentity::binding(address, launch_id, binding_id),
     )
     .is_some_and(|latest| {
-        latest.observation_id == turn.prompt_observation_id
-            && latest.observed_mono_ns == turn.prompt_observed_mono_ns
+        latest.observation_id == turn.observation_id
+            && latest.observed_mono_ns == turn.observed_mono_ns
     })
 }
 
@@ -3830,18 +4093,18 @@ fn latest_prompt(root: &Path, identity: &RecordIdentity) -> Option<PromptReferen
         .and_then(|prompts| prompts.latest)
 }
 
-/// Record that the user stopped the Claude Code lead turn `turn` follows, from
-/// `event`, which [`ProviderEvent::claude_turn_interrupt`] made for it, and
-/// clear the activity. As of Claude Code 2.1.300 pressing Esc runs no hook;
-/// the follower saw the session's status file go from working to no turn (see
-/// [`crate::claude_status`]). It holds the scope and the host it was handed and
-/// checks both again under the launch and claim locks, as `apply_activity`
-/// takes them.
+/// Record that the user stopped the prompt-followed lead turn `turn` follows
+/// (Claude Code or Antigravity CLI), from `event`, and clear the activity.
+/// Both providers run no hook on Esc (as of Claude Code 2.1.300 and `agy`
+/// 1.5.16); the follower observed the provider's own status store transition
+/// away from working (see [`crate::claude_status`] and [`crate::agy_status`]).
+/// It holds the scope and the host it was handed and checks both again under
+/// the launch and claim locks, as `apply_activity` takes them.
 ///
 /// The turn must still be open: its prompt is the lead's latest prompt, and
 /// the lead's last record after it is not a turn end, its `Stop`, its
 /// `StopFailure` or another follower's interrupt. A `Stop` hook that blocks
-/// lets Claude Code go on with the same turn, whose next records then come
+/// lets the provider go on with the same turn, whose next records then come
 /// after that `Stop`, so the last record decides, as it does for a Codex turn
 /// unless a prompt typed after a hook's end shows the turn went on
 /// ([`record_codex_turn_failure`]).
@@ -3850,12 +4113,12 @@ fn latest_prompt(root: &Path, identity: &RecordIdentity) -> Option<PromptReferen
 /// after the latest of the prompt, the lead's observations and the activity,
 /// not when the follower read the file, so a prompt whose hook began before
 /// this write and is recorded after it still shows.
-pub(crate) fn record_claude_turn_interrupt(
+pub(crate) fn record_prompt_turn_interrupt(
     root: &Path,
     address: &PaneAddress,
     launch_id: &str,
     host: &ClaimOwner,
-    turn: &ClaudeTurn,
+    turn: PromptTurn<'_>,
     event: &ProviderEvent,
     ports: &RuntimePorts<'_>,
 ) -> Result<LifecycleResult> {
@@ -3884,7 +4147,7 @@ pub(crate) fn record_claude_turn_interrupt(
             if !latest_prompt_is(root, address, launch_id, &binding_id, turn) {
                 return skipped();
             }
-            let prompt_stamp = turn.prompt_observed_mono_ns.as_str();
+            let prompt_stamp = turn.observed_mono_ns;
             let snapshot = followed_snapshot(root, &identity)?;
             let lead = || {
                 snapshot
@@ -4208,7 +4471,10 @@ fn obtain_hold_notes(
             deadline_mono_ns: deadline,
             reply: (!before_thinking).then_some(request.reply),
             background_tasks: (!before_thinking).then_some(request.background_tasks.unwrap_or(&[])),
-            prompt: (before_thinking && event.source_event == "UserPromptSubmit")
+            prompt: (before_thinking
+                && (event.source_event == "UserPromptSubmit"
+                    || (event.provider == Some(Provider::Agy)
+                        && event.source_event == "PreInvocation")))
                 .then_some(request.prompt),
             lifecycle: quiet.then_some(lifecycle.as_ref()).flatten(),
             prospective_observation: quiet.then_some(prospective.as_ref()).flatten(),
@@ -4279,9 +4545,22 @@ fn tool_called_since_prompt(root: &Path, identity: &RecordIdentity) -> bool {
 /// Whether `activity` is a `notify` that a child's permission prompt, still
 /// waiting, holds against the lead's tool calls.
 fn notify_held_by_child(resolved: &ResolvedLaunch, binding_id: &str, activity: &Value) -> bool {
+    notify_held_by_child_excluding(resolved, binding_id, activity, &[])
+}
+
+fn notify_held_by_child_excluding(
+    resolved: &ResolvedLaunch,
+    binding_id: &str,
+    activity: &Value,
+    excluding: &[String],
+) -> bool {
     activity["type"] == "notify"
         && child_waits(resolved, binding_id, |set, end| {
-            set.waits_since(end, activity["observed_mono_ns"].as_str().unwrap_or(""))
+            set.waits_since_excluding(
+                end,
+                activity["observed_mono_ns"].as_str().unwrap_or(""),
+                excluding,
+            )
         })
 }
 
@@ -4295,12 +4574,16 @@ fn hold_applies(event: &ProviderEvent, request: &hold_check::Request<'_>) -> boo
 }
 
 /// When the registered checks run for `event`, if they do: before a lead
-/// Claude or Codex `Stop`, and, for quiet checks, before a lead prompt or tool
+/// Claude, Codex, or Antigravity CLI `Stop` that ends normally
+/// (`ResponseFinished`), and, for quiet checks, before a lead prompt or tool
 /// call writes `thinking`. `obtain_hold_notes` then skips the tool calls after
 /// a turn's first (`tool_call_skips_check`).
 fn check_phase(event: &ProviderEvent, request: &hold_check::Request<'_>) -> Option<Phase> {
     if event.agent_id.is_some()
-        || !matches!(event.provider, Some(Provider::Claude | Provider::Codex))
+        || !matches!(
+            event.provider,
+            Some(Provider::Claude | Provider::Codex | Provider::Agy)
+        )
     {
         return None;
     }
@@ -4308,15 +4591,26 @@ fn check_phase(event: &ProviderEvent, request: &hold_check::Request<'_>) -> Opti
         .registrations
         .iter()
         .any(|registration| registration.purpose == hold_check::Purpose::Quiet);
-    if event.source_event == "Stop" && (quiet || hold_applies(event, request)) {
+    if event.source_event == "Stop"
+        && matches!(
+            event.observation.as_ref().map(|item| &item.body),
+            Some(crate::observations::ObservationBody::ResponseFinished { .. })
+        )
+        && (quiet || hold_applies(event, request))
+    {
         return Some(Phase::BeforeTurnEnd);
     }
     (quiet
         && event.activity_type.as_deref() == Some("thinking")
-        && matches!(
+        && (matches!(
             event.source_event.as_str(),
             "UserPromptSubmit" | "PreToolUse"
-        ))
+        ) || (event.provider == Some(Provider::Agy)
+            && event.source_event == "PreInvocation"
+            && event
+                .observation
+                .as_ref()
+                .is_some_and(LifecycleObservation::is_lead_prompt))))
     .then_some(Phase::BeforeThinking)
 }
 
@@ -4346,6 +4640,8 @@ mod lifecycle_write_tests {
             native_refused: false,
             pending_observation_id: Some("11111111-1111-4111-8111-111111111111".into()),
             observation_id: None,
+            pending_observation_kind: Some("response_finished".into()),
+            observation_kind: None,
             pending_turn_end: Some(TurnEnd {
                 status: TurnEndStatus::Recorded,
                 held: Some(true),

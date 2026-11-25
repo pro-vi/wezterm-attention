@@ -173,6 +173,28 @@
         "registration": "register",
         "native_event": "session_compact"
       }
+    },
+    "agy": {
+      "SessionStart": {
+        "registration": "register",
+        "native_event": "SessionStart"
+      },
+      "PreInvocation": {
+        "registration": "register",
+        "native_event": "PreInvocation"
+      },
+      "PreToolUse": {
+        "registration": "register",
+        "native_event": "PreToolUse"
+      },
+      "PostToolUse": {
+        "registration": "register",
+        "native_event": "PostToolUse"
+      },
+      "Stop": {
+        "registration": "register",
+        "native_event": "Stop"
+      }
     }
   },
   "tool_classification": {
@@ -182,7 +204,8 @@
       "request_user_input_async": {"tool_class": "question", "question_mode": "nonblocking"},
       "request_permissions": {"tool_class": "permission"}
     },
-    "pi": {}
+    "pi": {},
+    "agy": {"ask_question": {"tool_class": "question", "question_mode": "blocking"}}
   },
   "digests": {
     "algorithm": "sha256",
@@ -246,9 +269,9 @@
     ],
     "end_reasons": ["session_end", "sweep_absent"],
     "pane_presence": ["present", "verified_absent", "unavailable"],
-    "providers": ["claude", "codex", "pi"],
+    "providers": ["claude", "codex", "pi", "agy"],
     "reader_confidence": ["confirmed", "unconfirmed"],
-    "subagent_providers": ["claude", "codex"],
+    "subagent_providers": ["claude", "codex", "agy"],
     "subagent_statuses": ["active", "stopped"]
   },
   "lifecycle_sources": {
@@ -344,6 +367,27 @@
       ],
       "compaction_succeeded": [
         "session_compact"
+      ]
+    },
+    "agy": {
+      "prompt_submitted": [
+        "PreInvocation"
+      ],
+      "tool_preflight": [
+        "PreToolUse"
+      ],
+      "tool_result": [
+        "PostToolUse"
+      ],
+      "response_finished": [
+        "Stop"
+      ],
+      "attempt_outcome": [
+        "Stop"
+      ],
+      "user_interrupt": [
+        "Stop",
+        "agy_status"
       ]
     }
   },
@@ -1276,6 +1320,18 @@
     "pi": {
       "run_settled": [
         "agent_settled"
+      ]
+    },
+    "agy": {
+      "response_finished": [
+        "Stop"
+      ],
+      "attempt_outcome": [
+        "Stop"
+      ],
+      "user_interrupt": [
+        "Stop",
+        "agy_status"
       ]
     }
   }

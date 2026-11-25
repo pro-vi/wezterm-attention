@@ -183,6 +183,7 @@ pub enum Provider {
     Claude,
     Codex,
     Pi,
+    Agy,
 }
 
 impl Provider {
@@ -191,6 +192,7 @@ impl Provider {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
             "pi" => Some(Self::Pi),
+            "agy" => Some(Self::Agy),
             _ => None,
         }
     }
@@ -200,6 +202,7 @@ impl Provider {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Pi => "pi",
+            Self::Agy => "agy",
         }
     }
 }
@@ -947,10 +950,12 @@ pub fn parse_record_value(value: &Value, protocol: &Manifest) -> Verdict {
                 .as_object()
                 .is_some_and(|notes| notes.values().all(|note| note["quiet"] == true));
             // Only a Claude turn end takes hold notes; a quiet note goes on a
-            // Claude or Codex turn end, or the thinking of a turn as it started.
+            // Claude, Codex or Agy turn end, or the thinking of a turn as it started.
             value["target"]["kind"] == "binding"
                 && (value["type"] == "stop" || value["type"] == "thinking")
-                && (value["source"] == "claude" || value["source"] == "codex")
+                && (value["source"] == "claude"
+                    || value["source"] == "codex"
+                    || value["source"] == "agy")
                 && (quiet || (value["type"] == "stop" && value["source"] == "claude"))
         }
         kind if is_lifecycle_snapshot_kind(kind) => {

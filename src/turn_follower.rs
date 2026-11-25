@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::agy_status::{self, AGY_STATUS};
 use crate::claude_status::{self, Foreign, SESSION_STATUS};
 use crate::codex_rollout::{Refusal, Rollout, TASK_COMPLETE, TurnSignal};
 use crate::identity::PaneAddress;
@@ -33,9 +34,10 @@ use crate::wezterm::{ProcessStart, RuntimePorts};
 /// Each provider's `source_event` for the turn ends its follower records.
 /// The manifest's `native_hooks` do not declare them, and a hook event they do
 /// not declare is ignored, so a hook cannot claim one.
-pub const FOLLOWER_SOURCES: [(Provider, &str); 2] = [
+pub const FOLLOWER_SOURCES: [(Provider, &str); 3] = [
     (Provider::Codex, TASK_COMPLETE),
     (Provider::Claude, SESSION_STATUS),
+    (Provider::Agy, AGY_STATUS),
 ];
 
 /// How many polls a follower waits for another turn's follower to leave the
@@ -65,6 +67,7 @@ pub struct FollowRequest {
 pub enum FollowedTurn {
     Codex(CodexTurn),
     Claude(ClaudeTurn),
+    Agy(AgyTurn),
 }
 
 /// A Codex turn, and where in which rollout to read from.
@@ -87,11 +90,26 @@ pub struct ClaudeTurn {
     pub status_file: String,
 }
 
+/// An Antigravity CLI (`agy`) lead turn, named by the prompt it follows: the
+/// prompt as the writer stored it, `conversation_summaries.db`, optionally
+/// `conversations/<id>.db`, and the turn's starting step index.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgyTurn {
+    pub prompt_observation_id: String,
+    pub prompt_observed_mono_ns: String,
+    pub summaries_db: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conv_db: Option<String>,
+    pub initial_step_count: i64,
+}
+
 impl FollowedTurn {
     pub fn provider(&self) -> Provider {
         match self {
             Self::Codex(_) => Provider::Codex,
             Self::Claude(_) => Provider::Claude,
+            Self::Agy(_) => Provider::Agy,
         }
     }
 
@@ -101,6 +119,7 @@ impl FollowedTurn {
         match self {
             Self::Codex(turn) => &turn.turn_id,
             Self::Claude(turn) => &turn.prompt_observation_id,
+            Self::Agy(turn) => &turn.prompt_observation_id,
         }
     }
 }
@@ -246,6 +265,12 @@ enum Reader<'a> {
         turn: &'a ClaudeTurn,
         last_working_at: Option<u64>,
     },
+    /// Polled against `agy`'s local SQLite databases. `seen_working` tracks
+    /// whether this follower observed the turn running before seeing idle.
+    Agy {
+        turn: &'a AgyTurn,
+        seen_working: bool,
+    },
 }
 
 impl<'a> Reader<'a> {
@@ -263,6 +288,10 @@ impl<'a> Reader<'a> {
             FollowedTurn::Claude(turn) => Ok(Self::Claude {
                 turn,
                 last_working_at: None,
+            }),
+            FollowedTurn::Agy(turn) => Ok(Self::Agy {
+                turn,
+                seen_working: false,
             }),
         }
     }
@@ -327,7 +356,10 @@ impl<'a> Reader<'a> {
                     &request.address,
                     &request.launch_id,
                     &request.binding_id(),
-                    turn,
+                    crate::lifecycle::PromptTurn {
+                        observation_id: &turn.prompt_observation_id,
+                        observed_mono_ns: &turn.prompt_observed_mono_ns,
+                    },
                 ) {
                     return Ok(Some(Followed::PromptReplaced));
                 }
@@ -355,18 +387,76 @@ impl<'a> Reader<'a> {
                     } if last_working_at.is_some_and(|working| updated_at > working) => {
                         let event =
                             ProviderEvent::claude_turn_interrupt(&request.session_id, version);
-                        crate::lifecycle::record_claude_turn_interrupt(
+                        crate::lifecycle::record_prompt_turn_interrupt(
                             root,
                             &request.address,
                             &request.launch_id,
                             host,
-                            turn,
+                            crate::lifecycle::PromptTurn {
+                                observation_id: &turn.prompt_observation_id,
+                                observed_mono_ns: &turn.prompt_observed_mono_ns,
+                            },
                             &event,
                             ports,
                         )
                         .map(|result| Some(Followed::Recorded(result)))
                     }
                     claude_status::Reading::Ended { .. } => Ok(None),
+                }
+            }
+            Self::Agy { turn, seen_working } => {
+                let prompt_turn = crate::lifecycle::PromptTurn {
+                    observation_id: &turn.prompt_observation_id,
+                    observed_mono_ns: &turn.prompt_observed_mono_ns,
+                };
+                if !crate::lifecycle::latest_prompt_is(
+                    root,
+                    &request.address,
+                    &request.launch_id,
+                    &request.binding_id(),
+                    prompt_turn,
+                ) {
+                    return Ok(Some(Followed::PromptReplaced));
+                }
+                match agy_status::read_status(
+                    Path::new(&turn.summaries_db),
+                    turn.conv_db.as_deref().map(Path::new),
+                    &request.session_id,
+                    turn.initial_step_count,
+                ) {
+                    agy_status::Reading::Working => {
+                        *seen_working = true;
+                        Ok(None)
+                    }
+                    agy_status::Reading::Canceled => {
+                        let event = ProviderEvent::agy_turn_interrupt(&request.session_id);
+                        crate::lifecycle::record_prompt_turn_interrupt(
+                            root,
+                            &request.address,
+                            &request.launch_id,
+                            host,
+                            prompt_turn,
+                            &event,
+                            ports,
+                        )
+                        .map(|result| Some(Followed::Recorded(result)))
+                    }
+                    agy_status::Reading::Idle if *seen_working => {
+                        let event = ProviderEvent::agy_turn_interrupt(&request.session_id);
+                        crate::lifecycle::record_prompt_turn_interrupt(
+                            root,
+                            &request.address,
+                            &request.launch_id,
+                            host,
+                            prompt_turn,
+                            &event,
+                            ports,
+                        )
+                        .map(|result| Some(Followed::Recorded(result)))
+                    }
+                    agy_status::Reading::Idle
+                    | agy_status::Reading::Absent
+                    | agy_status::Reading::Unreadable(_) => Ok(None),
                 }
             }
         }

@@ -124,6 +124,12 @@ pub enum ChildTransition<'a> {
         agent_id: &'a str,
         order: &'a str,
     },
+    /// Several children stopped by one tool call (such as an `agy`
+    /// `manage_subagents` kill listing explicit ids) at `order`.
+    StopIds {
+        agent_ids: &'a [String],
+        order: &'a str,
+    },
     ParentClear {
         order: &'a str,
         event_id: &'a str,
@@ -263,6 +269,9 @@ impl ChildPresenceSet {
             ChildTransition::Stop { agent_id, order } => self
                 .ignored_by_end(end, order)
                 .unwrap_or_else(|| self.stop(agent_id, order)),
+            ChildTransition::StopIds { agent_ids, order } => self
+                .ignored_by_end(end, order)
+                .unwrap_or_else(|| self.stop_many(agent_ids, order)),
             ChildTransition::Start {
                 agent_id,
                 agent_type,
@@ -401,6 +410,32 @@ impl ChildPresenceSet {
         Reduction::of(true, Disposition::Applied)
     }
 
+    fn stop_many(&mut self, agent_ids: &[String], order: &str) -> Reduction {
+        let mut any_changed = false;
+        let mut last_diagnostic = None;
+        for agent_id in agent_ids {
+            let reduction = self.stop(agent_id, order);
+            if reduction.disposition == Disposition::Conflict {
+                return reduction;
+            }
+            if reduction.changed {
+                any_changed = true;
+            }
+            if let Some(diagnostic) = reduction.diagnostic {
+                last_diagnostic = Some(diagnostic);
+            }
+        }
+        Reduction {
+            changed: any_changed,
+            disposition: if any_changed {
+                Disposition::Applied
+            } else {
+                Disposition::Skipped
+            },
+            diagnostic: last_diagnostic,
+        }
+    }
+
     /// Applies an event that shows a child working: a start, a tool call, or
     /// a permission request, named by `event`.
     fn advance(
@@ -498,8 +533,21 @@ impl ChildPresenceSet {
     /// and has done nothing since: a child that can hold a notify ordered at
     /// `since`.
     pub fn waits_since(&self, end: Option<EndMark<'_>>, since: &str) -> bool {
+        self.waits_since_excluding(end, since, &[])
+    }
+
+    /// [`Self::waits_since`], ignoring any children listed in `excluding`
+    /// (such as children being killed by the same event).
+    pub fn waits_since_excluding(
+        &self,
+        end: Option<EndMark<'_>>,
+        since: &str,
+        excluding: &[String],
+    ) -> bool {
         self.counted(end).iter().any(|child| {
-            child.status == ChildStatus::Waiting && child.last_mono_ns.as_str() >= since
+            child.status == ChildStatus::Waiting
+                && child.last_mono_ns.as_str() >= since
+                && !excluding.iter().any(|id| id == &child.agent_id)
         })
     }
 
