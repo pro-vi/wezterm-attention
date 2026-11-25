@@ -310,10 +310,10 @@ def parse_record(value: Any, manifest: dict[str, Any]) -> str:
         if kind == "activity" and "hold_notes" in value:
             quiet = all(note.get("quiet") is True for note in value["hold_notes"].values())
             if value["target"]["kind"] != "binding" or not (
-                (value["type"] == "stop" and (value["source"] == "claude" or (value["source"] == "codex" and quiet)))
-                or (value["type"] == "thinking" and quiet and value["source"] in {"claude", "codex"})
+                (value["type"] == "stop" and (value["source"] == "claude" or (value["source"] in {"codex", "agy"} and quiet)))
+                or (value["type"] == "thinking" and quiet and value["source"] in {"claude", "codex", "agy"})
             ):
-                raise InvalidRecord("hold notes require a binding stop, or a quiet note on Claude or Codex thinking")
+                raise InvalidRecord("hold notes require a binding stop, or a quiet note on Claude, Codex or Agy thinking")
         if kind in LIFECYCLE_SNAPSHOT_KINDS:
             validate_lifecycle(value, manifest)
         if kind == "child_presence_set":
@@ -435,6 +435,7 @@ def validate_lifecycle(value: dict[str, Any], manifest: dict[str, Any]) -> None:
                     ("codex", "request_user_input"): ("question", "blocking"),
                     ("codex", "request_user_input_async"): ("question", "nonblocking"),
                     ("codex", "request_permissions"): ("permission", None),
+                    ("agy", "ask_question"): ("question", "blocking"),
                 }.get(provider_tool, ("generic", None))
                 if (item["tool_class"], item.get("question_mode")) != expected:
                     raise InvalidRecord("tool classification mismatch")
@@ -452,8 +453,9 @@ def validate_lifecycle(value: dict[str, Any], manifest: dict[str, Any]) -> None:
                 if (actor["kind"] != "lead" or item["source_event"] not in sources
                     or compact_size(item) - compact_size(native) > limits["lifecycle_envelope_max_bytes"]
                     or any("note" in check and (item["source_event"] != "Stop"
+                        or kind != "response_finished"
                         or (check["note"].get("hold") and value["provider"] != "claude")
-                        or (check["note"].get("quiet") and value["provider"] not in {"claude", "codex"}))
+                        or (check["note"].get("quiet") and value["provider"] not in {"claude", "codex", "agy"}))
                         for check in end["hold_checks"])):
                     raise InvalidRecord("invalid annotated turn end")
             if name != ("requests" if request else "general") or compact_size(item) > limits["lifecycle_observation_max_bytes"]:

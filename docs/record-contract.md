@@ -311,8 +311,8 @@ Prompt return is `hooks publish` from a bound pane. It republishes the pane iden
 ## Child presence
 
 A binding's `children.json`, kind `child_presence_set`, holds the sub-agents of that binding that
-are running now, and nothing else. Only the providers in `subagent_providers`, Claude and Codex,
-have one; a Pi binding never does. Besides `kind`, `schema`, `address`, `launch_id`, `binding_id`
+are running now, and nothing else. Only the providers in `subagent_providers` — Claude, Codex, and
+Agy — have one; a Pi binding never does. Besides `kind`, `schema`, `address`, `launch_id`, `binding_id`
 and `provider`, it carries a `revision` UUID replaced on every write, `written_at_unix_ns`, and:
 
 - `live`: one entry per running child, `{agent_id, agent_type?, last_event, status,

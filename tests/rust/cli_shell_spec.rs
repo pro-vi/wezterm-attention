@@ -482,6 +482,27 @@ fn query_defaults_errors_and_help_support_agent_composition() {
     assert!(default.stderr.is_empty());
     let description: Value = serde_json::from_slice(&default.stdout).unwrap();
     assert_eq!(description["command"], "hooks describe");
+    let agy_desc_out = run(&["hooks", "describe", "--provider", "agy", "--json"]);
+    assert!(agy_desc_out.status.success());
+    let agy_desc: Value = serde_json::from_slice(&agy_desc_out.stdout).unwrap();
+    assert_eq!(agy_desc["result"]["provider"], "agy");
+    assert!(agy_desc["result"].get("extension_entrypoint").is_none());
+    let agy_events: Vec<&str> = agy_desc["result"]["native_hooks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["native_event"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        agy_events,
+        vec![
+            "PostToolUse",
+            "PreInvocation",
+            "PreToolUse",
+            "SessionStart",
+            "Stop"
+        ]
+    );
     for (args, exit) in [
         (vec!["hooks", "describe", "--provider", "unsupported"], 1),
         (vec!["bindings", "--provider", "unsupported"], 2),

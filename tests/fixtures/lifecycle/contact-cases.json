@@ -24,6 +24,15 @@
           "patch": {
             "source": "interactive"
           }
+        },
+        {
+          "provider": "agy",
+          "event": "PreInvocation",
+          "kind": "prompt_submitted",
+          "patch": {
+            "invocationNum": 0,
+            "initialNumSteps": 1
+          }
         }
       ]
     },
@@ -56,6 +65,17 @@
           "patch": {
             "tool_name": "read",
             "tool_use_id": "pi-call"
+          }
+        },
+        {
+          "provider": "agy",
+          "event": "PreToolUse",
+          "kind": "tool_preflight",
+          "patch": {
+            "toolCall": {
+              "name": "run_command",
+              "id": "coverage-tool"
+            }
           }
         }
       ]
@@ -91,6 +111,18 @@
             "tool_use_id": "pi-call",
             "is_error": false
           }
+        },
+        {
+          "provider": "agy",
+          "event": "PostToolUse",
+          "kind": "tool_result",
+          "patch": {
+            "toolCall": {
+              "name": "run_command",
+              "id": "coverage-tool"
+            },
+            "error": ""
+          }
         }
       ]
     },
@@ -114,6 +146,18 @@
             "tool_name": "read",
             "tool_use_id": "pi-call",
             "is_error": true
+          }
+        },
+        {
+          "provider": "agy",
+          "event": "PostToolUse",
+          "kind": "tool_result",
+          "patch": {
+            "toolCall": {
+              "name": "run_command",
+              "id": "coverage-tool"
+            },
+            "error": "command failed"
           }
         }
       ]
@@ -143,6 +187,17 @@
           "event": "agent_settled",
           "kind": "run_settled",
           "patch": {}
+        },
+        {
+          "provider": "agy",
+          "event": "Stop",
+          "kind": "response_finished",
+          "patch": {
+            "terminationReason": "NO_TOOL_CALL",
+            "fullyIdle": true,
+            "continuationActive": false,
+            "executionNum": 0
+          }
         }
       ]
     },
@@ -165,6 +220,15 @@
             "role": "assistant",
             "stop_reason": "error"
           }
+        },
+        {
+          "provider": "agy",
+          "event": "Stop",
+          "kind": "attempt_outcome",
+          "patch": {
+            "terminationReason": "ERROR",
+            "fullyIdle": true
+          }
         }
       ]
     },
@@ -186,6 +250,15 @@
           "patch": {
             "role": "assistant",
             "stop_reason": "aborted"
+          }
+        },
+        {
+          "provider": "agy",
+          "event": "Stop",
+          "kind": "user_interrupt",
+          "patch": {
+            "terminationReason": "USER_CANCELED",
+            "fullyIdle": true
           }
         }
       ]
@@ -269,6 +342,17 @@
             "tool_name": "request_user_input_async",
             "tool_use_id": "async-question"
           }
+        },
+        {
+          "provider": "agy",
+          "event": "PreToolUse",
+          "kind": "tool_preflight",
+          "patch": {
+            "toolCall": {
+              "name": "ask_question",
+              "id": "question"
+            }
+          }
         }
       ]
     },
@@ -301,6 +385,18 @@
             "tool_name": "request_user_input_async",
             "tool_use_id": "async-question",
             "tool_response": "{\"accepted\":true}"
+          }
+        },
+        {
+          "provider": "agy",
+          "event": "PostToolUse",
+          "kind": "tool_result",
+          "patch": {
+            "toolCall": {
+              "name": "ask_question",
+              "id": "question"
+            },
+            "error": ""
           }
         }
       ]
@@ -376,6 +472,21 @@
           "patch": {
             "tool_name": "shell",
             "agent_id": "coverage-child"
+          }
+        },
+        {
+          "provider": "agy",
+          "event": "PreToolUse",
+          "kind": "tool_preflight",
+          "patch": {
+            "conversationId": "coverage-child",
+            "parentConversationId": "coverage",
+            "agentName": "worker",
+            "lastUserInput": "",
+            "toolCall": {
+              "name": "run_command",
+              "id": "coverage-tool"
+            }
           }
         }
       ]

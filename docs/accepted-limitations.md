@@ -765,6 +765,49 @@ cannot do:
 - After an approval the tab keeps `notify` until the turn's `Stop`. The file
   then reads `busy` again within 0.03 s, and Attention does not act on that.
 
+## An `agy` turn stopped with Esc is recorded only from its status databases
+
+As of `agy` 1.5.16, pressing Esc in the interactive TUI or sending `SIGINT` in
+print mode runs no `Stop` hook and writes no cancellation entry to
+`transcript_full.jsonl`. On macOS, a lead `agy` prompt hook (`PreInvocation`
+with `invocationNum: 0`) that proved its host (`WEZTERM_ATTENTION_HOST_PID`)
+starts a turn follower (`attention hooks follow-turn`) that polls `agy`'s
+private SQLite databases (`conversation_summaries.db` and
+`conversations/<id>.db`, linked against the macOS SDK `libsqlite3`) once a
+second. It records a lead `user_interrupt` with `source_event` `agy_status` and
+writes an activity clear once either a step at or after `initialNumSteps`
+carries `CORTEX_STEP_STATUS_CANCELED` (`6`) with no active step running, or
+`conversation_summaries.db` transitions from working (`RUNNING`/`BUSY`/`CANCELING`
+or `not_fully_idle != 0`) to idle (`CASCADE_RUN_STATUS_IDLE`, `not_fully_idle = 0`).
+
+What it cannot do, and what else rests on `agy` 1.5.16's private on-disk files:
+
+- **macOS only for the Esc follower.** Non-macOS targets compile cleanly without
+  linking `libsqlite3`, so on Linux an Esc-interrupted `agy` turn stays
+  `thinking` until the next turn ends or `agy` exits.
+- **Private schema dependence.** Final replies for `--include-reply` (when
+  `Stop.finalModelOutput` is unset), prompt-vs-wakeup disambiguation at
+  `PreInvocation(invocationNum: 0)` (`transcript_full.jsonl`), subagent
+  parent/root linkage (`<artifactDirectoryPath>/.system_generated/messages/*.json`),
+  and Esc detection (`conversation_summaries.db`, `conversations/<id>.db`) all
+  read `agy` 1.5.16's private on-disk files. Every reader is bounded, refuses
+  symlinks and foreign ownership, and fails closed if `agy` changes its private
+  layout or SQLite schema.
+- **No hook consumer or check on `agy_status`.** As with Claude's
+  `session_status`, no hook consumer, reply capture, or quiet check runs for a
+  follower-recorded `agy_status` interrupt; `attention observe` and
+  `attention inspect` still see it.
+- **`PostToolUse.error` is empty for skipped `ask_question` and non-zero commands.**
+  As of `agy` 1.5.16, answered `ask_question`, Esc-skipped `ask_question`, and
+  failing `run_command` exits all send `PostToolUse` with `error: ""` and no
+  `result`. `attention observe --for answer` therefore reports that `ask_question`
+  returned, not that the user submitted an answer, and `tool_result.is_error`
+  is set only when `error` is non-empty.
+- **Background wakeup race and restore.** A turn whose `Stop` hook failed or
+  timed out is cleared as `agy_status` when the conversation returns to idle.
+  `examples/restore.mjs` currently types no resume line for `agy`
+  (`no_resume_form_for_agy`), as for Pi.
+
 ## A sub-agent whose permission was granted reads as waiting until its next tool call
 
 A sub-agent is marked waiting when it asks for permission, running again at

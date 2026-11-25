@@ -45,7 +45,7 @@ The launcher follows the link to find its checkout, so it works from anywhere on
 
 **After every `wezterm.plugin.update_all()`, run `install-cli.sh` again.** Updating replaces the Lua files with the newest commit on the repository's default branch, and leaves the previously built command in place, so the plugin can run ahead of the writer.
 
-Then register the [Claude Code](#claude-code-hooks) and [Codex](#codex-hooks) hooks. On macOS that is enough: an agent's first session start claims its pane by itself, so zsh needs no claim step. Bash still claims each agent command it starts, and on Linux a shell claim is the only way to claim; [Mux setup](mux-setup.md) covers both shells. See [Record contract](record-contract.md) for precedence and [Mux pane moves](mux-pane-moves.md) before moving the final pane out of a server tab.
+Then register the [Claude Code](#claude-code-hooks), [Codex](#codex-hooks) and [Antigravity CLI](#antigravity-cli-agy-hooks) hooks. On macOS that is enough: an agent's first session start claims its pane by itself, so zsh needs no claim step. Bash still claims each agent command it starts, and on Linux a shell claim is the only way to claim; [Mux setup](mux-setup.md) covers both shells. See [Record contract](record-contract.md) for precedence and [Mux pane moves](mux-pane-moves.md) before moving the final pane out of a server tab.
 
 ### Using your own clone instead
 
@@ -154,6 +154,32 @@ The setting does not keep a session out of a server that is already running, so 
 ```
 
 `SubagentStart` counts a subagent from its start. Child attribution needs matching native `agent_id` values; see [contact evidence](reviews/lifecycle-contact-results.md) for the paths that were exercised. A root `Stop` writes the lead stop and stops counting every subagent whose last event came before it. Codex (source at commit `985cf47a4`) does not make a parent wait for its subagents, but in the sessions recorded with Codex 0.157.1 none worked after its parent's `Stop`; one that does is counted again at its next event (see [accepted limitations](accepted-limitations.md#the-sub-agent-count-depends-on-how-claude-code-and-codex-send-hooks)). An `Interrupt` clears the tab's activity for that session, because Codex runs no `Stop` after one. A turn that ends on a model error runs no hook either, as of Codex 0.162.0; a turn follower records it from the session rollout as `notify` labelled with Codex's error code (see [accepted limitations](accepted-limitations.md#a-codex-turn-that-ends-on-a-model-error-is-recorded-only-from-its-rollout)). A child's `PermissionRequest` shows `notify` on the tab, since Codex has no `Notification` hook.
+
+## Antigravity CLI (`agy`) hooks
+
+Antigravity CLI (`agy`) reads global lifecycle hooks from `~/.gemini/config/hooks.json` (and project hooks from `.agents/hooks.json`). `attention hooks describe --provider agy --json` lists the five registered rows: `SessionStart`, `PreInvocation`, `PreToolUse`, `PostToolUse` and `Stop`. Use the same `WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy <Event>` command form and PATH link as for Claude Code and Codex.
+
+In `~/.gemini/config/hooks.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart":  [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy SessionStart" }] }],
+    "PreInvocation": [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy PreInvocation" }] }],
+    "PreToolUse":    [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy PreToolUse" }] }],
+    "PostToolUse":   [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy PostToolUse" }] }],
+    "Stop":          [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy Stop" }] }]
+  }
+}
+```
+
+As of `agy` 1.5.16:
+
+- `SessionStart` fires on a new conversation's first prompt and on `/new` or `/clear` (replacing the active binding in the same `agy` process when the hook proves its host and names a transcript). `agy --resume <id>` skips `SessionStart` and begins on `PreInvocation`, which lazily binds the resumed conversation under the same host proof.
+- `PreInvocation` submits the lead prompt (`invocationNum: 0` when the transcript ends on `USER_INPUT`), writes `thinking`, supports `--include-prompt` and `--quiet-check` (`before_thinking`), and starts the macOS turn follower that clears the tab on Esc from `agy`'s local SQLite status databases (see [accepted limitations](accepted-limitations.md#an-agy-turn-stopped-with-esc-is-recorded-only-from-its-status-databases)).
+- `PreToolUse` marks `ask_question` as `notify` (for lead or subagent), and `PostToolUse` restores `thinking`.
+- `Stop` with `fullyIdle: false` keeps the turn open as `thinking` while background subagents run. A terminal `Stop` with `NO_TOOL_CALL`, `TERMINAL_STEP_TYPE` or `INJECTED_RESPONSE` records `response_finished` (`stop`), supports `--include-reply` (from `finalModelOutput` or `transcriptPath`) and `--quiet-check` (`before_turn_end`), and reconciles live subagents. Error termination reasons (`ERROR`, `MAX_INVOCATIONS`, `MAX_FORCED_INVOCATIONS`, `MAX_TOKEN_BUDGET_EXCEEDED`, `TERMINAL_CUSTOM_HOOK`) record `attempt_outcome` (`notify` labelled with the reason), and `USER_CANCELED` clears the activity and records `user_interrupt`.
+- Subagents (including nested grandchildren) are linked to the root lead binding via `<artifactDirectoryPath>/.system_generated/messages/*.json`, stopped on child `Stop` (`fullyIdle: true`), lead `PostToolUse(manage_subagents)` `kill`/`kill_all`, or lead terminal `Stop`. Unlinked events with an empty `lastUserInput` are skipped before binding admission.
 
 ## Pi extension
 

@@ -155,7 +155,9 @@ fn stop(setup: &Setup, observation: &str) {
 fn codex_turn(request: &mut FollowRequest) -> &mut CodexTurn {
     match &mut request.turn {
         FollowedTurn::Codex(turn) => turn,
-        other @ FollowedTurn::Claude(_) => panic!("not a Codex turn: {other:?}"),
+        other @ (FollowedTurn::Claude(_) | FollowedTurn::Agy(_)) => {
+            panic!("not a Codex turn: {other:?}")
+        }
     }
 }
 

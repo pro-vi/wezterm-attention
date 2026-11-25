@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Antigravity CLI (`agy`) provider support (`agy` 1.5.16).** `attention hooks describe --provider agy` lists the five registered hooks (`SessionStart`, `PreInvocation`, `PreToolUse`, `PostToolUse`, `Stop`), the plugin formats the provider as `Agy`, and `shell/wezterm-attention.bash` adds `agy` to `WEZTERM_ATTENTION_COMMANDS`. Lead `PreInvocation` submits prompts (`--include-prompt` and `before_thinking` `--quiet-check`), lazily binds `agy --resume` under host proof, and distinguishes user prompts from background wakeups via `transcript_full.jsonl`. Lead `Stop` handles `fullyIdle: false` as non-terminal `thinking`, normal completion as `response_finished` (`--include-reply` from `finalModelOutput` or `transcript_full.jsonl` tail, and `before_turn_end` `--quiet-check`), error reasons as `attempt_outcome` (`notify` labelled with the reason), and `USER_CANCELED` as `user_interrupt` (`clear`). Blocking `ask_question` sets `notify` and `observe --for request,answer`; subagents and grandchildren are linked to the root lead via `.system_generated/messages/*.json` and reconciled on child `Stop`, `manage_subagents` `kill`/`kill_all`, and terminal lead `Stop`; on macOS, a turn follower clears Esc-interrupted turns (`source_event: agy_status`) from `agy`'s local SQLite status databases.
+- **`HookDelivery.observation_kind`.** Transient hook deliveries now carry optional `observation_kind` alongside `observation_id`, naming the confirmed observation's `kind` so consumers can distinguish outcomes sharing one native `source_event` (such as Agy `Stop`).
+- **ADR 0011: `provider` is an open identifier under CLI envelope schema 1.** Adding a provider raises the minor version and keeps CLI envelope schema 1, record schema 3, manifest schema 2, and wire version 2.
+
+### Fixed
+
+- **Replayed turn-ending clear events no longer clear a newer turn's activity.** `apply_clear_event` now applies the same `repeats_turn_end` replay guard as `apply_activity`.
+
 ## 1.16.0 — 2026-11-24
 
 ### Added

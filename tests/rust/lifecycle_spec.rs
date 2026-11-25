@@ -81,6 +81,8 @@ mod claim_fence;
 #[path = "lifecycle_spec/plugin_writes.rs"]
 mod plugin_writes;
 
+#[path = "lifecycle_spec/agy.rs"]
+mod agy;
 #[path = "lifecycle_spec/claude_esc_turn_end.rs"]
 mod claude_esc_turn_end;
 #[path = "lifecycle_spec/claude_status.rs"]
@@ -1469,6 +1471,8 @@ fn every_active_lifecycle_row_reaches_the_production_writer() {
             let provider = case["provider"].as_str().unwrap();
             let (start, patch) = if provider == "pi" {
                 ("session_start", json!({"start_source":"startup"}))
+            } else if provider == "agy" {
+                ("SessionStart", json!({}))
             } else {
                 ("SessionStart", json!({"source":"startup"}))
             };
@@ -1478,8 +1482,14 @@ fn every_active_lifecycle_row_reaches_the_production_writer() {
             );
             let name = case["event"].as_str().unwrap();
             let mut patch = case["patch"].clone();
-            patch["prompt"] = json!("SYNTHETIC-PRIVATE-SENTINEL");
-            patch["tool_input"] = json!({"private":"SYNTHETIC-PRIVATE-SENTINEL"});
+            if provider == "agy" {
+                if patch.get("lastUserInput").is_none() {
+                    patch["lastUserInput"] = json!("SYNTHETIC-PRIVATE-SENTINEL");
+                }
+            } else {
+                patch["prompt"] = json!("SYNTHETIC-PRIVATE-SENTINEL");
+                patch["tool_input"] = json!({"private":"SYNTHETIC-PRIVATE-SENTINEL"});
+            }
             let output = run_hook(
                 &setup,
                 &["hooks", "event", provider, name, "--strict"],
@@ -1493,9 +1503,10 @@ fn every_active_lifecycle_row_reaches_the_production_writer() {
             );
             assert!(output.stdout.is_empty());
             let directory = setup.binding_dir(provider, "coverage");
-            // A case with an agent id is a subagent's event, and a subagent's
-            // observations have their own snapshot.
-            let from_child = case["patch"].get("agent_id").is_some();
+            // A case with an agent id or parentConversationId is a subagent's
+            // event, and a subagent's observations have their own snapshot.
+            let from_child = case["patch"].get("agent_id").is_some()
+                || case["patch"].get("parentConversationId").is_some();
             let file = if from_child {
                 "children-lifecycle.json"
             } else {
@@ -1675,6 +1686,14 @@ fn payload(provider: &str, event: &str, session: &str, patch: Value) -> Value {
             "cwd": "/tmp/project",
             "model": "model-a"
         }),
+        "agy" => json!({
+            "conversationId": session,
+            "transcriptPath": "/tmp/agy.jsonl",
+            "cwd": "/tmp/project",
+            "hookEventName": event,
+            "modelName": "gemini-3.8-flash-medium",
+            "lastUserInput": "hello"
+        }),
         _ => json!({
             "session_id": session,
             "transcript_path": "/tmp/session.jsonl",
@@ -1710,11 +1729,13 @@ fn load_fixture(name: &str) -> Value {
 #[test]
 fn provider_fixtures_equal_the_closed_action_vocabulary() {
     let mut seen = BTreeSet::new();
-    for provider in ["claude", "codex", "pi"] {
+    for provider in ["claude", "codex", "pi", "agy"] {
         let fixture = load_fixture(provider);
         for case in fixture["cases"].as_array().expect("fixture cases") {
             let mut payload = fixture["base"].clone();
-            if provider != "pi" {
+            if provider == "agy" {
+                payload["hookEventName"] = case["event"].clone();
+            } else if provider != "pi" {
                 payload["hook_event_name"] = case["event"].clone();
             }
             if let (Some(target), Some(patch)) = (
@@ -1779,7 +1800,7 @@ fn hook_description_is_exhaustive_read_only_and_pins_public_fields() {
     use wezterm_attention::providers::{HookRegistration, describe_hooks};
     let contact: Value =
         serde_json::from_str(include_str!("../fixtures/lifecycle/contact-cases.json")).unwrap();
-    for provider in ["claude", "codex", "pi"] {
+    for provider in ["claude", "codex", "pi", "agy"] {
         let fixture = load_fixture(provider);
         let description = describe_hooks(provider).unwrap();
         for hook in &description.native_hooks {
@@ -1792,7 +1813,9 @@ fn hook_description_is_exhaustive_read_only_and_pins_public_fields() {
                 .filter(|case| case["event"] == *callback)
             {
                 let mut payload = fixture["base"].clone();
-                if provider != "pi" {
+                if provider == "agy" {
+                    payload["hookEventName"] = json!(callback);
+                } else if provider != "pi" {
                     payload["hook_event_name"] = json!(callback);
                 }
                 if let Some(patch) = case["patch"].as_object() {
