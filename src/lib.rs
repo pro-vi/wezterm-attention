@@ -28,6 +28,7 @@
     )
 )]
 
+pub mod check_file;
 pub mod children;
 pub mod claude_status;
 pub mod codex_rollout;

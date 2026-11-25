@@ -4440,10 +4440,7 @@ fn check_phase(event: &ProviderEvent, request: &hold_check::Request<'_>) -> Opti
     {
         return None;
     }
-    let quiet = request
-        .registrations
-        .iter()
-        .any(|registration| registration.purpose == hold_check::Purpose::Quiet);
+    let quiet = hold_check::has_quiet(request.registrations);
     if event.source_event == "Stop" && (quiet || hold_applies(event, request)) {
         return Some(Phase::BeforeTurnEnd);
     }

@@ -2092,3 +2092,322 @@ fn a_prompt_whose_check_failed_keeps_the_unseen_stop_for_its_first_tool_call() {
     assert_eq!(claimed["hold_notes"]["wezpup"]["quiet"], true);
     assert_eq!(claimed["unseen_stop"]["event_id"], first["event_id"]);
 }
+
+/// Writes `checks.json` in the state root, readable and writable by this
+/// user alone, with `checks` as its registrations.
+fn write_check_file(setup: &Setup, checks: &Value) -> PathBuf {
+    let root = state_root(&setup.env).unwrap();
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("checks.json");
+    fs::write(
+        &path,
+        serde_json::to_vec(&json!({"schema":1, "checks":checks})).unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    path
+}
+
+fn quiet_entry(provider: &str, event: &str, name: &str, check: &Path) -> Value {
+    json!({"provider":provider, "event":event, "kind":"quiet", "name":name,
+        "executable":check})
+}
+
+/// A lead prompt through `hooks event --strict`, with `flags` after the event
+/// and `CHECK_BUDGET` as the line's budget.
+fn prompt_hook(setup: &Setup, provider: &str, flags: &[&str]) -> std::process::Output {
+    let budget = CHECK_BUDGET.as_millis().to_string();
+    let mut arguments = vec![
+        "hooks",
+        "event",
+        provider,
+        "UserPromptSubmit",
+        "--strict",
+        "--check-budget-ms",
+        &budget,
+    ];
+    arguments.extend_from_slice(flags);
+    run_hook(
+        setup,
+        &arguments,
+        &super::payload(
+            provider,
+            "UserPromptSubmit",
+            "hold-session",
+            json!({"turn_id":"agent-turn", "prompt":"SYNTHETIC-AGENT-PROMPT"}),
+        ),
+    )
+}
+
+/// A quiet check that appends `name` to `order` and prints a quiet note.
+fn ordered_check(setup: &Setup, order: &Path, name: &str) -> PathBuf {
+    executable(
+        setup,
+        &format!(
+            "/bin/cat >/dev/null\necho {name} >> '{}'\nprintf '%s' '{QUIET_LINE}'",
+            order.display()
+        ),
+    )
+}
+
+#[test]
+fn a_check_in_checks_json_runs_on_a_hook_line_that_does_not_name_it() {
+    for (provider, other) in [("claude", "codex"), ("codex", "claude")] {
+        let setup = Setup::new();
+        bind(&setup, provider);
+        let (check, log, _) = logging_check(&setup);
+        let order = setup._scratch.0.join("order");
+        let elsewhere = ordered_check(&setup, &order, "elsewhere");
+        write_check_file(
+            &setup,
+            &json!([
+                quiet_entry(provider, "UserPromptSubmit", "wezpup", &check),
+                quiet_entry(provider, "Stop", "elsewhere", &elsewhere),
+                quiet_entry(other, "UserPromptSubmit", "elsewhere", &elsewhere),
+            ]),
+        );
+        let output = prompt_hook(&setup, provider, &[]);
+        assert!(
+            output.status.success(),
+            "{provider}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "", "{provider}");
+        let inputs = logged_inputs(&log);
+        assert_eq!(inputs.len(), 1, "{provider}");
+        assert_eq!(inputs[0]["phase"], "before_thinking");
+        assert_eq!(inputs[0]["check_name"], "wezpup");
+        // The prompt is read for a quiet check the line does not name too.
+        assert_eq!(inputs[0]["prompt"]["text"], "SYNTHETIC-AGENT-PROMPT");
+        let (activity, _) = records(&setup, provider);
+        assert_eq!(activity["type"], "thinking");
+        assert_eq!(
+            activity["hold_notes"]["wezpup"]["quiet"], true,
+            "{provider}"
+        );
+        assert!(!order.exists(), "{provider}: a check for another hook ran");
+    }
+}
+
+#[test]
+fn the_lines_checks_run_before_those_of_checks_json() {
+    let setup = Setup::new();
+    bind(&setup, "codex");
+    let order = setup._scratch.0.join("order");
+    let first = ordered_check(&setup, &order, "line");
+    let later = ordered_check(&setup, &order, "file");
+    write_check_file(
+        &setup,
+        &json!([quiet_entry("codex", "UserPromptSubmit", "later", &later)]),
+    );
+    let quiet = format!("first={}", first.display());
+    let output = prompt_hook(&setup, "codex", &["--quiet-check", &quiet]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(&order).unwrap(), "line\nfile\n");
+    let notes = records(&setup, "codex").0["hold_notes"].clone();
+    assert_eq!(notes["first"]["quiet"], true);
+    assert_eq!(notes["later"]["quiet"], true);
+}
+
+/// A name the line already gives, or times the line's budget cannot give,
+/// leave every check of the file out of that event, and the line's run as
+/// they would alone.
+#[test]
+fn checks_json_that_does_not_fit_beside_the_line_is_left_out_of_the_event() {
+    for case in ["same name", "budget"] {
+        let setup = Setup::new();
+        bind(&setup, "codex");
+        let order = setup._scratch.0.join("order");
+        let line = ordered_check(&setup, &order, "line");
+        let file = ordered_check(&setup, &order, "file");
+        let (named, line_time, file_time) = if case == "same name" {
+            ("wezpup", "", json!(null))
+        } else {
+            // 20 s for the line's check and 10 s for each of the file's
+            // leave the line's first check short of its time in 30 s.
+            ("other", ":20000ms", json!(10000))
+        };
+        let entries: Vec<Value> = [named, "later"]
+            .into_iter()
+            .map(|name| {
+                let mut entry = quiet_entry("codex", "UserPromptSubmit", name, &file);
+                if !file_time.is_null() {
+                    entry["time_ms"] = file_time.clone();
+                }
+                entry
+            })
+            .collect();
+        write_check_file(&setup, &json!(entries));
+        let quiet = format!("wezpup{line_time}={}", line.display());
+        let output = prompt_hook(&setup, "codex", &["--quiet-check", &quiet]);
+        assert!(
+            output.status.success(),
+            "{case}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.starts_with(
+                "attention: record_invalid: checks.json's checks for codex UserPromptSubmit were not run beside the hook line's: "
+            ),
+            "{case}: {stderr}"
+        );
+        assert_eq!(fs::read_to_string(&order).unwrap(), "line\n", "{case}");
+        let (activity, _) = records(&setup, "codex");
+        assert_eq!(activity["hold_notes"]["wezpup"]["quiet"], true, "{case}");
+    }
+}
+
+/// Turns a valid `checks.json`, at the first path, registering the check at
+/// the second, into one `hooks event` does not use.
+type Spoil = dyn Fn(&Path, &Path);
+
+/// A file `hooks event` does not use costs the event nothing but its checks:
+/// the prompt is recorded, `--strict` still exits zero, and the hook says why.
+#[test]
+fn a_checks_json_that_is_not_used_leaves_the_event_recorded_without_its_checks() {
+    let cases: [(&str, &Spoil, &str); 9] = [
+        (
+            "not JSON",
+            &|path, _| fs::write(path, "{").unwrap(),
+            "record_invalid: checks.json is invalid: ",
+        ),
+        (
+            "unknown field",
+            &|path, check| {
+                let mut entry = quiet_entry("codex", "UserPromptSubmit", "wezpup", check);
+                entry["env"] = json!({});
+                fs::write(path, json!({"schema":1, "checks":[entry]}).to_string()).unwrap();
+            },
+            "record_invalid: checks.json is invalid: unknown field `env`",
+        ),
+        (
+            // Its new field does not make it read as invalid.
+            "newer schema",
+            &|path, _| {
+                let file = json!({"schema":2, "checks":[], "consumers":[]});
+                fs::write(path, file.to_string()).unwrap();
+            },
+            "future_schema: checks.json has schema 2; this build reads schema 1",
+        ),
+        (
+            // `wezpup:100ms=…` would be read back as a check named wezpup
+            // that declares 100 ms.
+            "name with a colon",
+            &|path, check| {
+                let entry = quiet_entry("codex", "UserPromptSubmit", "wezpup:100ms", check);
+                fs::write(path, json!({"schema":1, "checks":[entry]}).to_string()).unwrap();
+            },
+            "record_invalid: checks.json names a check \"wezpup:100ms\"",
+        ),
+        (
+            // `a=/x=/y` would be read back as a check named a that runs `/x=/y`.
+            "name with an equals sign",
+            &|path, _| {
+                let entry = quiet_entry("codex", "UserPromptSubmit", "a=/x", Path::new("/y"));
+                fs::write(path, json!({"schema":1, "checks":[entry]}).to_string()).unwrap();
+            },
+            "record_invalid: checks.json names a check \"a=/x\"",
+        ),
+        (
+            // A FIFO would hold an open without O_NONBLOCK until a writer came.
+            "a FIFO",
+            &|path, _| {
+                fs::remove_file(path).unwrap();
+                let made = Command::new("/usr/bin/mkfifo").arg(path).status().unwrap();
+                assert!(made.success());
+            },
+            "record_invalid: checks.json is not a regular file",
+        ),
+        (
+            "unregistered hook",
+            &|path, check| {
+                let entry = quiet_entry("codex", "Notification", "wezpup", check);
+                fs::write(path, json!({"schema":1, "checks":[entry]}).to_string()).unwrap();
+            },
+            "record_invalid: checks.json names codex Notification, which is not a hook Attention registers",
+        ),
+        (
+            "relative program",
+            &|path, _| {
+                let entry = quiet_entry(
+                    "codex",
+                    "UserPromptSubmit",
+                    "wezpup",
+                    Path::new("bin/check"),
+                );
+                fs::write(path, json!({"schema":1, "checks":[entry]}).to_string()).unwrap();
+            },
+            "record_invalid: checks.json registers checks for codex UserPromptSubmit that a hook line could not: --quiet-check requires a unique lowercase name and absolute executable path",
+        ),
+        (
+            "group writable",
+            &|path, _| fs::set_permissions(path, fs::Permissions::from_mode(0o620)).unwrap(),
+            "state_permissions: checks.json must be owned by this user and not writable by group or others",
+        ),
+    ];
+    for (case, spoil, expected) in cases {
+        let setup = Setup::new();
+        bind(&setup, "codex");
+        let (check, log, _) = logging_check(&setup);
+        let path = write_check_file(
+            &setup,
+            &json!([quiet_entry("codex", "UserPromptSubmit", "wezpup", &check)]),
+        );
+        spoil(&path, &check);
+        let output = prompt_hook(&setup, "codex", &[]);
+        assert!(
+            output.status.success(),
+            "{case}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.starts_with(&format!("attention: {expected}")),
+            "{case}: {stderr}"
+        );
+        assert!(logged_inputs(&log).is_empty(), "{case}");
+        let (activity, _) = records(&setup, "codex");
+        assert_eq!(activity["type"], "thinking", "{case}");
+        assert!(activity.get("hold_notes").is_none(), "{case}: {activity}");
+    }
+}
+
+#[test]
+fn a_hold_check_in_checks_json_holds_a_claude_stop() {
+    let setup = Setup::new();
+    bind(&setup, "claude");
+    let check = executable(
+        &setup,
+        &format!("/bin/cat >/dev/null\nprintf '%s' '{HOLD_LINE}'"),
+    );
+    let mut entry = quiet_entry("claude", "Stop", "jev", &check);
+    entry["kind"] = json!("hold");
+    write_check_file(&setup, &json!([entry]));
+    let budget = CHECK_BUDGET.as_millis().to_string();
+    let output = run_hook(
+        &setup,
+        &[
+            "hooks",
+            "event",
+            "claude",
+            "Stop",
+            "--strict",
+            "--check-budget-ms",
+            &budget,
+        ],
+        &payload(),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (activity, snapshot) = records(&setup, "claude");
+    assert_eq!(activity["hold_notes"]["jev"]["hold"], true);
+    assert_eq!(last_end(&snapshot)["turn_end"]["held"], true);
+}

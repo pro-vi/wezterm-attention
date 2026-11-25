@@ -13,6 +13,7 @@
 - **Amended:** 2026-11-01 — the default held indicator is U+F186, Font Awesome's crescent moon
 - **Amended:** 2026-11-24 — a quiet check also runs as a lead turn starts, and its note marks the turn's `thinking`
 - **Amended:** 2026-11-25 — a stop the user is called to see stays under an application's turn until they have looked
+- **Amended:** 2026-11-25 — a check may also be registered in `checks.json` in the state root, which changes no hook line
 
 ## Context
 
@@ -114,6 +115,39 @@ and which no acknowledgement under the writer's locks can clear; and a
 record file of its own, which an older reader would ignore but which every
 activity writer would have to keep in step with the activity. An older
 reader rejects an activity that carries the copy.
+
+Amendment, 2026-11-25: a check may also be registered in `checks.json` in
+the state root, for one provider's hook event, and `hooks event` runs it after
+the checks of its kind that the hook line names. A check's registration no
+longer has to sit on the line, because a provider may tie its approval to the
+hook it approved. Codex (as of 0.171.0, read in its source) runs a hook only
+while the profile holds an approval of a hash of its event, matcher and
+handler, the command included, and a running session rebuilds its hooks against the approvals it
+already loaded, so a check added to a line needs a new approval in every
+Codex profile, and a session that was running can drop the line without a
+word. On 2026-11-25 one of two Codex sessions running while a check was added
+to its prompt and tool-call lines recorded no prompt and no tool call for its
+next two turns, the second after the lines were put back (wezpup's
+observation; wezpup is the application whose check it was). With the file, an
+installer adds, changes or removes a check, and no line changes. The file
+holds checks only, of both kinds, with what a flag carries: name, declared
+time, executable. It sets no environment; a check receives the hook's, as a
+line's check does. It lives in the state root, so whatever isolates the state
+root, such as a test's `WEZTERM_ATTENTION_DIR`, isolates its checks too. The
+whole file is ignored when it cannot be read, is not this user's, is writable
+by group or others, has a later schema, or holds an entry this build would
+refuse, a row it does not register included; an event's checks from it are
+left out when the line would be refused with them on it, by a name the line
+gives, times its budget cannot give, or more checks than the turn-end audit
+holds. Either way the event is recorded without them and the hook prints a
+diagnostic, which leaves the exit code alone as every diagnostic does.
+`doctor` lists the file's checks and says whether the file is valid; whether
+an event's checks fit beside its line shows only in that hook's diagnostic.
+Rejected: the same file for
+every option of `hooks event`, consumers and budget included, which nothing
+needs yet and which the file's `schema` leaves room for; a flag on the line
+that names the file, which would change every line once more; and keeping
+checks on the line only, which pays the approval on every change.
 ## Rationale
 
 A pre-write application check keeps message judgment with the application while Attention owns native facts and final state. Post-write consumers are too late. Keeping the preceding activity can keep an earlier checkmark. An internal question-matching heuristic duplicates application policy and gives Attention responsibility for message interpretation.

@@ -79,6 +79,8 @@ The binding record is durable before its pointer. Every writer of pane records i
 
 Schema 2 carries `source` with canonical `socket_path`, `realm_id` and `incarnation_id`, derived from the publishing GUI socket. The filename must match its incarnation and window ID. Schema-1 files at `tabs/<window id>.json` remain readable with no known source. Equal window numbers do not associate legacy files with new sources. Cleanup uses the validated file path rather than reconstructing one from a window number.
 
+An application's installer may also write `checks.json` at the state root, which registers hold and quiet checks that `hooks event` runs. It is input, not a published fact, and like the tab-order files it carries its own `schema` (currently 1) rather than a manifest entry. No `attention` command writes or removes it. See [checks registered outside the hook line](consumer-guide.md#pre-write-hold-checks).
+
 
 Window checks are derived per query and never stored in publication files. Their statuses are `present`, `not_listed` and `unavailable`; source identity failure cannot produce `not_listed`. The recorded source namespace is separate from a pane realm, so realm-filtered sweep still leaves tab publications alone.
 
