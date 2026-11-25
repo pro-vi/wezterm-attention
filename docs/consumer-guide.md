@@ -18,7 +18,7 @@ Use the full pane object. A server pane ID alone is not globally unique across m
 |---|---|
 | `type` | Existing display winner after activity/review priority |
 | `frame` | The frame of the pane's activity, which `get_attention` returns second: the one its writer stored, as `attention mark --frame` does, or, for a `thinking` pane whose writer stored none, one from the clock, a new one each second. `nil` when the pane shows another state than the activity's own: a review that outranks it, a hold, or a waiting child's `notify` |
-| `activity_type`, `event_id`, `source` | Eligible lead activity, independently of review |
+| `activity_type`, `event_id`, `source` | Eligible lead activity, independently of review. While the pane shows a stop the user has not seen under later activity (`unseen_stop` in the [record contract](record-contract.md#precedence-and-the-plugins-writes)), they are that stop's |
 | `label` | The shown activity's label, such as the Codex error code on an errored turn's `notify`; `nil` when the activity has none, or when the pane shows another state than the activity's own: a review that outranks it, a hold, or a waiting child's `notify` |
 | `turn_end_held`, `turn_end_quiet` | Whether the shown turn end is held by a [hold check](#pre-write-hold-checks), or carries a quiet note; both false when neither applies |
 | `thinking_quiet` | Whether the pane shows a lead's `thinking` whose turn a [quiet check](#pre-write-hold-checks) proved an application's when it started; false on a held turn end and when a review outranks the thinking. Attention 1.15.1 and earlier never set it |

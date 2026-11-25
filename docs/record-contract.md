@@ -469,6 +469,25 @@ new `event_id` instead of reporting the acknowledged one unchanged. Without that
 activity is a `stop` the human already dismissed would never light the tab again. An unreadable
 acknowledgement counts as none, so it can only leave the earlier behaviour in place.
 
+A stop the user is called to see, one with no hold note that holds and no quiet note, stays under
+a turn a quiet check proved an application's until they have looked. When a hook's activity that
+carries a quiet note replaces such a stop of its own source while the stop is still shown and has
+no `ttl_ms`, the new record keeps a copy of it as `unseen_stop`: its `event_id`, `source`,
+`observed_mono_ns` and `written_at_unix_ns`, with `frame` and `label` when it has them. Each later
+hook activity with a quiet note carries the copy on while neither the slot's clear nor the
+acknowledgement covers the copy or the activity that carries it. The `thinking` of a prompt the quiet
+checks were asked about and did not claim carries the copy too, because as of Claude Code 2.1.331
+a check can tell where a Claude prompt came from only at the turn's first tool call; when that
+call's checks answer and none claims it, the record is written again without the copy, under the
+same `event_id`. Any other activity, a prompt no quiet check was asked about included,
+keeps none: the user's own turn, or a pane nobody can acknowledge from this GUI, would otherwise
+keep the copy for good. Only a binding's `thinking` or an activity with a quiet note carries one.
+The view shows the copy as the pane's activity while the activity under it does not outrank a
+stop in the configured priority, and `attention plugin acknowledge` accepts its event id while it
+is shown so. An acknowledgement of the copy, or of the activity that carries it, ends it. A `mark`
+write and a turn end the turn follower records keep none. Attention 1.16.0 and earlier, plugin or
+command, reject an activity that carries one.
+
 A held Claude Stop retains native activity `type=stop` and stores validated `hold_notes` under the configured program names. The GUI derives fixed held presentation from these notes. While the binding's child set holds a waiting child, the GUI presents any lead `stop`, held or not, as `notify`. The writer runs no hold check for a Stop that keeps a waiting child counted, and records each configured program as `not_dispatched` with reason `child_waiting` ([ADR 0005](adr/0005-application-hold-notes-on-recorded-turn-ends.md) says which children a Stop keeps). Automatic acknowledgement refuses held activity under the writer locks, including when custom auto_clear includes its displayed type. Any newer activity, such as the next prompt's or a later applicable unheld Stop's, replaces it.
 
 Its native lead lifecycle observation retains the original event/actor/time and gains Attention-owned `turn_end` applicability, held state and per-program execution facts. This is written after native effects, not an application claim. Audit is excluded from native replay equality. The native-only observation allowance remains 2048 bytes; a separate 16384-byte allowance includes the annotation field's encoding overhead, for a total 18432-byte item limit. Exact nested notes require depth 9. Pool count/byte and snapshot limits remain unchanged. Registration reserves worst-case escaped audit bytes before native application so optional audit cannot displace native fields. The transient task array and reply are not stored here.

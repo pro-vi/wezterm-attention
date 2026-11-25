@@ -12,6 +12,7 @@
 - **Amended:** 2026-10-20 — `--check-budget-ms` sets the shared deadline for its hook line; 5000 ms without it
 - **Amended:** 2026-11-01 — the default held indicator is U+F186, Font Awesome's crescent moon
 - **Amended:** 2026-11-24 — a quiet check also runs as a lead turn starts, and its note marks the turn's `thinking`
+- **Amended:** 2026-11-25 — a stop the user is called to see stays under an application's turn until they have looked
 
 ## Context
 
@@ -84,6 +85,35 @@ than unreadable history, since a session's first prompt is its first
 observation. Rejected: a declaration on the launch that its turns are an
 agent's unless a person submits the prompt, which would keep state on the
 launch and still need the prompt check to say which prompts are the person's.
+
+Amendment, 2026-11-25: a stop the user is called to see, one that no hold
+note holds and no quiet note marks, stays on its pane through a turn a quiet
+check proved an application's, until the user has looked. Before, the next
+activity replaced it, so when a turn an application sent started in a pane
+whose finished turn nobody had looked at, that turn's working mark and then
+its quiet end took the pane, and the finished turn was never shown. The
+writer copies such a stop of the same source, while it is still shown, into
+the next activity record as `unseen_stop` when that record carries a quiet
+note: its event id, source and times, and its frame and label when it has
+them. Each later activity with a quiet note carries the copy on until the
+user acknowledges it or the activity it sits under, or a clear covers it.
+The view shows it as the pane's activity while the activity it sits under
+does not outrank a stop, and the plugin acknowledges it by its own event id.
+The `thinking` of a prompt the checks were asked about and did not claim
+carries it too, because as of Claude Code 2.1.331 a check can tell where a Claude
+prompt came from only at the turn's first tool call; that call, left
+unclaimed too, removes it. Any other activity drops it, because a turn that
+is not an application's is the user moving on, and a pane this GUI never
+acknowledges, such as one read from another machine, would otherwise keep it
+for good. A held stop is not copied, because the agent's work goes on and
+the turn's result comes with a later stop; neither is another publisher's
+stop, which only its own clear withdraws, nor a stop with a time limit,
+which the copy would outlive. Rejected: memory in the plugin or in a
+consumer's bar, which a configuration reload loses, another GUI never sees,
+and which no acknowledgement under the writer's locks can clear; and a
+record file of its own, which an older reader would ignore but which every
+activity writer would have to keep in step with the activity. An older
+reader rejects an activity that carries the copy.
 ## Rationale
 
 A pre-write application check keeps message judgment with the application while Attention owns native facts and final state. Post-write consumers are too late. Keeping the preceding activity can keep an earlier checkmark. An internal question-matching heuristic duplicates application policy and gives Attention responsibility for message interpretation.

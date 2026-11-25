@@ -499,6 +499,18 @@
         "written_at_unix_ns": "unix_ns20"
       }
     },
+    "unseen_stop": {
+      "required": ["event_id", "source", "observed_mono_ns", "written_at_unix_ns"],
+      "optional": ["frame", "label"],
+      "types": {
+        "event_id": "uuid",
+        "source": "safe_label",
+        "observed_mono_ns": "monotonic_ns20",
+        "written_at_unix_ns": "unix_ns20",
+        "frame": "nonnegative_integer",
+        "label": "safe_label"
+      }
+    },
     "prompt_answer": {
       "required": ["tool_call_id", "question_index", "observation_id", "observed_mono_ns"],
       "optional": [],
@@ -1072,7 +1084,8 @@
         "frame",
         "label",
         "ttl_ms",
-        "hold_notes"
+        "hold_notes",
+        "unseen_stop"
       ],
       "types": {
         "kind": "record_kind",
@@ -1088,7 +1101,8 @@
         "frame": "nonnegative_integer",
         "label": "safe_label",
         "ttl_ms": "positive_integer",
-        "hold_notes": "hold_notes"
+        "hold_notes": "hold_notes",
+        "unseen_stop": "unseen_stop"
       }
     },
     "activity_clear": {

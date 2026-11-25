@@ -641,6 +641,29 @@ return function(context)
     records.acknowledgement = acknowledgement
     collect_diagnostic(diagnostics, ack_diagnostic)
 
+    -- A stop the user has not seen stays under the later activity the writer
+    -- kept it beneath. The pane shows it while that activity does not outrank
+    -- a stop and the user has acknowledged neither.
+    local unseen_stop = activity and activity.unseen_stop
+    if unseen_stop and activity_clear and unseen_stop.observed_mono_ns <= activity_clear.observed_mono_ns then
+      unseen_stop = nil
+    end
+    if unseen_stop and not (acknowledgement and same_target(acknowledgement.target, activity.target)
+        and (acknowledgement.activity_event_id == activity.event_id
+          or acknowledgement.activity_event_id == unseen_stop.event_id)) then
+      local priority = M._active_priority_map or { thinking = 1, review = 2, stop = 3, notify = 4 }
+      if (priority[activity.type] or 0) <= (priority.stop or 0) then
+        activity = {
+          kind = activity.kind, schema = activity.schema, address = activity.address,
+          launch_id = activity.launch_id, target = activity.target, type = "stop",
+          event_id = unseen_stop.event_id, source = unseen_stop.source,
+          observed_mono_ns = unseen_stop.observed_mono_ns,
+          written_at_unix_ns = unseen_stop.written_at_unix_ns,
+          frame = unseen_stop.frame, label = unseen_stop.label,
+        }
+      end
+    end
+
     local activity_expiry_unix_ns
     if activity and activity.ttl_ms then
       local expired, age_error, boundary =

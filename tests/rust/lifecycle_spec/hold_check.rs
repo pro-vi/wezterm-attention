@@ -1810,3 +1810,285 @@ fn a_lead_tool_call_held_by_a_waiting_child_runs_no_quiet_check() {
     assert!(logged_inputs(&log).is_empty());
     assert_eq!(records(&setup, "claude").0["type"], "notify");
 }
+
+fn acknowledge(setup: &Setup, event_id: &Value) -> String {
+    let root = state_root(&setup.env).unwrap();
+    let (address, _) = pane_address(&setup.env).unwrap();
+    wezterm_attention::lifecycle::acknowledge_activity(
+        &root,
+        &address,
+        &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"],
+        event_id.as_str().unwrap(),
+    )
+    .unwrap()
+    .disposition
+    .as_str()
+    .to_owned()
+}
+
+/// A person's finished turn stays on the pane until they have looked, through
+/// the turn an application starts there next: the tab shows the person's
+/// stop, not the application's thinking or its quiet stop, until the plugin
+/// acknowledges it. Then the application's activity shows, and its next turn
+/// keeps nothing.
+#[test]
+fn a_stop_the_user_has_not_seen_stays_under_an_applications_turn() {
+    for provider in ["claude", "codex"] {
+        let setup = Setup::new();
+        bind(&setup, provider);
+        let (check, _log, _answer) = logging_check(&setup);
+        setup.apply(
+            &event(
+                provider,
+                "UserPromptSubmit",
+                "hold-session",
+                json!({"turn_id":"typed-turn"}),
+            ),
+            "00000000000000000300",
+        );
+        setup.apply(
+            &event(
+                provider,
+                "Stop",
+                "hold-session",
+                json!({"turn_id":"typed-turn"}),
+            ),
+            "00000000000000000310",
+        );
+        let (typed, _) = records(&setup, provider);
+        assert_eq!(typed["type"], "stop");
+        assert!(typed.get("unseen_stop").is_none());
+        let typed_render = super::mark_clear::plugin_reader_answer(&setup, "quiet_render");
+
+        quiet_thinking(
+            &setup,
+            provider,
+            "UserPromptSubmit",
+            json!({"turn_id":"agent-turn","prompt":"SYNTHETIC-AGENT-PROMPT"}),
+            &check,
+            "00000000000000000320",
+        );
+        let (thinking, _) = records(&setup, provider);
+        assert_eq!(thinking["type"], "thinking");
+        assert_eq!(thinking["hold_notes"]["wezpup"]["quiet"], true);
+        assert_eq!(thinking["unseen_stop"]["event_id"], typed["event_id"]);
+        assert_eq!(thinking["unseen_stop"]["source"], provider);
+        wezterm_attention::protocol::validate_record(&thinking, Some("activity")).unwrap();
+        assert_eq!(
+            super::mark_clear::plugin_reader_answer(&setup, "quiet_render"),
+            typed_render,
+            "{provider}: the person's stop shows over the application's thinking"
+        );
+
+        // The turn's tool calls leave the record as it was.
+        quiet_thinking(
+            &setup,
+            provider,
+            "PreToolUse",
+            json!({"tool_name":"Bash","tool_use_id":"call_1","turn_id":"agent-turn"}),
+            &check,
+            "00000000000000000330",
+        );
+        assert_eq!(records(&setup, provider).0, thinking);
+
+        quiet_thinking(
+            &setup,
+            provider,
+            "Stop",
+            json!({"turn_id":"agent-turn"}),
+            &check,
+            "00000000000000000340",
+        );
+        let (ended, _) = records(&setup, provider);
+        assert_eq!(ended["type"], "stop");
+        assert_eq!(ended["hold_notes"]["wezpup"]["quiet"], true);
+        assert_eq!(ended["unseen_stop"], thinking["unseen_stop"]);
+        assert_eq!(
+            super::mark_clear::plugin_reader_answer(&setup, "quiet_render"),
+            typed_render,
+            "{provider}: the person's stop shows over the application's quiet stop"
+        );
+
+        assert_eq!(acknowledge(&setup, &typed["event_id"]), "applied");
+        let quiet_render = super::mark_clear::plugin_reader_answer(&setup, "quiet_render");
+        assert!(
+            quiet_render
+                .starts_with("raw=stop shown=stop thinking_quiet=false turn_end_quiet=true"),
+            "{provider}: {quiet_render}"
+        );
+        assert_eq!(acknowledge(&setup, &ended["event_id"]), "applied");
+        assert_eq!(
+            super::mark_clear::plugin_reader_answer(&setup, "activity"),
+            "activity=none source=none"
+        );
+
+        quiet_thinking(
+            &setup,
+            provider,
+            "UserPromptSubmit",
+            json!({"turn_id":"next-agent-turn","prompt":"SYNTHETIC-AGENT-PROMPT"}),
+            &check,
+            "00000000000000000350",
+        );
+        let (next, _) = records(&setup, provider);
+        assert_eq!(next["hold_notes"]["wezpup"]["quiet"], true);
+        assert!(next.get("unseen_stop").is_none(), "{provider}: {next}");
+    }
+}
+
+/// A prompt the quiet checks answered without claiming keeps the unseen stop
+/// until its turn's first tool call is answered, since a check can prove a
+/// Claude turn an application's only at that call; left unclaimed there too,
+/// the turn is the person's, and the stop goes. A prompt no quiet check was
+/// asked about keeps nothing, and neither does a held stop or another
+/// publisher's stop.
+#[test]
+fn only_an_applications_turn_keeps_the_unseen_stop() {
+    let setup = Setup::new();
+    bind(&setup, "claude");
+    let (check, _log, answer) = logging_check(&setup);
+    let tool = |id: &str, turn: &str| json!({"tool_name":"Bash","tool_use_id":id,"turn_id":turn});
+    setup.apply(
+        &event("claude", "Stop", "hold-session", json!({"turn_id":"t1"})),
+        "00000000000000000300",
+    );
+    let (first, _) = records(&setup, "claude");
+    fs::write(&answer, "").unwrap();
+    quiet_thinking(
+        &setup,
+        "claude",
+        "UserPromptSubmit",
+        json!({"turn_id":"t2","prompt":"SYNTHETIC-PEER-PROMPT"}),
+        &check,
+        "00000000000000000310",
+    );
+    let (unclaimed, _) = records(&setup, "claude");
+    assert_eq!(unclaimed["type"], "thinking");
+    assert!(unclaimed.get("hold_notes").is_none());
+    assert_eq!(unclaimed["unseen_stop"]["event_id"], first["event_id"]);
+    wezterm_attention::protocol::validate_record(&unclaimed, Some("activity")).unwrap();
+    assert!(
+        super::mark_clear::plugin_reader_answer(&setup, "quiet_render")
+            .starts_with("raw=stop shown=stop ")
+    );
+    quiet_thinking(
+        &setup,
+        "claude",
+        "PreToolUse",
+        tool("call_1", "t2"),
+        &check,
+        "00000000000000000315",
+    );
+    let (person, _) = records(&setup, "claude");
+    assert!(person.get("unseen_stop").is_none(), "{person}");
+    assert_eq!(person["event_id"], unclaimed["event_id"]);
+    assert!(
+        super::mark_clear::plugin_reader_answer(&setup, "quiet_render")
+            .starts_with("raw=thinking shown=thinking ")
+    );
+    assert_eq!(acknowledge(&setup, &first["event_id"]), "ignored");
+
+    // A prompt that no quiet check was asked about keeps nothing.
+    setup.apply(
+        &event("claude", "Stop", "hold-session", json!({"turn_id":"t2"})),
+        "00000000000000000320",
+    );
+    setup.apply(
+        &event(
+            "claude",
+            "UserPromptSubmit",
+            "hold-session",
+            json!({"turn_id":"t3"}),
+        ),
+        "00000000000000000330",
+    );
+    let (unasked, _) = records(&setup, "claude");
+    assert_eq!(unasked["type"], "thinking");
+    assert!(unasked.get("unseen_stop").is_none(), "{unasked}");
+
+    // A held turn end of the person's turn is not kept under the next turn.
+    let hold = executable(
+        &setup,
+        &format!("/bin/cat > /dev/null\nprintf '%s' '{HOLD_LINE}'"),
+    );
+    let output = hook(&setup, &payload(), &hold, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let (held, _) = records(&setup, "claude");
+    assert_eq!(held["hold_notes"]["jev"]["hold"], true, "{held}");
+    fs::write(&answer, QUIET_LINE).unwrap();
+    quiet_thinking(
+        &setup,
+        "claude",
+        "UserPromptSubmit",
+        json!({"turn_id":"t4","prompt":"SYNTHETIC-AGENT-PROMPT"}),
+        &check,
+        "99999999999999999990",
+    );
+    let (after_hold, _) = records(&setup, "claude");
+    assert_eq!(after_hold["hold_notes"]["wezpup"]["quiet"], true);
+    assert!(after_hold.get("unseen_stop").is_none(), "{after_hold}");
+
+    // Another publisher's stop is withdrawn by its own clear, so it is not
+    // copied under an application's turn.
+    apply_mark_activity(
+        &setup.env,
+        "stop",
+        "build",
+        None,
+        None,
+        None,
+        "99999999999999999991",
+        "00000000012345678900",
+    )
+    .expect("mark applies");
+    quiet_thinking(
+        &setup,
+        "claude",
+        "UserPromptSubmit",
+        json!({"turn_id":"t5","prompt":"SYNTHETIC-AGENT-PROMPT"}),
+        &check,
+        "99999999999999999992",
+    );
+    let (after_mark, _) = records(&setup, "claude");
+    assert_eq!(after_mark["hold_notes"]["wezpup"]["quiet"], true);
+    assert!(after_mark.get("unseen_stop").is_none(), "{after_mark}");
+}
+
+/// A prompt whose quiet check failed has not been shown to be the person's,
+/// so its thinking keeps the unseen stop, and a first tool call that proves
+/// the turn an application's keeps it on.
+#[test]
+fn a_prompt_whose_check_failed_keeps_the_unseen_stop_for_its_first_tool_call() {
+    let setup = Setup::new();
+    bind(&setup, "claude");
+    let (check, _log, _answer) = logging_check(&setup);
+    let failing = executable(&setup, "/bin/cat > /dev/null\nexit 3");
+    setup.apply(
+        &event("claude", "Stop", "hold-session", json!({"turn_id":"t1"})),
+        "00000000000000000300",
+    );
+    let (first, _) = records(&setup, "claude");
+    let outcome = quiet_thinking(
+        &setup,
+        "claude",
+        "UserPromptSubmit",
+        json!({"turn_id":"t2","prompt":"SYNTHETIC-PEER-PROMPT"}),
+        &failing,
+        "00000000000000000310",
+    );
+    assert_ne!(outcome.hold_checks[0].stage, hold_check::Stage::Completed);
+    let (prompted, _) = records(&setup, "claude");
+    assert!(prompted.get("hold_notes").is_none());
+    assert_eq!(prompted["unseen_stop"]["event_id"], first["event_id"]);
+    quiet_thinking(
+        &setup,
+        "claude",
+        "PreToolUse",
+        json!({"tool_name":"Bash","tool_use_id":"call_1","turn_id":"t2"}),
+        &check,
+        "00000000000000000315",
+    );
+    let (claimed, _) = records(&setup, "claude");
+    assert_eq!(claimed["hold_notes"]["wezpup"]["quiet"], true);
+    assert_eq!(claimed["unseen_stop"]["event_id"], first["event_id"]);
+}

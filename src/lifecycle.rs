@@ -1100,6 +1100,7 @@ fn semantic_activity(mut value: Value) -> Value {
             "observed_mono_ns",
             "written_at_unix_ns",
             "publication_id",
+            "unseen_stop",
         ] {
             object.remove(field);
         }
@@ -1121,6 +1122,70 @@ fn acknowledged(root: &Path, identity: &RecordIdentity, existing: &Value) -> boo
         return false;
     };
     ack["target"] == existing["target"] && ack["activity_event_id"].as_str() == Some(event_id)
+}
+
+/// Whether `activity` is a turn end the user is called to see: a stop that
+/// neither a hold check holds nor a quiet check proved an application's.
+fn stop_to_see(activity: &Value) -> bool {
+    let notes = activity["hold_notes"].as_object();
+    activity["type"] == "stop"
+        && !notes.is_some_and(|notes| {
+            notes
+                .values()
+                .any(|note| note["hold"] == true || note["quiet"] == true)
+        })
+}
+
+/// Whether a quiet check proved the turn of `activity` an application's.
+fn quiet_activity(activity: &Value) -> bool {
+    activity["hold_notes"]
+        .as_object()
+        .is_some_and(|notes| notes.values().any(|note| note["quiet"] == true))
+}
+
+/// The stop the user has not seen that `existing`, the activity a new
+/// activity of `source` replaces in its slot, leaves for that new one to
+/// keep: `existing` itself, when it is a stop of that same source the user
+/// is called to see and still shown, or the stop it already keeps, while
+/// neither the slot's clear nor the user's acknowledgement covers it or
+/// `existing`. Another publisher's stop is not copied, since only its own
+/// `mark clear` withdraws it, and neither is a stop with a time limit, since
+/// the copy has none.
+fn unseen_stop_under(
+    root: &Path,
+    identity: &RecordIdentity,
+    existing: &Value,
+    source: &Value,
+    visible: bool,
+    clear: Option<&Value>,
+) -> Option<Value> {
+    if visible
+        && stop_to_see(existing)
+        && existing["source"] == *source
+        && existing.get("ttl_ms").is_none()
+    {
+        let mut stop = json!({});
+        for field in [
+            "event_id",
+            "source",
+            "observed_mono_ns",
+            "written_at_unix_ns",
+            "frame",
+            "label",
+        ] {
+            if let Some(value) = existing.get(field) {
+                stop[field] = value.clone();
+            }
+        }
+        return Some(stop);
+    }
+    let stop = existing.get("unseen_stop")?;
+    let kept = json!({"target": existing["target"], "event_id": stop["event_id"]});
+    (uncleared(existing, clear)
+        && uncleared(stop, clear)
+        && !acknowledged(root, identity, existing)
+        && !acknowledged(root, identity, &kept))
+    .then(|| stop.clone())
 }
 
 /// Whether the clear watermark `clear` covers what was observed at
@@ -1987,6 +2052,36 @@ fn apply_activity(
                 && existing
                     .as_ref()
                     .is_some_and(|activity| notify_held_by_child(resolved, &binding_id, activity));
+            let unseen = existing.as_ref().and_then(|existing| {
+                unseen_stop_under(
+                    &resolved.root,
+                    &identity,
+                    existing,
+                    &base["source"],
+                    visible,
+                    clear.as_ref(),
+                )
+            });
+            // Whether this lead event's checks were asked at all, and whether
+            // they answered without claiming the turn: one completed, none
+            // left a quiet note, and none had its note discarded.
+            let (asked, unclaimed) = resolved
+                .evidence
+                .as_ref()
+                .filter(|_| event.agent_id.is_none())
+                .map_or((false, false), |evidence| {
+                    let checks = &evidence.borrow().hold_checks;
+                    (
+                        !checks.is_empty(),
+                        checks
+                            .iter()
+                            .any(|check| check.stage == hold_check::Stage::Completed)
+                            && !checks.iter().any(|check| {
+                                check.stage == hold_check::Stage::EvidenceChanged
+                                    || check.note.as_ref().is_some_and(|note| !note.holds())
+                            }),
+                    )
+                });
             let ActivityOutcome {
                 result,
                 standing: activity,
@@ -2025,6 +2120,40 @@ fn apply_activity(
                     observation,
                     written_at,
                 )
+            };
+            // The stop the user has not seen stays under a turn a quiet check
+            // proved an application's: a person's own turn means they have
+            // moved on, and a pane this GUI never acknowledges, such as one
+            // read from another machine, would otherwise keep it for good. A
+            // prompt the checks were asked about and did not claim keeps it
+            // until its turn's first tool call is answered, since as of
+            // Claude Code 2.1.331 a check can tell where a prompt came from
+            // only then; that call, left unclaimed too, takes it away.
+            let prompt_asked = asked && event.source_event == "UserPromptSubmit";
+            let (activity, written) = match (unseen, written) {
+                (Some(stop), Some(mut record))
+                    if result.disposition.as_str() == "applied"
+                        && (quiet_activity(&record)
+                            || (prompt_asked && record["type"] == "thinking")) =>
+                {
+                    record["unseen_stop"] = stop;
+                    (Some(record.clone()), Some(record))
+                }
+                (_, None)
+                    if result.disposition.as_str() == "skipped"
+                        && unclaimed
+                        && event.source_event == "PreToolUse"
+                        && activity.as_ref().is_some_and(|standing| {
+                            standing.get("unseen_stop").is_some() && !quiet_activity(standing)
+                        }) =>
+                {
+                    let mut record = activity.unwrap_or_default();
+                    if let Some(object) = record.as_object_mut() {
+                        object.remove("unseen_stop");
+                    }
+                    (Some(record.clone()), Some(record))
+                }
+                (_, written) => (activity, written),
             };
             let mut replacements: Vec<_> = written
                 .map(|record| Replacement::always(activity_path.clone(), record))
@@ -2733,13 +2862,20 @@ pub fn acknowledge_activity(
             } = activity_slot(root, address, launch_id, current.as_ref())?;
             let activity = read_record_at(root, "activity", &identity)?;
             let shown = activity.as_ref().is_some_and(|activity| {
-                activity["event_id"].as_str() == Some(activity_event_id)
-                    && activity["target"] == target
+                activity["target"] == target
                     && uncleared(activity, clear.as_ref())
-                    && activity
-                        .get("hold_notes")
-                        .and_then(Value::as_object)
-                        .is_none_or(|notes| !notes.values().any(|note| note["hold"] == true))
+                    && if activity["event_id"].as_str() == Some(activity_event_id) {
+                        activity
+                            .get("hold_notes")
+                            .and_then(Value::as_object)
+                            .is_none_or(|notes| !notes.values().any(|note| note["hold"] == true))
+                    } else {
+                        // The stop kept under the activity, which the pane
+                        // shows until the user has acknowledged either.
+                        activity["unseen_stop"]["event_id"].as_str() == Some(activity_event_id)
+                            && uncleared(&activity["unseen_stop"], clear.as_ref())
+                            && !acknowledged(root, &identity, activity)
+                    }
             });
             if !shown {
                 return Ok(CommitPlan::reporting(Mutation::plain(

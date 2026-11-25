@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **A finished turn nobody has looked at stays on its pane through the turns an application starts there.** Before, the next activity replaced it, so when an agent's message started a turn in a pane whose finished turn was unread, that turn's working mark and then its quiet end took the pane, and the check never showed. Now an activity a quiet check proved an application's keeps a copy of the stop as `unseen_stop` until the user acknowledges it or the activity above it. The `thinking` of a prompt the quiet checks were asked about and did not claim keeps it until the turn's first tool call is answered, since a check can tell where a Claude prompt came from only then. The pane view shows the copy as the pane's activity, with its own `event_id`, while the activity above it does not outrank a stop, so the tab shows the check over the application's working mark, held mark and quiet end. A turn that is not an application's, a `notify`, a held turn end and another publisher's stop keep the old behaviour. Update the plugin and the `attention` command together: 1.16.0 and earlier reject an activity record that carries the copy. See "Precedence and the plugin's writes" in `docs/record-contract.md`.
+
 ## 1.16.0 — 2026-11-24
 
 ### Added
