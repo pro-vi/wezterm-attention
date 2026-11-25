@@ -200,13 +200,16 @@ A lead `UserPromptSubmit` starts the turn's `thinking` activity for Claude and C
 Pi's `agent_start` does, so the pane is tinted from the prompt rather than from the turn's first
 tool call and a turn that calls no tool still shows activity. The first `PreToolUse` of that turn
 repeats the same `thinking` and is skipped. A child actor cannot write lead state, so its prompt
-stays observation-only. The one exception is a child's `PermissionRequest`: a child blocked on a
-permission prompt waits for the user as the lead would, so it publishes lead `notify` activity and
-marks the child `waiting` in the binding's `children.json`; its observation still names the child
-as the actor. While that child waits, the lead's next `thinking` does not replace the visible
-`notify`. The wait has no time limit, because a child blocked on a prompt sends nothing: it ends at
-the child's next tool call, its `SubagentStop`, a Codex parent stop or a Claude lead `Stop` that
-removes it, or the binding's end. A user prompt or any lead activity other than `thinking` replaces the stored `notify`
+stays observation-only. The exception is a child waiting for the user — a Claude or Codex child's
+`PermissionRequest`, or an Agy child's `PreToolUse` of `ask_question` — which waits for the user as
+the lead would, so it publishes lead `notify` activity and marks the child `waiting` in the
+binding's `children.json`; its observation still names the child as the actor. While that child
+waits, the lead's next `thinking` does not replace the visible `notify`. The wait has no time limit,
+because a child blocked on a prompt sends nothing: it ends at the child's next tool call (for Agy,
+child `PreInvocation`, non-blocking `PreToolUse`, or `PostToolUse` of `ask_question`), its
+`SubagentStop` or Agy child `Stop` (`fullyIdle != false`), a Codex parent stop, a Claude lead `Stop`
+or Agy lead `PostToolUse` of `manage_subagents` / terminal lead `Stop` that removes it, or the
+binding's end. A user prompt or any lead activity other than `thinking` replaces the stored `notify`
 at once; a lead `stop` still shows as `notify` while a counted child waits. A child set that cannot be read or changed does not stop the `notify`; the event reports
 `partial` with that record's diagnostic.
 
@@ -290,26 +293,33 @@ limitations](accepted-limitations.md#a-codex-turn-that-ends-on-a-model-error-is-
 active binding as `resume` and `clear` do. A Pi `session_start` with source `new`, `resume` or
 `fork` replaces it; one with source `startup` or `reload` does not.
 
-While the active binding has not ended, a lead Codex `SessionStart` with source `startup` for
-another session replaces it only when it carries a valid `transcript_path`, the hook proved its
-host, and the active binding's `host.json` names the same process on the same terminal
-(`tty_path` and `tty_fingerprint`) and has no `contested_at_unix_ns`. Any other such start is
-refused (`binding_conflict`), and a Claude `startup` never replaces an active binding; a start
-whose proof no longer holds under the launch and claim locks is ignored with the proof's
-diagnostic, as any event is. As of Codex 0.162.0, `/new` makes this start and runs no `SessionEnd`
-for the session before, and an ephemeral session, such as the memory consolidation worker Codex
-runs in the same process, names no transcript. The proof says which process started the session,
-not which session the pane shows, so the binding names the newest lead session its host started;
-what that leaves for the earlier session is in
-[Accepted limitations](accepted-limitations.md#after-codex-new-the-earlier-sessions-turns-are-not-shown).
+While the active binding has not ended, a lead Codex `SessionStart` with source `startup` — or a
+lead Agy `SessionStart` (`start_source` `unspecified`, as on `/new` and `/clear`) or lazy lead Agy
+`PreInvocation` (`--resume`) — for another session replaces it only when it carries a valid
+transcript path (`transcript_path` for Codex, `transcriptPath` for Agy), the hook proved its host,
+and the active binding's `host.json` names the same process on the same terminal (`tty_path` and
+`tty_fingerprint`) and has no `contested_at_unix_ns`. Any other such start (including an Agy start
+lacking either proof) is refused (`binding_conflict`), and a Claude `startup` never replaces an
+active binding; a start whose proof no longer holds under the launch and claim locks is ignored with
+the proof's diagnostic, as any event is. As of Codex 0.162.0 and `agy` 1.5.16, `/new` (and `/clear`
+in `agy`) makes this start and runs no `SessionEnd` for the session before, and an ephemeral Codex
+session, such as the memory consolidation worker Codex runs in the same process, names no
+transcript. The proof says which process started the session, not which session the pane shows, so
+the binding names the newest lead session its host started; what that leaves for the earlier session
+is in [Accepted limitations](accepted-limitations.md#after-codex-new-the-earlier-sessions-turns-are-not-shown).
 
 A provider event with a malformed optional field keeps its action and loses only that field. The
 fields are `agent_type`, `transcript_path` or `session_file`, `cwd`, `CLAUDE_CONFIG_DIR`,
-`CODEX_HOME`, `PI_CODING_AGENT_DIR`, `model`, and the Pi bus `label`. One `record_invalid`
-diagnostic names them, with message `optional fields were dropped: …` and the list in
-`context.dropped_fields`. An empty `agent_type` is not malformed: it says the agent has no type, as
-Claude Code 2.1.283 sends for the agents it runs for itself. A malformed `session_id` still
-ignores the event, because it is identity, not metadata. A native enum value this version does
+`CODEX_HOME`, `PI_CODING_AGENT_DIR`, `model`, the Pi bus `label`, and Agy's `transcriptPath`,
+`modelName`, `artifactDirectoryPath` and `agentName`. One `record_invalid` diagnostic names them,
+with message `optional fields were dropped: …` and the list in `context.dropped_fields`. An empty
+`agent_type` (or Agy `agentName`) is not malformed: it says the agent has no type, as Claude Code
+2.1.283 sends for the agents it runs for itself. For Agy, dropping a malformed `transcriptPath`
+fails closed on lead `PreInvocation(invocationNum: 0)` prompt confirmation and lazy-binding
+eligibility, and dropping a malformed `artifactDirectoryPath` prevents filesystem sub-agent lineage
+lookup (leaving an unlinked empty-`lastUserInput` callback skipped). A malformed `session_id` (or
+Agy `conversationId`) still ignores the event, because it is identity, not metadata. A native enum
+value this version does
 not know keeps the observation: an unknown `error_category` becomes `unknown`, and an unknown
 `input_source` or compaction trigger is omitted.
 
@@ -415,9 +425,11 @@ without reading it; sweep keeps a binding that holds a link, as it keeps any. Th
 set held are counted again at their next event. A set that a newer writer wrote (`future_schema`),
 one that cannot be read, one that cannot be moved aside (`probe_unavailable`), or a change past the
 size bound, leaves the set as it was: a child's event is refused with that diagnostic, while a
-child's permission request, a Codex parent `Stop` and a Claude lead `Stop` that lists tasks still write
-their activity and report
-`partial`, with `native_state` rejected, so no consumer is given the event.
+child's permission request (or Agy child `PreToolUse` of `ask_question`), a Codex parent `Stop`, a
+Claude lead `Stop` that lists tasks, and an Agy lead `PostToolUse` of `manage_subagents`
+(`kill`/`kill_all`) or terminal lead `Stop` (including `USER_CANCELED` clear) still write their
+activity or activity clear and report `partial`, with `native_state` rejected, so no consumer is
+given the event.
 
 Readers, the plugin and `attention inspect`, check the set's structure and count its `live`
 entries. They apply none of the rules above but one, the binding's end: no child is counted while

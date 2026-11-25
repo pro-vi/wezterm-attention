@@ -2151,12 +2151,15 @@ fn apply_activity(
             // A lead stop carries the tasks the provider still runs (or an
             // empty list on a fully idle `agy` stop or `manage_subagents`
             // `kill_all`), and `manage_subagents kill` names specific child
-            // ids. Even when another waiting child keeps `notify` held on the
-            // pane, child kills/reconciles still update `children.json` so
-            // sequential kills release `notify` once the last waiting child is
-            // gone.
+            // ids. For admitted `PostToolUse` `manage_subagents` results, run
+            // child cleanup even when the proposed `thinking` activity was
+            // ignored against a held or newer activity so per-child ordering
+            // in `children.json` still removes killed children without
+            // overwriting the standing activity.
+            let post_tool_ignored =
+                event.source_event == "PostToolUse" && result.disposition == Disposition::Ignored;
             let run_child_cleanup =
-                !matches!(result.disposition.as_str(), "ignored" | "conflict") || held;
+                !matches!(result.disposition.as_str(), "ignored" | "conflict") || post_tool_ignored;
             if let Some(in_flight) = event.in_flight_task_ids.as_deref()
                 && run_child_cleanup
             {
@@ -2189,7 +2192,7 @@ fn apply_activity(
             let mut result = result;
             let (refused, diagnostic) = match children_report {
                 Ok(Some(child_result)) => {
-                    if held && child_result.disposition == Disposition::Applied {
+                    if post_tool_ignored && child_result.disposition == Disposition::Applied {
                         result.disposition = Disposition::Applied;
                         if result.event_id.is_none() {
                             result.event_id = child_result.event_id;
@@ -4185,12 +4188,29 @@ pub(crate) fn record_prompt_turn_interrupt(
                     .iter()
                     .flat_map(LifecycleSnapshot::lead_observations)
             };
-            if latest(lead().filter(|item| item.observed_mono_ns.as_str() > prompt_stamp))
-                .is_some_and(|last| last.ends_turn(provider))
-            {
-                return skipped();
-            }
             let activity = read_record_at(root, "activity", &identity)?;
+            let clear = read_record_at(root, "activity_clear", &identity)?;
+            if let Some(last) =
+                latest(lead().filter(|item| item.observed_mono_ns.as_str() > prompt_stamp))
+                && last.ends_turn(provider)
+            {
+                // As of `agy` 1.5.16, a Stop-hook continuation resumes the same
+                // turn via a lead `PreInvocation` that writes a newer `thinking`
+                // activity without emitting a new lead observation. Treat that
+                // newer uncleared `agy` thinking activity as reopening the turn.
+                let resumed_thinking = provider == Provider::Agy
+                    && activity.as_ref().is_some_and(|record| {
+                        record["type"] == "thinking"
+                            && record["source"] == "agy"
+                            && uncleared(record, clear.as_ref())
+                            && record["observed_mono_ns"]
+                                .as_str()
+                                .is_some_and(|order| order > last.observed_mono_ns.as_str())
+                    });
+                if !resumed_thinking {
+                    return skipped();
+                }
+            }
             let Some(observation) = just_after(
                 iter::once(prompt_stamp)
                     .chain(lead().map(|item| item.observed_mono_ns.as_str()))
@@ -4630,10 +4650,7 @@ fn check_phase(event: &ProviderEvent, request: &hold_check::Request<'_>) -> Opti
         .iter()
         .any(|registration| registration.purpose == hold_check::Purpose::Quiet);
     if event.source_event == "Stop"
-        && matches!(
-            event.observation.as_ref().map(|item| &item.body),
-            Some(crate::observations::ObservationBody::ResponseFinished { .. })
-        )
+        && event.activity_type.as_deref() == Some("stop")
         && (quiet || hold_applies(event, request))
     {
         return Some(Phase::BeforeTurnEnd);

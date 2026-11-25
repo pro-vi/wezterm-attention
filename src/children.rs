@@ -413,6 +413,7 @@ impl ChildPresenceSet {
     fn stop_many(&mut self, agent_ids: &[String], order: &str) -> Reduction {
         let mut staged = self.clone();
         let mut any_changed = false;
+        let mut any_ignored = false;
         let mut last_diagnostic = None;
         for agent_id in agent_ids {
             let reduction = staged.stop(agent_id, order);
@@ -421,6 +422,8 @@ impl ChildPresenceSet {
             }
             if reduction.changed {
                 any_changed = true;
+            } else if reduction.disposition == Disposition::Ignored {
+                any_ignored = true;
             }
             if let Some(diagnostic) = reduction.diagnostic {
                 last_diagnostic = Some(diagnostic);
@@ -431,6 +434,8 @@ impl ChildPresenceSet {
             changed: any_changed,
             disposition: if any_changed {
                 Disposition::Applied
+            } else if any_ignored {
+                Disposition::Ignored
             } else {
                 Disposition::Skipped
             },

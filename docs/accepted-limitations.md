@@ -776,7 +776,8 @@ private SQLite databases (`conversation_summaries.db` and
 `conversations/<id>.db`, linked against the macOS SDK `libsqlite3`) once a
 second. It records a lead `user_interrupt` with `source_event` `agy_status` and
 writes an activity clear once either a step at or after `initialNumSteps`
-carries `CORTEX_STEP_STATUS_CANCELED` (`6`) with no active step running, or
+carries `CORTEX_STEP_STATUS_CANCELED` (`6`) or `CORTEX_STEP_STATUS_INTERRUPTED`
+(`12`) with no active step running, or
 `conversation_summaries.db` transitions from working (`RUNNING`/`BUSY`/`CANCELING`
 or `not_fully_idle != 0`) to idle (`CASCADE_RUN_STATUS_IDLE`, `not_fully_idle = 0`).
 

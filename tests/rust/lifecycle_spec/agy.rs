@@ -1940,3 +1940,354 @@ fn agy_follower_guards_missing_initial_steps_corrupt_conv_db_and_foreign_db() {
         ));
     }
 }
+
+#[test]
+fn agy_delayed_self_kill_ignores_empty_transcript_fails_closed_and_delayed_lead_kill_runs_past_unheld_notify()
+ {
+    let setup = Setup::new();
+    setup.claim();
+    setup.apply(
+        &event("agy", "SessionStart", LEAD, json!({})),
+        "00000000000000000200",
+    );
+
+    // 1. Delayed child PostToolUse self-kill returns Ignored (not Skipped)
+    // matching ChildTransition::Stop parity.
+    let start_c = event(
+        "agy",
+        "SessionStart",
+        "self-c",
+        json!({"parentConversationId": LEAD, "agentName": "worker", "lastUserInput": ""}),
+    );
+    assert_eq!(
+        setup.apply(&start_c, "00000000000000000300").disposition,
+        "applied"
+    );
+    let delayed_self_kill = event(
+        "agy",
+        "PostToolUse",
+        "self-c",
+        json!({
+            "parentConversationId": LEAD,
+            "agentName": "worker",
+            "lastUserInput": "",
+            "toolCall": {
+                "name": "manage_subagents",
+                "id": "self-kill-old",
+                "args": {"Action": "kill", "ConversationIds": ["self-c"]}
+            },
+            "error": ""
+        }),
+    );
+    let res = setup.apply(&delayed_self_kill, "00000000000000000250");
+    assert_eq!(res.disposition, "ignored", "{res:?}");
+
+    // 2. Empty-string transcriptPath on lead PreInvocation(inv=0) fails closed
+    // (no PromptSubmitted observation, dropped_fields diagnostic reported).
+    let empty_tx_pre = parse_provider_event(
+        "agy",
+        "PreInvocation",
+        &json!({
+            "hookEventName": "PreInvocation",
+            "conversationId": LEAD,
+            "transcriptPath": "",
+            "cwd": "/tmp/project",
+            "lastUserInput": "stale prompt",
+            "invocationNum": 0
+        }),
+        &setup.env,
+    );
+    assert!(empty_tx_pre.observation.is_none());
+    assert!(empty_tx_pre.diagnostic.is_some());
+
+    // 3. Delayed lead manage_subagents kill for child A (t=400) still removes A
+    // even when child B's newer notify (t=500) is no longer held (B answered at t=550).
+    let start_a = event(
+        "agy",
+        "SessionStart",
+        "child-a",
+        json!({"parentConversationId": LEAD, "agentName": "worker", "lastUserInput": ""}),
+    );
+    assert_eq!(
+        setup.apply(&start_a, "00000000000000000350").disposition,
+        "applied"
+    );
+    let ask_b = event(
+        "agy",
+        "PreToolUse",
+        "child-b",
+        json!({
+            "parentConversationId": LEAD,
+            "agentName": "worker",
+            "lastUserInput": "",
+            "toolCall": {"name": "ask_question", "id": "q-b"}
+        }),
+    );
+    assert_eq!(
+        setup.apply(&ask_b, "00000000000000000500").disposition,
+        "applied"
+    );
+    let answer_b = event(
+        "agy",
+        "PostToolUse",
+        "child-b",
+        json!({
+            "parentConversationId": LEAD,
+            "agentName": "worker",
+            "lastUserInput": "",
+            "toolCall": {"name": "ask_question", "id": "q-b"},
+            "error": ""
+        }),
+    );
+    assert_eq!(
+        setup.apply(&answer_b, "00000000000000000550").disposition,
+        "applied"
+    );
+    let delayed_kill_a = event(
+        "agy",
+        "PostToolUse",
+        LEAD,
+        json!({
+            "toolCall": {
+                "name": "manage_subagents",
+                "id": "kill-a-delayed",
+                "args": {"Action": "kill", "ConversationIds": ["child-a"]}
+            },
+            "error": ""
+        }),
+    );
+    let res = setup.apply(&delayed_kill_a, "00000000000000000400");
+    assert_eq!(res.disposition, "applied", "{res:?}");
+    let children = read_json(setup.binding_dir("agy", LEAD).join("children.json")).unwrap();
+    let live_ids: Vec<&str> = children["live"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["agent_id"].as_str().unwrap())
+        .collect();
+    assert!(!live_ids.contains(&"child-a"), "{live_ids:?}");
+    assert!(live_ids.contains(&"child-b"), "{live_ids:?}");
+    // Newer notify at t=500 stays preserved.
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "notify"
+    );
+
+    // 4. USER_CANCELED Stop reconciles live children to empty while clearing activity.
+    let cancel = event(
+        "agy",
+        "Stop",
+        LEAD,
+        json!({"terminationReason": "USER_CANCELED", "fullyIdle": true, "executionId": "turn-c"}),
+    );
+    assert_eq!(
+        setup.apply(&cancel, "00000000000000000600").disposition,
+        "applied"
+    );
+    assert!(shown_activity(&setup.binding_dir("agy", LEAD)).is_none());
+    let children = read_json(setup.binding_dir("agy", LEAD).join("children.json")).unwrap();
+    assert_eq!(children["live"].as_array().unwrap().len(), 0);
+
+    // 5. Lazy binding refusal under a shell claim without host proof when
+    // another binding is already active aborts without replacing the binding.
+    let (_, other_tx) = agy_brain_dir(&setup, "other-session");
+    write_jsonl(
+        &other_tx,
+        &[json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "other"})],
+    );
+    let other_pre = parse_provider_event(
+        "agy",
+        "PreInvocation",
+        &json!({
+            "hookEventName": "PreInvocation",
+            "conversationId": "other-session",
+            "transcriptPath": other_tx.to_string_lossy(),
+            "cwd": "/tmp/project",
+            "lastUserInput": "other",
+            "invocationNum": 0
+        }),
+        &setup.env,
+    );
+    let refused = setup.apply(&other_pre, "00000000000000000700");
+    assert_eq!(refused.disposition, "conflict", "{refused:?}");
+    assert_eq!(
+        refused.diagnostic.as_ref().map(|d| d.code.as_str()),
+        Some("binding_conflict")
+    );
+}
+
+#[test]
+fn claude_stop_hold_check_still_runs_when_optional_observation_field_is_malformed() {
+    let setup = Setup::new();
+    setup.claim();
+    setup.apply(
+        &event(
+            "claude",
+            "SessionStart",
+            "c-hold",
+            json!({"source": "startup"}),
+        ),
+        "00000000000000000200",
+    );
+    let checker = make_executable(
+        &setup,
+        "claude-hold-check",
+        "/bin/cat >/dev/null\nprintf '{\"hold\":true,\"answer\":\"still_waiting\"}\\n'",
+    );
+    let check_arg = format!("jev={}", checker.display());
+    // Malformed stop_hook_active (non-bool) causes observation parsing to fail
+    // (event.observation = None), while activity_type is still "stop".
+    let stop_payload = json!({
+        "hook_event_name": "Stop",
+        "session_id": "c-hold",
+        "transcript_path": "/tmp/c-hold.jsonl",
+        "cwd": "/tmp/project",
+        "last_assistant_message": "Waiting for background job",
+        "background_tasks": [{"id": "bg-1", "type": "shell", "status": "running", "description": "bg task"}],
+        "stop_hook_active": "not-a-bool"
+    });
+    let mut child = rust_command(&setup)
+        .args([
+            "hooks",
+            "event",
+            "claude",
+            "Stop",
+            "--hold-check",
+            &check_arg,
+            "--debug",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&stop_payload).unwrap())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let act = shown_activity(&setup.binding_dir("claude", "c-hold")).unwrap();
+    assert_eq!(act["type"], "stop");
+    assert_eq!(act["hold_notes"]["jev"]["hold"], json!(true));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn agy_follower_clears_esc_during_stop_hook_continuation_without_new_observation() {
+    let mut setup = Setup::new();
+    setup.claim();
+    let (lead_dir, lead_tx) = agy_brain_dir(&setup, LEAD);
+    write_jsonl(
+        &lead_tx,
+        &[json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "cont"})],
+    );
+    let env = setup.naming(AGENT_PID);
+    let start = parse_provider_event(
+        "agy",
+        "SessionStart",
+        &json!({
+            "hookEventName": "SessionStart",
+            "conversationId": LEAD,
+            "transcriptPath": lead_tx.to_string_lossy(),
+            "artifactDirectoryPath": lead_dir.to_string_lossy(),
+            "cwd": "/tmp/project",
+            "lastUserInput": "cont"
+        }),
+        &env,
+    );
+    apply_as(&setup, &env, &start, "00000000000000000200");
+    let pre0 = parse_provider_event(
+        "agy",
+        "PreInvocation",
+        &json!({
+            "hookEventName": "PreInvocation",
+            "conversationId": LEAD,
+            "transcriptPath": lead_tx.to_string_lossy(),
+            "artifactDirectoryPath": lead_dir.to_string_lossy(),
+            "cwd": "/tmp/project",
+            "lastUserInput": "cont",
+            "invocationNum": 0,
+            "initialNumSteps": 1
+        }),
+        &env,
+    );
+    apply_as(&setup, &env, &pre0, "00000000000000000300");
+    let req = last_request(&setup);
+
+    // Normal Stop ends attempt 1 (ResponseFinished at t=400).
+    let stop1 = parse_provider_event(
+        "agy",
+        "Stop",
+        &json!({
+            "hookEventName": "Stop",
+            "conversationId": LEAD,
+            "transcriptPath": lead_tx.to_string_lossy(),
+            "cwd": "/tmp/project",
+            "lastUserInput": "cont",
+            "terminationReason": "NO_TOOL_CALL",
+            "fullyIdle": true,
+            "continuationActive": false,
+            "executionNum": 0
+        }),
+        &env,
+    );
+    apply_as(&setup, &env, &stop1, "00000000000000000400");
+
+    // Stop hook continuation resumes the same turn with PreInvocation(inv=1),
+    // writing thinking at t=500 with NO lead observation.
+    let pre1 = parse_provider_event(
+        "agy",
+        "PreInvocation",
+        &json!({
+            "hookEventName": "PreInvocation",
+            "conversationId": LEAD,
+            "transcriptPath": lead_tx.to_string_lossy(),
+            "cwd": "/tmp/project",
+            "lastUserInput": "cont",
+            "invocationNum": 1,
+            "initialNumSteps": 2
+        }),
+        &env,
+    );
+    assert!(pre1.observation.is_none());
+    apply_as(&setup, &env, &pre1, "00000000000000000500");
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "thinking"
+    );
+
+    let FollowedTurn::Agy(AgyTurn {
+        ref summaries_db,
+        ref conv_db,
+        ..
+    }) = req.turn
+    else {
+        panic!("expected AgyTurn");
+    };
+    let summaries = PathBuf::from(summaries_db);
+    let conv = PathBuf::from(conv_db.as_ref().unwrap());
+    run_sqlite(
+        &summaries,
+        "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, status TEXT, not_fully_idle INTEGER);
+         INSERT INTO conversation_summaries VALUES ('agy-lead-1', 'CASCADE_RUN_STATUS_IDLE', 0);",
+    );
+    run_sqlite(
+        &conv,
+        "CREATE TABLE steps (idx INTEGER PRIMARY KEY, status INTEGER);
+         INSERT INTO steps VALUES (2, 6);",
+    );
+    setup.clock = FixedClock {
+        monotonic: "00000000000000000900",
+        unix: "00000000099999999900",
+    };
+    let followed = follow_every(&setup, &req, Duration::from_millis(10));
+    assert_eq!(recorded(&followed), "applied");
+    assert!(shown_activity(&setup.binding_dir("agy", LEAD)).is_none());
+}

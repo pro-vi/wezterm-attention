@@ -995,11 +995,9 @@ fn parse_agy(event_name: &str, payload: &Value, _env: &BTreeMap<String, String>)
         Err(diagnostic) => return agy_ignored(diagnostic),
     };
     let mut dropped = DroppedFields::default();
-    let transcript_provided = matches!(
-        payload.get("transcriptPath"),
-        Some(value) if !value.is_null() && value.as_str() != Some("")
-    );
-    let transcript_path = dropped.keep("transcriptPath", optional_path(payload, "transcriptPath"));
+    let transcript_checked = optional_path(payload, "transcriptPath");
+    let transcript_provided = !matches!(transcript_checked, Ok(None));
+    let transcript_path = dropped.keep("transcriptPath", transcript_checked);
     let cwd = dropped.keep("cwd", optional_path(payload, "cwd"));
     let model = dropped.keep("modelName", optional_label(payload, "modelName"));
     let artifact_dir = dropped.keep(
@@ -1574,10 +1572,7 @@ pub fn reply_content(
             text_content(payload, "last_assistant_message")
         }
         Some(Provider::Agy) => {
-            if !matches!(
-                event.observation.as_ref().map(|item| &item.body),
-                Some(ObservationBody::ResponseFinished { .. })
-            ) {
+            if event.activity_type.as_deref() != Some("stop") {
                 return HookContent::Unsupported;
             }
             let max_bytes = match manifest() {

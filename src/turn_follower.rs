@@ -240,7 +240,7 @@ pub enum Followed {
     AlreadyFollowed,
     /// The Codex rollout could not be read for this turn.
     RolloutRefused(Refusal),
-    /// A newer prompt replaced the followed Claude prompt, or the prompt
+    /// A newer prompt replaced the followed Claude or Agy prompt, or the prompt
     /// record no longer names it.
     PromptReplaced,
     /// The Claude Code status file is not there: its process is exiting, or

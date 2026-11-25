@@ -51,6 +51,10 @@ const MAX_MESSAGE_BYTES: usize = 256 << 10;
 /// Maximum number of message files inspected in one conversation directory.
 const MAX_MESSAGE_FILES: usize = 256;
 
+/// Maximum directory entries enumerated from `.system_generated/messages/` per
+/// lookup, keeping `lstat` work bounded on busy sessions.
+const MAX_MESSAGE_DIR_SCAN: usize = 512;
+
 /// Maximum subagent ancestry depth walked toward the root lead session.
 const MAX_SUBAGENT_DEPTH: usize = 8;
 
@@ -62,11 +66,10 @@ pub enum ReplyRead {
     TooLarge,
 }
 
-/// Parent/root linkage recovered for an `agy` subagent conversation.
+/// Root linkage recovered for an `agy` subagent conversation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubagentLineage {
     pub root_session_id: String,
-    pub parent_session_id: String,
     pub role: Option<String>,
     pub type_name: Option<String>,
 }
@@ -80,7 +83,8 @@ pub enum Reading {
     /// The conversation is idle with no pending background work.
     Idle,
     /// A step created during this turn carries `CORTEX_STEP_STATUS_CANCELED`
-    /// (`6`) with no active step running.
+    /// (`6`) or `CORTEX_STEP_STATUS_INTERRUPTED` (`12`) with no active step
+    /// running.
     Canceled,
     /// Neither database held a row for this conversation yet.
     Absent,
@@ -175,50 +179,47 @@ fn open_owned_regular(path: &Path) -> Option<File> {
     Some(file)
 }
 
+struct TailBytes {
+    bytes: Vec<u8>,
+    /// True when `bytes` starts mid-line (the byte immediately before the
+    /// window was not `\n`).
+    partial_first_line: bool,
+    /// True whenever the file was larger than `max_window` so earlier lines
+    /// were omitted before `bytes`.
+    omitted_prefix: bool,
+}
+
 /// Read up to `max_window` trailing bytes from an owned regular transcript file.
-/// Returns `(bytes, truncated_head)` where `truncated_head` is true only when
-/// `bytes` begins mid-line (the byte immediately before the window was not
-/// `\n`).
-fn read_tail_bytes(path: &Path, max_window: usize) -> Option<(Vec<u8>, bool)> {
+fn read_tail_bytes(path: &Path, max_window: usize) -> Option<TailBytes> {
     let mut file = open_owned_regular(path)?;
     let size = file.metadata().ok()?.len();
     let window = u64::try_from(max_window).unwrap_or(u64::MAX);
-    let mut buf = Vec::new();
+    let mut bytes = Vec::new();
     if size > window {
         let offset = size - window;
         file.seek(SeekFrom::Start(offset - 1)).ok()?;
         let take = window.saturating_add(1);
-        file.take(take).read_to_end(&mut buf).ok()?;
-        if buf.is_empty() {
+        file.take(take).read_to_end(&mut bytes).ok()?;
+        if bytes.is_empty() {
             return None;
         }
-        let truncated_head = buf[0] != b'\n';
-        buf.drain(..1);
-        Some((buf, truncated_head))
+        let partial_first_line = bytes[0] != b'\n';
+        bytes.drain(..1);
+        Some(TailBytes {
+            bytes,
+            partial_first_line,
+            omitted_prefix: true,
+        })
     } else {
         file.take(window.saturating_add(1))
-            .read_to_end(&mut buf)
+            .read_to_end(&mut bytes)
             .ok()?;
-        Some((buf, false))
+        Some(TailBytes {
+            bytes,
+            partial_first_line: false,
+            omitted_prefix: false,
+        })
     }
-}
-
-fn trim_ascii_whitespace(mut slice: &[u8]) -> &[u8] {
-    while let Some((&first, rest)) = slice.split_first() {
-        if first.is_ascii_whitespace() {
-            slice = rest;
-        } else {
-            break;
-        }
-    }
-    while let Some((&last, rest)) = slice.split_last() {
-        if last.is_ascii_whitespace() {
-            slice = rest;
-        } else {
-            break;
-        }
-    }
-    slice
 }
 
 fn parse_jsonl_object(trimmed: &[u8]) -> Option<Value> {
@@ -235,17 +236,17 @@ pub fn last_reply_from_transcript(path: &Path, max_text_bytes: usize) -> ReplyRe
     let window = max_text_bytes
         .saturating_mul(2)
         .clamp(TRANSCRIPT_PROMPT_WINDOW_BYTES, TRANSCRIPT_MAX_TAIL_BYTES);
-    let Some((buf, truncated_head)) = read_tail_bytes(path, window) else {
+    let Some(tail) = read_tail_bytes(path, window) else {
         return ReplyRead::Absent;
     };
-    let raw_lines: Vec<&[u8]> = buf.split(|&byte| byte == b'\n').collect();
+    let raw_lines: Vec<&[u8]> = tail.bytes.split(|&byte| byte == b'\n').collect();
     let mut saw_complete_line = false;
     for (idx, raw) in raw_lines.iter().enumerate().rev() {
-        let trimmed = trim_ascii_whitespace(raw);
+        let trimmed = raw.trim_ascii();
         if trimmed.is_empty() {
             continue;
         }
-        if idx == 0 && truncated_head {
+        if idx == 0 && tail.partial_first_line {
             return if !saw_complete_line {
                 ReplyRead::TooLarge
             } else {
@@ -256,9 +257,12 @@ pub fn last_reply_from_transcript(path: &Path, max_text_bytes: usize) -> ReplyRe
         let Some(step) = parse_jsonl_object(trimmed) else {
             return ReplyRead::Absent;
         };
-        match step.get("type").and_then(Value::as_str) {
-            Some("USER_INPUT" | "ERROR_MESSAGE") => return ReplyRead::Absent,
-            Some("PLANNER_RESPONSE") => {
+        let Some(step_type) = step.get("type").and_then(Value::as_str) else {
+            return ReplyRead::Absent;
+        };
+        match step_type {
+            "USER_INPUT" | "ERROR_MESSAGE" => return ReplyRead::Absent,
+            "PLANNER_RESPONSE" => {
                 if let Some(content) = step.get("content").and_then(Value::as_str)
                     && !content.is_empty()
                 {
@@ -281,16 +285,16 @@ pub fn last_reply_from_transcript(path: &Path, max_text_bytes: usize) -> ReplyRe
 /// Returns `None` when the file is absent, rejected, unreadable, malformed, or
 /// truncated across the deciding boundary so callers fail closed.
 pub fn is_user_prompt_invocation(path: &Path) -> Option<bool> {
-    let (buf, truncated_head) = read_tail_bytes(path, TRANSCRIPT_PROMPT_WINDOW_BYTES)?;
-    let raw_lines: Vec<&[u8]> = buf.split(|&byte| byte == b'\n').collect();
+    let tail = read_tail_bytes(path, TRANSCRIPT_PROMPT_WINDOW_BYTES)?;
+    let raw_lines: Vec<&[u8]> = tail.bytes.split(|&byte| byte == b'\n').collect();
     let mut saw_system_tail = false;
     let mut saw_user_before_system = false;
     for (idx, raw) in raw_lines.iter().enumerate().rev() {
-        let trimmed = trim_ascii_whitespace(raw);
+        let trimmed = raw.trim_ascii();
         if trimmed.is_empty() {
             continue;
         }
-        if idx == 0 && truncated_head {
+        if idx == 0 && tail.partial_first_line {
             return None;
         }
         let step = parse_jsonl_object(trimmed)?;
@@ -322,7 +326,7 @@ pub fn is_user_prompt_invocation(path: &Path) -> Option<bool> {
             return Some(false);
         }
     }
-    saw_user_before_system.then_some(true)
+    (saw_user_before_system && !tail.omitted_prefix).then_some(true)
 }
 
 struct DirectParent {
@@ -339,6 +343,7 @@ fn direct_parent_from_messages(
     let entries = fs::read_dir(&messages_dir).ok()?;
     let mut candidates: Vec<(SystemTime, PathBuf)> = entries
         .flatten()
+        .take(MAX_MESSAGE_DIR_SCAN)
         .filter_map(|entry| {
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("json")
@@ -366,7 +371,11 @@ fn direct_parent_from_messages(
         let Ok(bytes) = read_bounded(&file, MAX_MESSAGE_BYTES) else {
             continue;
         };
-        if bytes.len() > MAX_MESSAGE_BYTES {
+        if bytes.len() > MAX_MESSAGE_BYTES
+            || !bytes
+                .windows(b"invoke_subagent".len())
+                .any(|window| window == b"invoke_subagent")
+        {
             continue;
         }
         let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
@@ -447,13 +456,12 @@ pub fn resolve_subagent_lineage(
     let mut visited = BTreeSet::new();
     visited.insert(conversation_id.to_owned());
     visited.insert(first.parent_id.clone());
-    let mut root_id = first.parent_id.clone();
+    let mut root_id = first.parent_id;
     for _ in 1..MAX_SUBAGENT_DEPTH {
         let next_dir = brain_dir.join(&root_id);
         let Some(next) = direct_parent_from_messages(&root_id, &next_dir) else {
             return Some(SubagentLineage {
                 root_session_id: root_id,
-                parent_session_id: first.parent_id,
                 role: first.role,
                 type_name: first.type_name,
             });
@@ -470,7 +478,6 @@ pub fn resolve_subagent_lineage(
     }
     Some(SubagentLineage {
         root_session_id: root_id,
-        parent_session_id: first.parent_id,
         role: first.role,
         type_name: first.type_name,
     })
@@ -528,6 +535,7 @@ mod platform {
     }
 
     const SQLITE_OK: c_int = 0;
+    const SQLITE_INTEGER: c_int = 1;
     const SQLITE_CANTOPEN: c_int = 14;
     const SQLITE_ROW: c_int = 100;
     const SQLITE_DONE: c_int = 101;
@@ -541,10 +549,15 @@ mod platform {
     // descriptors (`conversations/<id>.db` `steps.status`):
     //   1 = PENDING, 2 = RUNNING, 8 = GENERATING, 9 = WAITING, 11 = QUEUED
     //   6 = CANCELED, 12 = INTERRUPTED
-    //   3 = DONE, 4 = INVALID, 5 = CLEARED, 7 = ERROR (terminal non-canceled)
+    //   0 = UNSPECIFIED, 3 = DONE, 4 = INVALID, 5 = CLEARED, 7 = ERROR
+    const STEP_STATUS_UNSPECIFIED: i64 = 0;
     const STEP_STATUS_PENDING: i64 = 1;
     const STEP_STATUS_RUNNING: i64 = 2;
+    const STEP_STATUS_DONE: i64 = 3;
+    const STEP_STATUS_INVALID: i64 = 4;
+    const STEP_STATUS_CLEARED: i64 = 5;
     const STEP_STATUS_CANCELED: i64 = 6;
+    const STEP_STATUS_ERROR: i64 = 7;
     const STEP_STATUS_GENERATING: i64 = 8;
     const STEP_STATUS_WAITING: i64 = 9;
     const STEP_STATUS_QUEUED: i64 = 11;
@@ -576,6 +589,7 @@ mod platform {
         ) -> c_int;
         fn sqlite3_bind_int64(stmt: *mut Sqlite3Stmt, idx: c_int, val: i64) -> c_int;
         fn sqlite3_step(stmt: *mut Sqlite3Stmt) -> c_int;
+        fn sqlite3_column_type(stmt: *mut Sqlite3Stmt, col: c_int) -> c_int;
         fn sqlite3_column_text(stmt: *mut Sqlite3Stmt, col: c_int) -> *const u8;
         fn sqlite3_column_int64(stmt: *mut Sqlite3Stmt, col: c_int) -> i64;
         fn sqlite3_finalize(stmt: *mut Sqlite3Stmt) -> c_int;
@@ -640,7 +654,7 @@ mod platform {
         uri.push_str("file:");
         for byte in text.bytes() {
             match byte {
-                b'%' | b'?' | b'#' | b' ' | 0x00..=0x1F | 0x7F => {
+                b'%' | b'?' | b'#' | b' ' | 0x00..=0x1F | 0x7F..=0xFF => {
                     uri.push('%');
                     let hi = byte >> 4;
                     let lo = byte & 0x0F;
@@ -850,20 +864,27 @@ mod platform {
                 // SAFETY: `stmt.0` is a bound prepared statement.
                 match unsafe { sqlite3_step(stmt.0) } {
                     SQLITE_ROW => {
-                        // SAFETY: column 0 is `status` integer.
-                        let st = unsafe { sqlite3_column_int64(stmt.0, 0) };
-                        if matches!(
-                            st,
-                            STEP_STATUS_PENDING
-                                | STEP_STATUS_RUNNING
-                                | STEP_STATUS_GENERATING
-                                | STEP_STATUS_WAITING
-                                | STEP_STATUS_QUEUED
-                        ) {
-                            return Ok(StepsState::Active);
+                        // SAFETY: `stmt.0` returned SQLITE_ROW; column 0 is `status`.
+                        if unsafe { sqlite3_column_type(stmt.0, 0) } != SQLITE_INTEGER {
+                            return Ok(StepsState::Unreadable(Unreadable::UnknownStatus));
                         }
-                        if matches!(st, STEP_STATUS_CANCELED | STEP_STATUS_INTERRUPTED) {
-                            saw_canceled = true;
+                        // SAFETY: column 0 was just confirmed to hold SQLITE_INTEGER.
+                        let st = unsafe { sqlite3_column_int64(stmt.0, 0) };
+                        match st {
+                            STEP_STATUS_PENDING
+                            | STEP_STATUS_RUNNING
+                            | STEP_STATUS_GENERATING
+                            | STEP_STATUS_WAITING
+                            | STEP_STATUS_QUEUED => return Ok(StepsState::Active),
+                            STEP_STATUS_CANCELED | STEP_STATUS_INTERRUPTED => {
+                                saw_canceled = true;
+                            }
+                            STEP_STATUS_UNSPECIFIED
+                            | STEP_STATUS_DONE
+                            | STEP_STATUS_INVALID
+                            | STEP_STATUS_CLEARED
+                            | STEP_STATUS_ERROR => {}
+                            _ => return Ok(StepsState::Unreadable(Unreadable::UnknownStatus)),
                         }
                     }
                     SQLITE_DONE => break,
@@ -1132,7 +1153,6 @@ mod tests {
             resolve_subagent_lineage(child, &brain.join(child)),
             Some(SubagentLineage {
                 root_session_id: lead.into(),
-                parent_session_id: lead.into(),
                 role: Some("Coordinator".into()),
                 type_name: Some("self".into()),
             })
@@ -1141,7 +1161,6 @@ mod tests {
             resolve_subagent_lineage(grand, &brain.join(grand)),
             Some(SubagentLineage {
                 root_session_id: lead.into(),
-                parent_session_id: child.into(),
                 role: Some("Worker".into()),
                 type_name: Some("research".into()),
             })
@@ -1198,7 +1217,7 @@ mod tests {
             None
         );
 
-        // Depth > MAX_LINEAGE_DEPTH (8) fails closed instead of returning an intermediate node.
+        // Depth > MAX_SUBAGENT_DEPTH (8) fails closed instead of returning an intermediate node.
         fs::create_dir_all(brain.join("deep-0")).unwrap();
         for idx in 1..=10 {
             write_spawn(&format!("deep-{idx}"), &format!("deep-{}", idx - 1));
@@ -1271,7 +1290,6 @@ mod tests {
             resolve_subagent_lineage(child, &brain.join(child)),
             Some(SubagentLineage {
                 root_session_id: lead.into(),
-                parent_session_id: lead.into(),
                 role: Some("Scout".into()),
                 type_name: Some("research".into()),
             })
@@ -1488,6 +1506,149 @@ mod tests {
             read_status(&summaries_link, None, "conv-1", 0),
             Reading::Unreadable(Unreadable::Foreign)
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn transcript_readers_fail_closed_on_missing_type_and_newline_aligned_truncation() {
+        let dir = scratch("tx-fail-closed");
+        let tx = dir.join("transcript_full.jsonl");
+
+        // JSON object missing/non-string "type" stops reverse reply scan instead
+        // of falling through to PRIOR_REPLY.
+        for bad_row in [
+            json!({"step_index": 2, "status": "DONE", "content": "missing type"}),
+            json!({"step_index": 2, "type": null, "status": "DONE"}),
+            json!({"step_index": 2, "type": 42, "status": "DONE"}),
+        ] {
+            fs::write(
+                &tx,
+                format!(
+                    "{}\n{}\n{}\n{}\n",
+                    json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "t1"}),
+                    json!({"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "PRIOR_REPLY"}),
+                    bad_row,
+                    json!({"step_index": 3, "type": "PLANNER_RESPONSE", "status": "DONE", "content": ""})
+                ),
+            )
+            .unwrap();
+            assert_eq!(last_reply_from_transcript(&tx, 1024), ReplyRead::Absent);
+        }
+
+        // >512 KiB transcript where truncation lands right on a newline boundary
+        // after an earlier PLANNER_RESPONSE must return None (never Some(true)).
+        let earlier = format!(
+            "{}\n{}\n",
+            json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "t1"}),
+            json!({"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "done"})
+        );
+        let tail = format!(
+            "{}\n{}\n",
+            json!({"step_index": 2, "type": "USER_INPUT", "status": "DONE", "content": "x".repeat(600 * 1024)}),
+            json!({"step_index": 3, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "msg"})
+        );
+        // Pad earlier so size - 512 KiB lands on an exact '\n' byte.
+        let mut content = earlier;
+        let target_prefix = 64 * 1024;
+        let pad_len = target_prefix - content.len() - 1;
+        content.push_str(&format!(
+            "{}\n",
+            json!({"step_index": 99, "type": "GENERIC", "content": "p".repeat(pad_len.saturating_sub(50))})
+        ));
+        content.push_str(&tail);
+        fs::write(&tx, &content).unwrap();
+        assert_eq!(is_user_prompt_invocation(&tx), None);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sqlite_non_ascii_wal_paths_unknown_statuses_and_nonempty_wal_guard() {
+        use std::process::Command;
+
+        let dir = scratch("sqlite-utf8-status");
+        let nested = dir.join("café 用户 %20#?");
+        fs::create_dir_all(&nested).unwrap();
+        let summaries = nested.join("conversation_summaries.db");
+        let conv = nested.join("conv-utf8.db");
+
+        let run_sql_and_close_wal = |db: &PathBuf, sql: &str| {
+            let out = Command::new("/usr/bin/sqlite3")
+                .arg(db)
+                .arg(format!("{sql}\nPRAGMA wal_checkpoint(TRUNCATE);"))
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "sqlite3 failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            for suffix in ["-wal", "-shm"] {
+                let _ = fs::remove_file(PathBuf::from(format!("{}{suffix}", db.display())));
+            }
+        };
+
+        run_sql_and_close_wal(
+            &summaries,
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, status TEXT, not_fully_idle INTEGER);
+             INSERT INTO conversation_summaries VALUES ('conv-utf8', 'CASCADE_RUN_STATUS_IDLE', 0);",
+        );
+        run_sql_and_close_wal(
+            &conv,
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE steps (idx INTEGER PRIMARY KEY, status);
+             INSERT INTO steps VALUES (0, 3), (1, 9);",
+        );
+        // Cleanly-closed WAL under non-ASCII UTF-8 + URI-special characters reads cleanly.
+        assert_eq!(
+            read_status(&summaries, Some(&conv), "conv-utf8", 1),
+            Reading::Working
+        );
+
+        // Non-empty -wal in a read-only directory forces SQLITE_CANTOPEN on the
+        // primary handle (cannot create -shm) and refuses the immutable=1 fallback.
+        use std::os::unix::fs::PermissionsExt;
+        let conv_wal = PathBuf::from(format!("{}-wal", conv.display()));
+        fs::write(&conv_wal, vec![0x37u8; 4096]).unwrap();
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o555)).unwrap();
+        let wal_guard_reading = read_status(&summaries, Some(&conv), "conv-utf8", 1);
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = fs::remove_file(&conv_wal);
+        assert_eq!(
+            wal_guard_reading,
+            Reading::Unreadable(Unreadable::ReadFailed)
+        );
+
+        // Unknown integer (99), TEXT, and NULL in steps.status fail closed as UnknownStatus
+        // (both alone and alongside a CANCELED=6 step).
+        for bad_sql in [
+            "DELETE FROM steps; INSERT INTO steps VALUES (1, 99);",
+            "DELETE FROM steps; INSERT INTO steps VALUES (1, 6), (2, 99);",
+            "DELETE FROM steps; INSERT INTO steps VALUES (1, 'CORTEX_STEP_STATUS_WAITING');",
+            "DELETE FROM steps; INSERT INTO steps VALUES (1, NULL);",
+        ] {
+            run_sql_and_close_wal(&conv, bad_sql);
+            assert_eq!(
+                read_status(&summaries, Some(&conv), "conv-utf8", 1),
+                Reading::Unreadable(Unreadable::UnknownStatus),
+                "expected UnknownStatus for {bad_sql}"
+            );
+        }
+
+        // NULL and unknown text in conversation_summaries.status fail closed as UnknownStatus.
+        run_sql_and_close_wal(&conv, "DELETE FROM steps; INSERT INTO steps VALUES (1, 3);");
+        for bad_summary in [
+            "UPDATE conversation_summaries SET status=NULL WHERE conversation_id='conv-utf8';",
+            "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_FUTURE' WHERE conversation_id='conv-utf8';",
+        ] {
+            run_sql_and_close_wal(&summaries, bad_summary);
+            assert_eq!(
+                read_status(&summaries, Some(&conv), "conv-utf8", 1),
+                Reading::Unreadable(Unreadable::UnknownStatus),
+                "expected UnknownStatus for {bad_summary}"
+            );
+        }
         let _ = fs::remove_dir_all(dir);
     }
 }
