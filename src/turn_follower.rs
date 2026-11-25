@@ -2,9 +2,9 @@
 //! came to an end, for the ends a provider runs no hook for. It lives no
 //! longer than the agent process whose hook started it or the binding that
 //! recorded the turn, and records an end only through the writer, under the
-//! locks every writer takes. A Claude Code follower follows the turn of one
-//! prompt. A Codex follower follows its turn, then each lead turn the rollout
-//! starts after it, recording each that ends on a model error.
+//! locks every writer takes. A Claude Code or Agy follower follows the turn of
+//! one prompt. A Codex follower follows its turn, then each lead turn the
+//! rollout starts after it, recording each that ends on a model error.
 //!
 //! What it reads is the provider's own file, which a reader for that provider
 //! turns into what the follower acts on; nothing else here knows that file.
@@ -41,9 +41,9 @@ pub const FOLLOWER_SOURCES: [(Provider, &str); 3] = [
 ];
 
 /// How many polls a follower waits for another turn's follower to leave the
-/// lock or to name this turn: a Claude follower leaves within one poll of
-/// seeing its turn end, and a Codex follower names the next turn within one
-/// poll of reading its start.
+/// lock or to name this turn: a Claude or Agy follower leaves within one poll
+/// of seeing its turn end or be replaced, and a Codex follower names the next
+/// turn within one poll of reading its start.
 const TAKE_OVER_POLLS: u32 = 10;
 
 /// What a follower is handed: the binding's scope, the host process whose

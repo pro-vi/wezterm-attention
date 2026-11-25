@@ -962,10 +962,10 @@ fn agy_manage_subagents_stops(
 }
 
 fn agy_ignored(diagnostic: Diagnostic) -> ProviderEvent {
-    let mut event =
-        ProviderEvent::ignored(Some(Provider::Agy), diagnostic.code, &diagnostic.message);
-    event.diagnostic = Some(diagnostic);
-    event
+    ProviderEvent {
+        diagnostic: Some(diagnostic),
+        ..ProviderEvent::inert(Some(Provider::Agy))
+    }
 }
 
 fn parse_agy(event_name: &str, payload: &Value, _env: &BTreeMap<String, String>) -> ProviderEvent {

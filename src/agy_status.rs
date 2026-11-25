@@ -35,6 +35,10 @@ use crate::records::read_bounded;
 /// [`crate::turn_follower::FOLLOWER_SOURCES`].
 pub const AGY_STATUS: &str = "agy_status";
 
+/// Upper bound on bytes read from the start of `transcript.jsonl` to test
+/// whether a conversation began with a `USER_INPUT` step (a root lead).
+const TRANSCRIPT_FIRST_LINE_MAX_BYTES: usize = 256 << 10;
+
 /// Default tail window read from `transcript_full.jsonl` when inspecting the
 /// latest prompt step.
 const TRANSCRIPT_PROMPT_WINDOW_BYTES: usize = 512 << 10;
@@ -84,12 +88,12 @@ pub enum Reading {
     Idle,
     /// A step created during this turn carries `CORTEX_STEP_STATUS_CANCELED`
     /// (`6`) or `CORTEX_STEP_STATUS_INTERRUPTED` (`12`) with no active step
-    /// running.
+    /// running and no active summary row.
     Canceled,
     /// Neither database held a row for this conversation yet.
     Absent,
-    /// A transient lock, missing `-shm` during checkpoint, platform limit, or
-    /// unexpected status prevented reading; a later poll decides.
+    /// Reading failed: `ReadFailed` and `UnknownStatus` defer to a later poll,
+    /// while `Foreign` and `PlatformUnsupported` stop the follower.
     Unreadable(Unreadable),
 }
 
@@ -335,10 +339,43 @@ struct DirectParent {
     type_name: Option<String>,
 }
 
+/// Fast O(1) check for whether `conv_brain_dir` is a user-started root lead:
+/// as of `agy` 1.5.16, root leads start `transcript.jsonl` with `USER_INPUT`,
+/// whereas subagents start with `SYSTEM_MESSAGE`. Returning `false` falls back
+/// to scanning `.system_generated/messages/`.
+fn is_root_lead_transcript(conv_brain_dir: &Path) -> bool {
+    let tx_path = conv_brain_dir
+        .join(".system_generated")
+        .join("logs")
+        .join("transcript.jsonl");
+    let Some(file) = open_owned_regular(&tx_path) else {
+        return false;
+    };
+    let mut buf = Vec::new();
+    let Ok(_) = file
+        .take((TRANSCRIPT_FIRST_LINE_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut buf)
+    else {
+        return false;
+    };
+    let line = match buf.iter().position(|&b| b == b'\n') {
+        Some(pos) => &buf[..pos],
+        None if buf.len() <= TRANSCRIPT_FIRST_LINE_MAX_BYTES => &buf[..],
+        None => return false,
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(line) else {
+        return false;
+    };
+    value.get("type").and_then(Value::as_str) == Some("USER_INPUT")
+}
+
 fn direct_parent_from_messages(
     conversation_id: &str,
     conv_brain_dir: &Path,
 ) -> Option<DirectParent> {
+    if is_root_lead_transcript(conv_brain_dir) {
+        return None;
+    }
     let messages_dir = conv_brain_dir.join(".system_generated").join("messages");
     let entries = fs::read_dir(&messages_dir).ok()?;
     let mut candidates: Vec<(SystemTime, PathBuf)> = entries
@@ -375,6 +412,9 @@ fn direct_parent_from_messages(
             || !bytes
                 .windows(b"invoke_subagent".len())
                 .any(|window| window == b"invoke_subagent")
+            || !bytes
+                .windows(b"toolCall".len())
+                .any(|window| window == b"toolCall")
         {
             continue;
         }
@@ -484,19 +524,20 @@ pub fn resolve_subagent_lineage(
 }
 
 /// Check that a SQLite database path is a regular file owned by the effective
-/// user and not a symlink.
+/// user and not a symlink. Returns `Err(None)` when absent and
+/// `Err(Some(reason))` when unreadable or foreign.
 #[cfg(target_os = "macos")]
-fn check_owned_regular_path(path: &Path) -> Result<(), Reading> {
+fn check_owned_regular_path(path: &Path) -> Result<(), Option<Unreadable>> {
     if !path.is_absolute() {
-        return Err(Reading::Unreadable(Unreadable::Foreign));
+        return Err(Some(Unreadable::Foreign));
     }
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(Reading::Absent),
-        Err(_) => return Err(Reading::Unreadable(Unreadable::ReadFailed)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(None),
+        Err(_) => return Err(Some(Unreadable::ReadFailed)),
     };
     if !metadata.file_type().is_file() || metadata.uid() != crate::identity::effective_uid() {
-        return Err(Reading::Unreadable(Unreadable::Foreign));
+        return Err(Some(Unreadable::Foreign));
     }
     Ok(())
 }
@@ -536,6 +577,7 @@ mod platform {
 
     const SQLITE_OK: c_int = 0;
     const SQLITE_INTEGER: c_int = 1;
+    const SQLITE_TEXT: c_int = 3;
     const SQLITE_CANTOPEN: c_int = 14;
     const SQLITE_ROW: c_int = 100;
     const SQLITE_DONE: c_int = 101;
@@ -710,13 +752,8 @@ mod platform {
         query: impl Fn(*mut Sqlite3) -> Result<T, c_int>,
     ) -> Result<T, Unreadable> {
         let resolved = resolve_parent_keeping_leaf(path)?;
-        if let Err(reading) = check_owned_regular_path(&resolved) {
-            return Err(match reading {
-                Reading::Unreadable(reason) => reason,
-                Reading::Working | Reading::Idle | Reading::Canceled | Reading::Absent => {
-                    Unreadable::ReadFailed
-                }
-            });
+        if let Err(reason) = check_owned_regular_path(&resolved) {
+            return Err(reason.unwrap_or(Unreadable::ReadFailed));
         }
         let c_path = CString::new(resolved.to_str().ok_or(Unreadable::ReadFailed)?)
             .map_err(|_| Unreadable::ReadFailed)?;
@@ -751,13 +788,10 @@ mod platform {
     }
 
     fn read_summary(summaries_db: &Path, conversation_id: &str) -> SummaryRow {
-        if let Err(reading) = check_owned_regular_path(summaries_db) {
-            return match reading {
-                Reading::Absent => SummaryRow::Absent,
-                Reading::Unreadable(reason) => SummaryRow::Unreadable(reason),
-                Reading::Working | Reading::Idle | Reading::Canceled => {
-                    SummaryRow::Unreadable(Unreadable::ReadFailed)
-                }
+        if let Err(reason) = check_owned_regular_path(summaries_db) {
+            return match reason {
+                None => SummaryRow::Absent,
+                Some(reason) => SummaryRow::Unreadable(reason),
             };
         }
         let Ok(cid_len) = c_int::try_from(conversation_id.len()) else {
@@ -794,7 +828,18 @@ mod platform {
             if step_rc != SQLITE_ROW {
                 return Err(step_rc);
             }
-            // SAFETY: `stmt.0` returned SQLITE_ROW; column 0 is text (or null), column 1 is integer.
+            // SAFETY: `stmt.0` returned SQLITE_ROW; verify exact column storage
+            // classes before decoding so NULL/TEXT/REAL/BLOB cannot coerce to 0.
+            let (status_type, idle_type) = unsafe {
+                (
+                    sqlite3_column_type(stmt.0, 0),
+                    sqlite3_column_type(stmt.0, 1),
+                )
+            };
+            if status_type != SQLITE_TEXT || idle_type != SQLITE_INTEGER {
+                return Ok(SummaryRow::Unreadable(Unreadable::UnknownStatus));
+            }
+            // SAFETY: column 0 was just confirmed to hold SQLITE_TEXT.
             let status_ptr = unsafe { sqlite3_column_text(stmt.0, 0) };
             if status_ptr.is_null() {
                 return Ok(SummaryRow::Unreadable(Unreadable::UnknownStatus));
@@ -804,7 +849,7 @@ mod platform {
             let Ok(status) = unsafe { CStr::from_ptr(status_ptr.cast::<c_char>()) }.to_str() else {
                 return Ok(SummaryRow::Unreadable(Unreadable::UnknownStatus));
             };
-            // SAFETY: `stmt.0` returned SQLITE_ROW; column 1 is `not_fully_idle`.
+            // SAFETY: column 1 was just confirmed to hold SQLITE_INTEGER.
             let not_fully_idle = unsafe { sqlite3_column_int64(stmt.0, 1) };
             Ok(match status {
                 "CASCADE_RUN_STATUS_RUNNING"
@@ -835,13 +880,10 @@ mod platform {
     }
 
     fn read_conv_steps(conv_db: &Path, initial_step_count: i64) -> StepsState {
-        if let Err(reading) = check_owned_regular_path(conv_db) {
-            return match reading {
-                Reading::Absent => StepsState::Absent,
-                Reading::Unreadable(reason) => StepsState::Unreadable(reason),
-                Reading::Working | Reading::Idle | Reading::Canceled => {
-                    StepsState::Unreadable(Unreadable::ReadFailed)
-                }
+        if let Err(reason) = check_owned_regular_path(conv_db) {
+            return match reason {
+                None => StepsState::Absent,
+                Some(reason) => StepsState::Unreadable(reason),
             };
         }
         let query = |db: *mut Sqlite3| -> Result<StepsState, c_int> {
@@ -912,17 +954,24 @@ mod platform {
         let steps_state = conv_db
             .map(|path| read_conv_steps(path, initial_step_count))
             .unwrap_or(StepsState::Absent);
-        match steps_state {
+        let canceled = match steps_state {
             StepsState::Active => return Reading::Working,
-            StepsState::Canceled => return Reading::Canceled,
             StepsState::Unreadable(reason) => return Reading::Unreadable(reason),
-            StepsState::Quiescent | StepsState::Absent => {}
-        }
+            StepsState::Canceled => true,
+            StepsState::Quiescent | StepsState::Absent => false,
+        };
+        // Even when an earlier tool step in this turn was canceled (e.g., a
+        // killed background command), consult `conversation_summaries.db` first
+        // so active turns (`RUNNING` or `not_fully_idle != 0` while waiting on
+        // subagents) still report `Working` and malformed summary rows still
+        // fail closed.
         match read_summary(summaries_db, conversation_id) {
             SummaryRow::Working => Reading::Working,
-            SummaryRow::Idle => Reading::Idle,
-            SummaryRow::Absent => Reading::Absent,
             SummaryRow::Unreadable(reason) => Reading::Unreadable(reason),
+            SummaryRow::Idle if canceled => Reading::Canceled,
+            SummaryRow::Idle => Reading::Idle,
+            SummaryRow::Absent if canceled => Reading::Canceled,
+            SummaryRow::Absent => Reading::Absent,
         }
     }
 }
@@ -1294,6 +1343,65 @@ mod tests {
                 type_name: Some("research".into()),
             })
         );
+
+        // When the root lead has a transcript.jsonl starting with USER_INPUT,
+        // lineage resolution short-circuits without reading the lead's
+        // messages/ directory (verified by making lead's messages/ unreadable
+        // and placing a decoy invoke_subagent message inside it).
+        let lead_logs = brain.join(lead).join(".system_generated").join("logs");
+        fs::create_dir_all(&lead_logs).unwrap();
+        fs::write(
+            lead_logs.join("transcript.jsonl"),
+            format!(
+                "{}\n",
+                json!({"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "hi"})
+            ),
+        )
+        .unwrap();
+        let lead_msgs = brain.join(lead).join(".system_generated").join("messages");
+        fs::create_dir_all(&lead_msgs).unwrap();
+        fs::write(
+            lead_msgs.join("decoy.json"),
+            serde_json::to_string(&json!({
+                "sender": "decoy-parent",
+                "sourceMetadata": {
+                    "tool": {
+                        "conversationId": "decoy-parent",
+                        "toolCall": { "name": "invoke_subagent", "argumentsJson": "{}" }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_subagent_lineage(child, &brain.join(child)),
+            Some(SubagentLineage {
+                root_session_id: lead.into(),
+                role: Some("Scout".into()),
+                type_name: Some("research".into()),
+            })
+        );
+        // Subagents start transcript.jsonl with SYSTEM_MESSAGE, so they still
+        // scan their own messages/ directory to find their parent.
+        let child_logs = brain.join(child).join(".system_generated").join("logs");
+        fs::create_dir_all(&child_logs).unwrap();
+        fs::write(
+            child_logs.join("transcript.jsonl"),
+            format!(
+                "{}\n",
+                json!({"step_index": 0, "source": "SYSTEM", "type": "SYSTEM_MESSAGE", "content": "prompt"})
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_subagent_lineage(child, &brain.join(child)),
+            Some(SubagentLineage {
+                root_session_id: lead.into(),
+                role: Some("Scout".into()),
+                type_name: Some("research".into()),
+            })
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -1383,18 +1491,24 @@ mod tests {
             Reading::Working
         );
 
-        // Esc during generation: step flips to status=6 (CANCELED) even if summaries lags.
+        // A canceled step (status=6, e.g. killed background command) while
+        // summaries still reports not_fully_idle=1 stays Working until the
+        // summary settles to IDLE with not_fully_idle=0, when it reads Canceled.
         run_sql(&conv, "INSERT INTO steps VALUES (2, 6);");
+        assert_eq!(
+            read_status(&summaries, Some(&conv), "conv-1", 1),
+            Reading::Working
+        );
+        run_sql(
+            &summaries,
+            "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle=0 WHERE conversation_id='conv-1';",
+        );
         assert_eq!(
             read_status(&summaries, Some(&conv), "conv-1", 1),
             Reading::Canceled
         );
 
         // ERROR (7) is quiescent, not active: IDLE with not_fully_idle=0 -> Idle.
-        run_sql(
-            &summaries,
-            "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle=0 WHERE conversation_id='conv-1';",
-        );
         run_sql(&conv, "INSERT INTO steps VALUES (3, 7);");
         assert_eq!(
             read_status(&summaries, Some(&conv), "conv-1", 3),
@@ -1636,11 +1750,18 @@ mod tests {
             );
         }
 
-        // NULL and unknown text in conversation_summaries.status fail closed as UnknownStatus.
+        // NULL, integer, and unknown text in conversation_summaries.status, as
+        // well as NULL, TEXT, REAL, and BLOB in not_fully_idle, fail closed as
+        // UnknownStatus instead of coercing not_fully_idle to 0 (`Idle`).
         run_sql_and_close_wal(&conv, "DELETE FROM steps; INSERT INTO steps VALUES (1, 3);");
         for bad_summary in [
-            "UPDATE conversation_summaries SET status=NULL WHERE conversation_id='conv-utf8';",
-            "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_FUTURE' WHERE conversation_id='conv-utf8';",
+            "UPDATE conversation_summaries SET status=NULL, not_fully_idle=0 WHERE conversation_id='conv-utf8';",
+            "UPDATE conversation_summaries SET status=0, not_fully_idle=0 WHERE conversation_id='conv-utf8';",
+            "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_FUTURE', not_fully_idle=0 WHERE conversation_id='conv-utf8';",
+            "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle=NULL WHERE conversation_id='conv-utf8';",
+            "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle='true' WHERE conversation_id='conv-utf8';",
+            "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle=0.5 WHERE conversation_id='conv-utf8';",
+            "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle=X'00' WHERE conversation_id='conv-utf8';",
         ] {
             run_sql_and_close_wal(&summaries, bad_summary);
             assert_eq!(
@@ -1649,6 +1770,68 @@ mod tests {
                 "expected UnknownStatus for {bad_summary}"
             );
         }
+
+        // Valid integer not_fully_idle still distinguishes Working (nonzero) from Idle (0).
+        run_sql_and_close_wal(
+            &summaries,
+            "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle=1 WHERE conversation_id='conv-utf8';",
+        );
+        assert_eq!(
+            read_status(&summaries, Some(&conv), "conv-utf8", 1),
+            Reading::Working
+        );
+        run_sql_and_close_wal(
+            &summaries,
+            "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle=0 WHERE conversation_id='conv-utf8';",
+        );
+        assert_eq!(
+            read_status(&summaries, Some(&conv), "conv-utf8", 1),
+            Reading::Idle
+        );
+
+        // An earlier canceled tool step (status=6) in steps must not override
+        // an active summary row (IDLE + not_fully_idle=1 while waiting on
+        // subagents, or RUNNING between steps) or a malformed summary row; it
+        // reports Canceled only once the summary is IDLE+0 or absent.
+        run_sql_and_close_wal(
+            &conv,
+            "DELETE FROM steps; INSERT INTO steps VALUES (1, 6), (2, 3);",
+        );
+        for active_summary in [
+            "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle=1 WHERE conversation_id='conv-utf8';",
+            "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_RUNNING', not_fully_idle=0 WHERE conversation_id='conv-utf8';",
+        ] {
+            run_sql_and_close_wal(&summaries, active_summary);
+            assert_eq!(
+                read_status(&summaries, Some(&conv), "conv-utf8", 1),
+                Reading::Working,
+                "canceled step must not preempt {active_summary}"
+            );
+        }
+        run_sql_and_close_wal(
+            &summaries,
+            "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle='true' WHERE conversation_id='conv-utf8';",
+        );
+        assert_eq!(
+            read_status(&summaries, Some(&conv), "conv-utf8", 1),
+            Reading::Unreadable(Unreadable::UnknownStatus)
+        );
+        run_sql_and_close_wal(
+            &summaries,
+            "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle=0 WHERE conversation_id='conv-utf8';",
+        );
+        assert_eq!(
+            read_status(&summaries, Some(&conv), "conv-utf8", 1),
+            Reading::Canceled
+        );
+        run_sql_and_close_wal(
+            &summaries,
+            "DELETE FROM conversation_summaries WHERE conversation_id='conv-utf8';",
+        );
+        assert_eq!(
+            read_status(&summaries, Some(&conv), "conv-utf8", 1),
+            Reading::Canceled
+        );
         let _ = fs::remove_dir_all(dir);
     }
 }

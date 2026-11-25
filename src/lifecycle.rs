@@ -65,6 +65,10 @@ struct HookEvidence {
     /// A child-set change the activity carried was refused, so not every
     /// native effect the action selected was written.
     native_refused: bool,
+    /// The proposed activity write was rejected while a sibling child cleanup
+    /// on the same hook applied, so neither `activity` nor `native_state`
+    /// confirmed the full requested action.
+    activity_refused: bool,
     pending_observation_id: Option<String>,
     observation_id: Option<String>,
     pending_observation_kind: Option<String>,
@@ -99,14 +103,15 @@ fn confirm_native(resolved: &ResolvedLaunch, binding_id: &str, mutation: &Mutati
         .planned_native
         .unwrap_or_else(|| accepted(&mutation.result));
     if evidence.persistence.native_state != Persistence::NotRequested {
-        evidence.persistence.native_state = if admitted && !evidence.native_refused {
-            Persistence::Confirmed
-        } else {
-            Persistence::Rejected
-        };
+        evidence.persistence.native_state =
+            if admitted && !evidence.native_refused && !evidence.activity_refused {
+                Persistence::Confirmed
+            } else {
+                Persistence::Rejected
+            };
     }
     if evidence.persistence.activity != Persistence::NotRequested {
-        evidence.persistence.activity = if admitted {
+        evidence.persistence.activity = if admitted && !evidence.activity_refused {
             Persistence::Confirmed
         } else {
             Persistence::Rejected
@@ -2101,7 +2106,8 @@ fn apply_activity(
                 .map(|record| Replacement::always(activity_path.clone(), record))
                 .into_iter()
                 .collect();
-            // Only a child's permission request reaches here with an agent id.
+            // Only a child's permission request or an Agy child's blocking
+            // tool (`ask_question`) reaches here with an agent id.
             // It marks the child `waiting` in the binding's child set, which
             // only holds the notify against the lead's tool calls (see the
             // record contract's Child presence), so a set that cannot be
@@ -2194,8 +2200,12 @@ fn apply_activity(
                 Ok(Some(child_result)) => {
                     if post_tool_ignored && child_result.disposition == Disposition::Applied {
                         result.disposition = Disposition::Applied;
+                        result.diagnostic = None;
                         if result.event_id.is_none() {
                             result.event_id = child_result.event_id;
+                        }
+                        if let Some(evidence) = &resolved.evidence {
+                            evidence.borrow_mut().activity_refused = true;
                         }
                     }
                     (false, child_result.diagnostic)
@@ -3460,6 +3470,7 @@ fn apply_provider_event_with_request(
         admission: None,
         planned_native: None,
         native_refused: false,
+        activity_refused: false,
         pending_observation_id: None,
         observation_id: None,
         pending_observation_kind: None,
@@ -3693,8 +3704,9 @@ fn apply_provider_event_inner(
 /// a model error runs no hook, and only the session rollout says it ended; the
 /// follower reads it from where the rollout stands now. As of Claude Code
 /// 2.1.300 a turn the user stops with Esc runs no hook, and the host's status
-/// file shows it. A follower needs the hook's proof of its host, because it
-/// lives no longer than that process.
+/// file shows it. As of `agy` 1.5.16 a turn the user stops with Esc runs no
+/// `Stop` hook, and its local SQLite status databases show it. A follower needs
+/// the hook's proof of its host, because it lives no longer than that process.
 ///
 /// A lead Codex prompt starts one, which waits for a follower that holds the
 /// binding's follower lock to leave or to name the prompt's turn. Any other
@@ -3704,11 +3716,13 @@ fn apply_provider_event_inner(
 /// on to each later turn. A Codex follower starts whatever the hook's
 /// disposition: a prompt whose thinking lost the activity slot still began its
 /// turn, and the follower writes only for a turn the binding recorded or one
-/// it carried into. A Claude follower follows a prompt, whether or not it
-/// carries a turn id, and starts only once the prompt record names it as the
+/// it carried into. A Claude or Agy follower follows a prompt, whether or not
+/// it carries a turn id, and starts only once the prompt record names it as the
 /// lead's latest prompt: it ends the turn only while that holds. A
-/// `CLAUDE_CONFIG_DIR` the hook could not keep starts none, since the status
-/// file is in that directory, not in `~/.claude`.
+/// `CLAUDE_CONFIG_DIR` the hook could not keep starts no Claude follower, since
+/// the status file is in that directory, not in `~/.claude`; an Agy prompt
+/// without a valid `transcriptPath` inside `<appDataDir>/brain/<id>/...` starts
+/// no Agy follower, since the SQLite databases live under `<appDataDir>`.
 fn start_turn_follower(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
@@ -4693,6 +4707,7 @@ mod lifecycle_write_tests {
             admission: None,
             planned_native: Some(true),
             native_refused: false,
+            activity_refused: false,
             pending_observation_id: Some("11111111-1111-4111-8111-111111111111".into()),
             observation_id: None,
             pending_observation_kind: Some("response_finished".into()),

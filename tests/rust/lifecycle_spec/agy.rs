@@ -9,11 +9,14 @@ use std::sync::Arc;
 #[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::self_claim::apply_as;
+use super::self_claim::{AGENT_LAUNCH, apply_as, install, self_owned_claim, stored_claim};
 #[cfg(target_os = "macos")]
 use super::turn_follower::{follow_every, last_request, recorded};
 use super::*;
+use wezterm_attention::consumer::{NotDispatchedReason, delivery_bytes};
+use wezterm_attention::hook_content::HookContent;
 use wezterm_attention::lifecycle::apply_provider_event_with_outcome;
+use wezterm_attention::lifecycle::outcome::Persistence;
 #[cfg(target_os = "macos")]
 use wezterm_attention::turn_follower::{AgyTurn, FollowedTurn};
 
@@ -2290,4 +2293,361 @@ fn agy_follower_clears_esc_during_stop_hook_continuation_without_new_observation
     let followed = follow_every(&setup, &req, Duration::from_millis(10));
     assert_eq!(recorded(&followed), "applied");
     assert!(shown_activity(&setup.binding_dir("agy", LEAD)).is_none());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn agy_follower_ignores_malformed_summary_and_active_killed_step_then_interrupts_on_valid_idle() {
+    let mut setup = Setup::new();
+    setup.claim();
+    let (lead_dir, lead_tx) = agy_brain_dir(&setup, LEAD);
+    write_jsonl(
+        &lead_tx,
+        &[json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "work"})],
+    );
+    let env = setup.naming(AGENT_PID);
+    let start = parse_provider_event(
+        "agy",
+        "SessionStart",
+        &json!({
+            "hookEventName": "SessionStart",
+            "conversationId": LEAD,
+            "transcriptPath": lead_tx.to_string_lossy(),
+            "artifactDirectoryPath": lead_dir.to_string_lossy(),
+            "cwd": "/tmp/project",
+            "lastUserInput": "work"
+        }),
+        &env,
+    );
+    apply_as(&setup, &env, &start, "00000000000000000200");
+    let pre = parse_provider_event(
+        "agy",
+        "PreInvocation",
+        &json!({
+            "hookEventName": "PreInvocation",
+            "conversationId": LEAD,
+            "transcriptPath": lead_tx.to_string_lossy(),
+            "artifactDirectoryPath": lead_dir.to_string_lossy(),
+            "cwd": "/tmp/project",
+            "lastUserInput": "work",
+            "invocationNum": 0,
+            "initialNumSteps": 1
+        }),
+        &env,
+    );
+    apply_as(&setup, &env, &pre, "00000000000000000300");
+    let req = last_request(&setup);
+    let FollowedTurn::Agy(AgyTurn {
+        ref summaries_db,
+        ref conv_db,
+        ..
+    }) = req.turn
+    else {
+        panic!("expected AgyTurn");
+    };
+    let summaries = PathBuf::from(summaries_db);
+    let conv = PathBuf::from(conv_db.as_ref().unwrap());
+    // Poll 1: earlier background tool step was killed (status=6), later step
+    // finished (status=3), and summary reports IDLE with not_fully_idle=1
+    // (waiting on background subagents) -> Working (sets seen_working=true,
+    // must NOT record user_interrupt).
+    run_sqlite(
+        &summaries,
+        "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, status TEXT, not_fully_idle);
+         INSERT INTO conversation_summaries VALUES ('agy-lead-1', 'CASCADE_RUN_STATUS_IDLE', 1);",
+    );
+    run_sqlite(
+        &conv,
+        "CREATE TABLE steps (idx INTEGER PRIMARY KEY, status INTEGER);
+         INSERT INTO steps VALUES (1, 6), (2, 3);",
+    );
+
+    let polls = Arc::new(AtomicUsize::new(0));
+    let polls_for_hook = Arc::clone(&polls);
+    let summaries_for_hook = summaries.clone();
+    let conv_for_hook = conv.clone();
+    let binding_dir_for_hook = setup.binding_dir("agy", LEAD);
+    *setup.processes.on_read.lock().unwrap() = Some(Arc::new(move |pid| {
+        if pid == AGENT_PID {
+            let n = polls_for_hook.fetch_add(1, Ordering::SeqCst);
+            if n == 2 {
+                // Still working after active killed-step poll: activity must stay thinking.
+                assert_eq!(
+                    shown_activity(&binding_dir_for_hook).unwrap()["type"],
+                    "thinking"
+                );
+                // Switch steps to quiescent DONE and corrupt not_fully_idle to TEXT 'true'.
+                run_sqlite(
+                    &conv_for_hook,
+                    "DELETE FROM steps; INSERT INTO steps VALUES (1, 3), (2, 3);",
+                );
+                run_sqlite(
+                    &summaries_for_hook,
+                    "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle='true' WHERE conversation_id='agy-lead-1';",
+                );
+            } else if n == 5 {
+                // After malformed summary polls, no interrupt may have been recorded.
+                assert_eq!(
+                    shown_activity(&binding_dir_for_hook).unwrap()["type"],
+                    "thinking"
+                );
+                // Finally deliver valid IDLE + integer 0 -> follower records user_interrupt.
+                run_sqlite(
+                    &summaries_for_hook,
+                    "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle=0 WHERE conversation_id='agy-lead-1';",
+                );
+            }
+        }
+        None
+    }));
+
+    setup.clock = FixedClock {
+        monotonic: "00000000000000000900",
+        unix: "00000000099999999900",
+    };
+    let followed = follow_every(&setup, &req, Duration::from_millis(10));
+    assert_eq!(recorded(&followed), "applied");
+    assert!(shown_activity(&setup.binding_dir("agy", LEAD)).is_none());
+    assert!(polls.load(Ordering::SeqCst) >= 6);
+}
+
+#[test]
+fn delayed_manage_subagents_kill_over_activity_clear_clears_diagnostic_and_rejects_activity_delivery()
+ {
+    let setup = Setup::new();
+    setup.claim();
+    setup.apply(
+        &event("agy", "SessionStart", LEAD, json!({})),
+        "00000000000000000200",
+    );
+    let start_a = event(
+        "agy",
+        "SessionStart",
+        "child-a",
+        json!({"parentConversationId": LEAD, "agentName": "worker", "lastUserInput": ""}),
+    );
+    assert_eq!(
+        setup.apply(&start_a, "00000000000000000300").disposition,
+        "applied"
+    );
+    // Clear lead activity at t=500 while child-a remains live so the delayed
+    // PostToolUse at t=400 is covered by activity-clear.
+    let interrupt = ProviderEvent::agy_turn_interrupt(LEAD);
+    assert_eq!(
+        setup.apply(&interrupt, "00000000000000000500").disposition,
+        "applied"
+    );
+
+    // Delayed PostToolUse(manage_subagents, kill child-a) at t=400 is covered by
+    // the t=500 activity clear, so plan_activity returns Ignored + BindingConflict,
+    // while StopIds still removes child-a.
+    let delayed_kill = event(
+        "agy",
+        "PostToolUse",
+        LEAD,
+        json!({
+            "toolCall": {
+                "name": "manage_subagents",
+                "id": "kill-a-covered",
+                "args": {"Action": "kill", "ConversationIds": ["child-a"]}
+            },
+            "error": ""
+        }),
+    );
+    let outcome = apply_provider_event_with_outcome(
+        &delayed_kill,
+        &setup.env,
+        "00000000000000000400",
+        &setup.ports(),
+    );
+    let res = outcome.result.as_ref().expect("applied child cleanup");
+    assert_eq!(res.disposition, "applied", "{res:?}");
+    assert!(
+        res.diagnostic.is_none(),
+        "stale binding_conflict diagnostic must not remain on an applied cleanup: {res:?}"
+    );
+    assert_eq!(outcome.persistence.activity, Persistence::Rejected);
+    assert_eq!(outcome.persistence.native_state, Persistence::Rejected);
+    assert_eq!(
+        delivery_bytes(
+            &outcome,
+            HookContent::NotRequested,
+            HookContent::NotRequested
+        ),
+        Err(NotDispatchedReason::NativeStateRejected)
+    );
+    let children = read_json(setup.binding_dir("agy", LEAD).join("children.json")).unwrap();
+    assert_eq!(children["live"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn agy_resume_self_claim_reuses_same_host_replaces_dead_owner_and_refuses_shell_claim() {
+    // 1. Same-host self-owned claim is reused without querying the WezTerm mux.
+    let setup = Setup::new();
+    install(&setup, &self_owned_claim(&setup, AGENT_LAUNCH, AGENT_PID));
+    let mux_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mux_calls_hook = std::sync::Arc::clone(&mux_calls);
+    *setup.panes.on_list.lock().unwrap() = Some(std::sync::Arc::new(move || {
+        mux_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }));
+    setup.panes.set(None);
+    let agent_env = setup.agent_env();
+    let (_, tx) = agy_brain_dir(&setup, "resume-same-host");
+    write_jsonl(
+        &tx,
+        &[json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "hi"})],
+    );
+    let pre = parse_provider_event(
+        "agy",
+        "PreInvocation",
+        &json!({
+            "hookEventName": "PreInvocation",
+            "conversationId": "resume-same-host",
+            "transcriptPath": tx.to_string_lossy(),
+            "cwd": "/tmp/project",
+            "lastUserInput": "hi",
+            "invocationNum": 0
+        }),
+        &agent_env,
+    );
+    let res = apply_as(&setup, &agent_env, &pre, "00000000000000000300");
+    assert_eq!(res.disposition, "applied", "{res:?}");
+    assert_eq!(mux_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        stored_claim(&setup).unwrap()["launch_id"],
+        json!(AGENT_LAUNCH)
+    );
+
+    // 2. Dead prior agent's self-owned claim is replaced via mux proof on ClaimStale.
+    let setup2 = Setup::new();
+    let dead_pid = AGENT_PID + 77;
+    setup2.processes.set(
+        dead_pid,
+        ProcessRead::Found(process_facts(
+            dead_pid,
+            SHELL_PID,
+            ControllingTerminal::Device(PANE_TTY_DEVICE),
+        )),
+    );
+    install(&setup2, &self_owned_claim(&setup2, AGENT_LAUNCH, dead_pid));
+    setup2.processes.set(dead_pid, ProcessRead::Gone);
+    let agent_env2 = setup2.agent_env();
+    let (_, tx2) = agy_brain_dir(&setup2, "resume-dead-owner");
+    write_jsonl(
+        &tx2,
+        &[json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "hi"})],
+    );
+    let pre2 = parse_provider_event(
+        "agy",
+        "PreInvocation",
+        &json!({
+            "hookEventName": "PreInvocation",
+            "conversationId": "resume-dead-owner",
+            "transcriptPath": tx2.to_string_lossy(),
+            "cwd": "/tmp/project",
+            "lastUserInput": "hi",
+            "invocationNum": 0
+        }),
+        &agent_env2,
+    );
+    let res2 = apply_as(&setup2, &agent_env2, &pre2, "00000000000000000400");
+    assert_eq!(res2.disposition, "applied", "{res2:?}");
+    let replaced_claim = stored_claim(&setup2).unwrap();
+    assert_ne!(replaced_claim["launch_id"], json!(AGENT_LAUNCH));
+    assert_eq!(replaced_claim["owner_pid"], json!(AGENT_PID.to_string()));
+
+    // 3. Existing shell claim without WEZTERM_ATTENTION_LAUNCH_ID refuses without touching mux.
+    let setup3 = Setup::new();
+    setup3.claim();
+    let mux_calls3 = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mux_calls3_hook = std::sync::Arc::clone(&mux_calls3);
+    *setup3.panes.on_list.lock().unwrap() = Some(std::sync::Arc::new(move || {
+        mux_calls3_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }));
+    setup3.panes.set(None);
+    let agent_env3 = setup3.agent_env();
+    let (_, tx3) = agy_brain_dir(&setup3, "resume-shell-claim");
+    write_jsonl(
+        &tx3,
+        &[json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "hi"})],
+    );
+    let pre3 = parse_provider_event(
+        "agy",
+        "PreInvocation",
+        &json!({
+            "hookEventName": "PreInvocation",
+            "conversationId": "resume-shell-claim",
+            "transcriptPath": tx3.to_string_lossy(),
+            "cwd": "/tmp/project",
+            "lastUserInput": "hi",
+            "invocationNum": 0
+        }),
+        &agent_env3,
+    );
+    let res3 = apply_as(&setup3, &agent_env3, &pre3, "00000000000000000500");
+    assert_eq!(res3.disposition, "ignored", "{res3:?}");
+    assert_eq!(mux_calls3.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn agy_user_canceled_stop_commits_clear_but_marks_partial_and_suppresses_delivery_when_children_refused()
+ {
+    let setup = Setup::new();
+    setup.claim();
+    setup.apply(
+        &event("agy", "SessionStart", LEAD, json!({})),
+        "00000000000000000200",
+    );
+    setup.apply(
+        &event("agy", "PreInvocation", LEAD, json!({"invocationNum": 1})),
+        "00000000000000000300",
+    );
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "thinking"
+    );
+    // Write a future-schema children.json so Reconcile refuses the child set.
+    let children_path = setup.binding_dir("agy", LEAD).join("children.json");
+    let launch_id = setup.env["WEZTERM_ATTENTION_LAUNCH_ID"].as_str();
+    fs::write(
+        &children_path,
+        serde_json::to_vec(&json!({
+            "kind": "children",
+            "schema": 999,
+            "binding_id": binding_id("agy", LEAD, launch_id),
+            "live": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let cancel = event(
+        "agy",
+        "Stop",
+        LEAD,
+        json!({"terminationReason": "USER_CANCELED", "fullyIdle": true}),
+    );
+    let outcome = apply_provider_event_with_outcome(
+        &cancel,
+        &setup.env,
+        "00000000000000000400",
+        &setup.ports(),
+    );
+    let res = outcome.result.as_ref().expect("partial clear result");
+    assert_eq!(res.disposition, "partial", "{res:?}");
+    assert_eq!(
+        res.diagnostic.as_ref().map(|d| d.code.as_str()),
+        Some("future_schema")
+    );
+    assert!(shown_activity(&setup.binding_dir("agy", LEAD)).is_none());
+    assert_eq!(outcome.persistence.activity, Persistence::Confirmed);
+    assert_eq!(outcome.persistence.native_state, Persistence::Rejected);
+    assert_eq!(
+        delivery_bytes(
+            &outcome,
+            HookContent::NotRequested,
+            HookContent::NotRequested
+        ),
+        Err(NotDispatchedReason::NativeStateRejected)
+    );
 }
