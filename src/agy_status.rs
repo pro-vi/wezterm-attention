@@ -21,7 +21,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -352,18 +352,15 @@ fn is_root_lead_transcript(conv_brain_dir: &Path) -> bool {
         return false;
     };
     let mut buf = Vec::new();
-    let Ok(_) = file
-        .take((TRANSCRIPT_FIRST_LINE_MAX_BYTES + 1) as u64)
-        .read_to_end(&mut buf)
+    let Ok(read) = BufReader::new(file.take((TRANSCRIPT_FIRST_LINE_MAX_BYTES + 1) as u64))
+        .read_until(b'\n', &mut buf)
     else {
         return false;
     };
-    let line = match buf.iter().position(|&b| b == b'\n') {
-        Some(pos) => &buf[..pos],
-        None if buf.len() <= TRANSCRIPT_FIRST_LINE_MAX_BYTES => &buf[..],
-        None => return false,
-    };
-    let Ok(value) = serde_json::from_slice::<Value>(line) else {
+    if read == 0 || (buf.len() > TRANSCRIPT_FIRST_LINE_MAX_BYTES && !buf.ends_with(b"\n")) {
+        return false;
+    }
+    let Ok(value) = serde_json::from_slice::<Value>(&buf) else {
         return false;
     };
     value.get("type").and_then(Value::as_str) == Some("USER_INPUT")
@@ -1346,8 +1343,8 @@ mod tests {
 
         // When the root lead has a transcript.jsonl starting with USER_INPUT,
         // lineage resolution short-circuits without reading the lead's
-        // messages/ directory (verified by making lead's messages/ unreadable
-        // and placing a decoy invoke_subagent message inside it).
+        // messages/ directory (verified by placing a decoy invoke_subagent
+        // message inside it).
         let lead_logs = brain.join(lead).join(".system_generated").join("logs");
         fs::create_dir_all(&lead_logs).unwrap();
         fs::write(
@@ -1750,13 +1747,13 @@ mod tests {
             );
         }
 
-        // NULL, integer, and unknown text in conversation_summaries.status, as
+        // NULL, BLOB, and unknown text in conversation_summaries.status, as
         // well as NULL, TEXT, REAL, and BLOB in not_fully_idle, fail closed as
-        // UnknownStatus instead of coercing not_fully_idle to 0 (`Idle`).
+        // UnknownStatus instead of coercing to `Idle`.
         run_sql_and_close_wal(&conv, "DELETE FROM steps; INSERT INTO steps VALUES (1, 3);");
         for bad_summary in [
             "UPDATE conversation_summaries SET status=NULL, not_fully_idle=0 WHERE conversation_id='conv-utf8';",
-            "UPDATE conversation_summaries SET status=0, not_fully_idle=0 WHERE conversation_id='conv-utf8';",
+            "UPDATE conversation_summaries SET status=CAST('CASCADE_RUN_STATUS_IDLE' AS BLOB), not_fully_idle=0 WHERE conversation_id='conv-utf8';",
             "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_FUTURE', not_fully_idle=0 WHERE conversation_id='conv-utf8';",
             "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle=NULL WHERE conversation_id='conv-utf8';",
             "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle='true' WHERE conversation_id='conv-utf8';",

@@ -3721,8 +3721,9 @@ fn apply_provider_event_inner(
 /// lead's latest prompt: it ends the turn only while that holds. A
 /// `CLAUDE_CONFIG_DIR` the hook could not keep starts no Claude follower, since
 /// the status file is in that directory, not in `~/.claude`; an Agy prompt
-/// without a valid `transcriptPath` inside `<appDataDir>/brain/<id>/...` starts
-/// no Agy follower, since the SQLite databases live under `<appDataDir>`.
+/// derives `<appDataDir>` from `transcriptPath`'s `brain/` ancestor or falls
+/// back to `$HOME/.gemini/antigravity-cli`, starting no follower when neither
+/// gives an absolute directory.
 fn start_turn_follower(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
