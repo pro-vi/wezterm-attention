@@ -1486,6 +1486,18 @@ fn every_active_lifecycle_row_reaches_the_production_writer() {
                 if patch.get("lastUserInput").is_none() {
                     patch["lastUserInput"] = json!("SYNTHETIC-PRIVATE-SENTINEL");
                 }
+                if name == "PreInvocation" && patch.get("transcriptPath").is_none() {
+                    let tx = setup._scratch.0.join("agy-coverage-transcript.jsonl");
+                    fs::write(
+                        &tx,
+                        format!(
+                            "{}\n",
+                            json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "SYNTHETIC-PRIVATE-SENTINEL"})
+                        ),
+                    )
+                    .unwrap();
+                    patch["transcriptPath"] = json!(tx.to_string_lossy());
+                }
             } else {
                 patch["prompt"] = json!("SYNTHETIC-PRIVATE-SENTINEL");
                 patch["tool_input"] = json!({"private":"SYNTHETIC-PRIVATE-SENTINEL"});

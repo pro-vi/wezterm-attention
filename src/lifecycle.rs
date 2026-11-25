@@ -1791,31 +1791,11 @@ fn started_again_diagnostic(kind: &str) -> Diagnostic {
     )
 }
 
-/// Plans one change to the binding's child set, inside the launch and claim
-/// locks: reads the binding, its end and the set, applies `transition`, and
-/// adds the replacement when the set changed. The set is read through
-/// [`read_or_move_aside`]; an invalid one is replaced by a new one even when
-/// the event changes nothing, and children it held reappear at their next
-/// event. A set its readers would reject as too large is refused rather than
-/// written.
-fn plan_children(
-    resolved: &ResolvedLaunch,
-    event: &ProviderEvent,
-    binding_id: &str,
-    written_at: &str,
-    transition: ChildTransition<'_>,
-    replacements: &mut Vec<Replacement>,
-) -> Result<LifecycleResult> {
-    plan_children_transitions(
-        resolved,
-        event,
-        binding_id,
-        written_at,
-        &[transition],
-        replacements,
-    )
-}
-
+/// Plans one or more changes to the binding's child set, inside the launch and
+/// claim locks: reads the binding, its end and the set, applies `transitions`
+/// atomically against a staged copy, and adds the replacement only when no
+/// transition conflicts and the set changed (or an invalid set was moved aside).
+/// A set its readers would reject as too large is refused rather than written.
 fn plan_children_transitions(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
@@ -1856,14 +1836,16 @@ fn plan_children_transitions(
     };
     set.schema = manifest()?.record_schema;
     let end_mark = EndMark::of(end.as_ref(), &binding);
+    let mut staged = set.clone();
     let mut any_changed = false;
     let mut disposition = Disposition::Skipped;
     let mut diagnostic = None;
     for (index, &transition) in transitions.iter().enumerate() {
-        let reduction = set.apply(end_mark, transition);
+        let reduction = staged.apply(end_mark, transition);
         if index == 0
             || reduction.disposition == Disposition::Conflict
-            || (reduction.changed && disposition == Disposition::Skipped)
+            || (reduction.changed
+                && matches!(disposition, Disposition::Skipped | Disposition::Ignored))
         {
             disposition = reduction.disposition;
         }
@@ -1882,7 +1864,8 @@ fn plan_children_transitions(
     if started_again {
         report_instead(&mut result.diagnostic, started_again_diagnostic(kind));
     }
-    if any_changed || started_again {
+    if disposition != Disposition::Conflict && (any_changed || started_again) {
+        set = staged;
         set.revision = Uuid::new_v4().to_string();
         set.written_at_unix_ns = written_at.to_owned();
         let value = serde_json::to_value(&set).map_err(|_| {
@@ -2055,25 +2038,23 @@ fn apply_activity(
             }
             // A lead that waits on a sub-agent keeps calling tools, and each
             // call is thinking. While a child that asked for permission is
-            // still waiting, its notify is what the user needs to see, and
-            // the lead's next tool call is expected, not a conflict. A
+            // still waiting (and is not removed by this event's child kill or
+            // reconcile at `observation`), its notify is what the user needs to
+            // see, and the lead's next tool call is expected, not a conflict. A
             // prompt, a call killing all waiting children, or anything but
             // thinking replaces it as usual.
-            let kills_all_children = event
-                .in_flight_task_ids
-                .as_deref()
-                .is_some_and(<[String]>::is_empty);
             let held = event.agent_id.is_none()
                 && base["type"] == "thinking"
                 && event.source_event != "UserPromptSubmit"
                 && !is_lead_prompt
-                && !kills_all_children
                 && visible
                 && existing.as_ref().is_some_and(|activity| {
-                    notify_held_by_child_excluding(
+                    notify_held_by_child_after(
                         resolved,
                         &binding_id,
                         activity,
+                        observation,
+                        event.in_flight_task_ids.as_deref(),
                         &event.stopped_child_ids,
                     )
                 });
@@ -2125,7 +2106,8 @@ fn apply_activity(
             // only holds the notify against the lead's tool calls (see the
             // record contract's Child presence), so a set that cannot be
             // changed is reported and the notify still applies.
-            let mut children_report = Ok(None);
+            let mut children_report: std::result::Result<Option<LifecycleResult>, Diagnostic> =
+                Ok(None);
             if let Some(agent_id) = event.agent_id.as_deref() {
                 children_report = plan_children_beside_activity(
                     resolved,
@@ -2138,7 +2120,8 @@ fn apply_activity(
                         order: observation,
                     },
                     &mut replacements,
-                );
+                )
+                .map(Some);
             }
             // A Codex parent's stop ends the children it covers. The stop is
             // the lead's own activity, so a set it cannot change is reported
@@ -2162,16 +2145,20 @@ fn apply_activity(
                         event_id: surviving_activity["event_id"].as_str().unwrap_or(""),
                     },
                     &mut replacements,
-                );
+                )
+                .map(Some);
             }
             // A lead stop carries the tasks the provider still runs (or an
             // empty list on a fully idle `agy` stop or `manage_subagents`
-            // `kill_all`), so a counted child it no longer lists ended without
-            // a stop of its own. The stop or tool result is the lead's own
-            // activity: a set it cannot change is reported and the activity
-            // still applies.
+            // `kill_all`), and `manage_subagents kill` names specific child
+            // ids. Even when another waiting child keeps `notify` held on the
+            // pane, child kills/reconciles still update `children.json` so
+            // sequential kills release `notify` once the last waiting child is
+            // gone.
+            let run_child_cleanup =
+                !matches!(result.disposition.as_str(), "ignored" | "conflict") || held;
             if let Some(in_flight) = event.in_flight_task_ids.as_deref()
-                && !matches!(result.disposition.as_str(), "ignored" | "conflict")
+                && run_child_cleanup
             {
                 children_report = plan_children_beside_activity(
                     resolved,
@@ -2183,10 +2170,9 @@ fn apply_activity(
                         in_flight,
                     },
                     &mut replacements,
-                );
-            } else if !event.stopped_child_ids.is_empty()
-                && !matches!(result.disposition.as_str(), "ignored" | "conflict")
-            {
+                )
+                .map(Some);
+            } else if !event.stopped_child_ids.is_empty() && run_child_cleanup {
                 children_report = plan_children_beside_activity(
                     resolved,
                     event,
@@ -2197,16 +2183,26 @@ fn apply_activity(
                         order: observation,
                     },
                     &mut replacements,
-                );
+                )
+                .map(Some);
             }
+            let mut result = result;
             let (refused, diagnostic) = match children_report {
-                Ok(diagnostic) => (false, diagnostic),
+                Ok(Some(child_result)) => {
+                    if held && child_result.disposition == Disposition::Applied {
+                        result.disposition = Disposition::Applied;
+                        if result.event_id.is_none() {
+                            result.event_id = child_result.event_id;
+                        }
+                    }
+                    (false, child_result.diagnostic)
+                }
+                Ok(None) => (false, None),
                 Err(diagnostic) => (true, Some(diagnostic)),
             };
             // What the child set reports, a restart included, replaces the
             // activity's own diagnostic, and a lifecycle failure that
             // append_observation records replaces both, as in apply_child.
-            let mut result = result;
             if let Some(diagnostic) = diagnostic {
                 report_instead(&mut result.diagnostic, diagnostic);
             }
@@ -2239,9 +2235,9 @@ fn apply_activity(
 /// Plans a child-set change that an activity carries, adding its
 /// replacement only when it applies. The activity stands whatever happens to
 /// the set. What the change reports comes back beside it: `Ok` with the
-/// diagnostic plan_children reports (a restart's, or else the transition's
-/// own), or `Err` when the set could not be planned or the transition
-/// conflicts with it, which makes an accepted activity's hook partial.
+/// child-set `LifecycleResult`, or `Err` when the set could not be planned or
+/// the transition conflicts with it, which makes an accepted activity's hook
+/// partial.
 fn plan_children_beside_activity(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
@@ -2249,14 +2245,14 @@ fn plan_children_beside_activity(
     written_at: &str,
     transition: ChildTransition<'_>,
     replacements: &mut Vec<Replacement>,
-) -> std::result::Result<Option<Diagnostic>, Diagnostic> {
+) -> std::result::Result<LifecycleResult, Diagnostic> {
     let mut planned = Vec::new();
-    match plan_children(
+    match plan_children_transitions(
         resolved,
         event,
         binding_id,
         written_at,
-        transition,
+        &[transition],
         &mut planned,
     ) {
         Ok(child) if child.disposition == Disposition::Conflict => {
@@ -2269,7 +2265,7 @@ fn plan_children_beside_activity(
         }
         Ok(child) => {
             replacements.extend(planned);
-            Ok(child.diagnostic)
+            Ok(child)
         }
         Err(error) => Err(error.diagnostic),
     }
@@ -2894,23 +2890,28 @@ fn apply_child(
     let agent_id = event.agent_id.as_deref().ok_or_else(|| {
         AttentionError::new(DiagnosticCode::RecordInvalid, "child event has no agent id")
     })?;
-    let transition = match (event.action, event.source_event.as_str()) {
-        (ProviderAction::ChildStopped, _) => ChildTransition::Stop {
-            agent_id,
-            order: observation,
-        },
-        (_, "SubagentStart" | "SessionStart") => ChildTransition::Start {
-            agent_id,
-            agent_type: event.agent_type.as_deref(),
-            order: observation,
-        },
-        _ => ChildTransition::Tool {
-            agent_id,
-            agent_type: event.agent_type.as_deref(),
-            order: observation,
-        },
-    };
-    let mut transitions = vec![transition];
+    let self_killed = event.source_event == "PostToolUse"
+        && event.stopped_child_ids.iter().any(|id| id == agent_id);
+    let mut transitions = Vec::new();
+    if !self_killed {
+        let transition = match (event.action, event.source_event.as_str()) {
+            (ProviderAction::ChildStopped, _) => ChildTransition::Stop {
+                agent_id,
+                order: observation,
+            },
+            (_, "SubagentStart" | "SessionStart") => ChildTransition::Start {
+                agent_id,
+                agent_type: event.agent_type.as_deref(),
+                order: observation,
+            },
+            _ => ChildTransition::Tool {
+                agent_id,
+                agent_type: event.agent_type.as_deref(),
+                order: observation,
+            },
+        };
+        transitions.push(transition);
+    }
     if !event.stopped_child_ids.is_empty() {
         transitions.push(ChildTransition::StopIds {
             agent_ids: &event.stopped_child_ids,
@@ -3246,7 +3247,8 @@ fn apply_clear_event(
             observation,
         )?;
         let mut replacements: Vec<_> = replacement.into_iter().collect();
-        let mut children_report = Ok(None);
+        let mut children_report: std::result::Result<Option<LifecycleResult>, Diagnostic> =
+            Ok(None);
         if let Some(in_flight) = event.in_flight_task_ids.as_deref()
             && !matches!(result.disposition.as_str(), "ignored" | "conflict")
         {
@@ -3260,10 +3262,12 @@ fn apply_clear_event(
                     in_flight,
                 },
                 &mut replacements,
-            );
+            )
+            .map(Some);
         }
         let (refused, diagnostic) = match children_report {
-            Ok(diagnostic) => (false, diagnostic),
+            Ok(Some(child)) => (false, child.diagnostic),
+            Ok(None) => (false, None),
             Err(diagnostic) => (true, Some(diagnostic)),
         };
         if let Some(diagnostic) = diagnostic {
@@ -3517,7 +3521,10 @@ fn apply_provider_event_with_request(
 
 enum LazyBind {
     Unneeded,
-    Bound(String),
+    Bound {
+        written_at: String,
+        host_diagnostic: Option<Diagnostic>,
+    },
     Refused(LifecycleResult),
 }
 
@@ -3563,8 +3570,11 @@ fn ensure_agy_preinvocation_binding(
     let result =
         binding_mutation(&binding_resolved, &binding_event, observation, &written_at)?.result;
     if accepted(&result) {
-        let _ = record_host(&binding_resolved, &binding_event, &written_at);
-        Ok(LazyBind::Bound(written_at))
+        let host_diagnostic = record_host(&binding_resolved, &binding_event, &written_at);
+        Ok(LazyBind::Bound {
+            written_at,
+            host_diagnostic,
+        })
     } else {
         Ok(LazyBind::Refused(result))
     }
@@ -3601,10 +3611,13 @@ fn apply_provider_event_inner(
         Err(error) => return Ok(LifecycleResult::ignored_error(error)),
     };
     resolved.evidence = evidence;
-    let bound_at =
+    let (bound_at, lazy_host_diagnostic) =
         match ensure_agy_preinvocation_binding(&resolved, event, observation, ports.clock)? {
-            LazyBind::Unneeded => None,
-            LazyBind::Bound(ts) => Some(ts),
+            LazyBind::Unneeded => (None, None),
+            LazyBind::Bound {
+                written_at,
+                host_diagnostic,
+            } => (Some(written_at), host_diagnostic),
             LazyBind::Refused(refused) => return Ok(refused),
         };
     let mut ran_checks = false;
@@ -3655,10 +3668,13 @@ fn apply_provider_event_inner(
                 .clone()
                 .or_else(|| resolved.publication_diagnostic.clone());
         }
-        if accepted(&result)
-            && let Some(problem) = record_host(&resolved, event, &written_at)
-        {
-            report_instead(&mut result.diagnostic, problem);
+        if accepted(&result) {
+            if let Some(problem) = lazy_host_diagnostic {
+                report_instead(&mut result.diagnostic, problem);
+            }
+            if let Some(problem) = record_host(&resolved, event, &written_at) {
+                report_instead(&mut result.diagnostic, problem);
+            }
         }
         // A follower that could not start leaves the hook's record as written,
         // and says so only where nothing else is reported.
@@ -3761,12 +3777,14 @@ fn start_turn_follower(
             let home = env.get("HOME").map(String::as_str);
             let summaries_db =
                 crate::agy_status::summaries_db_path(event.transcript_path.as_deref(), home)?;
-            let conv_db = event.provider_session_id.as_deref().and_then(|session_id| {
-                crate::agy_status::conversation_db_path(
-                    event.transcript_path.as_deref(),
-                    home,
-                    session_id,
-                )
+            let conv_db = event.initial_step_count.and_then(|_| {
+                event.provider_session_id.as_deref().and_then(|session_id| {
+                    crate::agy_status::conversation_db_path(
+                        event.transcript_path.as_deref(),
+                        home,
+                        session_id,
+                    )
+                })
             });
             FollowedTurn::Agy(AgyTurn {
                 prompt_observation_id: latest.observation_id,
@@ -4558,21 +4576,28 @@ fn tool_called_since_prompt(root: &Path, identity: &RecordIdentity) -> bool {
 /// Whether `activity` is a `notify` that a child's permission prompt, still
 /// waiting, holds against the lead's tool calls.
 fn notify_held_by_child(resolved: &ResolvedLaunch, binding_id: &str, activity: &Value) -> bool {
-    notify_held_by_child_excluding(resolved, binding_id, activity, &[])
+    activity["type"] == "notify"
+        && child_waits(resolved, binding_id, |set, end| {
+            set.waits_since(end, activity["observed_mono_ns"].as_str().unwrap_or(""))
+        })
 }
 
-fn notify_held_by_child_excluding(
+fn notify_held_by_child_after(
     resolved: &ResolvedLaunch,
     binding_id: &str,
     activity: &Value,
-    excluding: &[String],
+    order: &str,
+    in_flight: Option<&[String]>,
+    stop_ids: &[String],
 ) -> bool {
     activity["type"] == "notify"
         && child_waits(resolved, binding_id, |set, end| {
-            set.waits_since_excluding(
+            set.waits_since_after(
                 end,
                 activity["observed_mono_ns"].as_str().unwrap_or(""),
-                excluding,
+                order,
+                in_flight,
+                stop_ids,
             )
         })
 }

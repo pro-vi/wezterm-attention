@@ -126,8 +126,9 @@ A provider event finds its launch in this order, and stops at the first rule tha
    (`WEZTERM_ATTENTION_ENABLE_SELF_CLAIM` set to anything but `1`) or the platform is not macOS
    (`claim_stale`); when `WEZTERM_ATTENTION_HOST_PID` is missing or is not a positive decimal pid
    (`self_claim_parent_unverified`); when the pane holds a shell claim, for every event
-   (`claim_stale`); and, for any event but a session start, when the pane holds no claim
-   (`claim_stale`), before anything is proved or the mux is asked.
+   (`claim_stale`); and, for any event but a session start or a lead Agy `PreInvocation` carrying a
+   valid `transcriptPath` (for `agy --resume`, which as of `agy` 1.5.16 skips `SessionStart`), when
+   the pane holds no claim (`claim_stale`), before anything is proved or the mux is asked.
 3. Otherwise the writer proves its host. Its direct parent, as the kernel reports it, must be the
    process `WEZTERM_ATTENTION_HOST_PID` names, alive, this user's and not replaced while it is
    read, and the writer must not be traced (`self_claim_parent_unverified`). The host's terminal
@@ -135,10 +136,12 @@ A provider event finds its launch in this order, and stops at the first rule tha
    parent's; a terminal the kernel cannot report refuses (`probe_unavailable`), and a writer and
    parent that both have none refuse as `session_detached`: an agent that runs its sessions in
    a background process with no terminal hands that process's environment, taken from whichever
-   pane started it, to every session's hooks. A session start
+   pane started it, to every session's hooks. A session start — or a lead Agy `PreInvocation` with a
+   valid `transcriptPath` when the pane does not already hold this host's own claim —
    asks the mux: the host's terminal must be the device of the terminal the mux lists for
    `WEZTERM_PANE` on the current socket, and the listing must succeed and name the pane exactly
-   once (`unsafe_tty` otherwise). Any other event asks the mux nothing and proves itself against
+   once (`unsafe_tty` otherwise). Any other event (including a lead Agy `PreInvocation` when the
+   pane already holds this host's own claim) asks the mux nothing and proves itself against
    the pane's self-owned claim instead: the parent must be the claim's owner, the same pid started
    at the same time on the same boot (`claim_stale` otherwise); the host's terminal must be the
    device at the claim's `tty_path`, with the claim's `tty_fingerprint` (`unsafe_tty`); and the
@@ -147,15 +150,20 @@ A provider event finds its launch in this order, and stops at the first rule tha
    the one thing a listing would add is whether the pane is still open: an agent that outlives its
    closed pane keeps writing to that pane's records until its terminal goes away, and nothing
    displays them.
-4. A session start then claims, under the pane's claim lock and no other lock, after reading the
-   same host again. No claim: a new self-owned claim with a new launch id. The same process's own
-   claim: kept as it is, not rewritten. Another process's claim: replaced with a new launch id only
-   when that process is proven gone, meaning the boot session differs, no process has its pid, or
-   the process there started at another time; a live owner keeps the pane (`claim_stale`), and a
-   zombie or an owner that cannot be read keeps it too (`probe_unavailable`). Creating or replacing
-   needs the parent to be in the terminal's foreground process group; it need not lead that
-   group, as a native agent started by a launcher process does not. Keeping does not need it.
-   The claim is published to the proven terminal before the lock is released.
+4. A session start — or a lead Agy `PreInvocation` with a valid `transcriptPath` that did not
+   already prove itself against this host's existing self-owned claim — then claims, under the
+   pane's claim lock and no other lock, after reading the same host again. No claim: a new
+   self-owned claim with a new launch id. The same process's own claim: kept as it is, not
+   rewritten. Another process's claim: replaced with a new launch id only when that process is
+   proven gone, meaning the boot session differs, no process has its pid, or the process there
+   started at another time; a live owner keeps the pane (`claim_stale`), and a zombie or an owner
+   that cannot be read keeps it too (`probe_unavailable`). Creating or replacing needs the parent
+   to be in the terminal's foreground process group; it need not lead that group, as a native agent
+   started by a launcher process does not. Keeping does not need it. The claim is published to the
+   proven terminal before the lock is released. On a lead Agy `PreInvocation` with a valid
+   `transcriptPath` whose session is not yet the launch's current binding, the writer lazily creates
+   or replaces the binding (under the same-host rule below) before running checks or writing
+   activity.
 5. Any other event resolves against the self-owned claim it proved itself against.
 
 Every writer of a launch's records takes the launch lock, then the pane's claim lock, then a
@@ -211,10 +219,12 @@ write of the lifecycle observation, which is written last, is reported with what
 to report kept under `replaced`; a failed write of any other record is reported alone (see
 [accepted limitations](accepted-limitations.md#a-record-write-can-be-reported-failed-after-readers-already-see-it)).
 
-The integration records nothing, on purpose, for four events it knows: Claude Code's `idle_prompt`
-notification, Pi's `agent_end`, a Pi `session_shutdown` for a reload, and a Pi `message_end` for a
-message whose role is not `assistant`, or for a reply that stopped with `stop`, `length`, `toolUse`, `pending`
-or `deferred`, the stop reasons Pi 0.85.1 defines besides `error` and `aborted`. The bundled Pi
+The integration records nothing, on purpose, for five event classes it knows: Claude Code's
+`idle_prompt` notification, Pi's `agent_end`, a Pi `session_shutdown` for a reload, a Pi
+`message_end` for a message whose role is not `assistant` or for a reply that stopped with `stop`,
+`length`, `toolUse`, `pending` or `deferred` (the stop reasons Pi 0.85.1 defines besides `error`
+and `aborted`), and an unlinked Agy event whose `lastUserInput` is empty (preventing unlinked
+background or sub-agent callbacks from hijacking a lead binding). The bundled Pi
 extension forwards `message_end` only for a failed or aborted reply, and sends neither `agent_end`
 nor the `session_shutdown` of a reload, so the three Pi cases come only from another caller. Such an
 event answers `skipped` with no diagnostic, and the result's `message`, present only then, says why.
@@ -341,13 +351,25 @@ names, the writer empties `live`, drops `parent_clear` and records that end. A c
 at or before the recorded end, or one that arrives while the end still ends the binding, is then
 ignored (`binding_conflict`). After that the event itself applies:
 
-- **`SubagentStart`, a child's `PreToolUse` or a child's `PermissionRequest`** refreshes the child's
-  entry. `PreToolUse` sets `running`, `PermissionRequest` sets `waiting`, and `SubagentStart` keeps
-  the status the child had. A child not in the set is added only by `SubagentStart` or by an event
-  whose `agent_type` is not empty: Claude Code 2.1.283 also runs agents of its own, and one sent a
-  tool event with an `agent_id` and no type; those are not counted. The hook still succeeds for such
-  an event, and prints a `record_invalid` diagnostic naming it. A child's `PostToolUse` and
-  `PostToolUseFailure` change nothing.
+- **`SubagentStart`, a child's `PreToolUse` or a child's `PermissionRequest` (Claude/Codex)**
+  refreshes the child's entry. `PreToolUse` sets `running`, `PermissionRequest` sets `waiting`, and
+  `SubagentStart` keeps the status the child had. A child not in the set is added only by
+  `SubagentStart` or by an event whose `agent_type` is not empty: Claude Code 2.1.283 also runs
+  agents of its own, and one sent a tool event with an `agent_id` and no type; those are not
+  counted. The hook still succeeds for such an event, and prints a `record_invalid` diagnostic
+  naming it. A Claude or Codex child's `PostToolUse` and `PostToolUseFailure` change nothing.
+- **Agy sub-agent hooks** link a sub-agent (including nested grandchildren) to its root lead
+  session through `<artifactDirectoryPath>/.system_generated/messages/*.json` (or explicit
+  `rootConversationId`/`parentConversationId`). Child `SessionStart` acts like `SubagentStart`
+  (adding the child even without an `agent_type`); child `PreInvocation`, non-blocking `PreToolUse`,
+  and `Stop` with `fullyIdle: false` refresh the child as `running`; child `PreToolUse` of
+  `ask_question` publishes lead `notify` and marks the child `waiting`; child `PostToolUse` of
+  `ask_question` clears the child back to `running` without touching lead `activity.json`, child
+  `PostToolUse` of `manage_subagents` (`kill`) also removes the listed target ids atomically, and
+  any other child `PostToolUse` stays observation-only; child `Stop` with `fullyIdle: true` (or
+  absent) removes the child. On the lead, `PostToolUse` of `manage_subagents` removes listed ids
+  (`kill`) or reconciles against an empty in-flight list (`kill_all`), and a terminal lead `Stop`
+  (`fullyIdle != false`) reconciles against an empty in-flight list.
 - **The child's `SubagentStop`** removes it. A stop for a child the set does not hold changes
   nothing.
 - **A Codex parent `Stop`** takes the order of the activity it leaves standing as a cutoff,
@@ -513,7 +535,7 @@ Existing native mutations run before lifecycle replacement. There is no multi-fi
 
 `attention bindings --json` returns validated facts and four independent axes: binding phase, pane
 presence, reader confidence, and binding health. It never returns a resume command. Consumers build
-their own argv from the closed provider and session ID fields.
+their own argv from the provider (an open identifier under [ADR 0011](adr/0011-provider-is-an-open-identifier.md)) and session ID fields.
 
 `conflicted` health and the `binding_conflict` diagnostic mean two live claims on one provider
 session at different pane addresses. A binding that has ended, whose pane is verified absent, or
@@ -536,10 +558,12 @@ JSON responses contain `schema`, `command`, `status`, `complete`, `result`, and 
 
 
 A `hold_notes` entry may instead contain exactly `quiet=true` and an `answer`
-token. This is allowed on Claude and Codex binding Stops, where the
-corresponding `turn_end.hold_checks` entry retains the same note, and, as the
-only kind of note there, on a Claude or Codex binding's `thinking`: the note a
-quiet check gave as the lead's turn started, which has no `turn_end` entry. `held` is derived only from
+token. This is allowed on Claude, Codex, and Agy binding Stops — where the
+corresponding `turn_end.hold_checks` entry retains the same note only on
+`response_finished` `Stop` observations (never on `attempt_outcome` or
+`user_interrupt` Stops) — and, as the only kind of note there, on a Claude,
+Codex, or Agy binding's `thinking`: the note a quiet check gave as the lead's
+turn started, which has no `turn_end` entry. `held` is derived only from
 hold notes. Quiet presentation is derived from quiet notes and yields to held
 presentation and waiting permissions. A failed revalidation removes the
 applicable note and records `evidence_changed`; no stored quiet boolean is

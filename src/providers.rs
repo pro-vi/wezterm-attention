@@ -961,6 +961,13 @@ fn agy_manage_subagents_stops(
     }
 }
 
+fn agy_ignored(diagnostic: Diagnostic) -> ProviderEvent {
+    let mut event =
+        ProviderEvent::ignored(Some(Provider::Agy), diagnostic.code, &diagnostic.message);
+    event.diagnostic = Some(diagnostic);
+    event
+}
+
 fn parse_agy(event_name: &str, payload: &Value, _env: &BTreeMap<String, String>) -> ProviderEvent {
     if !declared_hook(Provider::Agy, event_name) {
         return ProviderEvent::ignored(
@@ -985,14 +992,13 @@ fn parse_agy(event_name: &str, payload: &Value, _env: &BTreeMap<String, String>)
     };
     let conversation_id = match safe_label(&payload["conversationId"], "conversationId") {
         Ok(id) => id,
-        Err(diagnostic) => {
-            let mut event =
-                ProviderEvent::ignored(Some(Provider::Agy), diagnostic.code, &diagnostic.message);
-            event.diagnostic = Some(diagnostic);
-            return event;
-        }
+        Err(diagnostic) => return agy_ignored(diagnostic),
     };
     let mut dropped = DroppedFields::default();
+    let transcript_provided = matches!(
+        payload.get("transcriptPath"),
+        Some(value) if !value.is_null() && value.as_str() != Some("")
+    );
     let transcript_path = dropped.keep("transcriptPath", optional_path(payload, "transcriptPath"));
     let cwd = dropped.keep("cwd", optional_path(payload, "cwd"));
     let model = dropped.keep("modelName", optional_label(payload, "modelName"));
@@ -1001,13 +1007,18 @@ fn parse_agy(event_name: &str, payload: &Value, _env: &BTreeMap<String, String>)
         optional_path(payload, "artifactDirectoryPath"),
     );
 
-    // Check forward-compatibility child identity fields first, then fall back
-    // to agy 1.5.16's `.system_generated/messages/*.json` upward walk.
-    let payload_root = match (
+    // Check forward-compatibility child identity fields first, then walk
+    // agy 1.5.16's `.system_generated/messages/*.json` upward to the root lead
+    // whenever `rootConversationId` is absent and the event is either unlinked
+    // (empty `lastUserInput`) or names only its direct `parentConversationId`.
+    let (payload_root, payload_parent) = match (
         nonempty_optional_label(object, "rootConversationId"),
         nonempty_optional_label(object, "parentConversationId"),
     ) {
-        (Ok(root), Ok(parent)) => root.or(parent).filter(|id| id != &conversation_id),
+        (Ok(root), Ok(parent)) => (
+            root.filter(|id| id != &conversation_id),
+            parent.filter(|id| id != &conversation_id),
+        ),
         _ => {
             return ProviderEvent::ignored(
                 Some(Provider::Agy),
@@ -1018,32 +1029,35 @@ fn parse_agy(event_name: &str, payload: &Value, _env: &BTreeMap<String, String>)
     };
     let payload_agent_name =
         dropped.keep("agentName", nonempty_optional_label(object, "agentName"));
+    let has_user_input = payload
+        .get("lastUserInput")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.is_empty());
 
     let (provider_session_id, agent_id, agent_type) = if let Some(root_id) = payload_root {
         (root_id, Some(conversation_id.clone()), payload_agent_name)
-    } else if let Some(lineage) = artifact_dir.as_deref().and_then(|dir| {
-        crate::agy_status::resolve_subagent_lineage(&conversation_id, Path::new(dir))
-    }) {
+    } else if (!has_user_input || payload_parent.is_some())
+        && let Some(lineage) = artifact_dir.as_deref().and_then(|dir| {
+            crate::agy_status::resolve_subagent_lineage(&conversation_id, Path::new(dir))
+        })
+    {
         (
             lineage.root_session_id,
             Some(conversation_id.clone()),
             payload_agent_name.or(lineage.role).or(lineage.type_name),
         )
-    } else {
+    } else if let Some(parent_id) = payload_parent {
+        (parent_id, Some(conversation_id.clone()), payload_agent_name)
+    } else if !has_user_input {
         // As of agy 1.5.16, unlinked child/background events carry an empty
         // `lastUserInput` while every lead event carries the active prompt.
         // Skip unlinked empty-input events before binding admission so they
         // can never hijack the pane's active lead binding.
-        let has_user_input = payload
-            .get("lastUserInput")
-            .and_then(Value::as_str)
-            .is_some_and(|text| !text.is_empty());
-        if !has_user_input {
-            return ProviderEvent::skipped(
-                Provider::Agy,
-                "agy event has empty lastUserInput and no resolved parent session",
-            );
-        }
+        return ProviderEvent::skipped(
+            Provider::Agy,
+            "agy event has empty lastUserInput and no resolved parent session",
+        );
+    } else {
         (conversation_id.clone(), None, None)
     };
 
@@ -1071,15 +1085,7 @@ fn parse_agy(event_name: &str, payload: &Value, _env: &BTreeMap<String, String>)
                     ..
                 } = match agy_tool_call(payload, event_name) {
                     Ok(parsed) => parsed,
-                    Err(diagnostic) => {
-                        let mut ignored = ProviderEvent::ignored(
-                            Some(Provider::Agy),
-                            diagnostic.code,
-                            &diagnostic.message,
-                        );
-                        ignored.diagnostic = Some(diagnostic);
-                        return ignored;
-                    }
+                    Err(diagnostic) => return agy_ignored(diagnostic),
                 };
                 let (tool_class, question_mode) = classify_tool("agy", &tool_name);
                 if question_mode == Some(QuestionMode::Blocking) {
@@ -1112,22 +1118,20 @@ fn parse_agy(event_name: &str, payload: &Value, _env: &BTreeMap<String, String>)
                     id: tool_call_id,
                 } = match agy_tool_call(payload, event_name) {
                     Ok(parsed) => parsed,
-                    Err(diagnostic) => {
-                        let mut ignored = ProviderEvent::ignored(
-                            Some(Provider::Agy),
-                            diagnostic.code,
-                            &diagnostic.message,
-                        );
-                        ignored.diagnostic = Some(diagnostic);
-                        return ignored;
-                    }
+                    Err(diagnostic) => return agy_ignored(diagnostic),
                 };
                 let (tool_class, question_mode) = classify_tool("agy", &tool_name);
-                event.action = ProviderAction::ChildActive;
                 let error_flag = agy_post_tool_error(payload);
-                if tool_name == "manage_subagents" && !matches!(error_flag, Ok(Some(true))) {
+                if tool_name == "manage_subagents" && matches!(error_flag, Ok(None)) {
                     let (_, stopped) = agy_manage_subagents_stops(tool_call, false);
                     event.stopped_child_ids = stopped;
+                }
+                if question_mode == Some(QuestionMode::Blocking)
+                    || !event.stopped_child_ids.is_empty()
+                {
+                    event.action = ProviderAction::ChildActive;
+                } else {
+                    event.action = ProviderAction::Observation;
                 }
                 match (tool_call_id, error_flag) {
                     (Ok(tool_call_id), Ok(is_error)) => {
@@ -1200,10 +1204,17 @@ fn parse_agy(event_name: &str, payload: &Value, _env: &BTreeMap<String, String>)
             event.action = ProviderAction::Activity;
             event.activity_type = Some("thinking".to_owned());
             if invocation_num == 0 {
-                let is_prompt =
-                    event.transcript_path.as_deref().and_then(|path| {
-                        crate::agy_status::is_user_prompt_invocation(Path::new(path))
-                    }) != Some(false);
+                // Fail closed whenever the payload names a transcript path that
+                // was rejected, unreadable, symlinked, or does not confirm a
+                // fresh USER_INPUT turn; only truly absent transcriptPath
+                // (synthetic payloads without a transcript) defaults to prompt.
+                let is_prompt = if !transcript_provided {
+                    true
+                } else {
+                    event.transcript_path.as_deref().is_some_and(|path| {
+                        crate::agy_status::is_user_prompt_invocation(Path::new(path)) == Some(true)
+                    })
+                };
                 if is_prompt {
                     match execution_id {
                         Ok(turn_id) => {
@@ -1227,15 +1238,7 @@ fn parse_agy(event_name: &str, payload: &Value, _env: &BTreeMap<String, String>)
                 ..
             } = match agy_tool_call(payload, event_name) {
                 Ok(parsed) => parsed,
-                Err(diagnostic) => {
-                    let mut ignored = ProviderEvent::ignored(
-                        Some(Provider::Agy),
-                        diagnostic.code,
-                        &diagnostic.message,
-                    );
-                    ignored.diagnostic = Some(diagnostic);
-                    return ignored;
-                }
+                Err(diagnostic) => return agy_ignored(diagnostic),
             };
             let (tool_class, question_mode) = classify_tool("agy", &tool_name);
             event.action = ProviderAction::Activity;
@@ -1273,19 +1276,11 @@ fn parse_agy(event_name: &str, payload: &Value, _env: &BTreeMap<String, String>)
                 id: tool_call_id,
             } = match agy_tool_call(payload, event_name) {
                 Ok(parsed) => parsed,
-                Err(diagnostic) => {
-                    let mut ignored = ProviderEvent::ignored(
-                        Some(Provider::Agy),
-                        diagnostic.code,
-                        &diagnostic.message,
-                    );
-                    ignored.diagnostic = Some(diagnostic);
-                    return ignored;
-                }
+                Err(diagnostic) => return agy_ignored(diagnostic),
             };
             let (tool_class, question_mode) = classify_tool("agy", &tool_name);
             let error_flag = agy_post_tool_error(payload);
-            if tool_name == "manage_subagents" && !matches!(error_flag, Ok(Some(true))) {
+            if tool_name == "manage_subagents" && matches!(error_flag, Ok(None)) {
                 let (in_flight, stopped) = agy_manage_subagents_stops(tool_call, true);
                 event.in_flight_task_ids = in_flight;
                 event.stopped_child_ids = stopped;

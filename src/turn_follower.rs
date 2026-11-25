@@ -248,6 +248,9 @@ pub enum Followed {
     StatusGone,
     /// The file at the status file's path is not the one to read.
     StatusForeign(Foreign),
+    /// The Antigravity CLI status database could not be trusted or is not
+    /// supported on this platform.
+    AgyStatusRefused(agy_status::Unreadable),
 }
 
 /// What one provider's follower reads its turn's end from.
@@ -418,17 +421,18 @@ impl<'a> Reader<'a> {
                 ) {
                     return Ok(Some(Followed::PromptReplaced));
                 }
-                match agy_status::read_status(
+                let reading = agy_status::read_status(
                     Path::new(&turn.summaries_db),
                     turn.conv_db.as_deref().map(Path::new),
                     &request.session_id,
                     turn.initial_step_count,
-                ) {
-                    agy_status::Reading::Working => {
+                );
+                match (reading, *seen_working) {
+                    (agy_status::Reading::Working, _) => {
                         *seen_working = true;
                         Ok(None)
                     }
-                    agy_status::Reading::Canceled => {
+                    (agy_status::Reading::Canceled, _) | (agy_status::Reading::Idle, true) => {
                         let event = ProviderEvent::agy_turn_interrupt(&request.session_id);
                         crate::lifecycle::record_prompt_turn_interrupt(
                             root,
@@ -441,22 +445,19 @@ impl<'a> Reader<'a> {
                         )
                         .map(|result| Some(Followed::Recorded(result)))
                     }
-                    agy_status::Reading::Idle if *seen_working => {
-                        let event = ProviderEvent::agy_turn_interrupt(&request.session_id);
-                        crate::lifecycle::record_prompt_turn_interrupt(
-                            root,
-                            &request.address,
-                            &request.launch_id,
-                            host,
-                            prompt_turn,
-                            &event,
-                            ports,
-                        )
-                        .map(|result| Some(Followed::Recorded(result)))
-                    }
-                    agy_status::Reading::Idle
-                    | agy_status::Reading::Absent
-                    | agy_status::Reading::Unreadable(_) => Ok(None),
+                    (
+                        agy_status::Reading::Unreadable(
+                            reason @ (agy_status::Unreadable::Foreign
+                            | agy_status::Unreadable::PlatformUnsupported),
+                        ),
+                        _,
+                    ) => Ok(Some(Followed::AgyStatusRefused(reason))),
+                    (
+                        agy_status::Reading::Idle
+                        | agy_status::Reading::Absent
+                        | agy_status::Reading::Unreadable(_),
+                        _,
+                    ) => Ok(None),
                 }
             }
         }

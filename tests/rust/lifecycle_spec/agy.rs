@@ -4,13 +4,17 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::self_claim::apply_as;
+#[cfg(target_os = "macos")]
 use super::turn_follower::{follow_every, last_request, recorded};
 use super::*;
 use wezterm_attention::lifecycle::apply_provider_event_with_outcome;
+#[cfg(target_os = "macos")]
 use wezterm_attention::turn_follower::{AgyTurn, FollowedTurn};
 
 const LEAD: &str = "agy-lead-1";
@@ -1186,4 +1190,753 @@ fn agy_hook_outcome_reports_observation_kind() {
         outcome.observation_kind.as_deref(),
         Some("response_finished")
     );
+}
+
+#[test]
+fn agy_stop_ids_conflict_is_atomic_and_self_kill_and_delayed_child_kill_work() {
+    let setup = Setup::new();
+    setup.claim();
+    setup.apply(
+        &event("agy", "SessionStart", LEAD, json!({})),
+        "00000000000000000200",
+    );
+    for (cid, ts) in [
+        ("c1", "00000000000000000300"),
+        ("c2", "00000000000000000350"),
+    ] {
+        let start = event(
+            "agy",
+            "SessionStart",
+            cid,
+            json!({"parentConversationId": LEAD, "agentName": "worker", "lastUserInput": ""}),
+        );
+        assert_eq!(setup.apply(&start, ts).disposition, "applied");
+    }
+
+    // 1. Multi-id StopIds from lead where 2nd id conflicts at equal order
+    // leaves children.json completely unchanged (c1 stays live).
+    let before_children =
+        fs::read_to_string(setup.binding_dir("agy", LEAD).join("children.json")).unwrap();
+    let conflict_kill = event(
+        "agy",
+        "PostToolUse",
+        LEAD,
+        json!({
+            "toolCall": {
+                "name": "manage_subagents",
+                "id": "call-k-conflict",
+                "args": {"Action": "kill", "ConversationIds": ["c1", "c2"]}
+            },
+            "error": ""
+        }),
+    );
+    let res = setup.apply(&conflict_kill, "00000000000000000350");
+    assert_eq!(res.disposition, "partial", "{res:?}");
+    let after_children =
+        fs::read_to_string(setup.binding_dir("agy", LEAD).join("children.json")).unwrap();
+    assert_eq!(before_children, after_children);
+
+    // 2. Child apply_child with StopIds conflict commits neither transition.
+    let child_conflict = event(
+        "agy",
+        "PostToolUse",
+        "c1",
+        json!({
+            "parentConversationId": LEAD,
+            "agentName": "worker",
+            "lastUserInput": "",
+            "toolCall": {
+                "name": "manage_subagents",
+                "id": "child-k-conflict",
+                "args": {"Action": "kill", "ConversationIds": ["c2"]}
+            },
+            "error": ""
+        }),
+    );
+    let res = setup.apply(&child_conflict, "00000000000000000350");
+    assert_eq!(res.disposition, "conflict", "{res:?}");
+    let after_child_conflict =
+        fs::read_to_string(setup.binding_dir("agy", LEAD).join("children.json")).unwrap();
+    assert_eq!(before_children, after_child_conflict);
+
+    // 3. Delayed child PostToolUse where caller's own Tool is older than its
+    // latest timestamp still applies StopIds for an older target child.
+    let c1_newer = event(
+        "agy",
+        "PreToolUse",
+        "c1",
+        json!({
+            "parentConversationId": LEAD,
+            "agentName": "worker",
+            "lastUserInput": "",
+            "toolCall": {"name": "run_command", "id": "c1-run"}
+        }),
+    );
+    assert_eq!(
+        setup.apply(&c1_newer, "00000000000000000400").disposition,
+        "applied"
+    );
+    let delayed_kill = event(
+        "agy",
+        "PostToolUse",
+        "c1",
+        json!({
+            "parentConversationId": LEAD,
+            "agentName": "worker",
+            "lastUserInput": "",
+            "toolCall": {
+                "name": "manage_subagents",
+                "id": "c1-kill-c2",
+                "args": {"Action": "kill", "ConversationIds": ["c2"]}
+            },
+            "error": ""
+        }),
+    );
+    let res = setup.apply(&delayed_kill, "00000000000000000380");
+    assert_eq!(res.disposition, "applied", "{res:?}");
+    let children = read_json(setup.binding_dir("agy", LEAD).join("children.json")).unwrap();
+    assert_eq!(children["live"].as_array().unwrap().len(), 1);
+    assert_eq!(children["live"][0]["agent_id"], "c1");
+
+    // 4. Child self-kill removes itself cleanly without self-conflicting.
+    let self_kill = event(
+        "agy",
+        "PostToolUse",
+        "c1",
+        json!({
+            "parentConversationId": LEAD,
+            "agentName": "worker",
+            "lastUserInput": "",
+            "toolCall": {
+                "name": "manage_subagents",
+                "id": "c1-self-kill",
+                "args": {"Action": "kill", "ConversationIds": ["c1"]}
+            },
+            "error": ""
+        }),
+    );
+    let res = setup.apply(&self_kill, "00000000000000000450");
+    assert_eq!(res.disposition, "applied", "{res:?}");
+    let children = read_json(setup.binding_dir("agy", LEAD).join("children.json")).unwrap();
+    assert_eq!(children["live"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn agy_sequential_waiting_child_kills_and_delayed_kills_preserve_notify_semantics() {
+    let setup = Setup::new();
+    setup.claim();
+    setup.apply(
+        &event("agy", "SessionStart", LEAD, json!({})),
+        "00000000000000000200",
+    );
+    for (cid, ts, expected) in [
+        ("w1", "00000000000000000310", "applied"),
+        ("w2", "00000000000000000320", "skipped"),
+    ] {
+        let ask = event(
+            "agy",
+            "PreToolUse",
+            cid,
+            json!({
+                "parentConversationId": LEAD,
+                "agentName": "worker",
+                "lastUserInput": "",
+                "toolCall": {"name": "ask_question", "id": format!("q-{cid}")}
+            }),
+        );
+        assert_eq!(setup.apply(&ask, ts).disposition, expected);
+    }
+    let children = read_json(setup.binding_dir("agy", LEAD).join("children.json")).unwrap();
+    assert_eq!(children["live"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "notify"
+    );
+
+    // Kill w1 first: w1 must be removed from children.json while w2 still holds notify.
+    let kill_w1 = event(
+        "agy",
+        "PostToolUse",
+        LEAD,
+        json!({
+            "toolCall": {
+                "name": "manage_subagents",
+                "id": "kill-w1",
+                "args": {"Action": "kill", "ConversationIds": ["w1"]}
+            },
+            "error": ""
+        }),
+    );
+    let res1 = setup.apply(&kill_w1, "00000000000000000350");
+    assert_eq!(res1.disposition, "applied", "{res1:?}");
+    let children = read_json(setup.binding_dir("agy", LEAD).join("children.json")).unwrap();
+    assert_eq!(children["live"].as_array().unwrap().len(), 1);
+    assert_eq!(children["live"][0]["agent_id"], "w2");
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "notify"
+    );
+
+    // Kill w2 second: clears w2 and releases notify back to thinking.
+    let kill_w2 = event(
+        "agy",
+        "PostToolUse",
+        LEAD,
+        json!({
+            "toolCall": {
+                "name": "manage_subagents",
+                "id": "kill-w2",
+                "args": {"Action": "kill", "ConversationIds": ["w2"]}
+            },
+            "error": ""
+        }),
+    );
+    let res2 = setup.apply(&kill_w2, "00000000000000000360");
+    assert_eq!(res2.disposition, "applied", "{res2:?}");
+    let children = read_json(setup.binding_dir("agy", LEAD).join("children.json")).unwrap();
+    assert_eq!(children["live"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "thinking"
+    );
+
+    // Newer waiting child w3 at t=460 must survive both delayed kill and delayed kill_all at t=450.
+    let ask_w3 = event(
+        "agy",
+        "PreToolUse",
+        "w3",
+        json!({
+            "parentConversationId": LEAD,
+            "agentName": "worker",
+            "lastUserInput": "",
+            "toolCall": {"name": "ask_question", "id": "q-w3"}
+        }),
+    );
+    assert_eq!(
+        setup.apply(&ask_w3, "00000000000000000460").disposition,
+        "applied"
+    );
+    let delayed_kill_w3 = event(
+        "agy",
+        "PostToolUse",
+        LEAD,
+        json!({
+            "toolCall": {
+                "name": "manage_subagents",
+                "id": "delayed-kill-w3",
+                "args": {"Action": "kill", "ConversationIds": ["w3"]}
+            },
+            "error": ""
+        }),
+    );
+    setup.apply(&delayed_kill_w3, "00000000000000000450");
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "notify"
+    );
+    let children = read_json(setup.binding_dir("agy", LEAD).join("children.json")).unwrap();
+    assert_eq!(children["live"].as_array().unwrap().len(), 1);
+
+    let delayed_kill_all = event(
+        "agy",
+        "PostToolUse",
+        LEAD,
+        json!({
+            "toolCall": {
+                "name": "manage_subagents",
+                "id": "delayed-kill-all",
+                "args": {"Action": "kill_all"}
+            },
+            "error": ""
+        }),
+    );
+    setup.apply(&delayed_kill_all, "00000000000000000450");
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "notify"
+    );
+    let children = read_json(setup.binding_dir("agy", LEAD).join("children.json")).unwrap();
+    assert_eq!(children["live"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn agy_malformed_post_tool_error_generic_child_post_tool_and_grandchild_parent_id() {
+    let setup = Setup::new();
+    setup.claim();
+    setup.apply(
+        &event("agy", "SessionStart", LEAD, json!({})),
+        "00000000000000000200",
+    );
+
+    // 1. Malformed non-string PostToolUse.error fails closed without killing subagents.
+    let child_ask = event(
+        "agy",
+        "PreToolUse",
+        "c1",
+        json!({
+            "parentConversationId": LEAD,
+            "agentName": "worker",
+            "lastUserInput": "",
+            "toolCall": {"name": "ask_question", "id": "q-1"}
+        }),
+    );
+    assert_eq!(
+        setup.apply(&child_ask, "00000000000000000300").disposition,
+        "applied"
+    );
+    for args in [
+        json!({"Action": "kill", "ConversationIds": ["c1"]}),
+        json!({"Action": "kill_all"}),
+    ] {
+        let bad_kill = event(
+            "agy",
+            "PostToolUse",
+            LEAD,
+            json!({
+                "toolCall": {"name": "manage_subagents", "id": "bad-err", "args": args},
+                "error": 123
+            }),
+        );
+        assert!(bad_kill.stopped_child_ids.is_empty());
+        assert!(bad_kill.in_flight_task_ids.is_none());
+        assert_eq!(bad_kill.action, ProviderAction::Observation);
+        setup.apply(&bad_kill, "00000000000000000320");
+    }
+    let children = read_json(setup.binding_dir("agy", LEAD).join("children.json")).unwrap();
+    assert_eq!(children["live"].as_array().unwrap().len(), 1);
+
+    // 2. Generic child PostToolUse (e.g. run_command) stays Observation and
+    // preserves child Waiting state so lead PreToolUse cannot clear notify.
+    let generic_child_post = event(
+        "agy",
+        "PostToolUse",
+        "c1",
+        json!({
+            "parentConversationId": LEAD,
+            "agentName": "worker",
+            "lastUserInput": "",
+            "toolCall": {"name": "run_command", "id": "run-1"},
+            "error": ""
+        }),
+    );
+    assert_eq!(generic_child_post.action, ProviderAction::Observation);
+    setup.apply(&generic_child_post, "00000000000000000340");
+    let lead_tool = event(
+        "agy",
+        "PreToolUse",
+        LEAD,
+        json!({"toolCall": {"name": "run_command", "id": "lead-run"}}),
+    );
+    setup.apply(&lead_tool, "00000000000000000350");
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "notify"
+    );
+
+    // 3. Grandchild supplying parentConversationId without rootConversationId
+    // still walks messages/*.json up to the root lead session id.
+    let (child_dir, _) = agy_brain_dir(&setup, "mid-child");
+    let (grand_dir, _) = agy_brain_dir(&setup, "leaf-grand");
+    let (lead_dir, _) = agy_brain_dir(&setup, LEAD);
+    fs::create_dir_all(&lead_dir).unwrap();
+    for (dir, sender) in [(&child_dir, LEAD), (&grand_dir, "mid-child")] {
+        let mdir = dir.join(".system_generated").join("messages");
+        fs::create_dir_all(&mdir).unwrap();
+        fs::write(
+            mdir.join("0001.json"),
+            serde_json::to_vec(&json!({
+                "sender": sender,
+                "sourceMetadata": {
+                    "tool": {
+                        "conversationId": sender,
+                        "toolCall": {
+                            "name": "invoke_subagent",
+                            "argumentsJson": "{\"Role\":\"Worker\",\"TypeName\":\"self\"}"
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let grand_ev = parse_provider_event(
+        "agy",
+        "SessionStart",
+        &json!({
+            "hookEventName": "SessionStart",
+            "conversationId": "leaf-grand",
+            "parentConversationId": "mid-child",
+            "artifactDirectoryPath": grand_dir.to_string_lossy(),
+            "lastUserInput": ""
+        }),
+        &setup.env,
+    );
+    assert_eq!(grand_ev.provider_session_id.as_deref(), Some(LEAD));
+    assert_eq!(grand_ev.agent_id.as_deref(), Some("leaf-grand"));
+}
+
+#[test]
+fn agy_rejected_transcript_and_corrupt_user_input_fail_closed() {
+    use std::os::unix::fs::symlink;
+
+    let setup = Setup::new();
+    setup.claim();
+    let (_, tx) = agy_brain_dir(&setup, LEAD);
+    write_jsonl(
+        &tx,
+        &[
+            json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "turn1"}),
+            json!({"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "PRIOR_REPLY"}),
+            json!({"step_index": 2, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "wakeup"}),
+        ],
+    );
+    let tx_link = setup._scratch.0.join("tx-symlink.jsonl");
+    symlink(&tx, &tx_link).unwrap();
+
+    setup.apply(
+        &event("agy", "SessionStart", LEAD, json!({})),
+        "00000000000000000200",
+    );
+
+    // Symlinked and rejected relative transcriptPath on PreInvocation(inv=0)
+    // must never emit PromptSubmitted or deliver stale lastUserInput.
+    for (idx, bad_path) in [
+        tx_link.to_string_lossy().into_owned(),
+        "relative/transcript.jsonl".to_owned(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let sink = setup._scratch.0.join(format!("bad-tx-delivery-{idx}.json"));
+        let consumer = make_executable(
+            &setup,
+            &format!("bad-tx-consumer-{idx}"),
+            &format!("/bin/cat > '{}'", sink.display()),
+        );
+        let pre = json!({
+            "hookEventName": "PreInvocation",
+            "conversationId": LEAD,
+            "transcriptPath": bad_path,
+            "cwd": "/tmp/project",
+            "lastUserInput": "stale prompt",
+            "invocationNum": 0,
+            "initialNumSteps": 3
+        });
+        let out = agy_hook_cli(
+            &setup,
+            &setup.env,
+            "PreInvocation",
+            &pre,
+            &[
+                "--consumer",
+                consumer.to_str().unwrap(),
+                "--consumer-timeout-ms",
+                "5000",
+                "--include-prompt",
+            ],
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let delivery: Value = serde_json::from_slice(&fs::read(&sink).unwrap()).unwrap();
+        assert!(delivery.get("observation_id").is_none());
+        assert!(delivery.get("observation_kind").is_none());
+        assert_eq!(delivery["prompt"], json!({"availability": "unsupported"}));
+    }
+
+    // Corrupt USER_INPUT boundary in transcript prevents leaking PRIOR_REPLY on Stop.
+    fs::write(
+        &tx,
+        format!(
+            "{}\n{}\n{{\"step_index\":2,\"type\":\"USER_INPUT\",CORRUPT\n{}\n",
+            json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "turn1"}),
+            json!({"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "PRIOR_REPLY"}),
+            json!({"step_index": 3, "type": "PLANNER_RESPONSE", "status": "DONE", "content": ""})
+        ),
+    )
+    .unwrap();
+    let stop_sink = setup._scratch.0.join("corrupt-stop-delivery.json");
+    let stop_consumer = make_executable(
+        &setup,
+        "corrupt-stop-consumer",
+        &format!("/bin/cat > '{}'", stop_sink.display()),
+    );
+    let stop_payload = json!({
+        "hookEventName": "Stop",
+        "conversationId": LEAD,
+        "transcriptPath": tx.to_string_lossy(),
+        "cwd": "/tmp/project",
+        "lastUserInput": "turn2",
+        "terminationReason": "NO_TOOL_CALL",
+        "fullyIdle": true,
+        "continuationActive": false,
+        "executionNum": 0
+    });
+    let stop_out = agy_hook_cli(
+        &setup,
+        &setup.env,
+        "Stop",
+        &stop_payload,
+        &[
+            "--consumer",
+            stop_consumer.to_str().unwrap(),
+            "--consumer-timeout-ms",
+            "5000",
+            "--include-reply",
+            "--strict",
+        ],
+    );
+    assert!(
+        stop_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stop_out.stderr)
+    );
+    let stop_delivery: Value = serde_json::from_slice(&fs::read(&stop_sink).unwrap()).unwrap();
+    assert_eq!(stop_delivery["reply"], json!({"availability": "absent"}));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn agy_follower_guards_missing_initial_steps_corrupt_conv_db_and_foreign_db() {
+    use std::os::unix::fs::symlink;
+
+    // 1. Missing initialNumSteps omits conv_db so an older canceled step
+    // cannot falsely fire user_interrupt while summaries says RUNNING.
+    {
+        let setup = Setup::new();
+        setup.claim();
+        let (lead_dir, lead_tx) = agy_brain_dir(&setup, LEAD);
+        write_jsonl(
+            &lead_tx,
+            &[json!({"step_index": 3, "type": "USER_INPUT", "status": "DONE", "content": "turn2"})],
+        );
+        let env = setup.naming(AGENT_PID);
+        let start = parse_provider_event(
+            "agy",
+            "SessionStart",
+            &json!({
+                "hookEventName": "SessionStart",
+                "conversationId": LEAD,
+                "transcriptPath": lead_tx.to_string_lossy(),
+                "artifactDirectoryPath": lead_dir.to_string_lossy(),
+                "cwd": "/tmp/project",
+                "lastUserInput": "turn2"
+            }),
+            &env,
+        );
+        apply_as(&setup, &env, &start, "00000000000000000200");
+        let pre = parse_provider_event(
+            "agy",
+            "PreInvocation",
+            &json!({
+                "hookEventName": "PreInvocation",
+                "conversationId": LEAD,
+                "transcriptPath": lead_tx.to_string_lossy(),
+                "artifactDirectoryPath": lead_dir.to_string_lossy(),
+                "cwd": "/tmp/project",
+                "lastUserInput": "turn2",
+                "invocationNum": 0
+            }),
+            &env,
+        );
+        apply_as(&setup, &env, &pre, "00000000000000000300");
+        let req = last_request(&setup);
+        let FollowedTurn::Agy(AgyTurn {
+            ref summaries_db,
+            ref conv_db,
+            ..
+        }) = req.turn
+        else {
+            panic!("expected AgyTurn");
+        };
+        assert!(
+            conv_db.is_none(),
+            "missing initialNumSteps must omit conv_db"
+        );
+        let summaries = PathBuf::from(summaries_db);
+        let conv = setup
+            ._scratch
+            .0
+            .join("app_data")
+            .join("conversations")
+            .join(format!("{LEAD}.db"));
+        run_sqlite(
+            &summaries,
+            "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, status TEXT, not_fully_idle INTEGER);
+             INSERT INTO conversation_summaries VALUES ('agy-lead-1', 'CASCADE_RUN_STATUS_RUNNING', 1);",
+        );
+        run_sqlite(
+            &conv,
+            "CREATE TABLE steps (idx INTEGER PRIMARY KEY, status INTEGER);
+             INSERT INTO steps VALUES (1, 6);",
+        );
+        let polls = Arc::new(AtomicUsize::new(0));
+        *setup.processes.on_read.lock().unwrap() = Some(Arc::new(move |pid| {
+            if pid == AGENT_PID && polls.fetch_add(1, Ordering::SeqCst) >= 3 {
+                return Some(ProcessRead::Gone);
+            }
+            None
+        }));
+        let followed = follow_every(&setup, &req, Duration::from_millis(10));
+        *setup.processes.on_read.lock().unwrap() = None;
+        assert!(matches!(
+            followed,
+            wezterm_attention::turn_follower::Followed::HostGone
+        ));
+        assert_eq!(
+            shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+            "thinking"
+        );
+    }
+
+    // 2. Corrupt conv_db mid-ask_question after seen_working=true must NOT
+    // fall through to summaries IDLE/nfi=0 and falsely interrupt the wait.
+    {
+        let setup = Setup::new();
+        setup.claim();
+        let (lead_dir, lead_tx) = agy_brain_dir(&setup, LEAD);
+        write_jsonl(
+            &lead_tx,
+            &[json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "ask"})],
+        );
+        let env = setup.naming(AGENT_PID);
+        let start = parse_provider_event(
+            "agy",
+            "SessionStart",
+            &json!({
+                "hookEventName": "SessionStart",
+                "conversationId": LEAD,
+                "transcriptPath": lead_tx.to_string_lossy(),
+                "artifactDirectoryPath": lead_dir.to_string_lossy(),
+                "cwd": "/tmp/project",
+                "lastUserInput": "ask"
+            }),
+            &env,
+        );
+        apply_as(&setup, &env, &start, "00000000000000000200");
+        let pre = parse_provider_event(
+            "agy",
+            "PreInvocation",
+            &json!({
+                "hookEventName": "PreInvocation",
+                "conversationId": LEAD,
+                "transcriptPath": lead_tx.to_string_lossy(),
+                "artifactDirectoryPath": lead_dir.to_string_lossy(),
+                "cwd": "/tmp/project",
+                "lastUserInput": "ask",
+                "invocationNum": 0,
+                "initialNumSteps": 1
+            }),
+            &env,
+        );
+        apply_as(&setup, &env, &pre, "00000000000000000300");
+        let req = last_request(&setup);
+        let FollowedTurn::Agy(AgyTurn {
+            ref summaries_db,
+            ref conv_db,
+            ..
+        }) = req.turn
+        else {
+            panic!("expected AgyTurn");
+        };
+        let summaries = PathBuf::from(summaries_db);
+        let conv = PathBuf::from(conv_db.as_ref().unwrap());
+        run_sqlite(
+            &summaries,
+            "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, status TEXT, not_fully_idle INTEGER);
+             INSERT INTO conversation_summaries VALUES ('agy-lead-1', 'CASCADE_RUN_STATUS_IDLE', 0);",
+        );
+        run_sqlite(
+            &conv,
+            "CREATE TABLE steps (idx INTEGER PRIMARY KEY, status INTEGER);
+             INSERT INTO steps VALUES (1, 9);",
+        );
+        let polls = Arc::new(AtomicUsize::new(0));
+        let conv_clone = conv.clone();
+        *setup.processes.on_read.lock().unwrap() = Some(Arc::new(move |pid| {
+            if pid != AGENT_PID {
+                return None;
+            }
+            let n = polls.fetch_add(1, Ordering::SeqCst);
+            if n == 1 {
+                fs::write(&conv_clone, b"corrupt-sqlite").unwrap();
+            } else if n >= 4 {
+                return Some(ProcessRead::Gone);
+            }
+            None
+        }));
+        let followed = follow_every(&setup, &req, Duration::from_millis(10));
+        *setup.processes.on_read.lock().unwrap() = None;
+        assert!(matches!(
+            followed,
+            wezterm_attention::turn_follower::Followed::HostGone
+        ));
+        assert_eq!(
+            shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+            "thinking"
+        );
+    }
+
+    // 3. Symlinked summaries_db exits immediately with AgyStatusRefused(Foreign).
+    {
+        let setup = Setup::new();
+        setup.claim();
+        let (lead_dir, lead_tx) = agy_brain_dir(&setup, LEAD);
+        write_jsonl(
+            &lead_tx,
+            &[json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "hi"})],
+        );
+        let env = setup.naming(AGENT_PID);
+        let start = parse_provider_event(
+            "agy",
+            "SessionStart",
+            &json!({
+                "hookEventName": "SessionStart",
+                "conversationId": LEAD,
+                "transcriptPath": lead_tx.to_string_lossy(),
+                "artifactDirectoryPath": lead_dir.to_string_lossy(),
+                "cwd": "/tmp/project",
+                "lastUserInput": "hi"
+            }),
+            &env,
+        );
+        apply_as(&setup, &env, &start, "00000000000000000200");
+        let pre = parse_provider_event(
+            "agy",
+            "PreInvocation",
+            &json!({
+                "hookEventName": "PreInvocation",
+                "conversationId": LEAD,
+                "transcriptPath": lead_tx.to_string_lossy(),
+                "artifactDirectoryPath": lead_dir.to_string_lossy(),
+                "cwd": "/tmp/project",
+                "lastUserInput": "hi",
+                "invocationNum": 0
+            }),
+            &env,
+        );
+        apply_as(&setup, &env, &pre, "00000000000000000300");
+        let req = last_request(&setup);
+        let FollowedTurn::Agy(AgyTurn {
+            ref summaries_db, ..
+        }) = req.turn
+        else {
+            panic!("expected AgyTurn");
+        };
+        let summaries = PathBuf::from(summaries_db);
+        fs::create_dir_all(summaries.parent().unwrap()).unwrap();
+        let real = setup._scratch.0.join("real-summaries.db");
+        fs::write(&real, b"").unwrap();
+        symlink(&real, &summaries).unwrap();
+        let followed = follow_every(&setup, &req, Duration::from_millis(10));
+        assert!(matches!(
+            followed,
+            wezterm_attention::turn_follower::Followed::AgyStatusRefused(
+                wezterm_attention::agy_status::Unreadable::Foreign
+            )
+        ));
+    }
 }

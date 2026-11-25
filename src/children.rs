@@ -411,10 +411,11 @@ impl ChildPresenceSet {
     }
 
     fn stop_many(&mut self, agent_ids: &[String], order: &str) -> Reduction {
+        let mut staged = self.clone();
         let mut any_changed = false;
         let mut last_diagnostic = None;
         for agent_id in agent_ids {
-            let reduction = self.stop(agent_id, order);
+            let reduction = staged.stop(agent_id, order);
             if reduction.disposition == Disposition::Conflict {
                 return reduction;
             }
@@ -425,6 +426,7 @@ impl ChildPresenceSet {
                 last_diagnostic = Some(diagnostic);
             }
         }
+        *self = staged;
         Reduction {
             changed: any_changed,
             disposition: if any_changed {
@@ -533,21 +535,48 @@ impl ChildPresenceSet {
     /// and has done nothing since: a child that can hold a notify ordered at
     /// `since`.
     pub fn waits_since(&self, end: Option<EndMark<'_>>, since: &str) -> bool {
-        self.waits_since_excluding(end, since, &[])
+        self.counted(end).iter().any(|child| {
+            child.status == ChildStatus::Waiting && child.last_mono_ns.as_str() >= since
+        })
     }
 
-    /// [`Self::waits_since`], ignoring any children listed in `excluding`
-    /// (such as children being killed by the same event).
-    pub fn waits_since_excluding(
+    /// [`Self::waits_since`], excluding children that a `Reconcile`
+    /// (`in_flight`) or `StopIds` (`stop_ids`) transition at `order` will
+    /// actually remove.
+    pub fn waits_since_after(
         &self,
         end: Option<EndMark<'_>>,
         since: &str,
-        excluding: &[String],
+        order: &str,
+        in_flight: Option<&[String]>,
+        stop_ids: &[String],
     ) -> bool {
-        self.counted(end).iter().any(|child| {
+        let counted = self.counted(end);
+        if let Some(listed) = in_flight {
+            return counted.iter().any(|child| {
+                child.status == ChildStatus::Waiting
+                    && child.last_mono_ns.as_str() >= since
+                    && kept_through_stop(child, order, listed)
+            });
+        }
+        let stop_ignored_by_end = self
+            .lifetime_end
+            .as_ref()
+            .is_some_and(|last| order <= last.observed_mono_ns.as_str());
+        let batch_conflicts = !stop_ignored_by_end
+            && !stop_ids.is_empty()
+            && counted.iter().any(|child| {
+                stop_ids.iter().any(|id| id == &child.agent_id)
+                    && child.last_mono_ns.as_str() == order
+            });
+        counted.iter().any(|child| {
+            let removed_by_stop = !stop_ignored_by_end
+                && !batch_conflicts
+                && stop_ids.iter().any(|id| id == &child.agent_id)
+                && order > child.last_mono_ns.as_str();
             child.status == ChildStatus::Waiting
                 && child.last_mono_ns.as_str() >= since
-                && !excluding.iter().any(|id| id == &child.agent_id)
+                && !removed_by_stop
         })
     }
 
