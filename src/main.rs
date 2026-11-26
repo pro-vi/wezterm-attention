@@ -33,7 +33,7 @@ use wezterm_attention::wezterm::{
     bin_name = "attention",
     version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("ATTENTION_BUILD_COMMIT"), ")"),
     about = "Publish and maintain mux-native WezTerm attention state.",
-    after_help = "Example: attention bindings --socket /absolute/mux.sock\nQueries (bindings, tabs, inspect, observe, doctor, sweep) and hooks describe return JSON by default.\nCheck status and complete before using query results.\nRegistration requirements: attention hooks describe --provider claude"
+    after_help = "Example: attention bindings --socket /absolute/mux.sock\nQueries (bindings, tabs, inspect, observe, doctor, sweep), checks add, checks remove and hooks describe return JSON by default.\nCheck status and complete before using query results.\nRegistration requirements: attention hooks describe --provider claude"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -70,6 +70,61 @@ enum Command {
     Doctor(DoctorArgs),
     /// Preview or apply conservative retention work.
     Sweep(SweepArgs),
+    /// Add or remove one check in checks.json, which hooks event reads.
+    Checks {
+        #[command(subcommand)]
+        command: ChecksCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ChecksCommand {
+    /// Register one check; an equal one already there is left as it is.
+    Add(CheckArgs),
+    /// Remove the entry equal to the one named; with none, nothing changes.
+    Remove(CheckArgs),
+}
+
+impl ChecksCommand {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Add(_) => "checks add",
+            Self::Remove(_) => "checks remove",
+        }
+    }
+
+    fn args(&self) -> &CheckArgs {
+        let (Self::Add(args) | Self::Remove(args)) = self;
+        args
+    }
+}
+
+#[derive(Clone, Debug, Args)]
+#[command(
+    after_help = "Example: attention checks add --provider codex --event PreToolUse --kind quiet --name wezpup --time-ms 300 --executable /absolute/executable\nThe file is checks.json in the state root, which hooks event reads on every call: run this with the WEZTERM_ATTENTION_DIR, XDG_STATE_HOME and HOME the panes' hooks have, which choose the root in that order.\nThe file carries no owner, so remove takes the whole entry as add was given it, and a different check under the same name is refused by both; keep your own list of what you added. To change an entry, remove it and add the new one.\nA change after which hooks would run none of the file's checks is refused, and so is any command on a file they would not use now.\nAn entry no checks.json could hold is a usage error, before the file is read.\nresult.changed says whether the file was written; attention doctor lists every entry."
+)]
+struct CheckArgs {
+    /// A provider, such as claude or codex.
+    #[arg(long, value_parser = supported_provider)]
+    provider: String,
+    /// One of that provider's events that `attention hooks describe --provider <provider>` lists with registration "register", such as UserPromptSubmit.
+    #[arg(long)]
+    event: String,
+    /// hold or quiet: the check runs as --hold-check or --quiet-check would on the event's line.
+    #[arg(long, value_parser = ["hold", "quiet"])]
+    kind: String,
+    /// Lowercase letters, digits, _ and -, starting with a letter; one check per name for each provider's event.
+    #[arg(long)]
+    name: String,
+    /// The time the check declares, as NAME:300ms=… does on a hook line.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=wezterm_attention::hold_check::MAX_BUDGET_MS))]
+    time_ms: Option<u64>,
+    /// The check's absolute executable, without arguments.
+    #[arg(long)]
+    executable: String,
+    /// Return the JSON envelope (also the default).
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -130,7 +185,7 @@ struct EventArgs {
 
 fn provider_event_help() -> String {
     let mut help =
-        "Example: attention hooks event claude Stop --consumer /absolute/reply-sink --consumer-timeout-ms 1000 --include-reply --strict < callback.json\nConsumers run after native locks release. Retrying may repeat consumer effects.\nChecks that checks.json in the state root registers for the event run after the line's checks of the same kind; attention doctor lists them.\nRegistration details: attention hooks describe --provider <provider> --json".to_owned();
+        "Example: attention hooks event claude Stop --consumer /absolute/reply-sink --consumer-timeout-ms 1000 --include-reply --strict < callback.json\nConsumers run after native locks release. Retrying may repeat consumer effects.\nChecks that checks.json in the state root registers for the event run after the line's checks of the same kind; attention checks add and attention checks remove change them, and attention doctor lists them.\nRegistration details: attention hooks describe --provider <provider> --json".to_owned();
     if let Ok(manifest) = wezterm_attention::protocol::manifest() {
         for (provider, hooks) in &manifest.native_hooks {
             let events = hooks
@@ -521,6 +576,8 @@ fn query_json(command: &str) -> bool {
             | "doctor"
             | "sweep"
             | "hooks describe"
+            | "checks add"
+            | "checks remove"
     ) || command == "plugin"
         || command.starts_with("plugin ")
 }
@@ -648,6 +705,7 @@ fn invocation(command: &Option<Command>) -> (&'static str, bool) {
         Some(Command::Mark(args)) => ("mark", args.json),
         Some(Command::Doctor(args)) => ("doctor", args.json),
         Some(Command::Sweep(args)) => ("sweep", args.json),
+        Some(Command::Checks { command }) => (command.name(), command.args().json),
     }
 }
 
@@ -728,7 +786,46 @@ fn run(cli: &Cli, name: &'static str) -> Result<ExitCode, AttentionError> {
         Some(Command::Mark(args)) => run_mark(args, name, &environment),
         Some(Command::Doctor(args)) => run_doctor(args, name, &environment),
         Some(Command::Sweep(args)) => run_sweep(args, name, &environment),
+        Some(Command::Checks { command }) => run_checks(command, name, &environment),
     }
+}
+
+fn run_checks(
+    command: &ChecksCommand,
+    name: &str,
+    environment: &BTreeMap<String, String>,
+) -> Result<ExitCode, AttentionError> {
+    use wezterm_attention::check_file;
+    let args = command.args();
+    let root = wezterm_attention::records::state_root(environment)?;
+    let entry = check_file::Entry {
+        provider: args.provider.clone(),
+        event: args.event.clone(),
+        kind: if args.kind == "hold" {
+            wezterm_attention::hold_check::Purpose::Hold
+        } else {
+            wezterm_attention::hold_check::Purpose::Quiet
+        },
+        name: args.name.clone(),
+        time_ms: args.time_ms,
+        executable: args.executable.clone(),
+    };
+    let changed = match command {
+        ChecksCommand::Add(_) => check_file::add(&root, entry)?,
+        ChecksCommand::Remove(_) => check_file::remove(&root, &entry)?,
+    };
+    emit(
+        &Response::new(
+            name,
+            "ok",
+            true,
+            vec![],
+            serde_json::json!({"changed": changed}),
+        ),
+        args.json,
+        false,
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 fn run_hooks_describe(args: &DescribeArgs, name: &str) -> Result<ExitCode, AttentionError> {
@@ -1526,8 +1623,12 @@ fn main() -> ExitCode {
             let first = arguments.get(1).and_then(|arg| arg.to_str());
             let second = arguments.get(2).and_then(|arg| arg.to_str());
             let command = match (first, second) {
-                (Some("hooks"), Some(sub @ ("describe" | "claim" | "publish" | "event"))) => {
-                    format!("hooks {sub}")
+                (
+                    Some(group @ "hooks"),
+                    Some(sub @ ("describe" | "claim" | "publish" | "event")),
+                )
+                | (Some(group @ "checks"), Some(sub @ ("add" | "remove"))) => {
+                    format!("{group} {sub}")
                 }
                 (Some(command), _) => command.to_owned(),
                 _ => "attention".to_owned(),

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`attention checks add` and `attention checks remove` change one entry of `checks.json`.** An installer no longer has to copy the file's rules to edit it. Each command takes one whole entry (provider, event, kind, name, optional declared time, executable), reads the file under a lock in the state root, refuses a change after which hooks would run none of the file's checks, and replaces the file with one written the way hooks read it. Adding an entry that is already there, or removing one that is not, changes nothing; an entry no file could hold, such as one for an event this build does not register, is a usage error, so a mistyped removal is not taken for one already done. The file carries no owner, so a different check under the same name for the same provider and event is refused, not replaced or removed. See "Adding and removing one check" in `docs/consumer-guide.md`.
+
+### Fixed
+
+- **A state directory path that names a file is refused, and the file keeps its mode.** Before, a command that made sure its state directory existed set that file's mode to 0700, then failed. It now fails with `state_permissions` and leaves the file alone.
+
 ## 1.17.0 — 2026-11-25
 
 ### Added

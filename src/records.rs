@@ -918,6 +918,13 @@ pub(crate) fn binding_ended(root: &Path, binding: &Value, identity: &RecordIdent
 }
 
 pub fn mkdir_private(path: &Path) -> Result<()> {
+    // The chmod below would otherwise replace a file's mode with 0700.
+    if fs::metadata(path).is_ok_and(|metadata| !metadata.is_dir()) {
+        return Err(AttentionError::new(
+            DiagnosticCode::StatePermissions,
+            "state path is not a directory",
+        ));
+    }
     let mut missing = Vec::new();
     let mut cursor = path;
     while !cursor.exists() {

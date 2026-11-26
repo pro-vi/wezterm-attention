@@ -2151,3 +2151,285 @@ fn only_a_usage_error_names_a_command_for_help() {
         "{stderr}"
     );
 }
+
+/// Runs `attention checks <verb>` for one entry against `state`, and returns
+/// its exit code and JSON envelope.
+fn checks_command(state: &Path, verb: &str, entry: &Value) -> (Option<i32>, Value) {
+    let text = |field: &str| entry[field].as_str().expect("entry field");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_attention"));
+    command.args([
+        "checks",
+        verb,
+        "--provider",
+        text("provider"),
+        "--event",
+        text("event"),
+        "--kind",
+        text("kind"),
+        "--name",
+        text("name"),
+        "--executable",
+        text("executable"),
+    ]);
+    if let Some(time) = entry.get("time_ms") {
+        command.args(["--time-ms", &time.to_string()]);
+    }
+    let output = command
+        .env_clear()
+        .env("HOME", state)
+        .env("WEZTERM_ATTENTION_DIR", state)
+        .output()
+        .expect("run attention checks");
+    let envelope = serde_json::from_slice(&output.stdout).expect("JSON envelope");
+    (output.status.code(), envelope)
+}
+
+fn check_entry(event: &str, name: &str, time_ms: Option<u64>) -> Value {
+    let mut entry = json!({"provider":"codex", "event":event, "kind":"quiet", "name":name,
+        "executable":"/usr/bin/true"});
+    if let Some(time) = time_ms {
+        entry["time_ms"] = json!(time);
+    }
+    entry
+}
+
+fn file_mode(path: &Path) -> u32 {
+    fs::metadata(path).expect("metadata").permissions().mode() & 0o777
+}
+
+/// `checks add` and `checks remove` change one entry of `checks.json` by the
+/// rules `hooks event` reads it with, so an installer need not copy them. The
+/// file carries no owner: a different check under the same name is refused
+/// by both. An entry no file could hold is a usage error, and a change after
+/// which hooks would run none of the file's checks, or any command on a file
+/// they would not use, leaves the file as it was.
+#[test]
+fn checks_add_and_remove_change_one_entry_and_refuse_the_rest() {
+    let scratch = Scratch::new();
+    let state = scratch.0.join("state");
+    let file = state.join("checks.json");
+    let refused = |verb: &str, entry: &Value, code: &str| {
+        let before = fs::read(&file).ok();
+        let (exit, envelope) = checks_command(&state, verb, entry);
+        let (expected_exit, status) = if code == "bad_usage" {
+            (2, "usage_error")
+        } else {
+            (1, "unavailable")
+        };
+        assert_eq!(exit, Some(expected_exit), "{envelope}");
+        assert_eq!(envelope["status"], status, "{envelope}");
+        assert_eq!(envelope["diagnostics"][0]["code"], code, "{envelope}");
+        assert_eq!(fs::read(&file).ok(), before, "{envelope}");
+        envelope
+    };
+    let changed = |verb: &str, entry: &Value, expected: bool, checks: &[&Value]| {
+        let (exit, envelope) = checks_command(&state, verb, entry);
+        assert_eq!(exit, Some(0), "{envelope}");
+        assert_eq!(envelope["command"], format!("checks {verb}"), "{envelope}");
+        assert_eq!(
+            envelope["result"],
+            json!({"changed": expected}),
+            "{envelope}"
+        );
+        // Read with the hooks' own reader: what they would run is what was meant.
+        let kept = match wezterm_attention::check_file::read(&state) {
+            wezterm_attention::check_file::Read::Absent => json!([]),
+            wezterm_attention::check_file::Read::Valid(entries) => json!(entries),
+            wezterm_attention::check_file::Read::Invalid(diagnostic) => {
+                panic!("{diagnostic:?}")
+            }
+        };
+        assert_eq!(kept, json!(checks), "{envelope}");
+    };
+    let prompt = check_entry("UserPromptSubmit", "wezpup", Some(300));
+    let tool = check_entry("PreToolUse", "wezpup", Some(300));
+    let other = check_entry("PreToolUse", "other", None);
+
+    // Removing from no file creates nothing.
+    changed("remove", &tool, false, &[]);
+    assert!(!state.exists());
+
+    changed("add", &prompt, true, &[&prompt]);
+    assert_eq!(file_mode(&state), 0o700);
+    assert_eq!(file_mode(&file), 0o600);
+    let written = fs::read(&file).expect("read checks.json");
+    changed("add", &prompt, false, &[&prompt]);
+    assert_eq!(fs::read(&file).expect("read checks.json"), written);
+    changed("add", &tool, true, &[&prompt, &tool]);
+    changed("add", &other, true, &[&prompt, &tool, &other]);
+
+    // A different check under the same name is not the caller's to replace or remove.
+    let message = refused(
+        "add",
+        &check_entry("PreToolUse", "wezpup", Some(100)),
+        "record_invalid",
+    );
+    assert!(
+        message["diagnostics"][0]["message"]
+            .as_str()
+            .expect("message")
+            .contains("wezpup:300ms=/usr/bin/true"),
+        "{message}"
+    );
+    refused(
+        "remove",
+        &check_entry("PreToolUse", "wezpup", None),
+        "record_invalid",
+    );
+
+    // An entry no file could hold is a usage error, so a mistyped event is
+    // not reported as already removed.
+    refused(
+        "remove",
+        &check_entry("PretoolUse", "wezpup", Some(300)),
+        "bad_usage",
+    );
+    refused(
+        "add",
+        &check_entry("PreToolUse", "Upper", None),
+        "bad_usage",
+    );
+    let mut relative = check_entry("PreToolUse", "late", None);
+    relative["executable"] = json!("true");
+    refused("add", &relative, "bad_usage");
+
+    // A check that could be registered alone but not beside the event's
+    // others would make hooks run none of the file's checks: the first
+    // declares the whole of the largest budget, and a second reserves time
+    // after it.
+    let whole = check_entry(
+        "UserPromptSubmit",
+        "whole",
+        Some(wezterm_attention::hold_check::MAX_BUDGET_MS),
+    );
+    changed("remove", &prompt, true, &[&tool, &other]);
+    changed("add", &whole, true, &[&tool, &other, &whole]);
+    refused(
+        "add",
+        &check_entry("UserPromptSubmit", "late", None),
+        "record_invalid",
+    );
+    changed("remove", &whole, true, &[&tool, &other]);
+
+    changed("remove", &tool, true, &[&other]);
+    changed("remove", &tool, false, &[&other]);
+
+    // A file hooks would not use now is left as it is.
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o620)).expect("chmod");
+    refused("add", &tool, "state_permissions");
+    refused("remove", &other, "state_permissions");
+    assert_eq!(file_mode(&file), 0o620);
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).expect("chmod");
+
+    // A link is followed by hooks, and a rename would replace it.
+    let elsewhere = scratch.0.join("kept-elsewhere.json");
+    fs::rename(&file, &elsewhere).expect("move checks.json");
+    std::os::unix::fs::symlink(&elsewhere, &file).expect("link checks.json");
+    let before = fs::read(&elsewhere).expect("read");
+    let (exit, envelope) = checks_command(&state, "add", &tool);
+    assert_eq!(exit, Some(1), "{envelope}");
+    assert!(
+        fs::symlink_metadata(&file)
+            .expect("link")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read(&elsewhere).expect("read"), before);
+}
+
+/// Installers that add at once each keep their entry: the read and the
+/// replace happen under one lock.
+#[test]
+fn checks_added_at_once_are_all_kept() {
+    let scratch = Scratch::new();
+    let state = scratch.0.join("state");
+    let names: Vec<String> = (0..12).map(|index| format!("check{index}")).collect();
+    let adds: Vec<_> = names
+        .iter()
+        .map(|name| {
+            let entry = check_entry("PreToolUse", name, None);
+            let state = state.clone();
+            std::thread::spawn(move || checks_command(&state, "add", &entry))
+        })
+        .collect();
+    for add in adds {
+        let (exit, envelope) = add.join().expect("join");
+        assert_eq!(exit, Some(0), "{envelope}");
+    }
+    let file: Value =
+        serde_json::from_slice(&fs::read(state.join("checks.json")).expect("read")).expect("JSON");
+    let mut kept: Vec<_> = file["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .map(|entry| entry["name"].as_str().expect("name").to_owned())
+        .collect();
+    kept.sort();
+    let mut expected = names.clone();
+    expected.sort();
+    assert_eq!(kept, expected);
+}
+
+/// A command line `checks add` cannot use is answered with its own JSON
+/// envelope, as the other commands that print one by default are.
+#[test]
+fn a_checks_command_line_that_cannot_be_used_is_a_json_usage_error() {
+    let output = Command::new(env!("CARGO_BIN_EXE_attention"))
+        .args(["checks", "add", "--provider", "codex", "--kind", "loud"])
+        .env_clear()
+        .output()
+        .expect("run attention checks add");
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("JSON envelope");
+    assert_eq!(envelope["command"], "checks add", "{envelope}");
+    assert_eq!(envelope["status"], "usage_error", "{envelope}");
+    assert_eq!(
+        envelope["diagnostics"][0]["help"], "attention checks add --help",
+        "{envelope}"
+    );
+}
+
+/// A state root that names a file is refused, and the file keeps its mode.
+#[test]
+fn checks_commands_leave_a_file_named_as_the_state_root_alone() {
+    let scratch = Scratch::new();
+    let state = scratch.0.join("state");
+    fs::write(&state, "not a directory\n").expect("write file");
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o644)).expect("chmod");
+    for verb in ["add", "remove"] {
+        let (exit, envelope) =
+            checks_command(&state, verb, &check_entry("PreToolUse", "wezpup", None));
+        assert_eq!(exit, Some(1), "{envelope}");
+        assert_eq!(
+            envelope["diagnostics"][0]["code"], "state_permissions",
+            "{envelope}"
+        );
+        assert_eq!(file_mode(&state), 0o644, "{verb}: {envelope}");
+    }
+}
+
+/// A command that cannot take the lock within its time says so and writes
+/// nothing.
+#[test]
+fn a_checks_command_that_cannot_take_the_lock_writes_nothing() {
+    let scratch = Scratch::new();
+    let state = scratch.0.join("state");
+    let (exit, envelope) = wezterm_attention::records::with_lock(
+        &state.join(".checks.lock"),
+        Duration::from_secs(1),
+        || {
+            Ok(checks_command(
+                &state,
+                "add",
+                &check_entry("PreToolUse", "wezpup", None),
+            ))
+        },
+    )
+    .expect("hold the lock");
+    assert_eq!(exit, Some(1), "{envelope}");
+    assert_eq!(
+        envelope["diagnostics"][0]["code"], "probe_unavailable",
+        "{envelope}"
+    );
+    assert!(!state.join("checks.json").exists());
+}
