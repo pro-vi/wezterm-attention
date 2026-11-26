@@ -29,9 +29,12 @@ promising an install: the installed command can come from another worktree.
    during a run: the 1.15.1 gate started at 11.8, reached 44, and failed only
    the hook-latency comparison (`sequential_p95_within_2x` from
    `tests/python/measure.py`, a 95th-percentile ratio against a fixed old
-   build). Before rerunning, diff the hook writer's code since the last gate
-   that passed: when it is unchanged, the failure is the load; a rerun at
-   load 11.9 then passed.
+   build). Before rerunning after that comparison fails, diff the hook
+   writer's code since the last gate that passed: when it is unchanged, the
+   failure is the load; a rerun at load 11.9 then passed. Any other test that
+   fails in the gate and passes alone is a timing question until measured:
+   time what it waits on against the window it allows, since that can be slow
+   for reasons of its own, as `lsof` was in the 1.16.0 gate (`16a9ee53`).
 4. Tag that commit `vX.Y.Z` and push the commit and the tag. Tag after the
    heading is dated: the `v1.0.0` tag sits one commit before the one that dated
    its heading, so the tagged `CHANGELOG.md` has no date.
