@@ -25,7 +25,7 @@ end
 attention.apply_to_config(config, {
   -- This config polls from its own update-status handler below.
   auto_poll = false,
-  -- Optional provider suffix: " · Claude", " · Codex", " · Pi", or " · Agy".
+  -- Optional provider suffix, for example " · Claude".
   show_provider = true,
   on_view_change = follow_up and follow_up.on_view_change or nil,
 })

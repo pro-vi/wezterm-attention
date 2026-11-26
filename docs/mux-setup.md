@@ -97,9 +97,9 @@ Sourcing the file a second time installs nothing new, so `source ~/.bashrc` afte
 
 ## Zsh launch claims
 
-On macOS, zsh needs no claim step. Start `claude`, `codex`, `pi` or `agy` as you would anywhere: the agent's
+On macOS, zsh needs no claim step. Start any supported agent as you would anywhere: the agent's
 first session start claims the pane for the agent's own process, through the hook command in the
-[setup guide](setup.md#claude-code-hooks) or, for Pi, through the extension. Sourcing the zsh
+[setup guide](setup.md) or, for Pi, through the extension. Sourcing the zsh
 integration is optional there. It republishes the pane's claim at every prompt, and there it clears
 the activity an agent left behind once the agent's process has exited; without it, that activity
 stays until the next agent claims the pane.
@@ -119,10 +119,7 @@ command, so its claim is explicit. In `~/.zshrc`:
 Then launch agents through the claim:
 
 ```zsh
-wezterm_attention_claim && claude
-wezterm_attention_claim && codex
-wezterm_attention_claim && pi
-wezterm_attention_claim && agy
+wezterm_attention_claim && <agent>    # e.g. wezterm_attention_claim && claude
 ```
 
 Call `wezterm_attention_claim` once immediately before each supported agent launch. The zsh prompt
@@ -172,12 +169,10 @@ A claim belongs to the pane's own terminal. A program started inside the pane, s
 
 ## Provider hooks
 
-Registration is yours; this repository does not edit Claude, Codex or Antigravity CLI settings. The setup guide has complete, copyable blocks for [Claude Code](setup.md#claude-code-hooks), [Codex](setup.md#codex-hooks) and [Antigravity CLI](setup.md#antigravity-cli-agy-hooks). They come from the package's own description:
+Registration is yours; this repository does not edit any agent's settings. The [setup guide](setup.md) has complete, copyable blocks for each hook-based provider. They come from the package's own description:
 
 ```sh
-attention hooks describe --provider claude --json
-attention hooks describe --provider codex --json
-attention hooks describe --provider agy --json
+attention hooks describe --provider <provider> --json    # e.g. --provider claude
 ```
 
 For each `registration=register` row, run the `attention` link on your PATH with that row's `arguments` and pass the original callback JSON on stdin, as one command that first sets `WEZTERM_ATTENTION_HOST_PID=$PPID` and then `exec`s it; the [setup guide](setup.md#claude-code-hooks) says why. Ignored rows are not registrations.
