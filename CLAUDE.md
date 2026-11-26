@@ -5,6 +5,14 @@
 Cut a release only when the maintainer asks for one. This repository has no CI,
 so `tests/gate.sh` is the only check, and nothing runs it for you.
 
+Before picking the version, look for work that already names it:
+`git worktree list`, `gh pr list`, and each open branch's `CHANGELOG.md` and
+handoff notes. Tell the maintainer about such a branch before releasing. 1.17.0
+was cut from `main` on 2026-11-25 while an open branch's notes named 1.17.0 as
+its own release; the branch then had to merge the tag and take the next number.
+Check also which build `attention --version` reports on the machine before
+promising an install: the installed command can come from another worktree.
+
 1. Pick the version from "The product version" in `docs/consumer-guide.md`: a
    release that adds to a public contract raises the minor version, one that
    raises a schema or wire number raises the major version, and fixes only
