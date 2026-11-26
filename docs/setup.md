@@ -159,16 +159,16 @@ The setting does not keep a session out of a server that is already running, so 
 
 Antigravity CLI (`agy`) reads global lifecycle hooks from `~/.gemini/config/hooks.json` (and project hooks from `.agents/hooks.json`). `attention hooks describe --provider agy --json` lists the five registered rows: `SessionStart`, `PreInvocation`, `PreToolUse`, `PostToolUse` and `Stop`. Use the same `WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy <Event>` command form and PATH link as for Claude Code and Codex.
 
-In `~/.gemini/config/hooks.json`:
+In `~/.gemini/config/hooks.json` (unlike Claude Code and Codex, `agy` 1.5.16 nests each event under a named hook key, uses flat handler arrays for `SessionStart`, `PreInvocation` and `Stop`, and wraps `PreToolUse` and `PostToolUse` in a `matcher`/`hooks` group):
 
 ```json
 {
-  "hooks": {
-    "SessionStart":  [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy SessionStart" }] }],
-    "PreInvocation": [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy PreInvocation" }] }],
-    "PreToolUse":    [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy PreToolUse" }] }],
-    "PostToolUse":   [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy PostToolUse" }] }],
-    "Stop":          [{ "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy Stop" }] }]
+  "wezterm-attention": {
+    "SessionStart":  [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy SessionStart", "timeout": 15 }],
+    "PreInvocation": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy PreInvocation", "timeout": 15 }],
+    "PreToolUse":    [{ "matcher": "*", "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy PreToolUse", "timeout": 15 }] }],
+    "PostToolUse":   [{ "matcher": "*", "hooks": [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy PostToolUse", "timeout": 15 }] }],
+    "Stop":          [{ "type": "command", "command": "WEZTERM_ATTENTION_HOST_PID=$PPID exec attention hooks event agy Stop", "timeout": 15 }]
   }
 }
 ```
