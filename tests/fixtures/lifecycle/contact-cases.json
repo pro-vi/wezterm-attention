@@ -478,10 +478,9 @@
           "provider": "agy",
           "event": "PreToolUse",
           "kind": "tool_preflight",
+          "child_of": "coverage",
           "patch": {
             "conversationId": "coverage-child",
-            "parentConversationId": "coverage",
-            "agentName": "worker",
             "lastUserInput": "",
             "toolCall": {
               "name": "run_command",

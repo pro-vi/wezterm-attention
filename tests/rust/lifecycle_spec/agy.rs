@@ -54,6 +54,33 @@ fn agy_brain_dir(setup: &Setup, conv_id: &str) -> (PathBuf, PathBuf) {
     (artifact, tx)
 }
 
+fn link_agy_child(setup: &Setup, parent: &str, child: &str, role: &str) -> String {
+    let (parent_dir, _) = agy_brain_dir(setup, parent);
+    let (child_dir, _) = agy_brain_dir(setup, child);
+    fs::create_dir_all(&parent_dir).unwrap();
+    let mdir = child_dir.join(".system_generated").join("messages");
+    fs::create_dir_all(&mdir).unwrap();
+    let args_json = json!({"Role": role, "TypeName": "self"}).to_string();
+    fs::write(
+        mdir.join("0001.json"),
+        serde_json::to_vec(&json!({
+            "sender": parent,
+            "sourceMetadata": {
+                "tool": {
+                    "conversationId": parent,
+                    "toolCall": {
+                        "name": "invoke_subagent",
+                        "argumentsJson": args_json
+                    }
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    child_dir.to_string_lossy().into_owned()
+}
+
 fn agy_hook_cli(
     _setup: &Setup,
     env: &BTreeMap<String, String>,
@@ -536,7 +563,50 @@ fn agy_quiet_checks_run_on_prompt_first_tool_and_normal_stop_only() {
     assert_eq!(act["type"], "thinking");
     assert_eq!(act["hold_notes"]["wezpup"]["quiet"], json!(true));
 
-    // 2. Intra-turn PreInvocation(inv=1) and Stop(fullyIdle: false) preserve
+    // 2. First PreToolUse re-runs before_thinking quiet check; a second
+    // PreToolUse skips it while preserving the thinking quiet note.
+    let tool1 = json!({
+        "hookEventName": "PreToolUse",
+        "conversationId": LEAD,
+        "transcriptPath": tx_str,
+        "cwd": "/tmp/project",
+        "lastUserInput": "auto prompt",
+        "toolCall": {"name": "run_command", "id": "call-tool-1"}
+    });
+    assert!(
+        agy_hook_cli(
+            &setup,
+            &setup.env,
+            "PreToolUse",
+            &tool1,
+            &["--quiet-check", &check_arg, "--strict"],
+        )
+        .status
+        .success()
+    );
+    let tool2 = json!({
+        "hookEventName": "PreToolUse",
+        "conversationId": LEAD,
+        "transcriptPath": tx_str,
+        "cwd": "/tmp/project",
+        "lastUserInput": "auto prompt",
+        "toolCall": {"name": "run_command", "id": "call-tool-2"}
+    });
+    assert!(
+        agy_hook_cli(
+            &setup,
+            &setup.env,
+            "PreToolUse",
+            &tool2,
+            &["--quiet-check", &check_arg, "--strict"],
+        )
+        .status
+        .success()
+    );
+    let act = shown_activity(&setup.binding_dir("agy", LEAD)).unwrap();
+    assert_eq!(act["hold_notes"]["wezpup"]["quiet"], json!(true));
+
+    // 3. Intra-turn PreInvocation(inv=1) and Stop(fullyIdle: false) preserve
     // the thinking quiet note without re-running the check.
     let pre1 = json!({
         "hookEventName": "PreInvocation",
@@ -641,21 +711,23 @@ fn agy_quiet_checks_run_on_prompt_first_tool_and_normal_stop_only() {
     assert_eq!(act["type"], "stop");
     assert_eq!(act["hold_notes"]["wezpup"]["quiet"], json!(true));
 
-    // Exactly 2 invocations: PreInvocation(0) and normal Stop.
+    // Exactly 3 invocations: PreInvocation(0), first PreToolUse, and normal Stop.
     let logged: Vec<Value> = fs::read_to_string(&log_file)
         .unwrap()
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(logged.len(), 2, "{logged:?}");
+    assert_eq!(logged.len(), 3, "{logged:?}");
     assert_eq!(logged[0]["phase"], "before_thinking");
     assert_eq!(logged[0]["source_event"], "PreInvocation");
     assert_eq!(
         logged[0]["prompt"],
         json!({"availability": "available", "text": "auto prompt"})
     );
-    assert_eq!(logged[1]["phase"], "before_turn_end");
-    assert_eq!(logged[1]["source_event"], "Stop");
+    assert_eq!(logged[1]["phase"], "before_thinking");
+    assert_eq!(logged[1]["source_event"], "PreToolUse");
+    assert_eq!(logged[2]["phase"], "before_turn_end");
+    assert_eq!(logged[2]["source_event"], "Stop");
 }
 
 #[test]
@@ -1203,15 +1275,17 @@ fn agy_stop_ids_conflict_is_atomic_and_self_kill_and_delayed_child_kill_work() {
         &event("agy", "SessionStart", LEAD, json!({})),
         "00000000000000000200",
     );
-    for (cid, ts) in [
-        ("c1", "00000000000000000300"),
-        ("c2", "00000000000000000350"),
+    let c1_dir = link_agy_child(&setup, LEAD, "c1", "worker");
+    let c2_dir = link_agy_child(&setup, LEAD, "c2", "worker");
+    for (cid, dir, ts) in [
+        ("c1", &c1_dir, "00000000000000000300"),
+        ("c2", &c2_dir, "00000000000000000350"),
     ] {
         let start = event(
             "agy",
             "SessionStart",
             cid,
-            json!({"parentConversationId": LEAD, "agentName": "worker", "lastUserInput": ""}),
+            json!({"artifactDirectoryPath": dir, "lastUserInput": ""}),
         );
         assert_eq!(setup.apply(&start, ts).disposition, "applied");
     }
@@ -1245,8 +1319,7 @@ fn agy_stop_ids_conflict_is_atomic_and_self_kill_and_delayed_child_kill_work() {
         "PostToolUse",
         "c1",
         json!({
-            "parentConversationId": LEAD,
-            "agentName": "worker",
+            "artifactDirectoryPath": c1_dir,
             "lastUserInput": "",
             "toolCall": {
                 "name": "manage_subagents",
@@ -1269,8 +1342,7 @@ fn agy_stop_ids_conflict_is_atomic_and_self_kill_and_delayed_child_kill_work() {
         "PreToolUse",
         "c1",
         json!({
-            "parentConversationId": LEAD,
-            "agentName": "worker",
+            "artifactDirectoryPath": c1_dir,
             "lastUserInput": "",
             "toolCall": {"name": "run_command", "id": "c1-run"}
         }),
@@ -1284,8 +1356,7 @@ fn agy_stop_ids_conflict_is_atomic_and_self_kill_and_delayed_child_kill_work() {
         "PostToolUse",
         "c1",
         json!({
-            "parentConversationId": LEAD,
-            "agentName": "worker",
+            "artifactDirectoryPath": c1_dir,
             "lastUserInput": "",
             "toolCall": {
                 "name": "manage_subagents",
@@ -1307,8 +1378,7 @@ fn agy_stop_ids_conflict_is_atomic_and_self_kill_and_delayed_child_kill_work() {
         "PostToolUse",
         "c1",
         json!({
-            "parentConversationId": LEAD,
-            "agentName": "worker",
+            "artifactDirectoryPath": c1_dir,
             "lastUserInput": "",
             "toolCall": {
                 "name": "manage_subagents",
@@ -1336,13 +1406,13 @@ fn agy_sequential_waiting_child_kills_and_delayed_kills_preserve_notify_semantic
         ("w1", "00000000000000000310", "applied"),
         ("w2", "00000000000000000320", "skipped"),
     ] {
+        let dir = link_agy_child(&setup, LEAD, cid, "worker");
         let ask = event(
             "agy",
             "PreToolUse",
             cid,
             json!({
-                "parentConversationId": LEAD,
-                "agentName": "worker",
+                "artifactDirectoryPath": dir,
                 "lastUserInput": "",
                 "toolCall": {"name": "ask_question", "id": format!("q-{cid}")}
             }),
@@ -1404,13 +1474,13 @@ fn agy_sequential_waiting_child_kills_and_delayed_kills_preserve_notify_semantic
     );
 
     // Newer waiting child w3 at t=460 must survive both delayed kill and delayed kill_all at t=450.
+    let w3_dir = link_agy_child(&setup, LEAD, "w3", "worker");
     let ask_w3 = event(
         "agy",
         "PreToolUse",
         "w3",
         json!({
-            "parentConversationId": LEAD,
-            "agentName": "worker",
+            "artifactDirectoryPath": w3_dir,
             "lastUserInput": "",
             "toolCall": {"name": "ask_question", "id": "q-w3"}
         }),
@@ -1472,13 +1542,13 @@ fn agy_malformed_post_tool_error_generic_child_post_tool_and_grandchild_parent_i
     );
 
     // 1. Malformed non-string PostToolUse.error fails closed without killing subagents.
+    let c1_dir = link_agy_child(&setup, LEAD, "c1", "worker");
     let child_ask = event(
         "agy",
         "PreToolUse",
         "c1",
         json!({
-            "parentConversationId": LEAD,
-            "agentName": "worker",
+            "artifactDirectoryPath": c1_dir,
             "lastUserInput": "",
             "toolCall": {"name": "ask_question", "id": "q-1"}
         }),
@@ -1515,8 +1585,7 @@ fn agy_malformed_post_tool_error_generic_child_post_tool_and_grandchild_parent_i
         "PostToolUse",
         "c1",
         json!({
-            "parentConversationId": LEAD,
-            "agentName": "worker",
+            "artifactDirectoryPath": c1_dir,
             "lastUserInput": "",
             "toolCall": {"name": "run_command", "id": "run-1"},
             "error": ""
@@ -1536,41 +1605,16 @@ fn agy_malformed_post_tool_error_generic_child_post_tool_and_grandchild_parent_i
         "notify"
     );
 
-    // 3. Grandchild supplying parentConversationId without rootConversationId
-    // still walks messages/*.json up to the root lead session id.
-    let (child_dir, _) = agy_brain_dir(&setup, "mid-child");
-    let (grand_dir, _) = agy_brain_dir(&setup, "leaf-grand");
-    let (lead_dir, _) = agy_brain_dir(&setup, LEAD);
-    fs::create_dir_all(&lead_dir).unwrap();
-    for (dir, sender) in [(&child_dir, LEAD), (&grand_dir, "mid-child")] {
-        let mdir = dir.join(".system_generated").join("messages");
-        fs::create_dir_all(&mdir).unwrap();
-        fs::write(
-            mdir.join("0001.json"),
-            serde_json::to_vec(&json!({
-                "sender": sender,
-                "sourceMetadata": {
-                    "tool": {
-                        "conversationId": sender,
-                        "toolCall": {
-                            "name": "invoke_subagent",
-                            "argumentsJson": "{\"Role\":\"Worker\",\"TypeName\":\"self\"}"
-                        }
-                    }
-                }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-    }
+    // 3. Grandchild walks messages/*.json upward through mid-child to the root lead session id.
+    let _mid_dir = link_agy_child(&setup, LEAD, "mid-child", "Worker");
+    let grand_dir = link_agy_child(&setup, "mid-child", "leaf-grand", "Worker");
     let grand_ev = parse_provider_event(
         "agy",
         "SessionStart",
         &json!({
             "hookEventName": "SessionStart",
             "conversationId": "leaf-grand",
-            "parentConversationId": "mid-child",
-            "artifactDirectoryPath": grand_dir.to_string_lossy(),
+            "artifactDirectoryPath": grand_dir,
             "lastUserInput": ""
         }),
         &setup.env,
@@ -1956,11 +2000,12 @@ fn agy_delayed_self_kill_ignores_empty_transcript_fails_closed_and_delayed_lead_
 
     // 1. Delayed child PostToolUse self-kill returns Ignored (not Skipped)
     // matching ChildTransition::Stop parity.
+    let self_c_dir = link_agy_child(&setup, LEAD, "self-c", "worker");
     let start_c = event(
         "agy",
         "SessionStart",
         "self-c",
-        json!({"parentConversationId": LEAD, "agentName": "worker", "lastUserInput": ""}),
+        json!({"artifactDirectoryPath": self_c_dir, "lastUserInput": ""}),
     );
     assert_eq!(
         setup.apply(&start_c, "00000000000000000300").disposition,
@@ -1971,8 +2016,7 @@ fn agy_delayed_self_kill_ignores_empty_transcript_fails_closed_and_delayed_lead_
         "PostToolUse",
         "self-c",
         json!({
-            "parentConversationId": LEAD,
-            "agentName": "worker",
+            "artifactDirectoryPath": self_c_dir,
             "lastUserInput": "",
             "toolCall": {
                 "name": "manage_subagents",
@@ -2005,11 +2049,13 @@ fn agy_delayed_self_kill_ignores_empty_transcript_fails_closed_and_delayed_lead_
 
     // 3. Delayed lead manage_subagents kill for child A (t=400) still removes A
     // even when child B's newer notify (t=500) is no longer held (B answered at t=550).
+    let child_a_dir = link_agy_child(&setup, LEAD, "child-a", "worker");
+    let child_b_dir = link_agy_child(&setup, LEAD, "child-b", "worker");
     let start_a = event(
         "agy",
         "SessionStart",
         "child-a",
-        json!({"parentConversationId": LEAD, "agentName": "worker", "lastUserInput": ""}),
+        json!({"artifactDirectoryPath": child_a_dir, "lastUserInput": ""}),
     );
     assert_eq!(
         setup.apply(&start_a, "00000000000000000350").disposition,
@@ -2020,8 +2066,7 @@ fn agy_delayed_self_kill_ignores_empty_transcript_fails_closed_and_delayed_lead_
         "PreToolUse",
         "child-b",
         json!({
-            "parentConversationId": LEAD,
-            "agentName": "worker",
+            "artifactDirectoryPath": child_b_dir,
             "lastUserInput": "",
             "toolCall": {"name": "ask_question", "id": "q-b"}
         }),
@@ -2035,8 +2080,7 @@ fn agy_delayed_self_kill_ignores_empty_transcript_fails_closed_and_delayed_lead_
         "PostToolUse",
         "child-b",
         json!({
-            "parentConversationId": LEAD,
-            "agentName": "worker",
+            "artifactDirectoryPath": child_b_dir,
             "lastUserInput": "",
             "toolCall": {"name": "ask_question", "id": "q-b"},
             "error": ""
@@ -2385,7 +2429,17 @@ fn agy_follower_ignores_malformed_summary_and_active_killed_step_then_interrupts
                     &summaries_for_hook,
                     "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle='true' WHERE conversation_id='agy-lead-1';",
                 );
-            } else if n == 5 {
+            } else if n == 4 {
+                // Embedded-NUL TEXT status must also fail closed without ending the turn.
+                assert_eq!(
+                    shown_activity(&binding_dir_for_hook).unwrap()["type"],
+                    "thinking"
+                );
+                run_sqlite(
+                    &summaries_for_hook,
+                    "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE' || char(0) || 'INVALID', not_fully_idle=0 WHERE conversation_id='agy-lead-1';",
+                );
+            } else if n == 7 {
                 // After malformed summary polls, no interrupt may have been recorded.
                 assert_eq!(
                     shown_activity(&binding_dir_for_hook).unwrap()["type"],
@@ -2408,7 +2462,7 @@ fn agy_follower_ignores_malformed_summary_and_active_killed_step_then_interrupts
     let followed = follow_every(&setup, &req, Duration::from_millis(10));
     assert_eq!(recorded(&followed), "applied");
     assert!(shown_activity(&setup.binding_dir("agy", LEAD)).is_none());
-    assert!(polls.load(Ordering::SeqCst) >= 6);
+    assert!(polls.load(Ordering::SeqCst) >= 8);
 }
 
 #[test]
@@ -2420,11 +2474,12 @@ fn delayed_manage_subagents_kill_over_activity_clear_clears_diagnostic_and_rejec
         &event("agy", "SessionStart", LEAD, json!({})),
         "00000000000000000200",
     );
+    let child_a_dir = link_agy_child(&setup, LEAD, "child-a", "worker");
     let start_a = event(
         "agy",
         "SessionStart",
         "child-a",
-        json!({"parentConversationId": LEAD, "agentName": "worker", "lastUserInput": ""}),
+        json!({"artifactDirectoryPath": child_a_dir, "lastUserInput": ""}),
     );
     assert_eq!(
         setup.apply(&start_a, "00000000000000000300").disposition,
@@ -2649,5 +2704,479 @@ fn agy_user_canceled_stop_commits_clear_but_marks_partial_and_suppresses_deliver
             HookContent::NotRequested
         ),
         Err(NotDispatchedReason::NativeStateRejected)
+    );
+}
+
+#[test]
+fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
+    let setup = Setup::new();
+    setup.claim();
+    let (_, tx) = agy_brain_dir(&setup, LEAD);
+    let tx_str = tx.to_string_lossy().into_owned();
+    write_jsonl(
+        &tx,
+        &[
+            json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "human prompt"}),
+        ],
+    );
+
+    // 1. Human turn ends with an unread stop.
+    assert!(
+        agy_hook_cli(
+            &setup,
+            &setup.env,
+            "SessionStart",
+            &json!({
+                "hookEventName": "SessionStart",
+                "conversationId": LEAD,
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "human prompt"
+            }),
+            &["--strict"],
+        )
+        .status
+        .success()
+    );
+    assert!(
+        agy_hook_cli(
+            &setup,
+            &setup.env,
+            "Stop",
+            &json!({
+                "hookEventName": "Stop",
+                "conversationId": LEAD,
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "human prompt",
+                "terminationReason": "NO_TOOL_CALL",
+                "fullyIdle": true,
+                "continuationActive": false,
+                "executionNum": 0
+            }),
+            &["--strict"],
+        )
+        .status
+        .success()
+    );
+    let human_stop = shown_activity(&setup.binding_dir("agy", LEAD)).unwrap();
+    let human_stop_id = human_stop["event_id"].as_str().unwrap().to_owned();
+    assert_eq!(human_stop["type"], "stop");
+
+    // 2. Register quiet checks for agy via checks.json (no CLI --quiet-check flag).
+    let checker = make_executable(
+        &setup,
+        "agy-checks-json-quiet",
+        "/bin/cat >/dev/null\nprintf '{\"quiet\":true,\"answer\":\"controller_submitted\"}\\n'",
+    );
+    let checks_path = PathBuf::from(&setup.env["WEZTERM_ATTENTION_DIR"]).join("checks.json");
+    fs::write(
+        &checks_path,
+        serde_json::to_vec(&json!({
+            "schema": 1,
+            "checks": [
+                {"provider": "agy", "event": "PreInvocation", "kind": "quiet", "name": "wezpup", "executable": checker.to_string_lossy()},
+                {"provider": "agy", "event": "PreToolUse", "kind": "quiet", "name": "wezpup", "executable": checker.to_string_lossy()},
+                {"provider": "agy", "event": "Stop", "kind": "quiet", "name": "wezpup", "executable": checker.to_string_lossy()}
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&checks_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    // 3. Application turn runs PreInvocation(0) -> PreToolUse -> Stop(exec=0)
+    // -> Stop-hook continuation PreInvocation(inv=1) -> PreToolUse -> Stop(exec=1);
+    // every step stays quiet and keeps the unread human unseen_stop.
+    for (event_name, payload) in [
+        (
+            "PreInvocation",
+            json!({
+                "hookEventName": "PreInvocation",
+                "conversationId": LEAD,
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "auto prompt",
+                "invocationNum": 0,
+                "initialNumSteps": 1
+            }),
+        ),
+        (
+            "PreToolUse",
+            json!({
+                "hookEventName": "PreToolUse",
+                "conversationId": LEAD,
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "auto prompt",
+                "toolCall": {"name": "run_command", "id": "call-1"}
+            }),
+        ),
+        (
+            "Stop",
+            json!({
+                "hookEventName": "Stop",
+                "conversationId": LEAD,
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "auto prompt",
+                "terminationReason": "NO_TOOL_CALL",
+                "fullyIdle": true,
+                "continuationActive": false,
+                "executionNum": 0
+            }),
+        ),
+        (
+            "PreInvocation",
+            json!({
+                "hookEventName": "PreInvocation",
+                "conversationId": LEAD,
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "auto prompt",
+                "invocationNum": 1,
+                "initialNumSteps": 2
+            }),
+        ),
+        (
+            "PreToolUse",
+            json!({
+                "hookEventName": "PreToolUse",
+                "conversationId": LEAD,
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "auto prompt",
+                "toolCall": {"name": "run_command", "id": "call-2"}
+            }),
+        ),
+        (
+            "Stop",
+            json!({
+                "hookEventName": "Stop",
+                "conversationId": LEAD,
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "auto prompt",
+                "terminationReason": "NO_TOOL_CALL",
+                "fullyIdle": true,
+                "continuationActive": false,
+                "executionNum": 1
+            }),
+        ),
+    ] {
+        let out = agy_hook_cli(&setup, &setup.env, event_name, &payload, &["--strict"]);
+        assert!(
+            out.status.success(),
+            "{event_name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let act = shown_activity(&setup.binding_dir("agy", LEAD)).unwrap();
+        assert_eq!(
+            act["hold_notes"]["wezpup"]["quiet"],
+            json!(true),
+            "{event_name} lost quiet note: {act}"
+        );
+        assert_eq!(
+            act["unseen_stop"]["event_id"],
+            json!(human_stop_id),
+            "{event_name} lost unseen_stop: {act}"
+        );
+    }
+
+    // 4. Confirmed background wakeup (invocationNum=0, transcript ending in SYSTEM_MESSAGE)
+    // over the quiet stop preserves quiet note and unseen_stop.
+    write_jsonl(
+        &tx,
+        &[
+            json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "auto prompt"}),
+            json!({"step_index": 1, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "subagent done"}),
+        ],
+    );
+    let wakeup_out = agy_hook_cli(
+        &setup,
+        &setup.env,
+        "PreInvocation",
+        &json!({
+            "hookEventName": "PreInvocation",
+            "conversationId": LEAD,
+            "transcriptPath": tx_str,
+            "cwd": "/tmp/project",
+            "lastUserInput": "auto prompt",
+            "invocationNum": 0,
+            "initialNumSteps": 2
+        }),
+        &["--strict"],
+    );
+    assert!(wakeup_out.status.success());
+    let wakeup_act = shown_activity(&setup.binding_dir("agy", LEAD)).unwrap();
+    assert_eq!(wakeup_act["type"], "thinking");
+    assert_eq!(wakeup_act["hold_notes"]["wezpup"]["quiet"], json!(true));
+    assert_eq!(wakeup_act["unseen_stop"]["event_id"], json!(human_stop_id));
+
+    // Acknowledging the unseen_stop event_id succeeds while carried under quiet thinking.
+    let (address, _) = pane_address(&setup.env).unwrap();
+    let ack = wezterm_attention::lifecycle::acknowledge_activity(
+        &state_root(&setup.env).unwrap(),
+        &address,
+        &setup.env["WEZTERM_ATTENTION_LAUNCH_ID"],
+        &human_stop_id,
+    )
+    .unwrap();
+    assert_eq!(ack.disposition.as_str(), "applied");
+
+    // 5. Fail-closed invocationNum=0 with an unreadable/missing transcriptPath must
+    // NOT inherit quiet notes from a prior quiet stop.
+    assert!(
+        agy_hook_cli(
+            &setup,
+            &setup.env,
+            "Stop",
+            &json!({
+                "hookEventName": "Stop",
+                "conversationId": LEAD,
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "auto prompt",
+                "terminationReason": "NO_TOOL_CALL",
+                "fullyIdle": true,
+                "continuationActive": false,
+                "executionNum": 2
+            }),
+            &["--strict"],
+        )
+        .status
+        .success()
+    );
+    let unreadable_out = agy_hook_cli(
+        &setup,
+        &setup.env,
+        "PreInvocation",
+        &json!({
+            "hookEventName": "PreInvocation",
+            "conversationId": LEAD,
+            "transcriptPath": "/nonexistent/agy/transcript_full.jsonl",
+            "cwd": "/tmp/project",
+            "lastUserInput": "new human prompt",
+            "invocationNum": 0,
+            "initialNumSteps": 3
+        }),
+        &["--strict"],
+    );
+    assert!(unreadable_out.status.success());
+    let unreadable_act = shown_activity(&setup.binding_dir("agy", LEAD)).unwrap();
+    assert_eq!(unreadable_act["type"], "thinking");
+    assert!(
+        unreadable_act.get("hold_notes").is_none(),
+        "{unreadable_act}"
+    );
+    assert!(
+        unreadable_act.get("unseen_stop").is_none(),
+        "{unreadable_act}"
+    );
+}
+
+#[test]
+fn agy_unclaimed_prompt_holds_unseen_stop_until_first_tool_and_malformed_execution_id_keeps_lead_prompt()
+ {
+    let setup = Setup::new();
+    setup.claim();
+    let (_, tx) = agy_brain_dir(&setup, LEAD);
+    let tx_str = tx.to_string_lossy().into_owned();
+    write_jsonl(
+        &tx,
+        &[
+            json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "human turn"}),
+        ],
+    );
+
+    assert!(
+        agy_hook_cli(
+            &setup,
+            &setup.env,
+            "SessionStart",
+            &json!({
+                "hookEventName": "SessionStart",
+                "conversationId": LEAD,
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "human turn"
+            }),
+            &["--strict"],
+        )
+        .status
+        .success()
+    );
+    assert!(
+        agy_hook_cli(
+            &setup,
+            &setup.env,
+            "Stop",
+            &json!({
+                "hookEventName": "Stop",
+                "conversationId": LEAD,
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "human turn",
+                "terminationReason": "NO_TOOL_CALL",
+                "fullyIdle": true
+            }),
+            &["--strict"],
+        )
+        .status
+        .success()
+    );
+    let unseen_id = shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Unclaiming quiet check: PreInvocation(0) tentatively holds unseen_stop until
+    // the turn's unclaimed first PreToolUse strips it.
+    let unclaiming = make_executable(&setup, "agy-unclaiming-check", "/bin/cat >/dev/null");
+    let check_arg = format!("wezpup={}", unclaiming.display());
+    assert!(
+        agy_hook_cli(
+            &setup,
+            &setup.env,
+            "PreInvocation",
+            &json!({
+                "hookEventName": "PreInvocation",
+                "conversationId": LEAD,
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "second human turn",
+                "invocationNum": 0,
+                "initialNumSteps": 1
+            }),
+            &["--quiet-check", &check_arg, "--strict"],
+        )
+        .status
+        .success()
+    );
+    let after_prompt = shown_activity(&setup.binding_dir("agy", LEAD)).unwrap();
+    assert_eq!(after_prompt["type"], "thinking");
+    assert_eq!(after_prompt["unseen_stop"]["event_id"], json!(unseen_id));
+
+    assert!(
+        agy_hook_cli(
+            &setup,
+            &setup.env,
+            "PreToolUse",
+            &json!({
+                "hookEventName": "PreToolUse",
+                "conversationId": LEAD,
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "second human turn",
+                "toolCall": {"name": "run_command", "id": "call-unclaimed-1"}
+            }),
+            &["--quiet-check", &check_arg, "--strict"],
+        )
+        .status
+        .success()
+    );
+    let after_tool = shown_activity(&setup.binding_dir("agy", LEAD)).unwrap();
+    assert_eq!(after_tool["type"], "thinking");
+    assert!(after_tool.get("unseen_stop").is_none(), "{after_tool}");
+
+    // Confirmed lead PreInvocation(0) with a malformed optional executionId must
+    // still act as a lead prompt: it does not inherit prior quiet thinking notes,
+    // still replaces a waiting child's notify, and still runs before_thinking checks.
+    let claiming = make_executable(
+        &setup,
+        "agy-claiming-check",
+        "/bin/cat >/dev/null\nprintf '{\"quiet\":true,\"answer\":\"controller_submitted\"}\\n'",
+    );
+    let claim_arg = format!("wezpup={}", claiming.display());
+    assert!(
+        agy_hook_cli(
+            &setup,
+            &setup.env,
+            "PreInvocation",
+            &json!({
+                "hookEventName": "PreInvocation",
+                "conversationId": LEAD,
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "quiet turn",
+                "invocationNum": 0,
+                "initialNumSteps": 2
+            }),
+            &["--quiet-check", &claim_arg, "--strict"],
+        )
+        .status
+        .success()
+    );
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["hold_notes"]["wezpup"]["quiet"],
+        json!(true)
+    );
+
+    let bad_exec_payload = json!({
+        "hookEventName": "PreInvocation",
+        "conversationId": LEAD,
+        "transcriptPath": tx_str,
+        "cwd": "/tmp/project",
+        "lastUserInput": "fresh prompt with bad exec id",
+        "executionId": "bad\nexec",
+        "invocationNum": 0,
+        "initialNumSteps": 3
+    });
+    let parsed_bad = parse_provider_event("agy", "PreInvocation", &bad_exec_payload, &setup.env);
+    assert!(parsed_bad.is_lead_prompt);
+    assert!(!parsed_bad.continues_turn);
+    assert!(parsed_bad.observation.is_none());
+    assert!(parsed_bad.observation_diagnostic.is_some());
+
+    // Over quiet thinking: does NOT inherit prior quiet note when unclaiming check runs.
+    assert!(
+        agy_hook_cli(
+            &setup,
+            &setup.env,
+            "PreInvocation",
+            &bad_exec_payload,
+            &["--quiet-check", &check_arg],
+        )
+        .status
+        .success()
+    );
+    let after_bad_exec = shown_activity(&setup.binding_dir("agy", LEAD)).unwrap();
+    assert_eq!(after_bad_exec["type"], "thinking");
+    assert!(
+        after_bad_exec.get("hold_notes").is_none(),
+        "{after_bad_exec}"
+    );
+
+    // Over a waiting child's notify: replaces notify immediately instead of holding.
+    let child_dir = link_agy_child(&setup, LEAD, "waiting-child", "worker");
+    assert!(
+        agy_hook_cli(
+            &setup,
+            &setup.env,
+            "PreToolUse",
+            &json!({
+                "hookEventName": "PreToolUse",
+                "conversationId": "waiting-child",
+                "artifactDirectoryPath": child_dir,
+                "lastUserInput": "",
+                "toolCall": {"name": "ask_question", "id": "q-wait"}
+            }),
+            &["--strict"],
+        )
+        .status
+        .success()
+    );
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "notify"
+    );
+    assert!(
+        agy_hook_cli(&setup, &setup.env, "PreInvocation", &bad_exec_payload, &[],)
+            .status
+            .success()
+    );
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "thinking"
     );
 }

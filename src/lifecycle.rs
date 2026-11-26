@@ -2073,24 +2073,30 @@ fn apply_activity(
                 }
             }
             let mut base = activity_base(resolved, event, &binding_id)?;
-            let is_lead_prompt = event
-                .observation
-                .as_ref()
-                .is_some_and(LifecycleObservation::is_lead_prompt);
-            // A lead tool call (or intra-turn `agy` thinking continuation)
-            // while the pane shows its turn's thinking keeps the notes the
+            // A lead tool call while the pane shows its turn's thinking, or a
+            // confirmed Agy intra-turn continuation/wakeup over an uncleared
+            // same-source thinking or quiet stop, keeps the quiet notes the
             // turn was given. Only the turn's first tool call runs the quiet
             // checks (`tool_call_skips_check`), and a check that answers it
             // replaces its own note, an empty answer removing it; a check that
             // gave no answer leaves its note as it was.
+            let carry_existing_notes = existing.as_ref().is_some_and(|activity| {
+                if event.source_event == "PreToolUse" {
+                    visible && activity["type"] == "thinking"
+                } else if event.continues_turn {
+                    activity["source"] == base["source"]
+                        && uncleared(activity, clear.as_ref())
+                        && ((visible && activity["type"] == "thinking")
+                            || (activity["type"] == "stop" && quiet_activity(activity)))
+                } else {
+                    false
+                }
+            });
             if event.agent_id.is_none()
                 && base["type"] == "thinking"
-                && visible
-                && (event.source_event == "PreToolUse"
-                    || (event.provider == Some(Provider::Agy) && !is_lead_prompt))
+                && carry_existing_notes
                 && let Some(notes) = existing
                     .as_ref()
-                    .filter(|activity| activity["type"] == "thinking")
                     .and_then(|activity| activity["hold_notes"].as_object())
             {
                 let answered = |name: &str| {
@@ -2101,7 +2107,7 @@ fn apply_activity(
                     })
                 };
                 for (name, note) in notes {
-                    if !answered(name) {
+                    if !answered(name) && note["quiet"] == true {
                         base["hold_notes"][name] = note.clone();
                     }
                 }
@@ -2115,8 +2121,7 @@ fn apply_activity(
             // thinking replaces it as usual.
             let held = event.agent_id.is_none()
                 && base["type"] == "thinking"
-                && event.source_event != "UserPromptSubmit"
-                && !is_lead_prompt
+                && !event.is_lead_prompt
                 && visible
                 && existing.as_ref().is_some_and(|activity| {
                     notify_held_by_child_after(
@@ -2205,8 +2210,7 @@ fn apply_activity(
             // until its turn's first tool call is answered, since as of
             // Claude Code 2.1.331 a check can tell where a prompt came from
             // only then; that call, left unclaimed too, takes it away.
-            let prompt_asked =
-                asked && (event.source_event == "UserPromptSubmit" || is_lead_prompt);
+            let prompt_asked = asked && event.is_lead_prompt;
             let (activity, written) = match (unseen, written) {
                 (Some(stop), Some(mut record))
                     if result.disposition.as_str() == "applied"
@@ -4674,11 +4678,7 @@ fn obtain_hold_notes(
             deadline_mono_ns: deadline,
             reply: (!before_thinking).then_some(request.reply),
             background_tasks: (!before_thinking).then_some(request.background_tasks.unwrap_or(&[])),
-            prompt: (before_thinking
-                && (event.source_event == "UserPromptSubmit"
-                    || (event.provider == Some(Provider::Agy)
-                        && event.source_event == "PreInvocation")))
-                .then_some(request.prompt),
+            prompt: (before_thinking && event.is_lead_prompt).then_some(request.prompt),
             lifecycle: quiet.then_some(lifecycle.as_ref()).flatten(),
             prospective_observation: quiet.then_some(prospective.as_ref()).flatten(),
         };
@@ -4806,16 +4806,8 @@ fn check_phase(event: &ProviderEvent, request: &hold_check::Request<'_>) -> Opti
     }
     (quiet
         && event.activity_type.as_deref() == Some("thinking")
-        && (matches!(
-            event.source_event.as_str(),
-            "UserPromptSubmit" | "PreToolUse"
-        ) || (event.provider == Some(Provider::Agy)
-            && event.source_event == "PreInvocation"
-            && event
-                .observation
-                .as_ref()
-                .is_some_and(LifecycleObservation::is_lead_prompt))))
-    .then_some(Phase::BeforeThinking)
+        && (event.is_lead_prompt || event.source_event == "PreToolUse"))
+        .then_some(Phase::BeforeThinking)
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@
 //!    where `USER_INPUT` is flushed before `PreInvocation` runs).
 //! 3. Subagent parent/root lineage and role/type (`brain/<id>/.system_generated/
 //!    messages/*.json`, written before child `SessionStart` fires; hook stdin
-//!    omits `parentConversationId`, `rootConversationId`, and `agentName`).
+//!    omits parent/root conversation ids from hook stdin).
 //! 4. Whether an open lead turn was stopped with Esc, which runs no `Stop` hook
 //!    (`conversation_summaries.db` and `conversations/<id>.db`, polled by the
 //!    turn follower).
@@ -630,6 +630,7 @@ mod platform {
         fn sqlite3_step(stmt: *mut Sqlite3Stmt) -> c_int;
         fn sqlite3_column_type(stmt: *mut Sqlite3Stmt, col: c_int) -> c_int;
         fn sqlite3_column_text(stmt: *mut Sqlite3Stmt, col: c_int) -> *const u8;
+        fn sqlite3_column_bytes(stmt: *mut Sqlite3Stmt, col: c_int) -> c_int;
         fn sqlite3_column_int64(stmt: *mut Sqlite3Stmt, col: c_int) -> i64;
         fn sqlite3_finalize(stmt: *mut Sqlite3Stmt) -> c_int;
     }
@@ -838,12 +839,19 @@ mod platform {
             }
             // SAFETY: column 0 was just confirmed to hold SQLITE_TEXT.
             let status_ptr = unsafe { sqlite3_column_text(stmt.0, 0) };
+            // SAFETY: called after `sqlite3_column_text` on the same SQLITE_TEXT column.
+            let status_len = unsafe { sqlite3_column_bytes(stmt.0, 0) };
+            let Ok(status_len) = usize::try_from(status_len) else {
+                return Ok(SummaryRow::Unreadable(Unreadable::UnknownStatus));
+            };
             if status_ptr.is_null() {
                 return Ok(SummaryRow::Unreadable(Unreadable::UnknownStatus));
             }
-            // SAFETY: SQLite guarantees `sqlite3_column_text` returns a NUL-terminated UTF-8 string
-            // valid until the next step or finalize.
-            let Ok(status) = unsafe { CStr::from_ptr(status_ptr.cast::<c_char>()) }.to_str() else {
+            // SAFETY: SQLite guarantees `sqlite3_column_text` points to at least
+            // `sqlite3_column_bytes` UTF-8 bytes valid until the next step or finalize.
+            // Decoding the exact byte slice avoids truncating at embedded NUL bytes.
+            let status_bytes = unsafe { std::slice::from_raw_parts(status_ptr, status_len) };
+            let Ok(status) = std::str::from_utf8(status_bytes) else {
                 return Ok(SummaryRow::Unreadable(Unreadable::UnknownStatus));
             };
             // SAFETY: column 1 was just confirmed to hold SQLITE_INTEGER.
@@ -1755,6 +1763,7 @@ mod tests {
             "UPDATE conversation_summaries SET status=NULL, not_fully_idle=0 WHERE conversation_id='conv-utf8';",
             "UPDATE conversation_summaries SET status=CAST('CASCADE_RUN_STATUS_IDLE' AS BLOB), not_fully_idle=0 WHERE conversation_id='conv-utf8';",
             "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_FUTURE', not_fully_idle=0 WHERE conversation_id='conv-utf8';",
+            "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE' || char(0) || 'INVALID', not_fully_idle=0 WHERE conversation_id='conv-utf8';",
             "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle=NULL WHERE conversation_id='conv-utf8';",
             "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle='true' WHERE conversation_id='conv-utf8';",
             "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle=0.5 WHERE conversation_id='conv-utf8';",

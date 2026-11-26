@@ -313,9 +313,9 @@ is in [Accepted limitations](accepted-limitations.md#after-codex-new-the-earlier
 A provider event with a malformed optional field keeps its action and loses only that field. The
 fields are `agent_type`, `transcript_path` or `session_file`, `cwd`, `CLAUDE_CONFIG_DIR`,
 `CODEX_HOME`, `PI_CODING_AGENT_DIR`, `model`, the Pi bus `label`, and Agy's `transcriptPath`,
-`modelName`, `artifactDirectoryPath` and `agentName`. One `record_invalid` diagnostic names them,
+`modelName`, and `artifactDirectoryPath`. One `record_invalid` diagnostic names them,
 with message `optional fields were dropped: …` and the list in `context.dropped_fields`. An empty
-`agent_type` (or Agy `agentName`) is not malformed: it says the agent has no type, as Claude Code
+`agent_type` is not malformed: it says the agent has no type, as Claude Code
 2.1.283 sends for the agents it runs for itself. For Agy, dropping a malformed `transcriptPath`
 fails closed on lead `PreInvocation(invocationNum: 0)` prompt confirmation and lazy-binding
 eligibility, and dropping a malformed `artifactDirectoryPath` prevents filesystem sub-agent lineage
@@ -371,8 +371,7 @@ ignored (`binding_conflict`). After that the event itself applies:
   counted. The hook still succeeds for such an event, and prints a `record_invalid` diagnostic
   naming it. A Claude or Codex child's `PostToolUse` and `PostToolUseFailure` change nothing.
 - **Agy sub-agent hooks** link a sub-agent (including nested grandchildren) to its root lead
-  session through `<artifactDirectoryPath>/.system_generated/messages/*.json` (or explicit
-  `rootConversationId`/`parentConversationId`). Child `SessionStart` acts like `SubagentStart`
+  session through `<artifactDirectoryPath>/.system_generated/messages/*.json`. Child `SessionStart` acts like `SubagentStart`
   (adding the child even without an `agent_type`); child `PreInvocation`, non-blocking `PreToolUse`,
   and `Stop` with `fullyIdle: false` refresh the child as `running`; child `PreToolUse` of
   `ask_question` publishes lead `notify` and marks the child `waiting`; child `PostToolUse` of

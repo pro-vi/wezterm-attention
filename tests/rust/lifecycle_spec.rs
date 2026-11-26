@@ -1498,6 +1498,32 @@ fn every_active_lifecycle_row_reaches_the_production_writer() {
                     .unwrap();
                     patch["transcriptPath"] = json!(tx.to_string_lossy());
                 }
+                if let Some(parent_id) = case.get("child_of").and_then(Value::as_str) {
+                    let child_id = patch["conversationId"].as_str().unwrap();
+                    let brain = setup._scratch.0.join("agy-contact").join("brain");
+                    fs::create_dir_all(brain.join(parent_id)).unwrap();
+                    let child_dir = brain.join(child_id);
+                    let mdir = child_dir.join(".system_generated").join("messages");
+                    fs::create_dir_all(&mdir).unwrap();
+                    fs::write(
+                        mdir.join("0001.json"),
+                        serde_json::to_vec(&json!({
+                            "sender": parent_id,
+                            "sourceMetadata": {
+                                "tool": {
+                                    "conversationId": parent_id,
+                                    "toolCall": {
+                                        "name": "invoke_subagent",
+                                        "argumentsJson": "{\"Role\":\"worker\",\"TypeName\":\"self\"}"
+                                    }
+                                }
+                            }
+                        }))
+                        .unwrap(),
+                    )
+                    .unwrap();
+                    patch["artifactDirectoryPath"] = json!(child_dir.to_string_lossy());
+                }
             } else {
                 patch["prompt"] = json!("SYNTHETIC-PRIVATE-SENTINEL");
                 patch["tool_input"] = json!({"private":"SYNTHETIC-PRIVATE-SENTINEL"});
@@ -1515,10 +1541,10 @@ fn every_active_lifecycle_row_reaches_the_production_writer() {
             );
             assert!(output.stdout.is_empty());
             let directory = setup.binding_dir(provider, "coverage");
-            // A case with an agent id or parentConversationId is a subagent's
+            // A case with an agent id or child_of is a subagent's
             // event, and a subagent's observations have their own snapshot.
-            let from_child = case["patch"].get("agent_id").is_some()
-                || case["patch"].get("parentConversationId").is_some();
+            let from_child =
+                case["patch"].get("agent_id").is_some() || case.get("child_of").is_some();
             let file = if from_child {
                 "children-lifecycle.json"
             } else {
@@ -1740,6 +1766,7 @@ fn load_fixture(name: &str) -> Value {
 
 #[test]
 fn provider_fixtures_equal_the_closed_action_vocabulary() {
+    let fixture_scratch = Scratch::new();
     let mut seen = BTreeSet::new();
     for provider in ["claude", "codex", "pi", "agy"] {
         let fixture = load_fixture(provider);
@@ -1757,6 +1784,34 @@ fn provider_fixtures_equal_the_closed_action_vocabulary() {
                 for (key, value) in patch {
                     target.insert(key.clone(), value.clone());
                 }
+            }
+            if provider == "agy"
+                && let Some(parent_id) = case.get("child_of").and_then(Value::as_str)
+            {
+                let child_id = payload["conversationId"].as_str().unwrap();
+                let brain = fixture_scratch.0.join("agy-provider").join("brain");
+                fs::create_dir_all(brain.join(parent_id)).unwrap();
+                let child_dir = brain.join(child_id);
+                let mdir = child_dir.join(".system_generated").join("messages");
+                fs::create_dir_all(&mdir).unwrap();
+                fs::write(
+                    mdir.join("0001.json"),
+                    serde_json::to_vec(&json!({
+                        "sender": parent_id,
+                        "sourceMetadata": {
+                            "tool": {
+                                "conversationId": parent_id,
+                                "toolCall": {
+                                    "name": "invoke_subagent",
+                                    "argumentsJson": "{\"Role\":\"worker\",\"TypeName\":\"self\"}"
+                                }
+                            }
+                        }
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+                payload["artifactDirectoryPath"] = json!(child_dir.to_string_lossy());
             }
             let environment: BTreeMap<String, String> = case
                 .get("env")

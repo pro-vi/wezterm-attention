@@ -155,6 +155,16 @@ pub struct ProviderEvent {
     /// the turn follower to distinguish cancellations in the current turn from
     /// earlier turns.
     pub initial_step_count: Option<i64>,
+    /// Whether this event is a lead user prompt (`UserPromptSubmit` for
+    /// Claude/Codex, or a confirmed lead `PreInvocation(invocationNum: 0)` for
+    /// Agy), independent of whether optional observation correlation fields
+    /// parsed cleanly.
+    pub is_lead_prompt: bool,
+    /// Whether this event is a confirmed intra-turn thinking continuation or
+    /// non-prompt wakeup (Agy `PreInvocation(invocationNum > 0)`, Agy
+    /// `PreInvocation(invocationNum: 0)` whose transcript confirms a non-prompt
+    /// wakeup, or Agy `Stop(fullyIdle: false)`).
+    pub continues_turn: bool,
     /// The questions a Codex lead prompt answers. Only their ids are taken
     /// from the prompt; its text is never kept.
     pub answered_questions: Vec<crate::observations::AnsweredQuestion>,
@@ -538,6 +548,7 @@ fn parse_claude_or_codex(
     if event_name == "UserPromptSubmit" && event.agent_id.is_none() {
         event.action = ProviderAction::Activity;
         event.activity_type = Some("thinking".to_owned());
+        event.is_lead_prompt = true;
         return event;
     }
     // Claude sends StopFailure in place of Stop when an API error ends the
@@ -1005,50 +1016,25 @@ fn parse_agy(event_name: &str, payload: &Value, _env: &BTreeMap<String, String>)
         optional_path(payload, "artifactDirectoryPath"),
     );
 
-    // Check forward-compatibility child identity fields first, then walk
-    // agy 1.5.16's `.system_generated/messages/*.json` upward to the root lead
-    // whenever `rootConversationId` is absent and the event is either unlinked
-    // (empty `lastUserInput`) or names only its direct `parentConversationId`.
-    let (payload_root, payload_parent) = match (
-        nonempty_optional_label(object, "rootConversationId"),
-        nonempty_optional_label(object, "parentConversationId"),
-    ) {
-        (Ok(root), Ok(parent)) => (
-            root.filter(|id| id != &conversation_id),
-            parent.filter(|id| id != &conversation_id),
-        ),
-        _ => {
-            return ProviderEvent::ignored(
-                Some(Provider::Agy),
-                DiagnosticCode::RecordInvalid,
-                "child identity is invalid",
-            );
-        }
-    };
-    let payload_agent_name =
-        dropped.keep("agentName", nonempty_optional_label(object, "agentName"));
+    // As of agy 1.5.16, subagent hooks omit parent/root ids on stdin and carry
+    // an empty `lastUserInput`, while lead hooks carry the active prompt. Walk
+    // `.system_generated/messages/*.json` upward from `artifactDirectoryPath`
+    // to link subagents (including nested grandchildren) to their root lead.
     let has_user_input = payload
         .get("lastUserInput")
         .and_then(Value::as_str)
         .is_some_and(|text| !text.is_empty());
 
-    let (provider_session_id, agent_id, agent_type) = if let Some(root_id) = payload_root {
-        (root_id, Some(conversation_id.clone()), payload_agent_name)
-    } else if (!has_user_input || payload_parent.is_some())
+    let (provider_session_id, agent_id, agent_type) = if !has_user_input
         && let Some(lineage) = artifact_dir.as_deref().and_then(|dir| {
             crate::agy_status::resolve_subagent_lineage(&conversation_id, Path::new(dir))
-        })
-    {
+        }) {
         (
             lineage.root_session_id,
             Some(conversation_id.clone()),
-            payload_agent_name.or(lineage.role).or(lineage.type_name),
+            lineage.role.or(lineage.type_name),
         )
-    } else if let Some(parent_id) = payload_parent {
-        (parent_id, Some(conversation_id.clone()), payload_agent_name)
     } else if !has_user_input {
-        // As of agy 1.5.16, unlinked child/background events carry an empty
-        // `lastUserInput` while every lead event carries the active prompt.
         // Skip unlinked empty-input events before binding admission so they
         // can never hijack the pane's active lead binding.
         return ProviderEvent::skipped(
@@ -1206,27 +1192,36 @@ fn parse_agy(event_name: &str, payload: &Value, _env: &BTreeMap<String, String>)
                 // was rejected, unreadable, symlinked, or does not confirm a
                 // fresh USER_INPUT turn; only truly absent transcriptPath
                 // (synthetic payloads without a transcript) defaults to prompt.
-                let is_prompt = if !transcript_provided {
-                    true
+                let prompt_check = if !transcript_provided {
+                    Some(true)
                 } else {
-                    event.transcript_path.as_deref().is_some_and(|path| {
-                        crate::agy_status::is_user_prompt_invocation(Path::new(path)) == Some(true)
+                    event.transcript_path.as_deref().and_then(|path| {
+                        crate::agy_status::is_user_prompt_invocation(Path::new(path))
                     })
                 };
-                if is_prompt {
-                    match execution_id {
-                        Ok(turn_id) => {
-                            event.observation = Some(agy_observation(
-                                event_name,
-                                None,
-                                None,
-                                turn_id,
-                                ObservationBody::PromptSubmitted { input_source: None },
-                            ));
+                match prompt_check {
+                    Some(true) => {
+                        event.is_lead_prompt = true;
+                        match execution_id {
+                            Ok(turn_id) => {
+                                event.observation = Some(agy_observation(
+                                    event_name,
+                                    None,
+                                    None,
+                                    turn_id,
+                                    ObservationBody::PromptSubmitted { input_source: None },
+                                ));
+                            }
+                            Err(problem) => event.observation_diagnostic = Some(problem),
                         }
-                        Err(problem) => event.observation_diagnostic = Some(problem),
                     }
+                    Some(false) => {
+                        event.continues_turn = true;
+                    }
+                    None => {}
                 }
+            } else {
+                event.continues_turn = true;
             }
         }
         "PreToolUse" => {
@@ -1332,6 +1327,7 @@ fn parse_agy(event_name: &str, payload: &Value, _env: &BTreeMap<String, String>)
             if fully_idle == Some(false) {
                 event.action = ProviderAction::Activity;
                 event.activity_type = Some("thinking".to_owned());
+                event.continues_turn = true;
                 return event;
             }
             let continuation_active = match payload.get("continuationActive") {
@@ -1618,15 +1614,7 @@ pub fn prompt_content(
         Some(Provider::Claude | Provider::Codex) if event.source_event == "UserPromptSubmit" => {
             text_content(payload, "prompt")
         }
-        Some(Provider::Agy)
-            if event.source_event == "PreInvocation"
-                && event
-                    .observation
-                    .as_ref()
-                    .is_some_and(LifecycleObservation::is_lead_prompt) =>
-        {
-            text_content(payload, "lastUserInput")
-        }
+        Some(Provider::Agy) if event.is_lead_prompt => text_content(payload, "lastUserInput"),
         Some(Provider::Claude | Provider::Codex | Provider::Pi | Provider::Agy) | None => {
             HookContent::Unsupported
         }

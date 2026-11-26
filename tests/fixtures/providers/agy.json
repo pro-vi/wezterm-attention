@@ -23,11 +23,11 @@
     { "id": "lead_stop_user_canceled_clears", "event": "Stop", "patch": { "terminationReason": "USER_CANCELED", "fullyIdle": true }, "expected": "clear" },
     { "id": "lead_stop_error_notifies", "event": "Stop", "patch": { "terminationReason": "TERMINAL_CUSTOM_HOOK", "fullyIdle": true }, "expected": "activity", "activity_type": "notify" },
     { "id": "lead_stop_unknown_reason_is_invalid", "event": "Stop", "patch": { "terminationReason": "MYSTERY", "fullyIdle": true }, "expected": "ignored", "diagnostic": "record_invalid" },
-    { "id": "child_session_start", "event": "SessionStart", "patch": { "conversationId": "child-a", "parentConversationId": "agy-conv-a", "agentName": "worker", "lastUserInput": "" }, "expected": "child_active" },
-    { "id": "child_pre_tool_generic", "event": "PreToolUse", "patch": { "conversationId": "child-a", "parentConversationId": "agy-conv-a", "agentName": "worker", "lastUserInput": "", "toolCall": { "name": "run_command", "id": "c-1" } }, "expected": "child_active" },
-    { "id": "child_ask_question_notifies", "event": "PreToolUse", "patch": { "conversationId": "child-a", "parentConversationId": "agy-conv-a", "agentName": "worker", "lastUserInput": "", "toolCall": { "name": "ask_question", "id": "c-q" } }, "expected": "activity", "activity_type": "notify" },
-    { "id": "child_stop_fully_idle", "event": "Stop", "patch": { "conversationId": "child-a", "parentConversationId": "agy-conv-a", "agentName": "worker", "lastUserInput": "", "terminationReason": "NO_TOOL_CALL", "fullyIdle": true }, "expected": "child_stopped" },
-    { "id": "child_stop_not_fully_idle_stays_active", "event": "Stop", "patch": { "conversationId": "child-a", "parentConversationId": "agy-conv-a", "agentName": "worker", "lastUserInput": "", "terminationReason": "NO_TOOL_CALL", "fullyIdle": false }, "expected": "child_active" },
+    { "id": "child_session_start", "event": "SessionStart", "child_of": "agy-conv-a", "patch": { "conversationId": "child-a", "lastUserInput": "" }, "expected": "child_active" },
+    { "id": "child_pre_tool_generic", "event": "PreToolUse", "child_of": "agy-conv-a", "patch": { "conversationId": "child-a", "lastUserInput": "", "toolCall": { "name": "run_command", "id": "c-1" } }, "expected": "child_active" },
+    { "id": "child_ask_question_notifies", "event": "PreToolUse", "child_of": "agy-conv-a", "patch": { "conversationId": "child-a", "lastUserInput": "", "toolCall": { "name": "ask_question", "id": "c-q" } }, "expected": "activity", "activity_type": "notify" },
+    { "id": "child_stop_fully_idle", "event": "Stop", "child_of": "agy-conv-a", "patch": { "conversationId": "child-a", "lastUserInput": "", "terminationReason": "NO_TOOL_CALL", "fullyIdle": true }, "expected": "child_stopped" },
+    { "id": "child_stop_not_fully_idle_stays_active", "event": "Stop", "child_of": "agy-conv-a", "patch": { "conversationId": "child-a", "lastUserInput": "", "terminationReason": "NO_TOOL_CALL", "fullyIdle": false }, "expected": "child_active" },
     { "id": "unlinked_empty_user_input_is_skipped", "event": "SessionStart", "patch": { "lastUserInput": "" }, "expected": "ignored" },
     { "id": "post_invocation_is_not_declared", "event": "PostInvocation", "patch": {}, "expected": "ignored", "diagnostic": "integration_version_mismatch" }
   ]
