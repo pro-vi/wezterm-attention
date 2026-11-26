@@ -2764,11 +2764,35 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
     assert_eq!(human_stop["type"], "stop");
 
     // 2. Register quiet checks for agy via checks.json (no CLI --quiet-check flag).
+    let check_log = setup._scratch.0.join("agy-checks-json-calls.log");
+    let check_log_quoted = format!(
+        "'{}'",
+        check_log.display().to_string().replace('\'', "'\\''")
+    );
     let checker = make_executable(
         &setup,
         "agy-checks-json-quiet",
-        "/bin/cat >/dev/null\nprintf '{\"quiet\":true,\"answer\":\"controller_submitted\"}\\n'",
+        &format!(
+            "/bin/cat >/dev/null\nprintf 'called\\n' >> {check_log_quoted}\nprintf '{{\"quiet\":true,\"answer\":\"controller_submitted\"}}\\n'",
+        ),
     );
+    let check_calls = || {
+        fs::read_to_string(&check_log)
+            .map(|text| text.lines().count())
+            .unwrap_or(0)
+    };
+    let prompt_observations = || {
+        let snapshot: Value = serde_json::from_slice(
+            &fs::read(setup.binding_dir("agy", LEAD).join("lifecycle.json")).unwrap(),
+        )
+        .unwrap();
+        snapshot["pools"]["general"]["observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["kind"] == "prompt_submitted")
+            .count()
+    };
     let checks_path = PathBuf::from(&setup.env["WEZTERM_ATTENTION_DIR"]).join("checks.json");
     fs::write(
         &checks_path,
@@ -2883,35 +2907,168 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
         );
     }
 
-    // 4. Confirmed background wakeup (invocationNum=0, transcript ending in SYSTEM_MESSAGE)
-    // over the quiet stop preserves quiet note and unseen_stop.
+    // 4. Confirmed background wakeup (invocationNum=0, transcript ending in SYSTEM_MESSAGE
+    // after a completed PLANNER_RESPONSE) over the quiet stop preserves quiet note and
+    // unseen_stop via continues_turn without running before_thinking or appending a prompt.
     write_jsonl(
         &tx,
         &[
             json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "auto prompt"}),
-            json!({"step_index": 1, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "subagent done"}),
+            json!({"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "working"}),
+            json!({"step_index": 2, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "subagent done"}),
         ],
     );
+    let wakeup_payload = json!({
+        "hookEventName": "PreInvocation",
+        "conversationId": LEAD,
+        "transcriptPath": tx_str,
+        "cwd": "/tmp/project",
+        "lastUserInput": "auto prompt",
+        "invocationNum": 0,
+        "initialNumSteps": 3
+    });
+    let parsed_wakeup = parse_provider_event("agy", "PreInvocation", &wakeup_payload, &setup.env);
+    assert!(parsed_wakeup.continues_turn);
+    assert!(!parsed_wakeup.is_lead_prompt);
+    assert!(parsed_wakeup.observation.is_none());
+
+    let calls_before_wakeup = check_calls();
+    let prompts_before_wakeup = prompt_observations();
     let wakeup_out = agy_hook_cli(
         &setup,
         &setup.env,
         "PreInvocation",
-        &json!({
-            "hookEventName": "PreInvocation",
-            "conversationId": LEAD,
-            "transcriptPath": tx_str,
-            "cwd": "/tmp/project",
-            "lastUserInput": "auto prompt",
-            "invocationNum": 0,
-            "initialNumSteps": 2
-        }),
+        &wakeup_payload,
         &["--strict"],
     );
     assert!(wakeup_out.status.success());
+    assert_eq!(check_calls(), calls_before_wakeup);
+    assert_eq!(prompt_observations(), prompts_before_wakeup);
     let wakeup_act = shown_activity(&setup.binding_dir("agy", LEAD)).unwrap();
     assert_eq!(wakeup_act["type"], "thinking");
     assert_eq!(wakeup_act["hold_notes"]["wezpup"]["quiet"], json!(true));
     assert_eq!(wakeup_act["unseen_stop"]["event_id"], json!(human_stop_id));
+
+    // 4b. Lead PostToolUse for manage_subagents kill and kill_all during a quiet
+    // turn preserves quiet hold_notes and unseen_stop while stopping the children.
+    let quiet_w1_dir = link_agy_child(&setup, LEAD, "quiet-w1", "worker-1");
+    let quiet_w2_dir = link_agy_child(&setup, LEAD, "quiet-w2", "worker-2");
+    for (child_id, child_dir) in [("quiet-w1", &quiet_w1_dir), ("quiet-w2", &quiet_w2_dir)] {
+        assert!(
+            agy_hook_cli(
+                &setup,
+                &setup.env,
+                "SessionStart",
+                &json!({
+                    "hookEventName": "SessionStart",
+                    "conversationId": child_id,
+                    "artifactDirectoryPath": child_dir,
+                    "cwd": "/tmp/project"
+                }),
+                &["--strict"],
+            )
+            .status
+            .success()
+        );
+    }
+    let children_before = read_json(setup.binding_dir("agy", LEAD).join("children.json")).unwrap();
+    assert_eq!(children_before["live"].as_array().unwrap().len(), 2);
+
+    let kill_one_payload = json!({
+        "hookEventName": "PostToolUse",
+        "conversationId": LEAD,
+        "transcriptPath": tx_str,
+        "cwd": "/tmp/project",
+        "lastUserInput": "auto prompt",
+        "toolCall": {
+            "name": "manage_subagents",
+            "id": "call-kill-1",
+            "args": {"Action": "kill", "ConversationIds": ["quiet-w1"]}
+        },
+        "error": ""
+    });
+    let kill_all_payload = json!({
+        "hookEventName": "PostToolUse",
+        "conversationId": LEAD,
+        "transcriptPath": tx_str,
+        "cwd": "/tmp/project",
+        "lastUserInput": "auto prompt",
+        "toolCall": {
+            "name": "manage_subagents",
+            "id": "call-kill-all",
+            "args": {"Action": "kill_all"}
+        },
+        "error": ""
+    });
+    let ask_done_payload = json!({
+        "hookEventName": "PostToolUse",
+        "conversationId": LEAD,
+        "transcriptPath": tx_str,
+        "cwd": "/tmp/project",
+        "lastUserInput": "auto prompt",
+        "toolCall": {
+            "name": "ask_question",
+            "id": "call-ask-done",
+            "args": {"questions": []}
+        },
+        "error": ""
+    });
+    assert!(
+        parse_provider_event("agy", "PostToolUse", &kill_one_payload, &setup.env).continues_turn
+    );
+    assert!(
+        parse_provider_event("agy", "PostToolUse", &kill_all_payload, &setup.env).continues_turn
+    );
+    assert!(
+        !parse_provider_event("agy", "PostToolUse", &ask_done_payload, &setup.env).continues_turn
+    );
+
+    assert!(
+        agy_hook_cli(
+            &setup,
+            &setup.env,
+            "PostToolUse",
+            &kill_one_payload,
+            &["--strict"],
+        )
+        .status
+        .success()
+    );
+    assert_eq!(check_calls(), calls_before_wakeup);
+    let after_kill_one = shown_activity(&setup.binding_dir("agy", LEAD)).unwrap();
+    assert_eq!(after_kill_one["type"], "thinking");
+    assert_eq!(after_kill_one["hold_notes"]["wezpup"]["quiet"], json!(true));
+    assert_eq!(
+        after_kill_one["unseen_stop"]["event_id"],
+        json!(human_stop_id)
+    );
+    let children_after_one =
+        read_json(setup.binding_dir("agy", LEAD).join("children.json")).unwrap();
+    assert_eq!(children_after_one["live"].as_array().unwrap().len(), 1);
+    assert_eq!(children_after_one["live"][0]["agent_id"], "quiet-w2");
+
+    assert!(
+        agy_hook_cli(
+            &setup,
+            &setup.env,
+            "PostToolUse",
+            &kill_all_payload,
+            &["--strict"],
+        )
+        .status
+        .success()
+    );
+    assert_eq!(check_calls(), calls_before_wakeup);
+    let after_kill_all = shown_activity(&setup.binding_dir("agy", LEAD)).unwrap();
+    assert_eq!(after_kill_all["type"], "thinking");
+    assert_eq!(after_kill_all["hold_notes"]["wezpup"]["quiet"], json!(true));
+    assert_eq!(
+        after_kill_all["unseen_stop"]["event_id"],
+        json!(human_stop_id)
+    );
+    let children_after_all =
+        read_json(setup.binding_dir("agy", LEAD).join("children.json")).unwrap();
+    assert_eq!(children_after_all["live"].as_array().unwrap().len(), 0);
 
     // Acknowledging the unseen_stop event_id succeeds while carried under quiet thinking.
     let (address, _) = pane_address(&setup.env).unwrap();
@@ -3081,7 +3238,9 @@ fn agy_unclaimed_prompt_holds_unseen_stop_until_first_tool_and_malformed_executi
 
     // Confirmed lead PreInvocation(0) with a malformed optional executionId must
     // still act as a lead prompt: it does not inherit prior quiet thinking notes,
-    // still replaces a waiting child's notify, and still runs before_thinking checks.
+    // still replaces a waiting child's notify, and enters Phase::BeforeThinking
+    // (where Purpose::Quiet checks bypass with HistoryUnavailable because
+    // observation is None).
     let claiming = make_executable(
         &setup,
         "agy-claiming-check",
@@ -3128,17 +3287,21 @@ fn agy_unclaimed_prompt_holds_unseen_stop_until_first_tool_and_malformed_executi
     assert!(parsed_bad.observation.is_none());
     assert!(parsed_bad.observation_diagnostic.is_some());
 
-    // Over quiet thinking: does NOT inherit prior quiet note when unclaiming check runs.
-    assert!(
-        agy_hook_cli(
-            &setup,
-            &setup.env,
-            "PreInvocation",
-            &bad_exec_payload,
-            &["--quiet-check", &check_arg],
-        )
-        .status
-        .success()
+    // Over quiet thinking with a claiming check: enters Phase::BeforeThinking,
+    // bypasses Purpose::Quiet with history_unavailable because observation is None,
+    // and does NOT inherit the prior turn's quiet note.
+    let bad_exec_out = agy_hook_cli(
+        &setup,
+        &setup.env,
+        "PreInvocation",
+        &bad_exec_payload,
+        &["--quiet-check", &claim_arg, "--debug"],
+    );
+    assert!(bad_exec_out.status.success());
+    let bad_exec_env: Value = serde_json::from_slice(&bad_exec_out.stderr).unwrap();
+    assert_eq!(
+        bad_exec_env["result"]["hold_checks"][0]["reason"],
+        "history_unavailable"
     );
     let after_bad_exec = shown_activity(&setup.binding_dir("agy", LEAD)).unwrap();
     assert_eq!(after_bad_exec["type"], "thinking");

@@ -163,7 +163,8 @@ pub struct ProviderEvent {
     /// Whether this event is a confirmed intra-turn thinking continuation or
     /// non-prompt wakeup (Agy `PreInvocation(invocationNum > 0)`, Agy
     /// `PreInvocation(invocationNum: 0)` whose transcript confirms a non-prompt
-    /// wakeup, or Agy `Stop(fullyIdle: false)`).
+    /// wakeup, Agy lead `PostToolUse` for `manage_subagents` `kill`/`kill_all`,
+    /// or Agy `Stop(fullyIdle: false)`).
     pub continues_turn: bool,
     /// The questions a Codex lead prompt answers. Only their ids are taken
     /// from the prompt; its text is never kept.
@@ -1278,12 +1279,14 @@ fn parse_agy(event_name: &str, payload: &Value, _env: &BTreeMap<String, String>)
                 event.in_flight_task_ids = in_flight;
                 event.stopped_child_ids = stopped;
             }
-            if question_mode == Some(QuestionMode::Blocking)
-                || event.in_flight_task_ids.is_some()
-                || !event.stopped_child_ids.is_empty()
-            {
+            let stops_children =
+                event.in_flight_task_ids.is_some() || !event.stopped_child_ids.is_empty();
+            if question_mode == Some(QuestionMode::Blocking) || stops_children {
                 event.action = ProviderAction::Activity;
                 event.activity_type = Some("thinking".to_owned());
+                if stops_children {
+                    event.continues_turn = true;
+                }
             } else {
                 event.action = ProviderAction::Observation;
             }
