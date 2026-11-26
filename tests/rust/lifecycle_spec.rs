@@ -1501,27 +1501,8 @@ fn every_active_lifecycle_row_reaches_the_production_writer() {
                 if let Some(parent_id) = case.get("child_of").and_then(Value::as_str) {
                     let child_id = patch["conversationId"].as_str().unwrap();
                     let brain = setup._scratch.0.join("agy-contact").join("brain");
-                    fs::create_dir_all(brain.join(parent_id)).unwrap();
-                    let child_dir = brain.join(child_id);
-                    let mdir = child_dir.join(".system_generated").join("messages");
-                    fs::create_dir_all(&mdir).unwrap();
-                    fs::write(
-                        mdir.join("0001.json"),
-                        serde_json::to_vec(&json!({
-                            "sender": parent_id,
-                            "sourceMetadata": {
-                                "tool": {
-                                    "conversationId": parent_id,
-                                    "toolCall": {
-                                        "name": "invoke_subagent",
-                                        "argumentsJson": "{\"Role\":\"worker\",\"TypeName\":\"self\"}"
-                                    }
-                                }
-                            }
-                        }))
-                        .unwrap(),
-                    )
-                    .unwrap();
+                    let child_dir =
+                        write_agy_child_link(&brain, parent_id, child_id, "worker", "self");
                     patch["artifactDirectoryPath"] = json!(child_dir.to_string_lossy());
                 }
             } else {
@@ -1695,6 +1676,38 @@ fn live_child_ids(setup: &Setup, provider: &str, session: &str) -> Vec<String> {
         .collect()
 }
 
+fn write_agy_child_link(
+    brain_root: &std::path::Path,
+    parent_id: &str,
+    child_id: &str,
+    role: &str,
+    type_name: &str,
+) -> PathBuf {
+    fs::create_dir_all(brain_root.join(parent_id)).unwrap();
+    let child_dir = brain_root.join(child_id);
+    let mdir = child_dir.join(".system_generated").join("messages");
+    fs::create_dir_all(&mdir).unwrap();
+    let args_json = json!({"Role": role, "TypeName": type_name}).to_string();
+    fs::write(
+        mdir.join("0001.json"),
+        serde_json::to_vec(&json!({
+            "sender": parent_id,
+            "sourceMetadata": {
+                "tool": {
+                    "conversationId": parent_id,
+                    "toolCall": {
+                        "name": "invoke_subagent",
+                        "argumentsJson": args_json
+                    }
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    child_dir
+}
+
 fn run_hook(setup: &Setup, arguments: &[&str], payload: &Value) -> std::process::Output {
     let mut child = rust_command(setup)
         .args(arguments)
@@ -1790,27 +1803,7 @@ fn provider_fixtures_equal_the_closed_action_vocabulary() {
             {
                 let child_id = payload["conversationId"].as_str().unwrap();
                 let brain = fixture_scratch.0.join("agy-provider").join("brain");
-                fs::create_dir_all(brain.join(parent_id)).unwrap();
-                let child_dir = brain.join(child_id);
-                let mdir = child_dir.join(".system_generated").join("messages");
-                fs::create_dir_all(&mdir).unwrap();
-                fs::write(
-                    mdir.join("0001.json"),
-                    serde_json::to_vec(&json!({
-                        "sender": parent_id,
-                        "sourceMetadata": {
-                            "tool": {
-                                "conversationId": parent_id,
-                                "toolCall": {
-                                    "name": "invoke_subagent",
-                                    "argumentsJson": "{\"Role\":\"worker\",\"TypeName\":\"self\"}"
-                                }
-                            }
-                        }
-                    }))
-                    .unwrap(),
-                )
-                .unwrap();
+                let child_dir = write_agy_child_link(&brain, parent_id, child_id, "worker", "self");
                 payload["artifactDirectoryPath"] = json!(child_dir.to_string_lossy());
             }
             let environment: BTreeMap<String, String> = case

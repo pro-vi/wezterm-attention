@@ -178,6 +178,7 @@ return function(context)
         claude = "Claude pane title is changing on every poll; give the tab a title of its own or disable Claude title updates",
         codex = "Codex pane title is changing on every poll; give the tab a title of its own or disable Codex title updates",
         pi = "Pi pane title is changing on every poll; give the tab a title of its own or disable Pi title updates",
+        agy = "Agy pane title is changing on every poll; give the tab a title of its own or disable Agy title updates",
       }
       report_error_once("title-churn:" .. cache_key .. ":" .. scope,
         provider_hint[provider] or "pane title is changing on every poll; give the tab a title of its own")

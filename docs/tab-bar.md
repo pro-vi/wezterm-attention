@@ -33,13 +33,15 @@ A program that reports progress with WezTerm's progress sequence (OSC 9;4), as c
 
 ## Subagent activity
 
-Claude Code and Codex hooks record each subagent of a pane from its
-`SubagentStart`, or from its first tool call or permission request when no
-start was seen, until it ends. A subagent stays counted however long it is
-quiet, as while it runs one long command. It stops counting at its own
-`SubagentStop`, at a Codex parent's `Stop` that comes after its last event, at
-a Claude lead's `Stop` whose `background_tasks` no longer lists it, or when its
-session ends. The count is independent of the pane's own activity: a
+Claude Code, Codex and Agy hooks record each subagent of a pane from its
+`SubagentStart` (or Agy child `SessionStart`), or from its first tool call,
+permission request or Agy `ask_question` when no start was seen, until it ends.
+A subagent stays counted however long it is quiet, as while it runs one long
+command. It stops counting at its own `SubagentStop` (or Agy child `Stop` with
+`fullyIdle` true or absent), at a Codex parent's `Stop` that comes after its
+last event, at a Claude lead's `Stop` whose `background_tasks` no longer lists
+it, at an Agy `manage_subagents` `kill`/`kill_all` or terminal lead `Stop`, or
+when its session ends. The count is independent of the pane's own activity: a
 pane can carry running subagents with no activity at all — the parent agent
 stopped and you acknowledged its check — or alongside activity of any type.
 

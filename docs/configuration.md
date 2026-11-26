@@ -34,7 +34,7 @@ attention.apply_to_config(config, {
   show_directory = true,
   settled_title_fallback = true,
 
-  -- Append " · Claude", " · Codex" or " · Pi" when the tab's indicator comes
+  -- Append " · Claude", " · Codex", " · Pi" or " · Agy" when the tab's indicator comes
   -- from a pane with a provider binding.
   show_provider = false,
 

@@ -10,7 +10,7 @@
 //!    where `USER_INPUT` is flushed before `PreInvocation` runs).
 //! 3. Subagent parent/root lineage and role/type (`brain/<id>/.system_generated/
 //!    messages/*.json`, written before child `SessionStart` fires; hook stdin
-//!    omits parent/root conversation ids from hook stdin).
+//!    omits parent/root conversation ids).
 //! 4. Whether an open lead turn was stopped with Esc, which runs no `Stop` hook
 //!    (`conversation_summaries.db` and `conversations/<id>.db`, polled by the
 //!    turn follower).
@@ -155,19 +155,31 @@ pub fn conversation_db_path(
     home: Option<&str>,
     conversation_id: &str,
 ) -> Option<PathBuf> {
-    if !valid_conversation_segment(conversation_id) {
-        return None;
-    }
-    Some(
-        app_data_dir(transcript_path, home)?
-            .join("conversations")
-            .join(format!("{conversation_id}.db")),
-    )
+    let dir = app_data_dir(transcript_path, home)?;
+    valid_conversation_segment(conversation_id).then(|| {
+        dir.join("conversations")
+            .join(format!("{conversation_id}.db"))
+    })
+}
+
+/// Resolve `conversation_summaries.db` and (when `conversation_id` is a valid
+/// segment) `conversations/<id>.db` from a single `app_data_dir` walk.
+pub fn status_db_paths(
+    transcript_path: Option<&str>,
+    home: Option<&str>,
+    conversation_id: Option<&str>,
+) -> Option<(PathBuf, Option<PathBuf>)> {
+    let dir = app_data_dir(transcript_path, home)?;
+    let summaries = dir.join("conversation_summaries.db");
+    let conv = conversation_id
+        .filter(|id| valid_conversation_segment(id))
+        .map(|id| dir.join("conversations").join(format!("{id}.db")));
+    Some((summaries, conv))
 }
 
 /// Open a regular file owned by the effective user without following symlinks
-/// or blocking on FIFOs.
-fn open_owned_regular(path: &Path) -> Option<File> {
+/// or blocking on FIFOs, returning the handle and its byte length.
+fn open_owned_regular(path: &Path) -> Option<(File, u64)> {
     if !path.is_absolute() {
         return None;
     }
@@ -180,7 +192,7 @@ fn open_owned_regular(path: &Path) -> Option<File> {
     if !metadata.file_type().is_file() || metadata.uid() != crate::identity::effective_uid() {
         return None;
     }
-    Some(file)
+    Some((file, metadata.len()))
 }
 
 struct TailBytes {
@@ -195,26 +207,23 @@ struct TailBytes {
 
 /// Read up to `max_window` trailing bytes from an owned regular transcript file.
 fn read_tail_bytes(path: &Path, max_window: usize) -> Option<TailBytes> {
-    let mut file = open_owned_regular(path)?;
-    let size = file.metadata().ok()?.len();
+    let (mut file, size) = open_owned_regular(path)?;
     let window = u64::try_from(max_window).unwrap_or(u64::MAX);
-    let mut bytes = Vec::new();
     if size > window {
         let offset = size - window;
         file.seek(SeekFrom::Start(offset - 1)).ok()?;
-        let take = window.saturating_add(1);
-        file.take(take).read_to_end(&mut bytes).ok()?;
-        if bytes.is_empty() {
-            return None;
-        }
-        let partial_first_line = bytes[0] != b'\n';
-        bytes.drain(..1);
+        let mut prev = [0u8; 1];
+        file.read_exact(&mut prev).ok()?;
+        let mut bytes = Vec::with_capacity(max_window);
+        file.take(window).read_to_end(&mut bytes).ok()?;
         Some(TailBytes {
             bytes,
-            partial_first_line,
+            partial_first_line: prev[0] != b'\n',
             omitted_prefix: true,
         })
     } else {
+        let cap = usize::try_from(size).unwrap_or(max_window).min(max_window);
+        let mut bytes = Vec::with_capacity(cap);
         file.take(window.saturating_add(1))
             .read_to_end(&mut bytes)
             .ok()?;
@@ -243,14 +252,15 @@ pub fn last_reply_from_transcript(path: &Path, max_text_bytes: usize) -> ReplyRe
     let Some(tail) = read_tail_bytes(path, window) else {
         return ReplyRead::Absent;
     };
-    let raw_lines: Vec<&[u8]> = tail.bytes.split(|&byte| byte == b'\n').collect();
+    let mut lines = tail.bytes.rsplit(|&byte| byte == b'\n').peekable();
     let mut saw_complete_line = false;
-    for (idx, raw) in raw_lines.iter().enumerate().rev() {
+    while let Some(raw) = lines.next() {
+        let is_first = lines.peek().is_none();
         let trimmed = raw.trim_ascii();
         if trimmed.is_empty() {
             continue;
         }
-        if idx == 0 && tail.partial_first_line {
+        if is_first && tail.partial_first_line {
             return if !saw_complete_line {
                 ReplyRead::TooLarge
             } else {
@@ -289,48 +299,40 @@ pub fn last_reply_from_transcript(path: &Path, max_text_bytes: usize) -> ReplyRe
 /// Returns `None` when the file is absent, rejected, unreadable, malformed, or
 /// truncated across the deciding boundary so callers fail closed.
 pub fn is_user_prompt_invocation(path: &Path) -> Option<bool> {
+    enum Scan {
+        Tail,
+        SystemTail,
+        UserBeforeSystem,
+    }
+
     let tail = read_tail_bytes(path, TRANSCRIPT_PROMPT_WINDOW_BYTES)?;
-    let raw_lines: Vec<&[u8]> = tail.bytes.split(|&byte| byte == b'\n').collect();
-    let mut saw_system_tail = false;
-    let mut saw_user_before_system = false;
-    for (idx, raw) in raw_lines.iter().enumerate().rev() {
+    let mut lines = tail.bytes.rsplit(|&byte| byte == b'\n').peekable();
+    let mut state = Scan::Tail;
+    while let Some(raw) = lines.next() {
+        let is_first = lines.peek().is_none();
         let trimmed = raw.trim_ascii();
         if trimmed.is_empty() {
             continue;
         }
-        if idx == 0 && tail.partial_first_line {
+        if is_first && tail.partial_first_line {
             return None;
         }
         let step = parse_jsonl_object(trimmed)?;
         let step_type = step.get("type").and_then(Value::as_str)?;
-        if !saw_system_tail && !saw_user_before_system {
-            if step_type == "USER_INPUT" {
-                return Some(true);
-            }
-            if step_type == "SYSTEM_MESSAGE" {
-                saw_system_tail = true;
-                continue;
-            }
-            return Some(false);
-        }
-        if !saw_user_before_system {
-            if step_type == "SYSTEM_MESSAGE" {
-                continue;
-            }
-            if step_type == "USER_INPUT" {
-                saw_user_before_system = true;
-                continue;
-            }
-            return Some(false);
-        }
         // After finding USER_INPUT before trailing SYSTEM_MESSAGE(s), confirm
         // no earlier PLANNER_RESPONSE exists (SessionStart systemMessage runs
         // before any planner response; background wakeups follow one).
-        if step_type == "PLANNER_RESPONSE" {
-            return Some(false);
+        match (&state, step_type) {
+            (Scan::Tail, "USER_INPUT") => return Some(true),
+            (Scan::Tail, "SYSTEM_MESSAGE") => state = Scan::SystemTail,
+            (Scan::SystemTail, "SYSTEM_MESSAGE") => {}
+            (Scan::SystemTail, "USER_INPUT") => state = Scan::UserBeforeSystem,
+            (Scan::Tail | Scan::SystemTail, _) => return Some(false),
+            (Scan::UserBeforeSystem, "PLANNER_RESPONSE") => return Some(false),
+            (Scan::UserBeforeSystem, _) => {}
         }
     }
-    (saw_user_before_system && !tail.omitted_prefix).then_some(true)
+    (matches!(state, Scan::UserBeforeSystem) && !tail.omitted_prefix).then_some(true)
 }
 
 struct DirectParent {
@@ -348,7 +350,7 @@ fn is_root_lead_transcript(conv_brain_dir: &Path) -> bool {
         .join(".system_generated")
         .join("logs")
         .join("transcript.jsonl");
-    let Some(file) = open_owned_regular(&tx_path) else {
+    let Some((file, _)) = open_owned_regular(&tx_path) else {
         return false;
     };
     let mut buf = Vec::new();
@@ -369,6 +371,7 @@ fn is_root_lead_transcript(conv_brain_dir: &Path) -> bool {
 fn direct_parent_from_messages(
     conversation_id: &str,
     conv_brain_dir: &Path,
+    extract_type: bool,
 ) -> Option<DirectParent> {
     if is_root_lead_transcript(conv_brain_dir) {
         return None;
@@ -399,9 +402,12 @@ fn direct_parent_from_messages(
     // subagent directories.
     candidates.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
     for (_, path) in candidates.into_iter().take(MAX_MESSAGE_FILES) {
-        let Some(file) = open_owned_regular(&path) else {
+        let Some((file, size)) = open_owned_regular(&path) else {
             continue;
         };
+        if size > MAX_MESSAGE_BYTES as u64 {
+            continue;
+        }
         let Ok(bytes) = read_bounded(&file, MAX_MESSAGE_BYTES) else {
             continue;
         };
@@ -446,24 +452,23 @@ fn direct_parent_from_messages(
         else {
             continue;
         };
-        let (role, type_name) = tool_call
-            .get("argumentsJson")
-            .and_then(Value::as_str)
-            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-            .map(|args| {
-                let role = args
-                    .get("Role")
-                    .and_then(Value::as_str)
-                    .filter(|text| !text.is_empty())
-                    .and_then(|text| safe_text(text, "Role").ok());
-                let type_name = args
-                    .get("TypeName")
-                    .and_then(Value::as_str)
-                    .filter(|text| !text.is_empty())
-                    .and_then(|text| safe_text(text, "TypeName").ok());
-                (role, type_name)
-            })
-            .unwrap_or((None, None));
+        let (role, type_name) = if extract_type {
+            tool_call
+                .get("argumentsJson")
+                .and_then(Value::as_str)
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                .map(|args| {
+                    let field = |name| {
+                        args.get(name)
+                            .and_then(Value::as_str)
+                            .and_then(|text| safe_text(text, name).ok())
+                    };
+                    (field("Role"), field("TypeName"))
+                })
+                .unwrap_or((None, None))
+        } else {
+            (None, None)
+        };
         return Some(DirectParent {
             parent_id,
             role,
@@ -489,35 +494,26 @@ pub fn resolve_subagent_lineage(
     if brain_dir.file_name().and_then(|name| name.to_str()) != Some("brain") {
         return None;
     }
-    let first = direct_parent_from_messages(conversation_id, artifact_dir)?;
+    let first = direct_parent_from_messages(conversation_id, artifact_dir, true)?;
     let mut visited = BTreeSet::new();
     visited.insert(conversation_id.to_owned());
     visited.insert(first.parent_id.clone());
     let mut root_id = first.parent_id;
-    for _ in 1..MAX_SUBAGENT_DEPTH {
+    for step in 1..=MAX_SUBAGENT_DEPTH {
         let next_dir = brain_dir.join(&root_id);
-        let Some(next) = direct_parent_from_messages(&root_id, &next_dir) else {
+        let Some(next) = direct_parent_from_messages(&root_id, &next_dir, false) else {
             return Some(SubagentLineage {
                 root_session_id: root_id,
                 role: first.role,
                 type_name: first.type_name,
             });
         };
-        if !visited.insert(next.parent_id.clone()) {
+        if step == MAX_SUBAGENT_DEPTH || !visited.insert(next.parent_id.clone()) {
             return None;
         }
         root_id = next.parent_id;
     }
-    // Confirm the ancestor at MAX_SUBAGENT_DEPTH is actually a root with no parent.
-    let final_dir = brain_dir.join(&root_id);
-    if direct_parent_from_messages(&root_id, &final_dir).is_some() {
-        return None;
-    }
-    Some(SubagentLineage {
-        root_session_id: root_id,
-        role: first.role,
-        type_name: first.type_name,
-    })
+    None
 }
 
 /// Check that a SQLite database path is a regular file owned by the effective
@@ -689,17 +685,14 @@ mod platform {
     }
 
     fn immutable_file_uri(path: &Path) -> Option<CString> {
+        use std::fmt::Write;
         let text = path.to_str()?;
         let mut uri = String::with_capacity(text.len() + 24);
         uri.push_str("file:");
         for byte in text.bytes() {
             match byte {
                 b'%' | b'?' | b'#' | b' ' | 0x00..=0x1F | 0x7F..=0xFF => {
-                    uri.push('%');
-                    let hi = byte >> 4;
-                    let lo = byte & 0x0F;
-                    uri.push(char::from(if hi < 10 { b'0' + hi } else { b'A' + hi - 10 }));
-                    uri.push(char::from(if lo < 10 { b'0' + lo } else { b'A' + lo - 10 }));
+                    let _ = write!(uri, "%{byte:02X}");
                 }
                 _ => uri.push(char::from(byte)),
             }
@@ -723,21 +716,40 @@ mod platform {
         Ok(guard)
     }
 
+    fn prepare_stmt(db: *mut Sqlite3, sql: &'static CStr) -> Result<StmtGuard, c_int> {
+        let mut stmt = ptr::null_mut();
+        // SAFETY: `db` is open, `sql` is a static NUL-terminated string, `stmt` is a valid out-pointer.
+        let prep_rc =
+            unsafe { sqlite3_prepare_v2(db, sql.as_ptr(), -1, &mut stmt, ptr::null_mut()) };
+        if prep_rc != SQLITE_OK {
+            return Err(prep_rc);
+        }
+        Ok(StmtGuard(stmt))
+    }
+
     /// Resolve parent directory symlinks (e.g. `/var` -> `/private/var` on
     /// macOS) without following the leaf filename itself: as of macOS
     /// libsqlite3 3.51.0, `SQLITE_OPEN_NOFOLLOW` fails with `SQLITE_CANTOPEN`
     /// if any ancestor component is a symlink, whereas canonicalizing only the
     /// parent lets `SQLITE_OPEN_NOFOLLOW` enforce atomic `O_NOFOLLOW` on the
     /// database file itself.
-    fn resolve_parent_keeping_leaf(path: &Path) -> Result<PathBuf, Unreadable> {
-        let parent = path.parent().ok_or(Unreadable::ReadFailed)?;
-        let leaf = path.file_name().ok_or(Unreadable::ReadFailed)?;
-        let real_parent = fs::canonicalize(parent).map_err(|_| Unreadable::ReadFailed)?;
-        Ok(real_parent.join(leaf))
+    fn resolve_parent_keeping_leaf(path: &Path) -> Result<Option<PathBuf>, Unreadable> {
+        if !path.is_absolute() {
+            return Err(Unreadable::Foreign);
+        }
+        let parent = path.parent().ok_or(Unreadable::Foreign)?;
+        let leaf = path.file_name().ok_or(Unreadable::Foreign)?;
+        let real_parent = match fs::canonicalize(parent) {
+            Ok(real) => real,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(Unreadable::ReadFailed),
+        };
+        Ok(Some(real_parent.join(leaf)))
     }
 
     /// Run `query` against a read-only connection to `path`.
     ///
+    /// Returns `Ok(None)` when `path` (or its parent directory) does not exist.
     /// As of `agy` 1.5.16, SQLite databases use `journal_mode=wal`: when the
     /// last writer closes cleanly, SQLite deletes `-wal` and `-shm` while the
     /// database header stays in WAL format, so a read-only open returns
@@ -748,17 +760,21 @@ mod platform {
     fn with_readonly_db<T>(
         path: &Path,
         query: impl Fn(*mut Sqlite3) -> Result<T, c_int>,
-    ) -> Result<T, Unreadable> {
-        let resolved = resolve_parent_keeping_leaf(path)?;
-        if let Err(reason) = check_owned_regular_path(&resolved) {
-            return Err(reason.unwrap_or(Unreadable::ReadFailed));
+    ) -> Result<Option<T>, Unreadable> {
+        let Some(resolved) = resolve_parent_keeping_leaf(path)? else {
+            return Ok(None);
+        };
+        match check_owned_regular_path(&resolved) {
+            Ok(()) => {}
+            Err(None) => return Ok(None),
+            Err(Some(reason)) => return Err(reason),
         }
         let c_path = CString::new(resolved.to_str().ok_or(Unreadable::ReadFailed)?)
             .map_err(|_| Unreadable::ReadFailed)?;
         let primary = open_with_flags(&c_path, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOFOLLOW)
             .and_then(|db| query(db.0));
         match primary {
-            Ok(value) => Ok(value),
+            Ok(value) => Ok(Some(value)),
             Err(SQLITE_CANTOPEN) if wal_absent_or_empty(&resolved) => {
                 let before = file_stamp(&resolved).ok_or(Unreadable::ReadFailed)?;
                 let uri = immutable_file_uri(&resolved).ok_or(Unreadable::ReadFailed)?;
@@ -772,39 +788,21 @@ mod platform {
                 if !wal_absent_or_empty(&resolved) || file_stamp(&resolved) != Some(before) {
                     return Err(Unreadable::ReadFailed);
                 }
-                Ok(value)
+                Ok(Some(value))
             }
             Err(_) => Err(Unreadable::ReadFailed),
         }
     }
 
-    enum SummaryRow {
-        Working,
-        Idle,
-        Absent,
-        Unreadable(Unreadable),
-    }
-
-    fn read_summary(summaries_db: &Path, conversation_id: &str) -> SummaryRow {
-        if let Err(reason) = check_owned_regular_path(summaries_db) {
-            return match reason {
-                None => SummaryRow::Absent,
-                Some(reason) => SummaryRow::Unreadable(reason),
+    fn read_summary(summaries_db: &Path, conversation_id: &str) -> Reading {
+        let query = |db: *mut Sqlite3| -> Result<Reading, c_int> {
+            let Ok(cid_len) = c_int::try_from(conversation_id.len()) else {
+                return Ok(Reading::Unreadable(Unreadable::ReadFailed));
             };
-        }
-        let Ok(cid_len) = c_int::try_from(conversation_id.len()) else {
-            return SummaryRow::Unreadable(Unreadable::ReadFailed);
-        };
-        let query = |db: *mut Sqlite3| -> Result<SummaryRow, c_int> {
-            let sql = c"SELECT status, not_fully_idle FROM conversation_summaries WHERE conversation_id = ?1 LIMIT 1";
-            let mut stmt = ptr::null_mut();
-            // SAFETY: `db` is open, `sql` is a static NUL-terminated string, `stmt` is a valid out-pointer.
-            let prep_rc =
-                unsafe { sqlite3_prepare_v2(db, sql.as_ptr(), -1, &mut stmt, ptr::null_mut()) };
-            if prep_rc != SQLITE_OK {
-                return Err(prep_rc);
-            }
-            let stmt = StmtGuard(stmt);
+            let stmt = prepare_stmt(
+                db,
+                c"SELECT status, not_fully_idle FROM conversation_summaries WHERE conversation_id = ?1 LIMIT 1",
+            )?;
             // SAFETY: `stmt.0` is valid, `conversation_id` bytes stay valid across bind with SQLITE_TRANSIENT.
             let bind_rc = unsafe {
                 sqlite3_bind_text(
@@ -821,7 +819,7 @@ mod platform {
             // SAFETY: `stmt.0` is a bound prepared statement.
             let step_rc = unsafe { sqlite3_step(stmt.0) };
             if step_rc == SQLITE_DONE {
-                return Ok(SummaryRow::Absent);
+                return Ok(Reading::Absent);
             }
             if step_rc != SQLITE_ROW {
                 return Err(step_rc);
@@ -835,72 +833,54 @@ mod platform {
                 )
             };
             if status_type != SQLITE_TEXT || idle_type != SQLITE_INTEGER {
-                return Ok(SummaryRow::Unreadable(Unreadable::UnknownStatus));
+                return Ok(Reading::Unreadable(Unreadable::UnknownStatus));
             }
             // SAFETY: column 0 was just confirmed to hold SQLITE_TEXT.
             let status_ptr = unsafe { sqlite3_column_text(stmt.0, 0) };
             // SAFETY: called after `sqlite3_column_text` on the same SQLITE_TEXT column.
             let status_len = unsafe { sqlite3_column_bytes(stmt.0, 0) };
             let Ok(status_len) = usize::try_from(status_len) else {
-                return Ok(SummaryRow::Unreadable(Unreadable::UnknownStatus));
+                return Ok(Reading::Unreadable(Unreadable::UnknownStatus));
             };
             if status_ptr.is_null() {
-                return Ok(SummaryRow::Unreadable(Unreadable::UnknownStatus));
+                return Ok(Reading::Unreadable(Unreadable::UnknownStatus));
             }
             // SAFETY: SQLite guarantees `sqlite3_column_text` points to at least
             // `sqlite3_column_bytes` UTF-8 bytes valid until the next step or finalize.
             // Decoding the exact byte slice avoids truncating at embedded NUL bytes.
             let status_bytes = unsafe { std::slice::from_raw_parts(status_ptr, status_len) };
             let Ok(status) = std::str::from_utf8(status_bytes) else {
-                return Ok(SummaryRow::Unreadable(Unreadable::UnknownStatus));
+                return Ok(Reading::Unreadable(Unreadable::UnknownStatus));
             };
             // SAFETY: column 1 was just confirmed to hold SQLITE_INTEGER.
             let not_fully_idle = unsafe { sqlite3_column_int64(stmt.0, 1) };
             Ok(match status {
                 "CASCADE_RUN_STATUS_RUNNING"
                 | "CASCADE_RUN_STATUS_BUSY"
-                | "CASCADE_RUN_STATUS_CANCELING" => SummaryRow::Working,
+                | "CASCADE_RUN_STATUS_CANCELING" => Reading::Working,
                 "CASCADE_RUN_STATUS_IDLE" => {
                     if not_fully_idle != 0 {
-                        SummaryRow::Working
+                        Reading::Working
                     } else {
-                        SummaryRow::Idle
+                        Reading::Idle
                     }
                 }
-                _ => SummaryRow::Unreadable(Unreadable::UnknownStatus),
+                _ => Reading::Unreadable(Unreadable::UnknownStatus),
             })
         };
         match with_readonly_db(summaries_db, query) {
-            Ok(row) => row,
-            Err(reason) => SummaryRow::Unreadable(reason),
+            Ok(Some(reading)) => reading,
+            Ok(None) => Reading::Absent,
+            Err(reason) => Reading::Unreadable(reason),
         }
     }
 
-    enum StepsState {
-        Active,
-        Canceled,
-        Quiescent,
-        Absent,
-        Unreadable(Unreadable),
-    }
-
-    fn read_conv_steps(conv_db: &Path, initial_step_count: i64) -> StepsState {
-        if let Err(reason) = check_owned_regular_path(conv_db) {
-            return match reason {
-                None => StepsState::Absent,
-                Some(reason) => StepsState::Unreadable(reason),
-            };
-        }
-        let query = |db: *mut Sqlite3| -> Result<StepsState, c_int> {
-            let sql = c"SELECT status FROM steps WHERE idx >= ?1 ORDER BY idx ASC";
-            let mut stmt = ptr::null_mut();
-            // SAFETY: `db` is open, `sql` is a static NUL-terminated string, `stmt` is a valid out-pointer.
-            let prep_rc =
-                unsafe { sqlite3_prepare_v2(db, sql.as_ptr(), -1, &mut stmt, ptr::null_mut()) };
-            if prep_rc != SQLITE_OK {
-                return Err(prep_rc);
-            }
-            let stmt = StmtGuard(stmt);
+    fn read_conv_steps(conv_db: &Path, initial_step_count: i64) -> Reading {
+        let query = |db: *mut Sqlite3| -> Result<Reading, c_int> {
+            let stmt = prepare_stmt(
+                db,
+                c"SELECT status FROM steps WHERE idx >= ?1 ORDER BY idx ASC",
+            )?;
             // SAFETY: `stmt.0` is valid.
             let bind_rc = unsafe { sqlite3_bind_int64(stmt.0, 1, initial_step_count) };
             if bind_rc != SQLITE_OK {
@@ -913,7 +893,7 @@ mod platform {
                     SQLITE_ROW => {
                         // SAFETY: `stmt.0` returned SQLITE_ROW; column 0 is `status`.
                         if unsafe { sqlite3_column_type(stmt.0, 0) } != SQLITE_INTEGER {
-                            return Ok(StepsState::Unreadable(Unreadable::UnknownStatus));
+                            return Ok(Reading::Unreadable(Unreadable::UnknownStatus));
                         }
                         // SAFETY: column 0 was just confirmed to hold SQLITE_INTEGER.
                         let st = unsafe { sqlite3_column_int64(stmt.0, 0) };
@@ -922,7 +902,7 @@ mod platform {
                             | STEP_STATUS_RUNNING
                             | STEP_STATUS_GENERATING
                             | STEP_STATUS_WAITING
-                            | STEP_STATUS_QUEUED => return Ok(StepsState::Active),
+                            | STEP_STATUS_QUEUED => return Ok(Reading::Working),
                             STEP_STATUS_CANCELED | STEP_STATUS_INTERRUPTED => {
                                 saw_canceled = true;
                             }
@@ -931,7 +911,7 @@ mod platform {
                             | STEP_STATUS_INVALID
                             | STEP_STATUS_CLEARED
                             | STEP_STATUS_ERROR => {}
-                            _ => return Ok(StepsState::Unreadable(Unreadable::UnknownStatus)),
+                            _ => return Ok(Reading::Unreadable(Unreadable::UnknownStatus)),
                         }
                     }
                     SQLITE_DONE => break,
@@ -939,14 +919,15 @@ mod platform {
                 }
             }
             Ok(if saw_canceled {
-                StepsState::Canceled
+                Reading::Canceled
             } else {
-                StepsState::Quiescent
+                Reading::Idle
             })
         };
         match with_readonly_db(conv_db, query) {
-            Ok(state) => state,
-            Err(reason) => StepsState::Unreadable(reason),
+            Ok(Some(reading)) => reading,
+            Ok(None) => Reading::Absent,
+            Err(reason) => Reading::Unreadable(reason),
         }
     }
 
@@ -956,14 +937,11 @@ mod platform {
         conversation_id: &str,
         initial_step_count: i64,
     ) -> Reading {
-        let steps_state = conv_db
-            .map(|path| read_conv_steps(path, initial_step_count))
-            .unwrap_or(StepsState::Absent);
-        let canceled = match steps_state {
-            StepsState::Active => return Reading::Working,
-            StepsState::Unreadable(reason) => return Reading::Unreadable(reason),
-            StepsState::Canceled => true,
-            StepsState::Quiescent | StepsState::Absent => false,
+        let canceled = match conv_db.map(|path| read_conv_steps(path, initial_step_count)) {
+            Some(Reading::Working) => return Reading::Working,
+            Some(Reading::Unreadable(reason)) => return Reading::Unreadable(reason),
+            Some(Reading::Canceled) => true,
+            Some(Reading::Idle | Reading::Absent) | None => false,
         };
         // Even when an earlier tool step in this turn was canceled (e.g., a
         // killed background command), consult `conversation_summaries.db` first
@@ -971,12 +949,12 @@ mod platform {
         // subagents) still report `Working` and malformed summary rows still
         // fail closed.
         match read_summary(summaries_db, conversation_id) {
-            SummaryRow::Working => Reading::Working,
-            SummaryRow::Unreadable(reason) => Reading::Unreadable(reason),
-            SummaryRow::Idle if canceled => Reading::Canceled,
-            SummaryRow::Idle => Reading::Idle,
-            SummaryRow::Absent if canceled => Reading::Canceled,
-            SummaryRow::Absent => Reading::Absent,
+            Reading::Idle | Reading::Absent if canceled => Reading::Canceled,
+            reading @ (Reading::Working
+            | Reading::Idle
+            | Reading::Canceled
+            | Reading::Absent
+            | Reading::Unreadable(_)) => reading,
         }
     }
 }
@@ -1162,6 +1140,63 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    fn write_spawn_msg(
+        brain: &std::path::Path,
+        recipient: &str,
+        filename: &str,
+        sender: &str,
+        role: &str,
+        type_name: &str,
+    ) -> PathBuf {
+        let mdir = brain
+            .join(recipient)
+            .join(".system_generated")
+            .join("messages");
+        fs::create_dir_all(&mdir).unwrap();
+        let args = json!({"Role": role, "TypeName": type_name}).to_string();
+        let path = mdir.join(filename);
+        fs::write(
+            &path,
+            serde_json::to_string(&json!({
+                "sender": sender,
+                "recipient": recipient,
+                "sourceMetadata": {
+                    "tool": {
+                        "conversationId": sender,
+                        "toolCall": {
+                            "id": "call_1",
+                            "name": "invoke_subagent",
+                            "argumentsJson": args
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        path
+    }
+
+    #[cfg(target_os = "macos")]
+    fn run_sql_and_close_wal(db: &std::path::Path, sql: &str) {
+        let out = std::process::Command::new("/usr/bin/sqlite3")
+            .arg(db)
+            .arg(format!("{sql}\nPRAGMA wal_checkpoint(TRUNCATE);"))
+            .output()
+            .expect("sqlite3 binary available on macOS");
+        assert!(
+            out.status.success(),
+            "sqlite3 failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // Match non-persisted WAL clean-close state (as `agy` 1.5.16 leaves
+        // on disk when its writer closes: WAL header, no -wal/-shm sidecars).
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = PathBuf::from(format!("{}{suffix}", db.display()));
+            let _ = fs::remove_file(sidecar);
+        }
+    }
+
     #[test]
     fn subagent_lineage_walks_grandchild_to_root_lead() {
         let dir = scratch("lineage");
@@ -1170,37 +1205,9 @@ mod tests {
         let child = "child-2222";
         let grand = "grand-3333";
 
-        let write_spawn_msg = |recipient: &str, sender: &str, role: &str, type_name: &str| {
-            let mdir = brain
-                .join(recipient)
-                .join(".system_generated")
-                .join("messages");
-            fs::create_dir_all(&mdir).unwrap();
-            let args = json!({"Role": role, "TypeName": type_name}).to_string();
-            fs::write(
-                mdir.join("0001.json"),
-                serde_json::to_string(&json!({
-                    "sender": sender,
-                    "recipient": recipient,
-                    "sourceMetadata": {
-                        "tool": {
-                            "conversationId": sender,
-                            "toolCall": {
-                                "id": "call_1",
-                                "name": "invoke_subagent",
-                                "argumentsJson": args
-                            }
-                        }
-                    }
-                }))
-                .unwrap(),
-            )
-            .unwrap();
-        };
-
         fs::create_dir_all(brain.join(lead)).unwrap();
-        write_spawn_msg(child, lead, "Coordinator", "self");
-        write_spawn_msg(grand, child, "Worker", "research");
+        write_spawn_msg(&brain, child, "0001.json", lead, "Coordinator", "self");
+        write_spawn_msg(&brain, grand, "0001.json", child, "Worker", "research");
 
         assert_eq!(resolve_subagent_lineage(lead, &brain.join(lead)), None);
         assert_eq!(
@@ -1227,28 +1234,7 @@ mod tests {
         let dir = scratch("lineage-guard");
         let brain = dir.join("brain");
         let write_spawn = |recipient: &str, sender: &str| {
-            let mdir = brain
-                .join(recipient)
-                .join(".system_generated")
-                .join("messages");
-            fs::create_dir_all(&mdir).unwrap();
-            fs::write(
-                mdir.join("spawn.json"),
-                serde_json::to_string(&json!({
-                    "sender": sender,
-                    "sourceMetadata": {
-                        "tool": {
-                            "conversationId": sender,
-                            "toolCall": {
-                                "name": "invoke_subagent",
-                                "argumentsJson": "{\"Role\":\"Worker\",\"TypeName\":\"self\"}"
-                            }
-                        }
-                    }
-                }))
-                .unwrap(),
-            )
-            .unwrap();
+            write_spawn_msg(&brain, recipient, "spawn.json", sender, "Worker", "self");
         };
 
         // Path traversal or absolute sender ids fail closed.
@@ -1291,28 +1277,17 @@ mod tests {
         let child = "child-many";
         fs::create_dir_all(brain.join(lead)).unwrap();
         let mdir = brain.join(child).join(".system_generated").join("messages");
-        fs::create_dir_all(&mdir).unwrap();
 
         let base_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         // Lexicographically late filename, but earliest mtime holds invoke_subagent.
-        let spawn_path = mdir.join("ffffffff-ffff-4fff-8fff-ffffffffffff.json");
-        fs::write(
-            &spawn_path,
-            serde_json::to_string(&json!({
-                "sender": lead,
-                "sourceMetadata": {
-                    "tool": {
-                        "conversationId": lead,
-                        "toolCall": {
-                            "name": "invoke_subagent",
-                            "argumentsJson": "{\"Role\":\"Scout\",\"TypeName\":\"research\"}"
-                        }
-                    }
-                }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+        let spawn_path = write_spawn_msg(
+            &brain,
+            child,
+            "ffffffff-ffff-4fff-8fff-ffffffffffff.json",
+            lead,
+            "Scout",
+            "research",
+        );
         fs::File::options()
             .write(true)
             .open(&spawn_path)
@@ -1525,29 +1500,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn sqlite_wal_cleanly_closed_db_reads_working_idle_and_canceled() {
-        use std::process::Command;
-
         let dir = scratch("sqlite-wal");
         let summaries = dir.join("conversation_summaries.db");
         let conv = dir.join("conv-wal.db");
-        let run_sql_and_close_wal = |db: &PathBuf, sql: &str| {
-            let out = Command::new("/usr/bin/sqlite3")
-                .arg(db)
-                .arg(format!("{sql}\nPRAGMA wal_checkpoint(TRUNCATE);"))
-                .output()
-                .expect("sqlite3 binary available on macOS");
-            assert!(
-                out.status.success(),
-                "sqlite3 failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            // Match non-persisted WAL clean-close state (as `agy` 1.5.16 leaves
-            // on disk when its writer closes: WAL header, no -wal/-shm sidecars).
-            for suffix in ["-wal", "-shm"] {
-                let sidecar = PathBuf::from(format!("{}{suffix}", db.display()));
-                let _ = fs::remove_file(sidecar);
-            }
-        };
 
         run_sql_and_close_wal(
             &summaries,
@@ -1683,29 +1638,11 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn sqlite_non_ascii_wal_paths_unknown_statuses_and_nonempty_wal_guard() {
-        use std::process::Command;
-
         let dir = scratch("sqlite-utf8-status");
         let nested = dir.join("café 用户 %20#?");
         fs::create_dir_all(&nested).unwrap();
         let summaries = nested.join("conversation_summaries.db");
         let conv = nested.join("conv-utf8.db");
-
-        let run_sql_and_close_wal = |db: &PathBuf, sql: &str| {
-            let out = Command::new("/usr/bin/sqlite3")
-                .arg(db)
-                .arg(format!("{sql}\nPRAGMA wal_checkpoint(TRUNCATE);"))
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "sqlite3 failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            for suffix in ["-wal", "-shm"] {
-                let _ = fs::remove_file(PathBuf::from(format!("{}{suffix}", db.display())));
-            }
-        };
 
         run_sql_and_close_wal(
             &summaries,

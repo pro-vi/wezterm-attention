@@ -55,56 +55,22 @@ fn agy_brain_dir(setup: &Setup, conv_id: &str) -> (PathBuf, PathBuf) {
 }
 
 fn link_agy_child(setup: &Setup, parent: &str, child: &str, role: &str) -> String {
-    let (parent_dir, _) = agy_brain_dir(setup, parent);
-    let (child_dir, _) = agy_brain_dir(setup, child);
-    fs::create_dir_all(&parent_dir).unwrap();
-    let mdir = child_dir.join(".system_generated").join("messages");
-    fs::create_dir_all(&mdir).unwrap();
-    let args_json = json!({"Role": role, "TypeName": "self"}).to_string();
-    fs::write(
-        mdir.join("0001.json"),
-        serde_json::to_vec(&json!({
-            "sender": parent,
-            "sourceMetadata": {
-                "tool": {
-                    "conversationId": parent,
-                    "toolCall": {
-                        "name": "invoke_subagent",
-                        "argumentsJson": args_json
-                    }
-                }
-            }
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    child_dir.to_string_lossy().into_owned()
+    let brain = setup._scratch.0.join("app_data").join("brain");
+    write_agy_child_link(&brain, parent, child, role, "self")
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn agy_hook_cli(
-    _setup: &Setup,
-    env: &BTreeMap<String, String>,
+    setup: &Setup,
+    _env: &BTreeMap<String, String>,
     event_name: &str,
     payload: &Value,
     extra: &[&str],
 ) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_attention"));
-    command
-        .env_clear()
-        .envs(env)
-        .args(["hooks", "event", "agy", event_name])
-        .args(extra)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(&serde_json::to_vec(payload).unwrap())
-        .unwrap();
-    child.wait_with_output().unwrap()
+    let mut args = vec!["hooks", "event", "agy", event_name];
+    args.extend_from_slice(extra);
+    run_hook(setup, &args, payload)
 }
 
 fn run_cli_with_stdin(
@@ -112,20 +78,7 @@ fn run_cli_with_stdin(
     args: &[&str],
     stdin: &Value,
 ) -> (std::process::Output, Value) {
-    let mut child = rust_command(setup)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(&serde_json::to_vec(stdin).unwrap())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
+    let out = run_hook(setup, args, stdin);
     let parsed: Value = serde_json::from_slice(&out.stdout).unwrap();
     (out, parsed)
 }
@@ -850,44 +803,9 @@ fn agy_subagents_walk_grandchild_messages_and_handle_kill_and_reconcile() {
     let (grand_dir, grand_tx) = agy_brain_dir(&setup, "grand-1");
 
     // Write invoke_subagent message JSON for child -> lead and grandchild -> child.
-    let child_msgs = child_dir.join(".system_generated").join("messages");
-    let grand_msgs = grand_dir.join(".system_generated").join("messages");
-    fs::create_dir_all(&child_msgs).unwrap();
-    fs::create_dir_all(&grand_msgs).unwrap();
-    fs::write(
-        child_msgs.join("0001.json"),
-        serde_json::to_vec(&json!({
-            "sender": LEAD,
-            "sourceMetadata": {
-                "tool": {
-                    "conversationId": LEAD,
-                    "toolCall": {
-                        "name": "invoke_subagent",
-                        "argumentsJson": "{\"Role\":\"Worker\",\"TypeName\":\"self\"}"
-                    }
-                }
-            }
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    fs::write(
-        grand_msgs.join("0001.json"),
-        serde_json::to_vec(&json!({
-            "sender": "child-1",
-            "sourceMetadata": {
-                "tool": {
-                    "conversationId": "child-1",
-                    "toolCall": {
-                        "name": "invoke_subagent",
-                        "argumentsJson": "{\"Role\":\"Leaf\",\"TypeName\":\"research\"}"
-                    }
-                }
-            }
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    let brain = setup._scratch.0.join("app_data").join("brain");
+    write_agy_child_link(&brain, LEAD, "child-1", "Worker", "self");
+    write_agy_child_link(&brain, "child-1", "grand-1", "Leaf", "research");
 
     // Lead binds.
     setup.apply(
@@ -2193,8 +2111,9 @@ fn claude_stop_hold_check_still_runs_when_optional_observation_field_is_malforme
         "background_tasks": [{"id": "bg-1", "type": "shell", "status": "running", "description": "bg task"}],
         "stop_hook_active": "not-a-bool"
     });
-    let mut child = rust_command(&setup)
-        .args([
+    let out = run_hook(
+        &setup,
+        &[
             "hooks",
             "event",
             "claude",
@@ -2202,19 +2121,9 @@ fn claude_stop_hold_check_still_runs_when_optional_observation_field_is_malforme
             "--hold-check",
             &check_arg,
             "--debug",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(&serde_json::to_vec(&stop_payload).unwrap())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
+        ],
+        &stop_payload,
+    );
     assert!(
         out.status.success(),
         "{}",

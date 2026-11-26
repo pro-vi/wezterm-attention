@@ -3469,7 +3469,7 @@ test("built-in and manual formatter contexts expose identical named attention", 
   assert(type(built_rendered) == "table" and type(manual_rendered) == "table",
     "both renderers must carry the marker tint")
   assert(built_rendered[2].Text:find(MARK.notify .. "+2 built · Claude", 1, true),
-    "built-in output must include the marker, count, base, and closed provider suffix")
+    "built-in output must include the marker, count, base, and provider suffix")
   assert(manual_rendered[2].Text:find(MARK.notify .. "+2 manual · Claude", 1, true),
     "manual output must apply the same decoration")
 end)
@@ -6246,6 +6246,7 @@ test("consumer manifest classification agrees with Rust and rejects incompatible
     { "codex", "request_user_input", "question", "blocking" },
     { "codex", "request_user_input_async", "question", "nonblocking" },
     { "codex", "request_permissions", "permission" },
+    { "agy", "ask_question", "question", "blocking" },
     { "pi", "AskUserQuestion", "generic" },
     { "unknown", "request_permissions", "generic" },
     { "codex", "request_user_input_async_extra", "generic" },

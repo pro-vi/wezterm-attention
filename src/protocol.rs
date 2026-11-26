@@ -205,6 +205,10 @@ impl Provider {
             Self::Agy => "agy",
         }
     }
+
+    pub const fn supports_quiet_notes(self) -> bool {
+        matches!(self, Self::Claude | Self::Codex | Self::Agy)
+    }
 }
 
 /// Serialized through `as_str` and read through `parse`, so the spellings
@@ -963,14 +967,13 @@ pub fn parse_record_value(value: &Value, protocol: &Manifest) -> Verdict {
             let quiet = value["hold_notes"]
                 .as_object()
                 .is_some_and(|notes| notes.values().all(|note| note["quiet"] == true));
+            let source = value["source"].as_str().and_then(Provider::parse);
             // Only a Claude turn end takes hold notes; a quiet note goes on a
             // Claude, Codex or Agy turn end, or the thinking of a turn as it started.
             value["target"]["kind"] == "binding"
                 && (value["type"] == "stop" || value["type"] == "thinking")
-                && (value["source"] == "claude"
-                    || value["source"] == "codex"
-                    || value["source"] == "agy")
-                && (quiet || (value["type"] == "stop" && value["source"] == "claude"))
+                && source.is_some_and(Provider::supports_quiet_notes)
+                && (quiet || (value["type"] == "stop" && source == Some(Provider::Claude)))
         }
         kind if is_lifecycle_snapshot_kind(kind) => {
             crate::observations::LifecycleSnapshot::deserialize(value)
@@ -1146,6 +1149,10 @@ mod consumer_manifest_tests {
         assert_eq!(
             classify_tool("codex", "request_permissions"),
             (ToolClass::Permission, None)
+        );
+        assert_eq!(
+            classify_tool("agy", "ask_question"),
+            (ToolClass::Question, Some(QuestionMode::Blocking))
         );
         for (provider, name) in [
             ("pi", "AskUserQuestion"),

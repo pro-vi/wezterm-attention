@@ -128,9 +128,10 @@ A provider event finds its launch in this order, and stops at the first rule tha
    (`WEZTERM_ATTENTION_ENABLE_SELF_CLAIM` set to anything but `1`) or the platform is not macOS
    (`claim_stale`); when `WEZTERM_ATTENTION_HOST_PID` is missing or is not a positive decimal pid
    (`self_claim_parent_unverified`); when the pane holds a shell claim, for every event
-   (`claim_stale`); and, for any event but a session start or a lead Agy `PreInvocation` carrying a
-   valid `transcriptPath` (for `agy --resume`, which as of `agy` 1.5.16 skips `SessionStart`), when
-   the pane holds no claim (`claim_stale`), before anything is proved or the mux is asked.
+   (`claim_stale`); and, for any event but a session start or an Agy resume start (a lead Agy
+   `PreInvocation` carrying a valid `transcriptPath`, because as of `agy` 1.5.16 `agy --resume`
+   skips `SessionStart`), when the pane holds no claim (`claim_stale`), before anything is proved
+   or the mux is asked.
 3. Otherwise the writer proves its host. Its direct parent, as the kernel reports it, must be the
    process `WEZTERM_ATTENTION_HOST_PID` names, alive, this user's and not replaced while it is
    read, and the writer must not be traced (`self_claim_parent_unverified`). The host's terminal
@@ -138,34 +139,31 @@ A provider event finds its launch in this order, and stops at the first rule tha
    parent's; a terminal the kernel cannot report refuses (`probe_unavailable`), and a writer and
    parent that both have none refuse as `session_detached`: an agent that runs its sessions in
    a background process with no terminal hands that process's environment, taken from whichever
-   pane started it, to every session's hooks. A session start — or a lead Agy `PreInvocation` with a
-   valid `transcriptPath` when the pane does not already hold this host's own claim —
-   asks the mux: the host's terminal must be the device of the terminal the mux lists for
-   `WEZTERM_PANE` on the current socket, and the listing must succeed and name the pane exactly
-   once (`unsafe_tty` otherwise). Any other event (including a lead Agy `PreInvocation` when the
-   pane already holds this host's own claim) asks the mux nothing and proves itself against
-   the pane's self-owned claim instead: the parent must be the claim's owner, the same pid started
-   at the same time on the same boot (`claim_stale` otherwise); the host's terminal must be the
-   device at the claim's `tty_path`, with the claim's `tty_fingerprint` (`unsafe_tty`); and the
-   socket must still be the incarnation the claim was made on (`incarnation_changed`). The listing
-   that made the claim proved that terminal is the pane's, and while its owner still runs on it,
-   the one thing a listing would add is whether the pane is still open: an agent that outlives its
-   closed pane keeps writing to that pane's records until its terminal goes away, and nothing
-   displays them.
-4. A session start — or a lead Agy `PreInvocation` with a valid `transcriptPath` that did not
-   already prove itself against this host's existing self-owned claim — then claims, under the
-   pane's claim lock and no other lock, after reading the same host again. No claim: a new
-   self-owned claim with a new launch id. The same process's own claim: kept as it is, not
-   rewritten. Another process's claim: replaced with a new launch id only when that process is
-   proven gone, meaning the boot session differs, no process has its pid, or the process there
-   started at another time; a live owner keeps the pane (`claim_stale`), and a zombie or an owner
-   that cannot be read keeps it too (`probe_unavailable`). Creating or replacing needs the parent
-   to be in the terminal's foreground process group; it need not lead that group, as a native agent
-   started by a launcher process does not. Keeping does not need it. The claim is published to the
-   proven terminal before the lock is released. On a lead Agy `PreInvocation` with a valid
-   `transcriptPath` whose session is not yet the launch's current binding, the writer lazily creates
-   or replaces the binding (under the same-host rule below) before running checks or writing
-   activity.
+   pane started it, to every session's hooks. A session start — or an Agy resume start when the
+   pane does not already hold this host's own claim — asks the mux: the host's terminal must be
+   the device of the terminal the mux lists for `WEZTERM_PANE` on the current socket, and the
+   listing must succeed and name the pane exactly once (`unsafe_tty` otherwise). Any other event
+   (including an Agy resume start when the pane already holds this host's own claim) asks the mux
+   nothing and proves itself against the pane's self-owned claim instead: the parent must be the
+   claim's owner, the same pid started at the same time on the same boot (`claim_stale`
+   otherwise); the host's terminal must be the device at the claim's `tty_path`, with the claim's
+   `tty_fingerprint` (`unsafe_tty`); and the socket must still be the incarnation the claim was
+   made on (`incarnation_changed`). The listing that made the claim proved that terminal is the
+   pane's, and while its owner still runs on it, the one thing a listing would add is whether the
+   pane is still open: an agent that outlives its closed pane keeps writing to that pane's records
+   until its terminal goes away, and nothing displays them.
+4. A session start — or an Agy resume start that did not already prove itself against this host's
+   existing self-owned claim — then claims, under the pane's claim lock and no other lock, after
+   reading the same host again. No claim: a new self-owned claim with a new launch id. The same
+   process's own claim: kept as it is, not rewritten. Another process's claim: replaced with a new
+   launch id only when that process is proven gone, meaning the boot session differs, no process
+   has its pid, or the process there started at another time; a live owner keeps the pane
+   (`claim_stale`), and a zombie or an owner that cannot be read keeps it too (`probe_unavailable`).
+   Creating or replacing needs the parent to be in the terminal's foreground process group; it need
+   not lead that group, as a native agent started by a launcher process does not. Keeping does not
+   need it. The claim is published to the proven terminal before the lock is released. On an Agy
+   resume start whose session is not yet the launch's current binding, the writer lazily creates or
+   replaces the binding (under the same-host rule below) before running checks or writing activity.
 5. Any other event resolves against the self-owned claim it proved itself against.
 
 Every writer of a launch's records takes the launch lock, then the pane's claim lock, then a
@@ -198,9 +196,9 @@ Exact TTL equality remains eligible. The first ineligible instant is one nanosec
 malformed, unavailable, or negative wall age fails closed: TTL-bearing state is omitted, retention
 does not prune it, and diagnostics report `record_invalid`, `probe_unavailable`, or `clock_skew`.
 
-A lead `UserPromptSubmit` starts the turn's `thinking` activity for Claude and Codex, the way
-Pi's `agent_start` does, so the pane is tinted from the prompt rather than from the turn's first
-tool call and a turn that calls no tool still shows activity. The first `PreToolUse` of that turn
+A lead `UserPromptSubmit` starts the turn's `thinking` activity for Claude and Codex, as Agy's
+lead `PreInvocation` and Pi's `agent_start` do, so the pane is tinted from the prompt rather
+than from the turn's first tool call and a turn that calls no tool still shows activity. The first `PreToolUse` of that turn
 repeats the same `thinking` and is skipped. A child actor cannot write lead state, so its prompt
 stays observation-only. The exception is a child waiting for the user — a Claude or Codex child's
 `PermissionRequest`, or an Agy child's `PreToolUse` of `ask_question` — which waits for the user as
@@ -242,11 +240,14 @@ value the event depends on that this build does not know, such as a `SessionStar
 notification type, a Pi `message_end` with no role, or a Pi reply whose stop reason is missing or
 not listed above.
 
-A turn that ends without `Stop` still ends the activity when the provider reports the ending. A
-lead Claude `StopFailure` (an API error ended the turn) publishes `notify`, because the user must
-act. A Codex `Interrupt` writes an activity clear for that session, because the user stopped the
-turn and there is nothing to report; it does not touch a Pi review. Both keep their lifecycle
-observation. A child's `StopFailure` stays observation-only.
+A turn that ends without a normal `Stop` still ends the activity when the provider reports the
+ending. A lead Claude `StopFailure` (an API error ended the turn) or a lead Agy `Stop` with an
+error `terminationReason` (`fullyIdle != false`) publishes `notify` (labelled with the reason on
+Agy), because the user must act. A Codex `Interrupt` or a lead Agy `Stop` with `terminationReason`
+`USER_CANCELED` (`fullyIdle != false`) writes an activity clear for that session, because the user
+stopped the turn and there is nothing to report; neither touches a Pi review. All keep their
+lifecycle observation. A child's `StopFailure` stays observation-only. An Agy lead `Stop` with
+`fullyIdle: false` keeps the turn open as `thinking` with no turn-end observation.
 A Claude turn the user stops with Esc runs no hook as of Claude Code 2.1.300. Where its prompt hook
 proved its host, the turn follower that hook starts reads the host's status file, which Claude Code
 keeps in its configuration directory, and once the file goes from a working turn to none it
@@ -262,6 +263,16 @@ wrote and is recorded after it still shows. The file says only that no turn is w
 ended normally but whose `Stop` Attention did not record, because the hook failed or timed out, is
 recorded as such an interrupt too. See
 [Accepted limitations](accepted-limitations.md#a-claude-turn-stopped-with-esc-is-recorded-only-from-its-status-file).
+An `agy` turn the user stops with Esc (or `SIGINT` in print mode) runs no `Stop` hook as of `agy`
+1.5.16. On macOS, where its lead `PreInvocation(invocationNum: 0)` prompt hook proved its host,
+the turn follower polls `agy`'s local SQLite status databases (`conversation_summaries.db` and,
+when `initialNumSteps` is present, `conversations/<id>.db`) and records a lead `user_interrupt`
+with `source_event` `agy_status` and an activity clear once either a step at or after
+`initialNumSteps` is canceled/interrupted with no active step or active summary row, or the
+summary row goes from working to idle; it obeys the same latest-prompt, open-turn and monotonic
+stamping rules as Claude's follower, treating a newer uncleared `agy` `thinking` activity after a
+blocked `Stop` as reopening the turn. See
+[Accepted limitations](accepted-limitations.md#an-agy-turn-stopped-with-esc-is-recorded-only-from-its-status-databases).
 A Codex turn that ends on a model error runs no hook as of Codex 0.162.0. Where a lead hook that
 names a turn proved its host, the turn follower that hook starts reads the session rollout and
 records the end: an `attempt_outcome` with `outcome` `failed`, `source_event` `task_complete`, the
@@ -338,9 +349,12 @@ Agy — have one; a Pi binding never does. Besides `kind`, `schema`, `address`, 
 and `provider`, it carries a `revision` UUID replaced on every write, `written_at_unix_ns`, and:
 
 - `live`: one entry per running child, `{agent_id, agent_type?, last_event, status,
-  last_mono_ns}`. `status` is `running`, or `waiting` once the child has asked for permission and
-  done nothing since. `last_event` names the kind of event that last changed the entry: `start`
-  (`SubagentStart`), `tool` (a tool call) or `permission` (a permission request). `agent_type` is
+  last_mono_ns}`. `status` is `running`, or `waiting` once the child has asked for permission
+  (or, on Agy, called `ask_question`) and done nothing since. `last_event` names the kind of event
+  that last changed the entry: `start` (`SubagentStart`, or Agy child `SessionStart`), `tool` (a
+  tool call, or Agy child `PreInvocation`, `ask_question` `PostToolUse`, or `Stop` with
+  `fullyIdle: false`) or `permission` (a permission request, or Agy child `PreToolUse` of
+  `ask_question`). `agent_type` is
   the provider's name for the kind of sub-agent, and nothing decides by its value. `last_mono_ns`
   is the order of the child's latest event.
 - `parent_clear`, optional: the latest Codex parent stop, `{observed_mono_ns, event_id, removed}`,
@@ -708,7 +722,7 @@ apart; sightings from before that binding ended do not count. A tree holding any
 `keep`; the preview says `keep` wherever apply would keep. Temporary files left by an interrupted
 write, a review that an earlier plugin build had moved aside to `<review>.json.<session>.<ms>.clear`
 while clearing it and never finished with, the lock `reviews/.<owner key>.lock` that every
-review writer leaves beside the reviews, and the lock `.follower.lock` a Codex turn follower leaves
+review writer leaves beside the reviews, and the lock `.follower.lock` a turn follower leaves
 in its binding's directory, do not hold a binding or pane tree back from retention; a lock-like
 file of any other name or place does. Nothing reads a moved-aside review. Every removal sweep makes stays inside the state
 root: a target reached through a symlinked directory below the root is kept, with a

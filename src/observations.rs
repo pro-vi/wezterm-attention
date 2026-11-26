@@ -1107,10 +1107,8 @@ impl LifecycleSnapshot {
                             .hold_checks
                             .iter()
                             .any(|check| check.note.as_ref().is_some_and(|note| !note.holds()))
-                            && (!matches!(
-                                self.provider,
-                                Provider::Claude | Provider::Codex | Provider::Agy
-                            ) || item.source_event != "Stop"
+                            && (!self.provider.supports_quiet_notes()
+                                || item.source_event != "Stop"
                                 || !matches!(item.body, ObservationBody::ResponseFinished { .. }))))
                 {
                     return Err(invalid());

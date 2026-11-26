@@ -320,7 +320,9 @@ later parent `Stop` that is published after its last event; a repeated `Stop`
 the writer skips keeps the earlier cutoff. A Claude sub-agent also goes at the
 next lead `Stop` whose `background_tasks` no longer lists it, so what stays
 counted to the session's end is one that Claude Code still lists, or one in a
-Claude Code session that sends no list.
+Claude Code session that sends no list. An Agy sub-agent also goes on a lead or
+child `PostToolUse` of `manage_subagents` (`kill` / lead `kill_all`) or a
+terminal lead `Stop` (`fullyIdle != false`).
 The end goes missing when:
 
 - the `SubagentStop` hook failed, timed out, or was not registered;
@@ -360,8 +362,10 @@ What starting again loses differs by file:
 
 - **The child set.** The new set is written even when the event changes
   nothing else. While the set is invalid, until the next event that writes it
-  (a child's start, stop, tool call or permission request, a Codex parent's
-  `Stop`, or a Claude lead's `Stop` that lists tasks), the tab shows `+?`. The
+  (a child's start, stop, tool call, permission request or Agy `ask_question`, a
+  Codex parent's `Stop`, a Claude lead's `Stop` that lists tasks, or an Agy
+  lead `manage_subagents` `kill`/`kill_all` or terminal `Stop`), the tab shows
+  `+?`. The
   sub-agents the
   invalid set held are counted again only at their next event, so one in
   the middle of a long command stays uncounted until it calls another tool or
@@ -429,7 +433,10 @@ A command that records a Codex turn's errored end writes an `attempt_outcome`
 with `source_event` `task_complete`, which a plugin from 1.1.0 or earlier does
 not list. One that records a Claude turn stopped with Esc writes a
 `user_interrupt` with `source_event` `session_status`, which a plugin from 1.3.0
-or earlier does not list. Such a plugin reads the binding's `lifecycle.json` as
+or earlier does not list. A command recording Agy events writes
+`provider: "agy"` (including `user_interrupt` with `source_event` `agy_status`),
+which a plugin from 1.17.0 or earlier does not list. Such a plugin reads the
+binding's `lifecycle.json` as
 invalid and shows its pane with no lifecycle until the end leaves the pool. A
 plugin reads the manifest once, when WezTerm loads its configuration, so one
 updated on disk still reads that way until the configuration is reloaded.
@@ -541,7 +548,7 @@ every binding and is not affected. Nothing is removed on the index's word.
 ## Removing a pane tree removes the lock files it holds
 
 Pane retention removes the pane's whole directory while it holds the pane's
-claim lock and the launch lock, and those lock files, with a Codex turn
+claim lock and the launch lock, and those lock files, with a turn
 follower's `.follower.lock`, are inside that directory. A
 writer that opened the old lock file and is waiting on it takes the lock on the
 removed file once sweep lets go, and a later writer creates a new lock file at
@@ -668,7 +675,8 @@ another's pane.
 
 ## A session whose start did not claim its pane records nothing until its next start
 
-An agent that claims its own pane claims it only at a session start. When that
+For Claude Code, Codex and Pi, an agent that claims its own pane claims it only
+at a session start. When that
 hook does not finish, because the agent stopped it at its timeout (on a heavily
 loaded machine Claude Code 2.1.301 cancelled one after 53 s against a 5 s
 timeout), or the start was refused, the pane keeps the claim it had: none, or
@@ -681,7 +689,11 @@ one does, is not shown.
 
 The session's next start claims the pane once the earlier agent has exited,
 whatever its source: `/clear`, `/compact`, `/resume`, or the agent started
-again. A tool or turn event does not claim it. A binding is made from a
+again. A tool or turn event does not claim it (the one exception is a lead Agy
+`PreInvocation` carrying a valid `transcriptPath`, because as of `agy` 1.5.16
+`agy --resume` skips `SessionStart`; see the
+[record contract](record-contract.md#claims-and-how-an-event-finds-its-launch)).
+A binding is made from a
 session start: `start_source` is a required field of the binding record, and a
 tool event has no start source to give it, nor the start's model. A claim taken
 from a tool event would need a binding without one, which the record contract
@@ -783,9 +795,8 @@ or `not_fully_idle != 0`) to idle (`CASCADE_RUN_STATUS_IDLE`, `not_fully_idle = 
 
 What it cannot do, and what else rests on `agy` 1.5.16's private on-disk files:
 
-- **macOS only for the Esc follower.** Non-macOS targets compile cleanly without
-  linking `libsqlite3`, so on Linux an Esc-interrupted `agy` turn stays
-  `thinking` until the next turn ends or `agy` exits.
+- **macOS only for the Esc follower.** Elsewhere, an Esc-interrupted `agy` turn
+  stays `thinking` until the next turn ends or `agy` exits.
 - **Private schema dependence.** Final replies for `--include-reply` (when
   `Stop.finalModelOutput` is unset), prompt-vs-wakeup disambiguation at
   `PreInvocation(invocationNum: 0)` (`transcript_full.jsonl`), subagent
@@ -804,10 +815,8 @@ What it cannot do, and what else rests on `agy` 1.5.16's private on-disk files:
   `result`. `attention observe --for answer` therefore reports that `ask_question`
   returned, not that the user submitted an answer, and `tool_result.is_error`
   is set only when `error` is non-empty.
-- **Background wakeup race and restore.** A turn whose `Stop` hook failed or
-  timed out is cleared as `agy_status` when the conversation returns to idle.
-  `examples/restore.mjs` currently types no resume line for `agy`
-  (`no_resume_form_for_agy`), as for Pi.
+- **Failed or timed-out `Stop` hooks.** A turn whose `Stop` hook failed or timed
+  out is cleared as `agy_status` when the conversation returns to idle.
 
 ## A sub-agent whose permission was granted reads as waiting until its next tool call
 

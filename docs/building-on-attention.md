@@ -1,6 +1,6 @@
 # Building on Attention
 
-Attention has two parts. A small Rust command, `attention`, runs as a hook from Claude Code, Codex or Pi and records what a pane's agent is doing against a pane identity that survives detach, reattach and multiple mux sockets. A Lua reader in WezTerm polls those records and renders the tab. Programs other than WezTerm can read the same records: `attention bindings --json`, `attention tabs` and `attention inspect` return validated facts, so a script does not have to scrape a terminal to find out which pane an agent is in.
+Attention has two parts. A small Rust command, `attention`, runs as a hook from Claude Code, Codex, Pi or Antigravity CLI (`agy`) and records what a pane's agent is doing against a pane identity that survives detach, reattach and multiple mux sockets. A Lua reader in WezTerm polls those records and renders the tab. Programs other than WezTerm can read the same records: `attention bindings --json`, `attention tabs` and `attention inspect` return validated facts, so a script does not have to scrape a terminal to find out which pane an agent is in.
 
 The records the `attention` command writes are called **v2 records** in these docs, after the manifest that defines them, `protocol/v2.json`; the name is for the record format, not a version of this project. They are the only format the plugin reads, and only the `attention` command writes them: see [Record contract](record-contract.md).
 

@@ -354,15 +354,16 @@ impl<'a> Reader<'a> {
                 turn,
                 last_working_at,
             } => {
+                let prompt_turn = crate::lifecycle::PromptTurn {
+                    observation_id: &turn.prompt_observation_id,
+                    observed_mono_ns: &turn.prompt_observed_mono_ns,
+                };
                 if !crate::lifecycle::latest_prompt_is(
                     root,
                     &request.address,
                     &request.launch_id,
                     &request.binding_id(),
-                    crate::lifecycle::PromptTurn {
-                        observation_id: &turn.prompt_observation_id,
-                        observed_mono_ns: &turn.prompt_observed_mono_ns,
-                    },
+                    prompt_turn,
                 ) {
                     return Ok(Some(Followed::PromptReplaced));
                 }
@@ -395,10 +396,7 @@ impl<'a> Reader<'a> {
                             &request.address,
                             &request.launch_id,
                             host,
-                            crate::lifecycle::PromptTurn {
-                                observation_id: &turn.prompt_observation_id,
-                                observed_mono_ns: &turn.prompt_observed_mono_ns,
-                            },
+                            prompt_turn,
                             &event,
                             ports,
                         )

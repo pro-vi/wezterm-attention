@@ -436,14 +436,8 @@ def validate_lifecycle(value: dict[str, Any], manifest: dict[str, Any]) -> None:
             request = kind in {"approval_requested", "automatic_denial", "elicitation_requested", "elicitation_action_selected", "notice"}
             if kind in {"tool_preflight", "tool_result"}:
                 request = item["tool_class"] != "generic"
-                provider_tool = (value["provider"], item["tool_name"])
-                expected = {
-                    ("claude", "AskUserQuestion"): ("question", "blocking"),
-                    ("codex", "request_user_input"): ("question", "blocking"),
-                    ("codex", "request_user_input_async"): ("question", "nonblocking"),
-                    ("codex", "request_permissions"): ("permission", None),
-                    ("agy", "ask_question"): ("question", "blocking"),
-                }.get(provider_tool, ("generic", None))
+                entry = manifest["tool_classification"].get(value["provider"], {}).get(item["tool_name"])
+                expected = (entry["tool_class"], entry.get("question_mode")) if entry else ("generic", None)
                 if (item["tool_class"], item.get("question_mode")) != expected:
                     raise InvalidRecord("tool classification mismatch")
                 if item.get("question_mode") == "nonblocking":
