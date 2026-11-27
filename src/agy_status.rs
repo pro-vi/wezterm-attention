@@ -460,11 +460,12 @@ fn direct_parent_from_messages(
     None
 }
 
-/// Resolve a subagent conversation's direct parent, root lead conversation id,
-/// and `Role`/`TypeName` from `<artifactDir>/.system_generated/messages/*.json`.
-/// Walks upward through `<brain>/<parentId>/.system_generated/messages/*.json`
-/// so nested grandchildren map to the pane's root lead session. Fails closed
-/// (`None`) on invalid segments, cycles, or depth beyond `MAX_SUBAGENT_DEPTH`.
+/// Resolve a subagent conversation's root lead conversation id and
+/// `Role`/`TypeName` from `<artifactDir>/.system_generated/messages/*.json`.
+/// Walks upward from its direct parent through
+/// `<brain>/<parentId>/.system_generated/messages/*.json` so nested
+/// grandchildren map to the pane's root lead session. Fails closed (`None`)
+/// on invalid segments, cycles, or depth beyond `MAX_SUBAGENT_DEPTH`.
 pub fn resolve_subagent_lineage(
     conversation_id: &str,
     artifact_dir: &Path,
@@ -1600,21 +1601,27 @@ mod tests {
             json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "t1"}),
             json!({"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "done"})
         );
-        let tail = format!(
+        let tail_template = format!(
             "{}\n{}\n",
-            json!({"step_index": 2, "type": "USER_INPUT", "status": "DONE", "content": "x".repeat(600 * 1024)}),
+            json!({"step_index": 2, "type": "USER_INPUT", "status": "DONE", "content": ""}),
             json!({"step_index": 3, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "msg"})
         );
-        // Pad earlier so size - 512 KiB lands on an exact '\n' byte.
-        let mut content = earlier;
-        let target_prefix = 64 * 1024;
-        let pad_len = target_prefix - content.len() - 1;
-        content.push_str(&format!(
-            "{}\n",
-            json!({"step_index": 99, "type": "GENERIC", "content": "p".repeat(pad_len.saturating_sub(50))})
-        ));
-        content.push_str(&tail);
+        let pad_len = super::TRANSCRIPT_PROMPT_WINDOW_BYTES - tail_template.len();
+        let tail = format!(
+            "{}\n{}\n",
+            json!({"step_index": 2, "type": "USER_INPUT", "status": "DONE", "content": "x".repeat(pad_len)}),
+            json!({"step_index": 3, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "msg"})
+        );
+        assert_eq!(tail.len(), super::TRANSCRIPT_PROMPT_WINDOW_BYTES);
+        let content = format!("{earlier}{tail}");
+        assert_eq!(
+            content.as_bytes()[content.len() - super::TRANSCRIPT_PROMPT_WINDOW_BYTES - 1],
+            b'\n'
+        );
         fs::write(&tx, &content).unwrap();
+        let tail_read = super::read_tail_bytes(&tx, super::TRANSCRIPT_PROMPT_WINDOW_BYTES)
+            .expect("newline-aligned tail should read");
+        assert!(tail_read.omitted_prefix && !tail_read.partial_first_line);
         assert_eq!(is_user_prompt_invocation(&tx), None);
         let _ = fs::remove_dir_all(dir);
     }
