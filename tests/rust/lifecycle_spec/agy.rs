@@ -63,7 +63,6 @@ fn link_agy_child(setup: &Setup, parent: &str, child: &str, role: &str) -> Strin
 
 fn agy_hook_cli(
     setup: &Setup,
-    _env: &BTreeMap<String, String>,
     event_name: &str,
     payload: &Value,
     extra: &[&str],
@@ -117,13 +116,7 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
         "modelName": "gemini-3.8-flash-medium",
         "lastUserInput": "Summarize the tests"
     });
-    let start_out = agy_hook_cli(
-        &setup,
-        &setup.env,
-        "SessionStart",
-        &start_payload,
-        &["--strict"],
-    );
+    let start_out = agy_hook_cli(&setup, "SessionStart", &start_payload, &["--strict"]);
     assert!(
         start_out.status.success(),
         "{}",
@@ -157,7 +150,6 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
     });
     let pre_out = agy_hook_cli(
         &setup,
-        &setup.env,
         "PreInvocation",
         &pre_inv,
         &[
@@ -203,7 +195,6 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
     );
     let wakeup_out = agy_hook_cli(
         &setup,
-        &setup.env,
         "PreInvocation",
         &pre_inv,
         &[
@@ -258,7 +249,6 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
     });
     let stop_out = agy_hook_cli(
         &setup,
-        &setup.env,
         "Stop",
         &stop_payload,
         &[
@@ -333,7 +323,6 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
     });
     let err_out = agy_hook_cli(
         &setup,
-        &setup.env,
         "Stop",
         &err_stop,
         &[
@@ -468,15 +457,9 @@ fn agy_quiet_checks_run_on_prompt_first_tool_and_normal_stop_only() {
         "lastUserInput": "auto prompt"
     });
     assert!(
-        agy_hook_cli(
-            &setup,
-            &setup.env,
-            "SessionStart",
-            &start_payload,
-            &["--strict"]
-        )
-        .status
-        .success()
+        agy_hook_cli(&setup, "SessionStart", &start_payload, &["--strict"])
+            .status
+            .success()
     );
 
     let log_file = setup._scratch.0.join("quiet-inputs.ndjson");
@@ -502,7 +485,6 @@ fn agy_quiet_checks_run_on_prompt_first_tool_and_normal_stop_only() {
     });
     let out = agy_hook_cli(
         &setup,
-        &setup.env,
         "PreInvocation",
         &pre0,
         &["--quiet-check", &check_arg, "--strict"],
@@ -529,7 +511,6 @@ fn agy_quiet_checks_run_on_prompt_first_tool_and_normal_stop_only() {
     assert!(
         agy_hook_cli(
             &setup,
-            &setup.env,
             "PreToolUse",
             &tool1,
             &["--quiet-check", &check_arg, "--strict"],
@@ -548,7 +529,6 @@ fn agy_quiet_checks_run_on_prompt_first_tool_and_normal_stop_only() {
     assert!(
         agy_hook_cli(
             &setup,
-            &setup.env,
             "PreToolUse",
             &tool2,
             &["--quiet-check", &check_arg, "--strict"],
@@ -573,7 +553,6 @@ fn agy_quiet_checks_run_on_prompt_first_tool_and_normal_stop_only() {
     assert!(
         agy_hook_cli(
             &setup,
-            &setup.env,
             "PreInvocation",
             &pre1,
             &["--quiet-check", &check_arg, "--strict"],
@@ -596,7 +575,6 @@ fn agy_quiet_checks_run_on_prompt_first_tool_and_normal_stop_only() {
     assert!(
         agy_hook_cli(
             &setup,
-            &setup.env,
             "Stop",
             &non_idle_stop,
             &["--quiet-check", &check_arg, "--strict"],
@@ -620,7 +598,6 @@ fn agy_quiet_checks_run_on_prompt_first_tool_and_normal_stop_only() {
     });
     let err_out = agy_hook_cli(
         &setup,
-        &setup.env,
         "Stop",
         &err_stop,
         &["--quiet-check", &check_arg, "--debug", "--strict"],
@@ -650,7 +627,6 @@ fn agy_quiet_checks_run_on_prompt_first_tool_and_normal_stop_only() {
     });
     let ok_out = agy_hook_cli(
         &setup,
-        &setup.env,
         "Stop",
         &ok_stop,
         &["--quiet-check", &check_arg, "--strict"],
@@ -1590,7 +1566,6 @@ fn agy_rejected_transcript_and_corrupt_user_input_fail_closed() {
         });
         let out = agy_hook_cli(
             &setup,
-            &setup.env,
             "PreInvocation",
             &pre,
             &[
@@ -1642,7 +1617,6 @@ fn agy_rejected_transcript_and_corrupt_user_input_fail_closed() {
     });
     let stop_out = agy_hook_cli(
         &setup,
-        &setup.env,
         "Stop",
         &stop_payload,
         &[
@@ -2633,7 +2607,6 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
     assert!(
         agy_hook_cli(
             &setup,
-            &setup.env,
             "SessionStart",
             &json!({
                 "hookEventName": "SessionStart",
@@ -2650,7 +2623,6 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
     assert!(
         agy_hook_cli(
             &setup,
-            &setup.env,
             "Stop",
             &json!({
                 "hookEventName": "Stop",
@@ -2797,7 +2769,7 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
             }),
         ),
     ] {
-        let out = agy_hook_cli(&setup, &setup.env, event_name, &payload, &["--strict"]);
+        let out = agy_hook_cli(&setup, event_name, &payload, &["--strict"]);
         assert!(
             out.status.success(),
             "{event_name}: {}",
@@ -2843,13 +2815,7 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
 
     let calls_before_wakeup = check_calls();
     let prompts_before_wakeup = prompt_observations();
-    let wakeup_out = agy_hook_cli(
-        &setup,
-        &setup.env,
-        "PreInvocation",
-        &wakeup_payload,
-        &["--strict"],
-    );
+    let wakeup_out = agy_hook_cli(&setup, "PreInvocation", &wakeup_payload, &["--strict"]);
     assert!(wakeup_out.status.success());
     assert_eq!(check_calls(), calls_before_wakeup);
     assert_eq!(prompt_observations(), prompts_before_wakeup);
@@ -2866,7 +2832,6 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
         assert!(
             agy_hook_cli(
                 &setup,
-                &setup.env,
                 "SessionStart",
                 &json!({
                     "hookEventName": "SessionStart",
@@ -2933,15 +2898,9 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
     );
 
     assert!(
-        agy_hook_cli(
-            &setup,
-            &setup.env,
-            "PostToolUse",
-            &kill_one_payload,
-            &["--strict"],
-        )
-        .status
-        .success()
+        agy_hook_cli(&setup, "PostToolUse", &kill_one_payload, &["--strict"],)
+            .status
+            .success()
     );
     assert_eq!(check_calls(), calls_before_wakeup);
     let after_kill_one = shown_activity(&setup.binding_dir("agy", LEAD)).unwrap();
@@ -2957,15 +2916,9 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
     assert_eq!(children_after_one["live"][0]["agent_id"], "quiet-w2");
 
     assert!(
-        agy_hook_cli(
-            &setup,
-            &setup.env,
-            "PostToolUse",
-            &kill_all_payload,
-            &["--strict"],
-        )
-        .status
-        .success()
+        agy_hook_cli(&setup, "PostToolUse", &kill_all_payload, &["--strict"],)
+            .status
+            .success()
     );
     assert_eq!(check_calls(), calls_before_wakeup);
     let after_kill_all = shown_activity(&setup.binding_dir("agy", LEAD)).unwrap();
@@ -2995,7 +2948,6 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
     assert!(
         agy_hook_cli(
             &setup,
-            &setup.env,
             "Stop",
             &json!({
                 "hookEventName": "Stop",
@@ -3015,7 +2967,6 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
     );
     let unreadable_out = agy_hook_cli(
         &setup,
-        &setup.env,
         "PreInvocation",
         &json!({
             "hookEventName": "PreInvocation",
@@ -3058,7 +3009,6 @@ fn agy_unclaimed_prompt_holds_unseen_stop_until_first_tool_and_malformed_executi
     assert!(
         agy_hook_cli(
             &setup,
-            &setup.env,
             "SessionStart",
             &json!({
                 "hookEventName": "SessionStart",
@@ -3075,7 +3025,6 @@ fn agy_unclaimed_prompt_holds_unseen_stop_until_first_tool_and_malformed_executi
     assert!(
         agy_hook_cli(
             &setup,
-            &setup.env,
             "Stop",
             &json!({
                 "hookEventName": "Stop",
@@ -3103,7 +3052,6 @@ fn agy_unclaimed_prompt_holds_unseen_stop_until_first_tool_and_malformed_executi
     assert!(
         agy_hook_cli(
             &setup,
-            &setup.env,
             "PreInvocation",
             &json!({
                 "hookEventName": "PreInvocation",
@@ -3126,7 +3074,6 @@ fn agy_unclaimed_prompt_holds_unseen_stop_until_first_tool_and_malformed_executi
     assert!(
         agy_hook_cli(
             &setup,
-            &setup.env,
             "PreToolUse",
             &json!({
                 "hookEventName": "PreToolUse",
@@ -3159,7 +3106,6 @@ fn agy_unclaimed_prompt_holds_unseen_stop_until_first_tool_and_malformed_executi
     assert!(
         agy_hook_cli(
             &setup,
-            &setup.env,
             "PreInvocation",
             &json!({
                 "hookEventName": "PreInvocation",
@@ -3201,7 +3147,6 @@ fn agy_unclaimed_prompt_holds_unseen_stop_until_first_tool_and_malformed_executi
     // and does NOT inherit the prior turn's quiet note.
     let bad_exec_out = agy_hook_cli(
         &setup,
-        &setup.env,
         "PreInvocation",
         &bad_exec_payload,
         &["--quiet-check", &claim_arg, "--debug"],
@@ -3224,7 +3169,6 @@ fn agy_unclaimed_prompt_holds_unseen_stop_until_first_tool_and_malformed_executi
     assert!(
         agy_hook_cli(
             &setup,
-            &setup.env,
             "PreToolUse",
             &json!({
                 "hookEventName": "PreToolUse",
@@ -3243,7 +3187,7 @@ fn agy_unclaimed_prompt_holds_unseen_stop_until_first_tool_and_malformed_executi
         "notify"
     );
     assert!(
-        agy_hook_cli(&setup, &setup.env, "PreInvocation", &bad_exec_payload, &[],)
+        agy_hook_cli(&setup, "PreInvocation", &bad_exec_payload, &[],)
             .status
             .success()
     );

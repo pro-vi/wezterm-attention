@@ -433,14 +433,16 @@ A command that records a Codex turn's errored end writes an `attempt_outcome`
 with `source_event` `task_complete`, which a plugin from 1.1.0 or earlier does
 not list. One that records a Claude turn stopped with Esc writes a
 `user_interrupt` with `source_event` `session_status`, which a plugin from 1.3.0
-or earlier does not list. A command recording Agy events writes
-`provider: "agy"` (including `user_interrupt` with `source_event` `agy_status`),
-which a plugin from 1.17.0 or earlier does not list. Such a plugin reads the
-binding's `lifecycle.json` as
+or earlier does not list. Such a plugin reads the binding's `lifecycle.json` as
 invalid and shows its pane with no lifecycle until the end leaves the pool. A
-plugin reads the manifest once, when WezTerm loads its configuration, so one
-updated on disk still reads that way until the configuration is reloaded.
-Update the plugin with the command, as [Install](../README.md#install) says.
+command recording Agy events writes `provider: "agy"` (including
+`user_interrupt` with `source_event` `agy_status`), which a plugin from 1.17.0
+or earlier does not list in `enums.providers`; such a plugin rejects the
+binding's `binding.json` (and `children.json`/`lifecycle.json`) and returns an
+empty view for that pane until the plugin is updated and reloaded. A plugin
+reads the manifest once, when WezTerm loads its configuration, so one updated
+on disk still reads that way until the configuration is reloaded. Update the
+plugin with the command, as [Install](../README.md#install) says.
 
 ## A record write can be reported failed after readers already see it
 

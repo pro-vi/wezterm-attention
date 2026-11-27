@@ -133,11 +133,6 @@ fn app_data_dir_from_brain_descendant(path: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Path to `conversation_summaries.db` for an `agy` session.
-pub fn summaries_db_path(transcript_path: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
-    Some(app_data_dir(transcript_path, home)?.join("conversation_summaries.db"))
-}
-
 /// Validate that `id` is a safe single path segment (rejecting empty strings,
 /// control characters, `.`, `..`, and path separators).
 fn valid_conversation_segment(id: &str) -> bool {
@@ -147,19 +142,6 @@ fn valid_conversation_segment(id: &str) -> bool {
         && !id.contains('/')
         && !id.contains('\\')
         && !id.contains('\0')
-}
-
-/// Path to `conversations/<conversationId>.db` for an `agy` session.
-pub fn conversation_db_path(
-    transcript_path: Option<&str>,
-    home: Option<&str>,
-    conversation_id: &str,
-) -> Option<PathBuf> {
-    let dir = app_data_dir(transcript_path, home)?;
-    valid_conversation_segment(conversation_id).then(|| {
-        dir.join("conversations")
-            .join(format!("{conversation_id}.db"))
-    })
 }
 
 /// Resolve `conversation_summaries.db` and (when `conversation_id` is a valid
@@ -985,9 +967,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        Reading, ReplyRead, SubagentLineage, Unreadable, app_data_dir, conversation_db_path,
-        is_user_prompt_invocation, last_reply_from_transcript, read_status,
-        resolve_subagent_lineage, summaries_db_path,
+        Reading, ReplyRead, SubagentLineage, Unreadable, app_data_dir, is_user_prompt_invocation,
+        last_reply_from_transcript, read_status, resolve_subagent_lineage, status_db_paths,
     };
 
     fn scratch(name: &str) -> PathBuf {
@@ -1393,21 +1374,24 @@ mod tests {
             Some(PathBuf::from("/tmp/agy-app"))
         );
         assert_eq!(
-            summaries_db_path(Some(tx), Some("/Users/x")),
-            Some(PathBuf::from("/tmp/agy-app/conversation_summaries.db"))
+            status_db_paths(Some(tx), Some("/Users/x"), Some("conv-1")),
+            Some((
+                PathBuf::from("/tmp/agy-app/conversation_summaries.db"),
+                Some(PathBuf::from("/tmp/agy-app/conversations/conv-1.db")),
+            ))
         );
         assert_eq!(
-            conversation_db_path(Some(tx), Some("/Users/x"), "conv-1"),
-            Some(PathBuf::from("/tmp/agy-app/conversations/conv-1.db"))
+            status_db_paths(Some(tx), Some("/Users/x"), Some("../escape")),
+            Some((
+                PathBuf::from("/tmp/agy-app/conversation_summaries.db"),
+                None,
+            ))
         );
         assert_eq!(
-            conversation_db_path(Some(tx), Some("/Users/x"), "../escape"),
-            None
-        );
-        assert_eq!(
-            summaries_db_path(None, Some("/Users/x")),
-            Some(PathBuf::from(
-                "/Users/x/.gemini/antigravity-cli/conversation_summaries.db"
+            status_db_paths(None, Some("/Users/x"), None),
+            Some((
+                PathBuf::from("/Users/x/.gemini/antigravity-cli/conversation_summaries.db"),
+                None,
             ))
         );
     }
