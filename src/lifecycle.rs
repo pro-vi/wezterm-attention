@@ -54,6 +54,10 @@ pub struct HookOutcome {
     /// Whether the admitted pane carried the user's mute once the hook's
     /// writes were done; false when no pane was admitted.
     pub muted: bool,
+    /// True only when this invocation freshly persisted a non-superseded turn
+    /// end for the binding's current turn, so an `agy` `Stop` without
+    /// `finalModelOutput` may safely fall back to the live transcript tail.
+    pub reply_transcript_attributable: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +79,8 @@ struct HookEvidence {
     observation_kind: Option<String>,
     pending_turn_end: Option<TurnEnd>,
     turn_end: Option<TurnEnd>,
+    pending_reply_transcript_attributable: bool,
+    reply_transcript_attributable: bool,
     hold_checks: Vec<HoldCheckOutcome>,
     /// The lifecycle snapshot id a quiet check read, `Some(None)` when the
     /// binding had recorded none yet; checked again under the writer locks.
@@ -1638,7 +1644,14 @@ fn append_observation(
         let recorded_prompt = ends_turn
             .then(|| latest_prompt(&resolved.root, &identity))
             .flatten();
-        if !snapshot.reduce(candidate, recorded_prompt.as_ref())? {
+        let continued_at = ends_turn
+            .then(|| agy_continued_at(&resolved.root, &identity, provider))
+            .flatten();
+        if !snapshot.reduce_with_continuation(
+            candidate,
+            recorded_prompt.as_ref(),
+            continued_at.as_deref(),
+        )? {
             let stored = snapshot
                 .pools
                 .general
@@ -1668,11 +1681,26 @@ fn append_observation(
             }
             return Ok(None);
         }
+        let latest_lead_prompt = latest(
+            snapshot
+                .lead_observations()
+                .filter(|item| item.is_lead_prompt()),
+        );
+        let matches_current_turn = match latest_lead_prompt {
+            None => true,
+            Some(prompt) => prompt.turn_id() == draft.turn_id(),
+        };
+        let fresh_current_turn_end = ends_turn
+            && pending_end
+                .as_ref()
+                .is_some_and(|end| end.status == TurnEndStatus::Recorded)
+            && matches_current_turn;
         if let Some(evidence) = &resolved.evidence {
             let mut evidence = evidence.borrow_mut();
             evidence.pending_observation_id = Some(draft.observation_id.clone());
             evidence.pending_observation_kind = Some(draft.body.kind().to_owned());
             evidence.pending_turn_end = pending_end;
+            evidence.pending_reply_transcript_attributable = fresh_current_turn_end;
         }
         let value = serde_json::to_value(snapshot).map_err(AttentionError::record_json)?;
         Ok(Some(PreparedRecordWrite::new(path, &value)?))
@@ -2032,6 +2060,7 @@ fn apply_activity(
                         draft,
                         observation,
                         latest_prompt(&resolved.root, &identity).as_ref(),
+                        agy_thinking_order(snapshot.provider, existing.as_ref(), clear.as_ref()),
                     )
                 })
             });
@@ -2447,6 +2476,7 @@ fn apply_observed_outputs_with(
             evidence.observation_id = evidence.pending_observation_id.clone();
             evidence.observation_kind = evidence.pending_observation_kind.clone();
             evidence.turn_end = evidence.pending_turn_end.clone();
+            evidence.reply_transcript_attributable = evidence.pending_reply_transcript_attributable;
         }
     };
     if let Some(replacement) = &mutation.lifecycle_replacement {
@@ -3346,7 +3376,7 @@ fn apply_clear_event(
                 let prompt = prompt_loaded
                     .get_or_insert_with(|| latest_prompt(&resolved.root, &identity))
                     .as_ref();
-                if snapshot.repeats_turn_end(draft, observation, prompt) {
+                if snapshot.repeats_turn_end(draft, observation, prompt, None) {
                     let existing_clear =
                         read_record_at(&resolved.root, "activity_clear", &identity)?;
                     let mut result = LifecycleResult::new(Disposition::Skipped);
@@ -3622,6 +3652,8 @@ fn apply_provider_event_with_request(
         observation_kind: None,
         pending_turn_end: None,
         turn_end: None,
+        pending_reply_transcript_attributable: false,
+        reply_transcript_attributable: false,
         quiet_snapshot: None,
         hold_checks: request
             .map(|r| {
@@ -3675,6 +3707,7 @@ fn apply_provider_event_with_request(
         turn_end: evidence.turn_end.clone(),
         hold_checks: evidence.hold_checks.clone(),
         muted,
+        reply_transcript_attributable: evidence.reply_transcript_attributable,
     }
 }
 
@@ -3831,7 +3864,8 @@ fn apply_provider_event_inner(
         }
         // A follower that could not start leaves the hook's record as written,
         // and says so only where nothing else is reported.
-        if let Some(problem) = start_turn_follower(&resolved, event, env, ports) {
+        if let Some(problem) = start_turn_follower(&resolved, event, accepted(&result), env, ports)
+        {
             result.diagnostic.get_or_insert(problem);
         }
         result
@@ -3857,7 +3891,10 @@ fn apply_provider_event_inner(
 /// turn, and the follower writes only for a turn the binding recorded or one
 /// it carried into. A Claude or Agy follower follows a prompt, whether or not
 /// it carries a turn id, and starts only once the prompt record names it as the
-/// lead's latest prompt: it ends the turn only while that holds. A
+/// lead's latest prompt: it ends the turn only while that holds. On Agy, an
+/// accepted lead continuation or wakeup `PreInvocation` also restarts the
+/// follower against that standing prompt when no follower holds the lock (for
+/// example after an idle poll between a blocked `Stop` and its continuation). A
 /// `CLAUDE_CONFIG_DIR` the hook could not keep starts no Claude follower, since
 /// the status file is in that directory, not in `~/.claude`; an Agy prompt
 /// derives `<appDataDir>` from `transcriptPath`'s `brain/` ancestor or falls
@@ -3866,21 +3903,23 @@ fn apply_provider_event_inner(
 fn start_turn_follower(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
+    event_accepted: bool,
     env: &BTreeMap<String, String>,
     ports: &RuntimePorts<'_>,
 ) -> Option<Diagnostic> {
-    let observation = event.observation.as_ref()?;
+    let observation = event.observation.as_ref();
     let host = &resolved.host.as_ref()?.proof.owner;
-    let confirmed_latest_prompt = || {
-        if !observation.is_lead_prompt() {
+    let confirmed_latest_prompt = |obs: &LifecycleObservation| {
+        if !obs.is_lead_prompt() {
             return None;
         }
         let binding_id = event_binding_id(event, &resolved.launch_id).ok()?;
         latest_prompt(&resolved.root, &resolved.binding(&binding_id))
-            .filter(|latest| latest.observation_id == observation.observation_id)
+            .filter(|latest| latest.observation_id == obs.observation_id)
     };
     let turn = match event.provider? {
         Provider::Codex => {
+            let observation = observation?;
             if observation.actor != crate::observations::Actor::Lead {
                 return None;
             }
@@ -3915,7 +3954,7 @@ fn start_turn_follower(
             {
                 return None;
             }
-            let latest = confirmed_latest_prompt()?;
+            let latest = confirmed_latest_prompt(observation?)?;
             let status_file = crate::claude_status::status_path(
                 event.config_dir.as_deref(),
                 env.get("HOME").map(String::as_str),
@@ -3928,7 +3967,26 @@ fn start_turn_follower(
             })
         }
         Provider::Agy => {
-            let latest = confirmed_latest_prompt()?;
+            let latest = if let Some(obs) = observation.filter(|obs| obs.is_lead_prompt()) {
+                confirmed_latest_prompt(obs)?
+            } else if event_accepted
+                && event.source_event == "PreInvocation"
+                && event.agent_id.is_none()
+                && event.activity_type.as_deref() == Some("thinking")
+            {
+                let binding_id = event_binding_id(event, &resolved.launch_id).ok()?;
+                if crate::turn_follower::is_followed(&turn_follower_lock(
+                    &resolved.root,
+                    &resolved.address,
+                    &resolved.launch_id,
+                    &binding_id,
+                )) {
+                    return None;
+                }
+                latest_prompt(&resolved.root, &resolved.binding(&binding_id))?
+            } else {
+                return None;
+            };
             let (summaries_db, conv_db) = crate::agy_status::status_db_paths(
                 event.transcript_path.as_deref(),
                 env.get("HOME").map(String::as_str),
@@ -4274,6 +4332,36 @@ fn latest_prompt(root: &Path, identity: &RecordIdentity) -> Option<PromptReferen
         .and_then(|prompts| prompts.latest)
 }
 
+/// For `agy`, a Stop-hook continuation or wakeup (`PreInvocation` or
+/// non-terminal `Stop(fullyIdle: false)`) reopens `thinking` in `activity.json`
+/// without writing a lifecycle observation. Returns that activity's monotonic
+/// order when `activity` is an uncleared `agy` `thinking` record.
+fn agy_thinking_order<'a>(
+    provider: Provider,
+    activity: Option<&'a Value>,
+    clear: Option<&Value>,
+) -> Option<&'a str> {
+    if provider != Provider::Agy {
+        return None;
+    }
+    let record = activity?;
+    if record["type"] != "thinking" || record["source"] != "agy" || !uncleared(record, clear) {
+        return None;
+    }
+    record["observed_mono_ns"].as_str()
+}
+
+fn agy_continued_at(root: &Path, identity: &RecordIdentity, provider: Provider) -> Option<String> {
+    if provider != Provider::Agy {
+        return None;
+    }
+    let activity = read_record_at(root, "activity", identity).ok().flatten();
+    let clear = read_record_at(root, "activity_clear", identity)
+        .ok()
+        .flatten();
+    agy_thinking_order(provider, activity.as_ref(), clear.as_ref()).map(str::to_owned)
+}
+
 /// Record that the user stopped the prompt-followed lead turn `turn` follows
 /// (Claude Code or Antigravity CLI), from `event`, and clear the activity.
 /// Both providers run no hook on Esc (as of Claude Code 2.1.300 and `agy`
@@ -4340,25 +4428,17 @@ pub(crate) fn record_prompt_turn_interrupt(
                 latest(lead().filter(|item| item.observed_mono_ns.as_str() > prompt_stamp))
                 && last.ends_turn(provider)
             {
-                // As of `agy` 1.5.16, a Stop-hook continuation resumes the same
-                // turn via a lead `PreInvocation` that writes a newer `thinking`
-                // activity without emitting a new lead observation. Treat that
-                // newer uncleared `agy` thinking activity as reopening the turn.
                 let resumed_thinking = if provider == Provider::Agy {
                     let standing = read_record_at(root, "activity", &identity)?;
-                    let newer_thinking = standing.as_ref().is_some_and(|record| {
-                        record["type"] == "thinking"
-                            && record["source"] == "agy"
-                            && record["observed_mono_ns"]
-                                .as_str()
-                                .is_some_and(|order| order > last.observed_mono_ns.as_str())
-                    });
-                    let resumed = newer_thinking && {
-                        let clear = read_record_at(root, "activity_clear", &identity)?;
-                        standing
-                            .as_ref()
-                            .is_some_and(|record| uncleared(record, clear.as_ref()))
+                    let clear = if standing.as_ref().is_some_and(|record| {
+                        record["type"] == "thinking" && record["source"] == "agy"
+                    }) {
+                        read_record_at(root, "activity_clear", &identity)?
+                    } else {
+                        None
                     };
+                    let resumed = agy_thinking_order(provider, standing.as_ref(), clear.as_ref())
+                        .is_some_and(|order| order > last.observed_mono_ns.as_str());
                     activity = Some(standing);
                     resumed
                 } else {
@@ -4610,7 +4690,22 @@ fn obtain_hold_notes(
         // start has none to keep: a Codex prompt typed while its turn runs
         // shares the turn id of the prompt that started it.
         let superseded = snapshot.as_ref().is_some_and(|snapshot| {
-            (!before_thinking && snapshot.repeats_turn_end(draft, observation, recorded_prompt))
+            let continued_at = (!before_thinking)
+                .then(|| {
+                    agy_continued_at(
+                        &resolved.root,
+                        &resolved.binding(binding_id),
+                        snapshot.provider,
+                    )
+                })
+                .flatten();
+            (!before_thinking
+                && snapshot.repeats_turn_end(
+                    draft,
+                    observation,
+                    recorded_prompt,
+                    continued_at.as_deref(),
+                ))
                 || snapshot
                     .pools
                     .general
@@ -4846,6 +4941,8 @@ mod lifecycle_write_tests {
                 }],
             }),
             turn_end: None,
+            pending_reply_transcript_attributable: false,
+            reply_transcript_attributable: false,
             hold_checks: Vec::new(),
             quiet_snapshot: None,
             persistence: HookPersistence {

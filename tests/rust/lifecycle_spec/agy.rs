@@ -140,6 +140,7 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
     let pre_inv = json!({
         "hookEventName": "PreInvocation",
         "conversationId": LEAD,
+        "executionId": "exec-1",
         "transcriptPath": tx_str,
         "artifactDirectoryPath": artifact_str,
         "cwd": "/tmp/project",
@@ -237,6 +238,7 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
     let stop_payload = json!({
         "hookEventName": "Stop",
         "conversationId": LEAD,
+        "executionId": "exec-1",
         "transcriptPath": tx_str,
         "artifactDirectoryPath": artifact_str,
         "cwd": "/tmp/project",
@@ -247,19 +249,15 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
         "continuationActive": false,
         "executionNum": 1
     });
-    let stop_out = agy_hook_cli(
-        &setup,
-        "Stop",
-        &stop_payload,
-        &[
-            "--consumer",
-            stop_consumer.to_str().unwrap(),
-            "--consumer-timeout-ms",
-            "5000",
-            "--include-reply",
-            "--strict",
-        ],
-    );
+    let stop_flags = [
+        "--consumer",
+        stop_consumer.to_str().unwrap(),
+        "--consumer-timeout-ms",
+        "5000",
+        "--include-reply",
+        "--strict",
+    ];
+    let stop_out = agy_hook_cli(&setup, "Stop", &stop_payload, &stop_flags);
     assert!(
         stop_out.status.success(),
         "{}",
@@ -288,19 +286,70 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
         json!(true)
     );
 
-    // Forward-compat: populated finalModelOutput takes precedence over transcript.
+    // After a newer turn writes a newer reply, replaying Turn 1's Stop keeps
+    // its original observation_id and suppresses transcript fallback (while
+    // populated finalModelOutput still delivers); a late Stop for an earlier
+    // executionId also reports absent.
+    let turn1_stop_id = stop_delivery["observation_id"].as_str().unwrap().to_owned();
+    write_jsonl(
+        &tx,
+        &[
+            json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "Summarize the tests"}),
+            json!({"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "All 67 tests pass."}),
+            json!({"step_index": 2, "type": "USER_INPUT", "status": "DONE", "content": "Next turn"}),
+        ],
+    );
+    let mut turn2_pre = pre_inv.clone();
+    turn2_pre["executionId"] = json!("exec-2");
+    turn2_pre["lastUserInput"] = json!("Next turn");
+    turn2_pre["initialNumSteps"] = json!(3);
+    assert!(
+        agy_hook_cli(&setup, "PreInvocation", &turn2_pre, &["--strict"])
+            .status
+            .success()
+    );
+    write_jsonl(
+        &tx,
+        &[
+            json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "Summarize the tests"}),
+            json!({"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "All 67 tests pass."}),
+            json!({"step_index": 2, "type": "USER_INPUT", "status": "DONE", "content": "Next turn"}),
+            json!({"step_index": 3, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "Next turn reply."}),
+        ],
+    );
+    assert!(
+        agy_hook_cli(&setup, "Stop", &stop_payload, &stop_flags)
+            .status
+            .success()
+    );
+    let replay_delivery: Value = serde_json::from_slice(&fs::read(&stop_sink).unwrap()).unwrap();
+    assert_eq!(replay_delivery["observation_id"], turn1_stop_id);
+    assert_eq!(replay_delivery["reply"], json!({"availability": "absent"}));
+
     let mut fwd_stop = stop_payload.clone();
     fwd_stop["finalModelOutput"] = json!("Direct payload reply");
-    let fwd_parsed = parse_provider_event("agy", "Stop", &fwd_stop, &setup.env);
+    assert!(
+        agy_hook_cli(&setup, "Stop", &fwd_stop, &stop_flags)
+            .status
+            .success()
+    );
+    let fwd_delivery: Value = serde_json::from_slice(&fs::read(&stop_sink).unwrap()).unwrap();
+    assert_eq!(fwd_delivery["observation_id"], turn1_stop_id);
     assert_eq!(
-        serde_json::to_value(wezterm_attention::providers::reply_content(
-            &fwd_parsed,
-            &fwd_stop,
-            true
-        ))
-        .unwrap(),
+        fwd_delivery["reply"],
         json!({"availability": "available", "text": "Direct payload reply"})
     );
+
+    let mut stale_stop = stop_payload.clone();
+    stale_stop["executionId"] = json!("exec-stale");
+    stale_stop["executionNum"] = json!(0);
+    assert!(
+        agy_hook_cli(&setup, "Stop", &stale_stop, &stop_flags)
+            .status
+            .success()
+    );
+    let stale_delivery: Value = serde_json::from_slice(&fs::read(&stop_sink).unwrap()).unwrap();
+    assert_eq!(stale_delivery["reply"], json!({"availability": "absent"}));
 
     // Error Stop (TERMINAL_CUSTOM_HOOK) produces attempt_outcome, notify with
     // label, and unsupported reply (never leaks the prior turn's reply).
@@ -2170,29 +2219,9 @@ fn agy_follower_clears_esc_during_stop_hook_continuation_without_new_observation
     );
     apply_as(&setup, &env, &stop1, "00000000000000000400");
 
-    // Stop hook continuation resumes the same turn with PreInvocation(inv=1),
-    // writing thinking at t=500 with NO lead observation.
-    let pre1 = parse_provider_event(
-        "agy",
-        "PreInvocation",
-        &json!({
-            "hookEventName": "PreInvocation",
-            "conversationId": LEAD,
-            "transcriptPath": lead_tx.to_string_lossy(),
-            "cwd": "/tmp/project",
-            "lastUserInput": "cont",
-            "invocationNum": 1,
-            "initialNumSteps": 2
-        }),
-        &env,
-    );
-    assert!(pre1.observation.is_none());
-    apply_as(&setup, &env, &pre1, "00000000000000000500");
-    assert_eq!(
-        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
-        "thinking"
-    );
-
+    // If follower #1 observes RUNNING -> IDLE between Stop and the continuation
+    // PreInvocation, it gets Skipped and exits; PreInvocation(inv=1) must
+    // restart a fresh follower anchored to the standing prompt.
     let FollowedTurn::Agy(AgyTurn {
         ref summaries_db,
         ref conv_db,
@@ -2206,18 +2235,68 @@ fn agy_follower_clears_esc_during_stop_hook_continuation_without_new_observation
     run_sqlite(
         &summaries,
         "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, status TEXT, not_fully_idle INTEGER);
-         INSERT INTO conversation_summaries VALUES ('agy-lead-1', 'CASCADE_RUN_STATUS_IDLE', 0);",
+         INSERT INTO conversation_summaries VALUES ('agy-lead-1', 'CASCADE_RUN_STATUS_RUNNING', 1);",
     );
     run_sqlite(
         &conv,
-        "CREATE TABLE steps (idx INTEGER PRIMARY KEY, status INTEGER);
-         INSERT INTO steps VALUES (2, 6);",
+        "CREATE TABLE steps (idx INTEGER PRIMARY KEY, status INTEGER);",
     );
+    let polls = Arc::new(AtomicUsize::new(0));
+    let polls_for_hook = Arc::clone(&polls);
+    let summaries_for_hook = summaries.clone();
+    *setup.processes.on_read.lock().unwrap() = Some(Arc::new(move |pid| {
+        if pid == AGENT_PID && polls_for_hook.fetch_add(1, Ordering::SeqCst) == 1 {
+            run_sqlite(
+                &summaries_for_hook,
+                "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle=0 WHERE conversation_id='agy-lead-1';",
+            );
+        }
+        None
+    }));
+    let followed_idle = follow_every(&setup, &req, Duration::from_millis(10));
+    assert_eq!(recorded(&followed_idle), "skipped");
+    *setup.processes.on_read.lock().unwrap() = None;
+
+    // Stop hook continuation resumes the same turn with PreInvocation(inv=1),
+    // writing thinking at t=500 with NO lead observation and restarting a follower.
+    let started_before = setup.followers.started.lock().unwrap().len();
+    let pre1 = parse_provider_event(
+        "agy",
+        "PreInvocation",
+        &json!({
+            "hookEventName": "PreInvocation",
+            "conversationId": LEAD,
+            "transcriptPath": lead_tx.to_string_lossy(),
+            "artifactDirectoryPath": lead_dir.to_string_lossy(),
+            "cwd": "/tmp/project",
+            "lastUserInput": "cont",
+            "invocationNum": 1,
+            "initialNumSteps": 2
+        }),
+        &env,
+    );
+    assert!(pre1.observation.is_none());
+    apply_as(&setup, &env, &pre1, "00000000000000000500");
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "thinking"
+    );
+    assert_eq!(
+        setup.followers.started.lock().unwrap().len(),
+        started_before + 1
+    );
+    let req2 = last_request(&setup);
+    let FollowedTurn::Agy(ref turn2) = req2.turn else {
+        panic!("expected AgyTurn");
+    };
+    assert_eq!(turn2.initial_step_count, 2);
+
+    run_sqlite(&conv, "INSERT INTO steps VALUES (2, 6);");
     setup.clock = FixedClock {
         monotonic: "00000000000000000900",
         unix: "00000000099999999900",
     };
-    let followed = follow_every(&setup, &req, Duration::from_millis(10));
+    let followed = follow_every(&setup, &req2, Duration::from_millis(10));
     assert_eq!(recorded(&followed), "applied");
     assert!(shown_activity(&setup.binding_dir("agy", LEAD)).is_none());
 }
@@ -2674,6 +2753,22 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
             .filter(|item| item["kind"] == "prompt_submitted")
             .count()
     };
+    let latest_stop_id = || {
+        let snapshot: Value = serde_json::from_slice(
+            &fs::read(setup.binding_dir("agy", LEAD).join("lifecycle.json")).unwrap(),
+        )
+        .unwrap();
+        snapshot["pools"]["general"]["observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|item| item["kind"] == "response_finished")
+            .unwrap()["observation_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
     let checks_path = PathBuf::from(&setup.env["WEZTERM_ATTENTION_DIR"]).join("checks.json");
     fs::write(
         &checks_path,
@@ -2691,14 +2786,31 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
     fs::set_permissions(&checks_path, fs::Permissions::from_mode(0o600)).unwrap();
 
     // 3. Application turn runs PreInvocation(0) -> PreToolUse -> Stop(exec=0)
-    // -> Stop-hook continuation PreInvocation(inv=1) -> PreToolUse -> Stop(exec=1);
-    // every step stays quiet and keeps the unread human unseen_stop.
-    for (event_name, payload) in [
+    // -> Stop-hook continuation PreInvocation(inv=1) -> PreToolUse -> Stop(exec=1)
+    // -> tool-free continuation PreInvocation(inv=2) -> Stop(exec=2);
+    // every step lands in its expected activity, stays quiet, and keeps the
+    // unread human unseen_stop, and each continuation Stop records its own end.
+    let mut stop_ids = Vec::new();
+    let stop_exec2 = json!({
+        "hookEventName": "Stop",
+        "conversationId": LEAD,
+        "executionId": "exec-auto",
+        "transcriptPath": tx_str,
+        "cwd": "/tmp/project",
+        "lastUserInput": "auto prompt",
+        "terminationReason": "NO_TOOL_CALL",
+        "fullyIdle": true,
+        "continuationActive": false,
+        "executionNum": 2
+    });
+    for (event_name, expected_type, payload) in [
         (
             "PreInvocation",
+            "thinking",
             json!({
                 "hookEventName": "PreInvocation",
                 "conversationId": LEAD,
+                "executionId": "exec-auto",
                 "transcriptPath": tx_str,
                 "cwd": "/tmp/project",
                 "lastUserInput": "auto prompt",
@@ -2708,9 +2820,11 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
         ),
         (
             "PreToolUse",
+            "thinking",
             json!({
                 "hookEventName": "PreToolUse",
                 "conversationId": LEAD,
+                "executionId": "exec-auto",
                 "transcriptPath": tx_str,
                 "cwd": "/tmp/project",
                 "lastUserInput": "auto prompt",
@@ -2719,9 +2833,11 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
         ),
         (
             "Stop",
+            "stop",
             json!({
                 "hookEventName": "Stop",
                 "conversationId": LEAD,
+                "executionId": "exec-auto",
                 "transcriptPath": tx_str,
                 "cwd": "/tmp/project",
                 "lastUserInput": "auto prompt",
@@ -2733,9 +2849,11 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
         ),
         (
             "PreInvocation",
+            "thinking",
             json!({
                 "hookEventName": "PreInvocation",
                 "conversationId": LEAD,
+                "executionId": "exec-auto",
                 "transcriptPath": tx_str,
                 "cwd": "/tmp/project",
                 "lastUserInput": "auto prompt",
@@ -2745,9 +2863,11 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
         ),
         (
             "PreToolUse",
+            "thinking",
             json!({
                 "hookEventName": "PreToolUse",
                 "conversationId": LEAD,
+                "executionId": "exec-auto",
                 "transcriptPath": tx_str,
                 "cwd": "/tmp/project",
                 "lastUserInput": "auto prompt",
@@ -2756,9 +2876,11 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
         ),
         (
             "Stop",
+            "stop",
             json!({
                 "hookEventName": "Stop",
                 "conversationId": LEAD,
+                "executionId": "exec-auto",
                 "transcriptPath": tx_str,
                 "cwd": "/tmp/project",
                 "lastUserInput": "auto prompt",
@@ -2768,6 +2890,21 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
                 "executionNum": 1
             }),
         ),
+        (
+            "PreInvocation",
+            "thinking",
+            json!({
+                "hookEventName": "PreInvocation",
+                "conversationId": LEAD,
+                "executionId": "exec-auto",
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "auto prompt",
+                "invocationNum": 2,
+                "initialNumSteps": 3
+            }),
+        ),
+        ("Stop", "stop", stop_exec2.clone()),
     ] {
         let out = agy_hook_cli(&setup, event_name, &payload, &["--strict"]);
         assert!(
@@ -2776,6 +2913,7 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
             String::from_utf8_lossy(&out.stderr)
         );
         let act = shown_activity(&setup.binding_dir("agy", LEAD)).unwrap();
+        assert_eq!(act["type"], expected_type, "{event_name}: {act}");
         assert_eq!(
             act["hold_notes"]["wezpup"]["quiet"],
             json!(true),
@@ -2786,7 +2924,20 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
             json!(human_stop_id),
             "{event_name} lost unseen_stop: {act}"
         );
+        if event_name == "Stop" {
+            stop_ids.push(latest_stop_id());
+        }
     }
+    assert_eq!(stop_ids.len(), 3);
+    assert_ne!(stop_ids[0], stop_ids[1]);
+    assert_ne!(stop_ids[1], stop_ids[2]);
+    // Immediate replay of Stop(exec=2) still deduplicates to the stored end.
+    assert!(
+        agy_hook_cli(&setup, "Stop", &stop_exec2, &["--strict"])
+            .status
+            .success()
+    );
+    assert_eq!(latest_stop_id(), stop_ids[2]);
 
     // 4. Confirmed background wakeup (invocationNum=0, transcript ending in SYSTEM_MESSAGE
     // after a completed PLANNER_RESPONSE) over the quiet stop preserves quiet note and
@@ -2952,13 +3103,14 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
             &json!({
                 "hookEventName": "Stop",
                 "conversationId": LEAD,
+                "executionId": "exec-auto",
                 "transcriptPath": tx_str,
                 "cwd": "/tmp/project",
                 "lastUserInput": "auto prompt",
                 "terminationReason": "NO_TOOL_CALL",
                 "fullyIdle": true,
                 "continuationActive": false,
-                "executionNum": 2
+                "executionNum": 3
             }),
             &["--strict"],
         )

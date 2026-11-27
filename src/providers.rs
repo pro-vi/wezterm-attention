@@ -1478,6 +1478,34 @@ pub fn reply_content(
     payload: &Value,
     requested: bool,
 ) -> crate::hook_content::HookContent {
+    reply_content_with_transcript_fallback(event, payload, requested, true)
+}
+
+/// Extract reply content for a transient hook delivery, gating mutable
+/// on-disk transcript fallback (`agy` when `finalModelOutput` is absent/empty)
+/// on `outcome.reply_transcript_attributable` so a replayed or superseded
+/// `Stop` never attributes a newer turn's transcript tail to an earlier
+/// observation id.
+pub fn reply_content_for_outcome(
+    event: &ProviderEvent,
+    payload: &Value,
+    requested: bool,
+    outcome: &crate::lifecycle::HookOutcome,
+) -> crate::hook_content::HookContent {
+    reply_content_with_transcript_fallback(
+        event,
+        payload,
+        requested,
+        outcome.reply_transcript_attributable,
+    )
+}
+
+fn reply_content_with_transcript_fallback(
+    event: &ProviderEvent,
+    payload: &Value,
+    requested: bool,
+    allow_transcript_fallback: bool,
+) -> crate::hook_content::HookContent {
     use crate::hook_content::HookContent;
     if !requested {
         return HookContent::NotRequested;
@@ -1511,6 +1539,9 @@ pub fn reply_content(
                 }
                 None | Some(Value::Null) | Some(Value::String(_)) => {}
                 Some(_) => return HookContent::Invalid,
+            }
+            if !allow_transcript_fallback {
+                return HookContent::Absent;
             }
             let Some(path) = event.transcript_path.as_deref() else {
                 return HookContent::Absent;

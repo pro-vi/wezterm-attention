@@ -1018,11 +1018,15 @@ impl LifecycleSnapshot {
 
     /// Whether `draft`, a lead turn end observed at `at`, is an end delivered
     /// again, of a turn the pools hold an end of (see [`Self::repeats`]).
+    /// `continued_at`, when present, is the monotonic order of a newer
+    /// uncleared activity proving the same turn resumed without emitting a
+    /// lifecycle observation (such as an `agy` continuation `PreInvocation`).
     pub fn repeats_turn_end(
         &self,
         draft: &LifecycleObservation,
         at: &str,
         recorded_prompt: Option<&PromptReference>,
+        continued_at: Option<&str>,
     ) -> bool {
         let key = draft.storage_key_parts();
         self.pools
@@ -1030,7 +1034,7 @@ impl LifecycleSnapshot {
             .observations
             .iter()
             .find(|item| item.storage_key_parts() == key)
-            .is_some_and(|stored| self.repeats(stored, draft, at, recorded_prompt))
+            .is_some_and(|stored| self.repeats(stored, draft, at, recorded_prompt, continued_at))
     }
 
     /// Whether `candidate`, observed at `at`, is `stored`, which has its key,
@@ -1042,13 +1046,17 @@ impl LifecycleSnapshot {
     /// equals `stored`. The pools keep one prompt per turn id, so a prompt
     /// typed while the turn runs is recorded only as the prompt record's
     /// latest, `recorded_prompt`, and counts as the lead going on; a prompt
-    /// carrying another turn's id is pooled, under that id.
+    /// carrying another turn's id is pooled, under that id. `continued_at`
+    /// carries the monotonic order of an uncleared same-turn continuation
+    /// activity when the provider reopens `thinking` without a lifecycle
+    /// observation.
     fn repeats(
         &self,
         stored: &LifecycleObservation,
         candidate: &LifecycleObservation,
         at: &str,
         recorded_prompt: Option<&PromptReference>,
+        continued_at: Option<&str>,
     ) -> bool {
         if stored.turn_id().is_some() && stored.ends_turn(self.provider) {
             let after = || {
@@ -1062,11 +1070,26 @@ impl LifecycleSnapshot {
             }) {
                 return true;
             }
+            let continuation_resumed = matches!(
+                (&stored.body, &candidate.body),
+                (
+                    ObservationBody::ResponseFinished { .. },
+                    ObservationBody::ResponseFinished {
+                        stop_hook_active: Some(true),
+                    }
+                )
+            );
             if after()
                 .map(|item| item.observed_mono_ns.as_str())
                 .chain(
                     recorded_prompt
                         .map(|prompt| prompt.observed_mono_ns.as_str())
+                        .filter(|order| *order > stored.observed_mono_ns.as_str()),
+                )
+                .chain(
+                    continuation_resumed
+                        .then_some(continued_at)
+                        .flatten()
                         .filter(|order| *order > stored.observed_mono_ns.as_str()),
                 )
                 .any(|order| order < at)
@@ -1212,6 +1235,18 @@ impl LifecycleSnapshot {
         candidate: LifecycleObservation,
         recorded_prompt: Option<&PromptReference>,
     ) -> Result<bool> {
+        self.reduce_with_continuation(candidate, recorded_prompt, None)
+    }
+
+    /// Like [`Self::reduce`], additionally accepting `continued_at` when a
+    /// same-turn continuation reopened `thinking` without a lifecycle
+    /// observation.
+    pub fn reduce_with_continuation(
+        &mut self,
+        candidate: LifecycleObservation,
+        recorded_prompt: Option<&PromptReference>,
+        continued_at: Option<&str>,
+    ) -> Result<bool> {
         self.validate_semantics()?;
         let limits = &manifest()?.limits;
         if !candidate.within_bounds()? {
@@ -1248,6 +1283,7 @@ impl LifecycleSnapshot {
                     &candidate,
                     &candidate.observed_mono_ns,
                     recorded_prompt,
+                    continued_at,
                 )
             {
                 return Ok(false);

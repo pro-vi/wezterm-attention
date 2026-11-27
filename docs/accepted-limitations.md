@@ -799,14 +799,19 @@ What it cannot do, and what else rests on `agy` 1.5.16's private on-disk files:
 
 - **macOS only for the Esc follower.** Elsewhere, an Esc-interrupted `agy` turn
   stays `thinking` until the next turn ends or `agy` exits.
-- **Private schema dependence.** Final replies for `--include-reply` (when
-  `Stop.finalModelOutput` is unset), prompt-vs-wakeup disambiguation at
-  `PreInvocation(invocationNum: 0)` (`transcript_full.jsonl`), subagent
-  parent/root linkage (`<artifactDirectoryPath>/.system_generated/messages/*.json`),
-  and Esc detection (`conversation_summaries.db`, `conversations/<id>.db`) all
-  read `agy` 1.5.16's private on-disk files. Every reader is bounded, refuses
+- **Private schema dependence and replay attribution.** Final replies for
+  `--include-reply` (when `Stop.finalModelOutput` is unset), prompt-vs-wakeup
+  disambiguation at `PreInvocation(invocationNum: 0)` (`transcript_full.jsonl`),
+  subagent parent/root linkage
+  (`<artifactDirectoryPath>/.system_generated/messages/*.json`), and Esc
+  detection (`conversation_summaries.db`, `conversations/<id>.db`) all read
+  `agy` 1.5.16's private on-disk files. Every reader is bounded, refuses
   symlinks and foreign ownership, and fails closed if `agy` changes its private
-  layout or SQLite schema.
+  layout or SQLite schema. Because `transcript_full.jsonl` carries no
+  `executionId`, `--include-reply` falls back to `transcript_full.jsonl` only
+  when `Stop` freshly writes a non-superseded end for the binding's current
+  turn; replayed or superseded `Stop` callbacks without `finalModelOutput`
+  report `reply` as `absent` rather than reading a newer turn's tail.
 - **No hook consumer or check on `agy_status`.** As with Claude's
   `session_status`, no hook consumer, reply capture, or quiet check runs for a
   follower-recorded `agy_status` interrupt; `attention observe` and
