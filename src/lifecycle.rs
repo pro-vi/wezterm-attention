@@ -190,7 +190,7 @@ pub struct LifecycleResult {
 }
 
 impl LifecycleResult {
-    fn new(disposition: Disposition) -> Self {
+    pub(crate) fn new(disposition: Disposition) -> Self {
         Self {
             disposition,
             diagnostic: None,
@@ -1647,6 +1647,29 @@ fn append_observation(
         let continued_at = ends_turn
             .then(|| agy_continued_at(&resolved.root, &identity, provider))
             .flatten();
+        let matches_current_turn = if ends_turn {
+            let latest_active = latest(
+                snapshot
+                    .lead_observations()
+                    .filter(|item| !item.ends_turn(provider)),
+            );
+            let prompt_covered = recorded_prompt.as_ref().is_none_or(|prompt| {
+                latest_active.is_some_and(|item| {
+                    item.observed_mono_ns.as_str() >= prompt.observed_mono_ns.as_str()
+                })
+            });
+            moved_aside.is_none()
+                && prompt_covered
+                && match draft.turn_id() {
+                    Some(turn) => latest_active.is_some_and(|item| item.turn_id() == Some(turn)),
+                    None => {
+                        snapshot.pools.general.retention_floor_mono_ns.is_none()
+                            && latest_active.is_some_and(|item| item.turn_id().is_none())
+                    }
+                }
+        } else {
+            false
+        };
         if !snapshot.reduce_with_continuation(
             candidate,
             recorded_prompt.as_ref(),
@@ -1681,15 +1704,6 @@ fn append_observation(
             }
             return Ok(None);
         }
-        let latest_lead_prompt = latest(
-            snapshot
-                .lead_observations()
-                .filter(|item| item.is_lead_prompt()),
-        );
-        let matches_current_turn = match latest_lead_prompt {
-            None => true,
-            Some(prompt) => prompt.turn_id() == draft.turn_id(),
-        };
         let fresh_current_turn_end = ends_turn
             && pending_end
                 .as_ref()
@@ -3864,7 +3878,8 @@ fn apply_provider_event_inner(
         }
         // A follower that could not start leaves the hook's record as written,
         // and says so only where nothing else is reported.
-        if let Some(problem) = start_turn_follower(&resolved, event, accepted(&result), env, ports)
+        if let Some(problem) =
+            start_turn_follower(&resolved, event, observation, accepted(&result), env, ports)
         {
             result.diagnostic.get_or_insert(problem);
         }
@@ -3891,18 +3906,20 @@ fn apply_provider_event_inner(
 /// turn, and the follower writes only for a turn the binding recorded or one
 /// it carried into. A Claude or Agy follower follows a prompt, whether or not
 /// it carries a turn id, and starts only once the prompt record names it as the
-/// lead's latest prompt: it ends the turn only while that holds. On Agy, an
-/// accepted lead continuation or wakeup `PreInvocation` also restarts the
-/// follower against that standing prompt when no follower holds the lock (for
-/// example after an idle poll between a blocked `Stop` and its continuation). A
-/// `CLAUDE_CONFIG_DIR` the hook could not keep starts no Claude follower, since
-/// the status file is in that directory, not in `~/.claude`; an Agy prompt
-/// derives `<appDataDir>` from `transcriptPath`'s `brain/` ancestor or falls
-/// back to `$HOME/.gemini/antigravity-cli`, starting no follower when neither
-/// gives an absolute directory.
+/// lead's latest prompt: it ends the turn only while that holds. On Agy, each
+/// follower is also scoped to the invocation timestamp that started it; an
+/// accepted lead continuation or wakeup `PreInvocation` starts a replacement
+/// follower whenever no follower holds the lock for an invocation after the
+/// prompt's latest turn end. A `CLAUDE_CONFIG_DIR` the hook could not keep
+/// starts no Claude follower, since the status file is in that directory, not
+/// in `~/.claude`; an Agy prompt derives `<appDataDir>` from
+/// `transcriptPath`'s `brain/` ancestor or falls back to
+/// `$HOME/.gemini/antigravity-cli`, starting no follower when neither gives an
+/// absolute directory.
 fn start_turn_follower(
     resolved: &ResolvedLaunch,
     event: &ProviderEvent,
+    event_observation: &str,
     event_accepted: bool,
     env: &BTreeMap<String, String>,
     ports: &RuntimePorts<'_>,
@@ -3967,23 +3984,45 @@ fn start_turn_follower(
             })
         }
         Provider::Agy => {
-            let latest = if let Some(obs) = observation.filter(|obs| obs.is_lead_prompt()) {
-                confirmed_latest_prompt(obs)?
+            let (latest, invocation_observed_mono_ns) = if let Some(obs) =
+                observation.filter(|obs| obs.is_lead_prompt())
+            {
+                let latest = confirmed_latest_prompt(obs)?;
+                let stamp = latest.observed_mono_ns.clone();
+                (latest, stamp)
             } else if event_accepted
                 && event.source_event == "PreInvocation"
                 && event.agent_id.is_none()
                 && event.activity_type.as_deref() == Some("thinking")
             {
                 let binding_id = event_binding_id(event, &resolved.launch_id).ok()?;
-                if crate::turn_follower::is_followed(&turn_follower_lock(
+                let identity = resolved.binding(&binding_id);
+                let latest = latest_prompt(&resolved.root, &identity)?;
+                let last_end = lifecycle_snapshot(&resolved.root, &identity).and_then(|snapshot| {
+                    snapshot
+                        .lead_observations()
+                        .filter(|item| {
+                            item.observed_mono_ns.as_str() > latest.observed_mono_ns.as_str()
+                                && item.ends_turn(Provider::Agy)
+                        })
+                        .map(|item| item.observed_mono_ns.clone())
+                        .max()
+                });
+                let covered = crate::turn_follower::followed_key(&turn_follower_lock(
                     &resolved.root,
                     &resolved.address,
                     &resolved.launch_id,
                     &binding_id,
-                )) {
+                ))
+                .is_some_and(|key| {
+                    key.strip_prefix(&latest.observation_id)
+                        .and_then(|rest| rest.strip_prefix(':'))
+                        .is_some_and(|stamp| last_end.as_deref().is_none_or(|end| stamp > end))
+                });
+                if covered {
                     return None;
                 }
-                latest_prompt(&resolved.root, &resolved.binding(&binding_id))?
+                (latest, event_observation.to_owned())
             } else {
                 return None;
             };
@@ -3997,6 +4036,7 @@ fn start_turn_follower(
             FollowedTurn::Agy(AgyTurn {
                 prompt_observation_id: latest.observation_id,
                 prompt_observed_mono_ns: latest.observed_mono_ns,
+                invocation_observed_mono_ns,
                 summaries_db: summaries_db.display().to_string(),
                 conv_db: conv_db.map(|path| path.display().to_string()),
                 initial_step_count: event.initial_step_count.unwrap_or(0),
@@ -4290,6 +4330,7 @@ pub(crate) fn record_codex_turn_failure(
 pub(crate) struct PromptTurn<'a> {
     pub(crate) observation_id: &'a str,
     pub(crate) observed_mono_ns: &'a str,
+    pub(crate) invocation_observed_mono_ns: Option<&'a str>,
 }
 
 /// Whether the lead's latest prompt in the binding `binding_id` is the
@@ -4310,6 +4351,25 @@ pub(crate) fn latest_prompt_is(
     .is_some_and(|latest| {
         latest.observation_id == turn.observation_id
             && latest.observed_mono_ns == turn.observed_mono_ns
+    })
+}
+
+/// Whether a lead turn-ending observation has already been recorded after
+/// `invocation_observed_mono_ns`, so an Agy follower for that invocation must
+/// exit and must not apply a stale status sample to a later continuation.
+pub(crate) fn agy_invocation_ended(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+    invocation_observed_mono_ns: &str,
+) -> bool {
+    let identity = RecordIdentity::binding(address, launch_id, binding_id);
+    lifecycle_snapshot(root, &identity).is_some_and(|snapshot| {
+        snapshot.lead_observations().any(|item| {
+            item.observed_mono_ns.as_str() > invocation_observed_mono_ns
+                && item.ends_turn(Provider::Agy)
+        })
     })
 }
 
@@ -4423,12 +4483,24 @@ pub(crate) fn record_prompt_turn_interrupt(
                     .iter()
                     .flat_map(LifecycleSnapshot::lead_observations)
             };
+            if provider == Provider::Agy
+                && let Some(invocation_stamp) = turn.invocation_observed_mono_ns
+                && lead().any(|item| {
+                    item.observed_mono_ns.as_str() > invocation_stamp
+                        && item.ends_turn(Provider::Agy)
+                })
+            {
+                return skipped();
+            }
             let mut activity: Option<Option<Value>> = None;
             if let Some(last) =
                 latest(lead().filter(|item| item.observed_mono_ns.as_str() > prompt_stamp))
                 && last.ends_turn(provider)
             {
-                let resumed_thinking = if provider == Provider::Agy {
+                let invocation_stamp = turn.invocation_observed_mono_ns.unwrap_or(prompt_stamp);
+                let resumed_thinking = if provider == Provider::Agy
+                    && invocation_stamp > last.observed_mono_ns.as_str()
+                {
                     let standing = read_record_at(root, "activity", &identity)?;
                     let clear = if standing.as_ref().is_some_and(|record| {
                         record["type"] == "thinking" && record["source"] == "agy"
@@ -4438,7 +4510,7 @@ pub(crate) fn record_prompt_turn_interrupt(
                         None
                     };
                     let resumed = agy_thinking_order(provider, standing.as_ref(), clear.as_ref())
-                        .is_some_and(|order| order > last.observed_mono_ns.as_str());
+                        .is_some_and(|order| order >= invocation_stamp);
                     activity = Some(standing);
                     resumed
                 } else {

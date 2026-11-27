@@ -69,7 +69,7 @@ No one kind marks the end of a turn. Read it per provider, from observations who
 | Codex | `user_interrupt` | `Interrupt`; Codex (source at commit `985cf47a4`) runs no `Stop` after one |
 | Codex | `attempt_outcome` | none: `task_complete` from the session rollout, with `error_code`; no hook consumer runs for it (see [accepted limitations](accepted-limitations.md#a-codex-turn-that-ends-on-a-model-error-is-recorded-only-from-its-rollout)) |
 | Pi | `run_settled` | `agent_settled`, which Pi 0.85.1 sends once no automatic retry, compaction or queued message will continue the run |
-| Agy | `response_finished` | `Stop` (as of `agy` 1.5.16) when `fullyIdle` is not false and `terminationReason` is `NO_TOOL_CALL`, `TERMINAL_STEP_TYPE` or `INJECTED_RESPONSE` |
+| Agy | `response_finished` | `Stop` (as of `agy` 1.5.16) when `fullyIdle` is not false and `terminationReason` is `NO_TOOL_CALL`, `TERMINAL_STEP_TYPE` or `INJECTED_RESPONSE` (carrying `execution_num` when the callback supplies `executionNum`) |
 | Agy | `attempt_outcome` | `Stop` (as of `agy` 1.5.16) when `fullyIdle` is not false and `terminationReason` is `ERROR`, `MAX_INVOCATIONS`, `MAX_FORCED_INVOCATIONS`, `MAX_TOKEN_BUDGET_EXCEEDED` or `TERMINAL_CUSTOM_HOOK`, with `error_code` set to that reason |
 | Agy | `user_interrupt` | `Stop` (as of `agy` 1.5.16) when `fullyIdle` is not false and `terminationReason` is `USER_CANCELED`, or `agy_status`, from `agy` 1.5.16's local status databases when the user stopped the turn with Esc (no hook consumer runs for `agy_status`; see [accepted limitations](accepted-limitations.md#an-agy-turn-stopped-with-esc-is-recorded-only-from-its-status-databases)) |
 

@@ -351,6 +351,81 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
     let stale_delivery: Value = serde_json::from_slice(&fs::read(&stop_sink).unwrap()).unwrap();
     assert_eq!(stale_delivery["reply"], json!({"availability": "absent"}));
 
+    // Evict Turn 1's Stop and Turn 2's PromptSubmitted from the 64-entry
+    // general pool with Turn 2 tool traffic: replaying Turn 1's Stop still
+    // reports absent while real Turn 2's Stop positively matches Turn 2's tool
+    // observations; after removing lifecycle.json, replaying Turn 1 also fails
+    // closed to absent.
+    let before_evict: LifecycleSnapshot = serde_json::from_slice(
+        &fs::read(setup.binding_dir("agy", LEAD).join("lifecycle.json")).unwrap(),
+    )
+    .unwrap();
+    let base_mono: u128 = before_evict
+        .pools
+        .general
+        .observations
+        .iter()
+        .map(|item| item.observed_mono_ns.parse::<u128>().unwrap())
+        .max()
+        .unwrap();
+    for step in 0..33u128 {
+        let call_id = format!("evict-{step}");
+        for (ev_name, offset) in [("PreToolUse", step * 2 + 1), ("PostToolUse", step * 2 + 2)] {
+            let tool_ev = parse_provider_event(
+                "agy",
+                ev_name,
+                &json!({
+                    "hookEventName": ev_name,
+                    "conversationId": LEAD,
+                    "executionId": "exec-2",
+                    "transcriptPath": tx_str,
+                    "cwd": "/tmp/project",
+                    "lastUserInput": "Next turn",
+                    "toolCall": {"name": "run_command", "id": call_id},
+                    "error": ""
+                }),
+                &setup.env,
+            );
+            apply_as(
+                &setup,
+                &setup.env,
+                &tool_ev,
+                &format!("{:020}", base_mono + offset),
+            );
+        }
+    }
+    assert!(
+        agy_hook_cli(&setup, "Stop", &stop_payload, &stop_flags)
+            .status
+            .success()
+    );
+    let evicted_replay: Value = serde_json::from_slice(&fs::read(&stop_sink).unwrap()).unwrap();
+    assert_eq!(evicted_replay["reply"], json!({"availability": "absent"}));
+
+    let mut turn2_stop = stop_payload.clone();
+    turn2_stop["executionId"] = json!("exec-2");
+    turn2_stop["lastUserInput"] = json!("Next turn");
+    turn2_stop["executionNum"] = json!(0);
+    assert!(
+        agy_hook_cli(&setup, "Stop", &turn2_stop, &stop_flags)
+            .status
+            .success()
+    );
+    let turn2_delivery: Value = serde_json::from_slice(&fs::read(&stop_sink).unwrap()).unwrap();
+    assert_eq!(
+        turn2_delivery["reply"],
+        json!({"availability": "available", "text": "Next turn reply."})
+    );
+
+    fs::remove_file(setup.binding_dir("agy", LEAD).join("lifecycle.json")).unwrap();
+    assert!(
+        agy_hook_cli(&setup, "Stop", &stop_payload, &stop_flags)
+            .status
+            .success()
+    );
+    let rebuilt_replay: Value = serde_json::from_slice(&fs::read(&stop_sink).unwrap()).unwrap();
+    assert_eq!(rebuilt_replay["reply"], json!({"availability": "absent"}));
+
     // Error Stop (TERMINAL_CUSTOM_HOOK) produces attempt_outcome, notify with
     // label, and unsupported reply (never leaks the prior turn's reply).
     let err_sink = setup._scratch.0.join("err-delivery.json");
@@ -2219,9 +2294,8 @@ fn agy_follower_clears_esc_during_stop_hook_continuation_without_new_observation
     );
     apply_as(&setup, &env, &stop1, "00000000000000000400");
 
-    // If follower #1 observes RUNNING -> IDLE between Stop and the continuation
-    // PreInvocation, it gets Skipped and exits; PreInvocation(inv=1) must
-    // restart a fresh follower anchored to the standing prompt.
+    // Once Stop(0) lands after invocation 0, follower #1 sees its invocation
+    // ended and exits Skipped immediately.
     let FollowedTurn::Agy(AgyTurn {
         ref summaries_db,
         ref conv_db,
@@ -2241,24 +2315,29 @@ fn agy_follower_clears_esc_during_stop_hook_continuation_without_new_observation
         &conv,
         "CREATE TABLE steps (idx INTEGER PRIMARY KEY, status INTEGER);",
     );
-    let polls = Arc::new(AtomicUsize::new(0));
-    let polls_for_hook = Arc::clone(&polls);
-    let summaries_for_hook = summaries.clone();
-    *setup.processes.on_read.lock().unwrap() = Some(Arc::new(move |pid| {
-        if pid == AGENT_PID && polls_for_hook.fetch_add(1, Ordering::SeqCst) == 1 {
-            run_sqlite(
-                &summaries_for_hook,
-                "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle=0 WHERE conversation_id='agy-lead-1';",
-            );
-        }
-        None
-    }));
     let followed_idle = follow_every(&setup, &req, Duration::from_millis(10));
     assert_eq!(recorded(&followed_idle), "skipped");
-    *setup.processes.on_read.lock().unwrap() = None;
 
     // Stop hook continuation resumes the same turn with PreInvocation(inv=1),
-    // writing thinking at t=500 with NO lead observation and restarting a follower.
+    // writing thinking at t=500 with NO lead observation and spawning a new
+    // invocation-scoped follower even while follower #1's lock is still held.
+    let (address, _) = pane_address(&env).unwrap();
+    let lock_path = wezterm_attention::records::turn_follower_lock(
+        &state_root(&env).unwrap(),
+        &address,
+        &env["WEZTERM_ATTENTION_LAUNCH_ID"],
+        &req.binding_id(),
+    );
+    let wezterm_attention::turn_follower::TakenTurn::Taken(held_old) =
+        wezterm_attention::turn_follower::take_turn(
+            &lock_path,
+            &req.turn.key(),
+            Duration::from_millis(10),
+        )
+        .unwrap()
+    else {
+        panic!("expected lock");
+    };
     let started_before = setup.followers.started.lock().unwrap().len();
     let pre1 = parse_provider_event(
         "agy",
@@ -2277,6 +2356,7 @@ fn agy_follower_clears_esc_during_stop_hook_continuation_without_new_observation
     );
     assert!(pre1.observation.is_none());
     apply_as(&setup, &env, &pre1, "00000000000000000500");
+    drop(held_old);
     assert_eq!(
         shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
         "thinking"
@@ -2286,16 +2366,62 @@ fn agy_follower_clears_esc_during_stop_hook_continuation_without_new_observation
         started_before + 1
     );
     let req2 = last_request(&setup);
+    assert_ne!(req2.turn.key(), req.turn.key());
     let FollowedTurn::Agy(ref turn2) = req2.turn else {
         panic!("expected AgyTurn");
     };
     assert_eq!(turn2.initial_step_count, 2);
 
+    // A tool-loop PreInvocation while follower #2 holds the lock does not spawn
+    // a duplicate follower.
+    let wezterm_attention::turn_follower::TakenTurn::Taken(held_new) =
+        wezterm_attention::turn_follower::take_turn(
+            &lock_path,
+            &req2.turn.key(),
+            Duration::from_millis(10),
+        )
+        .unwrap()
+    else {
+        panic!("expected lock");
+    };
+    let before_loop = setup.followers.started.lock().unwrap().len();
+    let pre2 = parse_provider_event(
+        "agy",
+        "PreInvocation",
+        &json!({
+            "hookEventName": "PreInvocation",
+            "conversationId": LEAD,
+            "transcriptPath": lead_tx.to_string_lossy(),
+            "artifactDirectoryPath": lead_dir.to_string_lossy(),
+            "cwd": "/tmp/project",
+            "lastUserInput": "cont",
+            "invocationNum": 2,
+            "initialNumSteps": 3
+        }),
+        &env,
+    );
+    apply_as(&setup, &env, &pre2, "00000000000000000550");
+    assert_eq!(setup.followers.started.lock().unwrap().len(), before_loop);
+    drop(held_new);
+
+    // An old follower from invocation 0 cannot clear continuation 1's thinking
+    // even if it already sees IDLE / canceled state; follower #2 clears Esc.
+    run_sqlite(
+        &summaries,
+        "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle=0 WHERE conversation_id='agy-lead-1';",
+    );
     run_sqlite(&conv, "INSERT INTO steps VALUES (2, 6);");
     setup.clock = FixedClock {
         monotonic: "00000000000000000900",
         unix: "00000000099999999900",
     };
+    let stale_follow = follow_every(&setup, &req, Duration::from_millis(10));
+    assert_eq!(recorded(&stale_follow), "skipped");
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "thinking"
+    );
+
     let followed = follow_every(&setup, &req2, Duration::from_millis(10));
     assert_eq!(recorded(&followed), "applied");
     assert!(shown_activity(&setup.binding_dir("agy", LEAD)).is_none());
@@ -2791,6 +2917,18 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
     // every step lands in its expected activity, stays quiet, and keeps the
     // unread human unseen_stop, and each continuation Stop records its own end.
     let mut stop_ids = Vec::new();
+    let stop_exec1 = json!({
+        "hookEventName": "Stop",
+        "conversationId": LEAD,
+        "executionId": "exec-auto",
+        "transcriptPath": tx_str,
+        "cwd": "/tmp/project",
+        "lastUserInput": "auto prompt",
+        "terminationReason": "NO_TOOL_CALL",
+        "fullyIdle": true,
+        "continuationActive": false,
+        "executionNum": 1
+    });
     let stop_exec2 = json!({
         "hookEventName": "Stop",
         "conversationId": LEAD,
@@ -2874,22 +3012,7 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
                 "toolCall": {"name": "run_command", "id": "call-2"}
             }),
         ),
-        (
-            "Stop",
-            "stop",
-            json!({
-                "hookEventName": "Stop",
-                "conversationId": LEAD,
-                "executionId": "exec-auto",
-                "transcriptPath": tx_str,
-                "cwd": "/tmp/project",
-                "lastUserInput": "auto prompt",
-                "terminationReason": "NO_TOOL_CALL",
-                "fullyIdle": true,
-                "continuationActive": false,
-                "executionNum": 1
-            }),
-        ),
+        ("Stop", "stop", stop_exec1.clone()),
         (
             "PreInvocation",
             "thinking",
@@ -2904,6 +3027,9 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
                 "initialNumSteps": 3
             }),
         ),
+        // Delayed replay of Stop(exec=1) during continuation 2 must not close
+        // continuation 2 or replace Stop(exec=1)'s observation id.
+        ("Stop", "thinking", stop_exec1),
         ("Stop", "stop", stop_exec2.clone()),
     ] {
         let out = agy_hook_cli(&setup, event_name, &payload, &["--strict"]);
@@ -2928,16 +3054,17 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
             stop_ids.push(latest_stop_id());
         }
     }
-    assert_eq!(stop_ids.len(), 3);
+    assert_eq!(stop_ids.len(), 4);
     assert_ne!(stop_ids[0], stop_ids[1]);
-    assert_ne!(stop_ids[1], stop_ids[2]);
+    assert_eq!(stop_ids[2], stop_ids[1]);
+    assert_ne!(stop_ids[3], stop_ids[1]);
     // Immediate replay of Stop(exec=2) still deduplicates to the stored end.
     assert!(
         agy_hook_cli(&setup, "Stop", &stop_exec2, &["--strict"])
             .status
             .success()
     );
-    assert_eq!(latest_stop_id(), stop_ids[2]);
+    assert_eq!(latest_stop_id(), stop_ids[3]);
 
     // 4. Confirmed background wakeup (invocationNum=0, transcript ending in SYSTEM_MESSAGE
     // after a completed PLANNER_RESPONSE) over the quiet stop preserves quiet note and

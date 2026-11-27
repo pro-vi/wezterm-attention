@@ -1271,9 +1271,9 @@ fn parse_agy(event_name: &str, payload: &Value) -> ProviderEvent {
                 Err(diagnostic) => return agy_ignored(diagnostic),
             };
             let execution_num = match payload.get("executionNum") {
-                None | Some(Value::Null) => 0,
+                None | Some(Value::Null) => None,
                 Some(value) => match value.as_u64() {
-                    Some(num) => num,
+                    Some(num) => Some(num),
                     None => {
                         return ProviderEvent::ignored(
                             Some(Provider::Agy),
@@ -1292,7 +1292,10 @@ fn parse_agy(event_name: &str, payload: &Value) -> ProviderEvent {
                         // As of agy 1.5.16, `continuationActive` stayed false
                         // on a Stop hook continuation while `executionNum`
                         // incremented to 1.
-                        stop_hook_active: Some(continuation_active || execution_num > 0),
+                        stop_hook_active: Some(
+                            continuation_active || execution_num.is_some_and(|num| num > 0),
+                        ),
+                        execution_num,
                     }
                 }
                 Some("USER_CANCELED") => {
@@ -1871,6 +1874,7 @@ fn parse_run_observation(
                     })
                 })
                 .transpose()?,
+            execution_num: None,
         },
         // Among hook events, one kind with two meanings. Claude Code 2.1.284
         // sends StopFailure instead of Stop, so for Claude this ends the turn.

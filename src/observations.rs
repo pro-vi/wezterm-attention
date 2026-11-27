@@ -89,6 +89,8 @@ pub enum ObservationBody {
     ResponseFinished {
         #[serde(skip_serializing_if = "Option::is_none")]
         stop_hook_active: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution_num: Option<u64>,
     },
     RunSettled,
     AttemptOutcome {
@@ -1070,12 +1072,27 @@ impl LifecycleSnapshot {
             }) {
                 return true;
             }
+            if let (
+                ObservationBody::ResponseFinished {
+                    execution_num: Some(stored_num),
+                    ..
+                },
+                ObservationBody::ResponseFinished {
+                    execution_num: Some(candidate_num),
+                    ..
+                },
+            ) = (&stored.body, &candidate.body)
+                && candidate_num <= stored_num
+            {
+                return true;
+            }
             let continuation_resumed = matches!(
                 (&stored.body, &candidate.body),
                 (
                     ObservationBody::ResponseFinished { .. },
                     ObservationBody::ResponseFinished {
                         stop_hook_active: Some(true),
+                        ..
                     }
                 )
             );

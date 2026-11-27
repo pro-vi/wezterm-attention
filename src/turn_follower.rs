@@ -9,6 +9,7 @@
 //! What it reads is the provider's own file, which a reader for that provider
 //! turns into what the follower acts on; nothing else here knows that file.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -25,7 +26,7 @@ use crate::codex_rollout::{Refusal, Rollout, TASK_COMPLETE, TurnSignal};
 use crate::identity::PaneAddress;
 use crate::launch::{ClaimOwner, OwnerState, owner_state};
 use crate::lifecycle::{LifecycleResult, binding_id};
-use crate::protocol::{AttentionError, DiagnosticCode, Provider, Result};
+use crate::protocol::{AttentionError, DiagnosticCode, Disposition, Provider, Result};
 use crate::providers::{ProviderEvent, safe_text};
 use crate::query::PaneScope;
 use crate::records::{open_state_lock, state_root, turn_follower_lock};
@@ -90,14 +91,17 @@ pub struct ClaudeTurn {
     pub status_file: String,
 }
 
-/// An Antigravity CLI (`agy`) lead turn, named by the prompt it follows: the
-/// prompt as the writer stored it, `conversation_summaries.db`, optionally
-/// `conversations/<id>.db`, and the turn's starting step index.
+/// An Antigravity CLI (`agy`) lead turn, named by the prompt and invocation it
+/// follows: the prompt as the writer stored it, the monotonic timestamp of the
+/// `PreInvocation` `thinking` activity that started or resumed this invocation,
+/// `conversation_summaries.db`, optionally `conversations/<id>.db`, and the
+/// invocation's starting step index.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgyTurn {
     pub prompt_observation_id: String,
     pub prompt_observed_mono_ns: String,
+    pub invocation_observed_mono_ns: String,
     pub summaries_db: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conv_db: Option<String>,
@@ -115,11 +119,14 @@ impl FollowedTurn {
 
     /// What names this turn among the binding's turns: the follower lock
     /// holds it.
-    pub fn key(&self) -> &str {
+    pub fn key(&self) -> Cow<'_, str> {
         match self {
-            Self::Codex(turn) => &turn.turn_id,
-            Self::Claude(turn) => &turn.prompt_observation_id,
-            Self::Agy(turn) => &turn.prompt_observation_id,
+            Self::Codex(turn) => Cow::Borrowed(&turn.turn_id),
+            Self::Claude(turn) => Cow::Borrowed(&turn.prompt_observation_id),
+            Self::Agy(turn) => Cow::Owned(format!(
+                "{}:{}",
+                turn.prompt_observation_id, turn.invocation_observed_mono_ns
+            )),
         }
     }
 }
@@ -221,6 +228,19 @@ pub fn take_turn(path: &Path, key: &str, wait: Duration) -> Result<TakenTurn> {
 /// hook that asked then starts one itself.
 pub fn is_followed(path: &Path) -> bool {
     File::open(path).is_ok_and(|file| file.try_lock_shared().is_err())
+}
+
+/// If a follower holds the follower lock at `path`, returns the key written in
+/// the lock file; returns `None` when the lock is absent or unheld.
+pub fn followed_key(path: &Path) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    if file.try_lock_shared().is_ok() {
+        return None;
+    }
+    let mut followed = String::new();
+    let _ = file.seek(SeekFrom::Start(0));
+    let _ = file.read_to_string(&mut followed);
+    Some(followed)
 }
 
 /// How a follower finished.
@@ -357,6 +377,7 @@ impl<'a> Reader<'a> {
                 let prompt_turn = crate::lifecycle::PromptTurn {
                     observation_id: &turn.prompt_observation_id,
                     observed_mono_ns: &turn.prompt_observed_mono_ns,
+                    invocation_observed_mono_ns: None,
                 };
                 if !crate::lifecycle::latest_prompt_is(
                     root,
@@ -409,6 +430,7 @@ impl<'a> Reader<'a> {
                 let prompt_turn = crate::lifecycle::PromptTurn {
                     observation_id: &turn.prompt_observation_id,
                     observed_mono_ns: &turn.prompt_observed_mono_ns,
+                    invocation_observed_mono_ns: Some(&turn.invocation_observed_mono_ns),
                 };
                 if !crate::lifecycle::latest_prompt_is(
                     root,
@@ -418,6 +440,17 @@ impl<'a> Reader<'a> {
                     prompt_turn,
                 ) {
                     return Ok(Some(Followed::PromptReplaced));
+                }
+                if crate::lifecycle::agy_invocation_ended(
+                    root,
+                    &request.address,
+                    &request.launch_id,
+                    &request.binding_id(),
+                    &turn.invocation_observed_mono_ns,
+                ) {
+                    return Ok(Some(Followed::Recorded(LifecycleResult::new(
+                        Disposition::Skipped,
+                    ))));
                 }
                 let reading = agy_status::read_status(
                     Path::new(&turn.summaries_db),
@@ -480,7 +513,8 @@ pub fn follow_turn(
     PaneScope::new(request.address.clone(), request.launch_id.clone(), None)
         .map_err(|_| invalid())?;
     safe_text(&request.session_id, "session_id").map_err(|_| invalid())?;
-    safe_text(request.turn.key(), "turn").map_err(|_| invalid())?;
+    let turn_key = request.turn.key();
+    safe_text(&turn_key, "turn").map_err(|_| invalid())?;
     let root = state_root(env)?;
     let binding = request.binding_id();
     let current = || {
@@ -491,7 +525,7 @@ pub fn follow_turn(
         return Ok(Followed::BindingChanged);
     }
     let lock = turn_follower_lock(&root, &request.address, &request.launch_id, &binding);
-    let mut held = match take_turn(&lock, request.turn.key(), poll * TAKE_OVER_POLLS)? {
+    let mut held = match take_turn(&lock, &turn_key, poll * TAKE_OVER_POLLS)? {
         TakenTurn::Taken(lock) => Some(lock),
         TakenTurn::AlreadyFollowed => return Ok(Followed::AlreadyFollowed),
         // A later turn's follower can hold the lock while this turn's end is

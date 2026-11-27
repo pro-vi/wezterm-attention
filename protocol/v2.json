@@ -726,6 +726,7 @@
         "source_version",
         "correlation",
         "stop_hook_active",
+        "execution_num",
         "turn_end"
       ],
       "types": {
@@ -738,6 +739,7 @@
         "actor": "lifecycle_actor",
         "correlation": "native_correlation",
         "stop_hook_active": "boolean",
+        "execution_num": "unsigned_integer",
         "turn_end": "turn_end"
       }
     },
