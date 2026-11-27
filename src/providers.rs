@@ -1010,7 +1010,7 @@ fn agy_ignored(diagnostic: Diagnostic) -> ProviderEvent {
     }
 }
 
-fn parse_agy(event_name: &str, payload: &Value, _env: &BTreeMap<String, String>) -> ProviderEvent {
+fn parse_agy(event_name: &str, payload: &Value) -> ProviderEvent {
     if !declared_hook(Provider::Agy, event_name) {
         return ProviderEvent::ignored(
             Some(Provider::Agy),
@@ -1385,7 +1385,7 @@ pub fn parse_provider_event(
         Provider::Claude | Provider::Codex => {
             parse_claude_or_codex(provider, event_name, payload, env)
         }
-        Provider::Agy => parse_agy(event_name, payload, env),
+        Provider::Agy => parse_agy(event_name, payload),
     };
     event.source_event = event_name.to_owned();
     if event.action != ProviderAction::Ignored && provider != Provider::Agy {
