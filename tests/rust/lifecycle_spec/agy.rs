@@ -471,14 +471,17 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
     // continuation 1 thinking without leaking its reply, while genuine Stop(1)
     // completes and delivers it.
     let prompts_path = setup.binding_dir("agy", LEAD).join("prompts.json");
-    let mut prompts_json: Value =
-        serde_json::from_slice(&fs::read(&prompts_path).unwrap()).unwrap();
-    assert_eq!(prompts_json["last_execution_num"], json!(0));
-    prompts_json
-        .as_object_mut()
-        .unwrap()
-        .remove("last_execution_num");
-    fs::write(&prompts_path, serde_json::to_vec(&prompts_json).unwrap()).unwrap();
+    let strip_last_execution_num = || {
+        let mut prompts_json: Value =
+            serde_json::from_slice(&fs::read(&prompts_path).unwrap()).unwrap();
+        assert_eq!(prompts_json["last_execution_num"], json!(0));
+        prompts_json
+            .as_object_mut()
+            .unwrap()
+            .remove("last_execution_num");
+        fs::write(&prompts_path, serde_json::to_vec(&prompts_json).unwrap()).unwrap();
+    };
+    strip_last_execution_num();
 
     let mut turn2_cont1 = turn2_pre.clone();
     turn2_cont1["invocationNum"] = json!(1);
@@ -488,6 +491,10 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
             .status
             .success()
     );
+    // PreInvocation continuation heals last_execution_num from lifecycle.json;
+    // strip it again to also prove subsequent tool writes heal it before
+    // evicting Stop(0) from the bounded pool.
+    strip_last_execution_num();
     let before_cont_evict: LifecycleSnapshot = serde_json::from_slice(
         &fs::read(setup.binding_dir("agy", LEAD).join("lifecycle.json")).unwrap(),
     )

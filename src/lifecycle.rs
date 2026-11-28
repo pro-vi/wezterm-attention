@@ -1521,6 +1521,31 @@ fn append_observation(
             });
         }
         let Some(draft) = &event.observation else {
+            if event.provider == Some(Provider::Agy)
+                && event.continues_turn
+                && accepted(&plan.result.result)
+                && let Ok(binding_id) = event_binding_id(event, &resolved.launch_id)
+            {
+                let identity = resolved.binding(&binding_id);
+                if let Some(snapshot) = lifecycle_snapshot(&resolved.root, &identity) {
+                    let prompt_read = read_latest_prompt(&resolved.root, &identity);
+                    if let Some((turn_id, max_num, pooled_prompt)) =
+                        pending_agy_guard_recovery(&snapshot, &prompt_read)
+                    {
+                        let (write, restarted) = prepare_agy_execution_end(
+                            resolved,
+                            &identity,
+                            &binding_id,
+                            &turn_id,
+                            max_num,
+                            pooled_prompt.as_ref(),
+                        )?;
+                        prompts_problem =
+                            restarted.then(|| started_again_diagnostic("prompt_record"));
+                        prompts_replacement = write;
+                    }
+                }
+            }
             return Ok(None);
         };
         let binding_id = event_binding_id(event, &resolved.launch_id)?;
@@ -1643,48 +1668,10 @@ fn append_observation(
         let recorded_prompt = prompt_read
             .as_ref()
             .and_then(PromptRecordRead::as_reference);
-        let pre_reduce_pooled_prompt = (provider == Provider::Agy)
-            .then(|| {
-                latest(
-                    snapshot
-                        .lead_observations()
-                        .filter(|item| item.is_lead_prompt()),
-                )
-                .map(|item| PromptReference::of_for(Provider::Agy, item))
-            })
-            .flatten();
-        let pre_reduce_agy_end = if provider == Provider::Agy && prompts_replacement.is_none() {
-            let current_turn_id = recorded_prompt
-                .and_then(|recorded| {
-                    recorded.turn_id.as_deref().or_else(|| {
-                        pre_reduce_pooled_prompt
-                            .as_ref()
-                            .filter(|pooled| {
-                                pooled.observation_id == recorded.observation_id
-                                    && pooled.observed_mono_ns == recorded.observed_mono_ns
-                            })
-                            .and_then(|pooled| pooled.turn_id.as_deref())
-                    })
-                })
-                .or_else(|| {
-                    recorded_prompt
-                        .is_none()
-                        .then(|| {
-                            pre_reduce_pooled_prompt
-                                .as_ref()
-                                .and_then(|p| p.turn_id.as_deref())
-                        })
-                        .flatten()
-                });
-            current_turn_id.and_then(|turn_id| {
-                let max_num = snapshot_max_agy_execution_num(&snapshot, turn_id)?;
-                let recorded_num = prompt_read
-                    .as_ref()
-                    .and_then(PromptRecordRead::last_execution_num);
-                recorded_num
-                    .is_none_or(|prev| max_num > prev)
-                    .then(|| (turn_id.to_owned(), max_num))
-            })
+        let pre_reduce_recovery = if provider == Provider::Agy && prompts_replacement.is_none() {
+            prompt_read
+                .as_ref()
+                .and_then(|read| pending_agy_guard_recovery(&snapshot, read))
         } else {
             None
         };
@@ -1731,6 +1718,23 @@ fn append_observation(
                     _ => evidence.persistence.lifecycle = Persistence::Rejected,
                 }
             }
+            if let Some((turn_id, max_num, pooled_prompt)) = pre_reduce_recovery {
+                match prepare_agy_execution_end(
+                    resolved,
+                    &identity,
+                    &binding_id,
+                    &turn_id,
+                    max_num,
+                    pooled_prompt.as_ref(),
+                ) {
+                    Ok((write, restarted)) => {
+                        prompts_replacement = write;
+                        prompts_problem =
+                            restarted.then(|| started_again_diagnostic("prompt_record"));
+                    }
+                    Err(error) => prompts_problem = Some(error.diagnostic),
+                }
+            }
             return Ok(None);
         }
         let fresh_current_turn_end = ends_turn
@@ -1738,29 +1742,52 @@ fn append_observation(
                 .as_ref()
                 .is_some_and(|end| end.status == TurnEndStatus::Recorded)
             && matches_current_turn;
-        let agy_guard_update = if fresh_current_turn_end
+        let fresh_agy_ordinal = if fresh_current_turn_end
             && let crate::observations::ObservationBody::ResponseFinished {
                 execution_num: Some(num),
                 ..
             } = &draft.body
             && let Some(turn_id) = draft.turn_id()
         {
-            let max_num = pre_reduce_agy_end
+            let pooled_prompt = latest(
+                snapshot
+                    .lead_observations()
+                    .filter(|item| item.is_lead_prompt()),
+            )
+            .map(|item| PromptReference::of_for(Provider::Agy, item));
+            let max_num = pre_reduce_recovery
                 .as_ref()
-                .filter(|(prev_turn, _)| prev_turn == turn_id)
-                .map_or(*num, |(_, prev)| (*num).max(*prev));
-            Some((turn_id.to_owned(), max_num))
+                .filter(|(prev_turn, _, _)| prev_turn == turn_id)
+                .map_or(*num, |(_, prev, _)| (*num).max(*prev));
+            Some((turn_id.to_owned(), max_num, pooled_prompt))
         } else {
-            pre_reduce_agy_end
+            None
         };
-        if let Some((turn_id, num)) = agy_guard_update {
+        if let Some((turn_id, num, pooled_prompt)) = fresh_agy_ordinal {
+            // Write lifecycle.json first so prompts.json never records an
+            // execution ordinal ahead of a confirmed Stop; if the second write
+            // fails, continuation and subsequent writes heal prompts.json
+            // before lifecycle.json can evict the recorded Stop.
             let (write, restarted) = prepare_agy_execution_end(
                 resolved,
                 &identity,
                 &binding_id,
                 &turn_id,
                 num,
-                pre_reduce_pooled_prompt.as_ref(),
+                pooled_prompt.as_ref(),
+            )?;
+            prompts_problem = restarted.then(|| started_again_diagnostic("prompt_record"));
+            prompts_replacement = write;
+        } else if let Some((turn_id, num, pooled_prompt)) = pre_reduce_recovery {
+            // The Stop is already recorded in lifecycle.json; persist its
+            // ordinal into prompts.json BEFORE this write can evict it.
+            let (write, restarted) = prepare_agy_execution_end(
+                resolved,
+                &identity,
+                &binding_id,
+                &turn_id,
+                num,
+                pooled_prompt.as_ref(),
             )?;
             prompts_problem = restarted.then(|| started_again_diagnostic("prompt_record"));
             if let Some(write) = write {
@@ -4614,6 +4641,48 @@ enum AgyStopOwnership {
     Unknown,
 }
 
+fn pending_agy_guard_recovery(
+    snapshot: &LifecycleSnapshot,
+    prompt_read: &PromptRecordRead,
+) -> Option<(String, u64, Option<PromptReference>)> {
+    if matches!(prompt_read, PromptRecordRead::Unreadable) {
+        return None;
+    }
+    let recorded_prompt = prompt_read.as_reference();
+    let pooled_prompt = latest(
+        snapshot
+            .lead_observations()
+            .filter(|item| item.is_lead_prompt()),
+    )
+    .map(|item| PromptReference::of_for(Provider::Agy, item));
+    let current_turn_id = recorded_prompt
+        .and_then(|recorded| {
+            recorded.turn_id.as_deref().or_else(|| {
+                pooled_prompt
+                    .as_ref()
+                    .filter(|pooled| {
+                        pooled.observation_id == recorded.observation_id
+                            && pooled.observed_mono_ns == recorded.observed_mono_ns
+                    })
+                    .and_then(|pooled| pooled.turn_id.as_deref())
+            })
+        })
+        .or_else(|| {
+            recorded_prompt
+                .is_none()
+                .then(|| pooled_prompt.as_ref().and_then(|p| p.turn_id.as_deref()))
+                .flatten()
+        })?;
+    let max_num = snapshot_max_agy_execution_num(snapshot, current_turn_id)?;
+    if prompt_read
+        .last_execution_num()
+        .is_some_and(|prev| max_num <= prev)
+    {
+        return None;
+    }
+    Some((current_turn_id.to_owned(), max_num, pooled_prompt))
+}
+
 fn snapshot_max_agy_execution_num(snapshot: &LifecycleSnapshot, turn_id: &str) -> Option<u64> {
     snapshot
         .lead_observations()
@@ -5545,77 +5614,20 @@ mod lifecycle_write_tests {
         assert!(evidence.observation_id.is_some());
         drop(evidence);
 
-        // When `prompts_before_lifecycle` is set (Agy's durable execution_num
-        // guard), prompts.json is written first: failing write #1 leaves
-        // lifecycle.json unwritten and unconfirmed; failing write #2 leaves
-        // prompts.json durable with last_execution_num so replays stay stale.
+        // On a fresh Stop (`prompts_before_lifecycle = false`), lifecycle.json
+        // is written first so a failed write #1 leaves prompts.json without
+        // last_execution_num and retrying Stop(1) still classifies as Current.
+        // Once Stop(1) is recorded in lifecycle.json and write #2 fails, a
+        // later healing write (`prompts_before_lifecycle = true`) writes
+        // prompts.json BEFORE lifecycle.json can evict Stop(1): failing write
+        // #1 refuses to overwrite lifecycle.json, and once prompts.json lands,
+        // Stop(1) is Stale even after eviction while Stop(2) is Current.
         std::fs::remove_file(&path).unwrap();
-        let mut agy_prompts = samples["lead_prompts"].clone();
-        agy_prompts["latest"]["turn_id"] = json!("exec-1");
+        let mut initial_prompts = samples["lead_prompts"].clone();
+        initial_prompts["latest"]["turn_id"] = json!("exec-1");
+        crate::records::atomic_replace(&prompts_path, &initial_prompts).unwrap();
+        let mut agy_prompts = initial_prompts;
         agy_prompts["last_execution_num"] = json!(1);
-        let guard_mutation = Mutation {
-            prompts_replacement: Some(
-                PreparedRecordWrite::new(prompts_path.clone(), &agy_prompts).unwrap(),
-            ),
-            prompts_before_lifecycle: true,
-            ..mutation
-        };
-        {
-            let mut ev = resolved.evidence.as_ref().unwrap().borrow_mut();
-            ev.persistence.lifecycle = Persistence::Unconfirmed;
-            ev.observation_id = None;
-            ev.turn_end = None;
-            ev.reply_transcript_attributable = false;
-        }
-        let err1 = crate::records::with_lock(
-            &launch_lock(&root, &address, &launch_id),
-            LOCK_TIMEOUT,
-            || {
-                apply_observed_outputs_with(&resolved, binding_id, &guard_mutation, |_| {
-                    Err(AttentionError::new(
-                        DiagnosticCode::StatePermissions,
-                        "synthetic guard write failure",
-                    ))
-                })
-            },
-        )
-        .unwrap_err();
-        assert_eq!(err1.diagnostic.context["prompts_write"], "unconfirmed");
-        assert!(!path.exists());
-        assert!(!prompts_path.exists());
-        assert_eq!(
-            resolved
-                .evidence
-                .as_ref()
-                .unwrap()
-                .borrow()
-                .persistence
-                .lifecycle,
-            Persistence::Unconfirmed
-        );
-        let err2 = crate::records::with_lock(
-            &launch_lock(&root, &address, &launch_id),
-            LOCK_TIMEOUT,
-            || {
-                let mut writes = 0;
-                apply_observed_outputs_with(&resolved, binding_id, &guard_mutation, |write| {
-                    writes += 1;
-                    if writes == 2 {
-                        return Err(AttentionError::new(
-                            DiagnosticCode::StatePermissions,
-                            "synthetic lifecycle write failure",
-                        ));
-                    }
-                    write.apply()
-                })
-            },
-        )
-        .unwrap_err();
-        assert_eq!(err2.diagnostic.context["lifecycle_write"], "unconfirmed");
-        assert!(prompts_path.exists());
-        assert!(!path.exists());
-        let saved_guard = read_latest_prompt(&root, &binding);
-        assert_eq!(saved_guard.last_execution_num(), Some(1));
         let stop_draft = |num: u64| LifecycleObservation {
             observation_id: Uuid::new_v4().to_string(),
             observed_mono_ns: "00000000000000000000".into(),
@@ -5633,6 +5645,82 @@ mod lifecycle_write_tests {
                 execution_num: Some(num),
             },
         };
+        let fresh_stop_mutation = Mutation {
+            prompts_replacement: Some(
+                PreparedRecordWrite::new(prompts_path.clone(), &agy_prompts).unwrap(),
+            ),
+            prompts_before_lifecycle: false,
+            ..mutation.clone()
+        };
+        let err_fresh = crate::records::with_lock(
+            &launch_lock(&root, &address, &launch_id),
+            LOCK_TIMEOUT,
+            || {
+                apply_observed_outputs_with(&resolved, binding_id, &fresh_stop_mutation, |_| {
+                    Err(AttentionError::new(
+                        DiagnosticCode::StatePermissions,
+                        "synthetic fresh stop lifecycle failure",
+                    ))
+                })
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            err_fresh.diagnostic.context["lifecycle_write"],
+            "unconfirmed"
+        );
+        assert!(!path.exists());
+        let untouched_prompts = read_latest_prompt(&root, &binding);
+        assert_eq!(untouched_prompts.last_execution_num(), None);
+        assert_eq!(
+            agy_stop_ownership(&stop_draft(1), None, false, &untouched_prompts),
+            AgyStopOwnership::Current
+        );
+
+        let heal_mutation = Mutation {
+            prompts_replacement: Some(
+                PreparedRecordWrite::new(prompts_path.clone(), &agy_prompts).unwrap(),
+            ),
+            prompts_before_lifecycle: true,
+            ..mutation
+        };
+        let err1 = crate::records::with_lock(
+            &launch_lock(&root, &address, &launch_id),
+            LOCK_TIMEOUT,
+            || {
+                apply_observed_outputs_with(&resolved, binding_id, &heal_mutation, |_| {
+                    Err(AttentionError::new(
+                        DiagnosticCode::StatePermissions,
+                        "synthetic guard heal failure",
+                    ))
+                })
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err1.diagnostic.context["prompts_write"], "unconfirmed");
+        assert!(!path.exists());
+        let err2 = crate::records::with_lock(
+            &launch_lock(&root, &address, &launch_id),
+            LOCK_TIMEOUT,
+            || {
+                let mut writes = 0;
+                apply_observed_outputs_with(&resolved, binding_id, &heal_mutation, |write| {
+                    writes += 1;
+                    if writes == 2 {
+                        return Err(AttentionError::new(
+                            DiagnosticCode::StatePermissions,
+                            "synthetic lifecycle write failure",
+                        ));
+                    }
+                    write.apply()
+                })
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err2.diagnostic.context["lifecycle_write"], "unconfirmed");
+        assert!(!path.exists());
+        let saved_guard = read_latest_prompt(&root, &binding);
+        assert_eq!(saved_guard.last_execution_num(), Some(1));
         assert_eq!(
             agy_stop_ownership(&stop_draft(1), None, false, &saved_guard),
             AgyStopOwnership::Stale
