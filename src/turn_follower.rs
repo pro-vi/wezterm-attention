@@ -474,9 +474,7 @@ impl<'a> Reader<'a> {
                             &request.binding_id(),
                         ) =>
                     {
-                        Ok(Some(Followed::Recorded(LifecycleResult::new(
-                            Disposition::Skipped,
-                        ))))
+                        Ok(None)
                     }
                     (agy_status::Reading::Canceled, _) | (agy_status::Reading::Idle, true) => {
                         prompt_turn.confirmed_canceled = confirmed_canceled;
@@ -490,7 +488,21 @@ impl<'a> Reader<'a> {
                             &event,
                             ports,
                         )
-                        .map(|result| Some(Followed::Recorded(result)))
+                        .map(|result| {
+                            if !confirmed_canceled
+                                && result.disposition == Disposition::Skipped
+                                && crate::lifecycle::agy_execution_history_lost(
+                                    root,
+                                    &request.address,
+                                    &request.launch_id,
+                                    &request.binding_id(),
+                                )
+                            {
+                                None
+                            } else {
+                                Some(Followed::Recorded(result))
+                            }
+                        })
                     }
                     (
                         agy_status::Reading::Unreadable(
