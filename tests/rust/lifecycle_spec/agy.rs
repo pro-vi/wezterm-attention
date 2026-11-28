@@ -464,9 +464,22 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
         json!({"availability": "available", "text": "Next turn reply."})
     );
 
-    // Same-execution continuation after evicting Turn 2's Stop(0): replaying
-    // Stop(0) stays superseded and leaves continuation 1 thinking without
-    // leaking its reply, while genuine Stop(1) completes and delivers it.
+    // Same-execution continuation after evicting Turn 2's Stop(0), even if a
+    // prior partial write had left prompts.json without last_execution_num:
+    // the tool traffic heals last_execution_num into prompts.json before
+    // Stop(0) is evicted, so replaying Stop(0) stays superseded and leaves
+    // continuation 1 thinking without leaking its reply, while genuine Stop(1)
+    // completes and delivers it.
+    let prompts_path = setup.binding_dir("agy", LEAD).join("prompts.json");
+    let mut prompts_json: Value =
+        serde_json::from_slice(&fs::read(&prompts_path).unwrap()).unwrap();
+    assert_eq!(prompts_json["last_execution_num"], json!(0));
+    prompts_json
+        .as_object_mut()
+        .unwrap()
+        .remove("last_execution_num");
+    fs::write(&prompts_path, serde_json::to_vec(&prompts_json).unwrap()).unwrap();
+
     let mut turn2_cont1 = turn2_pre.clone();
     turn2_cont1["invocationNum"] = json!(1);
     turn2_cont1["initialNumSteps"] = json!(4);
