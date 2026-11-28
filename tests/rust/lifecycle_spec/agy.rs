@@ -623,18 +623,22 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
     );
     assert!(!stop_sink.exists());
 
-    // Regression: loss -> continuation -> PreToolUse (rebuilding lifecycle.json
-    // under the same executionId) -> replay of old Stop(1) must STILL stay
-    // superseded, leave thinking intact, and not deliver a reply.
-    let mut partial_prompts: Value =
-        serde_json::from_slice(&fs::read(&prompts_path).unwrap()).unwrap();
-    partial_prompts["last_execution_num"] = json!(0);
-    partial_prompts
-        .as_object_mut()
-        .unwrap()
-        .remove("execution_history_lost");
-    fs::write(&prompts_path, serde_json::to_vec(&partial_prompts).unwrap()).unwrap();
-    let _ = fs::remove_file(setup.binding_dir("agy", LEAD).join("lifecycle.json"));
+    // Regression: after losing lifecycle.json while prompts.json holds an older
+    // last_execution_num (0), a replayed Stop(1) (> 0) stays superseded BOTH as
+    // the very first event after loss AND after a continuation PreToolUse
+    // rebuilds lifecycle.json under the same executionId.
+    let reset_lost_state = || {
+        let mut partial_prompts: Value =
+            serde_json::from_slice(&fs::read(&prompts_path).unwrap()).unwrap();
+        partial_prompts["last_execution_num"] = json!(0);
+        partial_prompts
+            .as_object_mut()
+            .unwrap()
+            .remove("execution_history_lost");
+        fs::write(&prompts_path, serde_json::to_vec(&partial_prompts).unwrap()).unwrap();
+        let _ = fs::remove_file(setup.binding_dir("agy", LEAD).join("lifecycle.json"));
+    };
+    reset_lost_state();
     let mut turn2_cont2 = turn2_pre.clone();
     turn2_cont2["invocationNum"] = json!(2);
     turn2_cont2["initialNumSteps"] = json!(5);
@@ -643,6 +647,19 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
             .status
             .success()
     );
+    let _ = fs::remove_file(&stop_sink);
+    assert!(
+        !agy_hook_cli(&setup, "Stop", &turn2_stop_cont1, &stop_flags)
+            .status
+            .success()
+    );
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "thinking"
+    );
+    assert!(!stop_sink.exists());
+
+    reset_lost_state();
     assert!(
         agy_hook_cli(
             &setup,

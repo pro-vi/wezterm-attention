@@ -1688,7 +1688,7 @@ fn append_observation(
             .flatten();
         let matches_current_turn = if ends_turn && provider == Provider::Agy {
             prompt_read.as_ref().is_some_and(|read| {
-                agy_stop_ownership(draft, Some(&snapshot), moved_aside.is_some(), read)
+                agy_stop_ownership(draft, Some(&snapshot), snapshot_was_lost, read)
                     == AgyStopOwnership::Current
             })
         } else {
@@ -4906,7 +4906,7 @@ fn agy_stop_ownership(
                     (Some(a), Some(b)) => Some(a.max(b)),
                     (a, b) => a.or(b),
                 };
-                if execution_history_lost {
+                if execution_history_lost || usable_snapshot.is_none() {
                     return if effective_last
                         .is_some_and(|last| execution_num.is_some_and(|c| c <= last))
                     {
@@ -5911,6 +5911,10 @@ mod lifecycle_write_tests {
         );
         assert_eq!(
             agy_stop_ownership(&stop_draft(2), None, false, &saved_guard),
+            AgyStopOwnership::Unknown
+        );
+        assert_eq!(
+            agy_stop_ownership(&stop_draft(2), Some(&intact_snapshot), false, &saved_guard),
             AgyStopOwnership::Current
         );
         std::fs::remove_dir_all(root).unwrap();
