@@ -2699,17 +2699,38 @@ fn agy_follower_clears_esc_during_stop_hook_continuation_without_new_observation
         "thinking"
     );
 
-    // An old follower from invocation 0 cannot clear continuation 1's thinking
-    // even if it already sees IDLE / canceled state; follower #2 clears Esc.
-    run_sqlite(
-        &summaries,
-        "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle=0 WHERE conversation_id='agy-lead-1';",
-    );
-    run_sqlite(&conv, "INSERT INTO steps VALUES (2, 6);");
+    // After execution_history_lost, an ambiguous Working -> Idle transition
+    // (as on a normal completion whose Stop was suppressed) must NOT be
+    // recorded as an Esc interrupt; only an explicit canceled step records Esc.
+    let prompts_path = setup.binding_dir("agy", LEAD).join("prompts.json");
+    let mut prompts_json: Value =
+        serde_json::from_slice(&fs::read(&prompts_path).unwrap()).unwrap();
+    prompts_json["execution_history_lost"] = json!(true);
+    fs::write(&prompts_path, serde_json::to_vec(&prompts_json).unwrap()).unwrap();
+    let summaries_for_thread = summaries.clone();
+    let flip = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(40));
+        run_sqlite(
+            &summaries_for_thread,
+            "UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE', not_fully_idle=0 WHERE conversation_id='agy-lead-1';",
+        );
+    });
     setup.clock = FixedClock {
         monotonic: "00000000000000000900",
         unix: "00000000099999999900",
     };
+    let idle_after_loss = follow_every(&setup, &req2, Duration::from_millis(10));
+    flip.join().unwrap();
+    assert_eq!(recorded(&idle_after_loss), "skipped");
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "thinking"
+    );
+
+    // An old follower from invocation 0 cannot clear continuation 1's thinking
+    // even if it already sees IDLE / canceled state; follower #2 clears Esc
+    // once an explicit canceled step is present (even after history loss).
+    run_sqlite(&conv, "INSERT INTO steps VALUES (2, 6);");
     let stale_follow = follow_every(&setup, &req, Duration::from_millis(10));
     assert_eq!(recorded(&stale_follow), "skipped");
     assert_eq!(

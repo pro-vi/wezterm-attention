@@ -4548,6 +4548,10 @@ pub(crate) struct PromptTurn<'a> {
     pub(crate) observation_id: &'a str,
     pub(crate) observed_mono_ns: &'a str,
     pub(crate) invocation_observed_mono_ns: Option<&'a str>,
+    /// For Agy followers: true when the provider's conversation DB recorded an
+    /// explicit canceled step (`Reading::Canceled`) rather than an ambiguous
+    /// `Working -> Idle` transition (`Reading::Idle`).
+    pub(crate) confirmed_canceled: bool,
 }
 
 /// Whether the lead's latest prompt in the binding `binding_id` is the
@@ -4599,6 +4603,32 @@ pub(crate) fn agy_invocation_ended(
                 && ends_agy_invocation(item)
         })
     })
+}
+
+/// Whether lifecycle history was lost for the active Agy prompt (so a genuine
+/// normal `Stop` may be suppressed as `Unknown` and an ambiguous `Idle` status
+/// sample must not be recorded as an Esc interrupt).
+pub(crate) fn agy_execution_history_lost(
+    root: &Path,
+    address: &PaneAddress,
+    launch_id: &str,
+    binding_id: &str,
+) -> bool {
+    let identity = RecordIdentity::binding(address, launch_id, binding_id);
+    match read_latest_prompt(root, &identity) {
+        PromptRecordRead::Present {
+            execution_history_lost: true,
+            ..
+        }
+        | PromptRecordRead::Unreadable => true,
+        PromptRecordRead::Present {
+            latest: Some(_), ..
+        } => !matches!(
+            read_lifecycle_snapshot(root, &identity),
+            SnapshotRead::Present(_)
+        ),
+        PromptRecordRead::Present { latest: None, .. } | PromptRecordRead::Missing => false,
+    }
 }
 
 enum SnapshotRead {
@@ -5074,11 +5104,24 @@ pub(crate) fn record_prompt_turn_interrupt(
                     LifecycleResult::new(Disposition::Skipped),
                 )))
             };
-            if !latest_prompt_is(root, address, launch_id, &binding_id, turn) {
+            let prompt_read = read_latest_prompt(root, &identity);
+            if !prompt_read.as_reference().is_some_and(|latest| {
+                latest.observation_id == turn.observation_id
+                    && latest.observed_mono_ns == turn.observed_mono_ns
+            }) {
                 return skipped();
             }
             let prompt_stamp = turn.observed_mono_ns;
             let snapshot = followed_snapshot(root, &identity)?;
+            // After lifecycle history loss, a genuine normal Stop for this
+            // execution may be suppressed (`Unknown`); only an explicit
+            // canceled step in the conversation DB proves Esc.
+            if provider == Provider::Agy
+                && !turn.confirmed_canceled
+                && (prompt_read.execution_history_lost() || snapshot.is_none())
+            {
+                return skipped();
+            }
             let lead = || {
                 snapshot
                     .iter()

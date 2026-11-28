@@ -378,6 +378,7 @@ impl<'a> Reader<'a> {
                     observation_id: &turn.prompt_observation_id,
                     observed_mono_ns: &turn.prompt_observed_mono_ns,
                     invocation_observed_mono_ns: None,
+                    confirmed_canceled: false,
                 };
                 if !crate::lifecycle::latest_prompt_is(
                     root,
@@ -427,10 +428,11 @@ impl<'a> Reader<'a> {
                 }
             }
             Self::Agy { turn, seen_working } => {
-                let prompt_turn = crate::lifecycle::PromptTurn {
+                let mut prompt_turn = crate::lifecycle::PromptTurn {
                     observation_id: &turn.prompt_observation_id,
                     observed_mono_ns: &turn.prompt_observed_mono_ns,
                     invocation_observed_mono_ns: Some(&turn.invocation_observed_mono_ns),
+                    confirmed_canceled: false,
                 };
                 if !crate::lifecycle::latest_prompt_is(
                     root,
@@ -458,12 +460,26 @@ impl<'a> Reader<'a> {
                     &request.session_id,
                     turn.initial_step_count,
                 );
+                let confirmed_canceled = matches!(reading, agy_status::Reading::Canceled);
                 match (reading, *seen_working) {
                     (agy_status::Reading::Working, _) => {
                         *seen_working = true;
                         Ok(None)
                     }
+                    (agy_status::Reading::Idle, true)
+                        if crate::lifecycle::agy_execution_history_lost(
+                            root,
+                            &request.address,
+                            &request.launch_id,
+                            &request.binding_id(),
+                        ) =>
+                    {
+                        Ok(Some(Followed::Recorded(LifecycleResult::new(
+                            Disposition::Skipped,
+                        ))))
+                    }
                     (agy_status::Reading::Canceled, _) | (agy_status::Reading::Idle, true) => {
+                        prompt_turn.confirmed_canceled = confirmed_canceled;
                         let event = ProviderEvent::agy_turn_interrupt(&request.session_id);
                         crate::lifecycle::record_prompt_turn_interrupt(
                             root,
