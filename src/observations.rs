@@ -235,6 +235,10 @@ pub struct PromptReference {
     pub observation_id: String,
     pub observed_mono_ns: String,
     pub written_at_unix_ns: String,
+    /// Native `turn_id` (`executionId`) for Agy lead prompts; omitted for other
+    /// providers so existing `prompts.json` records stay unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }
 
 /// A prompt that answered one question of a call: the call's native id, the
@@ -254,11 +258,17 @@ pub struct PromptAnswer {
 impl PromptReference {
     /// The later of the prompt record's latest and the newest the pools
     /// hold, in observation order; the record's wins a tie, as it is the
-    /// one generic traffic cannot evict.
+    /// one generic traffic cannot evict (filling a missing `turn_id` from
+    /// the pooled prompt when both name the same observation).
     pub fn later_of(recorded: Option<Self>, pooled: Option<Self>) -> Option<Self> {
         match (recorded, pooled) {
-            (Some(recorded), Some(pooled)) => {
+            (Some(mut recorded), Some(pooled)) => {
                 if recorded.order() >= pooled.order() {
+                    if recorded.observation_id == pooled.observation_id
+                        && recorded.turn_id.is_none()
+                    {
+                        recorded.turn_id = pooled.turn_id;
+                    }
                     Some(recorded)
                 } else {
                     Some(pooled)
@@ -273,7 +283,16 @@ impl PromptReference {
             observation_id: prompt.observation_id.clone(),
             observed_mono_ns: prompt.observed_mono_ns.clone(),
             written_at_unix_ns: prompt.written_at_unix_ns.clone(),
+            turn_id: None,
         }
+    }
+
+    pub fn of_for(provider: Provider, prompt: &LifecycleObservation) -> Self {
+        let mut reference = Self::of(prompt);
+        if provider == Provider::Agy {
+            reference.turn_id = prompt.turn_id().map(str::to_owned);
+        }
+        reference
     }
     /// Observation order: the monotonic stamp, then the id, as pools sort.
     fn order(&self) -> (&str, &str) {
@@ -512,7 +531,12 @@ impl LifecycleView {
             .observations
             .iter()
             .rfind(|pooled| pooled.observation.is_lead_prompt())
-            .map(|pooled| PromptReference::of(&pooled.observation));
+            .map(|pooled| {
+                lead.map_or_else(
+                    || PromptReference::of(&pooled.observation),
+                    |snapshot| PromptReference::of_for(snapshot.provider, &pooled.observation),
+                )
+            });
         view
     }
 
@@ -1069,7 +1093,14 @@ impl LifecycleSnapshot {
                 item.is_lead_prompt()
                     && item.turn_id() != stored.turn_id()
                     && item.observed_mono_ns.as_str() < at
-            }) {
+            }) || (self.provider == Provider::Agy
+                && recorded_prompt.is_some_and(|prompt| {
+                    prompt.turn_id.is_some()
+                        && prompt.turn_id.as_deref() != stored.turn_id()
+                        && prompt.observed_mono_ns.as_str() > stored.observed_mono_ns.as_str()
+                        && prompt.observed_mono_ns.as_str() < at
+                }))
+            {
                 return true;
             }
             if let (
@@ -1086,20 +1117,47 @@ impl LifecycleSnapshot {
             {
                 return true;
             }
-            let continuation_resumed = matches!(
-                (&stored.body, &candidate.body),
-                (
-                    ObservationBody::ResponseFinished { .. },
-                    ObservationBody::ResponseFinished {
-                        stop_hook_active: Some(true),
-                        ..
-                    }
+            let continuation_resumed = if self.provider == Provider::Agy {
+                matches!(
+                    (&stored.body, &candidate.body),
+                    (
+                        ObservationBody::ResponseFinished {
+                            execution_num: Some(stored_num),
+                            ..
+                        },
+                        ObservationBody::ResponseFinished {
+                            execution_num: Some(candidate_num),
+                            ..
+                        }
+                    ) if candidate_num > stored_num
                 )
-            );
+            } else {
+                false
+            };
+            let ignore_delayed_tool_result =
+                self.provider == Provider::Agy && !continuation_resumed;
             if after()
+                .filter(|item| {
+                    if self.provider != Provider::Agy {
+                        return true;
+                    }
+                    let not_superseded_end = !item.ends_turn(Provider::Agy)
+                        || item
+                            .turn_end
+                            .as_ref()
+                            .is_none_or(|end| end.status != TurnEndStatus::Superseded);
+                    let same_execution = item.turn_id() == stored.turn_id();
+                    let not_delayed_result = !ignore_delayed_tool_result
+                        || !matches!(item.body, ObservationBody::ToolResult { .. });
+                    not_superseded_end && same_execution && not_delayed_result
+                })
                 .map(|item| item.observed_mono_ns.as_str())
                 .chain(
                     recorded_prompt
+                        .filter(|prompt| {
+                            self.provider != Provider::Agy
+                                || prompt.turn_id.as_deref() == stored.turn_id()
+                        })
                         .map(|prompt| prompt.observed_mono_ns.as_str())
                         .filter(|order| *order > stored.observed_mono_ns.as_str()),
                 )

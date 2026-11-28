@@ -536,11 +536,12 @@
     },
     "prompt_reference": {
       "required": ["observation_id", "observed_mono_ns", "written_at_unix_ns"],
-      "optional": [],
+      "optional": ["turn_id"],
       "types": {
         "observation_id": "uuid",
         "observed_mono_ns": "monotonic_ns20",
-        "written_at_unix_ns": "unix_ns20"
+        "written_at_unix_ns": "unix_ns20",
+        "turn_id": "safe_label"
       }
     },
     "unseen_stop": {

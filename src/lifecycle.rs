@@ -1300,6 +1300,10 @@ struct ActivityOutcome {
     written: Option<Value>,
 }
 
+// Repeated thinking can keep the activity stamp unchanged. The lead's
+// recorded events still show whether it advanced while a check ran: its
+// pooled observations, and the prompt record's latest prompt, where alone
+// a prompt typed while its turn runs is kept.
 fn has_newer_lead_observation(
     snapshot: Option<&LifecycleSnapshot>,
     prompt: Option<&PromptReference>,
@@ -1313,21 +1317,6 @@ fn has_newer_lead_observation(
             .lead_observations()
             .any(|event| event.observed_mono_ns.as_str() > observation)
     })
-}
-
-fn newer_lead_observation(root: &Path, identity: &RecordIdentity, observation: &str) -> bool {
-    // Repeated thinking can keep the activity stamp unchanged. The lead's
-    // recorded events still show whether it advanced while a check ran: its
-    // pooled observations, and the prompt record's latest prompt, where alone
-    // a prompt typed while its turn runs is kept.
-    let prompt = latest_prompt(root, identity);
-    if has_newer_lead_observation(None, prompt.as_ref(), observation) {
-        return true;
-    }
-    // Unavailable rich history does not veto an independent native mutation;
-    // append_observation retains the read diagnostic on its existing path.
-    let snapshot = lifecycle_snapshot(root, identity);
-    has_newer_lead_observation(snapshot.as_ref(), None, observation)
 }
 
 fn turn_end_draft(event: &ProviderEvent) -> Option<&LifecycleObservation> {
@@ -1618,7 +1607,7 @@ fn append_observation(
         let pending_end = candidate.turn_end.clone();
         let lead_prompt = candidate
             .is_lead_prompt()
-            .then(|| PromptReference::of(&candidate));
+            .then(|| PromptReference::of_for(provider, &candidate));
         // Every lead prompt reaches the prompt record, the ones this file
         // will not store too: the general pool keeps one prompt per turn id,
         // and a prompt typed while a turn runs, an answer among them (see
@@ -1641,38 +1630,24 @@ fn append_observation(
                 Err(error) => prompts_problem = Some(error.diagnostic),
             }
         }
-        let recorded_prompt = ends_turn
-            .then(|| latest_prompt(&resolved.root, &identity))
-            .flatten();
+        let prompt_read = ends_turn.then(|| read_latest_prompt(&resolved.root, &identity));
+        let recorded_prompt = prompt_read
+            .as_ref()
+            .and_then(PromptRecordRead::as_reference);
         let continued_at = ends_turn
             .then(|| agy_continued_at(&resolved.root, &identity, provider))
             .flatten();
-        let matches_current_turn = if ends_turn {
-            let latest_active = latest(
-                snapshot
-                    .lead_observations()
-                    .filter(|item| !item.ends_turn(provider)),
-            );
-            let prompt_covered = recorded_prompt.as_ref().is_none_or(|prompt| {
-                latest_active.is_some_and(|item| {
-                    item.observed_mono_ns.as_str() >= prompt.observed_mono_ns.as_str()
-                })
-            });
-            moved_aside.is_none()
-                && prompt_covered
-                && match draft.turn_id() {
-                    Some(turn) => latest_active.is_some_and(|item| item.turn_id() == Some(turn)),
-                    None => {
-                        snapshot.pools.general.retention_floor_mono_ns.is_none()
-                            && latest_active.is_some_and(|item| item.turn_id().is_none())
-                    }
-                }
+        let matches_current_turn = if ends_turn && provider == Provider::Agy {
+            prompt_read.as_ref().is_some_and(|read| {
+                agy_stop_ownership(draft, Some(&snapshot), moved_aside.is_some(), read)
+                    == AgyStopOwnership::Current
+            })
         } else {
             false
         };
         if !snapshot.reduce_with_continuation(
             candidate,
-            recorded_prompt.as_ref(),
+            recorded_prompt,
             continued_at.as_deref(),
         )? {
             let stored = snapshot
@@ -2223,22 +2198,34 @@ fn apply_activity(
                 result,
                 standing: activity,
                 written,
-            } = if turn_end_draft(event).is_some()
-                && (existing.as_ref().is_some_and(|a| {
-                    a["observed_mono_ns"]
-                        .as_str()
-                        .is_some_and(|order| order > observation)
-                }) || newer_lead_observation(&resolved.root, &identity, observation)
-                    || covered_by_clear(observation, clear.as_ref())
-                    || {
-                        let end = read_record_at(&resolved.root, "binding_end", &identity)?;
-                        let ended = end
-                            .as_ref()
-                            .is_some_and(|end| ends_binding(end, current_binding));
-                        loaded_end = Some(end);
-                        ended
-                    })
-            {
+            } = if let Some(draft) = turn_end_draft(event)
+                && ({
+                    let snapshot_read = read_lifecycle_snapshot(&resolved.root, &identity);
+                    let prompt_read = read_latest_prompt(&resolved.root, &identity);
+                    existing.as_ref().is_some_and(|a| {
+                        a["observed_mono_ns"]
+                            .as_str()
+                            .is_some_and(|order| order > observation)
+                    }) || has_newer_lead_observation(
+                        snapshot_read.as_ref(),
+                        prompt_read.as_reference(),
+                        observation,
+                    ) || agy_stop_superseded_by_ownership(
+                        event_provider(event)?,
+                        draft,
+                        snapshot_read.as_ref(),
+                        snapshot_read.is_unreadable(),
+                        &prompt_read,
+                    ) || covered_by_clear(observation, clear.as_ref())
+                        || {
+                            let end = read_record_at(&resolved.root, "binding_end", &identity)?;
+                            let ended = end
+                                .as_ref()
+                                .is_some_and(|end| ends_binding(end, current_binding));
+                            loaded_end = Some(end);
+                            ended
+                        }
+                }) {
                 ActivityOutcome {
                     result: turn_end_superseded(),
                     standing: existing,
@@ -3381,15 +3368,15 @@ fn apply_clear_event(
         let mut loaded_end: Option<Option<Value>> = None;
         if let Some(draft) = turn_end_draft(event) {
             let identity = resolved.binding(&binding_id);
-            let snapshot = lifecycle_snapshot(&resolved.root, &identity);
-            let mut prompt_loaded: Option<Option<PromptReference>> = None;
+            let snapshot_read = read_lifecycle_snapshot(&resolved.root, &identity);
+            let mut prompt_loaded: Option<PromptRecordRead> = None;
             // A replayed turn-ending clear (such as a repeated USER_CANCELED
             // Stop or Codex Interrupt) must not write a fresh clear watermark
             // over a newer turn's activity.
-            if let Some(snapshot) = snapshot.as_ref() {
+            if let Some(snapshot) = snapshot_read.as_ref() {
                 let prompt = prompt_loaded
-                    .get_or_insert_with(|| latest_prompt(&resolved.root, &identity))
-                    .as_ref();
+                    .get_or_insert_with(|| read_latest_prompt(&resolved.root, &identity))
+                    .as_reference();
                 if snapshot.repeats_turn_end(draft, observation, prompt, None) {
                     let existing_clear =
                         read_record_at(&resolved.root, "activity_clear", &identity)?;
@@ -3413,17 +3400,24 @@ fn apply_clear_event(
                 .as_ref()
                 .is_some_and(|end| ends_binding(end, current_binding));
             loaded_end = Some(end);
+            let prompt_read =
+                prompt_loaded.get_or_insert_with(|| read_latest_prompt(&resolved.root, &identity));
             if activity.as_ref().is_some_and(|a| {
                 a["observed_mono_ns"]
                     .as_str()
                     .is_some_and(|order| order > observation)
             }) || ended
                 || has_newer_lead_observation(
-                    snapshot.as_ref(),
-                    prompt_loaded
-                        .get_or_insert_with(|| latest_prompt(&resolved.root, &identity))
-                        .as_ref(),
+                    snapshot_read.as_ref(),
+                    prompt_read.as_reference(),
                     observation,
+                )
+                || agy_stop_superseded_by_ownership(
+                    event_provider(event)?,
+                    draft,
+                    snapshot_read.as_ref(),
+                    snapshot_read.is_unreadable(),
+                    prompt_read,
                 )
             {
                 return Ok(append_observation(
@@ -4003,7 +3997,7 @@ fn start_turn_follower(
                         .lead_observations()
                         .filter(|item| {
                             item.observed_mono_ns.as_str() > latest.observed_mono_ns.as_str()
-                                && item.ends_turn(Provider::Agy)
+                                && ends_agy_invocation(item)
                         })
                         .map(|item| item.observed_mono_ns.clone())
                         .max()
@@ -4354,9 +4348,20 @@ pub(crate) fn latest_prompt_is(
     })
 }
 
-/// Whether a lead turn-ending observation has already been recorded after
-/// `invocation_observed_mono_ns`, so an Agy follower for that invocation must
-/// exit and must not apply a stale status sample to a later continuation.
+/// Whether `item` is an effective Agy lead turn-ending observation. A `Stop`
+/// persisted as `TurnEndStatus::Superseded` is kept only as history and must
+/// not retire an active invocation's follower.
+fn ends_agy_invocation(item: &LifecycleObservation) -> bool {
+    item.ends_turn(Provider::Agy)
+        && item
+            .turn_end
+            .as_ref()
+            .is_none_or(|end| end.status != TurnEndStatus::Superseded)
+}
+
+/// Whether an effective lead turn-ending observation has already been recorded
+/// after `invocation_observed_mono_ns`, so an Agy follower for that invocation
+/// must exit and must not apply a stale status sample to a later continuation.
 pub(crate) fn agy_invocation_ended(
     root: &Path,
     address: &PaneAddress,
@@ -4368,28 +4373,226 @@ pub(crate) fn agy_invocation_ended(
     lifecycle_snapshot(root, &identity).is_some_and(|snapshot| {
         snapshot.lead_observations().any(|item| {
             item.observed_mono_ns.as_str() > invocation_observed_mono_ns
-                && item.ends_turn(Provider::Agy)
+                && ends_agy_invocation(item)
         })
     })
+}
+
+enum SnapshotRead {
+    Present(Box<LifecycleSnapshot>),
+    Missing,
+    Unreadable,
+}
+
+impl SnapshotRead {
+    fn as_ref(&self) -> Option<&LifecycleSnapshot> {
+        match self {
+            Self::Present(snapshot) => Some(snapshot),
+            Self::Missing | Self::Unreadable => None,
+        }
+    }
+
+    fn is_unreadable(&self) -> bool {
+        matches!(self, Self::Unreadable)
+    }
+}
+
+fn read_lifecycle_snapshot(root: &Path, identity: &RecordIdentity) -> SnapshotRead {
+    match read_record_at(root, "lifecycle_snapshot", identity) {
+        Ok(None) => SnapshotRead::Missing,
+        Ok(Some(value)) => match serde_json::from_value(value) {
+            Ok(snapshot) => SnapshotRead::Present(Box::new(snapshot)),
+            Err(_) => SnapshotRead::Unreadable,
+        },
+        Err(_) => SnapshotRead::Unreadable,
+    }
 }
 
 /// The lead's lifecycle snapshot of the binding `identity` names; `None` when
 /// there is none or it cannot be read.
 fn lifecycle_snapshot(root: &Path, identity: &RecordIdentity) -> Option<LifecycleSnapshot> {
-    read_record_at(root, "lifecycle_snapshot", identity)
-        .ok()
-        .flatten()
-        .and_then(|value| serde_json::from_value(value).ok())
+    match read_lifecycle_snapshot(root, identity) {
+        SnapshotRead::Present(snapshot) => Some(*snapshot),
+        SnapshotRead::Missing | SnapshotRead::Unreadable => None,
+    }
+}
+
+enum PromptRecordRead {
+    Present(Option<PromptReference>),
+    Missing,
+    Unreadable,
+}
+
+impl PromptRecordRead {
+    fn as_reference(&self) -> Option<&PromptReference> {
+        match self {
+            Self::Present(prompt) => prompt.as_ref(),
+            Self::Missing | Self::Unreadable => None,
+        }
+    }
+}
+
+fn read_latest_prompt(root: &Path, identity: &RecordIdentity) -> PromptRecordRead {
+    match read_record_at(root, "lead_prompts", identity) {
+        Ok(None) => PromptRecordRead::Missing,
+        Ok(Some(value)) => match serde_json::from_value::<LeadPrompts>(value) {
+            Ok(prompts) => PromptRecordRead::Present(prompts.latest),
+            Err(_) => PromptRecordRead::Unreadable,
+        },
+        Err(_) => PromptRecordRead::Unreadable,
+    }
 }
 
 /// The lead's latest prompt, from the binding's prompt record; `None` when
 /// the record names none or cannot be read.
 fn latest_prompt(root: &Path, identity: &RecordIdentity) -> Option<PromptReference> {
-    read_record_at(root, "lead_prompts", identity)
-        .ok()
-        .flatten()
-        .and_then(|value| serde_json::from_value::<LeadPrompts>(value).ok())
-        .and_then(|prompts| prompts.latest)
+    match read_latest_prompt(root, identity) {
+        PromptRecordRead::Present(prompt) => prompt,
+        PromptRecordRead::Missing | PromptRecordRead::Unreadable => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgyStopOwnership {
+    /// Positive match between the Stop's `executionId` and the current turn's
+    /// lead prompt boundary: may transition activity, run Stop checks, retire
+    /// the follower, and fall back to the transcript tail for `--include-reply`.
+    Current,
+    /// Genuine no-ID turn with intact history (or a fresh binding before any
+    /// prompt with no conflicting execution): may transition activity, run Stop
+    /// checks, and retire the follower, but never reads transcript fallback.
+    Anonymous,
+    /// Proven to belong to an older or different execution than the current turn.
+    Stale,
+    /// Ownership cannot be established (unreadable prompt or lifecycle record,
+    /// missing ID on an identified turn, or evicted history without a matching
+    /// current prompt): must not change activity, clear it, run Stop checks,
+    /// retire a follower, or read transcript fallback.
+    Unknown,
+}
+
+fn agy_stop_ownership(
+    draft: &LifecycleObservation,
+    snapshot: Option<&LifecycleSnapshot>,
+    snapshot_unusable: bool,
+    prompt_read: &PromptRecordRead,
+) -> AgyStopOwnership {
+    if matches!(prompt_read, PromptRecordRead::Unreadable) {
+        return AgyStopOwnership::Unknown;
+    }
+    let usable_snapshot = snapshot.filter(|_| !snapshot_unusable);
+    let pooled_prompt = usable_snapshot.and_then(|snapshot| {
+        latest(
+            snapshot
+                .lead_observations()
+                .filter(|item| item.is_lead_prompt()),
+        )
+    });
+    let history_lost = snapshot_unusable
+        || usable_snapshot
+            .is_some_and(|snapshot| snapshot.pools.general.retention_floor_mono_ns.is_some());
+    let effective_prompt = match (prompt_read.as_reference(), pooled_prompt) {
+        (Some(recorded), Some(pooled))
+            if pooled.observed_mono_ns.as_str() > recorded.observed_mono_ns.as_str() =>
+        {
+            Some(PromptReference::of_for(Provider::Agy, pooled))
+        }
+        (Some(recorded), Some(pooled))
+            if recorded.turn_id.is_none()
+                && pooled.observation_id == recorded.observation_id
+                && pooled.observed_mono_ns == recorded.observed_mono_ns =>
+        {
+            Some(PromptReference::of_for(Provider::Agy, pooled))
+        }
+        (Some(recorded), _) => Some(recorded.clone()),
+        (None, Some(pooled)) => {
+            if history_lost {
+                return if pooled
+                    .turn_id()
+                    .is_some_and(|pid| draft.turn_id().is_some_and(|did| did != pid))
+                {
+                    AgyStopOwnership::Stale
+                } else {
+                    AgyStopOwnership::Unknown
+                };
+            }
+            Some(PromptReference::of_for(Provider::Agy, pooled))
+        }
+        (None, None) => None,
+    };
+    let Some(prompt) = effective_prompt else {
+        if history_lost {
+            return AgyStopOwnership::Unknown;
+        }
+        let conflicting_turn = usable_snapshot.is_some_and(|snapshot| {
+            snapshot.lead_observations().any(|item| {
+                (!item.ends_turn(Provider::Agy) || ends_agy_invocation(item))
+                    && item.turn_id().is_some()
+                    && item.turn_id() != draft.turn_id()
+            })
+        });
+        if conflicting_turn {
+            return if draft.turn_id().is_some() {
+                AgyStopOwnership::Stale
+            } else {
+                AgyStopOwnership::Unknown
+            };
+        }
+        return AgyStopOwnership::Anonymous;
+    };
+    match (prompt.turn_id.as_deref(), draft.turn_id()) {
+        (Some(current_id), Some(draft_id)) if current_id == draft_id => AgyStopOwnership::Current,
+        (Some(_), Some(_)) => AgyStopOwnership::Stale,
+        (Some(_), None) => AgyStopOwnership::Unknown,
+        (None, Some(draft_id)) => {
+            let seen_before_prompt = usable_snapshot.is_some_and(|snapshot| {
+                snapshot.lead_observations().any(|item| {
+                    item.observed_mono_ns.as_str() < prompt.observed_mono_ns.as_str()
+                        && item.turn_id() == Some(draft_id)
+                })
+            });
+            if seen_before_prompt {
+                AgyStopOwnership::Stale
+            } else {
+                AgyStopOwnership::Unknown
+            }
+        }
+        (None, None) => {
+            if snapshot_unusable {
+                return AgyStopOwnership::Unknown;
+            }
+            let Some(snapshot) = usable_snapshot else {
+                return AgyStopOwnership::Unknown;
+            };
+            let prompt_in_pool = snapshot
+                .lead_observations()
+                .any(|item| item.observation_id == prompt.observation_id);
+            let pool_has_identified = snapshot
+                .lead_observations()
+                .any(|item| item.turn_id().is_some());
+            if prompt_in_pool || !pool_has_identified {
+                AgyStopOwnership::Anonymous
+            } else {
+                AgyStopOwnership::Unknown
+            }
+        }
+    }
+}
+
+fn agy_stop_superseded_by_ownership(
+    provider: Provider,
+    draft: &LifecycleObservation,
+    snapshot: Option<&LifecycleSnapshot>,
+    snapshot_unusable: bool,
+    prompt_read: &PromptRecordRead,
+) -> bool {
+    if provider != Provider::Agy || !draft.ends_turn(Provider::Agy) {
+        return false;
+    }
+    matches!(
+        agy_stop_ownership(draft, snapshot, snapshot_unusable, prompt_read),
+        AgyStopOwnership::Stale | AgyStopOwnership::Unknown
+    )
 }
 
 /// For `agy`, a Stop-hook continuation or wakeup (`PreInvocation` or
@@ -4486,16 +4689,18 @@ pub(crate) fn record_prompt_turn_interrupt(
             if provider == Provider::Agy
                 && let Some(invocation_stamp) = turn.invocation_observed_mono_ns
                 && lead().any(|item| {
-                    item.observed_mono_ns.as_str() > invocation_stamp
-                        && item.ends_turn(Provider::Agy)
+                    item.observed_mono_ns.as_str() > invocation_stamp && ends_agy_invocation(item)
                 })
             {
                 return skipped();
             }
             let mut activity: Option<Option<Value>> = None;
-            if let Some(last) =
-                latest(lead().filter(|item| item.observed_mono_ns.as_str() > prompt_stamp))
-                && last.ends_turn(provider)
+            if let Some(last) = latest(lead().filter(|item| {
+                item.observed_mono_ns.as_str() > prompt_stamp
+                    && (provider != Provider::Agy
+                        || !item.ends_turn(Provider::Agy)
+                        || ends_agy_invocation(item))
+            })) && last.ends_turn(provider)
             {
                 let invocation_stamp = turn.invocation_observed_mono_ns.unwrap_or(prompt_stamp);
                 let resumed_thinking = if provider == Provider::Agy
@@ -4637,6 +4842,7 @@ struct HoldScope {
     /// false when one exists but could not be read.
     snapshot_absent: bool,
     prompts: Option<LeadPrompts>,
+    prompts_read: PromptRecordRead,
 }
 
 fn prepare_hold_scope(
@@ -4675,11 +4881,6 @@ fn prepare_hold_scope(
                 return Ok(CommitPlan::reporting(None));
             }
             // A record that cannot be read gives the check none of its history.
-            let read = |kind| {
-                read_record_at(&resolved.root, kind, &resolved.binding(&binding_id))
-                    .ok()
-                    .flatten()
-            };
             let found = read_record_at(
                 &resolved.root,
                 "lifecycle_snapshot",
@@ -4690,7 +4891,21 @@ fn prepare_hold_scope(
                 .ok()
                 .flatten()
                 .and_then(|value| serde_json::from_value(value).ok());
-            let prompts = read("lead_prompts").and_then(|value| serde_json::from_value(value).ok());
+            let (prompts, prompts_read) = match read_record_at(
+                &resolved.root,
+                "lead_prompts",
+                &resolved.binding(&binding_id),
+            ) {
+                Ok(None) => (None, PromptRecordRead::Missing),
+                Ok(Some(value)) => match serde_json::from_value::<LeadPrompts>(value) {
+                    Ok(record) => {
+                        let latest = record.latest.clone();
+                        (Some(record), PromptRecordRead::Present(latest))
+                    }
+                    Err(_) => (None, PromptRecordRead::Unreadable),
+                },
+                Err(_) => (None, PromptRecordRead::Unreadable),
+            };
             Ok(CommitPlan::reporting(Some(HoldScope {
                 scope: HookScope {
                     address: resolved.address.clone(),
@@ -4702,6 +4917,7 @@ fn prepare_hold_scope(
                 snapshot,
                 snapshot_absent,
                 prompts,
+                prompts_read,
             })))
         },
         |_| Ok(()),
@@ -4732,6 +4948,7 @@ fn obtain_hold_notes(
         snapshot,
         snapshot_absent,
         prompts,
+        prompts_read,
     })) = prepare_hold_scope(resolved, event)
     else {
         return hold_check::bypass(request.registrations, Bypass::NoCurrentScope);
@@ -4754,7 +4971,7 @@ fn obtain_hold_notes(
     // thinking a lifecycle file not yet written is no history, not history
     // that could not be read.
     let prospective = event.observation.as_ref().and_then(|draft| {
-        let recorded_prompt = prompts.as_ref().and_then(|prompts| prompts.latest.as_ref());
+        let recorded_prompt = prompts_read.as_reference();
         if snapshot.is_none() && !(before_thinking && snapshot_absent) {
             return None;
         }
@@ -4772,12 +4989,18 @@ fn obtain_hold_notes(
                 })
                 .flatten();
             (!before_thinking
-                && snapshot.repeats_turn_end(
+                && (snapshot.repeats_turn_end(
                     draft,
                     observation,
                     recorded_prompt,
                     continued_at.as_deref(),
-                ))
+                ) || agy_stop_superseded_by_ownership(
+                    snapshot.provider,
+                    draft,
+                    Some(snapshot),
+                    false,
+                    &prompts_read,
+                )))
                 || snapshot
                     .pools
                     .general

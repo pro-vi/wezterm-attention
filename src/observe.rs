@@ -447,7 +447,7 @@ fn latest_prompt(state: &State) -> Option<PromptReference> {
                 (&a.observed_mono_ns, &a.observation_id)
                     .cmp(&(&b.observed_mono_ns, &b.observation_id))
             })
-            .map(PromptReference::of)
+            .map(|item| PromptReference::of_for(snapshot.provider, item))
     });
     PromptReference::later_of(
         state.prompts.as_ref().and_then(|p| p.latest.clone()),

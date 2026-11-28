@@ -340,22 +340,58 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
         json!({"availability": "available", "text": "Direct payload reply"})
     );
 
-    let mut stale_stop = stop_payload.clone();
-    stale_stop["executionId"] = json!("exec-stale");
-    stale_stop["executionNum"] = json!(0);
+    // A delayed PostToolUse for Turn 1 arriving after Turn 2's prompt must not
+    // let Turn 1's Stop or an anonymous Stop claim Turn 2, flip thinking to
+    // stop, or forward Turn 2's reply.
+    let delayed_turn1_tool = json!({
+        "hookEventName": "PostToolUse",
+        "conversationId": LEAD,
+        "executionId": "exec-1",
+        "transcriptPath": tx_str,
+        "cwd": "/tmp/project",
+        "lastUserInput": "Summarize the tests",
+        "toolCall": {"name": "run_command", "id": "delayed-t1"},
+        "error": ""
+    });
     assert!(
-        agy_hook_cli(&setup, "Stop", &stale_stop, &stop_flags)
+        agy_hook_cli(&setup, "PostToolUse", &delayed_turn1_tool, &["--strict"])
             .status
             .success()
     );
-    let stale_delivery: Value = serde_json::from_slice(&fs::read(&stop_sink).unwrap()).unwrap();
-    assert_eq!(stale_delivery["reply"], json!({"availability": "absent"}));
+
+    let mut stale_stop = stop_payload.clone();
+    stale_stop["executionId"] = json!("exec-stale");
+    stale_stop["executionNum"] = json!(0);
+    let _ = fs::remove_file(&stop_sink);
+    let stale_out = agy_hook_cli(&setup, "Stop", &stale_stop, &stop_flags);
+    assert!(!stale_out.status.success());
+    assert!(
+        String::from_utf8_lossy(&stale_out.stderr)
+            .contains("turn end was superseded by newer native state")
+    );
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "thinking"
+    );
+    assert!(!stop_sink.exists());
+
+    let mut anon_stop = stop_payload.clone();
+    anon_stop.as_object_mut().unwrap().remove("executionId");
+    anon_stop["executionNum"] = json!(0);
+    let anon_out = agy_hook_cli(&setup, "Stop", &anon_stop, &stop_flags);
+    assert!(!anon_out.status.success());
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "thinking"
+    );
+    assert!(!stop_sink.exists());
 
     // Evict Turn 1's Stop and Turn 2's PromptSubmitted from the 64-entry
-    // general pool with Turn 2 tool traffic: replaying Turn 1's Stop still
-    // reports absent while real Turn 2's Stop positively matches Turn 2's tool
-    // observations; after removing lifecycle.json, replaying Turn 1 also fails
-    // closed to absent.
+    // general pool with Turn 2 tool traffic: even after a delayed Turn 1
+    // PostToolUse, replaying Turn 1's Stop is superseded, keeps Turn 2
+    // thinking, and suppresses consumer delivery while real Turn 2's Stop
+    // positively matches Turn 2's prompt record; after removing lifecycle.json,
+    // replaying Turn 1 also stays superseded and suppresses delivery.
     let before_evict: LifecycleSnapshot = serde_json::from_slice(
         &fs::read(setup.binding_dir("agy", LEAD).join("lifecycle.json")).unwrap(),
     )
@@ -394,13 +430,20 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
             );
         }
     }
+    let mut delayed_after_evict = delayed_turn1_tool;
+    delayed_after_evict["toolCall"]["id"] = json!("delayed-t1-after-evict");
     assert!(
-        agy_hook_cli(&setup, "Stop", &stop_payload, &stop_flags)
+        agy_hook_cli(&setup, "PostToolUse", &delayed_after_evict, &["--strict"])
             .status
             .success()
     );
-    let evicted_replay: Value = serde_json::from_slice(&fs::read(&stop_sink).unwrap()).unwrap();
-    assert_eq!(evicted_replay["reply"], json!({"availability": "absent"}));
+    let evicted_out = agy_hook_cli(&setup, "Stop", &stop_payload, &stop_flags);
+    assert!(!evicted_out.status.success());
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "thinking"
+    );
+    assert!(!stop_sink.exists());
 
     let mut turn2_stop = stop_payload.clone();
     turn2_stop["executionId"] = json!("exec-2");
@@ -411,6 +454,10 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
             .status
             .success()
     );
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "stop"
+    );
     let turn2_delivery: Value = serde_json::from_slice(&fs::read(&stop_sink).unwrap()).unwrap();
     assert_eq!(
         turn2_delivery["reply"],
@@ -418,13 +465,10 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
     );
 
     fs::remove_file(setup.binding_dir("agy", LEAD).join("lifecycle.json")).unwrap();
-    assert!(
-        agy_hook_cli(&setup, "Stop", &stop_payload, &stop_flags)
-            .status
-            .success()
-    );
-    let rebuilt_replay: Value = serde_json::from_slice(&fs::read(&stop_sink).unwrap()).unwrap();
-    assert_eq!(rebuilt_replay["reply"], json!({"availability": "absent"}));
+    let _ = fs::remove_file(&stop_sink);
+    let rebuilt_out = agy_hook_cli(&setup, "Stop", &stop_payload, &stop_flags);
+    assert!(!rebuilt_out.status.success());
+    assert!(!stop_sink.exists());
 
     // Error Stop (TERMINAL_CUSTOM_HOOK) produces attempt_outcome, notify with
     // label, and unsupported reply (never leaks the prior turn's reply).
@@ -437,6 +481,7 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
     let err_stop = json!({
         "hookEventName": "Stop",
         "conversationId": LEAD,
+        "executionId": "exec-2",
         "transcriptPath": tx_str,
         "cwd": "/tmp/project",
         "lastUserInput": "Next turn",
@@ -2263,6 +2308,7 @@ fn agy_follower_clears_esc_during_stop_hook_continuation_without_new_observation
         &json!({
             "hookEventName": "PreInvocation",
             "conversationId": LEAD,
+            "executionId": "exec-cont",
             "transcriptPath": lead_tx.to_string_lossy(),
             "artifactDirectoryPath": lead_dir.to_string_lossy(),
             "cwd": "/tmp/project",
@@ -2282,6 +2328,7 @@ fn agy_follower_clears_esc_during_stop_hook_continuation_without_new_observation
         &json!({
             "hookEventName": "Stop",
             "conversationId": LEAD,
+            "executionId": "exec-cont",
             "transcriptPath": lead_tx.to_string_lossy(),
             "cwd": "/tmp/project",
             "lastUserInput": "cont",
@@ -2403,6 +2450,32 @@ fn agy_follower_clears_esc_during_stop_hook_continuation_without_new_observation
     apply_as(&setup, &env, &pre2, "00000000000000000550");
     assert_eq!(setup.followers.started.lock().unwrap().len(), before_loop);
     drop(held_new);
+
+    // A superseded Stop from an older execution persisted during continuation 1
+    // must keep thinking and must NOT retire follower #2.
+    let stale_stop = parse_provider_event(
+        "agy",
+        "Stop",
+        &json!({
+            "hookEventName": "Stop",
+            "conversationId": LEAD,
+            "executionId": "exec-stale",
+            "transcriptPath": lead_tx.to_string_lossy(),
+            "cwd": "/tmp/project",
+            "lastUserInput": "old",
+            "terminationReason": "NO_TOOL_CALL",
+            "fullyIdle": true,
+            "continuationActive": false,
+            "executionNum": 0
+        }),
+        &env,
+    );
+    let stale_res = apply_as(&setup, &env, &stale_stop, "00000000000000000600");
+    assert_eq!(stale_res.disposition, "ignored", "{stale_res:?}");
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "thinking"
+    );
 
     // An old follower from invocation 0 cannot clear continuation 1's thinking
     // even if it already sees IDLE / canceled state; follower #2 clears Esc.
@@ -3268,6 +3341,171 @@ fn agy_quiet_continuation_wakeup_and_unseen_stop_with_checks_json() {
     assert!(
         unreadable_act.get("unseen_stop").is_none(),
         "{unreadable_act}"
+    );
+
+    // Genuine no-ID turn (PreInvocation(0) with valid USER_INPUT transcript and
+    // no executionId) still transitions from thinking to stop on its no-ID Stop.
+    write_jsonl(
+        &tx,
+        &[
+            json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "anonymous prompt"}),
+        ],
+    );
+    assert!(
+        agy_hook_cli(
+            &setup,
+            "PreInvocation",
+            &json!({
+                "hookEventName": "PreInvocation",
+                "conversationId": LEAD,
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "anonymous prompt",
+                "invocationNum": 0,
+                "initialNumSteps": 1
+            }),
+            &["--strict"],
+        )
+        .status
+        .success()
+    );
+    assert!(
+        agy_hook_cli(
+            &setup,
+            "Stop",
+            &json!({
+                "hookEventName": "Stop",
+                "conversationId": LEAD,
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "anonymous prompt",
+                "terminationReason": "NO_TOOL_CALL",
+                "fullyIdle": true,
+                "continuationActive": false,
+                "executionNum": 0
+            }),
+            &["--strict"],
+        )
+        .status
+        .success()
+    );
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "stop"
+    );
+
+    // 6. Omitted-executionNum replay (continuationActive: true) must not reopen
+    // on PreInvocation or a delayed PostToolUse, and a stale-execution Stop must
+    // not run checks.json Stop checks.
+    assert!(
+        agy_hook_cli(
+            &setup,
+            "PreInvocation",
+            &json!({
+                "hookEventName": "PreInvocation",
+                "conversationId": LEAD,
+                "executionId": "exec-no-ord",
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "auto prompt",
+                "invocationNum": 0,
+                "initialNumSteps": 1
+            }),
+            &["--strict"],
+        )
+        .status
+        .success()
+    );
+    let no_ord_stop = json!({
+        "hookEventName": "Stop",
+        "conversationId": LEAD,
+        "executionId": "exec-no-ord",
+        "transcriptPath": tx_str,
+        "cwd": "/tmp/project",
+        "lastUserInput": "auto prompt",
+        "terminationReason": "NO_TOOL_CALL",
+        "fullyIdle": true,
+        "continuationActive": true
+    });
+    assert!(
+        agy_hook_cli(&setup, "Stop", &no_ord_stop, &["--strict"])
+            .status
+            .success()
+    );
+    let no_ord_id = latest_stop_id();
+    assert!(
+        agy_hook_cli(
+            &setup,
+            "PreInvocation",
+            &json!({
+                "hookEventName": "PreInvocation",
+                "conversationId": LEAD,
+                "executionId": "exec-no-ord",
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "auto prompt",
+                "invocationNum": 1,
+                "initialNumSteps": 2
+            }),
+            &["--strict"],
+        )
+        .status
+        .success()
+    );
+    assert!(
+        agy_hook_cli(
+            &setup,
+            "PostToolUse",
+            &json!({
+                "hookEventName": "PostToolUse",
+                "conversationId": LEAD,
+                "executionId": "exec-no-ord",
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "auto prompt",
+                "toolCall": {"name": "run_command", "id": "delayed-no-ord"},
+                "error": ""
+            }),
+            &["--strict"],
+        )
+        .status
+        .success()
+    );
+    let calls_before_stale = check_calls();
+    assert!(
+        agy_hook_cli(&setup, "Stop", &no_ord_stop, &["--strict"])
+            .status
+            .success()
+    );
+    assert_eq!(latest_stop_id(), no_ord_id);
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "thinking"
+    );
+    assert_eq!(check_calls(), calls_before_stale);
+
+    let stale_checked = agy_hook_cli(
+        &setup,
+        "Stop",
+        &json!({
+            "hookEventName": "Stop",
+            "conversationId": LEAD,
+            "executionId": "exec-old-checked",
+            "transcriptPath": tx_str,
+            "cwd": "/tmp/project",
+            "lastUserInput": "auto prompt",
+            "terminationReason": "NO_TOOL_CALL",
+            "fullyIdle": true,
+            "continuationActive": false,
+            "executionNum": 0
+        }),
+        &["--strict"],
+    );
+    assert!(!stale_checked.status.success());
+    assert_eq!(check_calls(), calls_before_stale);
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "thinking"
     );
 }
 

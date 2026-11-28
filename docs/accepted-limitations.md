@@ -809,10 +809,11 @@ What it cannot do, and what else rests on `agy` 1.5.16's private on-disk files:
   symlinks and foreign ownership, and fails closed if `agy` changes its private
   layout or SQLite schema. Because `transcript_full.jsonl` carries no
   `executionId`, `--include-reply` falls back to `transcript_full.jsonl` only
-  when `Stop` freshly writes a non-superseded end that positively matches the
-  binding's current turn; replayed, superseded, or history-less `Stop`
-  callbacks without `finalModelOutput` report `reply` as `absent` rather than
-  reading a newer turn's tail.
+  when `Stop` carries an `executionId` and freshly writes a non-superseded end
+  matching the binding's current prompt boundary (assuming synchronous `Stop`
+  hook delivery before `agy` appends the next turn); replayed, superseded,
+  anonymous, or history-less `Stop` callbacks without `finalModelOutput` report
+  `reply` as `absent` rather than reading a newer turn's tail.
 - **No hook consumer or check on `agy_status`.** As with Claude's
   `session_status`, no hook consumer, reply capture, or quiet check runs for a
   follower-recorded `agy_status` interrupt; `attention observe` and

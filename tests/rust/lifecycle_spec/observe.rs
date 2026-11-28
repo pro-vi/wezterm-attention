@@ -311,6 +311,7 @@ fn a_prompt_seen_only_in_the_prompt_record_is_not_reported_twice() {
         observation_id: observation_id.clone(),
         observed_mono_ns: "00000000000000000300".into(),
         written_at_unix_ns: "00000000000000000300".into(),
+        turn_id: None,
     });
     atomic_replace(&dir.join("prompts.json"), &json!(prompts)).unwrap();
     let answer = observe(&root, &scope, &filters(), Some(&cursor), Duration::ZERO).unwrap();
