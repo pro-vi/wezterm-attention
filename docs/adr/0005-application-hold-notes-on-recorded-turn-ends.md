@@ -129,7 +129,10 @@ word. On 2026-11-25 one of two Codex sessions running while a check was added
 to its prompt and tool-call lines recorded no prompt and no tool call for its
 next two turns, the second after the lines were put back (wezpup's
 observation; wezpup is the application whose check it was). With the file, an
-installer adds, changes or removes a check, and no line changes. The file
+installer adds, changes or removes a check, and no line changes.
+`attention checks add` and `attention checks remove` change one entry under
+a lock in the state root; the file carries no owner, so both refuse a
+different check under the same name for the same provider and event. The file
 holds checks only, of both kinds, with what a flag carries: name, declared
 time, executable. It sets no environment; a check receives the hook's, as a
 line's check does. It lives in the state root, so whatever isolates the state

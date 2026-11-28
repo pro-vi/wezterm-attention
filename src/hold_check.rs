@@ -67,7 +67,8 @@ pub fn has_quiet(registrations: &[Registration]) -> bool {
 }
 
 /// When a chain runs: before a lead turn end is recorded, or before a lead
-/// prompt or tool call writes a new `thinking` activity. Only quiet checks run
+/// prompt or tool call writes a new `thinking` activity, and again at a turn's
+/// first lead tool call on a `thinking` already shown. Only quiet checks run
 /// before thinking.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

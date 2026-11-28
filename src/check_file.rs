@@ -2,27 +2,35 @@
 //! `hooks event` runs them after the checks of the same kind its hook line
 //! names, so an installer can add, change or remove a check without changing
 //! the line, which a provider may tie its approval to. See ADR 0005's
-//! amendment of 2026-11-25.
+//! amendment on `checks.json`. `attention checks add` and `attention checks
+//! remove` change one entry under the same rules, so an installer need not
+//! copy them.
 use std::collections::BTreeSet;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::ErrorKind;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::hold_check::{self, Purpose, Registration};
 use crate::protocol::{
     AttentionError, Diagnostic, DiagnosticCode, HookRegistration, Result, manifest,
 };
-use crate::records::{naming_record, read_bounded};
+use crate::records::{
+    LOCK_TIMEOUT, atomic_replace, naming_record, read_bounded, with_lock, within_read_bound,
+};
 
 /// The file's name in the state root.
 pub const FILE_NAME: &str = "checks.json";
 /// The one schema this build reads.
 const SCHEMA: u64 = 1;
+/// Held while `add` or `remove` reads and replaces the file, so two
+/// installers that run at once do not each drop the other's entry. Hooks read
+/// the file without it: a rename never shows them half a file.
+const LOCK_NAME: &str = ".checks.lock";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -33,16 +41,16 @@ struct CheckFile {
 
 /// One check the file registers on one provider's hook event, as one
 /// `--hold-check` or `--quiet-check` on that event's line would.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
-    provider: String,
-    event: String,
-    kind: Purpose,
-    name: String,
+    pub provider: String,
+    pub event: String,
+    pub kind: Purpose,
+    pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    time_ms: Option<u64>,
-    executable: String,
+    pub time_ms: Option<u64>,
+    pub executable: String,
 }
 
 impl Entry {
@@ -76,6 +84,124 @@ pub fn read(root: &Path) -> Read {
         Ok(None) => Read::Absent,
         Err(error) => Read::Invalid(naming_record(root, &path, error).diagnostic),
     }
+}
+
+/// Registers `entry` in the file under `root`, creating both when missing,
+/// and says whether it wrote the file. An equal entry already there leaves
+/// the file as it is.
+pub fn add(root: &Path, entry: Entry) -> Result<bool> {
+    registrable(&entry)?;
+    edit(root, |entries| {
+        let absent = position(entries, &entry)?.is_none();
+        if absent {
+            entries.push(entry);
+        }
+        Ok(absent)
+    })
+}
+
+/// Removes the entry equal to `entry`, keeping every other entry in its
+/// order, and says whether it wrote the file. With no such entry, or no
+/// file, nothing changes, and nothing is created.
+pub fn remove(root: &Path, entry: &Entry) -> Result<bool> {
+    registrable(entry)?;
+    if fs::symlink_metadata(root.join(FILE_NAME))
+        .is_err_and(|error| error.kind() == ErrorKind::NotFound)
+    {
+        return Ok(false);
+    }
+    edit(root, |entries| {
+        let found = position(entries, entry)?;
+        if let Some(index) = found {
+            entries.remove(index);
+        }
+        Ok(found.is_some())
+    })
+}
+
+/// Refuses, as a usage error, an entry no file could hold, before the file is
+/// read: for `remove`, a mistyped event would otherwise read as a removal
+/// already done.
+fn registrable(entry: &Entry) -> Result<()> {
+    validate(std::slice::from_ref(entry)).map_err(|error| {
+        AttentionError::usage(format!(
+            "this check cannot be registered: {}",
+            error.diagnostic.message
+        ))
+    })
+}
+
+/// Where `entries` holds `entry`. The file carries no owner, so naming the
+/// entry whole is the nearest a caller comes to showing it is theirs: a
+/// different check under the same name for the same provider and event,
+/// which a valid file holds at most once, is refused, since it may be another
+/// installer's. Callers that added an equal entry share it.
+fn position(entries: &[Entry], entry: &Entry) -> Result<Option<usize>> {
+    match entries.iter().position(|found| {
+        found.provider == entry.provider && found.event == entry.event && found.name == entry.name
+    }) {
+        Some(index) if entries[index] == *entry => Ok(Some(index)),
+        Some(index) => Err(registered_otherwise(&entries[index])),
+        None => Ok(None),
+    }
+}
+
+/// Reads the file under its lock, applies `change`, and when it reports a
+/// change, writes the result in place of the file if this build would run
+/// its checks. A file this build would not use is left as it is, whatever
+/// the change: rewriting it would drop what it holds.
+fn edit(root: &Path, change: impl FnOnce(&mut Vec<Entry>) -> Result<bool>) -> Result<bool> {
+    let path = root.join(FILE_NAME);
+    let refused = |prefix: &str, error: AttentionError| {
+        AttentionError::new(
+            error.diagnostic.code,
+            format!("{prefix}: {}", error.diagnostic.message),
+        )
+    };
+    with_lock(&root.join(LOCK_NAME), LOCK_TIMEOUT, || {
+        // `read_entries` follows a link; a rename over it would replace the link.
+        if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return Err(AttentionError::new(
+                DiagnosticCode::RecordInvalid,
+                "checks.json is a link, which this command does not replace; edit the file it names",
+            ));
+        }
+        let mut entries = read_entries(&path)
+            .map_err(|error| refused("left as it is, since hooks do not use the file now", error))?
+            .unwrap_or_default();
+        if !change(&mut entries)? {
+            return Ok(false);
+        }
+        let value = json!({"schema": SCHEMA, "checks": entries});
+        validate(&entries)
+            .and_then(|()| within_read_bound(&value))
+            .map_err(|error| {
+                refused(
+                    "checks.json was left as it is: with this change hooks would refuse the file and run none of its checks",
+                    error,
+                )
+            })?;
+        atomic_replace(&path, &value)?;
+        Ok(true)
+    })
+    .map_err(|error| naming_record(root, &path, error))
+}
+
+fn registered_otherwise(found: &Entry) -> AttentionError {
+    AttentionError::new(
+        DiagnosticCode::RecordInvalid,
+        format!(
+            "checks.json registers a different {} check named {} for {} {}, which this command does not replace or remove: {}",
+            match found.kind {
+                Purpose::Hold => "hold",
+                Purpose::Quiet => "quiet",
+            },
+            found.name,
+            found.provider,
+            found.event,
+            found.flag_value()
+        ),
+    )
 }
 
 fn read_entries(path: &Path) -> Result<Option<Vec<Entry>>> {
