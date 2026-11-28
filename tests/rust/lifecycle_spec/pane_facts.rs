@@ -927,6 +927,7 @@ fn lead_prompts(
             written_at_unix_ns: "00000000000000000001".into(),
             turn_id: None,
         }),
+        last_execution_num: None,
         answers,
     };
     let protocol = wezterm_attention::protocol::manifest().unwrap();

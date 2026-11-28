@@ -218,6 +218,12 @@ pub struct LeadPrompts {
     /// The lead's latest prompt, whether or not the lifecycle file stored it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest: Option<PromptReference>,
+    /// Highest accepted Agy `ResponseFinished` `execution_num` for `latest`'s
+    /// `turn_id`, kept beside `latest` so an evicted or rebuilt replay cannot
+    /// close a newer continuation under the same execution id. Omitted for
+    /// other providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_execution_num: Option<u64>,
     pub answers: Vec<PromptAnswer>,
 }
 
@@ -310,6 +316,7 @@ impl LeadPrompts {
             launch_id: launch_id.to_owned(),
             binding_id: binding_id.to_owned(),
             latest: None,
+            last_execution_num: None,
             answers: vec![],
         }
     }
@@ -324,8 +331,44 @@ impl LeadPrompts {
             .is_none_or(|latest| latest.order() < prompt.order());
         if later {
             self.latest = Some(prompt.clone());
+            self.last_execution_num = None;
         }
         later
+    }
+
+    /// Records the highest accepted Agy `ResponseFinished` `execution_num` for
+    /// `latest`'s `turn_id`, backfilling `latest.turn_id` from `pooled_prompt`
+    /// when both name the same observation.
+    pub fn record_agy_execution_end(
+        &mut self,
+        turn_id: &str,
+        execution_num: u64,
+        pooled_prompt: Option<&PromptReference>,
+    ) -> bool {
+        if let Some(latest) = &mut self.latest
+            && latest.turn_id.is_none()
+            && let Some(pooled) = pooled_prompt
+            && pooled.observation_id == latest.observation_id
+            && pooled.observed_mono_ns == latest.observed_mono_ns
+        {
+            latest.turn_id = pooled.turn_id.clone();
+        }
+        if self
+            .latest
+            .as_ref()
+            .and_then(|latest| latest.turn_id.as_deref())
+            != Some(turn_id)
+        {
+            return false;
+        }
+        if self
+            .last_execution_num
+            .is_some_and(|prev| execution_num <= prev)
+        {
+            return false;
+        }
+        self.last_execution_num = Some(execution_num);
+        true
     }
 
     /// Adds the questions `prompt` answered. A question already answered

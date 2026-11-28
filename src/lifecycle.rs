@@ -1684,6 +1684,34 @@ fn append_observation(
                 .as_ref()
                 .is_some_and(|end| end.status == TurnEndStatus::Recorded)
             && matches_current_turn;
+        if fresh_current_turn_end
+            && let crate::observations::ObservationBody::ResponseFinished {
+                execution_num: Some(num),
+                ..
+            } = &draft.body
+            && let Some(turn_id) = draft.turn_id()
+        {
+            let pooled_prompt = latest(
+                snapshot
+                    .lead_observations()
+                    .filter(|item| item.is_lead_prompt()),
+            )
+            .map(|item| PromptReference::of_for(Provider::Agy, item));
+            match prepare_agy_execution_end(
+                resolved,
+                &identity,
+                &binding_id,
+                turn_id,
+                *num,
+                pooled_prompt.as_ref(),
+            ) {
+                Ok((write, restarted)) => {
+                    prompts_replacement = write;
+                    prompts_problem = restarted.then(|| started_again_diagnostic("prompt_record"));
+                }
+                Err(error) => prompts_problem = Some(error.diagnostic),
+            }
+        }
         if let Some(evidence) = &resolved.evidence {
             let mut evidence = evidence.borrow_mut();
             evidence.pending_observation_id = Some(draft.observation_id.clone());
@@ -1877,6 +1905,39 @@ fn prepare_prompts(
     let answered =
         prompts.record_answers(prompt, answered, protocol.limits.lifecycle_pool_max_count);
     if !(moved || answered || restarted) {
+        return Ok((None, restarted));
+    }
+    let value = serde_json::to_value(&prompts).map_err(AttentionError::record_json)?;
+    Ok((Some(PreparedRecordWrite::new(path, &value)?), restarted))
+}
+
+fn prepare_agy_execution_end(
+    resolved: &ResolvedLaunch,
+    identity: &RecordIdentity,
+    binding_id: &str,
+    turn_id: &str,
+    execution_num: u64,
+    pooled_prompt: Option<&PromptReference>,
+) -> Result<(Option<PreparedRecordWrite>, bool)> {
+    let path = identity.path(&resolved.root, "lead_prompts")?;
+    let found = read_or_move_aside(&path, "lead_prompts", identity, None)?;
+    let protocol = manifest()?;
+    let restarted = matches!(found, Replacing::MovedAside);
+    let mut prompts = match found {
+        Replacing::Present(value) => {
+            serde_json::from_value(value).map_err(AttentionError::record_json)?
+        }
+        Replacing::Missing | Replacing::MovedAside => LeadPrompts::empty(
+            resolved.address.clone(),
+            &resolved.launch_id,
+            binding_id,
+            protocol.record_schema,
+        ),
+    };
+    let seeded = prompts.latest.is_none()
+        && pooled_prompt.is_some_and(|prompt| prompts.record_prompt(prompt));
+    let moved = prompts.record_agy_execution_end(turn_id, execution_num, pooled_prompt);
+    if !(seeded || moved || restarted) {
         return Ok((None, restarted));
     }
     let value = serde_json::to_value(&prompts).map_err(AttentionError::record_json)?;
@@ -4418,7 +4479,10 @@ fn lifecycle_snapshot(root: &Path, identity: &RecordIdentity) -> Option<Lifecycl
 }
 
 enum PromptRecordRead {
-    Present(Option<PromptReference>),
+    Present {
+        latest: Option<PromptReference>,
+        last_execution_num: Option<u64>,
+    },
     Missing,
     Unreadable,
 }
@@ -4426,7 +4490,16 @@ enum PromptRecordRead {
 impl PromptRecordRead {
     fn as_reference(&self) -> Option<&PromptReference> {
         match self {
-            Self::Present(prompt) => prompt.as_ref(),
+            Self::Present { latest, .. } => latest.as_ref(),
+            Self::Missing | Self::Unreadable => None,
+        }
+    }
+
+    fn last_execution_num(&self) -> Option<u64> {
+        match self {
+            Self::Present {
+                last_execution_num, ..
+            } => *last_execution_num,
             Self::Missing | Self::Unreadable => None,
         }
     }
@@ -4436,7 +4509,10 @@ fn read_latest_prompt(root: &Path, identity: &RecordIdentity) -> PromptRecordRea
     match read_record_at(root, "lead_prompts", identity) {
         Ok(None) => PromptRecordRead::Missing,
         Ok(Some(value)) => match serde_json::from_value::<LeadPrompts>(value) {
-            Ok(prompts) => PromptRecordRead::Present(prompts.latest),
+            Ok(prompts) => PromptRecordRead::Present {
+                latest: prompts.latest,
+                last_execution_num: prompts.last_execution_num,
+            },
             Err(_) => PromptRecordRead::Unreadable,
         },
         Err(_) => PromptRecordRead::Unreadable,
@@ -4447,7 +4523,7 @@ fn read_latest_prompt(root: &Path, identity: &RecordIdentity) -> PromptRecordRea
 /// the record names none or cannot be read.
 fn latest_prompt(root: &Path, identity: &RecordIdentity) -> Option<PromptReference> {
     match read_latest_prompt(root, identity) {
-        PromptRecordRead::Present(prompt) => prompt,
+        PromptRecordRead::Present { latest, .. } => latest,
         PromptRecordRead::Missing | PromptRecordRead::Unreadable => None,
     }
 }
@@ -4491,20 +4567,23 @@ fn agy_stop_ownership(
     let history_lost = snapshot_unusable
         || usable_snapshot
             .is_some_and(|snapshot| snapshot.pools.general.retention_floor_mono_ns.is_some());
-    let effective_prompt = match (prompt_read.as_reference(), pooled_prompt) {
+    let (effective_prompt, last_execution_num) = match (prompt_read.as_reference(), pooled_prompt) {
         (Some(recorded), Some(pooled))
             if pooled.observed_mono_ns.as_str() > recorded.observed_mono_ns.as_str() =>
         {
-            Some(PromptReference::of_for(Provider::Agy, pooled))
+            (Some(PromptReference::of_for(Provider::Agy, pooled)), None)
         }
         (Some(recorded), Some(pooled))
             if recorded.turn_id.is_none()
                 && pooled.observation_id == recorded.observation_id
                 && pooled.observed_mono_ns == recorded.observed_mono_ns =>
         {
-            Some(PromptReference::of_for(Provider::Agy, pooled))
+            (
+                Some(PromptReference::of_for(Provider::Agy, pooled)),
+                prompt_read.last_execution_num(),
+            )
         }
-        (Some(recorded), _) => Some(recorded.clone()),
+        (Some(recorded), _) => (Some(recorded.clone()), prompt_read.last_execution_num()),
         (None, Some(pooled)) => {
             if history_lost {
                 return if pooled
@@ -4516,9 +4595,9 @@ fn agy_stop_ownership(
                     AgyStopOwnership::Unknown
                 };
             }
-            Some(PromptReference::of_for(Provider::Agy, pooled))
+            (Some(PromptReference::of_for(Provider::Agy, pooled)), None)
         }
-        (None, None) => None,
+        (None, None) => (None, None),
     };
     let Some(prompt) = effective_prompt else {
         if history_lost {
@@ -4541,7 +4620,23 @@ fn agy_stop_ownership(
         return AgyStopOwnership::Anonymous;
     };
     match (prompt.turn_id.as_deref(), draft.turn_id()) {
-        (Some(current_id), Some(draft_id)) if current_id == draft_id => AgyStopOwnership::Current,
+        (Some(current_id), Some(draft_id)) if current_id == draft_id => {
+            if let crate::observations::ObservationBody::ResponseFinished {
+                execution_num, ..
+            } = &draft.body
+            {
+                match (last_execution_num, execution_num) {
+                    (Some(last), Some(candidate)) if *candidate <= last => AgyStopOwnership::Stale,
+                    (Some(_), None) => AgyStopOwnership::Unknown,
+                    (None, None) if history_lost || usable_snapshot.is_none() => {
+                        AgyStopOwnership::Unknown
+                    }
+                    _ => AgyStopOwnership::Current,
+                }
+            } else {
+                AgyStopOwnership::Current
+            }
+        }
         (Some(_), Some(_)) => AgyStopOwnership::Stale,
         (Some(_), None) => AgyStopOwnership::Unknown,
         (None, Some(draft_id)) => {
@@ -4900,7 +4995,14 @@ fn prepare_hold_scope(
                 Ok(Some(value)) => match serde_json::from_value::<LeadPrompts>(value) {
                     Ok(record) => {
                         let latest = record.latest.clone();
-                        (Some(record), PromptRecordRead::Present(latest))
+                        let last_execution_num = record.last_execution_num;
+                        (
+                            Some(record),
+                            PromptRecordRead::Present {
+                                latest,
+                                last_execution_num,
+                            },
+                        )
                     }
                     Err(_) => (None, PromptRecordRead::Unreadable),
                 },

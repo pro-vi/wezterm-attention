@@ -464,10 +464,98 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
         json!({"availability": "available", "text": "Next turn reply."})
     );
 
+    // Same-execution continuation after evicting Turn 2's Stop(0): replaying
+    // Stop(0) stays superseded and leaves continuation 1 thinking without
+    // leaking its reply, while genuine Stop(1) completes and delivers it.
+    let mut turn2_cont1 = turn2_pre.clone();
+    turn2_cont1["invocationNum"] = json!(1);
+    turn2_cont1["initialNumSteps"] = json!(4);
+    assert!(
+        agy_hook_cli(&setup, "PreInvocation", &turn2_cont1, &["--strict"])
+            .status
+            .success()
+    );
+    let before_cont_evict: LifecycleSnapshot = serde_json::from_slice(
+        &fs::read(setup.binding_dir("agy", LEAD).join("lifecycle.json")).unwrap(),
+    )
+    .unwrap();
+    let cont_base_mono: u128 = before_cont_evict
+        .pools
+        .general
+        .observations
+        .iter()
+        .map(|item| item.observed_mono_ns.parse::<u128>().unwrap())
+        .max()
+        .unwrap();
+    for step in 0..33u128 {
+        let call_id = format!("cont-evict-{step}");
+        for (ev_name, offset) in [("PreToolUse", step * 2 + 1), ("PostToolUse", step * 2 + 2)] {
+            let tool_ev = parse_provider_event(
+                "agy",
+                ev_name,
+                &json!({
+                    "hookEventName": ev_name,
+                    "conversationId": LEAD,
+                    "executionId": "exec-2",
+                    "transcriptPath": tx_str,
+                    "cwd": "/tmp/project",
+                    "lastUserInput": "Next turn",
+                    "toolCall": {"name": "run_command", "id": call_id},
+                    "error": ""
+                }),
+                &setup.env,
+            );
+            apply_as(
+                &setup,
+                &setup.env,
+                &tool_ev,
+                &format!("{:020}", cont_base_mono + offset),
+            );
+        }
+    }
+    write_jsonl(
+        &tx,
+        &[
+            json!({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "Summarize the tests"}),
+            json!({"step_index": 1, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "All 67 tests pass."}),
+            json!({"step_index": 2, "type": "USER_INPUT", "status": "DONE", "content": "Next turn"}),
+            json!({"step_index": 3, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "Next turn reply."}),
+            json!({"step_index": 4, "type": "PLANNER_RESPONSE", "status": "DONE", "content": "Continuation 1 reply."}),
+        ],
+    );
+    let _ = fs::remove_file(&stop_sink);
+    let evicted_same_exec = agy_hook_cli(&setup, "Stop", &turn2_stop, &stop_flags);
+    assert!(!evicted_same_exec.status.success());
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "thinking"
+    );
+    assert!(!stop_sink.exists());
+
+    let mut turn2_stop_cont1 = turn2_stop.clone();
+    turn2_stop_cont1["executionNum"] = json!(1);
+    assert!(
+        agy_hook_cli(&setup, "Stop", &turn2_stop_cont1, &stop_flags)
+            .status
+            .success()
+    );
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "stop"
+    );
+    let cont1_delivery: Value = serde_json::from_slice(&fs::read(&stop_sink).unwrap()).unwrap();
+    assert_eq!(
+        cont1_delivery["reply"],
+        json!({"availability": "available", "text": "Continuation 1 reply."})
+    );
+
     fs::remove_file(setup.binding_dir("agy", LEAD).join("lifecycle.json")).unwrap();
     let _ = fs::remove_file(&stop_sink);
     let rebuilt_out = agy_hook_cli(&setup, "Stop", &stop_payload, &stop_flags);
     assert!(!rebuilt_out.status.success());
+    assert!(!stop_sink.exists());
+    let rebuilt_same_exec = agy_hook_cli(&setup, "Stop", &turn2_stop_cont1, &stop_flags);
+    assert!(!rebuilt_same_exec.status.success());
     assert!(!stop_sink.exists());
 
     // Error Stop (TERMINAL_CUSTOM_HOOK) produces attempt_outcome, notify with
