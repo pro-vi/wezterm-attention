@@ -224,6 +224,11 @@ pub struct LeadPrompts {
     /// other providers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_execution_num: Option<u64>,
+    /// Set for an Agy execution when `lifecycle.json` was missing or moved
+    /// aside after `latest` was recorded, so a rebuilt tool observation cannot
+    /// re-admit an older Stop whose ordinal write had failed before the loss.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub execution_history_lost: bool,
     pub answers: Vec<PromptAnswer>,
 }
 
@@ -317,6 +322,7 @@ impl LeadPrompts {
             binding_id: binding_id.to_owned(),
             latest: None,
             last_execution_num: None,
+            execution_history_lost: false,
             answers: vec![],
         }
     }
@@ -332,8 +338,20 @@ impl LeadPrompts {
         if later {
             self.latest = Some(prompt.clone());
             self.last_execution_num = None;
+            self.execution_history_lost = false;
         }
         later
+    }
+
+    /// Marks that `lifecycle.json` was lost or rebuilt during `latest`'s
+    /// execution so subsequent rebuilt tool events cannot re-admit a replayed
+    /// Stop whose ordinal was not yet persisted here.
+    pub fn mark_execution_history_lost(&mut self) -> bool {
+        if self.latest.is_none() || self.execution_history_lost {
+            return false;
+        }
+        self.execution_history_lost = true;
+        true
     }
 
     /// Records the highest accepted Agy `ResponseFinished` `execution_num` for

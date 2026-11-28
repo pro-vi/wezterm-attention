@@ -928,6 +928,7 @@ fn lead_prompts(
             turn_id: None,
         }),
         last_execution_num: None,
+        execution_history_lost: false,
         answers,
     };
     let protocol = wezterm_attention::protocol::manifest().unwrap();

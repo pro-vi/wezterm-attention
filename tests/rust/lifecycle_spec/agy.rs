@@ -623,6 +623,58 @@ fn agy_lead_turn_prompt_reply_observation_kind_and_wakeup_separation() {
     );
     assert!(!stop_sink.exists());
 
+    // Regression: loss -> continuation -> PreToolUse (rebuilding lifecycle.json
+    // under the same executionId) -> replay of old Stop(1) must STILL stay
+    // superseded, leave thinking intact, and not deliver a reply.
+    let mut partial_prompts: Value =
+        serde_json::from_slice(&fs::read(&prompts_path).unwrap()).unwrap();
+    partial_prompts["last_execution_num"] = json!(0);
+    partial_prompts
+        .as_object_mut()
+        .unwrap()
+        .remove("execution_history_lost");
+    fs::write(&prompts_path, serde_json::to_vec(&partial_prompts).unwrap()).unwrap();
+    let _ = fs::remove_file(setup.binding_dir("agy", LEAD).join("lifecycle.json"));
+    let mut turn2_cont2 = turn2_pre.clone();
+    turn2_cont2["invocationNum"] = json!(2);
+    turn2_cont2["initialNumSteps"] = json!(5);
+    assert!(
+        agy_hook_cli(&setup, "PreInvocation", &turn2_cont2, &["--strict"])
+            .status
+            .success()
+    );
+    assert!(
+        agy_hook_cli(
+            &setup,
+            "PreToolUse",
+            &json!({
+                "hookEventName": "PreToolUse",
+                "conversationId": LEAD,
+                "executionId": "exec-2",
+                "transcriptPath": tx_str,
+                "cwd": "/tmp/project",
+                "lastUserInput": "Next turn",
+                "toolCall": {"name": "run_command", "id": "rebuilt-tool-1"}
+            }),
+            &["--strict"],
+        )
+        .status
+        .success()
+    );
+    let rebuilt_prompts: Value = serde_json::from_slice(&fs::read(&prompts_path).unwrap()).unwrap();
+    assert_eq!(rebuilt_prompts["execution_history_lost"], json!(true));
+    let _ = fs::remove_file(&stop_sink);
+    assert!(
+        !agy_hook_cli(&setup, "Stop", &turn2_stop_cont1, &stop_flags)
+            .status
+            .success()
+    );
+    assert_eq!(
+        shown_activity(&setup.binding_dir("agy", LEAD)).unwrap()["type"],
+        "thinking"
+    );
+    assert!(!stop_sink.exists());
+
     // Error Stop (TERMINAL_CUSTOM_HOOK) produces attempt_outcome, notify with
     // label, and unsupported reply (never leaks the prior turn's reply).
     let err_sink = setup._scratch.0.join("err-delivery.json");
